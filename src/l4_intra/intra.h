@@ -21,9 +21,20 @@ enum PredictionMode {
     PAETH_PRED = 12,
 };
 
+// Per-block neighbor mode history (the only cross-block state intra knows).
+struct NeighborContext {
+    PredictionMode aboveMode = DC_PRED;
+    PredictionMode leftMode = DC_PRED;
+};
+
+// get_filt_type (enc_intra_prediction.c:20), luma: 1 iff either neighbor
+// block uses a SMOOTH* mode (svt_aom_is_smooth, intra_prediction.c:128).
+int filtType(const NeighborContext& neighbors);
+
 void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleDelta, int txwpx, int txhpx,
                           std::uint8_t aboveLeft, const std::uint8_t* aboveRef, int nTopPx, int nTopRightPx,
-                          const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx);
+                          const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
+                          const NeighborContext& neighbors = NeighborContext());
 
 std::string drZ1CuSource();
 

@@ -4,6 +4,14 @@
 
 namespace intra {
 
+int filtType(const NeighborContext& neighbors) {
+    const bool aboveSmooth = neighbors.aboveMode == SMOOTH_PRED || neighbors.aboveMode == SMOOTH_V_PRED ||
+                             neighbors.aboveMode == SMOOTH_H_PRED;
+    const bool leftSmooth = neighbors.leftMode == SMOOTH_PRED || neighbors.leftMode == SMOOTH_V_PRED ||
+                            neighbors.leftMode == SMOOTH_H_PRED;
+    return (aboveSmooth || leftSmooth) ? 1 : 0;
+}
+
 int edgeFilterStrength(int bs0, int bs1, int delta, int type) {
     const int d        = std::abs(delta);
     int       strength = 0;
@@ -384,7 +392,8 @@ const int kModeToAngle[13] = {0, 90, 180, 45, 135, 113, 157, 203, 67, 0, 0, 0, 0
 
 void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleDelta, int txwpx, int txhpx,
                           std::uint8_t aboveLeft, const std::uint8_t* aboveRef, int nTopPx, int nTopRightPx,
-                          const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx) {
+                          const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
+                          const NeighborContext& neighbors) {
     std::uint8_t leftData[2 * 64 + 32];
     std::uint8_t aboveData[2 * 64 + 32];
     std::uint8_t* const aboveRow = aboveData + 16;
@@ -520,12 +529,12 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
                 leftCol[-1]  = aboveRow[-1];
             }
             if (needAbove && nTopPx > 0) {
-                const int strength = edgeFilterStrength(txwpx, txhpx, pAngle - 90, 0);
+                const int strength = edgeFilterStrength(txwpx, txhpx, pAngle - 90, filtType(neighbors));
                 const int nPx      = nTopPx + abLe + (needRight ? txhpx : 0);
                 filterIntraEdge(aboveRow - abLe, nPx, strength);
             }
             if (needLeft && nLeftPx > 0) {
-                const int strength = edgeFilterStrength(txhpx, txwpx, pAngle - 180, 0);
+                const int strength = edgeFilterStrength(txhpx, txwpx, pAngle - 180, filtType(neighbors));
                 const int nPx      = nLeftPx + abLe + (needBottom ? txwpx : 0);
                 filterIntraEdge(leftCol - abLe, nPx, strength);
             }
@@ -947,26 +956,40 @@ __device__ int use_up(int bs0, int bs1, int delta) {
     return blkWh <= 16;
 }
 
-__device__ int filt_str(int bs0, int bs1, int delta) {
+__device__ int filt_str(int bs0, int bs1, int delta, int type) {
     const int d = abs_int(delta);
     int strength = 0;
     const int blkWh = bs0 + bs1;
-    if (blkWh <= 8) {
-        if (d >= 56) strength = 1;
-    } else if (blkWh <= 12) {
-        if (d >= 40) strength = 1;
-    } else if (blkWh <= 16) {
-        if (d >= 40) strength = 1;
-    } else if (blkWh <= 24) {
-        if (d >= 8) strength = 1;
-        if (d >= 16) strength = 2;
-        if (d >= 32) strength = 3;
-    } else if (blkWh <= 32) {
-        if (d >= 1) strength = 1;
-        if (d >= 4) strength = 2;
-        if (d >= 32) strength = 3;
+    if (type == 0) {
+        if (blkWh <= 8) {
+            if (d >= 56) strength = 1;
+        } else if (blkWh <= 12) {
+            if (d >= 40) strength = 1;
+        } else if (blkWh <= 16) {
+            if (d >= 40) strength = 1;
+        } else if (blkWh <= 24) {
+            if (d >= 8) strength = 1;
+            if (d >= 16) strength = 2;
+            if (d >= 32) strength = 3;
+        } else if (blkWh <= 32) {
+            if (d >= 1) strength = 1;
+            if (d >= 4) strength = 2;
+            if (d >= 32) strength = 3;
+        } else {
+            if (d >= 1) strength = 3;
+        }
     } else {
-        if (d >= 1) strength = 3;
+        if (blkWh <= 8) {
+            if (d >= 40) strength = 1;
+            if (d >= 64) strength = 2;
+        } else if (blkWh <= 16) {
+            if (d >= 20) strength = 1;
+            if (d >= 48) strength = 2;
+        } else if (blkWh <= 24) {
+            if (d >= 4) strength = 3;
+        } else {
+            if (d >= 1) strength = 3;
+        }
     }
     return strength;
 }
@@ -1026,6 +1049,7 @@ __device__ void upsamp(unsigned char* p, int sz) {
 
 extern "C" __global__ void predict_block_4x4(
     const int* mode, const int* angleDelta,
+    const int* aboveMode, const int* leftMode,
     const unsigned char* aboveRef, const int* nTopPx, const int* nTopRightPx,
     const unsigned char* leftRef, const int* nLeftPx, const int* nBottomLeftPx,
     const int* aboveLeft, unsigned char* dst) {
@@ -1135,16 +1159,18 @@ extern "C" __global__ void predict_block_4x4(
         }
         if (isDr) {
             int upAbove = 0;
-            int upLeft = 0;
+            int upLeft  = 0;
+            const int kFiltType =
+                (((*aboveMode >= 9 && *aboveMode <= 11) || (*leftMode >= 9 && *leftMode <= 11)) ? 1 : 0);
             const int abLe = needAboveLeft ? 1 : 0;
             if (needAbove && *nTopPx > 0) {
-                const int strength = filt_str(4, 4, pAngle - 90);
-                const int nPx = *nTopPx + abLe + (needRight ? 4 : 0);
+                const int strength = filt_str(4, 4, pAngle - 90, kFiltType);
+                const int nPx      = *nTopPx + abLe + (needRight ? 4 : 0);
                 filt_edge(aboveRow - abLe, nPx, strength);
             }
             if (needLeft && *nLeftPx > 0) {
-                const int strength = filt_str(4, 4, pAngle - 180);
-                const int nPx = *nLeftPx + abLe + (needBottom ? 4 : 0);
+                const int strength = filt_str(4, 4, pAngle - 180, kFiltType);
+                const int nPx      = *nLeftPx + abLe + (needBottom ? 4 : 0);
                 filt_edge(leftCol - abLe, nPx, strength);
             }
             upAbove = use_up(4, 4, pAngle - 90);

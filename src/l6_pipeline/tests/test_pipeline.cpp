@@ -107,6 +107,8 @@ TEST_CASE("gpu pipeline matches host pipeline bit-exactly") {
 
     int modeArg = mode;
     int deltaArg = 0;
+    int amArg = 0;
+    int lmArg = 0;
     int nTopArg = nTopPx;
     int nTrArg = nTopRightPx;
     int nLeftArg = nLeftPx;
@@ -114,6 +116,8 @@ TEST_CASE("gpu pipeline matches host pipeline bit-exactly") {
     int alArg = aboveLeft;
     gpurt::DeviceBuffer dMode(sizeof(modeArg));
     gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
+    gpurt::DeviceBuffer dAm(sizeof(amArg));
+    gpurt::DeviceBuffer dLm(sizeof(lmArg));
     gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
     gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
     gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
@@ -121,6 +125,8 @@ TEST_CASE("gpu pipeline matches host pipeline bit-exactly") {
     gpurt::DeviceBuffer dAl(sizeof(alArg));
     dMode.uploadFrom(&modeArg, sizeof(modeArg));
     dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
+    dAm.uploadFrom(&amArg, sizeof(amArg));
+    dLm.uploadFrom(&lmArg, sizeof(lmArg));
     dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
     dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
     dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
@@ -129,6 +135,8 @@ TEST_CASE("gpu pipeline matches host pipeline bit-exactly") {
 
     CUdeviceptr pMode = dMode.get();
     CUdeviceptr pDelta = dDelta.get();
+    CUdeviceptr pAm = dAm.get();
+    CUdeviceptr pLm = dLm.get();
     CUdeviceptr pAbove = dAbove.get();
     CUdeviceptr pNTop = dNTop.get();
     CUdeviceptr pNTr = dNTr.get();
@@ -137,7 +145,8 @@ TEST_CASE("gpu pipeline matches host pipeline bit-exactly") {
     CUdeviceptr pNBl = dNBl.get();
     CUdeviceptr pAl = dAl.get();
     CUdeviceptr pPred = dPred.get();
-    void* argsPred[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pPred};
+    void* argsPred[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl,
+                        &pPred};
     kPred.launch(1, 1, 16, 1, argsPred);
 
     // stage 2: subtract kernel (src plane - pred) -> int16 residual

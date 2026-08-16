@@ -7,7 +7,7 @@ namespace {
 
 bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const unsigned char* above, int nTopPx,
                      int nTopRightPx, const unsigned char* left, int nLeftPx, int nBottomLeftPx, int aboveLeft,
-                     const unsigned char* expected) {
+                     const unsigned char* expected, int aboveMode = 0, int leftMode = 0) {
     (void)ctx;
     const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
     const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
@@ -29,6 +29,8 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
 
     int modeArg = mode;
     int deltaArg = angleDelta;
+    int amArg = aboveMode;
+    int lmArg = leftMode;
     int nTopArg = nTopPx;
     int nTrArg = nTopRightPx;
     int nLeftArg = nLeftPx;
@@ -36,6 +38,8 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     int alArg = aboveLeft;
     gpurt::DeviceBuffer dMode(sizeof(modeArg));
     gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
+    gpurt::DeviceBuffer dAm(sizeof(amArg));
+    gpurt::DeviceBuffer dLm(sizeof(lmArg));
     gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
     gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
     gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
@@ -43,6 +47,8 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     gpurt::DeviceBuffer dAl(sizeof(alArg));
     dMode.uploadFrom(&modeArg, sizeof(modeArg));
     dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
+    dAm.uploadFrom(&amArg, sizeof(amArg));
+    dLm.uploadFrom(&lmArg, sizeof(lmArg));
     dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
     dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
     dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
@@ -51,6 +57,8 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
 
     CUdeviceptr pMode = dMode.get();
     CUdeviceptr pDelta = dDelta.get();
+    CUdeviceptr pAm = dAm.get();
+    CUdeviceptr pLm = dLm.get();
     CUdeviceptr pAbove = dAbove.get();
     CUdeviceptr pNTop = dNTop.get();
     CUdeviceptr pNTr = dNTr.get();
@@ -59,7 +67,7 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     CUdeviceptr pNBl = dNBl.get();
     CUdeviceptr pAl = dAl.get();
     CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
+    void* args[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
     k.launch(1, 1, 16, 1, args);
 
     unsigned char got[16] = {0};
@@ -77,6 +85,69 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
 
 TEST_CASE("edge filter strength is 1 for 4x4 with delta 56") {
     CHECK(intra::edgeFilterStrength(4, 4, 56, 0) == 1);
+}
+
+TEST_CASE("filt type is 1 when the above neighbor is smooth") {
+    // golden: svt_aom_is_smooth (intra_prediction.c:128) + get_filt_type
+    // (enc_intra_prediction.c:20): luma plane -> mode is SMOOTH_PRED/V/H
+    intra::NeighborContext ctx;
+    ctx.aboveMode = intra::SMOOTH_PRED;
+    CHECK(intra::filtType(ctx) == 1);
+}
+
+TEST_CASE("filt type is 1 when the left neighbor is smooth v") {
+    intra::NeighborContext ctx;
+    ctx.leftMode = intra::SMOOTH_V_PRED;
+    CHECK(intra::filtType(ctx) == 1);
+}
+
+TEST_CASE("filt type is 0 for non-smooth neighbors") {
+    intra::NeighborContext ctx;
+    ctx.aboveMode = intra::PAETH_PRED;
+    ctx.leftMode = intra::DC_PRED;
+    CHECK(intra::filtType(ctx) == 0);
+}
+
+TEST_CASE("builder applies the smooth-neighbor edge filter for d135") {
+    // hand-traced: filt_type=1 -> edgeFilterStrength(4,4,45,1)=1 -> 5-tap
+    // {0,4,8,4,0} over above+corner {90,100,101,102,103} -> {90,98,101,102,103}
+    // -> drZ2 (D135, up=0): r2c3 = above[0] = 98
+    const unsigned char above[4] = {100, 101, 102, 103};
+    const unsigned char left[4] = {10, 11, 12, 13};
+    unsigned char dst[16] = {0};
+    intra::NeighborContext ctx;
+    ctx.aboveMode = intra::SMOOTH_H_PRED;
+    intra::buildIntraPredictors(dst, 4, intra::D135_PRED, 0, 4, 4, 90, above, 4, 0, left, 4, 0, ctx);
+    CHECK(dst[2 * 4 + 3] == 98);
+}
+
+TEST_CASE("builder skips the edge filter for non-smooth neighbors") {
+    const unsigned char above[4] = {100, 101, 102, 103};
+    const unsigned char left[4] = {10, 11, 12, 13};
+    unsigned char dst[16] = {0};
+    intra::NeighborContext ctx;
+    ctx.aboveMode = intra::DC_PRED;
+    intra::buildIntraPredictors(dst, 4, intra::D135_PRED, 0, 4, 4, 90, above, 4, 0, left, 4, 0, ctx);
+    CHECK(dst[2 * 4 + 3] == 100);
+}
+
+TEST_CASE("gpu block predictor applies the smooth-neighbor filter like the builder") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const unsigned char above[4] = {100, 101, 102, 103};
+    const unsigned char left[4] = {10, 11, 12, 13};
+    unsigned char ref[16] = {0};
+    intra::NeighborContext nctx;
+    nctx.aboveMode = intra::SMOOTH_H_PRED;
+    intra::buildIntraPredictors(ref, 4, intra::D135_PRED, 0, 4, 4, 90, above, 4, 0, left, 4, 0, nctx);
+
+    bool ok = runBlockPredict(ctx, intra::D135_PRED, 0, above, 4, 0, left, 4, 0, 90, ref,
+                              intra::SMOOTH_H_PRED, intra::DC_PRED);
+    CHECK(ok);
 }
 
 TEST_CASE("intra edge upsample enabled for 4x4 with delta 23") {
@@ -847,68 +918,7 @@ TEST_CASE("gpu block predictor dc matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::DC_PRED, 0, 4, 4, 0, above, 4, 0, left, 4, 0);
 
-    const int mode = intra::DC_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 0;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 0;
-    const int aboveLeft = 0;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::DC_PRED, 0, above, 4, 0, left, 4, 0, 0, ref);
     CHECK(ok);
 }
 
@@ -924,68 +934,7 @@ TEST_CASE("gpu block predictor vertical matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::V_PRED, 0, 4, 4, 0, above, 4, 0, left, 4, 0);
 
-    const int mode = intra::V_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 0;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 0;
-    const int aboveLeft = 0;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::V_PRED, 0, above, 4, 0, left, 4, 0, 0, ref);
     CHECK(ok);
 }
 
@@ -1001,68 +950,7 @@ TEST_CASE("gpu block predictor horizontal matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::H_PRED, 0, 4, 4, 0, above, 4, 0, left, 4, 0);
 
-    const int mode = intra::H_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 0;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 0;
-    const int aboveLeft = 0;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::H_PRED, 0, above, 4, 0, left, 4, 0, 0, ref);
     CHECK(ok);
 }
 
@@ -1078,68 +966,7 @@ TEST_CASE("gpu block predictor paeth matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::PAETH_PRED, 0, 4, 4, 45, above, 4, 0, left, 4, 0);
 
-    const int mode = intra::PAETH_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 0;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 0;
-    const int aboveLeft = 45;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::PAETH_PRED, 0, above, 4, 0, left, 4, 0, 45, ref);
     CHECK(ok);
 }
 
@@ -1155,68 +982,7 @@ TEST_CASE("gpu block predictor smooth matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::SMOOTH_PRED, 0, 4, 4, 0, above, 4, 0, left, 4, 0);
 
-    const int mode = intra::SMOOTH_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 0;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 0;
-    const int aboveLeft = 0;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::SMOOTH_PRED, 0, above, 4, 0, left, 4, 0, 0, ref);
     CHECK(ok);
 }
 
@@ -1231,69 +997,7 @@ TEST_CASE("gpu block predictor d45 matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::D45_PRED, 0, 4, 4, 0, above, 4, 4, nullptr, 0, 0);
 
-    const int mode = intra::D45_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 4;
-    const int nLeftPx = 0;
-    const int nBottomLeftPx = 0;
-    const int aboveLeft = 0;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(unsigned char));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    unsigned char dummyLeft = 0;
-    dLeft.uploadFrom(&dummyLeft, sizeof(dummyLeft));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::D45_PRED, 0, above, 4, 4, nullptr, 0, 0, 0, ref);
     CHECK(ok);
 }
 
@@ -1309,68 +1013,7 @@ TEST_CASE("gpu block predictor d67 matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::D67_PRED, 0, 4, 4, 7, above, 4, 4, left, 4, 0);
 
-    const int mode = intra::D67_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 4;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 0;
-    const int aboveLeft = 7;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::D67_PRED, 0, above, 4, 4, left, 4, 0, 7, ref);
     CHECK(ok);
 }
 
@@ -1386,68 +1029,7 @@ TEST_CASE("gpu block predictor d203 matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::D203_PRED, 0, 4, 4, 7, above, 4, 0, left, 4, 4);
 
-    const int mode = intra::D203_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 0;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 4;
-    const int aboveLeft = 7;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::D203_PRED, 0, above, 4, 0, left, 4, 4, 7, ref);
     CHECK(ok);
 }
 
@@ -1463,68 +1045,7 @@ TEST_CASE("gpu block predictor d135 matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::D135_PRED, 0, 4, 4, 90, above, 4, 4, left, 4, 4);
 
-    const int mode = intra::D135_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 4;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 4;
-    const int aboveLeft = 90;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::D135_PRED, 0, above, 4, 4, left, 4, 4, 90, ref);
     CHECK(ok);
 }
 
@@ -1540,68 +1061,7 @@ TEST_CASE("gpu block predictor d113 matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::D113_PRED, 0, 4, 4, 7, above, 4, 0, left, 4, 0);
 
-    const int mode = intra::D113_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 0;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 0;
-    const int aboveLeft = 7;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::D113_PRED, 0, above, 4, 0, left, 4, 0, 7, ref);
     CHECK(ok);
 }
 
@@ -1617,68 +1077,7 @@ TEST_CASE("gpu block predictor d157 matches builder") {
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::D157_PRED, 0, 4, 4, 7, above, 4, 0, left, 4, 0);
 
-    const int mode = intra::D157_PRED;
-    const int nTopPx = 4;
-    const int nTopRightPx = 0;
-    const int nLeftPx = 4;
-    const int nBottomLeftPx = 0;
-    const int aboveLeft = 7;
-    const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
-    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
-    const auto it = std::find(names.begin(), names.end(), "predict_block_4x4");
-    REQUIRE(it != names.end());
-    gpurt::Kernel k(ptx, *it);
-
-    gpurt::DeviceBuffer dAbove(sizeof(above));
-    gpurt::DeviceBuffer dLeft(sizeof(left));
-    gpurt::DeviceBuffer dOut(sizeof(ref));
-    dAbove.uploadFrom(above, sizeof(above));
-    dLeft.uploadFrom(left, sizeof(left));
-
-    int modeArg = mode;
-    int deltaArg = 0;
-    int nTopArg = nTopPx;
-    int nTrArg = nTopRightPx;
-    int nLeftArg = nLeftPx;
-    int nBlArg = nBottomLeftPx;
-    int alArg = aboveLeft;
-    gpurt::DeviceBuffer dMode(sizeof(modeArg));
-    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
-    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
-    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
-    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
-    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
-    gpurt::DeviceBuffer dAl(sizeof(alArg));
-    dMode.uploadFrom(&modeArg, sizeof(modeArg));
-    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
-    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
-    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
-    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
-    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
-    dAl.uploadFrom(&alArg, sizeof(alArg));
-
-    CUdeviceptr pAbove = dAbove.get();
-    CUdeviceptr pLeft = dLeft.get();
-    CUdeviceptr pMode = dMode.get();
-    CUdeviceptr pDelta = dDelta.get();
-    CUdeviceptr pNTop = dNTop.get();
-    CUdeviceptr pNTr = dNTr.get();
-    CUdeviceptr pNLeft = dNLeft.get();
-    CUdeviceptr pNBl = dNBl.get();
-    CUdeviceptr pAl = dAl.get();
-    CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
-    k.launch(1, 1, 16, 1, args);
-
-    unsigned char got[16] = {0};
-    dOut.downloadTo(got, sizeof(got));
-
-    bool ok = true;
-    for (int i = 0; i < 16; ++i) {
-        if (got[i] != ref[i]) {
-            ok = false;
-        }
-    }
+    bool ok = runBlockPredict(ctx, intra::D157_PRED, 0, above, 4, 0, left, 4, 0, 7, ref);
     CHECK(ok);
 }
 
@@ -1777,3 +1176,4 @@ TEST_CASE("gpu block predictor dc fills 128 with no edges") {
     bool ok = runBlockPredict(ctx, intra::DC_PRED, 0, nullptr, 0, 0, nullptr, 0, 0, 0, ref);
     CHECK(ok);
 }
+
