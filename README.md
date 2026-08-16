@@ -29,8 +29,9 @@ twins are held to bit-exact agreement with the SVT host reference.
   Integer only.
 - **l4_intra** — `buildIntraPredictors` (1:1 with SVT, luma, DC
   availability variants, missing-neighbor fills), `dr_z1`/`z2`/`z3` +
-  `drPredictor`, edge filter / upsample, smoothPredict family; GPU
-  twin `predict_block_4x4`. Largest test surface (~75 doctest cases).
+  `drPredictor`, edge filter / upsample, filter-intra, smoothPredict
+  family; GPU twin `predict_block_4x4`. 71 doctest cases (incl. the
+  harness guard).
 - **l5_motion** — `motion::sad8x8` (strided uint8, bit-exact with
   SVT's `compute8x8_sad_kernel_c`) + GPU kernel.
 - **l6_pipeline** — 4x4 block composition:
@@ -55,10 +56,10 @@ third_party/
   SVT-AV1/        vendored source of truth (do not modify)
   doctest/        test framework
   hardware_docs/  perf-axis reference only (PTX ISA, GP104 whitepaper,
-                  Pascal Tuning Guide, Nsight/ncu guides)
+                  Pascal Tuning Guide, nvprof-era Profiler Users Guides
+                  — concepts-only on CUDA 12.2, whose profiler is ncu)
 CMakeLists.txt    top-level build
 AGENTS.md         TDD methodology + CUDA-specific GREEN rules
-.github/FUNDING.yml
 ```
 
 ## Target hardware
@@ -113,5 +114,6 @@ checks during REFACTOR. See `AGENTS.md` for the full rules.
   by the SVT-AV1 authors or the Alliance for Open Media.
 - **doctest** — vendored under `third_party/doctest/`, MIT License.
 - **hardware_docs** — vendored NVIDIA reference material (PTX ISA,
-  GP104 whitepaper, Pascal Tuning Guide, Nsight/`ncu` guides), used
-  for perf-axis guidance only.
+  GP104 whitepaper, Pascal Tuning Guide, nvprof-era Profiler Users
+  Guides), perf-axis only; our profile on CUDA 12.2 is `ncu` — the
+  guides are used for concepts only.
