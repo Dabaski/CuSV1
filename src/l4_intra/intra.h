@@ -49,7 +49,8 @@ void filterIntraPredictor(std::uint8_t* dst, int dstStride, const std::uint8_t* 
 void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleDelta, int txwpx, int txhpx,
                           std::uint8_t aboveLeft, const std::uint8_t* aboveRef, int nTopPx, int nTopRightPx,
                           const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
-                          const NeighborContext& neighbors = NeighborContext(), int filterIntraMode = -1);
+                          const NeighborContext& neighbors = NeighborContext(), int filterIntraMode = -1,
+                          bool disableEdgeFilter = false);
 
 std::string drZ1CuSource();
 

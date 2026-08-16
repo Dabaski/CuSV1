@@ -7,7 +7,8 @@ namespace {
 
 bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const unsigned char* above, int nTopPx,
                      int nTopRightPx, const unsigned char* left, int nLeftPx, int nBottomLeftPx, int aboveLeft,
-                     const unsigned char* expected, int aboveMode = 0, int leftMode = 0, int filterIntraMode = -1) {
+                     const unsigned char* expected, int aboveMode = 0, int leftMode = 0, int filterIntraMode = -1,
+                     int disableEdgeFilter = 0) {
     (void)ctx;
     const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
     const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
@@ -32,6 +33,7 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     int amArg = aboveMode;
     int lmArg = leftMode;
     int fiArg = filterIntraMode;
+    int defArg = disableEdgeFilter;
     int nTopArg = nTopPx;
     int nTrArg = nTopRightPx;
     int nLeftArg = nLeftPx;
@@ -42,6 +44,7 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     gpurt::DeviceBuffer dAm(sizeof(amArg));
     gpurt::DeviceBuffer dLm(sizeof(lmArg));
     gpurt::DeviceBuffer dFi(sizeof(fiArg));
+    gpurt::DeviceBuffer dDef(sizeof(defArg));
     gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
     gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
     gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
@@ -52,6 +55,7 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     dAm.uploadFrom(&amArg, sizeof(amArg));
     dLm.uploadFrom(&lmArg, sizeof(lmArg));
     dFi.uploadFrom(&fiArg, sizeof(fiArg));
+    dDef.uploadFrom(&defArg, sizeof(defArg));
     dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
     dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
     dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
@@ -63,6 +67,7 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     CUdeviceptr pAm = dAm.get();
     CUdeviceptr pLm = dLm.get();
     CUdeviceptr pFi = dFi.get();
+    CUdeviceptr pDef = dDef.get();
     CUdeviceptr pAbove = dAbove.get();
     CUdeviceptr pNTop = dNTop.get();
     CUdeviceptr pNTr = dNTr.get();
@@ -71,8 +76,8 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     CUdeviceptr pNBl = dNBl.get();
     CUdeviceptr pAl = dAl.get();
     CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl,
-                    &pAl,   &pFi,   &pOut};
+    void* args[] = {&pMode, &pDelta, &pAm,   &pLm,    &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft,
+                    &pNBl,  &pAl,   &pFi,   &pDef,   &pOut};
     k.launch(1, 1, 16, 1, args);
 
     unsigned char got[16] = {0};
@@ -229,6 +234,19 @@ TEST_CASE("gpu block predictor filter intra matches the builder") {
 
     bool ok = runBlockPredict(ctx, intra::DC_PRED, 0, above, 4, 0, left, 4, 0, 10, ref, 0, 0, 1);
     CHECK(ok);
+}
+
+TEST_CASE("builder skips edge filtering with disable_edge_filter") {
+    // enc_intra_prediction.c:183 — !disable_edge_filter wraps the whole
+    // filter+upsample block; disabled: raw z1 on the unfiltered above
+    // {10,20,30,40,...} -> r0c1 = (20*19 + 30*13 + 16) >> 5 = 24
+    // (enabled path upsamples first: r0c1 = 17)
+    const unsigned char above[8] = {10, 20, 30, 40, 50, 60, 70, 80};
+    const unsigned char left[4] = {9, 9, 9, 9};
+    unsigned char dst[16] = {0};
+    intra::buildIntraPredictors(dst, 4, intra::D67_PRED, 0, 4, 4, 7, above, 4, 4, left, 4, 0,
+                                intra::NeighborContext(), -1, true);
+    CHECK(dst[1] == 24);
 }
 
 TEST_CASE("intra edge upsample enabled for 4x4 with delta 23") {
@@ -1203,6 +1221,23 @@ TEST_CASE("gpu block predictor honors angle delta in zone 2") {
     intra::buildIntraPredictors(ref, 4, intra::D135_PRED, -1, 4, 4, 7, above, 4, 0, left, 4, 0);
 
     bool ok = runBlockPredict(ctx, intra::D135_PRED, -1, above, 4, 0, left, 4, 0, 7, ref);
+    CHECK(ok);
+}
+
+TEST_CASE("gpu block predictor skips edge filtering when disabled like the builder") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const unsigned char above[8] = {10, 20, 30, 40, 50, 60, 70, 80};
+    const unsigned char left[4] = {9, 9, 9, 9};
+    unsigned char ref[16] = {0};
+    intra::buildIntraPredictors(ref, 4, intra::D67_PRED, 0, 4, 4, 7, above, 4, 4, left, 4, 0,
+                                intra::NeighborContext(), -1, true);
+
+    bool ok = runBlockPredict(ctx, intra::D67_PRED, 0, above, 4, 4, left, 4, 0, 7, ref, 0, 0, -1, 1);
     CHECK(ok);
 }
 
