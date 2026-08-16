@@ -154,6 +154,18 @@ TEST_CASE("intra edge upsample enabled for 4x4 with delta 23") {
     CHECK(intra::useIntraEdgeUpsample(4, 4, 23, 0) == 1);
 }
 
+TEST_CASE("intra edge upsample honors filt type at 8x8 geometry") {
+    // svt_aom_use_intra_edge_upsample: type ? (blk_wh <= 8) : (blk_wh <= 16).
+    // At 8x8 (blk_wh = 16) the two branches disagree, so this unit test is the
+    // proof the filt_type wire reaches the upsample decision; the 4x4 builder
+    // path cannot observe it (both branches true at blk_wh = 8).
+    CHECK(intra::useIntraEdgeUpsample(8, 8, 23, 1) == 0);
+}
+
+TEST_CASE("intra edge upsample stays enabled for luma at 8x8 geometry") {
+    CHECK(intra::useIntraEdgeUpsample(8, 8, 23, 0) == 1);
+}
+
 TEST_CASE("edge filter strength 1 filters the last edge sample") {
     unsigned char p[5] = {10, 20, 30, 40, 50};
     intra::filterIntraEdge(p, 5, 1);

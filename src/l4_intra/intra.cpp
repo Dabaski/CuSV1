@@ -539,12 +539,12 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
                 filterIntraEdge(leftCol - abLe, nPx, strength);
             }
         }
-        upsampleAbove = useIntraEdgeUpsample(txwpx, txhpx, pAngle - 90, 0);
+        upsampleAbove = useIntraEdgeUpsample(txwpx, txhpx, pAngle - 90, filtType(neighbors));
         if (needAbove && upsampleAbove) {
             const int nPx = txwpx + (needRight ? txhpx : 0);
             upsampleIntraEdge(aboveRow, nPx);
         }
-        upsampleLeft = useIntraEdgeUpsample(txhpx, txwpx, pAngle - 180, 0);
+        upsampleLeft = useIntraEdgeUpsample(txhpx, txwpx, pAngle - 180, filtType(neighbors));
         if (needLeft && upsampleLeft) {
             const int nPx = txhpx + (needBottom ? txwpx : 0);
             upsampleIntraEdge(leftCol, nPx);
@@ -947,13 +947,13 @@ __device__ int get_dy(int angle) {
     return 1;
 }
 
-__device__ int use_up(int bs0, int bs1, int delta) {
+__device__ int use_up(int bs0, int bs1, int delta, int type) {
     const int d = abs_int(delta);
     const int blkWh = bs0 + bs1;
     if (d <= 0 || d >= 40) {
         return 0;
     }
-    return blkWh <= 16;
+    return type ? (blkWh <= 8) : (blkWh <= 16);
 }
 
 __device__ int filt_str(int bs0, int bs1, int delta, int type) {
@@ -1173,11 +1173,11 @@ extern "C" __global__ void predict_block_4x4(
                 const int nPx      = *nLeftPx + abLe + (needBottom ? 4 : 0);
                 filt_edge(leftCol - abLe, nPx, strength);
             }
-            upAbove = use_up(4, 4, pAngle - 90);
+            upAbove = use_up(4, 4, pAngle - 90, kFiltType);
             if (needAbove && upAbove) {
                 upsamp(aboveRow, 4 + (needRight ? 4 : 0));
             }
-            upLeft = use_up(4, 4, pAngle - 180);
+            upLeft = use_up(4, 4, pAngle - 180, kFiltType);
             if (needLeft && upLeft) {
                 upsamp(leftCol, 4 + (needBottom ? 4 : 0));
             }
