@@ -7,7 +7,7 @@ namespace {
 
 bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const unsigned char* above, int nTopPx,
                      int nTopRightPx, const unsigned char* left, int nLeftPx, int nBottomLeftPx, int aboveLeft,
-                     const unsigned char* expected, int aboveMode = 0, int leftMode = 0) {
+                     const unsigned char* expected, int aboveMode = 0, int leftMode = 0, int filterIntraMode = -1) {
     (void)ctx;
     const std::string ptx = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
     const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
@@ -31,6 +31,7 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     int deltaArg = angleDelta;
     int amArg = aboveMode;
     int lmArg = leftMode;
+    int fiArg = filterIntraMode;
     int nTopArg = nTopPx;
     int nTrArg = nTopRightPx;
     int nLeftArg = nLeftPx;
@@ -40,6 +41,7 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
     gpurt::DeviceBuffer dAm(sizeof(amArg));
     gpurt::DeviceBuffer dLm(sizeof(lmArg));
+    gpurt::DeviceBuffer dFi(sizeof(fiArg));
     gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
     gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
     gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
@@ -49,6 +51,7 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
     dAm.uploadFrom(&amArg, sizeof(amArg));
     dLm.uploadFrom(&lmArg, sizeof(lmArg));
+    dFi.uploadFrom(&fiArg, sizeof(fiArg));
     dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
     dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
     dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
@@ -59,6 +62,7 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     CUdeviceptr pDelta = dDelta.get();
     CUdeviceptr pAm = dAm.get();
     CUdeviceptr pLm = dLm.get();
+    CUdeviceptr pFi = dFi.get();
     CUdeviceptr pAbove = dAbove.get();
     CUdeviceptr pNTop = dNTop.get();
     CUdeviceptr pNTr = dNTr.get();
@@ -67,7 +71,8 @@ bool runBlockPredict(gpurt::GpuContext& ctx, int mode, int angleDelta, const uns
     CUdeviceptr pNBl = dNBl.get();
     CUdeviceptr pAl = dAl.get();
     CUdeviceptr pOut = dOut.get();
-    void* args[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl, &pAl, &pOut};
+    void* args[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft, &pNBl,
+                    &pAl,   &pFi,   &pOut};
     k.launch(1, 1, 16, 1, args);
 
     unsigned char got[16] = {0};
@@ -147,6 +152,82 @@ TEST_CASE("gpu block predictor applies the smooth-neighbor filter like the build
 
     bool ok = runBlockPredict(ctx, intra::D135_PRED, 0, above, 4, 0, left, 4, 0, 90, ref,
                               intra::SMOOTH_H_PRED, intra::DC_PRED);
+    CHECK(ok);
+}
+
+TEST_CASE("filter intra predictor mode dc matches svt golden") {
+    // golden: svt_av1_filter_intra_predictor_c (filterintra_c.c:70),
+    // FILTER_DC_PRED, corner 10, above {20,30,40,50}, left {21,31,41,51}
+    unsigned char ab[6] = {10, 20, 30, 40, 50};
+    const unsigned char left[4] = {21, 31, 41, 51};
+    unsigned char dst[16] = {0};
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 0);
+    CHECK(dst[0] == 25);
+}
+
+TEST_CASE("filter intra predictor mode 1 matches svt golden") {
+    // golden: svt_av1_filter_intra_predictor_c, FILTER_V_PRED, corner 10,
+    // above {20,30,40,50}, left {21,31,41,51}
+    unsigned char ab[6] = {10, 20, 30, 40, 50};
+    const unsigned char left[4] = {21, 31, 41, 51};
+    unsigned char dst[16] = {0};
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 1);
+    CHECK(dst[0] == 27);
+}
+
+TEST_CASE("filter intra predictor mode 2 matches svt golden") {
+    // golden: FILTER_H_PRED, same fixture
+    unsigned char ab[6] = {10, 20, 30, 40, 50};
+    const unsigned char left[4] = {21, 31, 41, 51};
+    unsigned char dst[16] = {0};
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 2);
+    CHECK(dst[0] == 26);
+}
+
+TEST_CASE("filter intra predictor mode 3 matches svt golden") {
+    // golden: FILTER_D157_PRED, same fixture
+    unsigned char ab[6] = {10, 20, 30, 40, 50};
+    const unsigned char left[4] = {21, 31, 41, 51};
+    unsigned char dst[16] = {0};
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 3);
+    CHECK(dst[0] == 22);
+}
+
+TEST_CASE("filter intra predictor mode 4 matches svt golden") {
+    // golden: FILTER_PAETH_PRED, same fixture
+    unsigned char ab[6] = {10, 20, 30, 40, 50};
+    const unsigned char left[4] = {21, 31, 41, 51};
+    unsigned char dst[16] = {0};
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 4);
+    CHECK(dst[0] == 28);
+}
+
+TEST_CASE("builder routes filter intra to the predictor early-out") {
+    // golden: build_intra_predictors with use_filter_intra (mode 0) produces
+    // the same 16 pixels as svt_av1_filter_intra_predictor_c on the assembled
+    // edges (corner 10, above {20,30,40,50}, left {21,31,41,51})
+    const unsigned char above[4] = {20, 30, 40, 50};
+    const unsigned char left[4] = {21, 31, 41, 51};
+    unsigned char dst[16] = {0};
+    intra::buildIntraPredictors(dst, 4, intra::DC_PRED, 0, 4, 4, 10, above, 4, 0, left, 4, 0,
+                                intra::NeighborContext(), 0);
+    CHECK(dst[3] == 44);
+}
+
+TEST_CASE("gpu block predictor filter intra matches the builder") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const unsigned char above[4] = {20, 30, 40, 50};
+    const unsigned char left[4] = {21, 31, 41, 51};
+    unsigned char ref[16] = {0};
+    intra::buildIntraPredictors(ref, 4, intra::DC_PRED, 0, 4, 4, 10, above, 4, 0, left, 4, 0,
+                                intra::NeighborContext(), 1);
+
+    bool ok = runBlockPredict(ctx, intra::DC_PRED, 0, above, 4, 0, left, 4, 0, 10, ref, 0, 0, 1);
     CHECK(ok);
 }
 
@@ -1188,4 +1269,5 @@ TEST_CASE("gpu block predictor dc fills 128 with no edges") {
     bool ok = runBlockPredict(ctx, intra::DC_PRED, 0, nullptr, 0, 0, nullptr, 0, 0, 0, ref);
     CHECK(ok);
 }
+
 

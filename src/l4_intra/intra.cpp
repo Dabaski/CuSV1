@@ -135,6 +135,68 @@ int roundPowerOfTwo(int value, int bits) {
     return (value + (1 << (bits - 1))) >> bits;
 }
 
+// definitions.h:460: ROUND_POWER_OF_TWO_SIGNED
+int roundPowerOfTwoSigned(int value, int bits) {
+    if (value < 0) {
+        return -roundPowerOfTwo(-value, bits);
+    }
+    return roundPowerOfTwo(value, bits);
+}
+
+// eb_av1_filter_intra_taps (C_DEFAULT/filterintra_c.c:17), verbatim.
+const int8_t kFilterIntraTaps[5][8][8] = {
+    {
+        {-6, 10, 0, 0, 0, 12, 0, 0},
+        {-5, 2, 10, 0, 0, 9, 0, 0},
+        {-3, 1, 1, 10, 0, 7, 0, 0},
+        {-3, 1, 1, 2, 10, 5, 0, 0},
+        {-4, 6, 0, 0, 0, 2, 12, 0},
+        {-3, 2, 6, 0, 0, 2, 9, 0},
+        {-3, 2, 2, 6, 0, 2, 7, 0},
+        {-3, 1, 2, 2, 6, 3, 5, 0},
+    },
+    {
+        {-10, 16, 0, 0, 0, 10, 0, 0},
+        {-6, 0, 16, 0, 0, 6, 0, 0},
+        {-4, 0, 0, 16, 0, 4, 0, 0},
+        {-2, 0, 0, 0, 16, 2, 0, 0},
+        {-10, 16, 0, 0, 0, 0, 10, 0},
+        {-6, 0, 16, 0, 0, 0, 6, 0},
+        {-4, 0, 0, 16, 0, 0, 4, 0},
+        {-2, 0, 0, 0, 16, 0, 2, 0},
+    },
+    {
+        {-8, 8, 0, 0, 0, 16, 0, 0},
+        {-8, 0, 8, 0, 0, 16, 0, 0},
+        {-8, 0, 0, 8, 0, 16, 0, 0},
+        {-8, 0, 0, 0, 8, 16, 0, 0},
+        {-4, 4, 0, 0, 0, 0, 16, 0},
+        {-4, 0, 4, 0, 0, 0, 16, 0},
+        {-4, 0, 0, 4, 0, 0, 16, 0},
+        {-4, 0, 0, 0, 4, 0, 16, 0},
+    },
+    {
+        {-2, 8, 0, 0, 0, 10, 0, 0},
+        {-1, 3, 8, 0, 0, 6, 0, 0},
+        {-1, 2, 3, 8, 0, 4, 0, 0},
+        {0, 1, 2, 3, 8, 2, 0, 0},
+        {-1, 4, 0, 0, 0, 3, 10, 0},
+        {-1, 3, 4, 0, 0, 4, 6, 0},
+        {-1, 2, 3, 4, 0, 4, 4, 0},
+        {-1, 2, 2, 3, 4, 3, 3, 0},
+    },
+    {
+        {-12, 14, 0, 0, 0, 14, 0, 0},
+        {-10, 0, 14, 0, 0, 12, 0, 0},
+        {-9, 0, 0, 14, 0, 11, 0, 0},
+        {-8, 0, 0, 0, 14, 10, 0, 0},
+        {-10, 12, 0, 0, 0, 0, 14, 0},
+        {-9, 1, 12, 0, 0, 0, 12, 0},
+        {-8, 0, 0, 12, 0, 1, 11, 0},
+        {-7, 0, 0, 1, 12, 1, 9, 0},
+    },
+};
+
 }  // namespace
 
 void drZ1(std::uint8_t* dst, int stride, int bw, int bh, const std::uint8_t* above, const std::uint8_t* left,
@@ -393,7 +455,7 @@ const int kModeToAngle[13] = {0, 90, 180, 45, 135, 113, 157, 203, 67, 0, 0, 0, 0
 void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleDelta, int txwpx, int txhpx,
                           std::uint8_t aboveLeft, const std::uint8_t* aboveRef, int nTopPx, int nTopRightPx,
                           const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
-                          const NeighborContext& neighbors) {
+                          const NeighborContext& neighbors, int filterIntraMode) {
     std::uint8_t leftData[2 * 64 + 32];
     std::uint8_t aboveData[2 * 64 + 32];
     std::uint8_t* const aboveRow = aboveData + 16;
@@ -404,6 +466,7 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
     int needAboveLeft  = kExtendModes[mode] & kNeedAboveLeft;
     int pAngle         = 0;
     const int isDrMode = mode >= V_PRED && mode <= D67_PRED;
+    const int useFilterIntra = filterIntraMode >= 0 && filterIntraMode <= 4;
 
     if (isDrMode) {
         pAngle = kModeToAngle[mode] + angleDelta * 3;
@@ -420,6 +483,11 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
             needLeft = 1;
             needAboveLeft = 1;
         }
+    }
+    if (useFilterIntra) {
+        needLeft = 1;
+        needAbove = 1;
+        needAboveLeft = 1;
     }
 
     if ((!needAbove && nLeftPx == 0) || (!needLeft && nTopPx == 0)) {
@@ -512,6 +580,11 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
             aboveRow[-1] = 128;
         }
         leftCol[-1] = aboveRow[-1];
+    }
+
+    if (useFilterIntra) {
+        filterIntraPredictor(dst, dstStride, aboveRow, leftCol, filterIntraMode);
+        return;
     }
 
     if (isDrMode) {
@@ -612,6 +685,49 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
         smoothVPredict(dst, dstStride, txwpx, txhpx, aboveRow, leftCol);
     } else if (mode == SMOOTH_H_PRED) {
         smoothHPredict(dst, dstStride, txwpx, txhpx, aboveRow, leftCol);
+    }
+}
+
+// svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c:70), 4x4
+void filterIntraPredictor(std::uint8_t* dst, int dstStride, const std::uint8_t* above,
+                          const std::uint8_t* left, int mode) {
+    std::uint8_t buffer[33][33] = {};
+    const int bw = 4;
+    const int bh = 4;
+
+    for (int r = 0; r < bh; ++r) {
+        buffer[r + 1][0] = left[r];
+    }
+    for (int c = 0; c < bw + 1; ++c) {
+        buffer[0][c] = above[c - 1];
+    }
+
+    for (int r = 1; r < bh + 1; r += 2) {
+        for (int c = 1; c < bw + 1; c += 4) {
+            const std::uint8_t p0 = buffer[r - 1][c - 1];
+            const std::uint8_t p1 = buffer[r - 1][c];
+            const std::uint8_t p2 = buffer[r - 1][c + 1];
+            const std::uint8_t p3 = buffer[r - 1][c + 2];
+            const std::uint8_t p4 = buffer[r - 1][c + 3];
+            const std::uint8_t p5 = buffer[r][c - 1];
+            const std::uint8_t p6 = buffer[r + 1][c - 1];
+            for (int k = 0; k < 8; ++k) {
+                const int rOffset = k >> 2;
+                const int cOffset = k & 0x03;
+                int sum = kFilterIntraTaps[mode][k][0] * p0 + kFilterIntraTaps[mode][k][1] * p1 +
+                          kFilterIntraTaps[mode][k][2] * p2 + kFilterIntraTaps[mode][k][3] * p3 +
+                          kFilterIntraTaps[mode][k][4] * p4 + kFilterIntraTaps[mode][k][5] * p5 +
+                          kFilterIntraTaps[mode][k][6] * p6;
+                const int v = roundPowerOfTwoSigned(sum, 4);
+                buffer[r + rOffset][c + cOffset] = static_cast<std::uint8_t>(clipPixelHighbd(v, 8));
+            }
+        }
+    }
+
+    for (int r = 0; r < bh; ++r) {
+        for (int c = 0; c < bw; ++c) {
+            dst[r * dstStride + c] = buffer[r + 1][c + 1];
+        }
     }
 }
 
@@ -924,7 +1040,8 @@ __constant__ unsigned short der[90] = {
     7,    0, 0,
     3,    0, 0,
 };
-
+)CUDA"
+    R"CUDB1(
 __device__ int abs_int(int v) {
     return v < 0 ? -v : v;
 }
@@ -954,6 +1071,71 @@ __device__ int use_up(int bs0, int bs1, int delta, int type) {
         return 0;
     }
     return type ? (blkWh <= 8) : (blkWh <= 16);
+}
+
+__constant__ signed char taps[5][8][8] = {
+    {
+        {-6, 10, 0, 0, 0, 12, 0, 0},
+        {-5, 2, 10, 0, 0, 9, 0, 0},
+        {-3, 1, 1, 10, 0, 7, 0, 0},
+        {-3, 1, 1, 2, 10, 5, 0, 0},
+        {-4, 6, 0, 0, 0, 2, 12, 0},
+        {-3, 2, 6, 0, 0, 2, 9, 0},
+        {-3, 2, 2, 6, 0, 2, 7, 0},
+        {-3, 1, 2, 2, 6, 3, 5, 0},
+    },
+    {
+        {-10, 16, 0, 0, 0, 10, 0, 0},
+        {-6, 0, 16, 0, 0, 6, 0, 0},
+        {-4, 0, 0, 16, 0, 4, 0, 0},
+        {-2, 0, 0, 0, 16, 2, 0, 0},
+        {-10, 16, 0, 0, 0, 0, 10, 0},
+        {-6, 0, 16, 0, 0, 0, 6, 0},
+        {-4, 0, 0, 16, 0, 0, 4, 0},
+        {-2, 0, 0, 0, 16, 0, 2, 0},
+    },
+    {
+        {-8, 8, 0, 0, 0, 16, 0, 0},
+        {-8, 0, 8, 0, 0, 16, 0, 0},
+        {-8, 0, 0, 8, 0, 16, 0, 0},
+        {-8, 0, 0, 0, 8, 16, 0, 0},
+        {-4, 4, 0, 0, 0, 0, 16, 0},
+        {-4, 0, 4, 0, 0, 0, 16, 0},
+        {-4, 0, 0, 4, 0, 0, 16, 0},
+        {-4, 0, 0, 0, 4, 0, 16, 0},
+    },
+    {
+        {-2, 8, 0, 0, 0, 10, 0, 0},
+        {-1, 3, 8, 0, 0, 6, 0, 0},
+        {-1, 2, 3, 8, 0, 4, 0, 0},
+        {0, 1, 2, 3, 8, 2, 0, 0},
+        {-1, 4, 0, 0, 0, 3, 10, 0},
+        {-1, 3, 4, 0, 0, 4, 6, 0},
+        {-1, 2, 3, 4, 0, 4, 4, 0},
+        {-1, 2, 2, 3, 4, 3, 3, 0},
+    },
+    {
+        {-12, 14, 0, 0, 0, 14, 0, 0},
+        {-10, 0, 14, 0, 0, 12, 0, 0},
+        {-9, 0, 0, 14, 0, 11, 0, 0},
+        {-8, 0, 0, 0, 14, 10, 0, 0},
+        {-10, 12, 0, 0, 0, 0, 14, 0},
+        {-9, 1, 12, 0, 0, 0, 12, 0},
+        {-8, 0, 0, 12, 0, 1, 11, 0},
+        {-7, 0, 0, 1, 12, 1, 9, 0},
+    },
+};
+)CUDB1"
+    R"CUDB2(
+__device__ int rp_pos(int value, int bits) {
+    return (value + (1 << (bits - 1))) >> bits;
+}
+
+__device__ int rp_signed(int value, int bits) {
+    if (value < 0) {
+        return -rp_pos(-value, bits);
+    }
+    return rp_pos(value, bits);
 }
 
 __device__ int filt_str(int bs0, int bs1, int delta, int type) {
@@ -1052,13 +1234,14 @@ extern "C" __global__ void predict_block_4x4(
     const int* aboveMode, const int* leftMode,
     const unsigned char* aboveRef, const int* nTopPx, const int* nTopRightPx,
     const unsigned char* leftRef, const int* nLeftPx, const int* nBottomLeftPx,
-    const int* aboveLeft, unsigned char* dst) {
+    const int* aboveLeft, const int* filterIntraMode, unsigned char* dst) {
     __shared__ unsigned char aboveData[64];
     __shared__ unsigned char leftData[64];
     __shared__ int kDc;
     __shared__ int kAngle;
     __shared__ int kUpA;
     __shared__ int kUpL;
+    __shared__ unsigned char kFi[16];
 
     const int idx = threadIdx.x;
     unsigned char* aboveRow = aboveData + 8;
@@ -1086,7 +1269,12 @@ extern "C" __global__ void predict_block_4x4(
             needLeft = 1;
             needAbove = 1;
         }
-        if (isDr) {
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needLeft = 1;
+            needAbove = 1;
+            needAboveLeft = 1;
+        }
+        if (m >= 3 && m <= 8) {
             if (m == 3) pAngle = 45;
             else if (m == 4) pAngle = 135;
             else if (m == 5) pAngle = 113;
@@ -1157,6 +1345,51 @@ extern "C" __global__ void predict_block_4x4(
             aboveRow[-1] = (unsigned char)(*aboveLeft);
             leftCol[-1] = aboveRow[-1];
         }
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            // svt_av1_filter_intra_predictor_c, 4x4, sequential strips in
+            // thread 0 (recursion is sequentially dependent)
+            unsigned char fb[5][5];
+            for (int rr = 0; rr < 5; ++rr) {
+                for (int cc = 0; cc < 5; ++cc) {
+                    fb[rr][cc] = 0;
+                }
+            }
+            for (int rr = 0; rr < 4; ++rr) {
+                fb[rr + 1][0] = leftCol[rr];
+            }
+            fb[0][0] = aboveRow[-1];
+            for (int cc = 1; cc < 5; ++cc) {
+                fb[0][cc] = aboveRow[cc - 1];
+            }
+            for (int rr = 1; rr < 5; rr += 2) {
+                for (int cc = 1; cc < 5; cc += 4) {
+                    const unsigned char p0 = fb[rr - 1][cc - 1];
+                    const unsigned char p1 = fb[rr - 1][cc];
+                    const unsigned char p2 = fb[rr - 1][cc + 1];
+                    const unsigned char p3 = fb[rr - 1][cc + 2];
+                    const unsigned char p4 = fb[rr - 1][cc + 3];
+                    const unsigned char p5 = fb[rr][cc - 1];
+                    const unsigned char p6 = fb[rr + 1][cc - 1];
+                    for (int k = 0; k < 8; ++k) {
+                        const int rOff = k >> 2;
+                        const int cOff = k & 0x03;
+                        int sum = taps[(*filterIntraMode)][k][0] * p0 + taps[(*filterIntraMode)][k][1] * p1 +
+                                  taps[(*filterIntraMode)][k][2] * p2 + taps[(*filterIntraMode)][k][3] * p3 +
+                                  taps[(*filterIntraMode)][k][4] * p4 + taps[(*filterIntraMode)][k][5] * p5 +
+                                  taps[(*filterIntraMode)][k][6] * p6;
+                        int v = rp_signed(sum, 4);
+                        if (v < 0) v = 0;
+                        else if (v > 255) v = 255;
+                        fb[rr + rOff][cc + cOff] = (unsigned char)v;
+                    }
+                }
+            }
+            for (int rr = 0; rr < 4; ++rr) {
+                for (int cc = 0; cc < 4; ++cc) {
+                    kFi[rr * 4 + cc] = fb[rr + 1][cc + 1];
+                }
+            }
+        }
         if (isDr) {
             int upAbove = 0;
             int upLeft  = 0;
@@ -1213,7 +1446,9 @@ extern "C" __global__ void predict_block_4x4(
     }
     __syncthreads();
     int m = *mode;
-    if (m == 0) {
+    if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+        dst[idx] = kFi[idx];
+    } else if (m == 0) {
         dst[idx] = (unsigned char)kDc;
     } else if (m == 1) {
         dst[idx] = aboveRow[idx & 3];
@@ -1315,7 +1550,7 @@ extern "C" __global__ void predict_block_4x4(
         }
     }
 }
-)CUDA";
+)CUDB2";
 }
 
 }  // namespace intra

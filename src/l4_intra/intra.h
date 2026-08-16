@@ -31,10 +31,25 @@ struct NeighborContext {
 // block uses a SMOOTH* mode (svt_aom_is_smooth, intra_prediction.c:128).
 int filtType(const NeighborContext& neighbors);
 
+// definitions.h:1295, verbatim order.
+enum class FilterIntraMode {
+    FILTER_DC_PRED = 0,
+    FILTER_V_PRED = 1,
+    FILTER_H_PRED = 2,
+    FILTER_D157_PRED = 3,
+    FILTER_PAETH_PRED = 4,
+    FILTER_INTRA_MODES = 5,
+};
+
+// svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c:70), 4x4.
+// above points at samples[0]; the corner is at above[-1] (SVT convention).
+void filterIntraPredictor(std::uint8_t* dst, int dstStride, const std::uint8_t* above,
+                          const std::uint8_t* left, int mode);
+
 void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleDelta, int txwpx, int txhpx,
                           std::uint8_t aboveLeft, const std::uint8_t* aboveRef, int nTopPx, int nTopRightPx,
                           const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
-                          const NeighborContext& neighbors = NeighborContext());
+                          const NeighborContext& neighbors = NeighborContext(), int filterIntraMode = -1);
 
 std::string drZ1CuSource();
 
