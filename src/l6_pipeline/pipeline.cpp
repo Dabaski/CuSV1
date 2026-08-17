@@ -121,4 +121,15 @@ void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::in
     }
 }
 
+std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b) {
+    std::int64_t sse = 0;
+    for (int y = 0; y < a.height(); ++y) {
+        for (int x = 0; x < a.width(); ++x) {
+            const std::int64_t d = static_cast<std::int64_t>(a.at(x, y)) - static_cast<std::int64_t>(b.at(x, y));
+            sse += d * d;
+        }
+    }
+    return sse;
+}
+
 }  // namespace pipeline

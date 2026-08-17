@@ -360,6 +360,36 @@ TEST_CASE("frame round trip 8x8 recon matches svt composition") {
     CHECK(dcOk);
 }
 
+TEST_CASE("frame mse is zero for identical planes") {
+    pixels::Plane a(8, 8, 4);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            a.at(x, y) = static_cast<std::uint8_t>(y * 8 + x);
+        }
+    }
+    pixels::Plane b(8, 8, 4);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            b.at(x, y) = static_cast<std::uint8_t>(y * 8 + x);
+        }
+    }
+    CHECK(pipeline::frameMse8(a, b) == 0);
+}
+
+TEST_CASE("frame mse is 64 for a unit-lift of every sample") {
+    // each of the 64 samples differs by exactly 1 -> SSE = 64 * 1 = 64
+    pixels::Plane a(8, 8, 4);
+    pixels::Plane b(8, 8, 4);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const std::uint8_t v = static_cast<std::uint8_t>(y * 8 + x + 40);
+            a.at(x, y) = v;
+            b.at(x, y) = static_cast<std::uint8_t>(v + 1);
+        }
+    }
+    CHECK(pipeline::frameMse8(a, b) == 64);
+}
+
 TEST_CASE("gpu round trip matches host encodeRecon4x4 bit-exactly") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");

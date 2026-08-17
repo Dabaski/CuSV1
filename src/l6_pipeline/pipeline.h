@@ -38,6 +38,9 @@ void encodeRecon4x4(const pixels::Plane& plane, int px, int py, const std::uint8
 void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                          intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
 
+// Sum of squared sample differences over the full frame (integer, exact).
+std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
+
 std::string subtractCuSource();
 
 }  // namespace pipeline
