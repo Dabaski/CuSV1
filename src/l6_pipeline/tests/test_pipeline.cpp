@@ -342,6 +342,22 @@ TEST_CASE("frame round trip 8x8 recon matches svt composition") {
         }
     }
     CHECK(coeffsOk);
+
+    // F2 folded: the per-block DC values above already prove the raster
+    // availability paths (the full golden covers every block); these explicit
+    // checks localize a failure to the exact variant:
+    //   block 0 (0,0) corner:  no neighbor -> early-out above=127 -> DC -3784
+    //   block 1 (0,1) first-row, left edge: left_ref[0] fallback -> DC 104
+    //   block 2 (1,0) first-col, above:     v_predictor on above row -> DC -18
+    //   block 3 (1,1) interior:              v_predictor on above row -> DC -37
+    const std::int32_t blockDc[4] = {-3784, 104, -18, -37};
+    bool dcOk = true;
+    for (int b = 0; b < 4; ++b) {
+        if (coeffs[b * 16] != blockDc[b]) {
+            dcOk = false;
+        }
+    }
+    CHECK(dcOk);
 }
 
 TEST_CASE("gpu round trip matches host encodeRecon4x4 bit-exactly") {
