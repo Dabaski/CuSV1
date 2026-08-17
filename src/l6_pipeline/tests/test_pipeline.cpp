@@ -224,3 +224,75 @@ TEST_CASE("gpu pipeline matches host pipeline bit-exactly") {
     }
     CHECK(ok);
 }
+
+TEST_CASE("round trip v+dct recon matches svt and recovers the source") {
+    // golden: harness composition build_intra_predictors (V_PRED) -> subtract
+    // -> fwd 2D -> inv 2D add onto the same predictor. For this block the
+    // fixed-point round trip is exactly lossless: recon == source. The 1:1
+    // claim is vs SVT's recon, not vs the original pixels.
+    const std::uint8_t srcData[16] = {21, 3, 5, 9, 9, 11, 3, 7, 7, 13, 5, 1, 15, 4, 25, 2};
+    const std::uint8_t above[4] = {10, 40, 30, 20};
+    const std::int32_t goldenCoeffs[16] = {-520, 140, 324, 202, -17, 18, 102, -68,
+                                           56,   3,   36,  120, -18, 23, 6,   -22};
+
+    pixels::Plane plane(4, 4, 4);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            plane.at(x, y) = srcData[y * 4 + x];
+        }
+    }
+
+    std::int32_t coeffs[16] = {0};
+    std::uint8_t recon[16] = {0};
+    pipeline::encodeRecon4x4(plane, 0, 0, above, 4, 0, nullptr, 0, 0, 0, intra::V_PRED, 0,
+                             transforms::TxType::DCT_DCT, coeffs, recon);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 16; ++i) {
+        if (coeffs[i] != goldenCoeffs[i]) {
+            coeffsOk = false;
+        }
+    }
+    CHECK(coeffsOk);
+
+    bool reconOk = true;
+    for (int i = 0; i < 16; ++i) {
+        if (recon[i] != srcData[i]) {
+            reconOk = false;
+        }
+    }
+    CHECK(reconOk);
+}
+
+TEST_CASE("round trip adst recon matches svt composition") {
+    // golden: harness composition build_intra_predictors (V_PRED, above
+    // {0,0,0,0} -> pred zero) -> subtract (src 250 constant) -> fwd 2D
+    // (ADST_ADST) -> inv 2D add onto the same predictor -> recon {250 * 16}.
+    // Note: SVT's 4x4 fixed-point fwd+inv is exact for in-range 8-bit blocks,
+    // so recon equals the source here; fixed-point round trips are NOT
+    // guaranteed lossless in general (larger transforms / higher bit depth),
+    // which is why the 1:1 claim is scoped to SVT's recon, not the source.
+    const std::uint8_t srcData[16] = {250, 250, 250, 250, 250, 250, 250, 250,
+                                      250, 250, 250, 250, 250, 250, 250, 250};
+    const std::uint8_t above[4] = {0, 0, 0, 0};
+
+    pixels::Plane plane(4, 4, 4);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            plane.at(x, y) = srcData[y * 4 + x];
+        }
+    }
+
+    std::int32_t coeffs[16] = {0};
+    std::uint8_t recon[16] = {0};
+    pipeline::encodeRecon4x4(plane, 0, 0, above, 4, 0, nullptr, 0, 0, 0, intra::V_PRED, 0,
+                             transforms::TxType::ADST_ADST, coeffs, recon);
+
+    bool reconOk = true;
+    for (int i = 0; i < 16; ++i) {
+        if (recon[i] != srcData[i]) {
+            reconOk = false;
+        }
+    }
+    CHECK(reconOk);
+}

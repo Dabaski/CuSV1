@@ -19,6 +19,15 @@ void encodeBlock4x4(const pixels::Plane& plane, int px, int py, const std::uint8
                     std::uint8_t aboveLeft, intra::PredictionMode mode, int angleDelta,
                     transforms::TxType txType, std::int32_t coeffs[16]);
 
+// Round trip: encode (predict + residual + fwd 2D) then reconstruct
+// (invTxfm2dAdd4x4 onto the same predictor). recon = SVT's recon for the
+// same chain — fixed-point fwd+inv is lossy in general, so recon is NOT
+// guaranteed to equal the source block.
+void encodeRecon4x4(const pixels::Plane& plane, int px, int py, const std::uint8_t* aboveRef, int nTopPx,
+                    int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
+                    std::uint8_t aboveLeft, intra::PredictionMode mode, int angleDelta,
+                    transforms::TxType txType, std::int32_t coeffs[16], std::uint8_t recon[16]);
+
 std::string subtractCuSource();
 
 }  // namespace pipeline
