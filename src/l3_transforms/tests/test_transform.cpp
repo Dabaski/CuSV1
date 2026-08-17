@@ -126,7 +126,13 @@ TEST_CASE("iadst4 matches svt_av1_iadst4_new golden") {
     const std::int32_t golden[4] = {59, 100, 105, 37};
     std::int32_t got[4] = {0};
     transforms::iadst4(in, got);
-    CHECK(got[2] == golden[2]);
+    bool ok = true;
+    for (int i = 0; i < 4; ++i) {
+        if (got[i] != golden[i]) {
+            ok = false;
+        }
+    }
+    CHECK(ok);
 }
 
 TEST_CASE("inv 2d add dct reconstructs the source block") {
@@ -170,6 +176,128 @@ TEST_CASE("inv 2d add adst matches svt golden") {
     bool ok = true;
     for (int i = 0; i < 16; ++i) {
         if (dst[i] != golden[i]) {
+            ok = false;
+        }
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("gpu inverse 2d add dct matches host bit-exactly") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const std::int32_t coeffs[16] = {-520, 140, 324, 202, -17, 18, 102, -68,
+                                     56,   3,   36,  120, -18, 23, 6,   -22};
+    std::uint8_t refDst[16];
+    const std::uint8_t row[4] = {10, 40, 30, 20};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            refDst[r * 4 + c] = row[c];
+        }
+    }
+    transforms::invTxfm2dAdd4x4(coeffs, refDst, 4, transforms::TxType::DCT_DCT);
+
+    const std::string ptx = *gpurt::compileToPtx(transforms::invTxfmCuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "inv_txfm_2d_add_4x4");
+    REQUIRE(it != names.end());
+    gpurt::Kernel k(ptx, *it);
+
+    std::uint8_t dst[16];
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            dst[r * 4 + c] = row[c];
+        }
+    }
+    gpurt::DeviceBuffer dCoeffs(sizeof(coeffs));
+    gpurt::DeviceBuffer dDst(sizeof(dst));
+    dCoeffs.uploadFrom(coeffs, sizeof(coeffs));
+    dDst.uploadFrom(dst, sizeof(dst));
+
+    int typeArg = 0;
+    int strideArg = 4;
+    gpurt::DeviceBuffer dType(sizeof(typeArg));
+    gpurt::DeviceBuffer dStride(sizeof(strideArg));
+    dType.uploadFrom(&typeArg, sizeof(typeArg));
+    dStride.uploadFrom(&strideArg, sizeof(strideArg));
+
+    CUdeviceptr pCoeffs = dCoeffs.get();
+    CUdeviceptr pType = dType.get();
+    CUdeviceptr pDst = dDst.get();
+    CUdeviceptr pStride = dStride.get();
+    void* args[] = {&pCoeffs, &pType, &pDst, &pStride};
+    k.launch(1, 1, 4, 1, args);
+
+    std::uint8_t got[16] = {0};
+    dDst.downloadTo(got, sizeof(got));
+
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (got[i] != refDst[i]) {
+            ok = false;
+        }
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("gpu inverse 2d add adst matches host bit-exactly") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const std::int32_t coeffs[16] = {-631, 53, 4,  55,  -16, 2,  45, -26,
+                                     -12,  -27, -47, -2,  2,   -2, 16, 53};
+    std::uint8_t refDst[16];
+    const std::uint8_t row[4] = {10, 40, 30, 20};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            refDst[r * 4 + c] = row[c];
+        }
+    }
+    transforms::invTxfm2dAdd4x4(coeffs, refDst, 4, transforms::TxType::ADST_ADST);
+
+    const std::string ptx = *gpurt::compileToPtx(transforms::invTxfmCuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "inv_txfm_2d_add_4x4");
+    REQUIRE(it != names.end());
+    gpurt::Kernel k(ptx, *it);
+
+    std::uint8_t dst[16];
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            dst[r * 4 + c] = row[c];
+        }
+    }
+    gpurt::DeviceBuffer dCoeffs(sizeof(coeffs));
+    gpurt::DeviceBuffer dDst(sizeof(dst));
+    dCoeffs.uploadFrom(coeffs, sizeof(coeffs));
+    dDst.uploadFrom(dst, sizeof(dst));
+
+    int typeArg = 1;
+    int strideArg = 4;
+    gpurt::DeviceBuffer dType(sizeof(typeArg));
+    gpurt::DeviceBuffer dStride(sizeof(strideArg));
+    dType.uploadFrom(&typeArg, sizeof(typeArg));
+    dStride.uploadFrom(&strideArg, sizeof(strideArg));
+
+    CUdeviceptr pCoeffs = dCoeffs.get();
+    CUdeviceptr pType = dType.get();
+    CUdeviceptr pDst = dDst.get();
+    CUdeviceptr pStride = dStride.get();
+    void* args[] = {&pCoeffs, &pType, &pDst, &pStride};
+    k.launch(1, 1, 4, 1, args);
+
+    std::uint8_t got[16] = {0};
+    dDst.downloadTo(got, sizeof(got));
+
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (got[i] != refDst[i]) {
             ok = false;
         }
     }

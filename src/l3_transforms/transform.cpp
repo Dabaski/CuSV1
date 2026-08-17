@@ -426,5 +426,125 @@ extern "C" __global__ void fwd_txfm_2d_4x4(const short* input, const int* stride
 )CUDA";
 }
 
+std::string invTxfmCuSource() {
+    return R"CUDA(
+__constant__ int kC12[64] = {
+    4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036, 4017, 3996, 3973, 3948, 3920, 3889, 3857, 3822,
+    3784, 3745, 3703, 3659, 3612, 3564, 3513, 3461, 3406, 3349, 3290, 3229, 3166, 3102, 3035, 2967,
+    2896, 2824, 2751, 2675, 2598, 2520, 2440, 2359, 2276, 2191, 2106, 2019, 1931, 1842, 1751, 1660,
+    1567, 1474, 1380, 1285, 1189, 1092, 995,  897,  799,  700,  601,  501,  401,  301,  201,  101,
+};
+
+__constant__ int kS12[5] = {0, 1321, 2482, 3344, 3803};
+
+__device__ int d_hb(int w0, int in0, int w1, int in1, int bit) {
+    long long r = (long long)(w0 * in0) + (long long)(w1 * in1) + (1LL << (bit - 1));
+    return (int)(r >> bit);
+}
+
+__device__ int d_rs(long long value, int bit) {
+    return (int)((value + (1LL << (bit - 1))) >> bit);
+}
+
+__device__ int d_cv(int value, int bit) {
+    if (bit <= 0) {
+        return value;
+    }
+    const long long hi = (1LL << (bit - 1)) - 1;
+    const long long lo = -(1LL << (bit - 1));
+    if (value < lo) return (int)lo;
+    if (value > hi) return (int)hi;
+    return value;
+}
+
+__device__ void d_idct4i(const int* input, int* output) {
+    const int bit = 12;
+    int bf[4];
+    int step[4];
+    bf[0] = input[0];
+    bf[1] = input[2];
+    bf[2] = input[1];
+    bf[3] = input[3];
+    step[0] = d_hb(kC12[32], bf[0], kC12[32], bf[1], bit);
+    step[1] = d_hb(kC12[32], bf[0], -kC12[32], bf[1], bit);
+    step[2] = d_hb(kC12[48], bf[2], -kC12[16], bf[3], bit);
+    step[3] = d_hb(kC12[16], bf[2], kC12[48], bf[3], bit);
+    output[0] = d_cv(step[0] + step[3], 16);
+    output[1] = d_cv(step[1] + step[2], 16);
+    output[2] = d_cv(step[1] - step[2], 16);
+    output[3] = d_cv(step[0] - step[3], 16);
+}
+
+__device__ void d_iadst4i(const int* input, int* output) {
+    const int bit = 12;
+    int x0 = input[0];
+    int x1 = input[1];
+    int x2 = input[2];
+    int x3 = input[3];
+    if (!(x0 | x1 | x2 | x3)) {
+        output[0] = output[1] = output[2] = output[3] = 0;
+        return;
+    }
+    int s0 = kS12[1] * x0;
+    int s1 = kS12[2] * x0;
+    int s2 = kS12[3] * x1;
+    int s3 = kS12[4] * x2;
+    int s4 = kS12[1] * x2;
+    int s5 = kS12[2] * x3;
+    int s6 = kS12[4] * x3;
+    int s7 = (x0 - x2) + x3;
+    s0 = s0 + s3;
+    s1 = s1 - s4;
+    s3 = s2;
+    s2 = kS12[3] * s7;
+    s0 = s0 + s5;
+    s1 = s1 - s6;
+    int y0 = s0 + s3;
+    int y1 = s1 + s3;
+    int y2 = s2;
+    int y3 = s0 + s1;
+    y3 = y3 - s3;
+    output[0] = d_rs(y0, bit);
+    output[1] = d_rs(y1, bit);
+    output[2] = d_rs(y2, bit);
+    output[3] = d_rs(y3, bit);
+}
+
+extern "C" __global__ void inv_txfm_2d_add_4x4(const int* coeffs, const int* txType, unsigned char* dst,
+                                               const int* stride) {
+    __shared__ int sbuf[16];
+    const int t = threadIdx.x;
+    int tmp[4];
+    int o[4];
+    for (int c = 0; c < 4; ++c) {
+        tmp[c] = d_cv(coeffs[t * 4 + c], 16);
+    }
+    if (*txType == 0) {
+        d_idct4i(tmp, o);
+    } else {
+        d_iadst4i(tmp, o);
+    }
+    for (int c = 0; c < 4; ++c) {
+        sbuf[t * 4 + c] = o[c];
+    }
+    __syncthreads();
+    for (int r = 0; r < 4; ++r) {
+        tmp[r] = d_cv(sbuf[r * 4 + t], 16);
+    }
+    if (*txType == 0) {
+        d_idct4i(tmp, o);
+    } else {
+        d_iadst4i(tmp, o);
+    }
+    for (int r = 0; r < 4; ++r) {
+        int v = (int)dst[r * (*stride) + t] + d_rs(o[r], 4);
+        if (v < 0) v = 0;
+        else if (v > 255) v = 255;
+        dst[r * (*stride) + t] = (unsigned char)v;
+    }
+}
+)CUDA";
+}
+
 }  // namespace transforms
 
