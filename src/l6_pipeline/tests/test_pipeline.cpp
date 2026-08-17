@@ -297,6 +297,53 @@ TEST_CASE("round trip adst recon matches svt composition") {
     CHECK(reconOk);
 }
 
+TEST_CASE("frame round trip 8x8 recon matches svt composition") {
+    // golden: harness composition frame_v_dct_8x8 (same raster loop over
+    // verbatim SVT primitives: build_intra_predictors V-path incl. early-out
+    // -> DCT fwd -> DCT inv-add onto the same predictor). The 4x4 fixed-point
+    // round trip is exact for these 8-bit blocks, so recon == source; the
+    // per-block coeffs discriminate the availability paths (corner block 0,0
+    // fills above=127 -> DC -3784; first-row/left-column use left[0])
+    const std::uint8_t srcData[64] = {21, 3,  5,  9,  19, 2, 8,  14, 9,  11, 3, 7,  5,  23, 1, 17,
+                                      7,  13, 5,  1,  25, 4, 6,  18, 15, 4,  25, 2,  12, 9,  30, 3,
+                                      18, 5,  7,  13, 14, 2, 20, 8,  6,  24, 3,  9,  11, 17, 5, 19,
+                                      22, 1,  8,  15, 4,  29, 7, 13, 10, 16, 6, 12, 3,  25, 11, 9};
+    const std::int32_t goldenCoeffs[64] = {
+        -3784, 78,  4,   54,  -17, 18,  102, -68, 56,  3,   36,  120, -18, 23, 6,   -22,
+        104,   17,  60,  28,  -37, -5,  85,  -102, -4, -1,  -64, 144, 7,   34, 143, 85,
+        -18,   -3,  166, -326, -6, 9,   6,   5,   -1,  -9,  6,   15,  9,   -3,  125, 131,
+        -37,   -15, 122, -356, -12, -8,  91,  140,  -25, 3,   -25, 118, -2,  9,   -45, 17};
+
+    pixels::Plane plane(8, 8, 4);
+    pixels::Plane recon(8, 8, 4);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            plane.at(x, y) = srcData[y * 8 + x];
+        }
+    }
+
+    std::int32_t coeffs[64] = {0};
+    pipeline::encodeFrameRecon4x4(plane, recon, coeffs, intra::V_PRED, 0, transforms::TxType::DCT_DCT);
+
+    bool reconOk = true;
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            if (recon.at(x, y) != srcData[y * 8 + x]) {
+                reconOk = false;
+            }
+        }
+    }
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 64; ++i) {
+        if (coeffs[i] != goldenCoeffs[i]) {
+            coeffsOk = false;
+        }
+    }
+    CHECK(coeffsOk);
+}
+
 TEST_CASE("gpu round trip matches host encodeRecon4x4 bit-exactly") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");
