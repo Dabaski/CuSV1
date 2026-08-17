@@ -160,8 +160,10 @@ TEST_CASE("inv 2d add dct reconstructs the source block") {
 }
 
 TEST_CASE("inv 2d add adst matches svt golden") {
-    // golden: inv_txfm2d_add_c (ADST_ADST) onto the V pred {10,40,30,20} x4
-    // with the E1 ADST_ADST coeffs of src {9,4,7,5,...}
+    // golden: inv_txfm2d_add_c (ADST_ADST inverse) onto the V pred
+    // {10,40,30,20} x4 with an E1 coefficient set {DC-mode DCT_DCT coeffs of
+    // src {9,4,7,5,...}} pushed through the ADST inverse (harness-computed
+    // for exactly this input; NOT a forward-ADST coefficient set)
     const std::int32_t coeffs[16] = {-631, 53, 4,  55,  -16, 2,  45, -26,
                                      -12,  -27, -47, -2,  2,   -2, 16, 53};
     const std::int32_t golden[16] = {6, 29, 20, 7, 5, 29, 6, 0, 10, 18, 6, 0, 0, 18, 7, 0};

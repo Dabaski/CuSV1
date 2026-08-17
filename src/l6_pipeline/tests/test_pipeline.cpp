@@ -296,3 +296,178 @@ TEST_CASE("round trip adst recon matches svt composition") {
     }
     CHECK(reconOk);
 }
+
+TEST_CASE("gpu round trip matches host encodeRecon4x4 bit-exactly") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const std::uint8_t srcData[16] = {21, 3, 5, 9, 9, 11, 3, 7, 7, 13, 5, 1, 15, 4, 25, 2};
+    const std::uint8_t above[4] = {10, 40, 30, 20};
+
+    pixels::Plane plane(4, 4, 4);
+    constexpr int kStride = 4 + 2 * 4;
+    std::uint8_t planeBuf[kStride * (4 + 2 * 4)];
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            plane.at(x, y) = srcData[y * 4 + x];
+            planeBuf[y * kStride + x] = srcData[y * 4 + x];
+        }
+    }
+
+    std::int32_t refCoeffs[16] = {0};
+    std::uint8_t refRecon[16] = {0};
+    pipeline::encodeRecon4x4(plane, 0, 0, above, 4, 0, nullptr, 0, 0, 0, intra::V_PRED, 0,
+                             transforms::TxType::DCT_DCT, refCoeffs, refRecon);
+
+    // stage 1: predict_block_4x4 -> pred
+    const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
+    const std::vector<std::string> predNames = gpurt::ptxEntryNames(ptxPred);
+    const auto itPred = std::find(predNames.begin(), predNames.end(), "predict_block_4x4");
+    REQUIRE(itPred != predNames.end());
+    gpurt::Kernel kPred(ptxPred, *itPred);
+
+    gpurt::DeviceBuffer dAbove(sizeof(above));
+    gpurt::DeviceBuffer dLeft(1);
+    gpurt::DeviceBuffer dPred(16);
+    dAbove.uploadFrom(above, sizeof(above));
+    unsigned char dummyLeft = 0;
+    dLeft.uploadFrom(&dummyLeft, 1);
+
+    int modeArg = intra::V_PRED;
+    int deltaArg = 0;
+    int amArg = 0;
+    int lmArg = 0;
+    int fiArg = -1;
+    int defArg = 0;
+    int nTopArg = 4;
+    int nTrArg = 0;
+    int nLeftArg = 0;
+    int nBlArg = 0;
+    int alArg = 0;
+    gpurt::DeviceBuffer dMode(sizeof(modeArg));
+    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
+    gpurt::DeviceBuffer dAm(sizeof(amArg));
+    gpurt::DeviceBuffer dLm(sizeof(lmArg));
+    gpurt::DeviceBuffer dFi(sizeof(fiArg));
+    gpurt::DeviceBuffer dDef(sizeof(defArg));
+    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
+    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
+    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
+    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
+    gpurt::DeviceBuffer dAl(sizeof(alArg));
+    dMode.uploadFrom(&modeArg, sizeof(modeArg));
+    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
+    dAm.uploadFrom(&amArg, sizeof(amArg));
+    dLm.uploadFrom(&lmArg, sizeof(lmArg));
+    dFi.uploadFrom(&fiArg, sizeof(fiArg));
+    dDef.uploadFrom(&defArg, sizeof(defArg));
+    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
+    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
+    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
+    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
+    dAl.uploadFrom(&alArg, sizeof(alArg));
+
+    CUdeviceptr pMode = dMode.get();
+    CUdeviceptr pDelta = dDelta.get();
+    CUdeviceptr pAm = dAm.get();
+    CUdeviceptr pLm = dLm.get();
+    CUdeviceptr pFi = dFi.get();
+    CUdeviceptr pDef = dDef.get();
+    CUdeviceptr pAbove = dAbove.get();
+    CUdeviceptr pNTop = dNTop.get();
+    CUdeviceptr pNTr = dNTr.get();
+    CUdeviceptr pLeft = dLeft.get();
+    CUdeviceptr pNLeft = dNLeft.get();
+    CUdeviceptr pNBl = dNBl.get();
+    CUdeviceptr pAl = dAl.get();
+    CUdeviceptr pPred = dPred.get();
+    void* argsPred[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft,
+                        &pNBl,  &pAl,   &pFi, &pDef, &pPred};
+    kPred.launch(1, 1, 16, 1, argsPred);
+
+    // stage 2: subtract_4x4_plane
+    const std::string ptxSub = *gpurt::compileToPtx(pipeline::subtractCuSource(), "compute_61");
+    const std::vector<std::string> subNames = gpurt::ptxEntryNames(ptxSub);
+    const auto itSub = std::find(subNames.begin(), subNames.end(), "subtract_4x4_plane");
+    REQUIRE(itSub != subNames.end());
+    gpurt::Kernel kSub(ptxSub, *itSub);
+
+    gpurt::DeviceBuffer dPlane(sizeof(planeBuf));
+    gpurt::DeviceBuffer dResidual(16 * sizeof(std::int16_t));
+    dPlane.uploadFrom(planeBuf, sizeof(planeBuf));
+    int srcStrideArg = kStride;
+    gpurt::DeviceBuffer dStride(sizeof(srcStrideArg));
+    dStride.uploadFrom(&srcStrideArg, sizeof(srcStrideArg));
+    int pxArg = 0;
+    int pyArg = 0;
+    gpurt::DeviceBuffer dPx(sizeof(pxArg));
+    gpurt::DeviceBuffer dPy(sizeof(pyArg));
+    dPx.uploadFrom(&pxArg, sizeof(pxArg));
+    dPy.uploadFrom(&pyArg, sizeof(pyArg));
+
+    CUdeviceptr pPlane = dPlane.get();
+    CUdeviceptr pResidual = dResidual.get();
+    CUdeviceptr pStride = dStride.get();
+    CUdeviceptr pPx = dPx.get();
+    CUdeviceptr pPy = dPy.get();
+    void* argsSub[] = {&pPlane, &pStride, &pPx, &pPy, &pPred, &pResidual};
+    kSub.launch(1, 1, 16, 1, argsSub);
+
+    // stage 3: fwd_txfm_2d_4x4
+    const std::string ptxTx = *gpurt::compileToPtx(transforms::fwdTxfmCuSource(), "compute_61");
+    const std::vector<std::string> txNames = gpurt::ptxEntryNames(ptxTx);
+    const auto itTx = std::find(txNames.begin(), txNames.end(), "fwd_txfm_2d_4x4");
+    REQUIRE(itTx != txNames.end());
+    gpurt::Kernel kTx(ptxTx, *itTx);
+
+    int typeArg = 0;
+    gpurt::DeviceBuffer dType(sizeof(typeArg));
+    dType.uploadFrom(&typeArg, sizeof(typeArg));
+    gpurt::DeviceBuffer dCoeffs(sizeof(refCoeffs));
+    int fwdStrideArg = 4;
+    gpurt::DeviceBuffer dFwdStride(sizeof(fwdStrideArg));
+    dFwdStride.uploadFrom(&fwdStrideArg, sizeof(fwdStrideArg));
+    CUdeviceptr pType = dType.get();
+    CUdeviceptr pStrideTx = dFwdStride.get();
+    CUdeviceptr pCoeffs = dCoeffs.get();
+    void* argsTx[] = {&pResidual, &pStrideTx, &pType, &pCoeffs};
+    kTx.launch(1, 1, 4, 1, argsTx);
+
+    // stage 4: inv_txfm_2d_add_4x4 onto the same pred buffer (dPred)
+    const std::string ptxInv = *gpurt::compileToPtx(transforms::invTxfmCuSource(), "compute_61");
+    const std::vector<std::string> invNames = gpurt::ptxEntryNames(ptxInv);
+    const auto itInv = std::find(invNames.begin(), invNames.end(), "inv_txfm_2d_add_4x4");
+    REQUIRE(itInv != invNames.end());
+    gpurt::Kernel kInv(ptxInv, *itInv);
+
+    int invStrideArg = 4;
+    gpurt::DeviceBuffer dInvStride(sizeof(invStrideArg));
+    dInvStride.uploadFrom(&invStrideArg, sizeof(invStrideArg));
+    CUdeviceptr pInvStride = dInvStride.get();
+    void* argsInv[] = {&pCoeffs, &pType, &pPred, &pInvStride};
+    kInv.launch(1, 1, 4, 1, argsInv);
+
+    std::int32_t gotCoeffs[16] = {0};
+    std::uint8_t gotRecon[16] = {0};
+    dCoeffs.downloadTo(gotCoeffs, sizeof(gotCoeffs));
+    dPred.downloadTo(gotRecon, sizeof(gotRecon));
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 16; ++i) {
+        if (gotCoeffs[i] != refCoeffs[i]) {
+            coeffsOk = false;
+        }
+    }
+    CHECK(coeffsOk);
+
+    bool reconOk = true;
+    for (int i = 0; i < 16; ++i) {
+        if (gotRecon[i] != refRecon[i]) {
+            reconOk = false;
+        }
+    }
+    CHECK(reconOk);
+}
