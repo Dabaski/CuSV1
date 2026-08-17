@@ -17,12 +17,20 @@ void fdct4(const std::int32_t input[4], std::int32_t output[4]);
 
 void fadst4(const std::int32_t input[4], std::int32_t output[4]);
 
+void idct4(const std::int32_t input[4], std::int32_t output[4]);
+
+void iadst4(const std::int32_t input[4], std::int32_t output[4]);
+
 enum class TxType {
     DCT_DCT,
     ADST_ADST,
 };
 
 void fwdTxfm2d4x4(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// svt_av1_inv_txfm2d_add_4x4_c (inv_transforms.c:2591), 8-bit: coeffs -> inv
+// 2D -> add onto pred block in place with clip to [0,255]
+void invTxfm2dAdd4x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
 
 std::string fwdTxfmCuSource();
 

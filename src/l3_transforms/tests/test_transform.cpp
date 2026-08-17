@@ -90,6 +90,92 @@ TEST_CASE("fadst4 golden output 3 is 6") {
     CHECK(got[3] == 6);
 }
 
+TEST_CASE("idct4 matches svt_av1_idct4_new golden") {
+    // golden: svt_av1_idct4_new @ cos_bit=12, input {100, 50, -20, 8}
+    const std::int32_t in[4] = {100, 50, -20, 8};
+    const std::int32_t golden[4] = {106, 97, 73, 8};
+    std::int32_t got[4] = {0};
+    transforms::idct4(in, got);
+    CHECK(got[0] == golden[0]);
+}
+
+TEST_CASE("idct4 golden output 1 is 97") {
+    const std::int32_t in[4] = {100, 50, -20, 8};
+    std::int32_t got[4] = {0};
+    transforms::idct4(in, got);
+    CHECK(got[1] == 97);
+}
+
+TEST_CASE("idct4 golden output 2 is 73") {
+    const std::int32_t in[4] = {100, 50, -20, 8};
+    std::int32_t got[4] = {0};
+    transforms::idct4(in, got);
+    CHECK(got[2] == 73);
+}
+
+TEST_CASE("idct4 golden output 3 is 8") {
+    const std::int32_t in[4] = {100, 50, -20, 8};
+    std::int32_t got[4] = {0};
+    transforms::idct4(in, got);
+    CHECK(got[3] == 8);
+}
+
+TEST_CASE("iadst4 matches svt_av1_iadst4_new golden") {
+    // golden: svt_av1_iadst4_new @ cos_bit=12, input {100, 50, -20, 8}
+    const std::int32_t in[4] = {100, 50, -20, 8};
+    const std::int32_t golden[4] = {59, 100, 105, 37};
+    std::int32_t got[4] = {0};
+    transforms::iadst4(in, got);
+    CHECK(got[2] == golden[2]);
+}
+
+TEST_CASE("inv 2d add dct reconstructs the source block") {
+    // golden: inv_txfm2d_add_c (DCT_DCT) onto the V pred {10,40,30,20} x4 with
+    // the E1 DCT_DCT coeffs of src {21,3,5,9,...} -> the source is recovered
+    // exactly (fwd+inv round trip is bit-exact for this block)
+    const std::int32_t coeffs[16] = {-520, 140, 324, 202, -17, 18, 102, -68,
+                                     56,   3,   36,  120, -18, 23, 6,   -22};
+    const std::int32_t golden[16] = {21, 3, 5, 9, 9, 11, 3, 7, 7, 13, 5, 1, 15, 4, 25, 2};
+    std::uint8_t dst[16];
+    const std::uint8_t row[4] = {10, 40, 30, 20};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            dst[r * 4 + c] = row[c];
+        }
+    }
+    transforms::invTxfm2dAdd4x4(coeffs, dst, 4, transforms::TxType::DCT_DCT);
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != golden[i]) {
+            ok = false;
+        }
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("inv 2d add adst matches svt golden") {
+    // golden: inv_txfm2d_add_c (ADST_ADST) onto the V pred {10,40,30,20} x4
+    // with the E1 ADST_ADST coeffs of src {9,4,7,5,...}
+    const std::int32_t coeffs[16] = {-631, 53, 4,  55,  -16, 2,  45, -26,
+                                     -12,  -27, -47, -2,  2,   -2, 16, 53};
+    const std::int32_t golden[16] = {6, 29, 20, 7, 5, 29, 6, 0, 10, 18, 6, 0, 0, 18, 7, 0};
+    std::uint8_t dst[16];
+    const std::uint8_t row[4] = {10, 40, 30, 20};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            dst[r * 4 + c] = row[c];
+        }
+    }
+    transforms::invTxfm2dAdd4x4(coeffs, dst, 4, transforms::TxType::ADST_ADST);
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != golden[i]) {
+            ok = false;
+        }
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("fadst4 all-zero input early-outs to zeros") {
     const std::int32_t in[4] = {0, 0, 0, 0};
     std::int32_t got[4] = {42, 42, 42, 42};

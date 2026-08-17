@@ -17,6 +17,43 @@ const std::int32_t kCospi13[64] = {
 // (svt_aom_eb_av1_sinpi_arr_data[i][j] = round((sqrt(2)*sin(j*Pi/9)*2/3)*(1<<(cos_bit_min+i))))
 const std::int32_t kSinpi13[5] = {0, 2642, 4964, 6689, 7606};
 
+// svt_aom_eb_av1_cospi_arr_data[2], the cos_bit=12 row (INV_COS_BIT,
+// inv_transforms.h:24)
+const std::int32_t kCospi12[64] = {
+    4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036, 4017, 3996, 3973, 3948, 3920, 3889, 3857, 3822,
+    3784, 3745, 3703, 3659, 3612, 3564, 3513, 3461, 3406, 3349, 3290, 3229, 3166, 3102, 3035, 2967,
+    2896, 2824, 2751, 2675, 2598, 2520, 2440, 2359, 2276, 2191, 2106, 2019, 1931, 1842, 1751, 1660,
+    1567, 1474, 1380, 1285, 1189, 1092, 995,  897,  799,  700,  601,  501,  401,  301,  201,  101,
+};
+
+// svt_aom_eb_av1_sinpi_arr_data[2], the cos_bit=12 row
+const std::int32_t kSinpi12[5] = {0, 1321, 2482, 3344, 3803};
+
+// inv_transforms.c:88 clamp_value, fixed clamp bit (16 for 8-bit, per
+// svt_av1_gen_inv_stage_range)
+constexpr int kInvClampBit = 16;
+
+std::int32_t clampValue(std::int32_t value, int bit) {
+    if (bit <= 0) {
+        return value;
+    }
+    const std::int64_t maxValue = (1LL << (bit - 1)) - 1;
+    const std::int64_t minValue = -(1LL << (bit - 1));
+    if (value < minValue) {
+        return static_cast<std::int32_t>(minValue);
+    }
+    if (value > maxValue) {
+        return static_cast<std::int32_t>(maxValue);
+    }
+    return value;
+}
+
+void clampBufIv(std::int32_t* buf, int size, int bit) {
+    for (int i = 0; i < size; ++i) {
+        buf[i] = clampValue(buf[i], bit);
+    }
+}
+
 }  // namespace
 
 std::int32_t cospi13(int index) {
@@ -35,6 +72,78 @@ std::int32_t halfBtf(std::int32_t w0, std::int32_t in0, std::int32_t w1, std::in
 
 std::int32_t roundShift(std::int64_t value, int bit) {
     return static_cast<std::int32_t>((value + (1LL << (bit - 1))) >> bit);
+}
+
+// svt_av1_idct4_new (inv_transforms.c:97), cos_bit = 12 (INV_COS_BIT)
+void idct4(const std::int32_t input[4], std::int32_t output[4]) {
+    const int8_t cosBit = 12;
+    const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    std::int32_t bf0[4];
+    std::int32_t bf1[4];
+    std::int32_t step[4];
+
+    bf1[0] = input[0];
+    bf1[1] = input[2];
+    bf1[2] = input[1];
+    bf1[3] = input[3];
+
+    for (int i = 0; i < 4; ++i) {
+        bf0[i] = bf1[i];
+    }
+    step[0] = halfBtf(kCospi12[32], bf0[0], kCospi12[32], bf0[1], cosBit);
+    step[1] = halfBtf(kCospi12[32], bf0[0], -kCospi12[32], bf0[1], cosBit);
+    step[2] = halfBtf(kCospi12[48], bf0[2], -kCospi12[16], bf0[3], cosBit);
+    step[3] = halfBtf(kCospi12[16], bf0[2], kCospi12[48], bf0[3], cosBit);
+
+    output[0] = clampValue(step[0] + step[3], stageRange[3]);
+    output[1] = clampValue(step[1] + step[2], stageRange[3]);
+    output[2] = clampValue(step[1] - step[2], stageRange[3]);
+    output[3] = clampValue(step[0] - step[3], stageRange[3]);
+}
+
+// svt_av1_iadst4_new (inv_transforms.c:729), cos_bit = 12 (incl. all-zero
+// early-out; stage_range unused)
+void iadst4(const std::int32_t input[4], std::int32_t output[4]) {
+    const int bit   = 12;
+    const std::int32_t x0 = input[0];
+    const std::int32_t x1 = input[1];
+    const std::int32_t x2 = input[2];
+    const std::int32_t x3 = input[3];
+
+    if (!(x0 | x1 | x2 | x3)) {
+        output[0] = output[1] = output[2] = output[3] = 0;
+        return;
+    }
+
+    std::int32_t s0 = kSinpi12[1] * x0;
+    std::int32_t s1 = kSinpi12[2] * x0;
+    std::int32_t s2 = kSinpi12[3] * x1;
+    std::int32_t s3 = kSinpi12[4] * x2;
+    std::int32_t s4 = kSinpi12[1] * x2;
+    std::int32_t s5 = kSinpi12[2] * x3;
+    std::int32_t s6 = kSinpi12[4] * x3;
+
+    std::int32_t s7 = (x0 - x2) + x3;
+
+    s0 = s0 + s3;
+    s1 = s1 - s4;
+    s3 = s2;
+    s2 = kSinpi12[3] * s7;
+
+    s0 = s0 + s5;
+    s1 = s1 - s6;
+
+    std::int32_t y0 = s0 + s3;
+    std::int32_t y1 = s1 + s3;
+    std::int32_t y2 = s2;
+    std::int32_t y3 = s0 + s1;
+
+    y3 = y3 - s3;
+
+    output[0] = roundShift(y0, bit);
+    output[1] = roundShift(y1, bit);
+    output[2] = roundShift(y2, bit);
+    output[3] = roundShift(y3, bit);
 }
 
 // svt_av1_fdct4_new (transforms.c), cos_bit = 13
@@ -144,6 +253,68 @@ void fwdTxfm2d4x4(const std::int16_t* input, std::int32_t* output, std::uint32_t
 
     for (std::uint32_t r = 0; r < 4; ++r) {
         txfm(buf + r * 4, output + r * 4);
+    }
+}
+
+namespace {
+
+using InvTxfmFn = void (*)(const std::int32_t*, std::int32_t*);
+
+InvTxfmFn inv1d4(TxType type) {
+    return type == TxType::DCT_DCT ? idct4 : iadst4;
+}
+
+// svt_av1_round_shift_array_c (inv_transforms.c:2449)
+void roundShiftArrayIv(std::int32_t* arr, int size, int bit) {
+    if (bit == 0) {
+        return;
+    }
+    if (bit > 0) {
+        for (int i = 0; i < size; ++i) {
+            arr[i] = roundShift(arr[i], bit);
+        }
+    } else {
+        for (int i = 0; i < size; ++i) {
+            arr[i] = arr[i] * (1 << (-bit));
+        }
+    }
+}
+
+void clipPixelAdd(std::uint8_t* dst, std::int32_t trans) {
+    const int v = static_cast<int>(*dst) + trans;
+    *dst = static_cast<std::uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+}
+
+}  // namespace
+
+// svt_av1_inv_txfm2d_add_4x4_c / inv_txfm2d_add_c, TX_4X4: rows then columns,
+// inv_shift_4x4 = {0, -4}, cos_bit 12/12, no flips, clamp bit 16; add via
+// clip_pixel_highbd(pred + round_shift(out, 4), 8)
+void invTxfm2dAdd4x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type) {
+    InvTxfmFn txfmRow = inv1d4(type);
+    std::int32_t buf[4 * 4];
+    std::int32_t tempIn[4];
+    std::int32_t tempOut[4];
+
+    for (std::uint32_t r = 0; r < 4; ++r) {
+        for (std::uint32_t c = 0; c < 4; ++c) {
+            tempIn[c] = coeffs[r * 4 + c];
+        }
+        clampBufIv(tempIn, 4, kInvClampBit);
+        txfmRow(tempIn, buf + r * 4);
+        roundShiftArrayIv(buf + r * 4, 4, 0);
+    }
+
+    for (std::uint32_t c = 0; c < 4; ++c) {
+        for (std::uint32_t r = 0; r < 4; ++r) {
+            tempIn[r] = buf[r * 4 + c];
+        }
+        clampBufIv(tempIn, 4, kInvClampBit);
+        txfmRow(tempIn, tempOut);
+        roundShiftArrayIv(tempOut, 4, 4);
+        for (std::uint32_t r = 0; r < 4; ++r) {
+            clipPixelAdd(dst + r * stride + c, tempOut[r]);
+        }
     }
 }
 
