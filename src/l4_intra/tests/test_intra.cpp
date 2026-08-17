@@ -236,12 +236,23 @@ TEST_CASE("gpu block predictor filter intra matches the builder") {
     CHECK(ok);
 }
 
-TEST_CASE("builder skips edge filtering with disable_edge_filter") {
-    // enc_intra_prediction.c:183 — !disable_edge_filter wraps the whole
-    // filter+upsample block; disabled: raw z1 on the unfiltered above
-    // {10,20,30,40,...} -> r0c1 = (20*19 + 30*13 + 16) >> 5 = 24
-    // (enabled path upsamples first: r0c1 = 17)
-    const unsigned char above[8] = {10, 20, 30, 40, 50, 60, 70, 80};
+TEST_CASE("builder applies edge filtering for d67 by default") {
+    // golden: svt_av1_transform_two_d-style harness, build_intra_predictors
+    // D67 4x4, corner 7, above {10,20,30,100,50,60,70,80} (n_top=4, n_tr=4),
+    // disable_edge_filter=0 -> upsample applies; r0c1 = 21
+    const unsigned char above[8] = {10, 20, 30, 100, 50, 60, 70, 80};
+    const unsigned char left[4] = {9, 9, 9, 9};
+    unsigned char dst[16] = {0};
+    intra::buildIntraPredictors(dst, 4, intra::D67_PRED, 0, 4, 4, 7, above, 4, 4, left, 4, 0,
+                                intra::NeighborContext(), -1, false);
+    CHECK(dst[1] == 21);
+}
+
+TEST_CASE("builder skips the edge filter/upsample when disabled") {
+    // golden: same harness, disable_edge_filter=1 -> raw z1 (no upsample);
+    // r0c1 = 24. The two goldens differ at this pixel, so this test fails if
+    // the !disable_edge_filter wrap is removed (the flag would be ignored).
+    const unsigned char above[8] = {10, 20, 30, 100, 50, 60, 70, 80};
     const unsigned char left[4] = {9, 9, 9, 9};
     unsigned char dst[16] = {0};
     intra::buildIntraPredictors(dst, 4, intra::D67_PRED, 0, 4, 4, 7, above, 4, 4, left, 4, 0,
@@ -1231,7 +1242,7 @@ TEST_CASE("gpu block predictor skips edge filtering when disabled like the build
     }
     gpurt::GpuContext ctx;
 
-    const unsigned char above[8] = {10, 20, 30, 40, 50, 60, 70, 80};
+    const unsigned char above[8] = {10, 20, 30, 100, 50, 60, 70, 80};
     const unsigned char left[4] = {9, 9, 9, 9};
     unsigned char ref[16] = {0};
     intra::buildIntraPredictors(ref, 4, intra::D67_PRED, 0, 4, 4, 7, above, 4, 4, left, 4, 0,

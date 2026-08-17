@@ -30,8 +30,7 @@ twins are held to bit-exact agreement with the SVT host reference.
 - **l4_intra** — `buildIntraPredictors` (1:1 with SVT, luma, DC
   availability variants, missing-neighbor fills), `dr_z1`/`z2`/`z3` +
   `drPredictor`, edge filter / upsample, filter-intra, smoothPredict
-  family; GPU twin `predict_block_4x4`. 71 doctest cases (incl. the
-  harness guard).
+  family; GPU twin `predict_block_4x4`.
 - **l5_motion** — `motion::sad8x8` (strided uint8, bit-exact with
   SVT's `compute8x8_sad_kernel_c`) + GPU kernel.
 - **l6_pipeline** — 4x4 block composition:
