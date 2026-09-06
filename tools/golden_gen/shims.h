@@ -1,0 +1,87 @@
+// tools/golden_gen/shims.h
+// Support shims for the verbatim SVT extracts in svt_gen.c. Each shim notes
+// its provenance (SVT header that defines the real thing). This file is
+// hand-written ON PURPOSE: it contains only type/macro plumbing, no
+// arithmetic. Any arithmetic lives in the verbatim extracts.
+#ifndef SVTD_SHIMS_H
+#define SVTD_SHIMS_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+// SVT uses INLINE/NOINLINE/ATTRIBUTE_PACKED macros (EbConfigMacros etc.).
+// SVT writes `static INLINE` itself, so INLINE expands to plain `inline`.
+#define INLINE inline
+#define NOINLINE
+#define ATTRIBUTE_PACKED
+
+// DECLARE_ALIGNED(alignment, type, name) - aom_dsp_common.h
+#define DECLARE_ALIGNED(alignment, type, name) type name
+
+// svt_memcpy_c - Utility.h: plain byte copy (verbatim semantics)
+#define svt_memcpy_c(dst, src, n) memcpy((dst), (src), (n))
+
+// clip_pixel / clip_pixel_highbd - aom_dsp_common.h:
+//   clip_pixel(val) = clamp to [0,255]; clip_pixel_highbd(val, bd) = clamp to
+//   [0, (1<<bd)-1]
+static inline int svtd_clip(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+#define clip_pixel(p) svtd_clip((p), 0, 255)
+#define clip_pixel_highbd(val, bd) svtd_clip((val), 0, ((1 << (bd)) - 1))
+
+// EB_ABS_DIFF - Utility.h
+#define EB_ABS_DIFF(a, b) (abs((int)((a)) - (int)((b))))
+
+#include <stdlib.h>
+
+// RTCD dispatch names resolve to the _c implementations in the generator
+// (common_dsp_rtcd.h declares svt_av1_dr_prediction_z1/z2/z3 as function
+// pointers defaulting to the _c variants; svt_memcpy dispatches likewise).
+#define svt_av1_dr_prediction_z1 svt_av1_dr_prediction_z1_c
+#define svt_av1_dr_prediction_z2 svt_av1_dr_prediction_z2_c
+#define svt_av1_dr_prediction_z3 svt_av1_dr_prediction_z3_c
+#define svt_av1_filter_intra_predictor svt_av1_filter_intra_predictor_c
+#define svt_av1_filter_intra_edge svt_av1_filter_intra_edge_c
+#define svt_av1_upsample_intra_edge svt_av1_upsample_intra_edge_c
+#define svt_memcpy svt_memcpy_c
+
+// TranHigh - inv_transforms.h:263
+typedef int64_t TranHigh;
+
+// TxSize: the generator only exercises TX_4X4 (=0 in SVT's TxSize enum).
+typedef enum { TX_4X4 = 0 } TxSize;
+// tx_size_wide/high for the single size the generator uses (SVT tables in
+// av1_common_int.h / common data; TX_4X4 -> 4x4).
+static const int32_t tx_size_wide[1] = {4};
+static const int32_t tx_size_high[1] = {4};
+
+// MAX_TXFM_STAGE_NUM - transforms.h; MAX_BLOCK_DIM / MAX_UPSAMPLE_SZ -
+// intra_prediction.h / definitions.h; MAX_TX_SIZE - definitions.h:410
+#define MAX_TXFM_STAGE_NUM 33
+#define MAX_BLOCK_DIM 64
+#define MAX_UPSAMPLE_SZ 16
+#define MAX_TX_SIZE (1 << 6)
+
+// MacroBlockD is opaque here: the luma 8-bit builder only touches xd via
+// get_filt_type, which the generator shims out (see svt_gen.c).
+typedef void MacroBlockD;
+
+// TxfmFunc - inv_transforms.h:259
+typedef void (*TxfmFunc)(const int32_t* input, int32_t* output, int8_t cos_bit,
+                         const int8_t* stage_range);
+
+// Dispatch tables the extracted builder indexes (svt_aom_eb_pred /
+// svt_aom_dc_pred). SVT populates them with the intra_pred_sized macro over
+// every TxSize (intra_prediction.c:1402); the generator instantiates the
+// TX_4X4 column only. Size 13 = INTRA_MODES (definitions.h:1204,
+// PAETH_PRED + 1). Declared here because build_intra_predictors references
+// them; defined and populated in composition.c.
+typedef void (*SvtdPredFn)(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left);
+extern SvtdPredFn svtd_eb_pred[13][1];
+extern SvtdPredFn svtd_dc_pred[2][2][1];
+#define svt_aom_eb_pred svtd_eb_pred
+#define svt_aom_dc_pred svtd_dc_pred
+
+// get_filt_type shim state (see svt_gen.c build_intra_predictors)
+extern int32_t svtd_filt_type;
+
+#endif  // SVTD_SHIMS_H

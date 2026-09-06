@@ -1,0 +1,141 @@
+// tools/golden_gen/main_primitives.c
+// Dumps every per-primitive golden. Run and diff against
+// tools/golden_gen/expected_primitives.txt (validation gate).
+#include "composition.c"
+
+int main(void) {
+    svtd_populate_dispatch();
+
+    // ---- table spot values (test_transform.cpp) ----
+    printf("cospi13_16 %d\n", cospi_arr(13)[16]);
+    printf("cospi13_32 %d\n", cospi_arr(13)[32]);
+    printf("cospi13_48 %d\n", cospi_arr(13)[48]);
+    printf("sinpi13_4 %d\n", sinpi_arr(13)[4]);
+    printf("halfbtf_5793_8 %d\n", half_btf(5793, 8, 5793, 8, 13));
+    printf("roundshift_96784_13 %d\n", round_shift(96784, 13));
+
+    // ---- forward 1D (fdct4/fadst4 {5,3,7,1} @13) ----
+    {
+        const int32_t in[4] = {5, 3, 7, 1};
+        int32_t o[4];
+        svt_av1_fdct4_new(in, o, 13, NULL);
+        printf("fdct4 %d %d %d %d\n", o[0], o[1], o[2], o[3]);
+        svt_av1_fadst4_new(in, o, 13, NULL);
+        printf("fadst4 %d %d %d %d\n", o[0], o[1], o[2], o[3]);
+    }
+
+    // ---- forward 2D cores (mirrors av1_tranform_two_d_core_c TX_4X4) ----
+    {
+        const int16_t in[16] = {9, 2, 3, 1, 5, 6, 7, 8, 8, 7, 6, 5, 4, 3, 9, 1};
+        int32_t out[16];
+        svtd_fwd2d4x4(in, 4, out, svt_av1_fdct4_new);
+        printf("fwd2d_dct:"); for (int i = 0; i < 16; ++i) printf(" %d", out[i]); printf("\n");
+        svtd_fwd2d4x4(in, 4, out, svt_av1_fadst4_new);
+        printf("fwd2d_adst:"); for (int i = 0; i < 16; ++i) printf(" %d", out[i]); printf("\n");
+        int16_t ones[16]; for (int i = 0; i < 16; ++i) ones[i] = 1;
+        svtd_fwd2d4x4(ones, 4, out, svt_av1_fdct4_new);
+        printf("fwd2d_ones:"); for (int i = 0; i < 16; ++i) printf(" %d", out[i]); printf("\n");
+    }
+
+    // ---- inverse 1D ({100,50,-20,8} @12) ----
+    {
+        const int32_t in[4] = {100, 50, -20, 8};
+        int32_t o[4];
+        const int8_t sr[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+        svt_av1_idct4_new(in, o, 12, sr);
+        printf("idct4 %d %d %d %d\n", o[0], o[1], o[2], o[3]);
+        svt_av1_iadst4_new(in, o, 12, sr);
+        printf("iadst4 %d %d %d %d\n", o[0], o[1], o[2], o[3]);
+    }
+
+    // ---- inverse 2D add cores ----
+    {
+        const int32_t cdct[16] = {-520, 140, 324, 202, -17, 18, 102, -68, 56, 3, 36, 120, -18, 23, 6, -22};
+        const int32_t cadst[16] = {-631, 53, 4, 55, -16, 2, 45, -26, -12, -27, -47, -2, 2, -2, 16, 53};
+        uint8_t pred[16];
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) pred[r*4+c] = (uint8_t)("\x0a\x28\x1e\x14"[c]);
+        svtd_inv2dadd4x4(cdct, pred, 4, svt_av1_idct4_new);
+        printf("inv2d_dct_onto_vpred:"); for (int i = 0; i < 16; ++i) printf(" %d", pred[i]); printf("\n");
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) pred[r*4+c] = (uint8_t)("\x0a\x28\x1e\x14"[c]);
+        svtd_inv2dadd4x4(cadst, pred, 4, svt_av1_iadst4_new);
+        printf("inv2d_adst_onto_vpred:"); for (int i = 0; i < 16; ++i) printf(" %d", pred[i]); printf("\n");
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) pred[r*4+c] = 27;
+        svtd_inv2dadd4x4(cadst, pred, 4, svt_av1_iadst4_new);
+        printf("inv2d_adst_onto_dcpred:"); for (int i = 0; i < 16; ++i) printf(" %d", pred[i]); printf("\n");
+    }
+
+    // ---- E1 composition (V + DC blocks) ----
+    {
+        const uint8_t above_v[4] = {10, 40, 30, 20};
+        const uint8_t src_v[16] = {21, 3, 5, 9, 9, 11, 3, 7, 7, 13, 5, 1, 15, 4, 25, 2};
+        uint8_t pred[16];
+        int16_t res[16];
+        int32_t cb[16];
+        svtd_builder_v(pred, above_v, 4);
+        for (int i = 0; i < 16; ++i) res[i] = (int16_t)(src_v[i] - pred[i]);
+        svtd_fwd2d4x4(res, 4, cb, svt_av1_fdct4_new);
+        printf("e1_v_dct:"); for (int i = 0; i < 16; ++i) printf(" %d", cb[i]); printf("\n");
+
+        const uint8_t above_dc[4] = {12, 24, 36, 48};
+        const uint8_t left_dc[4] = {6, 18, 30, 42};
+        const uint8_t src_dc[16] = {9, 4, 7, 5, 12, 8, 3, 6, 15, 2, 11, 4, 6, 9, 13, 2};
+        svtd_builder_dc(pred, above_dc, left_dc, 4, 4);
+        for (int i = 0; i < 16; ++i) res[i] = (int16_t)(src_dc[i] - pred[i]);
+        svtd_fwd2d4x4(res, 4, cb, svt_av1_fdct4_new);
+        printf("e1_dc_dct:"); for (int i = 0; i < 16; ++i) printf(" %d", cb[i]); printf("\n");
+    }
+
+    // ---- filter-intra modes 0-4 (corner 10, above {20,30,40,50}, left {21,31,41,51}) ----
+    {
+        uint8_t ab[6] = {10, 20, 30, 40, 50};
+        const uint8_t left[4] = {21, 31, 41, 51};
+        uint8_t dst[16];
+        for (int m = 0; m < 5; ++m) {
+            svt_av1_filter_intra_predictor_c(dst, 4, TX_4X4, ab + 1, left, m);
+            printf("fi_mode%d:", m); for (int i = 0; i < 16; ++i) printf(" %d", dst[i]); printf("\n");
+        }
+    }
+
+    // ---- E5: D67 on/off (non-linear above) ----
+    {
+        const uint8_t above[8] = {10, 20, 30, 100, 50, 60, 70, 80};
+        uint8_t dst[16];
+        svtd_builder_d67(dst, above, 4, 4, 7, 0);
+        printf("e5_d67_on:"); for (int i = 0; i < 16; ++i) printf(" %d", dst[i]); printf("\n");
+        svtd_builder_d67(dst, above, 4, 4, 7, 1);
+        printf("e5_d67_off:"); for (int i = 0; i < 16; ++i) printf(" %d", dst[i]); printf("\n");
+    }
+
+    // ---- SAD 4x4 (helper at width=height=4) ----
+    {
+        uint8_t s[16], r[16];
+        for (int i = 0; i < 16; ++i) { s[i] = (uint8_t)(i + 1); r[i] = 0; }
+        printf("sad4x4_ramp_vs_zero %u\n", svt_nxm_sad_kernel_helper_c(s, 4, r, 4, 4, 4));
+        uint8_t s2[64];
+        uint8_t r2[64];
+        memset(s2, 0, 64);
+        memset(r2, 0, 64);
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                s2[y * 8 + x] = (uint8_t)(y * 8 + x);
+                r2[y * 8 + x] = (uint8_t)(63 - (y * 8 + x));
+            }
+        }
+        printf("sad4x4_revramp_stride8 %u\n", svt_nxm_sad_kernel_helper_c(s2, 8, r2, 8, 4, 4));
+        printf("sad8x8_revramp_stride8 %u\n", svt_nxm_sad_kernel_helper_c(s2, 8, r2, 8, 8, 8));
+    }
+
+    // ---- F1 frame (V + DCT, 8x8) ----
+    {
+        const uint8_t src[64] = {21, 3,  5,  9,  19, 2, 8,  14, 9,  11, 3, 7,  5,  23, 1, 17,
+                                 7,  13, 5,  1,  25, 4, 6,  18, 15, 4,  25, 2,  12, 9,  30, 3,
+                                 18, 5,  7,  13, 14, 2, 20, 8,  6,  24, 3,  9,  11, 17, 5, 19,
+                                 22, 1,  8,  15, 4,  29, 7, 13, 10, 16, 6, 12, 3,  25, 11, 9};
+        uint8_t recon[64];
+        int32_t coeffs[64];
+        svtd_frame_v_dct_8x8(src, recon, coeffs);
+        printf("f1_recon:"); for (int i = 0; i < 64; ++i) printf(" %d", recon[i]); printf("\n");
+        printf("f1_coeffs:"); for (int i = 0; i < 64; ++i) printf(" %d", coeffs[i]); printf("\n");
+    }
+    return 0;
+}
