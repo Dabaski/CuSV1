@@ -157,11 +157,14 @@ being close to useless. Do not conflate them.
 
 ## Layer map (current)
 
+North star: a working, bit-exact 1:1 port of SVT-AV1 on CUDA 12.2 - every algorithm traceable to the vendored C source.
+
 - l0_core â€” minimal types (Sample, BlockSize) shared across layers.
 - l1_pixels â€” pixels::Plane (strided pixel buffer with padding).
 - l2_gpurt â€” NVRTC JIT + driver-API runtime (GpuContext, DeviceBuffer, Kernel, ptxEntryNames); kernels are CUDA C++ source strings compiled for compute_61.
 - l3_transforms â€” SVT-AV1 fixed-point forward transforms: fdct4, fadst4, fwdTxfm2d4x4(TxType) (4x4, cos_bit=13) plus a bit-exact GPU twin; cospi/sinpi cos_bit=13 tables and halfBtf/roundShift. Integer only.
 - l4_intra â€” buildIntraPredictors (1:1 with SVT build_intra_predictors, luma, DC availability variants, missing-neighbor fills), drZ1/2/3 + drPredictor, edge filter/upsample, smoothPredict family; GPU twin predict_block_4x4.
 - l5_motion â€” motion::sad8x8 (strided uint8, bit-exact with compute8x8_sad_kernel_c) + GPU kernel.
-- l6_pipeline - block + frame composition: encodeBlock4x4 / encodeRecon4x4 / encodeFrameRecon4x4 (raster 4x4 grid, intra-only, each block predicting from RECONSTRUCTED neighbors - M1 availability rules) = plane window (l1) + buildIntraPredictors (l4) -> int16 residual (no clamp) -> fwdTxfm2d4x4 (l3) -> invTxfm2dAdd4x4 (l3 inverse) onto the same predictor. Goldens captured from SVT's own C in the throwaway harness (%TEMP%\svt_ref\, never committed).
+- l6_pipeline - block + frame composition and DECISION: encodeBlock4x4 / encodeRecon4x4 / encodeFrameRecon4x4 (raster 4x4 grid, intra-only, each block predicting from RECONSTRUCTED neighbors - M1 availability rules) plus encodeFrameAuto4x4, where each block's mode is CHOSEN by the D2 SAD policy evaluated against reconstructed edges (policy is ours; primitives 1:1) and chosen modes feed NeighborContext (filt_type live) = plane window (l1) + buildIntraPredictors (l4) -> int16 residual (no clamp) -> fwdTxfm2d4x4 (l3) -> invTxfm2dAdd4x4 (l3 inverse) onto the same predictor. Goldens captured from SVT's own C in the committed generator (tools/golden_gen).
 - third_party/ â€” vendored SVT-AV1 (1:1 source of truth), doctest, hardware docs (perf-axis only: PTX ISA, GP104 whitepaper, Pascal Tuning Guide, Nsight-focused guides; CUDA 12.2 profiling is ncu, not nvprof).
+

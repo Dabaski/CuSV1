@@ -648,6 +648,61 @@ TEST_CASE("decide picks d45 for the diagonal fixture") {
     CHECK(d.sad == 0);
 }
 
+TEST_CASE("frame auto matches the generator policy golden bit-exactly") {
+    // golden: golden_gen golden_frame (d3_modes / d3_recon / d3_coeffs) —
+    // identical D2 policy over verbatim SVT primitives, decisions evaluated
+    // against RECONSTRUCTED neighbor edges, chosen modes feeding filt_type.
+    // modes 1 1 0 7 = V, V, DC, D203.
+    const std::uint8_t srcData[64] = {21, 3,  5,  9,  19, 2, 8,  14, 9,  11, 3, 7,  5,  23, 1, 17,
+                                      7,  13, 5,  1,  25, 4, 6,  18, 15, 4,  25, 2,  12, 9,  30, 3,
+                                      18, 5,  7,  13, 14, 2, 20, 8,  6,  24, 3,  9,  11, 17, 5, 19,
+                                      22, 1,  8,  15, 4,  29, 7, 13, 10, 16, 6, 12, 3,  25, 11, 9};
+    const std::uint8_t goldenModes[4] = {1, 1, 0, 7};
+    const std::int32_t goldenCoeffs[64] = {
+        -3784, 78,  4,   54,  -17, 18,  102, -68, 56,  3,   36,  120, -18, 23, 6,   -22,
+        104,   17,  60,  28,  -37, -5,  85,  -102, -4, -1,  -64, 144, 7,   34, 143, 85,
+        -34,   42,  71,  -50, -6,  9,   6,   5,   -1,  -9,  6,   15,  9,   -3,  125, 131,
+        0,     -9,  -72, -96, -6,  4,   88,  141,  -4, 13,  -35, 116, 6,   1,   -59, 16};
+
+    pixels::Plane plane(8, 8, 4);
+    pixels::Plane recon(8, 8, 4);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            plane.at(x, y) = srcData[y * 8 + x];
+        }
+    }
+
+    std::int32_t coeffs[64] = {0};
+    std::uint8_t modes[4] = {0};
+    pipeline::encodeFrameAuto4x4(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modes[i] != goldenModes[i]) {
+            modesOk = false;
+        }
+    }
+    CHECK(modesOk);
+
+    bool reconOk = true;
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            if (recon.at(x, y) != srcData[y * 8 + x]) {
+                reconOk = false;
+            }
+        }
+    }
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 64; ++i) {
+        if (coeffs[i] != goldenCoeffs[i]) {
+            coeffsOk = false;
+        }
+    }
+    CHECK(coeffsOk);
+}
+
 TEST_CASE("gpu round trip matches host encodeRecon4x4 bit-exactly") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");

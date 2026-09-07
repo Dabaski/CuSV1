@@ -27,7 +27,9 @@ void encodeBlock4x4(const pixels::Plane& plane, int px, int py, const std::uint8
 void encodeRecon4x4(const pixels::Plane& plane, int px, int py, const std::uint8_t* aboveRef, int nTopPx,
                     int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
                     std::uint8_t aboveLeft, intra::PredictionMode mode, int angleDelta,
-                    transforms::TxType txType, std::int32_t coeffs[16], std::uint8_t recon[16]);
+                    transforms::TxType txType, std::int32_t coeffs[16], std::uint8_t recon[16],
+                    const intra::NeighborContext& neighbors = intra::NeighborContext(),
+                    bool disableEdgeFilter = false);
 
 // Frame-level intra round trip: raster order over 4x4 blocks, each block
 // predicting from RECONSTRUCTED neighbors only (never source pixels).
@@ -39,6 +41,14 @@ void encodeRecon4x4(const pixels::Plane& plane, int px, int py, const std::uint8
 void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                          intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
 
+// D3 frame-level mode decision: raster 4x4 loop, each block's mode chosen by
+// decideBlockMode4x4 against RECONSTRUCTED neighbor edges (M1 availability),
+// winner encoded via encodeRecon4x4; chosen modes recorded per block and fed
+// into NeighborContext (filt_type live) for subsequent blocks. coeffs: 16
+// per block, row-major block order; modes: one per block.
+void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                        std::uint8_t* modes, transforms::TxType txType);
+
 // Sum of squared sample differences over the full frame (integer, exact).
 std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 
@@ -48,6 +58,7 @@ std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 // candidate set of all 13 PredictionModes, deterministic tie-break = lowest
 // mode index) is documented here and attributed to no one else.
 // angleDelta = 0 and filter-intra off for all candidates (parked).
+// neighbors: chosen neighbor modes for filt_type (default = no history).
 struct ModeDecision {
     intra::PredictionMode mode;
     std::uint32_t sad;
@@ -55,7 +66,8 @@ struct ModeDecision {
 
 ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
                                 int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
-                                int nBottomLeftPx, std::uint8_t aboveLeft);
+                                int nBottomLeftPx, std::uint8_t aboveLeft,
+                                const intra::NeighborContext& neighbors = intra::NeighborContext());
 
 std::string subtractCuSource();
 
