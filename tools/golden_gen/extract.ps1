@@ -139,14 +139,20 @@ Emit-Verbatim "transforms.c" "const int8_t fwd_cos_bit_col" "fwd_cos_bit_col"
 Emit-Verbatim "transforms.c" "const int8_t fwd_cos_bit_row" "fwd_cos_bit_row"
 Emit-Verbatim "transforms.c" "void svt_av1_fdct4_new" "svt_av1_fdct4_new"
 Emit-Verbatim "transforms.c" "void svt_av1_fadst4_new" "svt_av1_fadst4_new"
+Emit-Verbatim "transforms.c" "static const int8_t fwd_shift_8x8" "fwd_shift_8x8"
+Emit-Verbatim "transforms.c" "void svt_av1_fdct8_new" "svt_av1_fdct8_new"
+Emit-Verbatim "transforms.c" "void svt_av1_fadst8_new" "svt_av1_fadst8_new"
 
 # ---- inv_transforms.c: clamp / inverse kernels ----
 Emit-Verbatim "definitions.h" "static INLINE int64_t clamp64" "clamp64"
 Emit-Verbatim "inv_transforms.c" "static const int8_t inv_shift_4x4" "inv_shift_4x4"
+Emit-Verbatim "inv_transforms.c" "static const int8_t inv_shift_8x8" "inv_shift_8x8"
 Emit-Verbatim "inv_transforms.c" "static INLINE int32_t clamp_value" "clamp_value"
 Emit-Verbatim "inv_transforms.c" "static INLINE void clamp_buf" "clamp_buf"
 Emit-Verbatim "inv_transforms.c" "void svt_av1_idct4_new" "svt_av1_idct4_new"
 Emit-Verbatim "inv_transforms.c" "void svt_av1_iadst4_new" "svt_av1_iadst4_new"
+Emit-Verbatim "inv_transforms.c" "void svt_av1_idct8_new" "svt_av1_idct8_new"
+Emit-Verbatim "inv_transforms.c" "void svt_av1_iadst8_new" "svt_av1_iadst8_new"
 Emit-Verbatim "inv_transforms.c" "void svt_av1_round_shift_array_c" "svt_av1_round_shift_array_c"
 
 # ---- intra_prediction.c: intra machinery ----

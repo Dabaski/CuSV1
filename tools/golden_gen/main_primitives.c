@@ -5,6 +5,7 @@
 
 int main(void) {
     svtd_populate_dispatch();
+    fprintf(stderr, "CK: dispatch\n"); fflush(stderr);
 
     // ---- table spot values (test_transform.cpp) ----
     printf("cospi13_16 %d\n", cospi_arr(13)[16]);
@@ -12,6 +13,7 @@ int main(void) {
     printf("cospi13_48 %d\n", cospi_arr(13)[48]);
     printf("sinpi13_4 %d\n", sinpi_arr(13)[4]);
     printf("halfbtf_5793_8 %d\n", half_btf(5793, 8, 5793, 8, 13));
+    fprintf(stderr, "CK: tables\n"); fflush(stderr);
     printf("roundshift_96784_13 %d\n", round_shift(96784, 13));
 
     // ---- forward 1D (fdct4/fadst4 {5,3,7,1} @13) ----
@@ -47,6 +49,83 @@ int main(void) {
         svt_av1_iadst4_new(in, o, 12, sr);
         printf("iadst4 %d %d %d %d\n", o[0], o[1], o[2], o[3]);
     }
+
+    fprintf(stderr, "CK: 4x4 done\n"); fflush(stderr);
+
+    // ---- 8x8 forward 1D @ cos_bit 13 ----
+    {
+        const int32_t in8[8] = {200, 80, -50, 30, 100, -20, 60, 10};
+        int32_t o8[8];
+        svt_av1_fdct8_new(in8, o8, 13, NULL);
+        printf("fdct8:"); for (int i = 0; i < 8; ++i) printf(" %d", o8[i]); printf("\n");
+        svt_av1_fadst8_new(in8, o8, 13, NULL);
+        printf("fadst8:"); for (int i = 0; i < 8; ++i) printf(" %d", o8[i]); printf("\n");
+    }
+
+    fprintf(stderr, "CK: fwd8 done\n"); fflush(stderr);
+
+    // ---- 8x8 inverse 1D @ cos_bit 12 ----
+    {
+        const int32_t in8[8] = {300, -120, 75, 200, -60, 40, 90, -15};
+        int32_t o8[8];
+        const int8_t sr8[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+        svt_av1_idct8_new(in8, o8, 12, sr8);
+        printf("idct8:"); for (int i = 0; i < 8; ++i) printf(" %d", o8[i]); printf("\n");
+        svt_av1_iadst8_new(in8, o8, 12, sr8);
+        printf("iadst8:"); for (int i = 0; i < 8; ++i) printf(" %d", o8[i]); printf("\n");
+    }
+
+    fprintf(stderr, "CK: inv8 done\n"); fflush(stderr);
+
+    // ---- 8x8 forward 2D (DCT + ADST) ----
+    {
+        const int16_t in[64] = {12, 45, 3, 78, 22, 91, 6, 30,
+                                67, 8, 54, 11, 39, 71, 17, 48,
+                                2, 90, 25, 63, 7, 44, 85, 19,
+                                51, 36, 9, 77, 28, 5, 60, 83,
+                                15, 72, 41, 4, 88, 33, 26, 58,
+                                80, 13, 66, 47, 1, 95, 38, 70,
+                                24, 56, 10, 82, 31, 68, 14, 42,
+                                75, 29, 87, 20, 53, 16, 79, 34};
+        int32_t out[64];
+        svtd_fwd2d8x8(in, 8, out, svt_av1_fdct8_new);
+        printf("fwd2d8_dct:"); for (int i = 0; i < 64; ++i) printf(" %d", out[i]); printf("\n");
+        svtd_fwd2d8x8(in, 8, out, svt_av1_fadst8_new);
+        printf("fwd2d8_adst:"); for (int i = 0; i < 64; ++i) printf(" %d", out[i]); printf("\n");
+    }
+
+    fprintf(stderr, "CK: fwd2d8 done\n"); fflush(stderr);
+
+    // ---- 8x8 inverse 2D add (DCT + ADST) onto a V-pred 8x8 ----
+    {
+        const int32_t cdct8[64] = {520, -34, 78, -11, 92, 5, -63, 28,
+                                   -17, 45, -8, 60, -29, 71, 14, -52,
+                                   33, -76, 19, 41, -55, 23, 87, -9,
+                                   62, 12, -48, 70, -16, 38, -83, 25,
+                                   -44, 58, 8, -92, 31, 67, -21, 49,
+                                   15, -39, 74, -6, 84, -27, 51, -13,
+                                   66, 22, -57, 35, -78, 10, 43, -31,
+                                   -25, 80, -18, 56, 7, -61, 29, -71};
+        const int32_t cadst8[64] = {-45, 67, -12, 89, 23, -58, 41, -30,
+                                    71, -24, 56, -83, 15, 49, -37, 62,
+                                    -9, 38, -71, 27, 64, -45, 18, -77,
+                                    55, -61, 30, -14, 76, -22, 47, -88,
+                                    20, 41, -66, 12, -53, 78, -35, 59,
+                                    -72, 16, 44, -27, 61, -9, 33, -50,
+                                    37, -55, 69, -18, 42, -64, 25, -46,
+                                    -14, 58, -32, 74, -20, 51, -79, 11};
+        uint8_t pred[64];
+        for (int r = 0; r < 8; ++r)
+            for (int c = 0; c < 8; ++c) pred[r*8+c] = (uint8_t)(10 + 5*c);
+        svtd_inv2dadd8x8(cdct8, pred, 8, svt_av1_idct8_new);
+        printf("inv2d8_dct_onto_vpred:"); for (int i = 0; i < 64; ++i) printf(" %d", pred[i]); printf("\n");
+        for (int r = 0; r < 8; ++r)
+            for (int c = 0; c < 8; ++c) pred[r*8+c] = (uint8_t)(10 + 5*c);
+        svtd_inv2dadd8x8(cadst8, pred, 8, svt_av1_iadst8_new);
+        printf("inv2d8_adst_onto_vpred:"); for (int i = 0; i < 64; ++i) printf(" %d", pred[i]); printf("\n");
+    }
+
+    fprintf(stderr, "CK: inv2d8 done\n"); fflush(stderr);
 
     // ---- inverse 2D add cores ----
     {

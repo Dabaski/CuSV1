@@ -165,6 +165,74 @@ static void svtd_builder_d67(uint8_t* dst, const uint8_t* above, int n_top, int 
                       n_topright, left, 4, 0, above_left);
 }
 
+// ---- forward 2D core (8x8) -------------------------------------------------
+// Specialization of av1_tranform_two_d_core_c (transforms.c:2398) to TX_8X8,
+// 8-bit, no flips: fwd_shift_8x8 = {2, -1, 0} (transforms.c:123), cos_bit
+// 13/13 (fwd_cos_bit_col/row[1][1]). Col pass left-shifts by shift[0]=2,
+// after col transform right-shift by -shift[1]=1 (rounding), row pass no
+// final shift.
+static void svtd_fwd2d8x8(const int16_t* input, uint32_t input_stride, int32_t* output, TxfmFunc txfm) {
+    const int8_t* shift       = fwd_shift_8x8;
+    const int8_t  cos_bit_col = fwd_cos_bit_col[1][1];
+    const int8_t  cos_bit_row = fwd_cos_bit_row[1][1];
+    int32_t       buf[8 * 8];
+    int32_t       temp_in[8];
+    int32_t       temp_out[8];
+    int32_t       r, c;
+
+    for (c = 0; c < 8; ++c) {
+        for (r = 0; r < 8; ++r) {
+            temp_in[r] = input[r * input_stride + c];
+        }
+        svt_av1_round_shift_array_c(temp_in, 8, -shift[0]);
+        txfm(temp_in, temp_out, cos_bit_col, NULL);
+        svt_av1_round_shift_array_c(temp_out, 8, -shift[1]);
+        for (r = 0; r < 8; ++r) {
+            buf[r * 8 + c] = temp_out[r];
+        }
+    }
+    for (r = 0; r < 8; ++r) {
+        txfm(buf + r * 8, output + r * 8, cos_bit_row, NULL);
+        svt_av1_round_shift_array_c(output + r * 8, 8, -shift[2]);
+    }
+}
+
+// ---- inverse 2D add core (8x8) ---------------------------------------------
+// Specialization of inv_txfm2d_add_c (inv_transforms.c:2496) to TX_8X8,
+// 8-bit, no flips: inv_shift_8x8 = {-1, -4} (inv_transforms.c:19), cos_bit
+// 12 (INV_COS_BIT), clamp bits bd+8=16 and max(bd+6,16)=16.
+static void svtd_inv2dadd8x8(const int32_t* input, uint8_t* pred, int32_t stride, TxfmFunc txfm) {
+    const int8_t* shift       = inv_shift_8x8;
+    const int8_t  cos_bit_col = inv_cos_bit_col[1][1];
+    const int8_t  cos_bit_row = inv_cos_bit_row[1][1];
+    int32_t       buf[8 * 8];
+    int32_t       temp_in[8];
+    int32_t       temp_out[8];
+    const int8_t  stage_range[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    int32_t       r, c;
+
+    for (r = 0; r < 8; ++r) {
+        for (c = 0; c < 8; ++c) {
+            temp_in[c] = input[r * 8 + c];
+        }
+        clamp_buf(temp_in, 8, (int8_t)(8 + 8));
+        txfm(temp_in, buf + r * 8, cos_bit_row, stage_range);
+        svt_av1_round_shift_array_c(buf + r * 8, 8, -shift[0]);
+    }
+    for (c = 0; c < 8; ++c) {
+        for (r = 0; r < 8; ++r) {
+            temp_in[r] = buf[r * 8 + c];
+        }
+        clamp_buf(temp_in, 8, (int8_t)(8 + 6 > 16 ? 8 + 6 : 16));
+        txfm(temp_in, temp_out, cos_bit_col, stage_range);
+        svt_av1_round_shift_array_c(temp_out, 8, -shift[1]);
+        for (r = 0; r < 8; ++r) {
+            pred[r * stride + c] =
+                (uint8_t)clip_pixel_highbd(pred[r * stride + c] + temp_out[r], 8);
+        }
+    }
+}
+
 // ---- F1 frame composition (V + DCT, 8x8) -----------------------------------
 // M1 raster semantics: above iff by>0, left iff bx>0, above-left iff both,
 // top-right iff by>0 && bx+1<gridW, bottom-left never. Blocks predict from
