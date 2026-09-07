@@ -53,6 +53,20 @@ compile. If you can split a step into two smaller ones, split it.
    - One line: what tiny slice was added, test name, pass/fail state.
    - Do not batch multiple loop iterations into a single summary â€” report each one.
 ## Hard rules
+
+- **RED evidence is mandatory in every slice report**: the failing doctest
+  line (or compile error) is shown before GREEN. Refactor-only slices declare
+  themselves and show green-before/green-after instead. A test that passes on
+  first build must be proven discriminating (mutation check) or it counts as
+  a skipped RED.
+- **Commit messages carry measured values only** - register counts, SADs,
+  MSEs quoted in a commit message come from an actual run, never from
+  memory or estimation.
+- **Goldens come from tools/golden_gen** (committed generator), cited with
+  generator line + SVT provenance. Hand-traces are commentary, never
+  expected values.
+- **Deviations and limitations are named in the slice report**, never
+  silent.
  
 - Do not write test and implementation in the same edit/commit.
 - Do not write a test you already know will pass â€” if it passes on first run
@@ -167,4 +181,5 @@ North star: a working, bit-exact 1:1 port of SVT-AV1 on CUDA 12.2 - every algori
 - l5_motion â€” motion::sad8x8 (strided uint8, bit-exact with compute8x8_sad_kernel_c) + GPU kernel.
 - l6_pipeline - block + frame composition and DECISION: encodeBlock4x4 / encodeRecon4x4 / encodeFrameRecon4x4 (raster 4x4 grid, intra-only, each block predicting from RECONSTRUCTED neighbors - M1 availability rules) plus encodeFrameAuto4x4, where each block's mode is CHOSEN by the D2 SAD policy evaluated against reconstructed edges (policy is ours; primitives 1:1) and chosen modes feed NeighborContext (filt_type live) = plane window (l1) + buildIntraPredictors (l4) -> int16 residual (no clamp) -> fwdTxfm2d4x4 (l3) -> invTxfm2dAdd4x4 (l3 inverse) onto the same predictor. Goldens captured from SVT's own C in the committed generator (tools/golden_gen).
 - third_party/ â€” vendored SVT-AV1 (1:1 source of truth), doctest, hardware docs (perf-axis only: PTX ISA, GP104 whitepaper, Pascal Tuning Guide, Nsight-focused guides; CUDA 12.2 profiling is ncu, not nvprof).
+
 
