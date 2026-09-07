@@ -26,6 +26,78 @@ TEST_CASE("sad8x8 honors the src stride") {
     CHECK(motion::sad8x8(src, 12, ref, 8) == 2016);
 }
 
+TEST_CASE("sad4x4 ramp vs zero is 136") {
+    // golden: golden_gen primitives (svt_nxm_sad_kernel_helper_c @ 4x4),
+    // src = 1..16 flat stride 4, ref = 0 -> 1+2+...+16 = 136
+    std::uint8_t src[16] = {0};
+    std::uint8_t ref[16] = {0};
+    for (int i = 0; i < 16; ++i) {
+        src[i] = (std::uint8_t)(i + 1);
+    }
+    CHECK(motion::sad4x4(src, 4, ref, 4) == 136);
+}
+
+TEST_CASE("sad4x4 reversed ramps across stride 8 is 576") {
+    // golden: golden_gen primitives (svt_nxm_sad_kernel_helper_c @ 4x4):
+    // 4x4 top-left sub-block of an 8x8 buffer, src = ramp, ref = 63 - ramp
+    std::uint8_t src[64] = {0};
+    std::uint8_t ref[64] = {0};
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            src[y * 8 + x] = (std::uint8_t)(y * 8 + x);
+            ref[y * 8 + x] = (std::uint8_t)(63 - (y * 8 + x));
+        }
+    }
+    CHECK(motion::sad4x4(src, 8, ref, 8) == 576);
+}
+
+TEST_CASE("gpu sad4x4 matches host reference") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    std::uint8_t srcB[16] = {0};
+    std::uint8_t refB[16] = {0};
+    for (int i = 0; i < 16; ++i) {
+        srcB[i] = (std::uint8_t)(i * 7 % 13);
+        refB[i] = (std::uint8_t)(i * 5 % 11);
+    }
+    const std::uint32_t srcStride = 4;
+    const std::uint32_t refStride = 4;
+    const std::uint32_t ref = motion::sad4x4(srcB, srcStride, refB, refStride);
+
+    const std::string ptx = *gpurt::compileToPtx(motion::sad4x4CuSource(), "compute_61");
+    const std::string entry = gpurt::ptxEntryNames(ptx).at(0);
+    gpurt::Kernel k(ptx, entry);
+
+    gpurt::DeviceBuffer dSrc(sizeof(srcB));
+    gpurt::DeviceBuffer dRef(sizeof(refB));
+    gpurt::DeviceBuffer dOut(sizeof(ref));
+    dSrc.uploadFrom(srcB, sizeof(srcB));
+    dRef.uploadFrom(refB, sizeof(refB));
+
+    int sa = (int)srcStride;
+    int sb = (int)refStride;
+    gpurt::DeviceBuffer dSa(sizeof(sa));
+    gpurt::DeviceBuffer dSb(sizeof(sb));
+    dSa.uploadFrom(&sa, sizeof(sa));
+    dSb.uploadFrom(&sb, sizeof(sb));
+
+    CUdeviceptr pSrc = dSrc.get();
+    CUdeviceptr pSa = dSa.get();
+    CUdeviceptr pRef = dRef.get();
+    CUdeviceptr pSb = dSb.get();
+    CUdeviceptr pOut = dOut.get();
+    void* args[] = {&pSrc, &pSa, &pRef, &pSb, &pOut};
+    k.launch(1, 1, 1, 1, args);
+
+    int got = 0;
+    dOut.downloadTo(&got, sizeof(got));
+    CHECK((std::uint32_t)got == ref);
+}
+
 TEST_CASE("gpu sad8x8 matches host reference") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");

@@ -39,4 +39,42 @@ extern "C" __global__ void sad8x8_kernel(const unsigned char* src, const int* sr
 )CUDA";
 }
 
+// svt_nxm_sad_kernel_helper_c (C_DEFAULT/compute_sad_c.c:21) at 4x4
+std::uint32_t sad4x4(const std::uint8_t* src, std::uint32_t srcStride, const std::uint8_t* ref,
+                     std::uint32_t refStride) {
+    std::uint32_t sad = 0;
+
+    for (std::uint32_t r = 0; r < 4; ++r) {
+        for (std::uint32_t c = 0; c < 4; ++c) {
+            const int d = (int)src[c] - (int)ref[c];
+            sad += (std::uint32_t)(d < 0 ? -d : d);
+        }
+        src += srcStride;
+        ref += refStride;
+    }
+
+    return sad;
+}
+
+std::string sad4x4CuSource() {
+    return R"CUDA(
+extern "C" __global__ void sad4x4_kernel(const unsigned char* src, const int* srcStride,
+                                         const unsigned char* ref, const int* refStride, int* out) {
+    int sad = 0;
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            int d = (int)src[c] - (int)ref[c];
+            if (d < 0) {
+                d = -d;
+            }
+            sad += d;
+        }
+        src += *srcStride;
+        ref += *refStride;
+    }
+    out[0] = sad;
+}
+)CUDA";
+}
+
 }  // namespace motion
