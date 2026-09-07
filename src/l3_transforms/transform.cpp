@@ -367,6 +367,10 @@ TxfmFn fwd1d4(TxType type) {
     return type == TxType::DCT_DCT ? fdct4 : fadst4;
 }
 
+TxfmFn fwd1d8(TxType type) {
+    return type == TxType::DCT_DCT ? fdct8 : fadst8;
+}
+
 }  // namespace
 
 // svt_av1_transform_two_d_4x4_c / av1_tranform_two_d_core_c, TX_4X4 config:
@@ -393,6 +397,38 @@ void fwdTxfm2d4x4(const std::int16_t* input, std::int32_t* output, std::uint32_t
 
     for (std::uint32_t r = 0; r < 4; ++r) {
         txfm(buf + r * 4, output + r * 4);
+    }
+}
+
+// av1_tranform_two_d_core_c (transforms.c:2398) at TX_8X8: fwd_shift_8x8 =
+// {2, -1, 0} (transforms.c:123), cos_bit 13/13 from fwd_cos_bit_col/row[1][1]
+void fwdTxfm2d8x8(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type) {
+    TxfmFn txfm = fwd1d8(type);
+    std::int32_t buf[8 * 8];
+    std::int32_t tempIn[8];
+    std::int32_t tempOut[8];
+
+    for (std::uint32_t c = 0; c < 8; ++c) {
+        for (std::uint32_t r = 0; r < 8; ++r) {
+            tempIn[r] = input[r * stride + c];
+        }
+        // round_shift_array(..., -shift[0]) with shift[0] = 2 -> x4
+        for (std::uint32_t i = 0; i < 8; ++i) {
+            tempIn[i] *= (1 << 2);
+        }
+        txfm(tempIn, tempOut);
+        // round_shift_array(..., -shift[1]) with shift[1] = -1 -> >>1 rounding
+        for (std::uint32_t i = 0; i < 8; ++i) {
+            tempOut[i] = roundShift(tempOut[i], 1);
+        }
+        for (std::uint32_t r = 0; r < 8; ++r) {
+            buf[r * 8 + c] = tempOut[r];
+        }
+    }
+
+    for (std::uint32_t r = 0; r < 8; ++r) {
+        txfm(buf + r * 8, output + r * 8);
+        // round_shift_array(..., -shift[2]) with shift[2] = 0 -> no-op
     }
 }
 
@@ -427,8 +463,7 @@ void clipPixelAdd(std::uint8_t* dst, std::int32_t trans) {
 
 }  // namespace
 
-// svt_av1_inv_txfm2d_add_4x4_c / inv_txfm2d_add_c, TX_4X4: rows then columns,
-// inv_shift_4x4 = {0, -4}, cos_bit 12/12, no flips, clamp bit 16; add via
+// svt_av1_inv_txfm2d_add_4x4_c / inv_txfm2d_add_c, TX_4X4: rows then columns,// inv_shift_4x4 = {0, -4}, cos_bit 12/12, no flips, clamp bit 16; add via
 // clip_pixel_highbd(pred + round_shift(out, 4), 8)
 void invTxfm2dAdd4x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type) {
     InvTxfmFn txfmRow = inv1d4(type);

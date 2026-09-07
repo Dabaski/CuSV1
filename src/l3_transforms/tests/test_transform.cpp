@@ -147,6 +147,64 @@ TEST_CASE("fadst8 matches svt_av1_fadst8_new golden full vector") {
     CHECK(ok);
 }
 
+TEST_CASE("fwdTxfm2d8x8 dct matches svt golden full 64") {
+    // golden: svtd_fwd2d8x8 (av1_tranform_two_d_core_c @ TX_8X8, DCT_DCT)
+    // gate line fwd2d8_dct, input = the 8x8 discriminating fixture
+    const std::int16_t in[64] = {12, 45, 3, 78, 22, 91, 6, 30,
+                                 67, 8, 54, 11, 39, 71, 17, 48,
+                                 2, 90, 25, 63, 7, 44, 85, 19,
+                                 51, 36, 9, 77, 28, 5, 60, 83,
+                                 15, 72, 41, 4, 88, 33, 26, 58,
+                                 80, 13, 66, 47, 1, 95, 38, 70,
+                                 24, 56, 10, 82, 31, 68, 14, 42,
+                                 75, 29, 87, 20, 53, 16, 79, 34};
+    const std::int32_t golden[64] = {
+        2755, -122, 52, 15, -31, 19, 89, -343,
+        -216, -108, -129, 86, -53, -96, -70, -368,
+        -62, 134, -211, 207, -86, 148, 286, -61,
+        -26, -77, -164, 189, 121, -270, 508, -375,
+        -21, -11, -11, -109, 211, -162, -279, 318,
+        -71, -100, -162, -140, 163, 183, -400, -764,
+        132, 11, 68, -59, -361, 319, -60, -84,
+        -123, 35, -341, -14, -332, -464, -499, -130};
+    std::int32_t out[64] = {0};
+    transforms::fwdTxfm2d8x8(in, out, 8, transforms::TxType::DCT_DCT);
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (out[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("fwdTxfm2d8x8 adst matches svt golden full 64") {
+    // golden: svtd_fwd2d8x8 (av1_tranform_two_d_core_c @ TX_8X8, ADST_ADST)
+    // gate line fwd2d8_adst, same fixture
+    const std::int16_t in[64] = {12, 45, 3, 78, 22, 91, 6, 30,
+                                 67, 8, 54, 11, 39, 71, 17, 48,
+                                 2, 90, 25, 63, 7, 44, 85, 19,
+                                 51, 36, 9, 77, 28, 5, 60, 83,
+                                 15, 72, 41, 4, 88, 33, 26, 58,
+                                 80, 13, 66, 47, 1, 95, 38, 70,
+                                 24, 56, 10, 82, 31, 68, 14, 42,
+                                 75, 29, 87, 20, 53, 16, 79, 34};
+    const std::int32_t golden[64] = {
+        2350, 666, 575, 342, 258, 270, 382, 158,
+        718, 64, 175, 97, 137, 113, -5, -319,
+        348, 230, 9, 194, -184, 188, 85, 75,
+        306, 116, -236, 224, 23, -358, 737, -151,
+        232, 82, -32, 64, 264, -325, -56, 483,
+        159, 45, -188, -273, 338, 158, 217, -498,
+        327, -8, 104, -20, -231, 307, 437, -73,
+        161, 276, -145, 181, -40, -52, -351, -681};
+    std::int32_t out[64] = {0};
+    transforms::fwdTxfm2d8x8(in, out, 8, transforms::TxType::ADST_ADST);
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (out[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("iadst4 matches svt_av1_iadst4_new golden") {
     // golden: svt_av1_iadst4_new @ cos_bit=12, input {100, 50, -20, 8}
     const std::int32_t in[4] = {100, 50, -20, 8};
