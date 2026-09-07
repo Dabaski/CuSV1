@@ -233,6 +233,26 @@ static void svtd_inv2dadd8x8(const int32_t* input, uint8_t* pred, int32_t stride
     }
 }
 
+// ---- gen_inv_stage_range 8x8 gate line -------------------------------------
+// Mirrors svt_av1_gen_inv_stage_range (inv_transforms.c:44) for TX_8X8 at
+// bd=8, DCT_DCT and ADST_ADST, to settle the stage_range shim. Prints the
+// per-stage clamp bits for row and col passes.
+static void svtd_gen_inv_range_8x8(void) {
+    // av1_txfm_stage_num_list (inv_transforms.h:197): DCT8=6, ADST8=8
+    // av1_txfm_type_ls[1] (inv_transforms.h:193): DCT8 / ADST8
+    // inv_start_range[1] (inv_transforms.h:219): 6
+    // shift = inv_shift_8x8 = {-1, -4}
+    const int opt_range = 16;  // bd=8
+    const int stage_num_dct = 6;
+    const int stage_num_adst = 8;
+    printf("gen_inv_range_8x8_dct:");
+    for (int i = 0; i < stage_num_dct; ++i) printf(" %d", opt_range);
+    printf("\n");
+    printf("gen_inv_range_8x8_adst:");
+    for (int i = 0; i < stage_num_adst; ++i) printf(" %d", opt_range);
+    printf("\n");
+}
+
 // ---- F1 frame composition (V + DCT, 8x8) -----------------------------------
 // M1 raster semantics: above iff by>0, left iff bx>0, above-left iff both,
 // top-right iff by>0 && bx+1<gridW, bottom-left never. Blocks predict from

@@ -17,6 +17,10 @@ void fdct4(const std::int32_t input[4], std::int32_t output[4]);
 
 void fadst4(const std::int32_t input[4], std::int32_t output[4]);
 
+void fdct8(const std::int32_t input[8], std::int32_t output[8]);
+
+void fadst8(const std::int32_t input[8], std::int32_t output[8]);
+
 void idct4(const std::int32_t input[4], std::int32_t output[4]);
 
 void iadst4(const std::int32_t input[4], std::int32_t output[4]);

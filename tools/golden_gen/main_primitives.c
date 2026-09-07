@@ -127,6 +127,8 @@ int main(void) {
 
     fprintf(stderr, "CK: inv2d8 done\n"); fflush(stderr);
 
+    svtd_gen_inv_range_8x8();
+
     // ---- inverse 2D add cores ----
     {
         const int32_t cdct[16] = {-520, 140, 324, 202, -17, 18, 102, -68, 56, 3, 36, 120, -18, 23, 6, -22};

@@ -120,6 +120,33 @@ TEST_CASE("idct4 golden output 3 is 8") {
     CHECK(got[3] == 8);
 }
 
+TEST_CASE("fdct8 matches svt_av1_fdct8_new golden full vector") {
+    // golden: svt_av1_fdct8_new @ cos_bit=13, input {200,80,-50,30,100,-20,60,10}
+    // (gate line fdct8)
+    const std::int32_t in[8] = {200, 80, -50, 30, 100, -20, 60, 10};
+    const std::int32_t golden[8] = {290, 173, 154, 222, 191, 22, -163, 70};
+    std::int32_t got[8] = {0};
+    transforms::fdct8(in, got);
+    bool ok = true;
+    for (int i = 0; i < 8; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("fadst8 matches svt_av1_fadst8_new golden full vector") {
+    // golden: svt_av1_fadst8_new @ cos_bit=13, same input (gate line fadst8)
+    const std::int32_t in[8] = {200, 80, -50, 30, 100, -20, 60, 10};
+    const std::int32_t golden[8] = {165, 97, 67, 173, 296, 275, -2, 146};
+    std::int32_t got[8] = {0};
+    transforms::fadst8(in, got);
+    bool ok = true;
+    for (int i = 0; i < 8; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("iadst4 matches svt_av1_iadst4_new golden") {
     // golden: svt_av1_iadst4_new @ cos_bit=12, input {100, 50, -20, 8}
     const std::int32_t in[4] = {100, 50, -20, 8};
