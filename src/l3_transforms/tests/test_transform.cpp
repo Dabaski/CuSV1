@@ -232,6 +232,70 @@ TEST_CASE("iadst8 matches svt_av1_iadst8_new golden full vector") {
     CHECK(ok);
 }
 
+TEST_CASE("invTxfm2dAdd8x8 dct matches svt golden full 64") {
+    // golden: svtd_inv2dadd8x8 (inv_txfm2d_add_c @ TX_8X8, DCT_DCT)
+    // gate line inv2d8_dct_onto_vpred; pred = V-ramp (10+5c per row)
+    const std::int32_t coeffs[64] = {
+        520, -34, 78, -11, 92, 5, -63, 28,
+        -17, 45, -8, 60, -29, 71, 14, -52,
+        33, -76, 19, 41, -55, 23, 87, -9,
+        62, 12, -48, 70, -16, 38, -83, 25,
+        -44, 58, 8, -92, 31, 67, -21, 49,
+        15, -39, 74, -6, 84, -27, 51, -13,
+        66, 22, -57, 35, -78, 10, 43, -31,
+        -25, 80, -18, 56, 7, -61, 29, -71};
+    const std::uint8_t golden[64] = {
+        27, 20, 27, 36, 36, 47, 54, 51,
+        17, 20, 22, 31, 36, 42, 55, 52,
+        22, 27, 24, 32, 35, 51, 39, 54,
+        20, 18, 25, 34, 36, 22, 49, 65,
+        20, 29, 24, 38, 42, 28, 45, 45,
+        18, 27, 27, 36, 48, 45, 60, 53,
+        21, 22, 18, 27, 44, 41, 45, 69,
+        14, 19, 34, 30, 36, 39, 50, 62};
+    std::uint8_t dst[64];
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 8; ++c) dst[r*8+c] = (std::uint8_t)(10 + 5*c);
+    transforms::invTxfm2dAdd8x8(coeffs, dst, 8, transforms::TxType::DCT_DCT);
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (dst[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("invTxfm2dAdd8x8 adst matches svt golden full 64") {
+    // golden: svtd_inv2dadd8x8 (inv_txfm2d_add_c @ TX_8X8, ADST_ADST)
+    // gate line inv2d8_adst_onto_vpred; same pred
+    const std::int32_t coeffs[64] = {
+        -45, 67, -12, 89, 23, -58, 41, -30,
+        71, -24, 56, -83, 15, 49, -37, 62,
+        -9, 38, -71, 27, 64, -45, 18, -77,
+        55, -61, 30, -14, 76, -22, 47, -88,
+        20, 41, -66, 12, -53, 78, -35, 59,
+        -72, 16, 44, -27, 61, -9, 33, -50,
+        37, -55, 69, -18, 42, -64, 25, -46,
+        -14, 58, -32, 74, -20, 51, -79, 11};
+    const std::uint8_t golden[64] = {
+        11, 23, 15, 28, 32, 35, 38, 47,
+        11, 14, 16, 31, 34, 39, 36, 52,
+        10, 20, 22, 23, 35, 36, 42, 45,
+        13, 14, 25, 24, 26, 28, 34, 51,
+        16, 11, 28, 26, 35, 30, 54, 29,
+        10, 19, 19, 21, 24, 42, 36, 60,
+        10, 25, 13, 22, 25, 41, 23, 39,
+        9, 18, 21, 21, 33, 47, 33, 28};
+    std::uint8_t dst[64];
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 8; ++c) dst[r*8+c] = (std::uint8_t)(10 + 5*c);
+    transforms::invTxfm2dAdd8x8(coeffs, dst, 8, transforms::TxType::ADST_ADST);
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (dst[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("iadst4 matches svt_av1_iadst4_new golden") {
     // golden: svt_av1_iadst4_new @ cos_bit=12, input {100, 50, -20, 8}
     const std::int32_t in[4] = {100, 50, -20, 8};

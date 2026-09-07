@@ -42,6 +42,8 @@ void fwdTxfm2d8x8(const std::int16_t* input, std::int32_t* output, std::uint32_t
 // 2D -> add onto pred block in place with clip to [0,255]
 void invTxfm2dAdd4x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
 
+void invTxfm2dAdd8x8(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
 std::string invTxfmCuSource();
 
 std::string fwdTxfmCuSource();
