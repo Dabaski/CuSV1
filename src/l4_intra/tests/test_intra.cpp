@@ -1,4 +1,4 @@
-#include <doctest.h>
+﻿#include <doctest.h>
 #include <cmath>
 #include <gpurt.h>
 #include <intra.h>
@@ -166,7 +166,7 @@ TEST_CASE("filter intra predictor mode dc matches svt golden") {
     unsigned char ab[6] = {10, 20, 30, 40, 50};
     const unsigned char left[4] = {21, 31, 41, 51};
     unsigned char dst[16] = {0};
-    intra::filterIntraPredictor(dst, 4, ab + 1, left, 0);
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 0, 4, 4);
     CHECK(dst[0] == 25);
 }
 
@@ -176,7 +176,7 @@ TEST_CASE("filter intra predictor mode 1 matches svt golden") {
     unsigned char ab[6] = {10, 20, 30, 40, 50};
     const unsigned char left[4] = {21, 31, 41, 51};
     unsigned char dst[16] = {0};
-    intra::filterIntraPredictor(dst, 4, ab + 1, left, 1);
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 1, 4, 4);
     CHECK(dst[0] == 27);
 }
 
@@ -185,7 +185,7 @@ TEST_CASE("filter intra predictor mode 2 matches svt golden") {
     unsigned char ab[6] = {10, 20, 30, 40, 50};
     const unsigned char left[4] = {21, 31, 41, 51};
     unsigned char dst[16] = {0};
-    intra::filterIntraPredictor(dst, 4, ab + 1, left, 2);
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 2, 4, 4);
     CHECK(dst[0] == 26);
 }
 
@@ -194,7 +194,7 @@ TEST_CASE("filter intra predictor mode 3 matches svt golden") {
     unsigned char ab[6] = {10, 20, 30, 40, 50};
     const unsigned char left[4] = {21, 31, 41, 51};
     unsigned char dst[16] = {0};
-    intra::filterIntraPredictor(dst, 4, ab + 1, left, 3);
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 3, 4, 4);
     CHECK(dst[0] == 22);
 }
 
@@ -203,7 +203,7 @@ TEST_CASE("filter intra predictor mode 4 matches svt golden") {
     unsigned char ab[6] = {10, 20, 30, 40, 50};
     const unsigned char left[4] = {21, 31, 41, 51};
     unsigned char dst[16] = {0};
-    intra::filterIntraPredictor(dst, 4, ab + 1, left, 4);
+    intra::filterIntraPredictor(dst, 4, ab + 1, left, 4, 4, 4);
     CHECK(dst[0] == 28);
 }
 
@@ -233,6 +233,88 @@ TEST_CASE("gpu block predictor filter intra matches the builder") {
                                 intra::NeighborContext(), 1);
 
     bool ok = runBlockPredict(ctx, intra::DC_PRED, 0, above, 4, 0, left, 4, 0, 10, ref, 0, 0, 1);
+    CHECK(ok);
+}
+
+TEST_CASE("filter intra predictor 8x8 matches svt golden") {
+    // golden: svt_av1_filter_intra_predictor_c at TX_8X8, FILTER_V_PRED,
+    // corner 10, above {20..90}, left {21,31..91} — the two-column strip case
+    // (bw=8, strips at c=1,5). Gate line b5_fiv8.
+    unsigned char ab[10] = {10, 20, 30, 40, 50, 60, 70, 80, 90};
+    const unsigned char left[8] = {21, 31, 41, 51, 61, 71, 81, 91};
+    unsigned char dst[64] = {0};
+    intra::filterIntraPredictor(dst, 8, ab + 1, left, 1, 8, 8);
+    // dump actual values for debugging
+    for (int i = 0; i < 8; ++i) {
+        std::uint8_t row[8];
+        for (int c = 0; c < 8; ++c) row[c] = dst[i * 8 + c];
+        (void)row;
+    }
+    // full-vector golden from gate line b5_fiv8 (verified identical to host)
+    const unsigned char golden[64] = {
+        27, 34, 43, 51, 61, 70, 80, 90,
+        33, 38, 45, 53, 62, 71, 81, 90,
+        39, 42, 48, 54, 63, 71, 81, 90,
+        46, 46, 50, 56, 64, 72, 82, 90,
+        52, 50, 53, 57, 65, 72, 82, 90,
+        59, 54, 55, 59, 66, 73, 83, 90,
+        65, 58, 58, 60, 67, 73, 83, 90,
+        72, 62, 60, 62, 68, 74, 84, 90};
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (dst[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder v 8x8 matches svt golden") {
+    // golden: build_intra_predictors TX_8X8 V_PRED, above {31,12,77,4,50,23,68,15}
+    // gate line b5_v8
+    const unsigned char above[8] = {31, 12, 77, 4, 50, 23, 68, 15};
+    unsigned char dst[64] = {0};
+    intra::buildIntraPredictors(dst, 8, intra::V_PRED, 0, 8, 8, 0, above, 8, 0, nullptr, 0, 0);
+    const unsigned char golden[64] = {
+        31, 12, 77, 4, 50, 23, 68, 15,
+        31, 12, 77, 4, 50, 23, 68, 15,
+        31, 12, 77, 4, 50, 23, 68, 15,
+        31, 12, 77, 4, 50, 23, 68, 15,
+        31, 12, 77, 4, 50, 23, 68, 15,
+        31, 12, 77, 4, 50, 23, 68, 15,
+        31, 12, 77, 4, 50, 23, 68, 15,
+        31, 12, 77, 4, 50, 23, 68, 15};
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (dst[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder d67 8x8 exercises the upsample path") {
+    // golden: build_intra_predictors TX_8X8 D67_PRED, above (8+8 topright),
+    // left {9x8}, corner 7 — blk_wh=16, delta=-23, 0<d<40 → upsample IS live
+    // gate line b5_d67_8
+    const unsigned char above[16] = {10, 20, 30, 100, 50, 60, 70, 80, 90, 40, 25, 66, 11, 72, 33, 58};
+    const unsigned char left[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+    unsigned char dst[64] = {0};
+    intra::buildIntraPredictors(dst, 8, intra::D67_PRED, 0, 8, 8, 7, above, 8, 8, left, 8, 0);
+    bool ok = true;
+    // spot-check from the generator output (full vector too long to inline):
+    // gate line b5_d67_8 begins: 14 21 63 82 51 64 74 88 18 27 90 59 57 68 78 90 ...
+    const unsigned char goldenHead[16] = {14, 21, 63, 82, 51, 64, 74, 88, 18, 27, 90, 59, 57, 68, 78, 90};
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenHead[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder dc128 8x8 fills 128 with no neighbors") {
+    // golden: build_intra_predictors TX_8X8 DC_PRED, no edges — gate line b5_dc128_8
+    unsigned char dst[64] = {0};
+    intra::buildIntraPredictors(dst, 8, intra::DC_PRED, 0, 8, 8, 0, nullptr, 0, 0, nullptr, 0, 0);
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (dst[i] != 128) ok = false;
+    }
     CHECK(ok);
 }
 
@@ -1315,5 +1397,6 @@ TEST_CASE("gpu block predictor dc fills 128 with no edges") {
     bool ok = runBlockPredict(ctx, intra::DC_PRED, 0, nullptr, 0, 0, nullptr, 0, 0, 0, ref);
     CHECK(ok);
 }
+
 
 

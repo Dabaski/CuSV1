@@ -41,10 +41,10 @@ enum class FilterIntraMode {
     FILTER_INTRA_MODES = 5,
 };
 
-// svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c:70), 4x4.
+// svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c:70), bw x bh.
 // above points at samples[0]; the corner is at above[-1] (SVT convention).
 void filterIntraPredictor(std::uint8_t* dst, int dstStride, const std::uint8_t* above,
-                          const std::uint8_t* left, int mode);
+                          const std::uint8_t* left, int mode, int bw, int bh);
 
 void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleDelta, int txwpx, int txhpx,
                           std::uint8_t aboveLeft, const std::uint8_t* aboveRef, int nTopPx, int nTopRightPx,

@@ -47,12 +47,13 @@ static inline int svtd_clip(int v, int lo, int hi) { return v < lo ? lo : (v > h
 // TranHigh - inv_transforms.h:263
 typedef int64_t TranHigh;
 
-// TxSize: the generator only exercises TX_4X4 (=0 in SVT's TxSize enum).
-typedef enum { TX_4X4 = 0 } TxSize;
-// tx_size_wide/high for the single size the generator uses (SVT tables in
-// av1_common_int.h / common data; TX_4X4 -> 4x4).
-static const int32_t tx_size_wide[1] = {4};
-static const int32_t tx_size_high[1] = {4};
+// TxSize: the generator exercises TX_4X4 (=0) and TX_8X8 (=1) from SVT's
+// TxSize enum.
+typedef enum { TX_4X4 = 0, TX_8X8 = 1 } TxSize;
+// tx_size_wide/high for the sizes the generator uses (SVT tables in
+// av1_common data; TX_4X4 -> 4x4, TX_8X8 -> 8x8).
+static const int32_t tx_size_wide[2] = {4, 8};
+static const int32_t tx_size_high[2] = {4, 8};
 
 // MAX_TXFM_STAGE_NUM - transforms.h; MAX_BLOCK_DIM / MAX_UPSAMPLE_SZ -
 // intra_prediction.h / definitions.h; MAX_TX_SIZE - definitions.h:410
@@ -76,8 +77,8 @@ typedef void (*TxfmFunc)(const int32_t* input, int32_t* output, int8_t cos_bit,
 // PAETH_PRED + 1). Declared here because build_intra_predictors references
 // them; defined and populated in composition.c.
 typedef void (*SvtdPredFn)(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left);
-extern SvtdPredFn svtd_eb_pred[13][1];
-extern SvtdPredFn svtd_dc_pred[2][2][1];
+extern SvtdPredFn svtd_eb_pred[13][2];
+extern SvtdPredFn svtd_dc_pred[2][2][2];
 #define svt_aom_eb_pred svtd_eb_pred
 #define svt_aom_dc_pred svtd_dc_pred
 

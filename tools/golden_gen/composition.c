@@ -10,8 +10,8 @@
 // macro (intra_prediction.c:1402) over every TxSize; the generator
 // instantiates the TX_4X4 column. These adapters forward with bw=bh=4 ???
 // pure plumbing, no arithmetic.
-SvtdPredFn svtd_eb_pred[13][1];
-SvtdPredFn svtd_dc_pred[2][2][1];
+SvtdPredFn svtd_eb_pred[13][2];
+SvtdPredFn svtd_dc_pred[2][2][2];
 #define svt_aom_eb_pred svtd_eb_pred
 #define svt_aom_dc_pred svtd_dc_pred
 int32_t svtd_filt_type = 0;  // get_filt_type shim state (see svt_gen.c)
@@ -19,6 +19,11 @@ int32_t svtd_filt_type = 0;  // get_filt_type shim state (see svt_gen.c)
 #define SVTD_ADAPTER(name, fn) \
     static void name(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) { \
         fn(dst, stride, 4, 4, above, left); \
+    }
+
+#define SVTD_ADAPTER8(name, fn) \
+    static void name(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) { \
+        fn(dst, stride, 8, 8, above, left); \
     }
 
 SVTD_ADAPTER(eb_dc_4x4, dc_predictor)
@@ -32,11 +37,23 @@ SVTD_ADAPTER(eb_smooth_v_4x4, smooth_v_predictor)
 SVTD_ADAPTER(eb_smooth_h_4x4, smooth_h_predictor)
 SVTD_ADAPTER(eb_paeth_4x4, paeth_predictor)
 
+SVTD_ADAPTER8(eb_dc_8x8, dc_predictor)
+SVTD_ADAPTER8(eb_dc_left_8x8, dc_left_predictor)
+SVTD_ADAPTER8(eb_dc_top_8x8, dc_top_predictor)
+SVTD_ADAPTER8(eb_dc_128_8x8, dc_128_predictor)
+SVTD_ADAPTER8(eb_v_8x8, v_predictor)
+SVTD_ADAPTER8(eb_h_8x8, h_predictor)
+SVTD_ADAPTER8(eb_smooth_8x8, smooth_predictor)
+SVTD_ADAPTER8(eb_smooth_v_8x8, smooth_v_predictor)
+SVTD_ADAPTER8(eb_smooth_h_8x8, smooth_h_predictor)
+SVTD_ADAPTER8(eb_paeth_8x8, paeth_predictor)
+
 static void svtd_populate_dispatch(void) {
+    // TX_4X4 column (index 0)
     svtd_eb_pred[DC_PRED][0]      = eb_dc_4x4;
     svtd_eb_pred[V_PRED][0]       = eb_v_4x4;
     svtd_eb_pred[H_PRED][0]       = eb_h_4x4;
-    svtd_eb_pred[D45_PRED][0]     = eb_v_4x4;   /* dr modes never reach eb_pred; filled for completeness */
+    svtd_eb_pred[D45_PRED][0]     = eb_v_4x4;
     svtd_eb_pred[D135_PRED][0]    = eb_v_4x4;
     svtd_eb_pred[D113_PRED][0]    = eb_v_4x4;
     svtd_eb_pred[D157_PRED][0]    = eb_v_4x4;
@@ -51,6 +68,26 @@ static void svtd_populate_dispatch(void) {
     svtd_dc_pred[1][0][0] = eb_dc_left_4x4;
     svtd_dc_pred[0][1][0] = eb_dc_top_4x4;
     svtd_dc_pred[0][0][0] = eb_dc_128_4x4;
+
+    // TX_8X8 column (index 1)
+    svtd_eb_pred[DC_PRED][1]      = eb_dc_8x8;
+    svtd_eb_pred[V_PRED][1]       = eb_v_8x8;
+    svtd_eb_pred[H_PRED][1]       = eb_h_8x8;
+    svtd_eb_pred[D45_PRED][1]     = eb_v_8x8;
+    svtd_eb_pred[D135_PRED][1]    = eb_v_8x8;
+    svtd_eb_pred[D113_PRED][1]    = eb_v_8x8;
+    svtd_eb_pred[D157_PRED][1]    = eb_v_8x8;
+    svtd_eb_pred[D203_PRED][1]    = eb_v_8x8;
+    svtd_eb_pred[D67_PRED][1]     = eb_v_8x8;
+    svtd_eb_pred[SMOOTH_PRED][1]  = eb_smooth_8x8;
+    svtd_eb_pred[SMOOTH_V_PRED][1] = eb_smooth_v_8x8;
+    svtd_eb_pred[SMOOTH_H_PRED][1] = eb_smooth_h_8x8;
+    svtd_eb_pred[PAETH_PRED][1]   = eb_paeth_8x8;
+
+    svtd_dc_pred[1][1][1] = eb_dc_8x8;
+    svtd_dc_pred[1][0][1] = eb_dc_left_8x8;
+    svtd_dc_pred[0][1][1] = eb_dc_top_8x8;
+    svtd_dc_pred[0][0][1] = eb_dc_128_8x8;
 }
 
 // ---- forward 2D core -------------------------------------------------------
@@ -126,9 +163,10 @@ static void svtd_inv2dadd4x4(const int32_t* input, uint8_t* pred, int32_t stride
 // Each wraps the VERBATIM build_intra_predictors with the neighbor arrays it
 // expects: above_ref/left_ref with the corner at index -1 (the builder reads
 // above_row[-1] from above_ref[-1]).
-static void svtd_call_builder(uint8_t* dst, int mode, int angle_delta, int filter_intra_mode,
-                              int disable_edge_filter, const uint8_t* above, int n_top, int n_topright,
-                              const uint8_t* left, int n_left, int n_bottomleft, uint8_t above_left) {
+static void svtd_call_builder_tx(uint8_t* dst, int mode, int angle_delta, int filter_intra_mode,
+                                 int disable_edge_filter, const uint8_t* above, int n_top, int n_topright,
+                                 const uint8_t* left, int n_left, int n_bottomleft, uint8_t above_left,
+                                 TxSize tx_size) {
     uint8_t above_data[2 * 64 + 48];
     uint8_t left_data[2 * 64 + 48];
     memset(above_data, 0x80, sizeof(above_data));
@@ -140,9 +178,16 @@ static void svtd_call_builder(uint8_t* dst, int mode, int angle_delta, int filte
     for (i = 0; i < n_left + n_bottomleft; ++i) left_col[i] = left[i];
     above_row[-1] = above_left;
     left_col[-1]  = above_left;
-    build_intra_predictors(NULL, above_row, left_col, dst, 4, (PredictionMode)mode, angle_delta,
-                           (FilterIntraMode)filter_intra_mode, TX_4X4, disable_edge_filter, n_top,
-                           n_topright, n_left, n_bottomleft, 0);
+    build_intra_predictors(NULL, above_row, left_col, dst, tx_size_wide[tx_size], (PredictionMode)mode,
+                           angle_delta, (FilterIntraMode)filter_intra_mode, tx_size,
+                           disable_edge_filter, n_top, n_topright, n_left, n_bottomleft, 0);
+}
+
+static void svtd_call_builder(uint8_t* dst, int mode, int angle_delta, int filter_intra_mode,
+                              int disable_edge_filter, const uint8_t* above, int n_top, int n_topright,
+                              const uint8_t* left, int n_left, int n_bottomleft, uint8_t above_left) {
+    svtd_call_builder_tx(dst, mode, angle_delta, filter_intra_mode, disable_edge_filter, above, n_top,
+                         n_topright, left, n_left, n_bottomleft, above_left, TX_4X4);
 }
 
 // V-pred E1 helper: above only (n_top=4), corner 0
@@ -369,5 +414,6 @@ static void svtd_frame_auto_8x8(const uint8_t* src, uint8_t* recon, int32_t* coe
         }
     }
 }
+
 
 

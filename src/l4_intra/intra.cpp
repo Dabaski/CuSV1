@@ -583,7 +583,7 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
     }
 
     if (useFilterIntra) {
-        filterIntraPredictor(dst, dstStride, aboveRow, leftCol, filterIntraMode);
+        filterIntraPredictor(dst, dstStride, aboveRow, leftCol, filterIntraMode, txwpx, txhpx);
         return;
     }
 
@@ -690,12 +690,10 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
     }
 }
 
-// svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c:70), 4x4
+// svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c:70), bw x bh
 void filterIntraPredictor(std::uint8_t* dst, int dstStride, const std::uint8_t* above,
-                          const std::uint8_t* left, int mode) {
+                          const std::uint8_t* left, int mode, int bw, int bh) {
     std::uint8_t buffer[33][33] = {};
-    const int bw = 4;
-    const int bh = 4;
 
     for (int r = 0; r < bh; ++r) {
         buffer[r + 1][0] = left[r];

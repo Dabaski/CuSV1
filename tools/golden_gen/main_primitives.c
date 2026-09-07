@@ -129,6 +129,40 @@ int main(void) {
 
     svtd_gen_inv_range_8x8();
 
+    // ---- B5: 8x8 builder goldens ----
+    {
+        // (a) V_PRED full-neighbor at TX_8X8
+        {
+            const uint8_t above[8] = {31, 12, 77, 4, 50, 23, 68, 15};
+            uint8_t dst[64] = {0};
+            svtd_call_builder_tx(dst, V_PRED, 0, FILTER_INTRA_MODES, 0, above, 8, 0, above, 0, 0, 0, TX_8X8);
+            printf("b5_v8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
+        }
+        // (b) DC_PRED no-neighbor at TX_8X8
+        {
+            uint8_t dst[64] = {0};
+            uint8_t dummy[1] = {0};
+            svtd_call_builder_tx(dst, DC_PRED, 0, FILTER_INTRA_MODES, 0, dummy, 0, 0, dummy, 0, 0, 0, TX_8X8);
+            printf("b5_dc128_8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
+        }
+        // (c) D67 at TX_8X8 — upsample path (blk_wh=16, delta=67-90=-23, 0<d<40)
+        {
+            const uint8_t above[16] = {10, 20, 30, 100, 50, 60, 70, 80, 90, 40, 25, 66, 11, 72, 33, 58};
+            const uint8_t left[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+            uint8_t dst[64] = {0};
+            svtd_call_builder_tx(dst, D67_PRED, 0, FILTER_INTRA_MODES, 0, above, 8, 8, left, 8, 0, 7, TX_8X8);
+            printf("b5_d67_8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
+        }
+        // (d) FILTER_V_PRED at TX_8X8 — two-column strip case (bw=8, strips at c=1,5)
+        {
+            const uint8_t above[9] = {10, 20, 30, 40, 50, 60, 70, 80, 90};
+            const uint8_t left[8] = {21, 31, 41, 51, 61, 71, 81, 91};
+            uint8_t dst[64] = {0};
+            svtd_call_builder_tx(dst, V_PRED, 0, FILTER_V_PRED /* 1 */, 0, above + 1, 8, 0, left, 8, 0, 10, TX_8X8);
+            printf("b5_fiv8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
+        }
+    }
+
     // ---- inverse 2D add cores ----
     {
         const int32_t cdct[16] = {-520, 140, 324, 202, -17, 18, 102, -68, 56, 3, 36, 120, -18, 23, 6, -22};
