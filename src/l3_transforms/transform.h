@@ -25,6 +25,10 @@ void idct4(const std::int32_t input[4], std::int32_t output[4]);
 
 void iadst4(const std::int32_t input[4], std::int32_t output[4]);
 
+void idct8(const std::int32_t input[8], std::int32_t output[8]);
+
+void iadst8(const std::int32_t input[8], std::int32_t output[8]);
+
 enum class TxType {
     DCT_DCT,
     ADST_ADST,

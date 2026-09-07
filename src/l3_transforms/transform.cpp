@@ -146,6 +146,147 @@ void iadst4(const std::int32_t input[4], std::int32_t output[4]) {
     output[3] = roundShift(y3, bit);
 }
 
+// svt_av1_idct8_new (inv_transforms.c:136), cos_bit = 12 (INV_COS_BIT).
+// stage_range: {16,...} shim confirmed exact by gen_inv_range_8x8_dct gate
+// line (B1) — all 6 stages clamp at bit 16 for bd=8.
+void idct8(const std::int32_t input[8], std::int32_t output[8]) {
+    const int8_t cosBit = 12;
+    const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    std::int32_t bf0[8];
+    std::int32_t step[8];
+
+    // stage 1: bit-reverse
+    bf0[0] = input[0];
+    bf0[1] = input[4];
+    bf0[2] = input[2];
+    bf0[3] = input[6];
+    bf0[4] = input[1];
+    bf0[5] = input[5];
+    bf0[6] = input[3];
+    bf0[7] = input[7];
+
+    // stage 2
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = bf0[2];
+    step[3] = bf0[3];
+    step[4] = halfBtf(kCospi12[56], bf0[4], -kCospi12[8], bf0[7], cosBit);
+    step[5] = halfBtf(kCospi12[24], bf0[5], -kCospi12[40], bf0[6], cosBit);
+    step[6] = halfBtf(kCospi12[40], bf0[5], kCospi12[24], bf0[6], cosBit);
+    step[7] = halfBtf(kCospi12[8], bf0[4], kCospi12[56], bf0[7], cosBit);
+
+    // stage 3
+    bf0[0] = halfBtf(kCospi12[32], step[0], kCospi12[32], step[1], cosBit);
+    bf0[1] = halfBtf(kCospi12[32], step[0], -kCospi12[32], step[1], cosBit);
+    bf0[2] = halfBtf(kCospi12[48], step[2], -kCospi12[16], step[3], cosBit);
+    bf0[3] = halfBtf(kCospi12[16], step[2], kCospi12[48], step[3], cosBit);
+    bf0[4] = clampValue(step[4] + step[5], stageRange[3]);
+    bf0[5] = clampValue(step[4] - step[5], stageRange[3]);
+    bf0[6] = clampValue(-step[6] + step[7], stageRange[3]);
+    bf0[7] = clampValue(step[6] + step[7], stageRange[3]);
+
+    // stage 4
+    step[0] = clampValue(bf0[0] + bf0[3], stageRange[4]);
+    step[1] = clampValue(bf0[1] + bf0[2], stageRange[4]);
+    step[2] = clampValue(bf0[1] - bf0[2], stageRange[4]);
+    step[3] = clampValue(bf0[0] - bf0[3], stageRange[4]);
+    step[4] = bf0[4];
+    step[5] = halfBtf(-kCospi12[32], bf0[5], kCospi12[32], bf0[6], cosBit);
+    step[6] = halfBtf(kCospi12[32], bf0[5], kCospi12[32], bf0[6], cosBit);
+    step[7] = bf0[7];
+
+    // stage 5: final butterfly
+    output[0] = clampValue(step[0] + step[7], stageRange[5]);
+    output[1] = clampValue(step[1] + step[6], stageRange[5]);
+    output[2] = clampValue(step[2] + step[5], stageRange[5]);
+    output[3] = clampValue(step[3] + step[4], stageRange[5]);
+    output[4] = clampValue(step[3] - step[4], stageRange[5]);
+    output[5] = clampValue(step[2] - step[5], stageRange[5]);
+    output[6] = clampValue(step[1] - step[6], stageRange[5]);
+    output[7] = clampValue(step[0] - step[7], stageRange[5]);
+}
+
+// svt_av1_iadst8_new (inv_transforms.c:822), cos_bit = 12 (INV_COS_BIT).
+// Unlike iadst4, iadst8 HAS clamp_value at stages 3 and 5 — mirrored exactly.
+// stage_range: {16,...} shim confirmed exact by gen_inv_range_8x8_adst gate
+// line (B1) — all 8 stages clamp at bit 16 for bd=8.
+void iadst8(const std::int32_t input[8], std::int32_t output[8]) {
+    const int8_t cosBit = 12;
+    const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    std::int32_t bf0[8];
+    std::int32_t step[8];
+
+    // stage 1: permutation
+    bf0[0] = input[7];
+    bf0[1] = input[0];
+    bf0[2] = input[5];
+    bf0[3] = input[2];
+    bf0[4] = input[3];
+    bf0[5] = input[4];
+    bf0[6] = input[1];
+    bf0[7] = input[6];
+
+    // stage 2
+    step[0] = halfBtf(kCospi12[4], bf0[0], kCospi12[60], bf0[1], cosBit);
+    step[1] = halfBtf(kCospi12[60], bf0[0], -kCospi12[4], bf0[1], cosBit);
+    step[2] = halfBtf(kCospi12[20], bf0[2], kCospi12[44], bf0[3], cosBit);
+    step[3] = halfBtf(kCospi12[44], bf0[2], -kCospi12[20], bf0[3], cosBit);
+    step[4] = halfBtf(kCospi12[36], bf0[4], kCospi12[28], bf0[5], cosBit);
+    step[5] = halfBtf(kCospi12[28], bf0[4], -kCospi12[36], bf0[5], cosBit);
+    step[6] = halfBtf(kCospi12[52], bf0[6], kCospi12[12], bf0[7], cosBit);
+    step[7] = halfBtf(kCospi12[12], bf0[6], -kCospi12[52], bf0[7], cosBit);
+
+    // stage 3: clamp butterfly
+    bf0[0] = clampValue(step[0] + step[4], stageRange[3]);
+    bf0[1] = clampValue(step[1] + step[5], stageRange[3]);
+    bf0[2] = clampValue(step[2] + step[6], stageRange[3]);
+    bf0[3] = clampValue(step[3] + step[7], stageRange[3]);
+    bf0[4] = clampValue(step[0] - step[4], stageRange[3]);
+    bf0[5] = clampValue(step[1] - step[5], stageRange[3]);
+    bf0[6] = clampValue(step[2] - step[6], stageRange[3]);
+    bf0[7] = clampValue(step[3] - step[7], stageRange[3]);
+
+    // stage 4
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = bf0[2];
+    step[3] = bf0[3];
+    step[4] = halfBtf(kCospi12[16], bf0[4], kCospi12[48], bf0[5], cosBit);
+    step[5] = halfBtf(kCospi12[48], bf0[4], -kCospi12[16], bf0[5], cosBit);
+    step[6] = halfBtf(-kCospi12[48], bf0[6], kCospi12[16], bf0[7], cosBit);
+    step[7] = halfBtf(kCospi12[16], bf0[6], kCospi12[48], bf0[7], cosBit);
+
+    // stage 5: clamp butterfly
+    bf0[0] = clampValue(step[0] + step[2], stageRange[5]);
+    bf0[1] = clampValue(step[1] + step[3], stageRange[5]);
+    bf0[2] = clampValue(step[0] - step[2], stageRange[5]);
+    bf0[3] = clampValue(step[1] - step[3], stageRange[5]);
+    bf0[4] = clampValue(step[4] + step[6], stageRange[5]);
+    bf0[5] = clampValue(step[5] + step[7], stageRange[5]);
+    bf0[6] = clampValue(step[4] - step[6], stageRange[5]);
+    bf0[7] = clampValue(step[5] - step[7], stageRange[5]);
+
+    // stage 6
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = halfBtf(kCospi12[32], bf0[2], kCospi12[32], bf0[3], cosBit);
+    step[3] = halfBtf(kCospi12[32], bf0[2], -kCospi12[32], bf0[3], cosBit);
+    step[4] = bf0[4];
+    step[5] = bf0[5];
+    step[6] = halfBtf(kCospi12[32], bf0[6], kCospi12[32], bf0[7], cosBit);
+    step[7] = halfBtf(kCospi12[32], bf0[6], -kCospi12[32], bf0[7], cosBit);
+
+    // stage 7: output permutation with negation
+    output[0] = step[0];
+    output[1] = -step[4];
+    output[2] = step[6];
+    output[3] = -step[2];
+    output[4] = step[3];
+    output[5] = -step[7];
+    output[6] = step[5];
+    output[7] = -step[1];
+}
+
 // svt_av1_fdct8_new (transforms.c:196), cos_bit = 13
 void fdct8(const std::int32_t input[8], std::int32_t output[8]) {
     const int8_t cosBit = 13;
