@@ -132,4 +132,24 @@ std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b) {
     return sse;
 }
 
+// D2 policy (ours): all 13 PredictionModes, SAD-scored, lowest wins,
+// tie-break = lowest mode index. Primitives are 1:1 SVT.
+ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                                int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                int nBottomLeftPx, std::uint8_t aboveLeft) {
+    ModeDecision best{intra::DC_PRED, 0};
+    bool haveBest = false;
+    for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
+        std::uint8_t pred[16] = {0};
+        intra::buildIntraPredictors(pred, 4, m, 0, 4, 4, aboveLeft, aboveRef, nTopPx, nTopRightPx,
+                                    leftRef, nLeftPx, nBottomLeftPx);
+        const std::uint32_t sad = motion::sad4x4(src, 4, pred, 4);
+        if (!haveBest || sad < best.sad) {
+            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad};
+            haveBest = true;
+        }
+    }
+    return best;
+}
+
 }  // namespace pipeline

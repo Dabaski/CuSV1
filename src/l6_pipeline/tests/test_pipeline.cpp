@@ -609,6 +609,45 @@ TEST_CASE("gpu frame round trip matches host encodeFrameRecon4x4") {
     CHECK(coeffsOk);
 }
 
+TEST_CASE("decide picks vertical for the v fixture (paeth tie broken by index)") {
+    // golden: golden_gen d2_v — V SAD 0, PAETH SAD 0, everything else > 0;
+    // deterministic tie-break = lowest mode index -> V (1)
+    const std::uint8_t src[16] = {10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40};
+    const std::uint8_t above[4] = {10, 20, 30, 40};
+    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 0, nullptr, 0, 0, 0);
+    CHECK(d.mode == intra::V_PRED);
+    CHECK(d.sad == 0);
+}
+
+TEST_CASE("decide picks horizontal for the h fixture") {
+    // golden: golden_gen d2_h — H SAD 0, PAETH SAD 0, tie -> H (2)
+    const std::uint8_t src[16] = {5, 5, 5, 5, 10, 10, 10, 10, 15, 15, 15, 15, 20, 20, 20, 20};
+    const std::uint8_t left[4] = {5, 10, 15, 20};
+    const auto d = pipeline::decideBlockMode4x4(src, nullptr, 0, 0, left, 4, 0, 0);
+    CHECK(d.mode == intra::H_PRED);
+    CHECK(d.sad == 0);
+}
+
+TEST_CASE("decide picks dc on a flat block via thirteen-way tie") {
+    // golden: golden_gen d2_dc — all 13 candidate SADs are 0; tie-break -> DC (0)
+    const std::uint8_t src[16] = {50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50};
+    const std::uint8_t above[4] = {50, 50, 50, 50};
+    const std::uint8_t left[4] = {50, 50, 50, 50};
+    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 0, left, 4, 0, 50);
+    CHECK(d.mode == intra::DC_PRED);
+    CHECK(d.sad == 0);
+}
+
+TEST_CASE("decide picks d45 for the diagonal fixture") {
+    // golden: golden_gen d2_d45 — D45 SAD 0, next best 233 (SMOOTH_V); strict win
+    const std::uint8_t src[16] = {10, 20, 30, 40, 20, 30, 40, 50, 30, 40, 50, 60, 40, 50, 60, 70};
+    const std::uint8_t above[8] = {0, 10, 20, 30, 40, 50, 60, 70};
+    const std::uint8_t left[4] = {0, 10, 20, 30};
+    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 4, left, 4, 0, 0);
+    CHECK(d.mode == intra::D45_PRED);
+    CHECK(d.sad == 0);
+}
+
 TEST_CASE("gpu round trip matches host encodeRecon4x4 bit-exactly") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");

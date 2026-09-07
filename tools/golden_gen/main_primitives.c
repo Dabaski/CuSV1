@@ -137,5 +137,61 @@ int main(void) {
         printf("f1_recon:"); for (int i = 0; i < 64; ++i) printf(" %d", recon[i]); printf("\n");
         printf("f1_coeffs:"); for (int i = 0; i < 64; ++i) printf(" %d", coeffs[i]); printf("\n");
     }
+
+    // ---- D2 per-candidate SADs (4 fixtures) ----
+    {
+        // fixture V: rows identical to the above row
+        {
+            const uint8_t above[4] = {10, 20, 30, 40};
+            const uint8_t src[16] = {10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40};
+            printf("d2_v:");
+            for (int m = 0; m <= PAETH_PRED; ++m) {
+                uint8_t pred[16];
+                svtd_call_builder(pred, m, 0, FILTER_INTRA_MODES, 0, above, 4, 0, above /*unused*/, 0, 0, 0);
+                printf(" %u", svt_nxm_sad_kernel_helper_c(src, 4, pred, 4, 4, 4));
+            }
+            printf("\n");
+        }
+        // fixture H: rows constant, left column = row value
+        {
+            const uint8_t left[4] = {5, 10, 15, 20};
+            const uint8_t src[16] = {5, 5, 5, 5, 10, 10, 10, 10, 15, 15, 15, 15, 20, 20, 20, 20};
+            printf("d2_h:");
+            for (int m = 0; m <= PAETH_PRED; ++m) {
+                uint8_t pred[16];
+                svtd_call_builder(pred, m, 0, FILTER_INTRA_MODES, 0, left /*above unused*/, 0, 0, left, 4, 0, 0);
+                printf(" %u", svt_nxm_sad_kernel_helper_c(src, 4, pred, 4, 4, 4));
+            }
+            printf("\n");
+        }
+        // fixture DC: flat block, all edges 50 (tie-break check)
+        {
+            const uint8_t above[4] = {50, 50, 50, 50};
+            const uint8_t left[4] = {50, 50, 50, 50};
+            const uint8_t src[16] = {50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50};
+            printf("d2_dc:");
+            for (int m = 0; m <= PAETH_PRED; ++m) {
+                uint8_t pred[16];
+                svtd_call_builder(pred, m, 0, FILTER_INTRA_MODES, 0, above, 4, 0, left, 4, 0, 50);
+                printf(" %u", svt_nxm_sad_kernel_helper_c(src, 4, pred, 4, 4, 4));
+            }
+            printf("\n");
+        }
+        // fixture D45: diagonal ramp matching the 45-degree above direction
+        {
+            const uint8_t above[8] = {0, 10, 20, 30, 40, 50, 60, 70};
+            const uint8_t left[4] = {0, 10, 20, 30};
+            uint8_t src[16];
+            for (int y = 0; y < 4; ++y)
+                for (int x = 0; x < 4; ++x) src[y * 4 + x] = (uint8_t)(10 * (x + y + 1));
+            printf("d2_d45:");
+            for (int m = 0; m <= PAETH_PRED; ++m) {
+                uint8_t pred[16];
+                svtd_call_builder(pred, m, 0, FILTER_INTRA_MODES, 0, above, 4, 4, left, 4, 0, 0);
+                printf(" %u", svt_nxm_sad_kernel_helper_c(src, 4, pred, 4, 4, 4));
+            }
+            printf("\n");
+        }
+    }
     return 0;
 }

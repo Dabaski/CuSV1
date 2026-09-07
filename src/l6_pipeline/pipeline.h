@@ -5,6 +5,7 @@
 
 #include <pixels.h>
 #include <intra.h>
+#include <motion.h>
 #include <transform.h>
 
 namespace pipeline {
@@ -40,6 +41,21 @@ void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::in
 
 // Sum of squared sample differences over the full frame (integer, exact).
 std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
+
+// D2 mode decision — THE POLICY IS THIS PROJECT'S, NOT SVT's: SVT's real
+// mode decision is full RD with rate costs. The 1:1 guarantee covers every
+// primitive (predict / transform / SAD); the policy (SAD-only, fixed
+// candidate set of all 13 PredictionModes, deterministic tie-break = lowest
+// mode index) is documented here and attributed to no one else.
+// angleDelta = 0 and filter-intra off for all candidates (parked).
+struct ModeDecision {
+    intra::PredictionMode mode;
+    std::uint32_t sad;
+};
+
+ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                                int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                int nBottomLeftPx, std::uint8_t aboveLeft);
 
 std::string subtractCuSource();
 

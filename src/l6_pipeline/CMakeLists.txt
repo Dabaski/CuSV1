@@ -1,6 +1,6 @@
 add_library(av1_pipeline STATIC pipeline.cpp)
 target_include_directories(av1_pipeline PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(av1_pipeline PUBLIC av1_pixels av1_transforms av1_intra)
+target_link_libraries(av1_pipeline PUBLIC av1_pixels av1_transforms av1_intra av1_motion)
 
 add_executable(av1_l6_pipeline_tests tests/test_harness.cpp tests/test_pipeline.cpp)
 target_include_directories(av1_l6_pipeline_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/doctest)
