@@ -1334,10 +1334,11 @@ void defaultScan4x4(std::int16_t scan[16]) {
     }
 }
 
-// quantize_fp_helper_c (full_loop.c:222) at log_scale 0, qm/iqm NULL branch
-void quantizeFp4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
-                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
-    const int nCoeffs = 16;
+// quantize_fp_helper_c (full_loop.c:222) at log_scale 0, qm/iqm NULL branch.
+// Size-parameterized over n_coeffs (the C helper's own parameter); the 4x4/8x8
+// wrappers pass 16/64.
+void quantizeFpN(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                 int nCoeffs, std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
     int eobVal = -1;
     const std::int32_t rounding[2] = {tables.roundFp[0], tables.roundFp[1]};
     for (int i = 0; i < nCoeffs; ++i) {
@@ -1373,11 +1374,21 @@ void quantizeFp4x4(const std::int32_t* coeff, const QuantTables& tables, const s
     *eob = static_cast<std::uint16_t>(eobVal + 1);
 }
 
+void quantizeFp4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeFpN(coeff, tables, scan, 16, qcoeff, dqcoeff, eob);
+}
+
+void quantizeFp8x8(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeFpN(coeff, tables, scan, 64, qcoeff, dqcoeff, eob);
+}
+
 // svt_aom_quantize_b_c (full_loop.c:31) at log_scale 0, qm/iqm NULL branch
-// (wt = 1 << AOM_QM_BITS = 1 << 5, inv_transforms.h:27)
-void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
-                  std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
-    const int nCoeffs = 16;
+// (wt = 1 << AOM_QM_BITS = 1 << 5, inv_transforms.h:27). Size-parameterized
+// over n_coeffs like the C original.
+void quantizeBN(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                int nCoeffs, std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
     const std::int32_t zbins[2] = {tables.zbin[0], tables.zbin[1]};
     const std::int32_t nzbins[2] = {zbins[0] * -1, zbins[1] * -1};
     int nonZeroCount = nCoeffs;
@@ -1432,6 +1443,37 @@ void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const st
         }
     }
     *eob = static_cast<std::uint16_t>(eobVal + 1);
+}
+
+void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                  std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeBN(coeff, tables, scan, 16, qcoeff, dqcoeff, eob);
+}
+
+void quantizeB8x8(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                  std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeBN(coeff, tables, scan, 64, qcoeff, dqcoeff, eob);
+}
+
+// default (up-right diagonal) scan for 8x8, svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=8
+void defaultScan8x8(std::int16_t scan[64]) {
+    const int W = 8, H = 8;
+    int idx = 0;
+    for (int d = 0; d < W + H - 1; ++d) {
+        const int rlo = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
+        const int rhi = d < (H - 1) ? d : (H - 1);
+        const int incr = (H > W) ? 1 : (W > H) ? 0 : (d & 1);
+        if (incr) {
+            for (int r = rlo; r <= rhi; ++r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        } else {
+            for (int r = rhi; r >= rlo; --r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        }
+    }
 }
 
 std::string quantCuSource() {

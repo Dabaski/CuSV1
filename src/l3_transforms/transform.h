@@ -77,6 +77,18 @@ void quantizeFp4x4(const std::int32_t* coeff, const QuantTables& tables, const s
 void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
 
+// TX_8X8 entries: same helpers at n_coeffs=64, log_scale 0
+// (av1_get_tx_scale_tab[TX_8X8] = 0, full_loop.c:22 + :1617).
+void quantizeFp8x8(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
+
+void quantizeB8x8(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                  std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
+
+// default (up-right diagonal) scan for 8x8, same svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=8
+void defaultScan8x8(std::int16_t scan[64]);
+
 std::string quantCuSource();
 
 }  // namespace transforms

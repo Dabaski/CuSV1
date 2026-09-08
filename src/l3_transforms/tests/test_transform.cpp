@@ -700,6 +700,153 @@ TEST_CASE("quantize fp 4x4 matches the Q0 gate vectors across qindices") {
     }
 }
 
+TEST_CASE("quantize fp/b 8x8 and ADST proof match the QC1 gate vectors") {
+    // goldens: golden_gen qscan8 / q8fp_q100 / q8b_q100 / q8fp_q0 /
+    // qadst4fp_q100 / qadst4b_q100 / qadst8fp_q100.
+    // log_scale = av1_get_tx_scale_tab[TX_8X8] = 0 (full_loop.c:22 + :1617),
+    // so 8x8 uses the same helper at n_coeffs=64. The ADST proof: the fp/b
+    // helpers are TxType-agnostic — the fixtures are ADST fwd outputs of the
+    // same fixtures the gate recomputes.
+    std::int16_t scan8[64];
+    transforms::defaultScan8x8(scan8);
+    {
+        // qscan8 spot check (diagonal d=0..6 tail: 48 41 34 27 20 13 6)
+        const std::int16_t ref[16] = {0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5};
+        bool scanOk = true;
+        for (int i = 0; i < 16; ++i) {
+            if (scan8[i] != ref[i]) scanOk = false;
+        }
+        CHECK(scanOk);
+    }
+
+    const std::int16_t in8[64] = {12, 45, 3, 78, 22, 91, 6, 30,
+                                  67, 8, 54, 11, 39, 71, 17, 48,
+                                  2, 90, 25, 63, 7, 44, 85, 19,
+                                  51, 36, 9, 77, 28, 5, 60, 83,
+                                  15, 72, 41, 4, 88, 33, 26, 58,
+                                  80, 13, 66, 47, 1, 95, 38, 70,
+                                  24, 56, 10, 82, 31, 68, 14, 42,
+                                  75, 29, 87, 20, 53, 16, 79, 34};
+    std::int32_t cdct8[64];
+    transforms::fwdTxfm2d8x8(in8, cdct8, 8, transforms::TxType::DCT_DCT);
+
+    struct Ref8 {
+        int q;
+        bool useB;
+        std::int32_t qc[64];
+        std::int32_t dq[64];
+        std::uint16_t eob;
+    };
+    // clang-format off
+    const Ref8 refs8[] = {
+        {100, false,
+         {30, -1, 0, 0, 0, 0, 1, -3, -2, -1, -1, 1, 0, -1, -1, -3, -1, 1, -2, 2, -1, 1, 3, -1, 0, -1, -1, 2, 1, -2, 5, -3,
+          0, 0, 0, -1, 2, -1, -2, 3, -1, -1, -1, -1, 1, 2, -4, -7, 1, 0, 1, -1, -3, 3, -1, -1, -1, 0, -3, 0, -3, -4, -4, -1},
+         {2790, -112, 0, 0, 0, 0, 112, -336, -224, -112, -112, 112, 0, -112, -112, -336, -112, 112, -224, 224, -112, 112, 336, -112, 0, -112, -112, 224, 112, -224, 560, -336,
+          0, 0, 0, -112, 224, -112, -224, 336, -112, -112, -112, -112, 112, 224, -448, -784, 112, 0, 112, -112, -336, 336, -112, -112, -112, 0, -336, 0, -336, -448, -448, -112},
+         64},
+        {100, true,
+         {29, -1, 0, 0, 0, 0, 1, -3, -2, -1, -1, 1, 0, -1, 0, -3, 0, 1, -2, 2, -1, 1, 2, 0, 0, -1, -1, 2, 1, -2, 4, -3,
+          0, 0, 0, -1, 2, -1, -2, 3, 0, -1, -1, -1, 1, 2, -3, -7, 1, 0, 0, 0, -3, 3, 0, -1, -1, 0, -3, 0, -3, -4, -4, -1},
+         {2697, -112, 0, 0, 0, 0, 112, -336, -224, -112, -112, 112, 0, -112, 0, -336, 0, 112, -224, 224, -112, 112, 224, 0, 0, -112, -112, 224, 112, -224, 448, -336,
+          0, 0, 0, -112, 224, -112, -224, 336, 0, -112, -112, -112, 112, 224, -336, -784, 112, 0, 0, 0, -336, 336, 0, -112, -112, 0, -336, 0, -336, -448, -448, -112},
+         64},
+        {0, false,
+         {689, -31, 13, 4, -8, 5, 22, -86, -54, -27, -32, 22, -13, -24, -18, -92, -16, 34, -53, 52, -22, 37, 72, -15, -7, -19, -41, 47, 30, -68, 127, -94,
+          -5, -3, -3, -27, 53, -41, -70, 80, -18, -25, -41, -35, 41, 46, -100, -191, 33, 3, 17, -15, -90, 80, -15, -21, -31, 9, -85, -4, -83, -116, -125, -33},
+         {2756, -124, 52, 16, -32, 20, 88, -344, -216, -108, -128, 88, -52, -96, -72, -368, -64, 136, -212, 208, -88, 148, 288, -60, -28, -76, -164, 188, 120, -272, 508, -376,
+          -20, -12, -12, -108, 212, -164, -280, 320, -72, -100, -164, -140, 164, 184, -400, -764, 132, 12, 68, -60, -360, 320, -60, -84, -124, 36, -340, -16, -332, -464, -500, -132},
+         64},
+    };
+    // clang-format on
+    for (const auto& r : refs8) {
+        transforms::QuantTables t;
+        transforms::buildQuantTables(r.q, t);
+        std::int32_t qc[64] = {0};
+        std::int32_t dq[64] = {0};
+        std::uint16_t eob = 0;
+        if (r.useB) {
+            transforms::quantizeB8x8(cdct8, t, scan8, qc, dq, &eob);
+        } else {
+            transforms::quantizeFp8x8(cdct8, t, scan8, qc, dq, &eob);
+        }
+        bool ok = true;
+        for (int i = 0; i < 64; ++i) {
+            if (qc[i] != r.qc[i] || dq[i] != r.dq[i]) ok = false;
+        }
+        if (eob != r.eob) ok = false;
+        CHECK(ok);
+    }
+
+    // ADST proof at 4x4: same helper, ADST-produced coeffs
+    {
+        const std::int16_t in[16] = {9, 2, 3, 1, 5, 6, 7, 8, 8, 7, 6, 5, 4, 3, 9, 1};
+        std::int32_t cadst[16];
+        transforms::fwdTxfm2d4x4(in, cadst, 4, transforms::TxType::ADST_ADST);
+        std::int16_t scan4[16];
+        transforms::defaultScan4x4(scan4);
+
+        struct Ref4 {
+            bool useB;
+            std::int32_t qc[16];
+            std::int32_t dq[16];
+            std::uint16_t eob;
+        };
+        const Ref4 refs4[] = {
+            {false,
+             {2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+             {186, 112, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+             2},
+            {true,
+             {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+             {93, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+             1},
+        };
+        for (const auto& r : refs4) {
+            transforms::QuantTables t;
+            transforms::buildQuantTables(100, t);
+            std::int32_t qc[16] = {0};
+            std::int32_t dq[16] = {0};
+            std::uint16_t eob = 0;
+            if (r.useB) {
+                transforms::quantizeB4x4(cadst, t, scan4, qc, dq, &eob);
+            } else {
+                transforms::quantizeFp4x4(cadst, t, scan4, qc, dq, &eob);
+            }
+            bool ok = true;
+            for (int i = 0; i < 16; ++i) {
+                if (qc[i] != r.qc[i] || dq[i] != r.dq[i]) ok = false;
+            }
+            if (eob != r.eob) ok = false;
+            CHECK(ok);
+        }
+    }
+
+    // ADST proof at 8x8
+    {
+        std::int32_t cadst8[64];
+        transforms::fwdTxfm2d8x8(in8, cadst8, 8, transforms::TxType::ADST_ADST);
+        transforms::QuantTables t;
+        transforms::buildQuantTables(100, t);
+        std::int32_t qc[64] = {0};
+        std::int32_t dq[64] = {0};
+        std::uint16_t eob = 0;
+        transforms::quantizeFp8x8(cadst8, t, scan8, qc, dq, &eob);
+        const std::int32_t refQc[64] = {
+            25, 6, 5, 3, 2, 2, 3, 1, 6, 1, 2, 1, 1, 1, 0, -3, 3, 2, 0, 2, -2, 2, 1, 1, 3, 1, -2, 2, 0, -3, 7, -1,
+            2, 1, 0, 1, 2, -3, 0, 4, 1, 0, -2, -2, 3, 1, 2, -4, 3, 0, 1, 0, -2, 3, 4, -1, 1, 2, -1, 2, 0, 0, -3, -6};
+        const std::int32_t refDq[64] = {
+            2325, 672, 560, 336, 224, 224, 336, 112, 672, 112, 224, 112, 112, 112, 0, -336, 336, 224, 0, 224, -224, 224, 112, 112, 336, 112, -224, 224, 0, -336, 784, -112,
+            224, 112, 0, 112, 224, -336, 0, 448, 112, 0, -224, -224, 336, 112, 224, -448, 336, 0, 112, 0, -224, 336, 448, -112, 112, 224, -112, 224, 0, 0, -336, -672};
+        bool ok = true;
+        for (int i = 0; i < 64; ++i) {
+            if (qc[i] != refQc[i] || dq[i] != refDq[i]) ok = false;
+        }
+        if (eob != 64) ok = false;
+        CHECK(ok);
+    }
+}
+
 TEST_CASE("gpu quant_dequant_4x4 matches host quantizeFp4x4 (q0 + q100)") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");
