@@ -512,6 +512,79 @@ static void svtd_quantize_b_8x8(const TranLow* coeff, const SvtdQuantTables* t, 
                          t->dequant, eob, scan, NULL, NULL, NULL, 0);
 }
 
+// ---- QW1 frame composition: 8x8 D-policy + fixed-qindex quantization ------
+// Same loop as svtd_frame_auto_8x8_blocks (8x8 blocks, D2 policy), with the
+// FP quantizer wired in at n_coeffs=64/log_scale 0: qcoeff = coded coeffs,
+// dqcoeff feeds the inverse. Fixed qindex per run (no rate control).
+static void svtd_frame_auto_8x8_q(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes,
+                                  int qindex) {
+    const int fstride = 16;
+    const int gridW = 2, gridH = 2;
+    const int bsz = 8;
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(qindex, &t);
+    int16_t scan8[64];
+    svtd_default_scan_8x8(scan8);
+    memset(recon, 0, 256);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * bsz, py = by * bsz;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? bsz : 0;
+            const int nLeft = hasLeft ? bsz : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? bsz : 0;
+            uint8_t above[17] = {0};
+            uint8_t left[17] = {0};
+            uint8_t al = 0;
+            if (hasTop) for (int i = 0; i < bsz; ++i) above[i] = recon[(py - 1) * fstride + px + i];
+            if (hasLeft) for (int i = 0; i < bsz; ++i) left[i] = recon[(py + i) * fstride + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
+
+            const int aboveMode = hasTop ? modes[(by - 1) * gridW + bx] : DC_PRED;
+            const int leftMode = hasLeft ? modes[by * gridW + bx - 1] : DC_PRED;
+            svtd_filt_type = ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED ||
+                               aboveMode == SMOOTH_H_PRED) ||
+                              (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED ||
+                               leftMode == SMOOTH_H_PRED))
+                                 ? 1
+                                 : 0;
+
+            uint8_t srcblk[64];
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    srcblk[i * bsz + j] = src[(py + i) * fstride + px + j];
+
+            // D2 policy: 13 candidates, SAD scored, lowest wins, tie = lowest idx
+            uint32_t best_sad = 0;
+            int mode = -1;
+            for (int m = 0; m <= PAETH_PRED; ++m) {
+                uint8_t pred[64];
+                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+                                     0, al, TX_8X8);
+                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
+                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+            }
+            modes[by * gridW + bx] = mode;
+
+            uint8_t pred[64];
+            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+                                 0, al, TX_8X8);
+            int16_t res[64];
+            for (int i = 0; i < 64; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+            int32_t cb[64];
+            svtd_fwd2d8x8(res, bsz, cb, svt_av1_fdct8_new);
+            TranLow qc[64], dq[64];
+            uint16_t eob = 0;
+            svtd_quantize_fp_8x8(cb, &t, scan8, qc, dq, &eob);
+            for (int i = 0; i < 64; ++i) coeffs[(by * gridW + bx) * 64 + i] = qc[i];
+            svtd_inv2dadd8x8(dq, pred, bsz, svt_av1_idct8_new);
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    recon[(py + i) * fstride + px + j] = pred[i * bsz + j];
+        }
+    }
+}
+
 // ---- gen_inv_stage_range 8x8 gate line -------------------------------------
 // Mirrors svt_av1_gen_inv_stage_range (inv_transforms.c:44) for TX_8X8 at
 // bd=8, DCT_DCT and ADST_ADST, to settle the stage_range shim. Prints the
