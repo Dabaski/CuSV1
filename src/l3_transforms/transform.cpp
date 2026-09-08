@@ -776,7 +776,178 @@ extern "C" __global__ void fwd_txfm_2d_4x4(const short* input, const int* stride
         output[t * 4 + c] = o[c];
     }
 }
-)CUDA";
+)CUDA" R"CUDB1(
+__device__ void d_fdct8(const int* input, int* output) {
+    const int bit = 13;
+    int bf0[8];
+    int step[8];
+
+    bf0[0] = input[0] + input[7];
+    bf0[1] = input[1] + input[6];
+    bf0[2] = input[2] + input[5];
+    bf0[3] = input[3] + input[4];
+    bf0[4] = -input[4] + input[3];
+    bf0[5] = -input[5] + input[2];
+    bf0[6] = -input[6] + input[1];
+    bf0[7] = -input[7] + input[0];
+
+    step[0] = bf0[0] + bf0[3];
+    step[1] = bf0[1] + bf0[2];
+    step[2] = -bf0[2] + bf0[1];
+    step[3] = -bf0[3] + bf0[0];
+    step[4] = bf0[4];
+    step[5] = d_half_btf(-kCospi[32], bf0[5], kCospi[32], bf0[6], bit);
+    step[6] = d_half_btf(kCospi[32], bf0[6], kCospi[32], bf0[5], bit);
+    step[7] = bf0[7];
+
+    bf0[0] = step[0];
+    bf0[1] = step[1];
+    bf0[2] = step[2];
+    bf0[3] = step[3];
+    bf0[4] = step[4];
+    bf0[5] = step[5];
+    bf0[6] = step[6];
+    bf0[7] = step[7];
+
+    step[0] = d_half_btf(kCospi[32], bf0[0], kCospi[32], bf0[1], bit);
+    step[1] = d_half_btf(-kCospi[32], bf0[1], kCospi[32], bf0[0], bit);
+    step[2] = d_half_btf(kCospi[48], bf0[2], kCospi[16], bf0[3], bit);
+    step[3] = d_half_btf(kCospi[48], bf0[3], -kCospi[16], bf0[2], bit);
+    step[4] = bf0[4] + bf0[5];
+    step[5] = -bf0[5] + bf0[4];
+    step[6] = -bf0[6] + bf0[7];
+    step[7] = bf0[7] + bf0[6];
+
+    bf0[0] = step[0];
+    bf0[1] = step[1];
+    bf0[2] = step[2];
+    bf0[3] = step[3];
+    bf0[4] = step[4];
+    bf0[5] = step[5];
+    bf0[6] = step[6];
+    bf0[7] = step[7];
+
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = bf0[2];
+    step[3] = bf0[3];
+    step[4] = d_half_btf(kCospi[56], bf0[4], kCospi[8], bf0[7], bit);
+    step[5] = d_half_btf(kCospi[24], bf0[5], kCospi[40], bf0[6], bit);
+    step[6] = d_half_btf(kCospi[24], bf0[6], -kCospi[40], bf0[5], bit);
+    step[7] = d_half_btf(kCospi[56], bf0[7], -kCospi[8], bf0[4], bit);
+
+    output[0] = step[0];
+    output[1] = step[4];
+    output[2] = step[2];
+    output[3] = step[6];
+    output[4] = step[1];
+    output[5] = step[5];
+    output[6] = step[3];
+    output[7] = step[7];
+}
+
+__device__ void d_fadst8(const int* input, int* output) {
+    const int bit = 13;
+    int bf0[8];
+    int step[8];
+
+    bf0[0] = input[0];
+    bf0[1] = -input[7];
+    bf0[2] = -input[3];
+    bf0[3] = input[4];
+    bf0[4] = -input[1];
+    bf0[5] = input[6];
+    bf0[6] = input[2];
+    bf0[7] = -input[5];
+
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = d_half_btf(kCospi[32], bf0[2], kCospi[32], bf0[3], bit);
+    step[3] = d_half_btf(kCospi[32], bf0[2], -kCospi[32], bf0[3], bit);
+    step[4] = bf0[4];
+    step[5] = bf0[5];
+    step[6] = d_half_btf(kCospi[32], bf0[6], kCospi[32], bf0[7], bit);
+    step[7] = d_half_btf(kCospi[32], bf0[6], -kCospi[32], bf0[7], bit);
+
+    bf0[0] = step[0] + step[2];
+    bf0[1] = step[1] + step[3];
+    bf0[2] = step[0] - step[2];
+    bf0[3] = step[1] - step[3];
+    bf0[4] = step[4] + step[6];
+    bf0[5] = step[5] + step[7];
+    bf0[6] = step[4] - step[6];
+    bf0[7] = step[5] - step[7];
+
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = bf0[2];
+    step[3] = bf0[3];
+    step[4] = d_half_btf(kCospi[16], bf0[4], kCospi[48], bf0[5], bit);
+    step[5] = d_half_btf(kCospi[48], bf0[4], -kCospi[16], bf0[5], bit);
+    step[6] = d_half_btf(-kCospi[48], bf0[6], kCospi[16], bf0[7], bit);
+    step[7] = d_half_btf(kCospi[16], bf0[6], kCospi[48], bf0[7], bit);
+
+    bf0[0] = step[0] + step[4];
+    bf0[1] = step[1] + step[5];
+    bf0[2] = step[2] + step[6];
+    bf0[3] = step[3] + step[7];
+    bf0[4] = step[0] - step[4];
+    bf0[5] = step[1] - step[5];
+    bf0[6] = step[2] - step[6];
+    bf0[7] = step[3] - step[7];
+
+    step[0] = d_half_btf(kCospi[4], bf0[0], kCospi[60], bf0[1], bit);
+    step[1] = d_half_btf(kCospi[60], bf0[0], -kCospi[4], bf0[1], bit);
+    step[2] = d_half_btf(kCospi[20], bf0[2], kCospi[44], bf0[3], bit);
+    step[3] = d_half_btf(kCospi[44], bf0[2], -kCospi[20], bf0[3], bit);
+    step[4] = d_half_btf(kCospi[36], bf0[4], kCospi[28], bf0[5], bit);
+    step[5] = d_half_btf(kCospi[28], bf0[4], -kCospi[36], bf0[5], bit);
+    step[6] = d_half_btf(kCospi[52], bf0[6], kCospi[12], bf0[7], bit);
+    step[7] = d_half_btf(kCospi[12], bf0[6], -kCospi[52], bf0[7], bit);
+
+    output[0] = step[1];
+    output[1] = step[6];
+    output[2] = step[3];
+    output[3] = step[4];
+    output[4] = step[5];
+    output[5] = step[2];
+    output[6] = step[7];
+    output[7] = step[0];
+}
+
+// svt_av1_transform_two_d_core_c at TX_8X8: shift {2,-1,0}, cos_bit 13/13;
+// rows then columns, rounding >>1 after the row pass (shift[1] = -1)
+extern "C" __global__ void fwd_txfm_2d_8x8(const short* input, const int* stride, const int* txType,
+                                           int* output) {
+    __shared__ int sbuf[64];
+    const int t = threadIdx.x;
+    int tmp[8];
+    int o[8];
+    for (int r = 0; r < 8; ++r) {
+        tmp[r] = input[r * (*stride) + t] * 4;
+    }
+    if (*txType == 0) {
+        d_fdct8(tmp, o);
+    } else {
+        d_fadst8(tmp, o);
+    }
+    for (int r = 0; r < 8; ++r) {
+        sbuf[r * 8 + t] = d_round_shift(o[r], 1);
+    }
+    __syncthreads();
+    for (int c = 0; c < 8; ++c) {
+        tmp[c] = sbuf[t * 8 + c];
+    }
+    if (*txType == 0) {
+        d_fdct8(tmp, o);
+    } else {
+        d_fadst8(tmp, o);
+    }
+    for (int c = 0; c < 8; ++c) {
+        output[t * 8 + c] = o[c];
+    }
+}
+)CUDB1";
 }
 
 std::string invTxfmCuSource() {
@@ -896,7 +1067,164 @@ extern "C" __global__ void inv_txfm_2d_add_4x4(const int* coeffs, const int* txT
         dst[r * (*stride) + t] = (unsigned char)v;
     }
 }
-)CUDA";
+)CUDA" R"CUDB1(
+__device__ void d_idct8i(const int* input, int* output) {
+    const int bit = 12;
+    int bf0[8];
+    int step[8];
+
+    bf0[0] = input[0];
+    bf0[1] = input[4];
+    bf0[2] = input[2];
+    bf0[3] = input[6];
+    bf0[4] = input[1];
+    bf0[5] = input[5];
+    bf0[6] = input[3];
+    bf0[7] = input[7];
+
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = bf0[2];
+    step[3] = bf0[3];
+    step[4] = d_hb(kC12[56], bf0[4], -kC12[8], bf0[7], bit);
+    step[5] = d_hb(kC12[24], bf0[5], -kC12[40], bf0[6], bit);
+    step[6] = d_hb(kC12[40], bf0[5], kC12[24], bf0[6], bit);
+    step[7] = d_hb(kC12[8], bf0[4], kC12[56], bf0[7], bit);
+
+    bf0[0] = d_hb(kC12[32], step[0], kC12[32], step[1], bit);
+    bf0[1] = d_hb(kC12[32], step[0], -kC12[32], step[1], bit);
+    bf0[2] = d_hb(kC12[48], step[2], -kC12[16], step[3], bit);
+    bf0[3] = d_hb(kC12[16], step[2], kC12[48], step[3], bit);
+    bf0[4] = d_cv(step[4] + step[5], 16);
+    bf0[5] = d_cv(step[4] - step[5], 16);
+    bf0[6] = d_cv(-step[6] + step[7], 16);
+    bf0[7] = d_cv(step[6] + step[7], 16);
+
+    step[0] = d_cv(bf0[0] + bf0[3], 16);
+    step[1] = d_cv(bf0[1] + bf0[2], 16);
+    step[2] = d_cv(bf0[1] - bf0[2], 16);
+    step[3] = d_cv(bf0[0] - bf0[3], 16);
+    step[4] = bf0[4];
+    step[5] = d_hb(-kC12[32], bf0[5], kC12[32], bf0[6], bit);
+    step[6] = d_hb(kC12[32], bf0[5], kC12[32], bf0[6], bit);
+    step[7] = bf0[7];
+
+    output[0] = d_cv(step[0] + step[7], 16);
+    output[1] = d_cv(step[1] + step[6], 16);
+    output[2] = d_cv(step[2] + step[5], 16);
+    output[3] = d_cv(step[3] + step[4], 16);
+    output[4] = d_cv(step[3] - step[4], 16);
+    output[5] = d_cv(step[2] - step[5], 16);
+    output[6] = d_cv(step[1] - step[6], 16);
+    output[7] = d_cv(step[0] - step[7], 16);
+}
+
+__device__ void d_iadst8i(const int* input, int* output) {
+    const int bit = 12;
+    int bf0[8];
+    int step[8];
+
+    bf0[0] = input[7];
+    bf0[1] = input[0];
+    bf0[2] = input[5];
+    bf0[3] = input[2];
+    bf0[4] = input[3];
+    bf0[5] = input[4];
+    bf0[6] = input[1];
+    bf0[7] = input[6];
+
+    step[0] = d_hb(kC12[4], bf0[0], kC12[60], bf0[1], bit);
+    step[1] = d_hb(kC12[60], bf0[0], -kC12[4], bf0[1], bit);
+    step[2] = d_hb(kC12[20], bf0[2], kC12[44], bf0[3], bit);
+    step[3] = d_hb(kC12[44], bf0[2], -kC12[20], bf0[3], bit);
+    step[4] = d_hb(kC12[36], bf0[4], kC12[28], bf0[5], bit);
+    step[5] = d_hb(kC12[28], bf0[4], -kC12[36], bf0[5], bit);
+    step[6] = d_hb(kC12[52], bf0[6], kC12[12], bf0[7], bit);
+    step[7] = d_hb(kC12[12], bf0[6], -kC12[52], bf0[7], bit);
+
+    bf0[0] = d_cv(step[0] + step[4], 16);
+    bf0[1] = d_cv(step[1] + step[5], 16);
+    bf0[2] = d_cv(step[2] + step[6], 16);
+    bf0[3] = d_cv(step[3] + step[7], 16);
+    bf0[4] = d_cv(step[0] - step[4], 16);
+    bf0[5] = d_cv(step[1] - step[5], 16);
+    bf0[6] = d_cv(step[2] - step[6], 16);
+    bf0[7] = d_cv(step[3] - step[7], 16);
+
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = bf0[2];
+    step[3] = bf0[3];
+    step[4] = d_hb(kC12[16], bf0[4], kC12[48], bf0[5], bit);
+    step[5] = d_hb(kC12[48], bf0[4], -kC12[16], bf0[5], bit);
+    step[6] = d_hb(-kC12[48], bf0[6], kC12[16], bf0[7], bit);
+    step[7] = d_hb(kC12[16], bf0[6], kC12[48], bf0[7], bit);
+
+    bf0[0] = d_cv(step[0] + step[2], 16);
+    bf0[1] = d_cv(step[1] + step[3], 16);
+    bf0[2] = d_cv(step[0] - step[2], 16);
+    bf0[3] = d_cv(step[1] - step[3], 16);
+    bf0[4] = d_cv(step[4] + step[6], 16);
+    bf0[5] = d_cv(step[5] + step[7], 16);
+    bf0[6] = d_cv(step[4] - step[6], 16);
+    bf0[7] = d_cv(step[5] - step[7], 16);
+
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = d_hb(kC12[32], bf0[2], kC12[32], bf0[3], bit);
+    step[3] = d_hb(kC12[32], bf0[2], -kC12[32], bf0[3], bit);
+    step[4] = bf0[4];
+    step[5] = bf0[5];
+    step[6] = d_hb(kC12[32], bf0[6], kC12[32], bf0[7], bit);
+    step[7] = d_hb(kC12[32], bf0[6], -kC12[32], bf0[7], bit);
+
+    output[0] = step[0];
+    output[1] = -step[4];
+    output[2] = step[6];
+    output[3] = -step[2];
+    output[4] = step[3];
+    output[5] = -step[7];
+    output[6] = step[5];
+    output[7] = -step[1];
+}
+
+// svt_av1_inv_txfm2d_add_c at TX_8X8: rows then columns, inv_shift_8x8 =
+// {-1,-4} -> rounding >>1 after the row 1D and >>4 at the final add; clamp
+// bit 16 at both 1D inputs
+extern "C" __global__ void inv_txfm_2d_add_8x8(const int* coeffs, const int* txType,
+                                               unsigned char* dst, const int* stride) {
+    __shared__ int sbuf[64];
+    const int t = threadIdx.x;
+    int tmp[8];
+    int o[8];
+    for (int c = 0; c < 8; ++c) {
+        tmp[c] = d_cv(coeffs[t * 8 + c], 16);
+    }
+    if (*txType == 0) {
+        d_idct8i(tmp, o);
+    } else {
+        d_iadst8i(tmp, o);
+    }
+    for (int c = 0; c < 8; ++c) {
+        sbuf[t * 8 + c] = d_rs(o[c], 1);
+    }
+    __syncthreads();
+    for (int r = 0; r < 8; ++r) {
+        tmp[r] = d_cv(sbuf[r * 8 + t], 16);
+    }
+    if (*txType == 0) {
+        d_idct8i(tmp, o);
+    } else {
+        d_iadst8i(tmp, o);
+    }
+    for (int r = 0; r < 8; ++r) {
+        int v = (int)dst[r * (*stride) + t] + d_rs(o[r], 4);
+        if (v < 0) v = 0;
+        else if (v > 255) v = 255;
+        dst[r * (*stride) + t] = (unsigned char)v;
+    }
+}
+)CUDB1";
 }
 
 }  // namespace transforms

@@ -1536,3 +1536,21 @@ TEST_CASE("gpu block predictor dc fills 128 with no edges") {
 
 
 
+
+TEST_CASE("gpu block predictor dr corner fill derives above-left from left edge when top missing") {
+    // B8 finding: enc_intra_prediction.c fill at lines 572-582 - with nTopPx==0
+    // and nLeftPx>0, aboveRow[-1] = leftRef[0], NOT the raw aboveLeft arg.
+    // D113 z2 reads leftCol[-1] for column 0, so a raw 0 corner corrupts it.
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const unsigned char left[4] = {14, 3, 8, 13};
+    unsigned char ref[16] = {0};
+    intra::buildIntraPredictors(ref, 4, intra::D113_PRED, 0, 4, 4, 0, nullptr, 0, 0, left, 4, 0);
+
+    bool ok = runBlockPredict(ctx, intra::D113_PRED, 0, nullptr, 0, 0, left, 4, 0, 0, ref);
+    CHECK(ok);
+}

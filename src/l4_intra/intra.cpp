@@ -1342,7 +1342,18 @@ extern "C" __global__ void predict_block_4x4(
             }
         }
         if (needAboveLeft) {
-            aboveRow[-1] = (unsigned char)(*aboveLeft);
+            // enc_intra_prediction.c availability fill: the raw aboveLeft is
+            // used only when both edges exist; otherwise derive from the
+            // available edge (or 128)
+            if (*nTopPx > 0 && *nLeftPx > 0) {
+                aboveRow[-1] = (unsigned char)(*aboveLeft);
+            } else if (*nTopPx > 0) {
+                aboveRow[-1] = aboveRef[0];
+            } else if (*nLeftPx > 0) {
+                aboveRow[-1] = leftRef[0];
+            } else {
+                aboveRow[-1] = 128;
+            }
             leftCol[-1] = aboveRow[-1];
         }
         if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
@@ -1824,7 +1835,18 @@ extern "C" __global__ void predict_block_8x8(
             }
         }
         if (needAboveLeft) {
-            aboveRow[-1] = (unsigned char)(*aboveLeft);
+            // enc_intra_prediction.c availability fill: the raw aboveLeft is
+            // used only when both edges exist; otherwise derive from the
+            // available edge (or 128)
+            if (*nTopPx > 0 && *nLeftPx > 0) {
+                aboveRow[-1] = (unsigned char)(*aboveLeft);
+            } else if (*nTopPx > 0) {
+                aboveRow[-1] = aboveRef[0];
+            } else if (*nLeftPx > 0) {
+                aboveRow[-1] = leftRef[0];
+            } else {
+                aboveRow[-1] = 128;
+            }
             leftCol[-1] = aboveRow[-1];
         }
         if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
