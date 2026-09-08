@@ -227,9 +227,11 @@ TEST_CASE("gpu pipeline matches host pipeline bit-exactly") {
 
 TEST_CASE("round trip v+dct recon matches svt and recovers the source") {
     // golden: harness composition build_intra_predictors (V_PRED) -> subtract
-    // -> fwd 2D -> inv 2D add onto the same predictor. For this block the
-    // fixed-point round trip is exactly lossless: recon == source. The 1:1
-    // claim is vs SVT's recon, not vs the original pixels.
+    // -> fwd 2D -> inv 2D add onto the same predictor. This is the NO-QUANT
+    // path: for 4x4 the fixed-point fwd+inv round trip is exactly lossless
+    // (shifts {2,0,0}/{0,-4} are complementary), so recon == source. Real
+    // loss comes from quantization (see the Q2 frame test) — the lossy-by-
+    // design caveat is demonstrated there, not here.
     const std::uint8_t srcData[16] = {21, 3, 5, 9, 9, 11, 3, 7, 7, 13, 5, 1, 15, 4, 25, 2};
     const std::uint8_t above[4] = {10, 40, 30, 20};
     const std::int32_t goldenCoeffs[16] = {-520, 140, 324, 202, -17, 18, 102, -68,
@@ -268,10 +270,11 @@ TEST_CASE("round trip adst recon matches svt composition") {
     // golden: harness composition build_intra_predictors (V_PRED, above
     // {0,0,0,0} -> pred zero) -> subtract (src 250 constant) -> fwd 2D
     // (ADST_ADST) -> inv 2D add onto the same predictor -> recon {250 * 16}.
-    // Note: SVT's 4x4 fixed-point fwd+inv is exact for in-range 8-bit blocks,
-    // so recon equals the source here; fixed-point round trips are NOT
-    // guaranteed lossless in general (larger transforms / higher bit depth),
-    // which is why the 1:1 claim is scoped to SVT's recon, not the source.
+    // NO-QUANT path: the 4x4 fixed-point fwd+inv is exact for in-range 8-bit
+    // blocks (complementary shifts), so recon equals the source. Real loss
+    // enters through quantization (Q2 frame test) or the 8x8 shift design
+    // (scale-non-complementary by design); the 1:1 claim is scoped to SVT's
+    // recon semantics, not to source recovery in general.
     const std::uint8_t srcData[16] = {250, 250, 250, 250, 250, 250, 250, 250,
                                       250, 250, 250, 250, 250, 250, 250, 250};
     const std::uint8_t above[4] = {0, 0, 0, 0};
@@ -300,10 +303,12 @@ TEST_CASE("round trip adst recon matches svt composition") {
 TEST_CASE("frame round trip 8x8 recon matches svt composition") {
     // golden: harness composition frame_v_dct_8x8 (same raster loop over
     // verbatim SVT primitives: build_intra_predictors V-path incl. early-out
-    // -> DCT fwd -> DCT inv-add onto the same predictor). The 4x4 fixed-point
-    // round trip is exact for these 8-bit blocks, so recon == source; the
-    // per-block coeffs discriminate the availability paths (corner block 0,0
-    // fills above=127 -> DC -3784; first-row/left-column use left[0])
+    // -> DCT fwd -> DCT inv-add onto the same predictor). NO-QUANT path: the
+    // 4x4 fixed-point round trip is exact for these 8-bit blocks, so recon ==
+    // source (the lossy counterpart with the FP quantizer live is the Q2
+    // frame test); the per-block coeffs discriminate the availability paths
+    // (corner block 0,0 fills above=127 -> DC -3784; first-row/left-column
+    // use left[0])
     const std::uint8_t srcData[64] = {21, 3,  5,  9,  19, 2, 8,  14, 9,  11, 3, 7,  5,  23, 1, 17,
                                       7,  13, 5,  1,  25, 4, 6,  18, 15, 4,  25, 2,  12, 9,  30, 3,
                                       18, 5,  7,  13, 14, 2, 20, 8,  6,  24, 3,  9,  11, 17, 5, 19,
@@ -482,6 +487,56 @@ TEST_CASE("frame auto 8x8 matches the generator policy golden bit-exactly") {
     // TX_4X4. The mode map is the discriminator: decisions depend on
     // reconstructed edges, so any recon error would corrupt subsequent mode
     // choices and the map would differ.
+}
+
+TEST_CASE("frame auto 4x4 with quantization matches the Q2 generator golden") {
+    // golden: golden_gen q2f_modes/q2f_recon/q2f_coeffs at qindex 100 —
+    // D3 policy loop with the FP quantizer wired in (qcoeff = coded coeffs,
+    // dqcoeff feeds the inverse). recon now carries REAL quantization loss
+    // (compare with the lossless d3_recon / lossless round-trip tests).
+    const std::uint8_t srcData[64] = {21, 3,  5,  9,  19, 2, 8,  14, 9,  11, 3, 7,  5,  23, 1, 17,
+                                      7,  13, 5,  1,  25, 4, 6,  18, 15, 4,  25, 2,  12, 9,  30, 3,
+                                      18, 5,  7,  13, 14, 2, 20, 8,  6,  24, 3,  9,  11, 17, 5, 19,
+                                      22, 1,  8,  15, 4,  29, 7, 13, 10, 16, 6, 12, 3,  25, 11, 9};
+    const std::uint8_t goldenModes[4] = {1, 1, 0, 0};
+    const std::uint8_t goldenRecon[64] = {
+        16, 7, 0, 9,  19, 4,  7, 18, 11, 15, 0,  8,  11, 21, 0,  22,
+        10, 14, 6, 2,  23, 0,  6, 20, 12, 4,  21, 0,  9,  10, 26, 2,
+        18, 4, 9, 16, 15, 4,  16, 10, 8,  19, 7,  13, 7,  19, 6,  12,
+        23, 0, 10, 18, 1, 28, 5, 11, 13, 13, 8,  15, 1,  25, 13, 6};
+    const std::int32_t goldenCoeffs[64] = {
+        -41, 1, 0, 0, 0, 0, 1, -1, 0, 0, 0, 1, 0, 0, 0, 0,
+        1, 0, 1, 0, 0, 0, 1, -1, 0, 0, -1, 1, 0, 0, 1, 1,
+        1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
+        -1, 0, -1, -1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0};
+
+    pixels::Plane plane(8, 8, 4);
+    pixels::Plane recon(8, 8, 4);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x) plane.at(x, y) = srcData[y * 8 + x];
+
+    std::int32_t coeffs[64] = {0};
+    std::uint8_t modes[4] = {0};
+    pipeline::encodeFrameAuto4x4Q(plane, recon, coeffs, modes, 100,
+                                  transforms::TxType::DCT_DCT);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+
+    bool reconOk = true;
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            if (recon.at(x, y) != goldenRecon[y * 8 + x]) reconOk = false;
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 64; ++i) {
+        if (coeffs[i] != goldenCoeffs[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
 }
 
 TEST_CASE("gpu frame round trip matches host encodeFrameRecon4x4") {

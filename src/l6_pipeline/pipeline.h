@@ -52,6 +52,12 @@ void encodeFrameRecon8x8(const pixels::Plane& src, pixels::Plane& recon, std::in
 void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                         std::uint8_t* modes, transforms::TxType txType);
 
+// Q2: same D3 loop with the FP quantizer wired at a fixed qindex
+// (quantize_fp_helper_c at log_scale 0): qcoeff = coded coeffs, dqcoeff
+// feeds the inverse, so recon carries real quantization loss.
+void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+
 // Sum of squared sample differences over the full frame (integer, exact).
 std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 

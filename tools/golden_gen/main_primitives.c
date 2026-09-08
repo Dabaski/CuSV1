@@ -417,5 +417,25 @@ int main(void) {
             printf(" | %u\n", eob);
         }
     }
+    // ---- Q2: quantized 4x4 frame-policy composition (fixed qindex) ----
+    {
+        const uint8_t src[64] = {21, 3,  5,  9,  19, 2, 8,  14, 9,  11, 3, 7,  5,  23, 1, 17,
+                                 7,  13, 5,  1,  25, 4, 6,  18, 15, 4,  25, 2,  12, 9,  30, 3,
+                                 18, 5,  7,  13, 14, 2, 20, 8,  6,  24, 3,  9,  11, 17, 5, 19,
+                                 22, 1,  8,  15, 4,  29, 7, 13, 10, 16, 6, 12, 3,  25, 11, 9};
+        uint8_t recon[64];
+        int32_t coeffs[64];
+        int modes[4] = {0, 0, 0, 0};
+        svtd_frame_auto_4x4_q(src, recon, coeffs, modes, 100);
+        printf("q2f_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
+        printf("\n");
+        printf("q2f_recon:");
+        for (int i = 0; i < 64; ++i) printf(" %d", recon[i]);
+        printf("\n");
+        printf("q2f_coeffs:");
+        for (int i = 0; i < 64; ++i) printf(" %d", coeffs[i]);
+        printf("\n");
+    }
     return 0;
 }

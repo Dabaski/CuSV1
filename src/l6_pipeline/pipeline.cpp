@@ -373,4 +373,91 @@ void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int
     }
 }
 
+// Q2: D3 loop with the FP quantizer wired at a fixed qindex
+// (quantize_fp_helper_c at log_scale 0). qcoeff = coded coeffs; dqcoeff
+// feeds the inverse, so recon carries real quantization loss.
+void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType) {
+    const int gridW = src.width() / 4;
+    const int gridH = src.height() / 4;
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(qindex, qt);
+    std::int16_t scan[16];
+    transforms::defaultScan4x4(scan);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 4;
+            const int py = by * 4;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const bool hasAboveLeft = hasTop && hasLeft;
+            const int nTopPx = hasTop ? 4 : 0;
+            const int nLeftPx = hasLeft ? 4 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 4 : 0;
+            const int nBottomLeftPx = 0;
+
+            std::uint8_t above[4] = {0};
+            std::uint8_t left[4] = {0};
+            if (hasTop) {
+                for (int i = 0; i < 4; ++i) {
+                    above[i] = recon.at(px + i, py - 1);
+                }
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 4; ++i) {
+                    left[i] = recon.at(px - 1, py + i);
+                }
+            }
+            const std::uint8_t aboveLeft =
+                hasAboveLeft ? recon.at(px - 1, py - 1) : static_cast<std::uint8_t>(0);
+
+            intra::NeighborContext nctx;
+            nctx.aboveMode = hasTop
+                                 ? static_cast<intra::PredictionMode>(modes[(by - 1) * gridW + bx])
+                                 : intra::DC_PRED;
+            nctx.leftMode = hasLeft
+                                ? static_cast<intra::PredictionMode>(modes[by * gridW + bx - 1])
+                                : intra::DC_PRED;
+
+            std::uint8_t srcBlk[16] = {0};
+            for (int y = 0; y < 4; ++y) {
+                for (int x = 0; x < 4; ++x) {
+                    srcBlk[y * 4 + x] = src.at(px + x, py + y);
+                }
+            }
+
+            const ModeDecision d = decideBlockMode4x4(srcBlk, above, nTopPx, nTopRightPx, left,
+                                                      nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+            modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
+
+            // predict -> residual -> fwd -> quantize fp -> inverse on dqcoeff
+            std::uint8_t pred[16] = {0};
+            intra::buildIntraPredictors(pred, 4, d.mode, 0, 4, 4, aboveLeft, above, nTopPx,
+                                        nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
+            std::int16_t residual[16] = {0};
+            for (int y = 0; y < 4; ++y) {
+                for (int x = 0; x < 4; ++x) {
+                    residual[y * 4 + x] =
+                        static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 4 + x]);
+                }
+            }
+            std::int32_t cb[16] = {0};
+            transforms::fwdTxfm2d4x4(residual, cb, 4, txType);
+            std::int32_t qc[16] = {0};
+            std::int32_t dq[16] = {0};
+            std::uint16_t eob = 0;
+            transforms::quantizeFp4x4(cb, qt, scan, qc, dq, &eob);
+            for (int i = 0; i < 16; ++i) {
+                coeffs[(by * gridW + bx) * 16 + i] = qc[i];
+            }
+            std::uint8_t blk[16] = {0};
+            for (int i = 0; i < 16; ++i) blk[i] = pred[i];
+            transforms::invTxfm2dAdd4x4(dq, blk, 4, txType);
+            for (int i = 0; i < 16; ++i) {
+                recon.at(px + (i & 3), py + (i >> 2)) = blk[i];
+            }
+        }
+    }
+}
+
 }  // namespace pipeline

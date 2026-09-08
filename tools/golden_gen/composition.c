@@ -410,6 +410,72 @@ static void svtd_frame_auto_8x8_blocks(const uint8_t* src, uint8_t* recon, int32
     }
 }
 
+// ---- Q2 frame composition: D2 policy + fixed-qindex quantization -----------
+// Same loop as svtd_frame_auto_8x8 (4x4 blocks), with the FP quantizer wired
+// in: qcoeff = coded coeffs, dqcoeff feeds the inverse. Fixed qindex per run
+// (no rate control).
+static void svtd_frame_auto_4x4_q(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes,
+                                  int qindex) {
+    const int fstride = 8;
+    const int gridW = 2, gridH = 2;
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(qindex, &t);
+    int16_t scan[16];
+    svtd_default_scan_4x4(scan);
+    memset(recon, 0, 64);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 4, py = by * 4;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? 4 : 0;
+            const int nLeft = hasLeft ? 4 : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? 4 : 0;
+            uint8_t above[9] = {0};
+            uint8_t left[9] = {0};
+            uint8_t al = 0;
+            if (hasTop) for (int i = 0; i < 4; ++i) above[i] = recon[(py - 1) * fstride + px + i];
+            if (hasLeft) for (int i = 0; i < 4; ++i) left[i] = recon[(py + i) * fstride + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
+
+            const int aboveMode = hasTop ? modes[(by - 1) * gridW + bx] : DC_PRED;
+            const int leftMode = hasLeft ? modes[by * gridW + bx - 1] : DC_PRED;
+            svtd_filt_type = ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED ||
+                               aboveMode == SMOOTH_H_PRED) ||
+                              (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED ||
+                               leftMode == SMOOTH_H_PRED))
+                                 ? 1
+                                 : 0;
+
+            const uint8_t srcblk[16] = {
+                src[(py + 0) * fstride + px + 0], src[(py + 0) * fstride + px + 1],
+                src[(py + 0) * fstride + px + 2], src[(py + 0) * fstride + px + 3],
+                src[(py + 1) * fstride + px + 0], src[(py + 1) * fstride + px + 1],
+                src[(py + 1) * fstride + px + 2], src[(py + 1) * fstride + px + 3],
+                src[(py + 2) * fstride + px + 0], src[(py + 2) * fstride + px + 1],
+                src[(py + 2) * fstride + px + 2], src[(py + 2) * fstride + px + 3],
+                src[(py + 3) * fstride + px + 0], src[(py + 3) * fstride + px + 1],
+                src[(py + 3) * fstride + px + 2], src[(py + 3) * fstride + px + 3]};
+
+            uint32_t best_sad = 0;
+            const int mode = svtd_decide(srcblk, above, nTop, nTr, left, nLeft, 0, al, &best_sad);
+            modes[by * gridW + bx] = mode;
+
+            uint8_t pred[16];
+            svtd_call_builder(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
+            int16_t res[16];
+            for (int i = 0; i < 16; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+            int32_t cb[16];
+            svtd_fwd2d4x4(res, 4, cb, svt_av1_fdct4_new);
+            TranLow qc[16], dq[16];
+            uint16_t eob = 0;
+            svtd_quantize_fp_4x4(cb, &t, scan, qc, dq, &eob);
+            for (int i = 0; i < 16; ++i) coeffs[(by * gridW + bx) * 16 + i] = qc[i];
+            svtd_inv2dadd4x4(dq, pred, 4, svt_av1_idct4_new);
+            for (int i = 0; i < 16; ++i) recon[(py + (i >> 2)) * fstride + px + (i & 3)] = pred[i];
+        }
+    }
+}
+
 // ---- gen_inv_stage_range 8x8 gate line -------------------------------------
 // Mirrors svt_av1_gen_inv_stage_range (inv_transforms.c:44) for TX_8X8 at
 // bd=8, DCT_DCT and ADST_ADST, to settle the stage_range shim. Prints the
