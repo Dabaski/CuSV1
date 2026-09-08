@@ -78,8 +78,8 @@ TEST_CASE("gpu sad4x4 matches host reference") {
     dSrc.uploadFrom(srcB, sizeof(srcB));
     dRef.uploadFrom(refB, sizeof(refB));
 
-    int sa = (int)srcStride;
-    int sb = (int)refStride;
+    unsigned int sa = srcStride;
+    unsigned int sb = refStride;
     gpurt::DeviceBuffer dSa(sizeof(sa));
     gpurt::DeviceBuffer dSb(sizeof(sb));
     dSa.uploadFrom(&sa, sizeof(sa));
@@ -93,9 +93,9 @@ TEST_CASE("gpu sad4x4 matches host reference") {
     void* args[] = {&pSrc, &pSa, &pRef, &pSb, &pOut};
     k.launch(1, 1, 1, 1, args);
 
-    int got = 0;
+    unsigned int got = 0;
     dOut.downloadTo(&got, sizeof(got));
-    CHECK((std::uint32_t)got == ref);
+    CHECK(got == ref);
 }
 
 TEST_CASE("gpu sad8x8 matches host reference") {
@@ -125,8 +125,8 @@ TEST_CASE("gpu sad8x8 matches host reference") {
     dA.uploadFrom(a, sizeof(a));
     dB.uploadFrom(b, sizeof(b));
 
-    int sa = (int)aStride;
-    int sb = (int)bStride;
+    unsigned int sa = aStride;
+    unsigned int sb = bStride;
     gpurt::DeviceBuffer dSa(sizeof(sa));
     gpurt::DeviceBuffer dSb(sizeof(sb));
     dSa.uploadFrom(&sa, sizeof(sa));
@@ -140,7 +140,7 @@ TEST_CASE("gpu sad8x8 matches host reference") {
     void* args[] = {&pA, &pSa, &pB, &pSb, &pOut};
     k.launch(1, 1, 1, 1, args);
 
-    int got = 0;
+    unsigned int got = 0;
     dOut.downloadTo(&got, sizeof(got));
-    CHECK((std::uint32_t)got == ref);
+    CHECK(got == ref);
 }

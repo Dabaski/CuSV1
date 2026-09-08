@@ -20,16 +20,17 @@ std::uint32_t sad8x8(const std::uint8_t* src, std::uint32_t srcStride, const std
 
 std::string sad8x8CuSource() {
     return R"CUDA(
-extern "C" __global__ void sad8x8_kernel(const unsigned char* src, const int* srcStride,
-                                         const unsigned char* ref, const int* refStride, int* out) {
-    int sad = 0;
-    for (int r = 0; r < 8; ++r) {
-        for (int c = 0; c < 8; ++c) {
+extern "C" __global__ void sad8x8_kernel(const unsigned char* src, const unsigned int* srcStride,
+                                         const unsigned char* ref, const unsigned int* refStride,
+                                         unsigned int* out) {
+    unsigned int sad = 0;
+    for (unsigned int r = 0; r < 8; ++r) {
+        for (unsigned int c = 0; c < 8; ++c) {
             int d = (int)src[c] - (int)ref[c];
             if (d < 0) {
                 d = -d;
             }
-            sad += d;
+            sad += (unsigned int)d;
         }
         src += *srcStride;
         ref += *refStride;
@@ -58,16 +59,17 @@ std::uint32_t sad4x4(const std::uint8_t* src, std::uint32_t srcStride, const std
 
 std::string sad4x4CuSource() {
     return R"CUDA(
-extern "C" __global__ void sad4x4_kernel(const unsigned char* src, const int* srcStride,
-                                         const unsigned char* ref, const int* refStride, int* out) {
-    int sad = 0;
-    for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < 4; ++c) {
+extern "C" __global__ void sad4x4_kernel(const unsigned char* src, const unsigned int* srcStride,
+                                         const unsigned char* ref, const unsigned int* refStride,
+                                         unsigned int* out) {
+    unsigned int sad = 0;
+    for (unsigned int r = 0; r < 4; ++r) {
+        for (unsigned int c = 0; c < 4; ++c) {
             int d = (int)src[c] - (int)ref[c];
             if (d < 0) {
                 d = -d;
             }
-            sad += d;
+            sad += (unsigned int)d;
         }
         src += *srcStride;
         ref += *refStride;

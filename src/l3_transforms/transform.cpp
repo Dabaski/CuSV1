@@ -148,7 +148,7 @@ void iadst4(const std::int32_t input[4], std::int32_t output[4]) {
 
 // svt_av1_idct8_new (inv_transforms.c:136), cos_bit = 12 (INV_COS_BIT).
 // stage_range: {16,...} shim confirmed exact by gen_inv_range_8x8_dct gate
-// line (B1) — all 6 stages clamp at bit 16 for bd=8.
+// line (B1) ??? all 6 stages clamp at bit 16 for bd=8.
 void idct8(const std::int32_t input[8], std::int32_t output[8]) {
     const int8_t cosBit = 12;
     const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
@@ -207,9 +207,9 @@ void idct8(const std::int32_t input[8], std::int32_t output[8]) {
 }
 
 // svt_av1_iadst8_new (inv_transforms.c:822), cos_bit = 12 (INV_COS_BIT).
-// Unlike iadst4, iadst8 HAS clamp_value at stages 3 and 5 — mirrored exactly.
+// Unlike iadst4, iadst8 HAS clamp_value at stages 3 and 5 ??? mirrored exactly.
 // stage_range: {16,...} shim confirmed exact by gen_inv_range_8x8_adst gate
-// line (B1) — all 8 stages clamp at bit 16 for bd=8.
+// line (B1) ??? all 8 stages clamp at bit 16 for bd=8.
 void iadst8(const std::int32_t input[8], std::int32_t output[8]) {
     const int8_t cosBit = 12;
     const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
@@ -1225,6 +1225,210 @@ extern "C" __global__ void inv_txfm_2d_add_8x8(const int* coeffs, const int* txT
     }
 }
 )CUDB1";
+}
+
+// svt_aom_eb_av1 dc/ac QTX lookup tables (inv_transforms.c:3412 dc, :3357 ac),
+// verbatim, 8-bit rows. QINDEX_RANGE from definitions.h:1643 (MAXQ 255 -
+// MINQ 0 + 1).
+#define QINDEX_RANGE 256
+static const int16_t dc_qlookup_QTX[QINDEX_RANGE] = {
+    4,   8,   8,   9,   10,  11,  12,  12,  13,   14,   15,   16,   17,   18,   19,   19,   20,  21,  22,  23,
+    24,  25,  26,  26,  27,  28,  29,  30,  31,   32,   32,   33,   34,   35,   36,   37,   38,  38,  39,  40,
+    41,  42,  43,  43,  44,  45,  46,  47,  48,   48,   49,   50,   51,   52,   53,   53,   54,  55,  56,  57,
+    57,  58,  59,  60,  61,  62,  62,  63,  64,   65,   66,   66,   67,   68,   69,   70,   70,  71,  72,  73,
+    74,  74,  75,  76,  77,  78,  78,  79,  80,   81,   81,   82,   83,   84,   85,   85,   87,  88,  90,  92,
+    93,  95,  96,  98,  99,  101, 102, 104, 105,  107,  108,  110,  111,  113,  114,  116,  117, 118, 120, 121,
+    123, 125, 127, 129, 131, 134, 136, 138, 140,  142,  144,  146,  148,  150,  152,  154,  156, 158, 161, 164,
+    166, 169, 172, 174, 177, 180, 182, 185, 187,  190,  192,  195,  199,  202,  205,  208,  211, 214, 217, 220,
+    223, 226, 230, 233, 237, 240, 243, 247, 250,  253,  257,  261,  265,  269,  272,  276,  280, 284, 288, 292,
+    296, 300, 304, 309, 313, 317, 322, 326, 330,  335,  340,  344,  349,  354,  359,  364,  369, 374, 379, 384,
+    389, 395, 400, 406, 411, 417, 423, 429, 435,  441,  447,  454,  461,  467,  475,  482,  489, 497, 505, 513,
+    522, 530, 539, 549, 559, 569, 579, 590, 602,  614,  626,  640,  654,  668,  684,  700,  717, 736, 755, 775,
+    796, 819, 843, 869, 896, 925, 955, 988, 1022, 1058, 1098, 1139, 1184, 1232, 1282, 1336,
+};
+
+static const int16_t ac_qlookup_QTX[QINDEX_RANGE] = {
+    4,    8,    9,    10,   11,   12,   13,   14,   15,   16,   17,   18,   19,   20,   21,   22,   23,   24,   25,
+    26,   27,   28,   29,   30,   31,   32,   33,   34,   35,   36,   37,   38,   39,   40,   41,   42,   43,   44,
+    45,   46,   47,   48,   49,   50,   51,   52,   53,   54,   55,   56,   57,   58,   59,   60,   61,   62,   63,
+    64,   65,   66,   67,   68,   69,   70,   71,   72,   73,   74,   75,   76,   77,   78,   79,   80,   81,   82,
+    83,   84,   85,   86,   87,   88,   89,   90,   91,   92,   93,   94,   95,   96,   97,   98,   99,   100,  101,
+    102,  104,  106,  108,  110,  112,  114,  116,  118,  120,  122,  124,  126,  128,  130,  132,  134,  136,  138,
+    140,  142,  144,  146,  148,  150,  152,  155,  158,  161,  164,  167,  170,  173,  176,  179,  182,  185,  188,
+    191,  194,  197,  200,  203,  207,  211,  215,  219,  223,  227,  231,  235,  239,  243,  247,  251,  255,  260,
+    265,  270,  275,  280,  285,  290,  295,  300,  305,  311,  317,  323,  329,  335,  341,  347,  353,  359,  366,
+    373,  380,  387,  394,  401,  408,  416,  424,  432,  440,  448,  456,  465,  474,  483,  492,  501,  510,  520,
+    530,  540,  550,  560,  571,  582,  593,  604,  615,  627,  639,  651,  663,  676,  689,  702,  715,  729,  743,
+    757,  771,  786,  801,  816,  832,  848,  864,  881,  898,  915,  933,  951,  969,  988,  1007, 1026, 1046, 1066,
+    1087, 1108, 1129, 1151, 1173, 1196, 1219, 1243, 1267, 1292, 1317, 1343, 1369, 1396, 1423, 1451, 1479, 1508, 1537,
+    1567, 1597, 1628, 1660, 1692, 1725, 1759, 1793, 1828,
+};
+
+// svt_aom_invert_quant (inv_transforms.c:3516), verbatim
+void invertQuant(std::int16_t* quant, std::int16_t* shift, std::int32_t d) {
+    std::uint32_t t;
+    std::int32_t  l, m;
+    t = static_cast<std::uint32_t>(d);
+    for (l = 0; t > 1; l++) {
+        t >>= 1;
+    }
+    m      = 1 + (1 << (16 + l)) / d;
+    *quant = static_cast<std::int16_t>(m - (1 << 16));
+    *shift = static_cast<std::int16_t>(1 << (16 - l));
+}
+
+// svt_aom_dc_quant_qtx (inv_transforms.c:3467) at EB_EIGHT_BIT, delta 0
+std::int16_t dcQuantQtx(std::int32_t qindex) {
+    const std::int32_t qClamped = qindex < 0 ? 0 : (qindex > 255 ? 255 : qindex);
+    return dc_qlookup_QTX[qClamped];
+}
+
+// svt_aom_ac_quant_qtx (inv_transforms.c:3484) at EB_EIGHT_BIT, delta 0
+std::int16_t acQuantQtx(std::int32_t qindex) {
+    const std::int32_t qClamped = qindex < 0 ? 0 : (qindex > 255 ? 255 : qindex);
+    return ac_qlookup_QTX[qClamped];
+}
+
+// svt_aom_get_qzbin_factor (inv_transforms.c:3501) at EB_EIGHT_BIT
+std::int32_t qzbinFactor(std::int32_t q) {
+    const std::int32_t quant = dcQuantQtx(q);
+    return q == 0 ? 64 : (quant < 148 ? 84 : 80);
+}
+
+// luma rows of svt_av1_build_quantizer (md_config_process.c:106-135) at
+// sharpness == 0
+void buildQuantTables(std::int32_t qindex, QuantTables& tables) {
+    const std::int32_t qzbinFactorVal     = qzbinFactor(qindex);
+    const std::int32_t qroundingFactor = qindex == 0 ? 64 : 48;
+    for (int i = 0; i < 2; ++i) {
+        const std::int32_t quantQtx =
+            i == 0 ? dcQuantQtx(qindex) : acQuantQtx(qindex);
+        invertQuant(&tables.quant[i], &tables.quantShift[i], quantQtx);
+        tables.quantFp[i]  = static_cast<std::int16_t>((1 << 16) / quantQtx);
+        tables.roundFp[i]  = static_cast<std::int16_t>((64 * quantQtx) >> 7);
+        tables.zbin[i]     = static_cast<std::int16_t>(roundShift(qzbinFactorVal * quantQtx, 7));
+        tables.round[i]    = static_cast<std::int16_t>((qroundingFactor * quantQtx) >> 7);
+        tables.dequant[i]  = static_cast<std::int16_t>(quantQtx);
+    }
+}
+
+// default (up-right diagonal) scan, svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=4: square, odd diagonal r-increasing,
+// even r-decreasing
+void defaultScan4x4(std::int16_t scan[16]) {
+    const int W = 4, H = 4;
+    int idx = 0;
+    for (int d = 0; d < W + H - 1; ++d) {
+        const int rlo = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
+        const int rhi = d < (H - 1) ? d : (H - 1);
+        const int incr = (H > W) ? 1 : (W > H) ? 0 : (d & 1);
+        if (incr) {
+            for (int r = rlo; r <= rhi; ++r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        } else {
+            for (int r = rhi; r >= rlo; --r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        }
+    }
+}
+
+// quantize_fp_helper_c (full_loop.c:222) at log_scale 0, qm/iqm NULL branch
+void quantizeFp4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    const int nCoeffs = 16;
+    int eobVal = -1;
+    const std::int32_t rounding[2] = {tables.roundFp[0], tables.roundFp[1]};
+    for (int i = 0; i < nCoeffs; ++i) {
+        qcoeff[i] = 0;
+        dqcoeff[i] = 0;
+    }
+    for (int i = 0; i < nCoeffs; ++i) {
+        const int rc = scan[i];
+        const std::int32_t thresh = tables.dequant[rc != 0];
+        const std::int32_t coeffVal = coeff[rc];
+        const std::int32_t coeffSign = coeffVal < 0 ? -1 : 0;
+        std::int32_t absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+        std::int32_t tmp32 = 0;
+        if ((absCoeff << (1 + 0)) >= thresh) {
+            std::int64_t clamped = absCoeff + rounding[rc != 0];
+            if (clamped < -32768) clamped = -32768;
+            if (clamped > 32767) clamped = 32767;
+            absCoeff = static_cast<std::int32_t>(clamped);
+            tmp32 = static_cast<std::int32_t>((absCoeff * tables.quantFp[rc != 0]) >> (16 - 0));
+            if (tmp32) {
+                qcoeff[rc] = (tmp32 ^ coeffSign) - coeffSign;
+                const std::int32_t absDqcoeff =
+                    static_cast<std::int32_t>((static_cast<std::int64_t>(tmp32) *
+                                               tables.dequant[rc != 0]) >>
+                                              0);
+                dqcoeff[rc] = (absDqcoeff ^ coeffSign) - coeffSign;
+            }
+        }
+        if (tmp32) {
+            eobVal = i;
+        }
+    }
+    *eob = static_cast<std::uint16_t>(eobVal + 1);
+}
+
+// svt_aom_quantize_b_c (full_loop.c:31) at log_scale 0, qm/iqm NULL branch
+// (wt = 1 << AOM_QM_BITS = 1 << 5, inv_transforms.h:27)
+void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                  std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    const int nCoeffs = 16;
+    const std::int32_t zbins[2] = {tables.zbin[0], tables.zbin[1]};
+    const std::int32_t nzbins[2] = {zbins[0] * -1, zbins[1] * -1};
+    int nonZeroCount = nCoeffs;
+    int eobVal = -1;
+    for (int i = 0; i < nCoeffs; ++i) {
+        qcoeff[i] = 0;
+        dqcoeff[i] = 0;
+    }
+
+    // Pre-scan pass
+    for (int i = nCoeffs - 1; i >= 0; i--) {
+        const int rc = scan[i];
+        const std::int32_t wt = (1 << 5);
+        const std::int32_t coeffVal = coeff[rc] * wt;
+        if (coeffVal < (zbins[rc != 0] * (1 << 5)) && coeffVal > (nzbins[rc != 0] * (1 << 5))) {
+            nonZeroCount--;
+        } else {
+            break;
+        }
+    }
+
+    // Quantization pass: All coefficients with index >= zero_flag are
+    // skippable. Note: zero_flag can be zero.
+    for (int i = 0; i < nonZeroCount; i++) {
+        const int rc = scan[i];
+        const std::int32_t coeffVal = coeff[rc];
+        const std::int32_t coeffSign = coeffVal < 0 ? -1 : 0;
+        const std::int32_t absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+
+        const std::int32_t wt = (1 << 5);
+        if (absCoeff * wt >= (zbins[rc != 0] << 5)) {
+            std::int64_t tmp = absCoeff + roundShift(tables.round[rc != 0], 0);
+            if (tmp < -32768) tmp = -32768;
+            if (tmp > 32767) tmp = 32767;
+            tmp *= wt;
+            std::int32_t tmp32 = static_cast<std::int32_t>(
+                ((((tmp * tables.quant[rc != 0]) >> 16) + tmp) * tables.quantShift[rc != 0]) >>
+                (16 - 0 + 5));
+            qcoeff[rc] = (tmp32 ^ coeffSign) - coeffSign;
+            const std::int32_t absDqcoeff =
+                static_cast<std::int32_t>((static_cast<std::int64_t>(tmp32) *
+                                           tables.dequant[rc != 0]) >>
+                                          0);
+            dqcoeff[rc] = (absDqcoeff ^ coeffSign) - coeffSign;
+
+            if (tmp32) {
+                eobVal = i;
+            }
+        }
+    }
+    *eob = static_cast<std::uint16_t>(eobVal + 1);
 }
 
 }  // namespace transforms

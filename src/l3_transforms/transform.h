@@ -48,4 +48,33 @@ std::string invTxfmCuSource();
 
 std::string fwdTxfmCuSource();
 
+// Luma quantizer tables at sharpness == 0, mirroring the luma rows of
+// svt_av1_build_quantizer (md_config_process.c:106-135). Index 0 = dc,
+// index 1 = ac (the "dc path" is table index 0 — this SVT tree has no
+// separate av1_quantize_dc).
+struct QuantTables {
+    std::int16_t quant[2];        // y_quant (:130 via svt_aom_invert_quant)
+    std::int16_t quantShift[2];   // y_quant_shift (:130)
+    std::int16_t quantFp[2];      // y_quant_fp (:131)
+    std::int16_t roundFp[2];      // y_round_fp (:127, :132)
+    std::int16_t zbin[2];         // y_zbin (:133)
+    std::int16_t round[2];        // y_round (:108, :134)
+    std::int16_t dequant[2];      // y_dequant_qtx (:135)
+};
+
+void buildQuantTables(std::int32_t qindex, QuantTables& tables);
+
+// default (up-right diagonal) scan for 4x4, svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=4
+void defaultScan4x4(std::int16_t scan[16]);
+
+// quantize_fp_helper_c (full_loop.c:222) at log_scale 0 = TX_4X4
+// (svt_av1_quantize_fp_c, full_loop.c:286). qm/iqm NULL branch.
+void quantizeFp4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
+
+// svt_aom_quantize_b_c (full_loop.c:31) at log_scale 0, qm/iqm NULL branch.
+void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                  std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
+
 }  // namespace transforms

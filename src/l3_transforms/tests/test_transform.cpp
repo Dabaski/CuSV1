@@ -635,3 +635,117 @@ TEST_CASE("gpu fwd txfm 2d adst matches host bit-exactly") {
     }
     CHECK(ok);
 }
+
+TEST_CASE("quantizer tables match the Q0 gate at qindex 100") {
+    // golden: golden_gen qtab_q100 (md_config_process.c:106-135, sharpness=0)
+    transforms::QuantTables t;
+    transforms::buildQuantTables(100, t);
+    const std::int16_t ref[14] = {-20435, -28086, 1024, 1024, 704, 585, 46, 56, 61, 74, 34, 42, 93, 112};
+    bool ok = true;
+    const std::int16_t* fields[7] = {t.quant, t.quantShift, t.quantFp, t.roundFp, t.zbin, t.round, t.dequant};
+    for (int f = 0; f < 7; ++f) {
+        for (int i = 0; i < 2; ++i) {
+            if (fields[f][i] != ref[f * 2 + i]) ok = false;
+        }
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("quantize fp 4x4 matches the Q0 gate vectors across qindices") {
+    // fixture = d3_coeffs block 0 (golden_gen d3_coeffs, first 16 values)
+    const std::int32_t fix[16] = {-3784, 78, 4, 54, -17, 18, 102, -68, 56, 3, 36, 120, -18, 23, 6, -22};
+    // golden: golden_gen qfp_q{0,1,100,200,255} - qcoeff | dqcoeff | eob
+    struct Ref {
+        int q;
+        std::int32_t qc[16];
+        std::int32_t dq[16];
+        std::uint16_t eob;
+    } refs[] = {
+        {0,
+         {-946, 20, 1, 14, -4, 5, 26, -17, 14, 1, 9, 30, -5, 6, 2, -6},
+         {-3784, 80, 4, 56, -16, 20, 104, -68, 56, 4, 36, 120, -20, 24, 8, -24},
+         16},
+        {1,
+         {-473, 10, 1, 7, -2, 2, 13, -9, 7, 0, 5, 15, -2, 3, 1, -3},
+         {-3784, 80, 8, 56, -16, 16, 104, -72, 56, 0, 40, 120, -16, 24, 8, -24},
+         16},
+        {100,
+         {-41, 1, 0, 0, 0, 0, 1, -1, 0, 0, 0, 1, 0, 0, 0, 0},
+         {-3813, 112, 0, 0, 0, 0, 112, -112, 0, 0, 0, 112, 0, 0, 0, 0},
+         14},
+        {200,
+         {-10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+         {-3890, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+         1},
+        {255,
+         {-3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+         {-4008, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+         1},
+    };
+    std::int16_t scan[16];
+    transforms::defaultScan4x4(scan);
+    for (const auto& r : refs) {
+        transforms::QuantTables t;
+        transforms::buildQuantTables(r.q, t);
+        std::int32_t qc[16] = {0};
+        std::int32_t dq[16] = {0};
+        std::uint16_t eob = 0;
+        transforms::quantizeFp4x4(fix, t, scan, qc, dq, &eob);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) {
+            if (qc[i] != r.qc[i] || dq[i] != r.dq[i]) ok = false;
+        }
+        if (eob != r.eob) ok = false;
+        CHECK(ok);
+    }
+}
+
+TEST_CASE("quantize b 4x4 matches the Q0 gate vectors across qindices") {
+    // golden: golden_gen qb_q{0,1,100,200,255} - the b path differs from fp at
+    // q1/q100 (zbin pre-scan + quant_shift division vs fp rounding): e.g. at
+    // q100 qcoeff[7] is 0 (fp gives -1)
+    const std::int32_t fix[16] = {-3784, 78, 4, 54, -17, 18, 102, -68, 56, 3, 36, 120, -18, 23, 6, -22};
+    struct Ref {
+        int q;
+        std::int32_t qc[16];
+        std::int32_t dq[16];
+        std::uint16_t eob;
+    } refs[] = {
+        {0,
+         {-946, 20, 1, 14, -4, 5, 26, -17, 14, 1, 9, 30, -5, 6, 2, -6},
+         {-3784, 80, 4, 56, -16, 20, 104, -68, 56, 4, 36, 120, -20, 24, 8, -24},
+         16},
+        {1,
+         {-473, 10, 0, 7, -2, 2, 13, -8, 7, 0, 4, 15, -2, 3, 1, -3},
+         {-3784, 80, 0, 56, -16, 16, 104, -64, 56, 0, 32, 120, -16, 24, 8, -24},
+         16},
+        {100,
+         {-41, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0},
+         {-3813, 112, 0, 0, 0, 0, 112, 0, 0, 0, 0, 112, 0, 0, 0, 0},
+         14},
+        {200,
+         {-10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+         {-3890, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+         1},
+        {255,
+         {-3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+         {-4008, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+         1},
+    };
+    std::int16_t scan[16];
+    transforms::defaultScan4x4(scan);
+    for (const auto& r : refs) {
+        transforms::QuantTables t;
+        transforms::buildQuantTables(r.q, t);
+        std::int32_t qc[16] = {0};
+        std::int32_t dq[16] = {0};
+        std::uint16_t eob = 0;
+        transforms::quantizeB4x4(fix, t, scan, qc, dq, &eob);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) {
+            if (qc[i] != r.qc[i] || dq[i] != r.dq[i]) ok = false;
+        }
+        if (eob != r.eob) ok = false;
+        CHECK(ok);
+    }
+}
