@@ -466,6 +466,95 @@ TEST_CASE("gpu block predictor 8x8 h matches builder") {
     CHECK(okWithTop);
 }
 
+TEST_CASE("gpu block predictor honors angle delta in zone 2 for v and h at 8x8") {
+    // R-series: kernel isDr parity. goldens: golden_gen b9_vd1_8 / b9_hm1_8
+    // (verbatim build_intra_predictors, pAngle = mode_to_angle_map + delta*3:
+    // V delta=+1 -> 93 zone 2; H delta=-1 -> 177 zone 2). The pre-R1 kernels
+    // ignored delta for V/H (isDr started at m>=3), so GPU != host here.
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const unsigned char above[16] = {31, 12, 77, 4, 50, 23, 68, 15, 9, 41, 27, 63, 11, 55, 38, 72};
+    const unsigned char left[8] = {14, 3, 8, 13, 17, 9, 19, 26};
+
+    {
+        // golden: golden_gen b9_vd1_8
+        const unsigned char ref[64] = {
+            30, 13, 74, 8, 48, 24, 66, 18, 29, 13, 72, 11, 45, 26, 64, 20,
+            28, 14, 69, 15, 43, 27, 62, 23, 27, 15, 66, 18, 40, 28, 60, 26,
+            26, 15, 63, 22, 38, 30, 58, 29, 25, 16, 61, 25, 35, 31, 56, 31,
+            24, 17, 58, 29, 33, 32, 54, 34, 23, 17, 55, 33, 31, 34, 52, 37};
+        unsigned char host[64] = {0};
+        intra::buildIntraPredictors(host, 8, intra::V_PRED, 1, 8, 8, 7, above, 8, 8, left, 8, 0);
+        bool hostOk = true;
+        for (int i = 0; i < 64; ++i) {
+            if (host[i] != ref[i]) hostOk = false;
+        }
+        CHECK(hostOk);
+        bool gpuOk = runBlockPredict8x8(ctx, intra::V_PRED, 1, above, 8, 8, left, 8, 0, 7, host);
+        CHECK(gpuOk);
+    }
+    {
+        // golden: golden_gen b9_hm1_8 (pAngle 177, zone 2)
+        const unsigned char ref[64] = {
+            14, 13, 13, 13, 13, 12, 12, 12, 4,  4,  5,  5,  6,  6,  7,  8,
+            8,  7,  7,  7,  7,  6,  6,  6,  13, 13, 12, 12, 12, 12, 12, 12,
+            17, 17, 17, 17, 17, 16, 16, 16, 9,  10, 10, 11, 11, 11, 12, 12,
+            18, 18, 17, 17, 16, 16, 15, 15, 26, 25, 25, 25, 25, 24, 24, 24};
+        unsigned char host[64] = {0};
+        intra::buildIntraPredictors(host, 8, intra::H_PRED, -1, 8, 8, 7, above, 8, 8, left, 8, 0);
+        bool hostOk = true;
+        for (int i = 0; i < 64; ++i) {
+            if (host[i] != ref[i]) hostOk = false;
+        }
+        CHECK(hostOk);
+        bool gpuOk = runBlockPredict8x8(ctx, intra::H_PRED, -1, above, 8, 8, left, 8, 0, 7, host);
+        CHECK(gpuOk);
+    }
+}
+
+TEST_CASE("gpu block predictor honors angle delta for v and h at 4x4") {
+    // R-series: 4x4 kernel parity (goldens: golden_gen b9_vd1_4 / b9_hm1_4)
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const unsigned char above[16] = {31, 12, 77, 4, 50, 23, 68, 15, 9, 41, 27, 63, 11, 55, 38, 72};
+    const unsigned char left[4] = {14, 3, 8, 13};
+
+    {
+        // golden: golden_gen b9_vd1_4
+        const unsigned char ref[16] = {30, 13, 74, 8, 29, 13, 72, 12, 28, 14, 69, 16, 27, 15, 66, 19};
+        unsigned char host[16] = {0};
+        intra::buildIntraPredictors(host, 4, intra::V_PRED, 1, 4, 4, 7, above, 4, 4, left, 4, 0);
+        bool hostOk = true;
+        for (int i = 0; i < 16; ++i) {
+            if (host[i] != ref[i]) hostOk = false;
+        }
+        CHECK(hostOk);
+        bool gpuOk = runBlockPredict(ctx, intra::V_PRED, 1, above, 4, 4, left, 4, 0, 7, host);
+        CHECK(gpuOk);
+    }
+    {
+        // golden: golden_gen b9_hm1_4 (pAngle 177, zone 2)
+        const unsigned char ref[16] = {14, 13, 13, 13, 4, 4, 5, 5, 8, 7, 7, 7, 13, 13, 12, 12};
+        unsigned char host[16] = {0};
+        intra::buildIntraPredictors(host, 4, intra::H_PRED, -1, 4, 4, 7, above, 4, 4, left, 4, 0);
+        bool hostOk = true;
+        for (int i = 0; i < 16; ++i) {
+            if (host[i] != ref[i]) hostOk = false;
+        }
+        CHECK(hostOk);
+        bool gpuOk = runBlockPredict(ctx, intra::H_PRED, -1, above, 4, 4, left, 4, 0, 7, host);
+        CHECK(gpuOk);
+    }
+}
+
 TEST_CASE("gpu block predictor 8x8 d45 edge filtered matches builder") {
     // coverage fold-in from B6: filt_edge8 at strength 1 (delta=-45, d>=40)
     if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }

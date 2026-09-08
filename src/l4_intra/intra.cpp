@@ -1253,7 +1253,10 @@ extern "C" __global__ void predict_block_4x4(
         int needAbove = 0;
         int needAboveLeft = 0;
         int pAngle = 0;
-        int isDr = (m >= 3 && m <= 8) ? 1 : 0;
+        // isDr covers V..D67 (host: mode >= V_PRED && mode <= D67_PRED);
+        // H_PRED (m==2) is "dr" with pAngle 180 (kModeToAngle[2]) so
+        // angleDelta reaches V/H through the same pAngle path
+        int isDr = (m >= 1 && m <= 8) ? 1 : 0;
         if (m == 0) {
             needLeft = 1;
             needAbove = 1;
@@ -1274,8 +1277,10 @@ extern "C" __global__ void predict_block_4x4(
             needAbove = 1;
             needAboveLeft = 1;
         }
-        if (m >= 3 && m <= 8) {
-            if (m == 3) pAngle = 45;
+        if (isDr) {
+            if (m == 1) pAngle = 90;
+            else if (m == 2) pAngle = 180;
+            else if (m == 3) pAngle = 45;
             else if (m == 4) pAngle = 135;
             else if (m == 5) pAngle = 113;
             else if (m == 6) pAngle = 157;
@@ -1463,10 +1468,6 @@ extern "C" __global__ void predict_block_4x4(
         dst[idx] = kFi[idx];
     } else if (m == 0) {
         dst[idx] = (unsigned char)kDc;
-    } else if (m == 1) {
-        dst[idx] = aboveRow[idx & 3];
-    } else if (m == 2) {
-        dst[idx] = leftCol[idx >> 2];
     } else if (m == 12) {
         const int r = idx >> 2;
         const int c = idx & 3;
@@ -1498,7 +1499,9 @@ extern "C" __global__ void predict_block_4x4(
             val = (val + 128) >> 8;
             dst[idx] = (unsigned char)val;
         }
-    } else if (m >= 3 && m <= 8) {
+    } else if (m >= 1 && m <= 8) {
+        // dr zone for ALL dr modes (V..D67): the angle==90/180 collapse
+        // branches produce V/H exactly (mirrors host drPredictor dispatch)
         const int r = idx >> 2;
         const int c = idx & 3;
         const int angle = kAngle;
@@ -1782,10 +1785,11 @@ extern "C" __global__ void predict_block_8x8(
     if (idx == 0) {
         int m = *mode;
         int needLeft = 0, needAbove = 0, needAboveLeft = 0, pAngle = 0;
-        // dr range excludes H_PRED (m==2): it sits numerically inside 1..8 but
-        // is not directional (host: kModeToAngle[2] = 180 -> H reads leftCol);
-        // matches the 4x4 kernel and the host builder
-        int isDr = (m >= 3 && m <= 8) ? 1 : 0;
+        // isDr covers V..D67 (host: mode >= V_PRED && mode <= D67_PRED,
+        // enc_intra_prediction.c); H_PRED (m==2) is "dr" with pAngle 180
+        // (kModeToAngle[2]) so angleDelta reaches V/H through the same
+        // pAngle = base + delta*3 path as every other dr mode
+        int isDr = (m >= 1 && m <= 8) ? 1 : 0;
         if (m == 0) { needLeft = 1; needAbove = 1; }
         else if (m == 1) { needAbove = 1; }
         else if (m == 2) { needLeft = 1; }
@@ -1793,13 +1797,13 @@ extern "C" __global__ void predict_block_8x8(
         else if (m >= 9 && m <= 11) { needLeft = 1; needAbove = 1; }
         if (isDr) {
             if (m == 1) pAngle = 90;
+            else if (m == 2) pAngle = 180;
             else if (m == 3) pAngle = 45;
             else if (m == 4) pAngle = 135;
             else if (m == 5) pAngle = 113;
             else if (m == 6) pAngle = 157;
             else if (m == 7) pAngle = 203;
-            else if (m == 8) pAngle = 67;
-            else pAngle = 90;
+            else pAngle = 67;
             pAngle += (*angleDelta) * 3;
             if (pAngle <= 90) { needAbove = 1; needLeft = 0; needAboveLeft = 1; }
             else if (pAngle < 180) { needAbove = 1; needLeft = 1; needAboveLeft = 1; }
@@ -1935,10 +1939,6 @@ extern "C" __global__ void predict_block_8x8(
         dst[idx] = kFi[idx];
     } else if (m == 0) {
         dst[idx] = (unsigned char)kDc;
-    } else if (m == 1) {
-        dst[idx] = aboveRow[c8];
-    } else if (m == 2) {
-        dst[idx] = leftCol[r8];
     } else if (m == 12) {
         const int base = leftCol[r8] + aboveRow[c8] - aboveRow[-1];
         const int pL = (base > leftCol[r8]) ? base - leftCol[r8] : leftCol[r8] - base;
@@ -1964,7 +1964,9 @@ extern "C" __global__ void predict_block_8x8(
             val = (val + 128) >> 8;
             dst[idx] = (unsigned char)val;
         }
-    } else if (m >= 3 && m <= 8) {
+    } else if (m >= 1 && m <= 8) {
+        // dr zone for ALL dr modes (V..D67): the angle==90/180 collapse
+        // branches produce V/H exactly (mirrors host drPredictor dispatch)
         const int angle = kAngle;
         const int upA = kUpA;
         const int upL = kUpL;

@@ -550,5 +550,28 @@ int main(void) {
         for (int i = 0; i < 4 * 64; ++i) printf(" %d", coeffs[i]);
         printf("\n");
     }
+    // ---- R2: builder angle-delta goldens for V/H at both geometries ----
+    // The host builder handles delta already (verbatim
+    // build_intra_predictors: pAngle = mode_to_angle_map[mode] + delta*3);
+    // these gate lines pin it so the kernel isDr parity tests have goldens.
+    // V delta=+1 -> pAngle 93 (zone 2); H delta=-1 -> pAngle 177 (zone 2).
+    {
+        const uint8_t above[16] = {31, 12, 77, 4, 50, 23, 68, 15, 9, 41, 27, 63, 11, 55, 38, 72};
+        const uint8_t left[8] = {14, 3, 8, 13, 17, 9, 19, 26};
+        {
+            uint8_t dst[64] = {0};
+            svtd_call_builder_tx(dst, V_PRED, 1, FILTER_INTRA_MODES, 0, above, 8, 8, left, 8, 0, 7, TX_8X8);
+            printf("b9_vd1_8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
+            svtd_call_builder_tx(dst, H_PRED, -1, FILTER_INTRA_MODES, 0, above, 8, 8, left, 8, 0, 7, TX_8X8);
+            printf("b9_hm1_8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
+        }
+        {
+            uint8_t dst[16] = {0};
+            svtd_call_builder_tx(dst, V_PRED, 1, FILTER_INTRA_MODES, 0, above, 4, 4, left, 4, 0, 7, TX_4X4);
+            printf("b9_vd1_4:"); for (int i = 0; i < 16; ++i) printf(" %d", dst[i]); printf("\n");
+            svtd_call_builder_tx(dst, H_PRED, -1, FILTER_INTRA_MODES, 0, above, 4, 4, left, 4, 0, 7, TX_4X4);
+            printf("b9_hm1_4:"); for (int i = 0; i < 16; ++i) printf(" %d", dst[i]); printf("\n");
+        }
+    }
     return 0;
 }

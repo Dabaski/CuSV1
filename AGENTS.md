@@ -67,6 +67,14 @@ compile. If you can split a step into two smaller ones, split it.
   expected values.
 - **Deviations and limitations are named in the slice report**, never
   silent.
+- **Range conditions are enumerated, never spot-checked** (audit rule, R-series):
+  any mode/size/index range in a port (e.g. `isDr = m >= 1 && m <= 8`) must be
+  checked against the reference for EVERY value it admits, not just the ones
+  the current tests exercise. Precedent: B6's predict_block_8x8 shipped with
+  H_PRED (m==2) inside the dr range — acute bug caught in QW3, latent V/H
+  angleDelta divergence caught in the QW audit; both were invisible to the
+  spot-checked subset of modes.
+
  
 - Do not write test and implementation in the same edit/commit.
 - Do not write a test you already know will pass â€” if it passes on first run
