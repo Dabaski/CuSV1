@@ -64,6 +64,8 @@ std::string smoothPredictCuSourceRef();
 
 std::string predictBlockCuSource();
 
+std::string predictBlock8x8CuSource();
+
 int edgeFilterStrength(int bs0, int bs1, int delta, int type);
 
 int useIntraEdgeUpsample(int bs0, int bs1, int delta, int type);

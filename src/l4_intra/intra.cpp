@@ -1555,4 +1555,454 @@ extern "C" __global__ void predict_block_4x4(
 )CUDB2";
 }
 
+std::string predictBlock8x8CuSource() {
+    // Shared memory sizing arithmetic:
+    //   aboveRow = aboveData + 32. Backward reach: aboveRow[-2] (upsample
+    //   corner) = aboveData[30]. Forward: numTop max 16 raw, upsampled to
+    //   32; dr zones read above[maxBaseX + 1] where maxBaseX = 15 << 1 = 30,
+    //   so aboveRow[31] = aboveData[63]. Array size 96 covers [0..95].
+    //   Same for leftData.
+    return R"CUDA(
+__constant__ unsigned char sm_w8[8] = {255, 197, 146, 105, 73, 50, 37, 32};
+
+__constant__ unsigned short der8[90] = {
+    0,    0, 0,
+    1023, 0, 0,
+    547,  0, 0,
+    372,  0, 0, 0, 0,
+    273,  0, 0,
+    215,  0, 0,
+    178,  0, 0,
+    151,  0, 0,
+    132,  0, 0,
+    116,  0, 0,
+    102,  0, 0, 0,
+    90,   0, 0,
+    80,   0, 0,
+    71,   0, 0,
+    64,   0, 0,
+    57,   0, 0,
+    51,   0, 0,
+    45,   0, 0, 0,
+    40,   0, 0,
+    35,   0, 0,
+    31,   0, 0,
+    27,   0, 0,
+    23,   0, 0,
+    19,   0, 0,
+    15,   0, 0, 0, 0,
+    11,   0, 0,
+    7,    0, 0,
+    3,    0, 0,
+};
+
+__constant__ signed char taps8[5][8][8] = {
+    {
+        {-6, 10, 0, 0, 0, 12, 0, 0},
+        {-5, 2, 10, 0, 0, 9, 0, 0},
+        {-3, 1, 1, 10, 0, 7, 0, 0},
+        {-3, 1, 1, 2, 10, 5, 0, 0},
+        {-4, 6, 0, 0, 0, 2, 12, 0},
+        {-3, 2, 6, 0, 0, 2, 9, 0},
+        {-3, 2, 2, 6, 0, 2, 7, 0},
+        {-3, 1, 2, 2, 6, 3, 5, 0},
+    },
+    {
+        {-10, 16, 0, 0, 0, 10, 0, 0},
+        {-6, 0, 16, 0, 0, 6, 0, 0},
+        {-4, 0, 0, 16, 0, 4, 0, 0},
+        {-2, 0, 0, 0, 16, 2, 0, 0},
+        {-10, 16, 0, 0, 0, 0, 10, 0},
+        {-6, 0, 16, 0, 0, 0, 6, 0},
+        {-4, 0, 0, 16, 0, 0, 4, 0},
+        {-2, 0, 0, 0, 16, 0, 2, 0},
+    },
+    {
+        {-8, 8, 0, 0, 0, 16, 0, 0},
+        {-8, 0, 8, 0, 0, 16, 0, 0},
+        {-8, 0, 0, 8, 0, 16, 0, 0},
+        {-8, 0, 0, 0, 8, 16, 0, 0},
+        {-4, 4, 0, 0, 0, 0, 16, 0},
+        {-4, 0, 4, 0, 0, 0, 16, 0},
+        {-4, 0, 0, 4, 0, 0, 16, 0},
+        {-4, 0, 0, 0, 4, 0, 16, 0},
+    },
+    {
+        {-2, 8, 0, 0, 0, 10, 0, 0},
+        {-1, 3, 8, 0, 0, 6, 0, 0},
+        {-1, 2, 3, 8, 0, 4, 0, 0},
+        {0, 1, 2, 3, 8, 2, 0, 0},
+        {-1, 4, 0, 0, 0, 3, 10, 0},
+        {-1, 3, 4, 0, 0, 4, 6, 0},
+        {-1, 2, 3, 4, 0, 4, 4, 0},
+        {-1, 2, 2, 3, 4, 3, 3, 0},
+    },
+    {
+        {-12, 14, 0, 0, 0, 14, 0, 0},
+        {-10, 0, 14, 0, 0, 12, 0, 0},
+        {-9, 0, 0, 14, 0, 11, 0, 0},
+        {-8, 0, 0, 0, 14, 10, 0, 0},
+        {-10, 12, 0, 0, 0, 0, 14, 0},
+        {-9, 1, 12, 0, 0, 0, 12, 0},
+        {-8, 0, 0, 12, 0, 1, 11, 0},
+        {-7, 0, 0, 1, 12, 1, 9, 0},
+    },
+};
+)CUDA"
+    R"CUDB1(
+__device__ int abs8(int v) { return v < 0 ? -v : v; }
+
+__device__ int get_dx8(int angle) {
+    if (angle > 0 && angle < 90) return der8[angle];
+    if (angle > 90 && angle < 180) return der8[180 - angle];
+    return 1;
+}
+
+__device__ int get_dy8(int angle) {
+    if (angle > 90 && angle < 180) return der8[angle - 90];
+    if (angle > 180 && angle < 270) return der8[270 - angle];
+    return 1;
+}
+
+__device__ int use_up8(int bs0, int bs1, int delta, int type) {
+    const int d = abs8(delta);
+    const int blkWh = bs0 + bs1;
+    if (d <= 0 || d >= 40) return 0;
+    return type ? (blkWh <= 8) : (blkWh <= 16);
+}
+
+__device__ int filt_str8(int bs0, int bs1, int delta, int type) {
+    const int d = abs8(delta);
+    int strength = 0;
+    const int blkWh = bs0 + bs1;
+    if (type == 0) {
+        if (blkWh <= 8) { if (d >= 56) strength = 1; }
+        else if (blkWh <= 12) { if (d >= 40) strength = 1; }
+        else if (blkWh <= 16) { if (d >= 40) strength = 1; }
+        else if (blkWh <= 24) {
+            if (d >= 8) strength = 1;
+            if (d >= 16) strength = 2;
+            if (d >= 32) strength = 3;
+        } else if (blkWh <= 32) {
+            if (d >= 1) strength = 1;
+            if (d >= 4) strength = 2;
+            if (d >= 32) strength = 3;
+        } else { if (d >= 1) strength = 3; }
+    } else {
+        if (blkWh <= 8) {
+            if (d >= 40) strength = 1;
+            if (d >= 64) strength = 2;
+        } else if (blkWh <= 16) {
+            if (d >= 20) strength = 1;
+            if (d >= 48) strength = 2;
+        } else if (blkWh <= 24) { if (d >= 4) strength = 3; }
+        else { if (d >= 1) strength = 3; }
+    }
+    return strength;
+}
+
+__device__ int edge_tap8(int filt, int j) {
+    if (filt == 1) { const int k[5] = {0, 5, 6, 5, 0}; return k[j]; }
+    if (filt == 2) { const int k[5] = {2, 4, 4, 4, 2}; return k[j]; }
+    const int k[5] = {0, 4, 8, 4, 0}; return k[j];
+}
+
+__device__ void filt_edge8(unsigned char* p, int sz, int strength) {
+    if (!strength) return;
+    unsigned char edge[64];
+    for (int i = 0; i < sz; ++i) edge[i] = p[i];
+    const int filt = strength - 1;
+    for (int i = 1; i < sz; ++i) {
+        int s = 0;
+        for (int j = 0; j < 5; ++j) {
+            int k = i - 2 + j;
+            if (k < 0) k = 0; else if (k > sz - 1) k = sz - 1;
+            s += edge[k] * edge_tap8(filt, j);
+        }
+        s = (s + 8) >> 4;
+        p[i] = (unsigned char)s;
+    }
+}
+
+__device__ void upsamp8(unsigned char* p, int sz) {
+    unsigned char in[35];
+    in[0] = p[-1]; in[1] = p[-1];
+    for (int i = 0; i < sz; ++i) in[i + 2] = p[i];
+    in[sz + 2] = p[sz - 1];
+    p[-2] = in[0];
+    for (int i = 0; i < sz; ++i) {
+        int s = -(int)in[i] + 9 * in[i + 1] + 9 * in[i + 2] - in[i + 3];
+        s = (s + 8) >> 4;
+        if (s < 0) s = 0; else if (s > 255) s = 255;
+        p[2 * i - 1] = (unsigned char)s;
+        p[2 * i] = in[i + 2];
+    }
+}
+
+__device__ int rpos8(int value, int bits) { return (value + (1 << (bits - 1))) >> bits; }
+__device__ int rp_signed8(int value, int bits) {
+    if (value < 0) return -rpos8(-value, bits);
+    return rpos8(value, bits);
+}
+
+)CUDB1"
+    R"CUDB2(
+extern "C" __global__ void predict_block_8x8(
+    const int* mode, const int* angleDelta,
+    const int* aboveMode, const int* leftMode,
+    const unsigned char* aboveRef, const int* nTopPx, const int* nTopRightPx,
+    const unsigned char* leftRef, const int* nLeftPx, const int* nBottomLeftPx,
+    const int* aboveLeft, const int* filterIntraMode, const int* disableEdgeFilter,
+    unsigned char* dst) {
+    __shared__ unsigned char aboveData[96];
+    __shared__ unsigned char leftData[96];
+    __shared__ int kDc;
+    __shared__ int kAngle;
+    __shared__ int kUpA;
+    __shared__ int kUpL;
+    __shared__ unsigned char kFi[64];
+
+    const int idx = threadIdx.x;
+    const int r8 = idx >> 3;
+    const int c8 = idx & 7;
+    unsigned char* aboveRow = aboveData + 32;
+    unsigned char* leftCol = leftData + 32;
+
+    if (idx == 0) {
+        int m = *mode;
+        int needLeft = 0, needAbove = 0, needAboveLeft = 0, pAngle = 0;
+        int isDr = (m >= 1 && m <= 8) ? 1 : 0;
+        if (m == 0) { needLeft = 1; needAbove = 1; }
+        else if (m == 1) { needAbove = 1; }
+        else if (m == 2) { needLeft = 1; }
+        else if (m == 12) { needLeft = 1; needAbove = 1; needAboveLeft = 1; }
+        else if (m >= 9 && m <= 11) { needLeft = 1; needAbove = 1; }
+        if (isDr) {
+            if (m == 1) pAngle = 90;
+            else if (m == 3) pAngle = 45;
+            else if (m == 4) pAngle = 135;
+            else if (m == 5) pAngle = 113;
+            else if (m == 6) pAngle = 157;
+            else if (m == 7) pAngle = 203;
+            else if (m == 8) pAngle = 67;
+            else pAngle = 90;
+            pAngle += (*angleDelta) * 3;
+            if (pAngle <= 90) { needAbove = 1; needLeft = 0; needAboveLeft = 1; }
+            else if (pAngle < 180) { needAbove = 1; needLeft = 1; needAboveLeft = 1; }
+            else { needAbove = 0; needLeft = 1; needAboveLeft = 1; }
+        }
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needLeft = 1; needAbove = 1; needAboveLeft = 1;
+        }
+        const int needRight = isDr ? (pAngle < 90) : 0;
+        const int needBottom = isDr ? (pAngle > 180) : 0;
+        int i;
+        if (needLeft) {
+            const int numLeft = 8 + (needBottom ? 8 : 0);
+            if (*nLeftPx > 0) {
+                for (i = 0; i < *nLeftPx; ++i) leftCol[i] = leftRef[i];
+                if (needBottom && *nBottomLeftPx > 0) {
+                    for (; i < 8 + *nBottomLeftPx; ++i) leftCol[i] = leftRef[i];
+                }
+                for (; i < numLeft; ++i) leftCol[i] = leftCol[i - 1];
+            } else {
+                const unsigned char v = (*nTopPx > 0) ? aboveRef[0] : 129;
+                for (i = 0; i < numLeft; ++i) leftCol[i] = v;
+            }
+        }
+        if (needAbove) {
+            const int numTop = 8 + (needRight ? 8 : 0);
+            if (*nTopPx > 0) {
+                for (i = 0; i < *nTopPx; ++i) aboveRow[i] = aboveRef[i];
+                if (needRight && *nTopRightPx > 0) {
+                    for (i = 8; i < 8 + *nTopRightPx; ++i) aboveRow[i] = aboveRef[i];
+                }
+                for (; i < numTop; ++i) aboveRow[i] = aboveRow[i - 1];
+            } else {
+                const unsigned char v = (*nLeftPx > 0) ? leftRef[0] : 127;
+                for (i = 0; i < numTop; ++i) aboveRow[i] = v;
+            }
+        }
+        if (needAboveLeft) {
+            aboveRow[-1] = (unsigned char)(*aboveLeft);
+            leftCol[-1] = aboveRow[-1];
+        }
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            unsigned char fb[9][9];
+            for (int rr = 0; rr < 9; ++rr)
+                for (int cc = 0; cc < 9; ++cc) fb[rr][cc] = 0;
+            for (int rr = 0; rr < 8; ++rr) fb[rr + 1][0] = leftCol[rr];
+            fb[0][0] = aboveRow[-1];
+            for (int cc = 1; cc < 9; ++cc) fb[0][cc] = aboveRow[cc - 1];
+            for (int rr = 1; rr < 9; rr += 2) {
+                for (int cc = 1; cc < 9; cc += 4) {
+                    const unsigned char p0 = fb[rr - 1][cc - 1];
+                    const unsigned char p1 = fb[rr - 1][cc];
+                    const unsigned char p2 = fb[rr - 1][cc + 1];
+                    const unsigned char p3 = fb[rr - 1][cc + 2];
+                    const unsigned char p4 = fb[rr - 1][cc + 3];
+                    const unsigned char p5 = fb[rr][cc - 1];
+                    const unsigned char p6 = fb[rr + 1][cc - 1];
+                    for (int k = 0; k < 8; ++k) {
+                        const int rOff = k >> 2;
+                        const int cOff = k & 0x03;
+                        int sum = taps8[(*filterIntraMode)][k][0] * p0 +
+                                  taps8[(*filterIntraMode)][k][1] * p1 +
+                                  taps8[(*filterIntraMode)][k][2] * p2 +
+                                  taps8[(*filterIntraMode)][k][3] * p3 +
+                                  taps8[(*filterIntraMode)][k][4] * p4 +
+                                  taps8[(*filterIntraMode)][k][5] * p5 +
+                                  taps8[(*filterIntraMode)][k][6] * p6;
+                        int v = rp_signed8(sum, 4);
+                        if (v < 0) v = 0; else if (v > 255) v = 255;
+                        fb[rr + rOff][cc + cOff] = (unsigned char)v;
+                    }
+                }
+            }
+            for (int rr = 0; rr < 8; ++rr)
+                for (int cc = 0; cc < 8; ++cc) kFi[rr * 8 + cc] = fb[rr + 1][cc + 1];
+        }
+        if (isDr) {
+            int upAbove = 0, upLeft = 0;
+            if (!(*disableEdgeFilter)) {
+                const int kFiltType =
+                    (((*aboveMode >= 9 && *aboveMode <= 11) || (*leftMode >= 9 && *leftMode <= 11)) ? 1 : 0);
+                const int abLe = needAboveLeft ? 1 : 0;
+                if (needAbove && *nTopPx > 0) {
+                    const int strength = filt_str8(8, 8, pAngle - 90, kFiltType);
+                    const int nPx = *nTopPx + abLe + (needRight ? 8 : 0);
+                    filt_edge8(aboveRow - abLe, nPx, strength);
+                }
+                if (needLeft && *nLeftPx > 0) {
+                    const int strength = filt_str8(8, 8, pAngle - 180, kFiltType);
+                    const int nPx = *nLeftPx + abLe + (needBottom ? 8 : 0);
+                    filt_edge8(leftCol - abLe, nPx, strength);
+                }
+                upAbove = use_up8(8, 8, pAngle - 90, kFiltType);
+                if (needAbove && upAbove) upsamp8(aboveRow, 8 + (needRight ? 8 : 0));
+                upLeft = use_up8(8, 8, pAngle - 180, kFiltType);
+                if (needLeft && upLeft) upsamp8(leftCol, 8 + (needBottom ? 8 : 0));
+            }
+            kAngle = pAngle;
+            kUpA = upAbove;
+            kUpL = upLeft;
+        }
+        if (m == 0) {
+            int sum = 0;
+            if (*nLeftPx > 0 && *nTopPx > 0) {
+                for (i = 0; i < 8; ++i) sum += aboveRow[i];
+                for (i = 0; i < 8; ++i) sum += leftCol[i];
+                kDc = (sum + 8) / 16;
+            } else if (*nLeftPx > 0) {
+                for (i = 0; i < 8; ++i) sum += leftCol[i];
+                kDc = (sum + 4) / 8;
+            } else if (*nTopPx > 0) {
+                for (i = 0; i < 8; ++i) sum += aboveRow[i];
+                kDc = (sum + 4) / 8;
+            } else {
+                kDc = 128;
+            }
+        }
+    }
+    __syncthreads();
+    int m = *mode;
+    if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+        dst[idx] = kFi[idx];
+    } else if (m == 0) {
+        dst[idx] = (unsigned char)kDc;
+    } else if (m == 1) {
+        dst[idx] = aboveRow[c8];
+    } else if (m == 2) {
+        dst[idx] = leftCol[r8];
+    } else if (m == 12) {
+        const int base = leftCol[r8] + aboveRow[c8] - aboveRow[-1];
+        const int pL = (base > leftCol[r8]) ? base - leftCol[r8] : leftCol[r8] - base;
+        const int pT = (base > aboveRow[c8]) ? base - aboveRow[c8] : aboveRow[c8] - base;
+        const int pTL = (base > aboveRow[-1]) ? base - aboveRow[-1] : aboveRow[-1] - base;
+        dst[idx] = (pL <= pT && pL <= pTL) ? leftCol[r8] : (pT <= pTL) ? aboveRow[c8] : aboveRow[-1];
+    } else if (m >= 9 && m <= 11) {
+        const int below = leftCol[7];
+        const int right = aboveRow[7];
+        if (m == 9) {
+            const int wH = sm_w8[r8], wW = sm_w8[c8];
+            int val = wH * aboveRow[c8] + (256 - wH) * below + wW * leftCol[r8] + (256 - wW) * right;
+            val = (val + 256) >> 9;
+            dst[idx] = (unsigned char)val;
+        } else if (m == 10) {
+            const int wH = sm_w8[r8];
+            int val = wH * aboveRow[c8] + (256 - wH) * below;
+            val = (val + 128) >> 8;
+            dst[idx] = (unsigned char)val;
+        } else {
+            const int wW = sm_w8[c8];
+            int val = wW * leftCol[r8] + (256 - wW) * right;
+            val = (val + 128) >> 8;
+            dst[idx] = (unsigned char)val;
+        }
+    } else if (m >= 3 && m <= 8) {
+        const int angle = kAngle;
+        const int upA = kUpA;
+        const int upL = kUpL;
+        const int dx = get_dx8(angle);
+        const int dy = get_dy8(angle);
+        if (angle == 90) {
+            dst[idx] = aboveRow[c8];
+        } else if (angle == 180) {
+            dst[idx] = leftCol[r8];
+        } else if (angle < 90) {
+            const int maxBaseX = 15 << upA;
+            const int fracBits = 6 - upA;
+            const int baseInc = 1 << upA;
+            const int xr = dx * (r8 + 1);
+            int base = (xr >> fracBits) + c8 * baseInc;
+            if (base >= maxBaseX) {
+                dst[idx] = aboveRow[maxBaseX];
+            } else {
+                const int shift = ((xr << upA) & 0x3F) >> 1;
+                int val = aboveRow[base] * (32 - shift) + aboveRow[base + 1] * shift;
+                val = (val + 16) >> 5;
+                if (val > 255) val = 255;
+                dst[idx] = (unsigned char)val;
+            }
+        } else if (angle < 180) {
+            const int minBaseX = -(1 << upA);
+            const int fracBitsX = 6 - upA;
+            const int fracBitsY = 6 - upL;
+            const int baseIncX = 1 << upA;
+            const int xr = -dx * (r8 + 1);
+            int base1 = (xr >> fracBitsX) + c8 * baseIncX;
+            int val;
+            if (base1 >= minBaseX) {
+                const int shift1 = ((xr * (1 << upA)) & 0x3F) >> 1;
+                val = aboveRow[base1] * (32 - shift1) + aboveRow[base1 + 1] * shift1;
+            } else {
+                const int yc = (r8 << 6) - dy * (c8 + 1);
+                const int base2 = yc >> fracBitsY;
+                const int shift2 = ((yc * (1 << upL)) & 0x3F) >> 1;
+                val = leftCol[base2] * (32 - shift2) + leftCol[base2 + 1] * shift2;
+            }
+            val = (val + 16) >> 5;
+            if (val > 255) val = 255;
+            dst[idx] = (unsigned char)val;
+        } else {
+            const int maxBaseY = 15 << upL;
+            const int fracBits = 6 - upL;
+            const int baseInc = 1 << upL;
+            const int yc = dy * (c8 + 1);
+            int base = (yc >> fracBits) + r8 * baseInc;
+            if (base >= maxBaseY) {
+                dst[idx] = leftCol[maxBaseY];
+            } else {
+                const int shift = ((yc << upL) & 0x3F) >> 1;
+                int val = leftCol[base] * (32 - shift) + leftCol[base + 1] * shift;
+                val = (val + 16) >> 5;
+                if (val > 255) val = 255;
+                dst[idx] = (unsigned char)val;
+            }
+        }
+    }
+}
+)CUDB2";
+}
+
 }  // namespace intra

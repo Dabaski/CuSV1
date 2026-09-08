@@ -318,6 +318,130 @@ TEST_CASE("builder dc128 8x8 fills 128 with no neighbors") {
     CHECK(ok);
 }
 
+bool runBlockPredict8x8(gpurt::GpuContext& ctx, int mode, int angleDelta, const unsigned char* above,
+                        int nTopPx, int nTopRightPx, const unsigned char* left, int nLeftPx,
+                        int nBottomLeftPx, int aboveLeft, const unsigned char* expected,
+                        int aboveMode = 0, int leftMode = 0, int filterIntraMode = -1,
+                        int disableEdgeFilter = 0) {
+    (void)ctx;
+    const std::string ptx = *gpurt::compileToPtx(intra::predictBlock8x8CuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "predict_block_8x8");
+    if (it == names.end()) {
+        return false;
+    }
+    gpurt::Kernel k(ptx, *it);
+
+    gpurt::DeviceBuffer dAbove(nTopPx > 0 ? sizeof(unsigned char) * (nTopPx + nTopRightPx) : 1);
+    gpurt::DeviceBuffer dLeft(nLeftPx > 0 ? sizeof(unsigned char) * (nLeftPx + nBottomLeftPx) : 1);
+    gpurt::DeviceBuffer dOut(64);
+    if (nTopPx > 0) dAbove.uploadFrom(above, sizeof(unsigned char) * (nTopPx + nTopRightPx));
+    if (nLeftPx > 0) dLeft.uploadFrom(left, sizeof(unsigned char) * (nLeftPx + nBottomLeftPx));
+
+    int modeArg = mode, deltaArg = angleDelta, amArg = aboveMode, lmArg = leftMode;
+    int fiArg = filterIntraMode, defArg = disableEdgeFilter;
+    int nTopArg = nTopPx, nTrArg = nTopRightPx, nLeftArg = nLeftPx, nBlArg = nBottomLeftPx;
+    int alArg = aboveLeft;
+    gpurt::DeviceBuffer dMode(4), dDelta(4), dAm(4), dLm(4), dFi(4), dDef(4);
+    gpurt::DeviceBuffer dNTop(4), dNTr(4), dNLeft(4), dNBl(4), dAl(4);
+    dMode.uploadFrom(&modeArg, 4); dDelta.uploadFrom(&deltaArg, 4);
+    dAm.uploadFrom(&amArg, 4); dLm.uploadFrom(&lmArg, 4);
+    dFi.uploadFrom(&fiArg, 4); dDef.uploadFrom(&defArg, 4);
+    dNTop.uploadFrom(&nTopArg, 4); dNTr.uploadFrom(&nTrArg, 4);
+    dNLeft.uploadFrom(&nLeftArg, 4); dNBl.uploadFrom(&nBlArg, 4);
+    dAl.uploadFrom(&alArg, 4);
+
+    CUdeviceptr pMode = dMode.get(), pDelta = dDelta.get(), pAm = dAm.get(), pLm = dLm.get();
+    CUdeviceptr pAbove = dAbove.get(), pNTop = dNTop.get(), pNTr = dNTr.get();
+    CUdeviceptr pLeft = dLeft.get(), pNLeft = dNLeft.get(), pNBl = dNBl.get(), pAl = dAl.get();
+    CUdeviceptr pFi = dFi.get(), pDef = dDef.get(), pOut = dOut.get();
+    void* args[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft,
+                    &pNBl, &pAl, &pFi, &pDef, &pOut};
+    k.launch(1, 1, 64, 1, args);
+
+    unsigned char got[64] = {0};
+    dOut.downloadTo(got, 64);
+    for (int i = 0; i < 64; ++i) {
+        if (got[i] != expected[i]) return false;
+    }
+    return true;
+}
+
+TEST_CASE("gpu block predictor 8x8 v matches builder") {
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    const unsigned char above[8] = {31, 12, 77, 4, 50, 23, 68, 15};
+    unsigned char ref[64] = {0};
+    intra::buildIntraPredictors(ref, 8, intra::V_PRED, 0, 8, 8, 0, above, 8, 0, nullptr, 0, 0);
+    bool ok = runBlockPredict8x8(ctx, intra::V_PRED, 0, above, 8, 0, nullptr, 0, 0, 0, ref);
+    CHECK(ok);
+}
+
+TEST_CASE("gpu block predictor 8x8 dc128 matches builder") {
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    unsigned char ref[64] = {0};
+    intra::buildIntraPredictors(ref, 8, intra::DC_PRED, 0, 8, 8, 0, nullptr, 0, 0, nullptr, 0, 0);
+    bool ok = runBlockPredict8x8(ctx, intra::DC_PRED, 0, nullptr, 0, 0, nullptr, 0, 0, 0, ref);
+    CHECK(ok);
+}
+
+TEST_CASE("gpu block predictor 8x8 d67 upsample matches builder") {
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    const unsigned char above[16] = {10, 20, 30, 100, 50, 60, 70, 80, 90, 40, 25, 66, 11, 72, 33, 58};
+    const unsigned char left[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+    unsigned char ref[64] = {0};
+    intra::buildIntraPredictors(ref, 8, intra::D67_PRED, 0, 8, 8, 7, above, 8, 8, left, 8, 0);
+    bool ok = runBlockPredict8x8(ctx, intra::D67_PRED, 0, above, 8, 8, left, 8, 0, 7, ref);
+    CHECK(ok);
+}
+
+TEST_CASE("gpu block predictor 8x8 filter intra matches builder") {
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    const unsigned char above[9] = {10, 20, 30, 40, 50, 60, 70, 80, 90};
+    const unsigned char left[8] = {21, 31, 41, 51, 61, 71, 81, 91};
+    unsigned char ref[64] = {0};
+    intra::buildIntraPredictors(ref, 8, intra::V_PRED, 0, 8, 8, 10, above + 1, 8, 0, left, 8, 0,
+                                intra::NeighborContext(), 1);
+    bool ok = runBlockPredict8x8(ctx, intra::V_PRED, 0, above + 1, 8, 0, left, 8, 0, 10, ref, 0, 0, 1);
+    CHECK(ok);
+}
+
+TEST_CASE("gpu block predictor 8x8 paeth matches builder") {
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    const unsigned char above[8] = {10, 40, 30, 20, 60, 25, 45, 35};
+    const unsigned char left[8] = {50, 60, 70, 80, 55, 65, 75, 85};
+    unsigned char ref[64] = {0};
+    intra::buildIntraPredictors(ref, 8, intra::PAETH_PRED, 0, 8, 8, 45, above, 8, 0, left, 8, 0);
+    bool ok = runBlockPredict8x8(ctx, intra::PAETH_PRED, 0, above, 8, 0, left, 8, 0, 45, ref);
+    CHECK(ok);
+}
+
+TEST_CASE("gpu block predictor 8x8 smooth matches builder") {
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    const unsigned char above[8] = {10, 20, 30, 40, 50, 60, 70, 80};
+    const unsigned char left[8] = {5, 15, 25, 35, 45, 55, 65, 75};
+    unsigned char ref[64] = {0};
+    intra::buildIntraPredictors(ref, 8, intra::SMOOTH_PRED, 0, 8, 8, 0, above, 8, 0, left, 8, 0);
+    bool ok = runBlockPredict8x8(ctx, intra::SMOOTH_PRED, 0, above, 8, 0, left, 8, 0, 0, ref);
+    CHECK(ok);
+}
+
+TEST_CASE("gpu block predictor 8x8 angle delta d67-1 matches builder") {
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    const unsigned char above[16] = {10, 20, 30, 100, 50, 60, 70, 80, 90, 40, 25, 66, 11, 72, 33, 58};
+    const unsigned char left[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+    unsigned char ref[64] = {0};
+    intra::buildIntraPredictors(ref, 8, intra::D67_PRED, -1, 8, 8, 7, above, 8, 8, left, 8, 0);
+    bool ok = runBlockPredict8x8(ctx, intra::D67_PRED, -1, above, 8, 8, left, 8, 0, 7, ref);
+    CHECK(ok);
+}
+
 TEST_CASE("builder applies edge filtering for d67 by default") {
     // golden: svt_av1_transform_two_d-style harness, build_intra_predictors
     // D67 4x4, corner 7, above {10,20,30,100,50,60,70,80} (n_top=4, n_tr=4),
