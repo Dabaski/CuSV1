@@ -442,6 +442,30 @@ TEST_CASE("gpu block predictor 8x8 angle delta d67-1 matches builder") {
     CHECK(ok);
 }
 
+TEST_CASE("gpu block predictor 8x8 h matches builder") {
+    // QW3 finding: predict_block_8x8's isDr range (m >= 1) wrongly captures
+    // H_PRED (m==2): the dr override (pAngle defaults to 90 -> needLeft=0)
+    // skipped the left fill, so H read zeroed shared memory. The 4x4 kernel
+    // and the host (kExtendModes + kModeToAngle[2]=180) are correct.
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const unsigned char left[8] = {14, 3, 8, 13, 17, 9, 19, 26};
+    unsigned char ref[64] = {0};
+    intra::buildIntraPredictors(ref, 8, intra::H_PRED, 0, 8, 8, 0, left, 0, 0, left, 8, 0);
+    bool okNoTop = runBlockPredict8x8(ctx, intra::H_PRED, 0, left, 0, 0, left, 8, 0, 0, ref);
+    CHECK(okNoTop);
+
+    const unsigned char above[16] = {31, 12, 77, 4, 50, 23, 68, 15, 9, 41, 27, 63, 11, 55, 38, 72};
+    for (int i = 0; i < 64; ++i) ref[i] = 0;
+    intra::buildIntraPredictors(ref, 8, intra::H_PRED, 0, 8, 8, 7, above, 8, 8, left, 8, 0);
+    bool okWithTop = runBlockPredict8x8(ctx, intra::H_PRED, 0, above, 8, 8, left, 8, 0, 7, ref);
+    CHECK(okWithTop);
+}
+
 TEST_CASE("gpu block predictor 8x8 d45 edge filtered matches builder") {
     // coverage fold-in from B6: filt_edge8 at strength 1 (delta=-45, d>=40)
     if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }

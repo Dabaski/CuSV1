@@ -1782,7 +1782,10 @@ extern "C" __global__ void predict_block_8x8(
     if (idx == 0) {
         int m = *mode;
         int needLeft = 0, needAbove = 0, needAboveLeft = 0, pAngle = 0;
-        int isDr = (m >= 1 && m <= 8) ? 1 : 0;
+        // dr range excludes H_PRED (m==2): it sits numerically inside 1..8 but
+        // is not directional (host: kModeToAngle[2] = 180 -> H reads leftCol);
+        // matches the 4x4 kernel and the host builder
+        int isDr = (m >= 3 && m <= 8) ? 1 : 0;
         if (m == 0) { needLeft = 1; needAbove = 1; }
         else if (m == 1) { needAbove = 1; }
         else if (m == 2) { needLeft = 1; }
