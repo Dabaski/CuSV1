@@ -847,6 +847,85 @@ TEST_CASE("quantize fp/b 8x8 and ADST proof match the QC1 gate vectors") {
     }
 }
 
+TEST_CASE("gpu quant_dequant_8x8 matches host quantizeFp8x8 (dct + adst)") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    const std::int16_t in8[64] = {12, 45, 3, 78, 22, 91, 6, 30,
+                                  67, 8, 54, 11, 39, 71, 17, 48,
+                                  2, 90, 25, 63, 7, 44, 85, 19,
+                                  51, 36, 9, 77, 28, 5, 60, 83,
+                                  15, 72, 41, 4, 88, 33, 26, 58,
+                                  80, 13, 66, 47, 1, 95, 38, 70,
+                                  24, 56, 10, 82, 31, 68, 14, 42,
+                                  75, 29, 87, 20, 53, 16, 79, 34};
+    std::int32_t cdct8[64];
+    transforms::fwdTxfm2d8x8(in8, cdct8, 8, transforms::TxType::DCT_DCT);
+    std::int32_t cadst8[64];
+    transforms::fwdTxfm2d8x8(in8, cadst8, 8, transforms::TxType::ADST_ADST);
+
+    transforms::QuantTables t;
+    transforms::buildQuantTables(100, t);
+    std::int16_t scan8[64];
+    transforms::defaultScan8x8(scan8);
+
+    const std::string ptx = *gpurt::compileToPtx(transforms::quantCuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "quant_dequant_8x8");
+    REQUIRE(it != names.end());
+    gpurt::Kernel k(ptx, *it);
+
+    gpurt::DeviceBuffer dCoeff(64 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dQuantFp(sizeof(t.quantFp));
+    gpurt::DeviceBuffer dDequant(sizeof(t.dequant));
+    gpurt::DeviceBuffer dRoundFp(sizeof(t.roundFp));
+    gpurt::DeviceBuffer dScan(sizeof(scan8));
+    gpurt::DeviceBuffer dQcoeff(64 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dDqcoeff(64 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dEob(sizeof(std::uint16_t));
+    dQuantFp.uploadFrom(t.quantFp, sizeof(t.quantFp));
+    dDequant.uploadFrom(t.dequant, sizeof(t.dequant));
+    dRoundFp.uploadFrom(t.roundFp, sizeof(t.roundFp));
+    dScan.uploadFrom(scan8, sizeof(scan8));
+
+    CUdeviceptr pCoeff = dCoeff.get();
+    CUdeviceptr pQuantFp = dQuantFp.get();
+    CUdeviceptr pDequant = dDequant.get();
+    CUdeviceptr pRoundFp = dRoundFp.get();
+    CUdeviceptr pScan = dScan.get();
+    CUdeviceptr pQcoeff = dQcoeff.get();
+    CUdeviceptr pDqcoeff = dDqcoeff.get();
+    CUdeviceptr pEob = dEob.get();
+    void* args[] = {&pCoeff, &pQuantFp, &pDequant, &pRoundFp, &pScan, &pQcoeff, &pDqcoeff, &pEob};
+
+    for (int pass = 0; pass < 2; ++pass) {
+        const std::int32_t* fix = pass == 0 ? cdct8 : cadst8;
+        dCoeff.uploadFrom(fix, 64 * sizeof(std::int32_t));
+        std::int32_t refQc[64] = {0};
+        std::int32_t refDq[64] = {0};
+        std::uint16_t refEob = 0;
+        transforms::quantizeFp8x8(fix, t, scan8, refQc, refDq, &refEob);
+
+        k.launch(1, 1, 64, 1, args);
+
+        std::int32_t gotQc[64] = {0};
+        std::int32_t gotDq[64] = {0};
+        std::uint16_t gotEob = 0;
+        dQcoeff.downloadTo(gotQc, sizeof(gotQc));
+        dDqcoeff.downloadTo(gotDq, sizeof(gotDq));
+        dEob.downloadTo(&gotEob, sizeof(gotEob));
+        bool ok = true;
+        for (int i = 0; i < 64; ++i) {
+            if (gotQc[i] != refQc[i] || gotDq[i] != refDq[i]) ok = false;
+        }
+        if (gotEob != refEob) ok = false;
+        CHECK(ok);
+    }
+}
+
 TEST_CASE("gpu quant_dequant_4x4 matches host quantizeFp4x4 (q0 + q100)") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");

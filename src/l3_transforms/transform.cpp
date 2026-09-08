@@ -1517,6 +1517,45 @@ extern "C" __global__ void quant_dequant_4x4(const int* coeff, const short* quan
         *eob = (unsigned short)(m + 1);
     }
 }
+
+// TX_8X8 entry: same helper at n_coeffs=64, log_scale 0
+// (av1_get_tx_scale_tab[TX_8X8] = 0); 64 threads, thread t = scan position t.
+extern "C" __global__ void quant_dequant_8x8(const int* coeff, const short* quantFp,
+                                             const short* dequant, const short* roundFp,
+                                             const short* scan, int* qcoeff, int* dqcoeff,
+                                             unsigned short* eob) {
+    __shared__ int eobPos[64];
+    const int t = threadIdx.x;
+    const int rc = scan[t];
+    qcoeff[rc] = 0;
+    dqcoeff[rc] = 0;
+    const int thresh = dequant[rc != 0];
+    const int coeffVal = coeff[rc];
+    const int coeffSign = coeffVal < 0 ? -1 : 0;
+    int absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+    int tmp32 = 0;
+    if ((absCoeff << 1) >= thresh) {
+        long long clamped = absCoeff + roundFp[rc != 0];
+        if (clamped < -32768) clamped = -32768;
+        if (clamped > 32767) clamped = 32767;
+        absCoeff = (int)clamped;
+        tmp32 = (int)((absCoeff * quantFp[rc != 0]) >> 16);
+        if (tmp32) {
+            qcoeff[rc] = (tmp32 ^ coeffSign) - coeffSign;
+            const int absDq = (int)(((long long)tmp32 * dequant[rc != 0]) >> 0);
+            dqcoeff[rc] = (absDq ^ coeffSign) - coeffSign;
+        }
+    }
+    eobPos[t] = tmp32 ? t : -1;
+    __syncthreads();
+    if (t == 0) {
+        int m = -1;
+        for (int i = 0; i < 64; ++i) {
+            if (eobPos[i] > m) m = eobPos[i];
+        }
+        *eob = (unsigned short)(m + 1);
+    }
+}
 )CUDA";
 }
 
