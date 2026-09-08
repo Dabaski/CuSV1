@@ -376,6 +376,10 @@ void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int
 // Q2: D3 loop with the FP quantizer wired at a fixed qindex
 // (quantize_fp_helper_c at log_scale 0). qcoeff = coded coeffs; dqcoeff
 // feeds the inverse, so recon carries real quantization loss.
+// SCAN POLICY IS OURS: this run uses the fixed default scan (defaultScan4x4,
+// the svt_aom_init_iscan up-right diagonal) for every block; SVT selects the
+// scan per mode/tx type via get_scan_order (coefficients.h:40). Fixing the
+// scan is a scope decision, attributed to no one else.
 void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                          std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType) {
     const int gridW = src.width() / 4;

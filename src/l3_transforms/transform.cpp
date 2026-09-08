@@ -148,7 +148,7 @@ void iadst4(const std::int32_t input[4], std::int32_t output[4]) {
 
 // svt_av1_idct8_new (inv_transforms.c:136), cos_bit = 12 (INV_COS_BIT).
 // stage_range: {16,...} shim confirmed exact by gen_inv_range_8x8_dct gate
-// line (B1) ??? all 6 stages clamp at bit 16 for bd=8.
+// line (B1) — all 6 stages clamp at bit 16 for bd=8.
 void idct8(const std::int32_t input[8], std::int32_t output[8]) {
     const int8_t cosBit = 12;
     const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
@@ -207,9 +207,9 @@ void idct8(const std::int32_t input[8], std::int32_t output[8]) {
 }
 
 // svt_av1_iadst8_new (inv_transforms.c:822), cos_bit = 12 (INV_COS_BIT).
-// Unlike iadst4, iadst8 HAS clamp_value at stages 3 and 5 ??? mirrored exactly.
+// Unlike iadst4, iadst8 HAS clamp_value at stages 3 and 5 — mirrored exactly.
 // stage_range: {16,...} shim confirmed exact by gen_inv_range_8x8_adst gate
-// line (B1) ??? all 8 stages clamp at bit 16 for bd=8.
+// line (B1) — all 8 stages clamp at bit 16 for bd=8.
 void iadst8(const std::int32_t input[8], std::int32_t output[8]) {
     const int8_t cosBit = 12;
     const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
@@ -1409,7 +1409,10 @@ void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const st
 
         const std::int32_t wt = (1 << 5);
         if (absCoeff * wt >= (zbins[rc != 0] << 5)) {
-            std::int64_t tmp = absCoeff + roundShift(tables.round[rc != 0], 0);
+            // full_loop.c:67: ROUND_POWER_OF_TWO(round_ptr[rc != 0], 0) is the
+            // identity at log_scale 0 (roundShift(x, 0) would shift by 1<<-1,
+            // UB) — add the round value directly
+            std::int64_t tmp = absCoeff + tables.round[rc != 0];
             if (tmp < -32768) tmp = -32768;
             if (tmp > 32767) tmp = 32767;
             tmp *= wt;
