@@ -23,6 +23,7 @@ $files = @{
     "filterintra_c.c"    = (Get-Content (Join-Path $src "C_DEFAULT\filterintra_c.c") -Raw)
     "intra_prediction_c.c" = (Get-Content (Join-Path $src "C_DEFAULT\intra_prediction_c.c") -Raw)
     "compute_sad_c.c"    = (Get-Content (Join-Path $src "C_DEFAULT\compute_sad_c.c") -Raw)
+    "full_loop.c"        = (Get-Content (Join-Path $src "Codec\full_loop.c") -Raw)
     "definitions.h"      = (Get-Content (Join-Path $src "Codec\definitions.h") -Raw)
 }
 # normalize line endings to LF so multi-line patterns match regardless of
@@ -202,6 +203,23 @@ Emit-Verbatim "filterintra_c.c" "void svt_av1_filter_intra_predictor_c" "svt_av1
 
 # ---- SAD ----
 Emit-Verbatim "compute_sad_c.c" "uint32_t NOINLINE svt_nxm_sad_kernel_helper_c" "svt_nxm_sad_kernel_helper_c"
+
+# ---- quantizer (Q0) ----
+Emit-Macro "definitions.h" "typedef int32_t TranLow" "TranLow"
+Emit-Macro "definitions.h" "typedef uint8_t QmVal" "QmVal"
+Emit-Verbatim "definitions.h" "static INLINE int32_t clamp" "clamp"
+Emit-Macro "definitions.h" "#define MINQ" "MINQ"
+Emit-Macro "definitions.h" "#define MAXQ" "MAXQ"
+Emit-Macro "definitions.h" "#define QINDEX_RANGE" "QINDEX_RANGE"
+Emit-Macro "inv_transforms.h" "#define AOM_QM_BITS" "AOM_QM_BITS"
+Emit-Verbatim "inv_transforms.c" "static const int16_t ac_qlookup_QTX" "ac_qlookup_QTX"
+Emit-Verbatim "inv_transforms.c" "static const int16_t dc_qlookup_QTX" "dc_qlookup_QTX"
+Emit-Verbatim "inv_transforms.c" "int16_t svt_aom_dc_quant_qtx" "svt_aom_dc_quant_qtx"
+Emit-Verbatim "inv_transforms.c" "int16_t svt_aom_ac_quant_qtx" "svt_aom_ac_quant_qtx"
+Emit-Verbatim "inv_transforms.c" "int32_t svt_aom_get_qzbin_factor" "svt_aom_get_qzbin_factor"
+Emit-Verbatim "inv_transforms.c" "void svt_aom_invert_quant" "svt_aom_invert_quant"
+Emit-Verbatim "full_loop.c" "void svt_aom_quantize_b_c" "svt_aom_quantize_b_c"
+Emit-Verbatim "full_loop.c" "static void quantize_fp_helper_c" "quantize_fp_helper_c"
 
 # ---- build_intra_predictors with the documented get_filt_type shim ----
 $r = Extract-Block $files["enc_intra_prediction.c"] "static void build_intra_predictors(const MacroBlockD* xd" "build_intra_predictors"

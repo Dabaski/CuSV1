@@ -47,6 +47,18 @@ static inline int svtd_clip(int v, int lo, int hi) { return v < lo ? lo : (v > h
 // TranHigh - inv_transforms.h:263
 typedef int64_t TranHigh;
 
+// EbBitDepth - API/EbSvtAv1Formats.h:101. The API header is outside the
+// extractor's Source/Lib scope; the full enumerator list is required because
+// svt_aom_get_qzbin_factor's switch (inv_transforms.c:3501) references
+// EB_TEN_BIT/EB_TWELVE_BIT unconditionally (only EB_EIGHT_BIT is exercised).
+typedef enum {
+    EB_EIGHT_BIT     = 8,
+    EB_TEN_BIT       = 10,
+    EB_TWELVE_BIT    = 12,
+    EB_SIXTEEN_BIT   = 16,  // Not supported
+    EB_THIRTYTWO_BIT = 32,  // Not supported
+} EbBitDepth;
+
 // TxSize: the generator exercises TX_4X4 (=0) and TX_8X8 (=1) from SVT's
 // TxSize enum.
 typedef enum { TX_4X4 = 0, TX_8X8 = 1 } TxSize;

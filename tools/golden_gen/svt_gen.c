@@ -1579,6 +1579,249 @@ uint32_t NOINLINE svt_nxm_sad_kernel_helper_c(const uint8_t* src, // input param
     return sad;
 }
 
+// ==== SVT-AV1 definitions.h :986 - TranLow (verbatim extract; do not edit) ====
+typedef int32_t TranLow;
+
+// ==== SVT-AV1 definitions.h :987 - QmVal (verbatim extract; do not edit) ====
+typedef uint8_t QmVal;
+
+// ==== SVT-AV1 definitions.h :687 - clamp (verbatim extract; do not edit) ====
+static INLINE int32_t clamp(int32_t value, int32_t low, int32_t high) {
+    return value < low ? low : (value > high ? high : value);
+}
+
+// ==== SVT-AV1 definitions.h :1641 - MINQ (verbatim extract; do not edit) ====
+#define MINQ 0
+
+// ==== SVT-AV1 definitions.h :1642 - MAXQ (verbatim extract; do not edit) ====
+#define MAXQ 255
+
+// ==== SVT-AV1 definitions.h :1643 - QINDEX_RANGE (verbatim extract; do not edit) ====
+#define QINDEX_RANGE (MAXQ - MINQ + 1)
+
+// ==== SVT-AV1 inv_transforms.h :27 - AOM_QM_BITS (verbatim extract; do not edit) ====
+#define AOM_QM_BITS 5
+
+// ==== SVT-AV1 inv_transforms.c :3357 - ac_qlookup_QTX (verbatim extract; do not edit) ====
+static const int16_t ac_qlookup_QTX[QINDEX_RANGE] = {
+    4,    8,    9,    10,   11,   12,   13,   14,   15,   16,   17,   18,   19,   20,   21,   22,   23,   24,   25,
+    26,   27,   28,   29,   30,   31,   32,   33,   34,   35,   36,   37,   38,   39,   40,   41,   42,   43,   44,
+    45,   46,   47,   48,   49,   50,   51,   52,   53,   54,   55,   56,   57,   58,   59,   60,   61,   62,   63,
+    64,   65,   66,   67,   68,   69,   70,   71,   72,   73,   74,   75,   76,   77,   78,   79,   80,   81,   82,
+    83,   84,   85,   86,   87,   88,   89,   90,   91,   92,   93,   94,   95,   96,   97,   98,   99,   100,  101,
+    102,  104,  106,  108,  110,  112,  114,  116,  118,  120,  122,  124,  126,  128,  130,  132,  134,  136,  138,
+    140,  142,  144,  146,  148,  150,  152,  155,  158,  161,  164,  167,  170,  173,  176,  179,  182,  185,  188,
+    191,  194,  197,  200,  203,  207,  211,  215,  219,  223,  227,  231,  235,  239,  243,  247,  251,  255,  260,
+    265,  270,  275,  280,  285,  290,  295,  300,  305,  311,  317,  323,  329,  335,  341,  347,  353,  359,  366,
+    373,  380,  387,  394,  401,  408,  416,  424,  432,  440,  448,  456,  465,  474,  483,  492,  501,  510,  520,
+    530,  540,  550,  560,  571,  582,  593,  604,  615,  627,  639,  651,  663,  676,  689,  702,  715,  729,  743,
+    757,  771,  786,  801,  816,  832,  848,  864,  881,  898,  915,  933,  951,  969,  988,  1007, 1026, 1046, 1066,
+    1087, 1108, 1129, 1151, 1173, 1196, 1219, 1243, 1267, 1292, 1317, 1343, 1369, 1396, 1423, 1451, 1479, 1508, 1537,
+    1567, 1597, 1628, 1660, 1692, 1725, 1759, 1793, 1828,
+};
+
+// ==== SVT-AV1 inv_transforms.c :3412 - dc_qlookup_QTX (verbatim extract; do not edit) ====
+static const int16_t dc_qlookup_QTX[QINDEX_RANGE] = {
+    4,   8,   8,   9,   10,  11,  12,  12,  13,   14,   15,   16,   17,   18,   19,   19,   20,  21,  22,  23,
+    24,  25,  26,  26,  27,  28,  29,  30,  31,   32,   32,   33,   34,   35,   36,   37,   38,  38,  39,  40,
+    41,  42,  43,  43,  44,  45,  46,  47,  48,   48,   49,   50,   51,   52,   53,   53,   54,  55,  56,  57,
+    57,  58,  59,  60,  61,  62,  62,  63,  64,   65,   66,   66,   67,   68,   69,   70,   70,  71,  72,  73,
+    74,  74,  75,  76,  77,  78,  78,  79,  80,   81,   81,   82,   83,   84,   85,   85,   87,  88,  90,  92,
+    93,  95,  96,  98,  99,  101, 102, 104, 105,  107,  108,  110,  111,  113,  114,  116,  117, 118, 120, 121,
+    123, 125, 127, 129, 131, 134, 136, 138, 140,  142,  144,  146,  148,  150,  152,  154,  156, 158, 161, 164,
+    166, 169, 172, 174, 177, 180, 182, 185, 187,  190,  192,  195,  199,  202,  205,  208,  211, 214, 217, 220,
+    223, 226, 230, 233, 237, 240, 243, 247, 250,  253,  257,  261,  265,  269,  272,  276,  280, 284, 288, 292,
+    296, 300, 304, 309, 313, 317, 322, 326, 330,  335,  340,  344,  349,  354,  359,  364,  369, 374, 379, 384,
+    389, 395, 400, 406, 411, 417, 423, 429, 435,  441,  447,  454,  461,  467,  475,  482,  489, 497, 505, 513,
+    522, 530, 539, 549, 559, 569, 579, 590, 602,  614,  626,  640,  654,  668,  684,  700,  717, 736, 755, 775,
+    796, 819, 843, 869, 896, 925, 955, 988, 1022, 1058, 1098, 1139, 1184, 1232, 1282, 1336,
+};
+
+// ==== SVT-AV1 inv_transforms.c :3467 - svt_aom_dc_quant_qtx (verbatim extract; do not edit) ====
+int16_t svt_aom_dc_quant_qtx(int qindex, int delta, EbBitDepth bit_depth) {
+    const int q_clamped = clamp(qindex + delta, 0, MAXQ);
+    switch (bit_depth) {
+    case EB_EIGHT_BIT:
+        return dc_qlookup_QTX[q_clamped];
+#if CONFIG_ENABLE_HIGH_BIT_DEPTH
+    case EB_TEN_BIT:
+        return dc_qlookup_10_QTX[q_clamped];
+    case EB_TWELVE_BIT:
+        return dc_qlookup_12_QTX[q_clamped];
+#endif
+    default:
+        assert(0 && "bit_depth should be EB_EIGHT_BIT, EB_TEN_BIT or EB_TWELVE_BIT");
+        return -1;
+    }
+}
+
+// ==== SVT-AV1 inv_transforms.c :3484 - svt_aom_ac_quant_qtx (verbatim extract; do not edit) ====
+int16_t svt_aom_ac_quant_qtx(int qindex, int delta, EbBitDepth bit_depth) {
+    const int q_clamped = clamp(qindex + delta, 0, MAXQ);
+    switch (bit_depth) {
+    case EB_EIGHT_BIT:
+        return ac_qlookup_QTX[q_clamped];
+#if CONFIG_ENABLE_HIGH_BIT_DEPTH
+    case EB_TEN_BIT:
+        return ac_qlookup_10_QTX[q_clamped];
+    case EB_TWELVE_BIT:
+        return ac_qlookup_12_QTX[q_clamped];
+#endif
+    default:
+        assert(0 && "bit_depth should be EB_EIGHT_BIT, EB_TEN_BIT or EB_TWELVE_BIT");
+        return -1;
+    }
+}
+
+// ==== SVT-AV1 inv_transforms.c :3501 - svt_aom_get_qzbin_factor (verbatim extract; do not edit) ====
+int32_t svt_aom_get_qzbin_factor(int32_t q, EbBitDepth bit_depth) {
+    const int32_t quant = svt_aom_dc_quant_qtx(q, 0, bit_depth);
+    switch (bit_depth) {
+    case EB_EIGHT_BIT:
+        return q == 0 ? 64 : (quant < 148 ? 84 : 80);
+    case EB_TEN_BIT:
+        return q == 0 ? 64 : (quant < 592 ? 84 : 80);
+    case EB_TWELVE_BIT:
+        return q == 0 ? 64 : (quant < 2368 ? 84 : 80);
+    default:
+        assert(0 && "bit_depth should be EB_EIGHT_BIT, EB_TEN_BIT or EB_TWELVE_BIT");
+        return -1;
+    }
+}
+
+// ==== SVT-AV1 inv_transforms.c :3516 - svt_aom_invert_quant (verbatim extract; do not edit) ====
+void svt_aom_invert_quant(int16_t* quant, int16_t* shift, int32_t d) {
+    uint32_t t;
+    int32_t  l, m;
+    t = d;
+    for (l = 0; t > 1; l++) {
+        t >>= 1;
+    }
+    m      = 1 + (1 << (16 + l)) / d;
+    *quant = (int16_t)(m - (1 << 16));
+    *shift = 1 << (16 - l);
+}
+
+// ==== SVT-AV1 full_loop.c :31 - svt_aom_quantize_b_c (verbatim extract; do not edit) ====
+void svt_aom_quantize_b_c(const TranLow* coeff_ptr, intptr_t n_coeffs, const int16_t* zbin_ptr,
+                          const int16_t* round_ptr, const int16_t* quant_ptr, const int16_t* quant_shift_ptr,
+                          TranLow* qcoeff_ptr, TranLow* dqcoeff_ptr, const int16_t* dequant_ptr, uint16_t* eob_ptr,
+                          const int16_t* scan, const int16_t* iscan, const QmVal* qm_ptr, const QmVal* iqm_ptr,
+                          const int32_t log_scale) {
+    const int32_t zbins[2]  = {ROUND_POWER_OF_TWO(zbin_ptr[0], log_scale), ROUND_POWER_OF_TWO(zbin_ptr[1], log_scale)};
+    const int32_t nzbins[2] = {zbins[0] * -1, zbins[1] * -1};
+    intptr_t      non_zero_count = n_coeffs, eob = -1;
+    (void)iscan;
+
+    memset(qcoeff_ptr, 0, n_coeffs * sizeof(*qcoeff_ptr));
+    memset(dqcoeff_ptr, 0, n_coeffs * sizeof(*dqcoeff_ptr));
+
+    // Pre-scan pass
+    for (intptr_t i = n_coeffs - 1; i >= 0; i--) {
+        const int32_t rc    = scan[i];
+        const QmVal   wt    = qm_ptr != NULL ? qm_ptr[rc] : (1 << AOM_QM_BITS);
+        const int32_t coeff = coeff_ptr[rc] * wt;
+
+        if (coeff < (zbins[rc != 0] * (1 << AOM_QM_BITS)) && coeff > (nzbins[rc != 0] * (1 << AOM_QM_BITS))) {
+            non_zero_count--;
+        } else {
+            break;
+        }
+    }
+
+    // Quantization pass: All coefficients with index >= zero_flag are
+    // skippable. Note: zero_flag can be zero.
+    for (intptr_t i = 0; i < non_zero_count; i++) {
+        const int32_t rc         = scan[i];
+        const int32_t coeff      = coeff_ptr[rc];
+        const int     coeff_sign = coeff < 0 ? -1 : 0;
+        const int32_t abs_coeff  = (coeff ^ coeff_sign) - coeff_sign;
+
+        const QmVal wt = qm_ptr != NULL ? qm_ptr[rc] : (1 << AOM_QM_BITS);
+        if (abs_coeff * wt >= (zbins[rc != 0] << AOM_QM_BITS)) {
+            int64_t tmp = clamp(abs_coeff + ROUND_POWER_OF_TWO(round_ptr[rc != 0], log_scale), INT16_MIN, INT16_MAX);
+            tmp *= wt;
+            int32_t tmp32         = (int32_t)(((((tmp * quant_ptr[rc != 0]) >> 16) + tmp) * quant_shift_ptr[rc != 0]) >>
+                                      (16 - log_scale + AOM_QM_BITS)); // quantization
+            qcoeff_ptr[rc]        = (tmp32 ^ coeff_sign) - coeff_sign;
+            const int32_t iwt     = iqm_ptr != NULL ? iqm_ptr[rc] : (1 << AOM_QM_BITS);
+            const int32_t dequant = (dequant_ptr[rc != 0] * iwt + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS;
+            const TranLow abs_dqcoeff = (tmp32 * dequant) >> log_scale;
+            dqcoeff_ptr[rc]           = (TranLow)((abs_dqcoeff ^ coeff_sign) - coeff_sign);
+
+            if (tmp32) {
+                eob = i;
+            }
+        }
+    }
+    *eob_ptr = (uint16_t)(eob + 1);
+}
+
+// ==== SVT-AV1 full_loop.c :222 - quantize_fp_helper_c (verbatim extract; do not edit) ====
+static void quantize_fp_helper_c(const TranLow* coeff_ptr, intptr_t n_coeffs, const int16_t* zbin_ptr,
+                                 const int16_t* round_ptr, const int16_t* quant_ptr, const int16_t* quant_shift_ptr,
+                                 TranLow* qcoeff_ptr, TranLow* dqcoeff_ptr, const int16_t* dequant_ptr,
+                                 uint16_t* eob_ptr, const int16_t* scan, const int16_t* iscan, const QmVal* qm_ptr,
+                                 const QmVal* iqm_ptr, int log_scale) {
+    int       i, eob = -1;
+    const int rounding[2] = {ROUND_POWER_OF_TWO(round_ptr[0], log_scale), ROUND_POWER_OF_TWO(round_ptr[1], log_scale)};
+    (void)zbin_ptr;
+    (void)quant_shift_ptr;
+    (void)iscan;
+
+    memset(qcoeff_ptr, 0, n_coeffs * sizeof(*qcoeff_ptr));
+    memset(dqcoeff_ptr, 0, n_coeffs * sizeof(*dqcoeff_ptr));
+
+    if (qm_ptr == NULL && iqm_ptr == NULL) {
+        for (i = 0; i < n_coeffs; i++) {
+            const int     rc         = scan[i];
+            const int32_t thresh     = (int32_t)(dequant_ptr[rc != 0]);
+            const int     coeff      = coeff_ptr[rc];
+            const int     coeff_sign = coeff < 0 ? -1 : 0;
+            int64_t       abs_coeff  = (coeff ^ coeff_sign) - coeff_sign;
+            int           tmp32      = 0;
+            if ((abs_coeff << (1 + log_scale)) >= thresh) {
+                abs_coeff = clamp64(abs_coeff + rounding[rc != 0], INT16_MIN, INT16_MAX);
+                tmp32     = (int)((abs_coeff * quant_ptr[rc != 0]) >> (16 - log_scale));
+                if (tmp32) {
+                    qcoeff_ptr[rc]            = (tmp32 ^ coeff_sign) - coeff_sign;
+                    const TranLow abs_dqcoeff = (tmp32 * dequant_ptr[rc != 0]) >> log_scale;
+                    dqcoeff_ptr[rc]           = (abs_dqcoeff ^ coeff_sign) - coeff_sign;
+                }
+            }
+            if (tmp32) {
+                eob = i;
+            }
+        }
+    } else {
+        // Quantization pass: All coefficients with index >= zero_flag are
+        // skippable. Note: zero_flag can be zero.
+        for (i = 0; i < n_coeffs; i++) {
+            const int   rc         = scan[i];
+            const int   coeff      = coeff_ptr[rc];
+            const QmVal wt         = qm_ptr ? qm_ptr[rc] : (1 << AOM_QM_BITS);
+            const QmVal iwt        = iqm_ptr ? iqm_ptr[rc] : (1 << AOM_QM_BITS);
+            const int   dequant    = (dequant_ptr[rc != 0] * iwt + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS;
+            const int   coeff_sign = coeff < 0 ? -1 : 0;
+            int64_t     abs_coeff  = (coeff ^ coeff_sign) - coeff_sign;
+            int         tmp32      = 0;
+            if (abs_coeff * wt >= (dequant_ptr[rc != 0] << (AOM_QM_BITS - (1 + log_scale)))) {
+                abs_coeff += rounding[rc != 0];
+                abs_coeff      = clamp64(abs_coeff, INT16_MIN, INT16_MAX);
+                tmp32          = (int)((abs_coeff * wt * quant_ptr[rc != 0]) >> (16 - log_scale + AOM_QM_BITS));
+                qcoeff_ptr[rc] = (tmp32 ^ coeff_sign) - coeff_sign;
+                const TranLow abs_dqcoeff = (tmp32 * dequant) >> log_scale;
+                dqcoeff_ptr[rc]           = (abs_dqcoeff ^ coeff_sign) - coeff_sign;
+            }
+
+            if (tmp32) {
+                eob = i;
+            }
+        }
+    }
+    *eob_ptr = eob + 1;
+}
+
 // ==== SVT-AV1 enc_intra_prediction.c :40 - build_intra_predictors (verbatim EXCEPT the flagged get_filt_type shim) ====
 static void build_intra_predictors(const MacroBlockD* xd, uint8_t* top_neigh_array, uint8_t* left_neigh_array,
                                    // const uint8_t *ref,    int32_t ref_stride,

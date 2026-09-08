@@ -371,5 +371,51 @@ int main(void) {
         for (int i = 0; i < 64; ++i) printf(" %d", coeffs[i]);
         printf("\n");
     }
+    // ---- Q0: quantizer gate lines ----
+    {
+        // default scan 4x4 (coefficients.c:345-363 formula)
+        int16_t scan[16];
+        svtd_default_scan_4x4(scan);
+        printf("qscan4:"); for (int i = 0; i < 16; ++i) printf(" %d", scan[i]); printf("\n");
+
+        // luma quantizer tables at qindex 0, 1, 100, 200, 255
+        const int qs[5] = {0, 1, 100, 200, 255};
+        for (int qi = 0; qi < 5; ++qi) {
+            SvtdQuantTables t;
+            svtd_build_quantizer_luma(qs[qi], &t);
+            printf("qtab_q%d:", qs[qi]);
+            for (int i = 0; i < 2; ++i) printf(" %d", t.quant[i]);
+            for (int i = 0; i < 2; ++i) printf(" %d", t.quant_shift[i]);
+            for (int i = 0; i < 2; ++i) printf(" %d", t.quant_fp[i]);
+            for (int i = 0; i < 2; ++i) printf(" %d", t.round_fp[i]);
+            for (int i = 0; i < 2; ++i) printf(" %d", t.zbin[i]);
+            for (int i = 0; i < 2; ++i) printf(" %d", t.round[i]);
+            for (int i = 0; i < 2; ++i) printf(" %d", t.dequant[i]);
+            printf("\n");
+        }
+
+        // quantize fixture = d3_coeffs block 0 (the first 16 values of the
+        // D3 frame golden above; real fwd-txfm output incl. -3784 DC and
+        // sub-threshold ACs)
+        const TranLow fix[16] = {-3784, 78, 4, 54, -17, 18, 102, -68, 56, 3, 36, 120, -18, 23, 6, -22};
+        for (int qi = 0; qi < 5; ++qi) {
+            SvtdQuantTables t;
+            svtd_build_quantizer_luma(qs[qi], &t);
+            TranLow qc[16], dq[16];
+            uint16_t eob = 0;
+            svtd_quantize_fp_4x4(fix, &t, scan, qc, dq, &eob);
+            printf("qfp_q%d:", qs[qi]);
+            for (int i = 0; i < 16; ++i) printf(" %d", qc[i]);
+            printf(" |");
+            for (int i = 0; i < 16; ++i) printf(" %d", dq[i]);
+            printf(" | %u\n", eob);
+            svtd_quantize_b_4x4(fix, &t, scan, qc, dq, &eob);
+            printf("qb_q%d:", qs[qi]);
+            for (int i = 0; i < 16; ++i) printf(" %d", qc[i]);
+            printf(" |");
+            for (int i = 0; i < 16; ++i) printf(" %d", dq[i]);
+            printf(" | %u\n", eob);
+        }
+    }
     return 0;
 }
