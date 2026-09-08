@@ -476,6 +476,42 @@ static void svtd_frame_auto_4x4_q(const uint8_t* src, uint8_t* recon, int32_t* c
     }
 }
 
+// Default (up-right diagonal) scan for 8x8, same svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=8.
+static void svtd_default_scan_8x8(int16_t* scan) {
+    const int W = 8, H = 8;  // tx_size_wide/high[TX_8X8]
+    int idx = 0;
+    for (int d = 0; d < W + H - 1; ++d) {
+        const int rlo  = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
+        const int rhi  = d < (H - 1) ? d : (H - 1);
+        int       incr = (H > W) ? 1 : (W > H) ? 0 : (d & 1);
+        if (incr) {
+            for (int r = rlo; r <= rhi; ++r) {
+                scan[idx++] = (int16_t)(r * W + (d - r));
+            }
+        } else {
+            for (int r = rhi; r >= rlo; --r) {
+                scan[idx++] = (int16_t)(r * W + (d - r));
+            }
+        }
+    }
+}
+
+// TX_8X8 FP quantize entry: quantize_fp_helper_c at n_coeffs=64, log_scale 0
+// (log_scale = av1_get_tx_scale_tab[TX_8X8] = 0, full_loop.c:22 + :1617).
+static void svtd_quantize_fp_8x8(const TranLow* coeff, const SvtdQuantTables* t, const int16_t* scan,
+                                 TranLow* qcoeff, TranLow* dqcoeff, uint16_t* eob) {
+    quantize_fp_helper_c(coeff, 64, t->zbin, t->round_fp, t->quant_fp, t->quant_shift, qcoeff,
+                         dqcoeff, t->dequant, eob, scan, NULL, NULL, NULL, 0);
+}
+
+// TX_8X8 B quantize entry: svt_aom_quantize_b_c verbatim at log_scale 0.
+static void svtd_quantize_b_8x8(const TranLow* coeff, const SvtdQuantTables* t, const int16_t* scan,
+                                TranLow* qcoeff, TranLow* dqcoeff, uint16_t* eob) {
+    svt_aom_quantize_b_c(coeff, 64, t->zbin, t->round, t->quant, t->quant_shift, qcoeff, dqcoeff,
+                         t->dequant, eob, scan, NULL, NULL, NULL, 0);
+}
+
 // ---- gen_inv_stage_range 8x8 gate line -------------------------------------
 // Mirrors svt_av1_gen_inv_stage_range (inv_transforms.c:44) for TX_8X8 at
 // bd=8, DCT_DCT and ADST_ADST, to settle the stage_range shim. Prints the

@@ -437,5 +437,84 @@ int main(void) {
         for (int i = 0; i < 64; ++i) printf(" %d", coeffs[i]);
         printf("\n");
     }
+    // ---- QC1: 8x8 quantization + ADST-proof gate lines ----
+    {
+        // default scan 8x8 (coefficients.c:345-363 formula at W=H=8)
+        int16_t scan8[64];
+        svtd_default_scan_8x8(scan8);
+        printf("qscan8:"); for (int i = 0; i < 64; ++i) printf(" %d", scan8[i]); printf("\n");
+
+        SvtdQuantTables t100, t0;
+        svtd_build_quantizer_luma(100, &t100);
+        svtd_build_quantizer_luma(0, &t0);
+
+        // 8x8 DCT fixture = the fwd2d8_dct output (recomputed for provenance)
+        const int16_t in8[64] = {12, 45, 3, 78, 22, 91, 6, 30,
+                                 67, 8, 54, 11, 39, 71, 17, 48,
+                                 2, 90, 25, 63, 7, 44, 85, 19,
+                                 51, 36, 9, 77, 28, 5, 60, 83,
+                                 15, 72, 41, 4, 88, 33, 26, 58,
+                                 80, 13, 66, 47, 1, 95, 38, 70,
+                                 24, 56, 10, 82, 31, 68, 14, 42,
+                                 75, 29, 87, 20, 53, 16, 79, 34};
+        int32_t cdct8[64];
+        svtd_fwd2d8x8(in8, 8, cdct8, svt_av1_fdct8_new);
+        TranLow qc[64], dq[64];
+        uint16_t eob = 0;
+        svtd_quantize_fp_8x8(cdct8, &t100, scan8, qc, dq, &eob);
+        printf("q8fp_q100:");
+        for (int i = 0; i < 64; ++i) printf(" %d", qc[i]);
+        printf(" |");
+        for (int i = 0; i < 64; ++i) printf(" %d", dq[i]);
+        printf(" | %u\n", eob);
+        svtd_quantize_b_8x8(cdct8, &t100, scan8, qc, dq, &eob);
+        printf("q8b_q100:");
+        for (int i = 0; i < 64; ++i) printf(" %d", qc[i]);
+        printf(" |");
+        for (int i = 0; i < 64; ++i) printf(" %d", dq[i]);
+        printf(" | %u\n", eob);
+        svtd_quantize_fp_8x8(cdct8, &t0, scan8, qc, dq, &eob);
+        printf("q8fp_q0:");
+        for (int i = 0; i < 64; ++i) printf(" %d", qc[i]);
+        printf(" |");
+        for (int i = 0; i < 64; ++i) printf(" %d", dq[i]);
+        printf(" | %u\n", eob);
+
+        // ADST proof: the fp/b helpers are TxType-agnostic; bind ADST-produced
+        // coeff vectors at both geometries through the same verbatim helper
+        {
+            const int16_t in[16] = {9, 2, 3, 1, 5, 6, 7, 8, 8, 7, 6, 5, 4, 3, 9, 1};
+            int32_t cadst[16];
+            svtd_fwd2d4x4(in, 4, cadst, svt_av1_fadst4_new);
+            int16_t scan4[16];
+            svtd_default_scan_4x4(scan4);
+            TranLow qc4[16], dq4[16];
+            uint16_t eob4 = 0;
+            svtd_quantize_fp_4x4(cadst, &t100, scan4, qc4, dq4, &eob4);
+            printf("qadst4fp_q100:");
+            for (int i = 0; i < 16; ++i) printf(" %d", qc4[i]);
+            printf(" |");
+            for (int i = 0; i < 16; ++i) printf(" %d", dq4[i]);
+            printf(" | %u\n", eob4);
+            svtd_quantize_b_4x4(cadst, &t100, scan4, qc4, dq4, &eob4);
+            printf("qadst4b_q100:");
+            for (int i = 0; i < 16; ++i) printf(" %d", qc4[i]);
+            printf(" |");
+            for (int i = 0; i < 16; ++i) printf(" %d", dq4[i]);
+            printf(" | %u\n", eob4);
+        }
+        {
+            int32_t cadst8[64];
+            svtd_fwd2d8x8(in8, 8, cadst8, svt_av1_fadst8_new);
+            TranLow qc8[64], dq8[64];
+            uint16_t eob8 = 0;
+            svtd_quantize_fp_8x8(cadst8, &t100, scan8, qc8, dq8, &eob8);
+            printf("qadst8fp_q100:");
+            for (int i = 0; i < 64; ++i) printf(" %d", qc8[i]);
+            printf(" |");
+            for (int i = 0; i < 64; ++i) printf(" %d", dq8[i]);
+            printf(" | %u\n", eob8);
+        }
+    }
     return 0;
 }
