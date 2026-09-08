@@ -41,6 +41,9 @@ void encodeRecon4x4(const pixels::Plane& plane, int px, int py, const std::uint8
 void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                          intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
 
+void encodeFrameRecon8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                         intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
+
 // D3 frame-level mode decision: raster 4x4 loop, each block's mode chosen by
 // decideBlockMode4x4 against RECONSTRUCTED neighbor edges (M1 availability),
 // winner encoded via encodeRecon4x4; chosen modes recorded per block and fed
@@ -68,6 +71,17 @@ ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* abo
                                 int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
                                 int nBottomLeftPx, std::uint8_t aboveLeft,
                                 const intra::NeighborContext& neighbors = intra::NeighborContext());
+
+// D3 policy generalized to 8x8 blocks: decideBlockMode8x8 scores all 13
+// candidates with motion::sad8x8 (bit-exact with svt_nxm_sad_kernel_helper_c
+// at 8x8); same tie-break = lowest mode index. Policy is ours.
+ModeDecision decideBlockMode8x8(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                                int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                int nBottomLeftPx, std::uint8_t aboveLeft,
+                                const intra::NeighborContext& neighbors = intra::NeighborContext());
+
+void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                        std::uint8_t* modes, transforms::TxType txType);
 
 std::string subtractCuSource();
 

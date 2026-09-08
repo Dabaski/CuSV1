@@ -145,7 +145,7 @@ int main(void) {
             svtd_call_builder_tx(dst, DC_PRED, 0, FILTER_INTRA_MODES, 0, dummy, 0, 0, dummy, 0, 0, 0, TX_8X8);
             printf("b5_dc128_8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
         }
-        // (c) D67 at TX_8X8 — upsample path (blk_wh=16, delta=67-90=-23, 0<d<40)
+        // (b5-c) D67 at TX_8X8 — upsample path (blk_wh=16, delta=67-90=-23, 0<d<40)
         {
             const uint8_t above[16] = {10, 20, 30, 100, 50, 60, 70, 80, 90, 40, 25, 66, 11, 72, 33, 58};
             const uint8_t left[8] = {9, 9, 9, 9, 9, 9, 9, 9};
@@ -153,7 +153,7 @@ int main(void) {
             svtd_call_builder_tx(dst, D67_PRED, 0, FILTER_INTRA_MODES, 0, above, 8, 8, left, 8, 0, 7, TX_8X8);
             printf("b5_d67_8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
         }
-        // (d) FILTER_V_PRED at TX_8X8 — two-column strip case (bw=8, strips at c=1,5)
+        // (b5-d) FILTER_V_PRED at TX_8X8 — two-column strip case (bw=8, strips at c=1,5)
         {
             const uint8_t above[9] = {10, 20, 30, 40, 50, 60, 70, 80, 90};
             const uint8_t left[8] = {21, 31, 41, 51, 61, 71, 81, 91};
@@ -161,6 +161,49 @@ int main(void) {
             svtd_call_builder_tx(dst, V_PRED, 0, FILTER_V_PRED /* 1 */, 0, above + 1, 8, 0, left, 8, 0, 10, TX_8X8);
             printf("b5_fiv8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
         }
+        // (b5-e) D45 at TX_8X8 — edge-filtered (delta=-45, |d|>=40 → strength 1)
+        {
+            const uint8_t above[16] = {10, 20, 30, 40, 50, 60, 70, 80, 90, 15, 25, 35, 45, 55, 65, 75};
+            const uint8_t left[8] = {12, 22, 32, 42, 52, 62, 72, 82};
+            uint8_t dst[64] = {0};
+            svtd_call_builder_tx(dst, D45_PRED, 0, FILTER_INTRA_MODES, 0, above, 8, 8, left, 8, 0, 5, TX_8X8);
+            printf("b5_d45ef_8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
+        }
+    }
+
+    // ---- B7: 8x8 frame-policy composition (2x2 blocks of 8x8, 16x16 frame) ----
+    {
+        const uint8_t src[256] = {
+            21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18,
+            15,  4, 25,  2, 12,  9, 30,  3, 10, 16,  6, 12,  3, 25, 11,  9,
+            18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
+            22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
+             9, 11,  3,  7,  5, 23,  1, 17, 15,  4, 25,  2, 12,  9, 30,  3,
+            10, 16,  6, 12,  3, 25, 11,  9, 18,  5,  7, 13, 14,  2, 20,  8,
+             6, 24,  3,  9, 11, 17,  5, 19, 22,  1,  8, 15,  4, 29,  7, 13,
+            16, 28, 12, 20,  2, 31,  9, 26, 21,  3,  5,  9, 19,  2,  8, 14,
+             7, 13,  5,  1, 25,  4,  6, 18, 15,  4, 25,  2, 12,  9, 30,  3,
+            10, 16,  6, 12,  3, 25, 11,  9, 18,  5,  7, 13, 14,  2, 20,  8,
+             6, 24,  3,  9, 11, 17,  5, 19, 22,  1,  8, 15,  4, 29,  7, 13,
+            16, 28, 12, 20,  2, 31,  9, 26,  9, 11,  3,  7,  5, 23,  1, 17,
+            15,  4, 25,  2, 12,  9, 30,  3, 10, 16,  6, 12,  3, 25, 11,  9,
+            18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
+            22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
+            21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18,
+        };
+        uint8_t recon[256];
+        int32_t coeffs[4 * 64];
+        int modes[4] = {0, 0, 0, 0};
+        svtd_frame_auto_8x8_blocks(src, recon, coeffs, modes);
+        printf("b7_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
+        printf("\n");
+        printf("b7_recon:");
+        for (int i = 0; i < 256; ++i) printf(" %d", recon[i]);
+        printf("\n");
+        printf("b7_coeffs:");
+        for (int i = 0; i < 4 * 64; ++i) printf(" %d", coeffs[i]);
+        printf("\n");
     }
 
     // ---- inverse 2D add cores ----

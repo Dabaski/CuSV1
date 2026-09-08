@@ -442,6 +442,18 @@ TEST_CASE("gpu block predictor 8x8 angle delta d67-1 matches builder") {
     CHECK(ok);
 }
 
+TEST_CASE("gpu block predictor 8x8 d45 edge filtered matches builder") {
+    // coverage fold-in from B6: filt_edge8 at strength 1 (delta=-45, d>=40)
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    const unsigned char above[16] = {10, 20, 30, 40, 50, 60, 70, 80, 90, 15, 25, 35, 45, 55, 65, 75};
+    const unsigned char left[8] = {12, 22, 32, 42, 52, 62, 72, 82};
+    unsigned char ref[64] = {0};
+    intra::buildIntraPredictors(ref, 8, intra::D45_PRED, 0, 8, 8, 5, above, 8, 8, left, 8, 0);
+    bool ok = runBlockPredict8x8(ctx, intra::D45_PRED, 0, above, 8, 8, left, 8, 0, 5, ref);
+    CHECK(ok);
+}
+
 TEST_CASE("builder applies edge filtering for d67 by default") {
     // golden: svt_av1_transform_two_d-style harness, build_intra_predictors
     // D67 4x4, corner 7, above {10,20,30,100,50,60,70,80} (n_top=4, n_tr=4),
