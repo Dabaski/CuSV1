@@ -1478,6 +1478,158 @@ TEST_CASE("gpu inv_txfm_2d_add_8x8 matches host invTxfm2dAdd8x8 (dct + adst)") {
     CHECK(adstOk);
 }
 
+TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
+    // golden: golden_gen qw8_modes/qw8_recon/qw8_coeffs at qindex 100 —
+    // B7 policy loop (8x8 blocks) with the FP quantizer wired in
+    // (svtd_quantize_fp_8x8, n_coeffs=64/log_scale 0): qcoeff = coded coeffs,
+    // dqcoeff feeds svtd_inv2dadd8x8. Loss feeds back through decisions:
+    // qw8_modes 1 0 2 0 vs lossless b7_modes 1 5 6 0.
+    // SCAN POLICY IS OURS: fixed defaultScan8x8 for every block; SVT selects
+    // per mode/tx type via get_scan_order (coefficients.h:40).
+    const std::uint8_t srcData[256] = {
+        21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18,
+        15,  4, 25,  2, 12,  9, 30,  3, 10, 16,  6, 12,  3, 25, 11,  9,
+        18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
+        22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
+         9, 11,  3,  7,  5, 23,  1, 17, 15,  4, 25,  2, 12,  9, 30,  3,
+        10, 16,  6, 12,  3, 25, 11,  9, 18,  5,  7, 13, 14,  2, 20,  8,
+         6, 24,  3,  9, 11, 17,  5, 19, 22,  1,  8, 15,  4, 29,  7, 13,
+        16, 28, 12, 20,  2, 31,  9, 26, 21,  3,  5,  9, 19,  2,  8, 14,
+         7, 13,  5,  1, 25,  4,  6, 18, 15,  4, 25,  2, 12,  9, 30,  3,
+        10, 16,  6, 12,  3, 25, 11,  9, 18,  5,  7, 13, 14,  2, 20,  8,
+         6, 24,  3,  9, 11, 17,  5, 19, 22,  1,  8, 15,  4, 29,  7, 13,
+        16, 28, 12, 20,  2, 31,  9, 26,  9, 11,  3,  7,  5, 23,  1, 17,
+        15,  4, 25,  2, 12,  9, 30,  3, 10, 16,  6, 12,  3, 25, 11,  9,
+        18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
+        22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
+        21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18};
+    const std::uint8_t goldenModes[4] = {1, 0, 2, 0};
+    const std::uint8_t goldenRecon[256] = {
+        19, 1, 9, 8, 18, 0, 6, 18, 13, 14, 10, 0, 21, 9, 7, 15,
+        17, 7, 22, 4, 10, 10, 26, 7, 12, 19, 5, 14, 0, 23, 14, 9,
+        19, 6, 5, 8, 13, 7, 15, 9, 10, 26, 0, 8, 13, 17, 5, 17,
+        29, 0, 11, 17, 0, 31, 5, 15, 18, 25, 14, 18, 3, 35, 13, 18,
+        12, 12, 0, 5, 3, 23, 0, 13, 23, 2, 24, 5, 14, 5, 36, 3,
+        11, 20, 12, 4, 2, 29, 10, 10, 20, 4, 8, 8, 18, 0, 21, 8,
+        11, 25, 4, 12, 13, 15, 10, 18, 24, 10, 16, 15, 9, 25, 11, 19,
+        18, 25, 17, 23, 5, 30, 16, 22, 16, 6, 0, 7, 18, 0, 6, 13,
+        13, 14, 10, 0, 21, 9, 6, 15, 18, 5, 20, 2, 9, 7, 30, 2,
+        11, 18, 4, 14, 0, 22, 13, 9, 19, 4, 2, 12, 14, 0, 15, 10,
+        9, 25, 0, 8, 12, 17, 4, 16, 27, 3, 19, 19, 0, 31, 11, 17,
+        17, 24, 13, 17, 2, 35, 12, 18, 16, 7, 5, 9, 3, 22, 0, 17,
+        22, 1, 23, 4, 14, 4, 36, 2, 14, 11, 5, 14, 0, 24, 6, 11,
+        20, 3, 8, 7, 18, 0, 21, 8, 10, 22, 1, 5, 14, 13, 7, 14,
+        24, 9, 16, 15, 9, 25, 11, 19, 14, 28, 11, 17, 0, 40, 6, 20,
+        16, 6, 0, 6, 18, 0, 6, 13, 13, 8, 5, 0, 24, 1, 2, 15};
+    const std::int32_t goldenCoeffs[256] = {
+        -79, 0, 1, 1, 0, 0, 1, -1, -1, 0, 0, 0, 1, 1, 0, 2,
+        1, 0, 0, -1, 0, 0, -1, 1, -1, 0, 0, 0, 0, -1, 0, 0,
+        0, 0, 0, 0, 1, 0, 1, -1, 0, 0, 0, 0, 1, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 1, -1, -1, 0,
+        -1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
+        -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2,
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
+        -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+        -4, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
+        -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2,
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
+        -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+        1, 0, 1, 1, 0, 0, 1, -1, 0, 0, 0, 0, 0, 2, 0, 1,
+        0, 0, 0, 0, 0, 0, -1, 2, 0, 0, 0, 0, -1, 0, -1, 0,
+        -1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 0, 1, -1,
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 1, 1, -1};
+
+    pixels::Plane plane(16, 16, 4);
+    pixels::Plane recon(16, 16, 4);
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x) plane.at(x, y) = srcData[y * 16 + x];
+
+    std::int32_t coeffs[256] = {0};
+    std::uint8_t modes[4] = {0};
+    pipeline::encodeFrameAuto8x8Q(plane, recon, coeffs, modes, 100,
+                                  transforms::TxType::DCT_DCT);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+
+    bool reconOk = true;
+    for (int i = 0; i < 256; ++i) {
+        if (recon.at(i & 15, i >> 4) != goldenRecon[i]) reconOk = false;
+    }
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 256; ++i) {
+        if (coeffs[i] != goldenCoeffs[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
+}
+
+TEST_CASE("frame recon 8x8 with quantization matches the QW1 golden block 0") {
+    // golden: golden_gen qw8_coeffs/qw8_recon block 0 at qindex 100. Block 0
+    // has no neighbors, so the Auto winner (V, qw8_modes[0] = 1) and a forced
+    // V_PRED encode must produce identical coeffs + recon for it — this
+    // pins encodeFrameRecon8x8Q's quantized path to the generator.
+    const std::uint8_t srcData[256] = {
+        21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18,
+        15,  4, 25,  2, 12,  9, 30,  3, 10, 16,  6, 12,  3, 25, 11,  9,
+        18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
+        22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
+         9, 11,  3,  7,  5, 23,  1, 17, 15,  4, 25,  2, 12,  9, 30,  3,
+        10, 16,  6, 12,  3, 25, 11,  9, 18,  5,  7, 13, 14,  2, 20,  8,
+         6, 24,  3,  9, 11, 17,  5, 19, 22,  1,  8, 15,  4, 29,  7, 13,
+        16, 28, 12, 20,  2, 31,  9, 26, 21,  3,  5,  9, 19,  2,  8, 14,
+         7, 13,  5,  1, 25,  4,  6, 18, 15,  4, 25,  2, 12,  9, 30,  3,
+        10, 16,  6, 12,  3, 25, 11,  9, 18,  5,  7, 13, 14,  2, 20,  8,
+         6, 24,  3,  9, 11, 17,  5, 19, 22,  1,  8, 15,  4, 29,  7, 13,
+        16, 28, 12, 20,  2, 31,  9, 26,  9, 11,  3,  7,  5, 23,  1, 17,
+        15,  4, 25,  2, 12,  9, 30,  3, 10, 16,  6, 12,  3, 25, 11,  9,
+        18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
+        22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
+        21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18};
+    const std::int32_t goldenBlock0Coeffs[64] = {
+        -79, 0, 1, 1, 0, 0, 1, -1,
+        -1, 0, 0, 0, 1, 1, 0, 2,
+        1, 0, 0, -1, 0, 0, -1, 1,
+        -1, 0, 0, 0, 0, -1, 0, 0,
+        0, 0, 0, 0, 1, 0, 1, -1,
+        0, 0, 0, 0, 1, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        -1, 0, 0, 0, 1, -1, -1, 0};
+    const std::uint8_t goldenBlock0Recon[64] = {
+        19, 1, 9, 8, 18, 0, 6, 18,
+        17, 7, 22, 4, 10, 10, 26, 7,
+        19, 6, 5, 8, 13, 7, 15, 9,
+        29, 0, 11, 17, 0, 31, 5, 15,
+        12, 12, 0, 5, 3, 23, 0, 13,
+        11, 20, 12, 4, 2, 29, 10, 10,
+        11, 25, 4, 12, 13, 15, 10, 18,
+        18, 25, 17, 23, 5, 30, 16, 22};
+
+    pixels::Plane plane(16, 16, 4);
+    pixels::Plane recon(16, 16, 4);
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x) plane.at(x, y) = srcData[y * 16 + x];
+
+    std::int32_t coeffs[256] = {0};
+    pipeline::encodeFrameRecon8x8Q(plane, recon, coeffs, intra::V_PRED, 0, 100,
+                                   transforms::TxType::DCT_DCT);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 64; ++i) {
+        if (coeffs[i] != goldenBlock0Coeffs[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
+
+    bool reconOk = true;
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            if (recon.at(x, y) != goldenBlock0Recon[y * 8 + x]) reconOk = false;
+    CHECK(reconOk);
+}
 TEST_CASE("gpu frame auto 8x8 matches host encodeFrameAuto8x8 (host decides, gpu executes)") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");

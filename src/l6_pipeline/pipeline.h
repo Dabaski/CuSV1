@@ -58,6 +58,20 @@ void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int
 void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                          std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
 
+// QW2: 8x8 round trip with the FP quantizer wired at a fixed qindex
+// (quantize_fp_helper_c at n_coeffs=64, log_scale 0 per
+// av1_get_tx_scale_tab[TX_8X8] = 0). qcoeff = coded coeffs; dqcoeff feeds
+// invTxfm2dAdd8x8 onto the raw predictor.
+void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                          intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
+                          transforms::TxType txType);
+
+// QW2: D3 policy loop at 8x8 with the FP quantizer wired at a fixed qindex.
+// SCAN POLICY IS OURS: fixed defaultScan8x8 for every block (see
+// encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
+void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+
 // Sum of squared sample differences over the full frame (integer, exact).
 std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 
