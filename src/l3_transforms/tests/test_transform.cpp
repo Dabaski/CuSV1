@@ -700,6 +700,75 @@ TEST_CASE("quantize fp 4x4 matches the Q0 gate vectors across qindices") {
     }
 }
 
+TEST_CASE("gpu quant_dequant_4x4 matches host quantizeFp4x4 (q0 + q100)") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    // fixture = d3_coeffs block 0 (golden_gen d3_coeffs, first 16 values)
+    const std::int32_t fix[16] = {-3784, 78, 4, 54, -17, 18, 102, -68, 56, 3, 36, 120, -18, 23, 6, -22};
+    const int qs[2] = {0, 100};
+
+    const std::string ptx = *gpurt::compileToPtx(transforms::quantCuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "quant_dequant_4x4");
+    REQUIRE(it != names.end());
+    gpurt::Kernel k(ptx, *it);
+
+    std::int16_t scan[16];
+    transforms::defaultScan4x4(scan);
+    gpurt::DeviceBuffer dCoeff(sizeof(fix));
+    gpurt::DeviceBuffer dQuantFp(sizeof(std::int16_t) * 2);
+    gpurt::DeviceBuffer dDequant(sizeof(std::int16_t) * 2);
+    gpurt::DeviceBuffer dRoundFp(sizeof(std::int16_t) * 2);
+    gpurt::DeviceBuffer dScan(sizeof(scan));
+    gpurt::DeviceBuffer dQcoeff(sizeof(fix));
+    gpurt::DeviceBuffer dDqcoeff(sizeof(fix));
+    gpurt::DeviceBuffer dEob(sizeof(std::uint16_t));
+    dCoeff.uploadFrom(fix, sizeof(fix));
+    dScan.uploadFrom(scan, sizeof(scan));
+
+    CUdeviceptr pCoeff = dCoeff.get();
+    CUdeviceptr pQuantFp = dQuantFp.get();
+    CUdeviceptr pDequant = dDequant.get();
+    CUdeviceptr pRoundFp = dRoundFp.get();
+    CUdeviceptr pScan = dScan.get();
+    CUdeviceptr pQcoeff = dQcoeff.get();
+    CUdeviceptr pDqcoeff = dDqcoeff.get();
+    CUdeviceptr pEob = dEob.get();
+    void* args[] = {&pCoeff, &pQuantFp, &pDequant, &pRoundFp, &pScan, &pQcoeff, &pDqcoeff, &pEob};
+
+    for (int qi = 0; qi < 2; ++qi) {
+        transforms::QuantTables t;
+        transforms::buildQuantTables(qs[qi], t);
+        dQuantFp.uploadFrom(t.quantFp, sizeof(t.quantFp));
+        dDequant.uploadFrom(t.dequant, sizeof(t.dequant));
+        dRoundFp.uploadFrom(t.roundFp, sizeof(t.roundFp));
+
+        std::int32_t refQc[16] = {0};
+        std::int32_t refDq[16] = {0};
+        std::uint16_t refEob = 0;
+        transforms::quantizeFp4x4(fix, t, scan, refQc, refDq, &refEob);
+
+        k.launch(1, 1, 16, 1, args);
+
+        std::int32_t gotQc[16] = {0};
+        std::int32_t gotDq[16] = {0};
+        std::uint16_t gotEob = 0;
+        dQcoeff.downloadTo(gotQc, sizeof(gotQc));
+        dDqcoeff.downloadTo(gotDq, sizeof(gotDq));
+        dEob.downloadTo(&gotEob, sizeof(gotEob));
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) {
+            if (gotQc[i] != refQc[i] || gotDq[i] != refDq[i]) ok = false;
+        }
+        if (gotEob != refEob) ok = false;
+        CHECK(ok);
+    }
+}
+
 TEST_CASE("quantize b 4x4 matches the Q0 gate vectors across qindices") {
     // golden: golden_gen qb_q{0,1,100,200,255} - the b path differs from fp at
     // q1/q100 (zbin pre-scan + quant_shift division vs fp rounding): e.g. at

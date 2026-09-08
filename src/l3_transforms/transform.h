@@ -77,4 +77,6 @@ void quantizeFp4x4(const std::int32_t* coeff, const QuantTables& tables, const s
 void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
 
+std::string quantCuSource();
+
 }  // namespace transforms

@@ -1431,5 +1431,49 @@ void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const st
     *eob = static_cast<std::uint16_t>(eobVal + 1);
 }
 
+std::string quantCuSource() {
+    return R"CUDA(
+// quantize_fp_helper_c (full_loop.c:222) at log_scale 0, qm/iqm NULL branch;
+// 16 threads, thread t handles scan position t (rc = scan[t] covers all 16
+// raster positions exactly once). eob = highest nonzero scan position + 1.
+extern "C" __global__ void quant_dequant_4x4(const int* coeff, const short* quantFp,
+                                             const short* dequant, const short* roundFp,
+                                             const short* scan, int* qcoeff, int* dqcoeff,
+                                             unsigned short* eob) {
+    __shared__ int eobPos[16];
+    const int t = threadIdx.x;
+    const int rc = scan[t];
+    qcoeff[rc] = 0;
+    dqcoeff[rc] = 0;
+    const int thresh = dequant[rc != 0];
+    const int coeffVal = coeff[rc];
+    const int coeffSign = coeffVal < 0 ? -1 : 0;
+    int absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+    int tmp32 = 0;
+    if ((absCoeff << 1) >= thresh) {
+        long long clamped = absCoeff + roundFp[rc != 0];
+        if (clamped < -32768) clamped = -32768;
+        if (clamped > 32767) clamped = 32767;
+        absCoeff = (int)clamped;
+        tmp32 = (int)((absCoeff * quantFp[rc != 0]) >> 16);
+        if (tmp32) {
+            qcoeff[rc] = (tmp32 ^ coeffSign) - coeffSign;
+            const int absDq = (int)(((long long)tmp32 * dequant[rc != 0]) >> 0);
+            dqcoeff[rc] = (absDq ^ coeffSign) - coeffSign;
+        }
+    }
+    eobPos[t] = tmp32 ? t : -1;
+    __syncthreads();
+    if (t == 0) {
+        int m = -1;
+        for (int i = 0; i < 16; ++i) {
+            if (eobPos[i] > m) m = eobPos[i];
+        }
+        *eob = (unsigned short)(m + 1);
+    }
+}
+)CUDA";
+}
+
 }  // namespace transforms
 
