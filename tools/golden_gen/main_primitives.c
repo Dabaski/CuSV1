@@ -359,6 +359,117 @@ int main(void) {
 
     fprintf(stderr, "CK: b16 done\n"); fflush(stderr);
 
+    // ---- B32: 32x32 builder goldens (TX_32X32 column, L6) ----
+    // upsample dead at 32x32 (blk_wh = 64 > 16); corner blend LIVE (64 >= 24);
+    // zone-1 filter nPx = 65; sm_w32 row
+    {
+        uint8_t above64[64];
+        uint8_t left64[64];
+        for (int i = 0; i < 64; ++i) {
+            above64[i] = (uint8_t)((11 + 7 * i) % 251);
+            left64[i] = (uint8_t)((5 + 11 * i) % 251);
+        }
+        uint8_t dst[1024];
+        svtd_call_builder_tx(dst, V_PRED, 0, FILTER_INTRA_MODES, 0, above64, 32, 0, above64, 0, 0, 0, TX_32X32);
+        printf("b32_v:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, DC_PRED, 0, FILTER_INTRA_MODES, 0, above64, 32, 0, left64, 32, 0, 7, TX_32X32);
+        printf("b32_dc:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, DC_PRED, 0, FILTER_INTRA_MODES, 0, above64, 0, 0, left64, 0, 0, 0, TX_32X32);
+        printf("b32_dc128:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, D45_PRED, 0, FILTER_INTRA_MODES, 0, above64, 32, 32, left64, 32, 0, 7, TX_32X32);
+        printf("b32_d45:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, D135_PRED, 0, FILTER_INTRA_MODES, 0, above64, 32, 0, left64, 32, 0, 7, TX_32X32);
+        printf("b32_d135:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, D203_PRED, 0, FILTER_INTRA_MODES, 0, above64, 32, 0, left64, 32, 0, 7, TX_32X32);
+        printf("b32_d203:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, SMOOTH_PRED, 0, FILTER_INTRA_MODES, 0, above64, 32, 0, left64, 32, 0, 7, TX_32X32);
+        printf("b32_sm:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, PAETH_PRED, 0, FILTER_INTRA_MODES, 0, above64, 32, 0, left64, 32, 0, 7, TX_32X32);
+        printf("b32_paeth:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, V_PRED, 0, FILTER_V_PRED /* 1 */, 0, above64 + 1, 32, 0, left64, 32, 0, 10, TX_32X32);
+        printf("b32_fiv:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dst[i]);
+        printf("\n");
+    }
+
+    fprintf(stderr, "CK: b32 done\n"); fflush(stderr);
+
+    // ---- L6: 32x32 frame-policy gate lines (64x64, 2x2 of 32x32) ----
+    // rows 0-31 = ramp 2*(x+y+1) (max 2*63 = 126 < 255); rows 32-63 zero.
+    // block (bx=0, by=1) is the only nTr>0 block: above[j] = 2j+64 and D45
+    // zone-1 pred above[1+r+c] = 2*(r+c+33) = src[32+r][c] -> SAD 0 only with
+    // REAL TR.
+    {
+        uint8_t src[4096];
+        for (int y = 0; y < 64; ++y) {
+            for (int x = 0; x < 64; ++x) {
+                src[y * 64 + x] = (y < 32) ? (uint8_t)(2 * (x + y + 1)) : 0;
+            }
+        }
+        uint8_t recon[4096];
+        int32_t coeffs[4096];
+        int modes[4] = {0};
+        svtd_frame_auto_32x32_blocks(src, recon, coeffs, modes);
+        printf("f32_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
+        printf("\n");
+        printf("f32_recon:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", recon[i]);
+        printf("\n");
+        printf("f32_coeffs:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", coeffs[i]);
+        printf("\n");
+
+        uint8_t reconQ[4096];
+        int32_t coeffsQ[4096];
+        int modesQ[4] = {0};
+        svtd_frame_auto_32x32_q(src, reconQ, coeffsQ, modesQ, 100);
+        printf("f32q_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modesQ[i]);
+        printf("\n");
+        printf("f32q_coeffs:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", coeffsQ[i]);
+        printf("\n");
+
+        uint8_t reconV[4096];
+        int32_t coeffsV[4096];
+        svtd_frame_v_dct_32x32(src, reconV, coeffsV);
+        printf("f32v_recon:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", reconV[i]);
+        printf("\n");
+        printf("f32v_coeffs:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", coeffsV[i]);
+        printf("\n");
+
+        uint8_t reconVQ[4096];
+        int32_t coeffsVQ[4096];
+        svtd_frame_v_dct_32x32_q(src, reconVQ, coeffsVQ, 100);
+        printf("f32vq_recon:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", reconVQ[i]);
+        printf("\n");
+        printf("f32vq_coeffs:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", coeffsVQ[i]);
+        printf("\n");
+    }
+
+    fprintf(stderr, "CK: f32 done\n"); fflush(stderr);
+
     // ---- B5: 8x8 builder goldens ----
     {
         // (a) V_PRED full-neighbor at TX_8X8

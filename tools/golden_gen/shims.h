@@ -89,8 +89,8 @@ typedef void (*TxfmFunc)(const int32_t* input, int32_t* output, int8_t cos_bit,
 // PAETH_PRED + 1). Declared here because build_intra_predictors references
 // them; defined and populated in composition.c.
 typedef void (*SvtdPredFn)(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left);
-extern SvtdPredFn svtd_eb_pred[13][3];
-extern SvtdPredFn svtd_dc_pred[2][2][3];
+extern SvtdPredFn svtd_eb_pred[13][5];
+extern SvtdPredFn svtd_dc_pred[2][2][5];
 #define svt_aom_eb_pred svtd_eb_pred
 #define svt_aom_dc_pred svtd_dc_pred
 
