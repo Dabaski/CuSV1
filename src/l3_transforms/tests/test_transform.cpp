@@ -178,6 +178,41 @@ TEST_CASE("fadst16 matches svt_av1_fadst16_new golden full vector") {
     CHECK(ok);
 }
 
+TEST_CASE("idct16 matches svt_av1_idct16_new golden full vector") {
+    // golden: svt_av1_idct16_new @ cos_bit=12 (INV_COS_BIT), input
+    // {300,-120,75,200,-60,40,90,-15,55,-95,20,65,-40,85,-25,10}
+    // (gate line idct16); stage_range = opt_range 16 all stages
+    // (gen_inv_range_16x16_dct); idct16 clamps stages 3-7 only
+    const std::int32_t in[16] = {300, -120, 75, 200, -60, 40, 90, -15,
+                                 55, -95, 20, 65, -40, 85, -25, 10};
+    const std::int32_t golden[16] = {427, 201, 152, -56, 32, 128, -70, -76,
+                                     126, 366, 316, 600, 712, 40, 251, 243};
+    std::int32_t got[16] = {0};
+    transforms::idct16(in, got);
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("iadst16 matches svt_av1_iadst16_new golden full vector") {
+    // golden: svt_av1_iadst16_new @ cos_bit=12, same input (gate line iadst16);
+    // iadst16 clamps stages 3/5/7 only; NO all-zero early-out at 16 (unlike
+    // iadst4, inv_transforms.c:927-1130)
+    const std::int32_t in[16] = {300, -120, 75, 200, -60, 40, 90, -15,
+                                 55, -95, 20, 65, -40, 85, -25, 10};
+    const std::int32_t golden[16] = {193, 225, 250, 126, -43, 130, 7, -180,
+                                     -116, 178, 229, 480, 851, 188, 319, 335};
+    std::int32_t got[16] = {0};
+    transforms::iadst16(in, got);
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("fwdTxfm2d16x16 dct matches svt golden full 256") {
     // golden: svtd_fwd2d16x16 (av1_tranform_two_d_core_c @ TX_16X16, DCT_DCT;
     // fwd_shift_16x16 = {2,-2,0} transforms.c:124, cos_bit col 13 / row 12 =

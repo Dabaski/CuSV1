@@ -35,6 +35,15 @@ void idct8(const std::int32_t input[8], std::int32_t output[8]);
 
 void iadst8(const std::int32_t input[8], std::int32_t output[8]);
 
+// svt_av1_idct16_new (inv_transforms.c:215), cos_bit = 12 (INV_COS_BIT);
+// stage_range consumed at stages 3-7 only (clamp_value on the butterfly
+// adds), shim {16,...} proven by gen_inv_range_16x16_dct
+void idct16(const std::int32_t input[16], std::int32_t output[16]);
+
+// svt_av1_iadst16_new (inv_transforms.c:927), cos_bit = 12; stage_range
+// consumed at stages 3/5/7; no all-zero early-out at 16
+void iadst16(const std::int32_t input[16], std::int32_t output[16]);
+
 enum class TxType {
     DCT_DCT,
     ADST_ADST,
