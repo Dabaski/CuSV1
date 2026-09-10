@@ -917,6 +917,86 @@ static void svtd_frame_auto_16x16_q(const uint8_t* src, uint8_t* recon, int32_t*
     }
 }
 
+// ---- HK3: forced-mode 16x16 frame composition (closes the C7b gap) --------
+// Mirrors svtd_frame_v_dct_8x8 (F1 pattern) at TX_16X16: V_PRED forced + DCT,
+// 2x2 grid of 16x16 over the f16 fixture, M1 availability with the REAL recon
+// top-right gather. recon == source (the 16x16 fwd/inv roundtrip is exact);
+// the coeffs carry the pin (fwd of src minus the forced-mode prediction).
+static void svtd_frame_v_dct_16x16(const uint8_t* src, uint8_t* recon, int32_t* coeffs) {
+    const int fstride = 32;
+    const int gridW = 2, gridH = 2;
+    memset(recon, 0, 1024);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 16, py = by * 16;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? 16 : 0;
+            const int nLeft = hasLeft ? 16 : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? 16 : 0;
+            uint8_t above[33] = {0};
+            uint8_t left[33] = {0};
+            uint8_t al = 0;
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, 16, nTr);
+            if (hasLeft) for (int i = 0; i < 16; ++i) left[i] = recon[(py + i) * fstride + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
+            uint8_t pred[256];
+            svtd_call_builder_tx(pred, V_PRED, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left,
+                                 nLeft, 0, al, TX_16X16);
+            int16_t res[256];
+            for (int i = 0; i < 256; ++i)
+                res[i] = (int16_t)(src[(py + (i >> 4)) * fstride + px + (i & 15)] - pred[i]);
+            int32_t cb[256];
+            svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = cb[i];
+            svtd_inv2dadd16x16(cb, pred, 16, svt_av1_idct16_new);
+            for (int i = 0; i < 256; ++i)
+                recon[(py + (i >> 4)) * fstride + px + (i & 15)] = pred[i];
+        }
+    }
+}
+
+// Q variant: forced V_PRED + DCT + FP quantizer at a fixed qindex
+// (n_coeffs=256, log_scale 0); qcoeff = coded coeffs, dqcoeff feeds the
+// inverse, so recon carries real quantization loss.
+static void svtd_frame_v_dct_16x16_q(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int qindex) {
+    const int gridW = 2, gridH = 2;
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(qindex, &t);
+    int16_t scan16[256];
+    svtd_default_scan_16x16(scan16);
+    memset(recon, 0, 1024);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 16, py = by * 16;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? 16 : 0;
+            const int nLeft = hasLeft ? 16 : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? 16 : 0;
+            uint8_t above[33] = {0};
+            uint8_t left[33] = {0};
+            uint8_t al = 0;
+            if (hasTop) svtd_gather_above(above, recon, 32, px, py, 16, nTr);
+            if (hasLeft) for (int i = 0; i < 16; ++i) left[i] = recon[(py + i) * 32 + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * 32 + px - 1];
+            uint8_t pred[256];
+            svtd_call_builder_tx(pred, V_PRED, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left,
+                                 nLeft, 0, al, TX_16X16);
+            int16_t res[256];
+            for (int i = 0; i < 256; ++i)
+                res[i] = (int16_t)(src[(py + (i >> 4)) * 32 + px + (i & 15)] - pred[i]);
+            int32_t cb[256];
+            svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+            TranLow qc[256], dq[256];
+            uint16_t eob = 0;
+            svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
+            svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
+            for (int i = 0; i < 256; ++i)
+                recon[(py + (i >> 4)) * 32 + px + (i & 15)] = pred[i];
+        }
+    }
+}
+
 // ---- gen_inv_stage_range 8x8 gate line -------------------------------------
 // Mirrors svt_av1_gen_inv_stage_range (inv_transforms.c:44) for TX_8X8 at
 // bd=8, DCT_DCT and ADST_ADST, to settle the stage_range shim. Prints the

@@ -2992,3 +2992,77 @@ TEST_CASE("gpu frame auto 16x16 with quantization matches host encodeFrameAuto16
     }
     CHECK(coeffsOk);
 }
+TEST_CASE("frame recon 16x16 forced mode matches the f16v generator golden") {
+    // golden: golden_gen f16v_recon/f16v_coeffs (svtd_frame_v_dct_16x16,
+    // V_PRED forced + DCT over the f16 fixture) - closes the C7b gap
+    // (Recon16x16 had no gate pin). Discriminating: blocks 1-3 force V where
+    // the f16 auto winners were D203/H/H, so f16v_coeffs blk1..3 differ from
+    // f16_coeffs (e.g. blk1[0] 8193 vs 2849); block 0 matches f16 (auto
+    // winner was V, same no-edge 127-fill prediction). recon == source
+    // (exact 16x16 roundtrip).
+    const std::int32_t goldenHeads[4][8] = {
+        {-8063, -2344, 0, -257, 0, -90, 0, -44},
+        {8193, -2344, 0, -257, 0, -90, 0, -44},
+        {-12031, 2344, 0, 257, 0, 90, 0, 45},
+        {-20221, 2344, 0, 257, 0, 90, 0, 45}};
+
+    pixels::Plane plane(32, 32, 4);
+    pixels::Plane recon(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
+
+    std::int32_t coeffs[1024] = {0};
+    pipeline::encodeFrameRecon16x16(plane, recon, coeffs, intra::V_PRED, 0,
+                                    transforms::TxType::DCT_DCT);
+
+    bool reconOk = true;
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            if (recon.at(x, y) != plane.at(x, y)) reconOk = false;
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int b = 0; b < 4; ++b) {
+        for (int i = 0; i < 8; ++i) {
+            if (coeffs[b * 256 + i] != goldenHeads[b][i]) coeffsOk = false;
+        }
+    }
+    CHECK(coeffsOk);
+}
+
+TEST_CASE("frame recon 16x16 with quantization matches the f16vq generator golden") {
+    // golden: golden_gen f16vq_recon/f16vq_coeffs at qindex 100 (forced
+    // V_PRED, FP quantizer at n_coeffs=256/log_scale 0); recon carries real
+    // quantization loss (row 0 begins 5 8 12 17 ... vs source 4 8 12 16 ...).
+    const std::int32_t goldenHeads[4][8] = {
+        {-87, -21, 0, -2, 0, -1, 0, 0},
+        {88, -21, 0, -2, 0, -1, 0, 0},
+        {-128, 21, 0, 2, 0, 1, 0, 0},
+        {-216, 21, 0, 2, 0, 1, 0, 0}};
+
+    pixels::Plane plane(32, 32, 4);
+    pixels::Plane recon(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
+
+    std::int32_t coeffs[1024] = {0};
+    pipeline::encodeFrameRecon16x16Q(plane, recon, coeffs, intra::V_PRED, 0, 100,
+                                     transforms::TxType::DCT_DCT);
+
+bool reconHeadOk = true;
+    const std::uint8_t goldenReconRow0[8] = {5, 8, 12, 17, 21, 24, 28, 32};
+    for (int x = 0; x < 8; ++x) {
+        if (recon.at(x, 0) != goldenReconRow0[x]) reconHeadOk = false;
+    }
+    CHECK(reconHeadOk);
+
+    bool coeffsOk = true;
+    for (int b = 0; b < 4; ++b) {
+        for (int i = 0; i < 8; ++i) {
+            if (coeffs[b * 256 + i] != goldenHeads[b][i]) coeffsOk = false;
+        }
+    }
+    CHECK(coeffsOk);
+}

@@ -812,5 +812,35 @@ int main(void) {
         for (int i = 0; i < 1024; ++i) printf(" %d", coeffsQ[i]);
         printf("\n");
     }
+    // ---- HK3: forced-mode 16x16 frame gate lines (V_PRED + DCT, q100 Q) ----
+    // same f16 fixture (rows 0-15 ramp 4*(x+y+1), rows 16-31 zero); closes the
+    // C7b gap: encodeFrameRecon16x16 / encodeFrameRecon16x16Q get gate pins.
+    {
+        uint8_t src[1024];
+        for (int y = 0; y < 32; ++y) {
+            for (int x = 0; x < 32; ++x) {
+                src[y * 32 + x] = (y < 16) ? (uint8_t)(4 * (x + y + 1)) : 0;
+            }
+        }
+        uint8_t recon[1024];
+        int32_t coeffs[1024];
+        svtd_frame_v_dct_16x16(src, recon, coeffs);
+        printf("f16v_recon:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", recon[i]);
+        printf("\n");
+        printf("f16v_coeffs:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", coeffs[i]);
+        printf("\n");
+
+        uint8_t reconQ[1024];
+        int32_t coeffsQ[1024];
+        svtd_frame_v_dct_16x16_q(src, reconQ, coeffsQ, 100);
+        printf("f16vq_recon:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", reconQ[i]);
+        printf("\n");
+        printf("f16vq_coeffs:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", coeffsQ[i]);
+        printf("\n");
+    }
     return 0;
 }
