@@ -21,6 +21,12 @@ void fdct8(const std::int32_t input[8], std::int32_t output[8]);
 
 void fadst8(const std::int32_t input[8], std::int32_t output[8]);
 
+// svt_av1_fdct16_new (transforms.c:268), cos_bit = 13
+void fdct16(const std::int32_t input[16], std::int32_t output[16]);
+
+// svt_av1_fadst16_new (transforms.c:1714), cos_bit = 13
+void fadst16(const std::int32_t input[16], std::int32_t output[16]);
+
 void idct4(const std::int32_t input[4], std::int32_t output[4]);
 
 void iadst4(const std::int32_t input[4], std::int32_t output[4]);

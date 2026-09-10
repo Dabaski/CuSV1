@@ -147,6 +147,37 @@ TEST_CASE("fadst8 matches svt_av1_fadst8_new golden full vector") {
     CHECK(ok);
 }
 
+TEST_CASE("fdct16 matches svt_av1_fdct16_new golden full vector") {
+    // golden: svt_av1_fdct16_new @ cos_bit=13, input {200,80,-50,30,100,-20,60,10,
+    // -35,95,5,-70,45,25,-15,55} (gate line fdct16)
+    const std::int32_t in[16] = {200, 80, -50, 30, 100, -20, 60, 10,
+                                 -35, 95, 5, -70, 45, 25, -15, 55};
+    const std::int32_t golden[16] = {364, 248, 203, 88, 215, 130, 235, 303,
+                                     110, 41, 280, -304, -192, 51, 53, 36};
+    std::int32_t got[16] = {0};
+    transforms::fdct16(in, got);
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("fadst16 matches svt_av1_fadst16_new golden full vector") {
+    // golden: svt_av1_fadst16_new @ cos_bit=13, same input (gate line fadst16)
+    const std::int32_t in[16] = {200, 80, -50, 30, 100, -20, 60, 10,
+                                 -35, 95, 5, -70, 45, 25, -15, 55};
+    const std::int32_t golden[16] = {192, 142, 163, 22, 125, 39, 107, 307,
+                                     254, 126, 576, 124, -57, 72, 119, 148};
+    std::int32_t got[16] = {0};
+    transforms::fadst16(in, got);
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("fwdTxfm2d8x8 dct matches svt golden full 64") {
     // golden: svtd_fwd2d8x8 (av1_tranform_two_d_core_c @ TX_8X8, DCT_DCT)
     // gate line fwd2d8_dct, input = the 8x8 discriminating fixture

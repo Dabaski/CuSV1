@@ -427,6 +427,309 @@ void fadst8(const std::int32_t input[8], std::int32_t output[8]) {
     output[7] = step[0];
 }
 
+// svt_av1_fdct16_new (transforms.c:268-420), cos_bit = 13, stage_range unused
+void fdct16(const std::int32_t input[16], std::int32_t output[16]) {
+    const int8_t cosBit = 13;
+    std::int32_t bf0[16];
+    std::int32_t step[16];
+
+    // stage 1
+    bf0[0]  = input[0] + input[15];
+    bf0[1]  = input[1] + input[14];
+    bf0[2]  = input[2] + input[13];
+    bf0[3]  = input[3] + input[12];
+    bf0[4]  = input[4] + input[11];
+    bf0[5]  = input[5] + input[10];
+    bf0[6]  = input[6] + input[9];
+    bf0[7]  = input[7] + input[8];
+    bf0[8]  = -input[8] + input[7];
+    bf0[9]  = -input[9] + input[6];
+    bf0[10] = -input[10] + input[5];
+    bf0[11] = -input[11] + input[4];
+    bf0[12] = -input[12] + input[3];
+    bf0[13] = -input[13] + input[2];
+    bf0[14] = -input[14] + input[1];
+    bf0[15] = -input[15] + input[0];
+
+    // stage 2
+    step[0]  = bf0[0] + bf0[7];
+    step[1]  = bf0[1] + bf0[6];
+    step[2]  = bf0[2] + bf0[5];
+    step[3]  = bf0[3] + bf0[4];
+    step[4]  = -bf0[4] + bf0[3];
+    step[5]  = -bf0[5] + bf0[2];
+    step[6]  = -bf0[6] + bf0[1];
+    step[7]  = -bf0[7] + bf0[0];
+    step[8]  = bf0[8];
+    step[9]  = bf0[9];
+    step[10] = halfBtf(-kCospi13[32], bf0[10], kCospi13[32], bf0[13], cosBit);
+    step[11] = halfBtf(-kCospi13[32], bf0[11], kCospi13[32], bf0[12], cosBit);
+    step[12] = halfBtf(kCospi13[32], bf0[12], kCospi13[32], bf0[11], cosBit);
+    step[13] = halfBtf(kCospi13[32], bf0[13], kCospi13[32], bf0[10], cosBit);
+    step[14] = bf0[14];
+    step[15] = bf0[15];
+
+    // stage 3
+    bf0[0]  = step[0] + step[3];
+    bf0[1]  = step[1] + step[2];
+    bf0[2]  = -step[2] + step[1];
+    bf0[3]  = -step[3] + step[0];
+    bf0[4]  = step[4];
+    bf0[5]  = halfBtf(-kCospi13[32], step[5], kCospi13[32], step[6], cosBit);
+    bf0[6]  = halfBtf(kCospi13[32], step[6], kCospi13[32], step[5], cosBit);
+    bf0[7]  = step[7];
+    bf0[8]  = step[8] + step[11];
+    bf0[9]  = step[9] + step[10];
+    bf0[10] = -step[10] + step[9];
+    bf0[11] = -step[11] + step[8];
+    bf0[12] = -step[12] + step[15];
+    bf0[13] = -step[13] + step[14];
+    bf0[14] = step[14] + step[13];
+    bf0[15] = step[15] + step[12];
+
+    // stage 4
+    step[0]  = halfBtf(kCospi13[32], bf0[0], kCospi13[32], bf0[1], cosBit);
+    step[1]  = halfBtf(-kCospi13[32], bf0[1], kCospi13[32], bf0[0], cosBit);
+    step[2]  = halfBtf(kCospi13[48], bf0[2], kCospi13[16], bf0[3], cosBit);
+    step[3]  = halfBtf(kCospi13[48], bf0[3], -kCospi13[16], bf0[2], cosBit);
+    step[4]  = bf0[4] + bf0[5];
+    step[5]  = -bf0[5] + bf0[4];
+    step[6]  = -bf0[6] + bf0[7];
+    step[7]  = bf0[7] + bf0[6];
+    step[8]  = bf0[8];
+    step[9]  = halfBtf(-kCospi13[16], bf0[9], kCospi13[48], bf0[14], cosBit);
+    step[10] = halfBtf(-kCospi13[48], bf0[10], -kCospi13[16], bf0[13], cosBit);
+    step[11] = bf0[11];
+    step[12] = bf0[12];
+    step[13] = halfBtf(kCospi13[48], bf0[13], -kCospi13[16], bf0[10], cosBit);
+    step[14] = halfBtf(kCospi13[16], bf0[14], kCospi13[48], bf0[9], cosBit);
+    step[15] = bf0[15];
+
+    // stage 5
+    bf0[0]  = step[0];
+    bf0[1]  = step[1];
+    bf0[2]  = step[2];
+    bf0[3]  = step[3];
+    bf0[4]  = halfBtf(kCospi13[56], step[4], kCospi13[8], step[7], cosBit);
+    bf0[5]  = halfBtf(kCospi13[24], step[5], kCospi13[40], step[6], cosBit);
+    bf0[6]  = halfBtf(kCospi13[24], step[6], -kCospi13[40], step[5], cosBit);
+    bf0[7]  = halfBtf(kCospi13[56], step[7], -kCospi13[8], step[4], cosBit);
+    bf0[8]  = step[8] + step[9];
+    bf0[9]  = -step[9] + step[8];
+    bf0[10] = -step[10] + step[11];
+    bf0[11] = step[11] + step[10];
+    bf0[12] = step[12] + step[13];
+    bf0[13] = -step[13] + step[12];
+    bf0[14] = -step[14] + step[15];
+    bf0[15] = step[15] + step[14];
+
+    // stage 6
+    step[0]  = bf0[0];
+    step[1]  = bf0[1];
+    step[2]  = bf0[2];
+    step[3]  = bf0[3];
+    step[4]  = bf0[4];
+    step[5]  = bf0[5];
+    step[6]  = bf0[6];
+    step[7]  = bf0[7];
+    step[8]  = halfBtf(kCospi13[60], bf0[8], kCospi13[4], bf0[15], cosBit);
+    step[9]  = halfBtf(kCospi13[28], bf0[9], kCospi13[36], bf0[14], cosBit);
+    step[10] = halfBtf(kCospi13[44], bf0[10], kCospi13[20], bf0[13], cosBit);
+    step[11] = halfBtf(kCospi13[12], bf0[11], kCospi13[52], bf0[12], cosBit);
+    step[12] = halfBtf(kCospi13[12], bf0[12], -kCospi13[52], bf0[11], cosBit);
+    step[13] = halfBtf(kCospi13[44], bf0[13], -kCospi13[20], bf0[10], cosBit);
+    step[14] = halfBtf(kCospi13[28], bf0[14], -kCospi13[36], bf0[9], cosBit);
+    step[15] = halfBtf(kCospi13[60], bf0[15], -kCospi13[4], bf0[8], cosBit);
+
+    // stage 7
+    output[0]  = step[0];
+    output[1]  = step[8];
+    output[2]  = step[4];
+    output[3]  = step[12];
+    output[4]  = step[2];
+    output[5]  = step[10];
+    output[6]  = step[6];
+    output[7]  = step[14];
+    output[8]  = step[1];
+    output[9]  = step[9];
+    output[10] = step[5];
+    output[11] = step[13];
+    output[12] = step[3];
+    output[13] = step[11];
+    output[14] = step[7];
+    output[15] = step[15];
+}
+
+// svt_av1_fadst16_new (transforms.c:1714-1906), cos_bit = 13, stage_range
+// unused
+void fadst16(const std::int32_t input[16], std::int32_t output[16]) {
+    const int8_t cosBit = 13;
+    std::int32_t bf0[16];
+    std::int32_t step[16];
+
+    // stage 1
+    bf0[0]  = input[0];
+    bf0[1]  = -input[15];
+    bf0[2]  = -input[7];
+    bf0[3]  = input[8];
+    bf0[4]  = -input[3];
+    bf0[5]  = input[12];
+    bf0[6]  = input[4];
+    bf0[7]  = -input[11];
+    bf0[8]  = -input[1];
+    bf0[9]  = input[14];
+    bf0[10] = input[6];
+    bf0[11] = -input[9];
+    bf0[12] = input[2];
+    bf0[13] = -input[13];
+    bf0[14] = -input[5];
+    bf0[15] = input[10];
+
+    // stage 2
+    step[0]  = bf0[0];
+    step[1]  = bf0[1];
+    step[2]  = halfBtf(kCospi13[32], bf0[2], kCospi13[32], bf0[3], cosBit);
+    step[3]  = halfBtf(kCospi13[32], bf0[2], -kCospi13[32], bf0[3], cosBit);
+    step[4]  = bf0[4];
+    step[5]  = bf0[5];
+    step[6]  = halfBtf(kCospi13[32], bf0[6], kCospi13[32], bf0[7], cosBit);
+    step[7]  = halfBtf(kCospi13[32], bf0[6], -kCospi13[32], bf0[7], cosBit);
+    step[8]  = bf0[8];
+    step[9]  = bf0[9];
+    step[10] = halfBtf(kCospi13[32], bf0[10], kCospi13[32], bf0[11], cosBit);
+    step[11] = halfBtf(kCospi13[32], bf0[10], -kCospi13[32], bf0[11], cosBit);
+    step[12] = bf0[12];
+    step[13] = bf0[13];
+    step[14] = halfBtf(kCospi13[32], bf0[14], kCospi13[32], bf0[15], cosBit);
+    step[15] = halfBtf(kCospi13[32], bf0[14], -kCospi13[32], bf0[15], cosBit);
+
+    // stage 3
+    bf0[0]  = step[0] + step[2];
+    bf0[1]  = step[1] + step[3];
+    bf0[2]  = step[0] - step[2];
+    bf0[3]  = step[1] - step[3];
+    bf0[4]  = step[4] + step[6];
+    bf0[5]  = step[5] + step[7];
+    bf0[6]  = step[4] - step[6];
+    bf0[7]  = step[5] - step[7];
+    bf0[8]  = step[8] + step[10];
+    bf0[9]  = step[9] + step[11];
+    bf0[10] = step[8] - step[10];
+    bf0[11] = step[9] - step[11];
+    bf0[12] = step[12] + step[14];
+    bf0[13] = step[13] + step[15];
+    bf0[14] = step[12] - step[14];
+    bf0[15] = step[13] - step[15];
+
+    // stage 4
+    step[0]  = bf0[0];
+    step[1]  = bf0[1];
+    step[2]  = bf0[2];
+    step[3]  = bf0[3];
+    step[4]  = halfBtf(kCospi13[16], bf0[4], kCospi13[48], bf0[5], cosBit);
+    step[5]  = halfBtf(kCospi13[48], bf0[4], -kCospi13[16], bf0[5], cosBit);
+    step[6]  = halfBtf(-kCospi13[48], bf0[6], kCospi13[16], bf0[7], cosBit);
+    step[7]  = halfBtf(kCospi13[16], bf0[6], kCospi13[48], bf0[7], cosBit);
+    step[8]  = bf0[8];
+    step[9]  = bf0[9];
+    step[10] = bf0[10];
+    step[11] = bf0[11];
+    step[12] = halfBtf(kCospi13[16], bf0[12], kCospi13[48], bf0[13], cosBit);
+    step[13] = halfBtf(kCospi13[48], bf0[12], -kCospi13[16], bf0[13], cosBit);
+    step[14] = halfBtf(-kCospi13[48], bf0[14], kCospi13[16], bf0[15], cosBit);
+    step[15] = halfBtf(kCospi13[16], bf0[14], kCospi13[48], bf0[15], cosBit);
+
+    // stage 5
+    bf0[0]  = step[0] + step[4];
+    bf0[1]  = step[1] + step[5];
+    bf0[2]  = step[2] + step[6];
+    bf0[3]  = step[3] + step[7];
+    bf0[4]  = step[0] - step[4];
+    bf0[5]  = step[1] - step[5];
+    bf0[6]  = step[2] - step[6];
+    bf0[7]  = step[3] - step[7];
+    bf0[8]  = step[8] + step[12];
+    bf0[9]  = step[9] + step[13];
+    bf0[10] = step[10] + step[14];
+    bf0[11] = step[11] + step[15];
+    bf0[12] = step[8] - step[12];
+    bf0[13] = step[9] - step[13];
+    bf0[14] = step[10] - step[14];
+    bf0[15] = step[11] - step[15];
+
+    // stage 6
+    step[0]  = bf0[0];
+    step[1]  = bf0[1];
+    step[2]  = bf0[2];
+    step[3]  = bf0[3];
+    step[4]  = bf0[4];
+    step[5]  = bf0[5];
+    step[6]  = bf0[6];
+    step[7]  = bf0[7];
+    step[8]  = halfBtf(kCospi13[8], bf0[8], kCospi13[56], bf0[9], cosBit);
+    step[9]  = halfBtf(kCospi13[56], bf0[8], -kCospi13[8], bf0[9], cosBit);
+    step[10] = halfBtf(kCospi13[40], bf0[10], kCospi13[24], bf0[11], cosBit);
+    step[11] = halfBtf(kCospi13[24], bf0[10], -kCospi13[40], bf0[11], cosBit);
+    step[12] = halfBtf(-kCospi13[56], bf0[12], kCospi13[8], bf0[13], cosBit);
+    step[13] = halfBtf(kCospi13[8], bf0[12], kCospi13[56], bf0[13], cosBit);
+    step[14] = halfBtf(-kCospi13[24], bf0[14], kCospi13[40], bf0[15], cosBit);
+    step[15] = halfBtf(kCospi13[40], bf0[14], kCospi13[24], bf0[15], cosBit);
+
+    // stage 7
+    bf0[0]  = step[0] + step[8];
+    bf0[1]  = step[1] + step[9];
+    bf0[2]  = step[2] + step[10];
+    bf0[3]  = step[3] + step[11];
+    bf0[4]  = step[4] + step[12];
+    bf0[5]  = step[5] + step[13];
+    bf0[6]  = step[6] + step[14];
+    bf0[7]  = step[7] + step[15];
+    bf0[8]  = step[0] - step[8];
+    bf0[9]  = step[1] - step[9];
+    bf0[10] = step[2] - step[10];
+    bf0[11] = step[3] - step[11];
+    bf0[12] = step[4] - step[12];
+    bf0[13] = step[5] - step[13];
+    bf0[14] = step[6] - step[14];
+    bf0[15] = step[7] - step[15];
+
+    // stage 8
+    step[0]  = halfBtf(kCospi13[2], bf0[0], kCospi13[62], bf0[1], cosBit);
+    step[1]  = halfBtf(kCospi13[62], bf0[0], -kCospi13[2], bf0[1], cosBit);
+    step[2]  = halfBtf(kCospi13[10], bf0[2], kCospi13[54], bf0[3], cosBit);
+    step[3]  = halfBtf(kCospi13[54], bf0[2], -kCospi13[10], bf0[3], cosBit);
+    step[4]  = halfBtf(kCospi13[18], bf0[4], kCospi13[46], bf0[5], cosBit);
+    step[5]  = halfBtf(kCospi13[46], bf0[4], -kCospi13[18], bf0[5], cosBit);
+    step[6]  = halfBtf(kCospi13[26], bf0[6], kCospi13[38], bf0[7], cosBit);
+    step[7]  = halfBtf(kCospi13[38], bf0[6], -kCospi13[26], bf0[7], cosBit);
+    step[8]  = halfBtf(kCospi13[34], bf0[8], kCospi13[30], bf0[9], cosBit);
+    step[9]  = halfBtf(kCospi13[30], bf0[8], -kCospi13[34], bf0[9], cosBit);
+    step[10] = halfBtf(kCospi13[42], bf0[10], kCospi13[22], bf0[11], cosBit);
+    step[11] = halfBtf(kCospi13[22], bf0[10], -kCospi13[42], bf0[11], cosBit);
+    step[12] = halfBtf(kCospi13[50], bf0[12], kCospi13[14], bf0[13], cosBit);
+    step[13] = halfBtf(kCospi13[14], bf0[12], -kCospi13[50], bf0[13], cosBit);
+    step[14] = halfBtf(kCospi13[58], bf0[14], kCospi13[6], bf0[15], cosBit);
+    step[15] = halfBtf(kCospi13[6], bf0[14], -kCospi13[58], bf0[15], cosBit);
+
+    // stage 9
+    output[0]  = step[1];
+    output[1]  = step[14];
+    output[2]  = step[3];
+    output[3]  = step[12];
+    output[4]  = step[5];
+    output[5]  = step[10];
+    output[6]  = step[7];
+    output[7]  = step[8];
+    output[8]  = step[9];
+    output[9]  = step[6];
+    output[10] = step[11];
+    output[11] = step[4];
+    output[12] = step[13];
+    output[13] = step[2];
+    output[14] = step[15];
+    output[15] = step[0];
+}
+
 // svt_av1_fdct4_new (transforms.c), cos_bit = 13
 void fdct4(const std::int32_t input[4], std::int32_t output[4]) {
     const int8_t cosBit = 13;
