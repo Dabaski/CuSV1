@@ -72,6 +72,24 @@ void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::i
 void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                          std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
 
+// C7: 16x16 frame compositions. M1 availability: above iff by > 0, left iff
+// bx > 0, above-left iff both, top-right iff by > 0 && bx + 1 < gridW, and
+// the top-right extension carries REAL reconstructed samples (FR-series
+// gather: above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]). The 16x16 fwd/inv
+// roundtrip is exact, so recon == source for every block.
+void encodeFrameRecon16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
+
+void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                          std::uint8_t* modes, transforms::TxType txType);
+
+void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
+                            transforms::TxType txType);
+
+void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+
 // Sum of squared sample differences over the full frame (integer, exact).
 std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 
@@ -99,6 +117,13 @@ ModeDecision decideBlockMode8x8(const std::uint8_t* src, const std::uint8_t* abo
                                 int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
                                 int nBottomLeftPx, std::uint8_t aboveLeft,
                                 const intra::NeighborContext& neighbors = intra::NeighborContext());
+
+// C7 policy generalized to 16x16 blocks: same D2 policy scored with
+// motion::sad16x16 (bit-exact with svt_nxm_sad_kernel_helper_c at 16x16).
+ModeDecision decideBlockMode16x16(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                                  int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                  int nBottomLeftPx, std::uint8_t aboveLeft,
+                                  const intra::NeighborContext& neighbors = intra::NeighborContext());
 
 void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                         std::uint8_t* modes, transforms::TxType txType);

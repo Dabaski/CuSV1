@@ -1,4 +1,4 @@
-﻿#include <doctest.h>
+#include <doctest.h>
 #include <algorithm>
 #include <vector>
 #include <gpurt.h>
@@ -2448,6 +2448,87 @@ TEST_CASE("gpu frame auto 4x4 with quantization matches host encodeFrameAuto4x4Q
     bool coeffsOk = true;
     for (int i = 0; i < 64; ++i) {
         if (coeffsGot[i] != refCoeffs[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
+}
+
+TEST_CASE("frame auto 16x16 matches the f16 generator golden (real top-right)") {
+    // golden: golden_gen f16_modes/f16_recon/f16_coeffs (32x32, 2x2 of 16x16;
+    // rows 0-15 ramp 4*(x+y+1), rows 16-31 zero). Block 2 (bx=0, by=1) is the
+    // only nTr>0 block; with REAL recon top-right its D45 candidate SAD is
+    // 32767 (ramp continuation vs zero source) and H (16384) wins, under the
+    // pre-FR1 zero-fill D45 scores 12673 and would win - the mode map
+    // discriminates the gather (probe values, verbatim primitives, C7a).
+    // recon == source: the 16x16 fwd/inv roundtrip is exact.
+    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+
+    pixels::Plane plane(32, 32, 4);
+    pixels::Plane recon(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
+
+    std::int32_t coeffs[1024] = {0};
+    std::uint8_t modes[4] = {0};
+    pipeline::encodeFrameAuto16x16(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+
+    bool reconOk = true;
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            if (recon.at(x, y) != plane.at(x, y)) reconOk = false;
+    CHECK(reconOk);
+
+    // coeff spot pins from the f16_coeffs gate line
+    const std::int32_t goldenHeads[4][16] = {
+        {-8063, -2344, 0, -257, 0, -90, 0, -44, 3, -24, 0, -14, 0, -7, 0, -3},
+        {2849, -1605, 56, -181, 9, -66, 8, -29, 6, -30, -12, -4, -8, -4, 3, 4},
+        {-8190, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    bool coeffsOk = true;
+    for (int b = 0; b < 4; ++b) {
+        for (int i = 0; i < 16; ++i) {
+            if (coeffs[b * 256 + i] != goldenHeads[b][i]) coeffsOk = false;
+        }
+    }
+    CHECK(coeffsOk);
+}
+
+TEST_CASE("frame auto 16x16 with quantization matches the f16q generator golden") {
+    // golden: golden_gen f16q_modes/f16q_coeffs at qindex 100 (FP quantizer at
+    // n_coeffs=256, log_scale 0). Modes identical to lossless (1 7 2 2);
+    // quantization loss visible in coeffs.
+    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+
+    pixels::Plane plane(32, 32, 4);
+    pixels::Plane recon(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
+
+    std::int32_t coeffs[1024] = {0};
+    std::uint8_t modes[4] = {0};
+    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+
+    const std::int32_t goldenBlk0[16] = {-87, -21, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::int32_t goldenBlk2[8] = {-88, 0, 0, 0, 0, 0, 0, 0};
+    bool coeffsOk = true;
+    for (int i = 0; i < 16; ++i) {
+        if (coeffs[i] != goldenBlk0[i]) coeffsOk = false;
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (coeffs[512 + i] != goldenBlk2[i]) coeffsOk = false;
     }
     CHECK(coeffsOk);
 }
