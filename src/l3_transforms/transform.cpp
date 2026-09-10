@@ -2157,10 +2157,42 @@ void quantizeB8x8(const std::int32_t* coeff, const QuantTables& tables, const st
     quantizeBN(coeff, tables, scan, 64, qcoeff, dqcoeff, eob);
 }
 
+// TX_16X16 entries (C6): same helpers at n_coeffs=256, log_scale 0
+void quantizeFp16x16(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeFpN(coeff, tables, scan, 256, qcoeff, dqcoeff, eob);
+}
+
+void quantizeB16x16(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                    std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeBN(coeff, tables, scan, 256, qcoeff, dqcoeff, eob);
+}
+
 // default (up-right diagonal) scan for 8x8, svt_aom_init_iscan formula
 // (coefficients.c:345-363) at W=H=8
 void defaultScan8x8(std::int16_t scan[64]) {
     const int W = 8, H = 8;
+    int idx = 0;
+    for (int d = 0; d < W + H - 1; ++d) {
+        const int rlo = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
+        const int rhi = d < (H - 1) ? d : (H - 1);
+        const int incr = (H > W) ? 1 : (W > H) ? 0 : (d & 1);
+        if (incr) {
+            for (int r = rlo; r <= rhi; ++r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        } else {
+            for (int r = rhi; r >= rlo; --r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        }
+    }
+}
+
+// default (up-right diagonal) scan for 16x16, svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=16
+void defaultScan16x16(std::int16_t scan[256]) {
+    const int W = 16, H = 16;
     int idx = 0;
     for (int d = 0; d < W + H - 1; ++d) {
         const int rlo = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
@@ -2253,6 +2285,47 @@ extern "C" __global__ void quant_dequant_8x8(const int* coeff, const short* quan
     if (t == 0) {
         int m = -1;
         for (int i = 0; i < 64; ++i) {
+            if (eobPos[i] > m) m = eobPos[i];
+        }
+        *eob = (unsigned short)(m + 1);
+    }
+}
+
+// TX_16X16 entry (C6): same fp helper at n_coeffs=256, log_scale 0
+// (av1_get_tx_scale_tab[TX_16X16] = 0); 256 threads, thread t = scan
+// position t; eobPos[256] shared reduction (1024 B), zeroing mirrors the
+// helper's memset semantics.
+extern "C" __global__ void quant_dequant_16x16(const int* coeff, const short* quantFp,
+                                               const short* dequant, const short* roundFp,
+                                               const short* scan, int* qcoeff, int* dqcoeff,
+                                               unsigned short* eob) {
+    __shared__ int eobPos[256];
+    const int t = threadIdx.x;
+    const int rc = scan[t];
+    qcoeff[rc] = 0;
+    dqcoeff[rc] = 0;
+    const int thresh = dequant[rc != 0];
+    const int coeffVal = coeff[rc];
+    const int coeffSign = coeffVal < 0 ? -1 : 0;
+    int absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+    int tmp32 = 0;
+    if ((absCoeff << 1) >= thresh) {
+        long long clamped = absCoeff + roundFp[rc != 0];
+        if (clamped < -32768) clamped = -32768;
+        if (clamped > 32767) clamped = 32767;
+        absCoeff = (int)clamped;
+        tmp32 = (int)((absCoeff * quantFp[rc != 0]) >> 16);
+        if (tmp32) {
+            qcoeff[rc] = (tmp32 ^ coeffSign) - coeffSign;
+            const int absDq = (int)(((long long)tmp32 * dequant[rc != 0]) >> 0);
+            dqcoeff[rc] = (absDq ^ coeffSign) - coeffSign;
+        }
+    }
+    eobPos[t] = tmp32 ? t : -1;
+    __syncthreads();
+    if (t == 0) {
+        int m = -1;
+        for (int i = 0; i < 256; ++i) {
             if (eobPos[i] > m) m = eobPos[i];
         }
         *eob = (unsigned short)(m + 1);
