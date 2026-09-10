@@ -3066,3 +3066,157 @@ bool reconHeadOk = true;
     }
     CHECK(coeffsOk);
 }
+TEST_CASE("frame auto 32x32 matches the f32 generator golden (real top-right)") {
+    // golden: golden_gen f32_modes/f32_recon/f32_coeffs (64x64, 2x2 of 32x32;
+    // rows 0-31 ramp 2*(x+y+1), rows 32-63 zero). Block 2 (bx=0, by=1) is the
+    // only nTr>0 block; with REAL recon top-right the D45 zone-1 SAD is 0
+    // (above[j] = 2j+64, pred above[1+r+c] = 2*(r+c+33) = src[32+r][c]) and H
+    // wins on the zero rows; the mode map discriminates the FR gather.
+    // DEVIATION from the earlier assumption: the 32x32 fwd/inv roundtrip is
+    // LOSSY (fwd_shift_32x32 sum 2-4+0 = -2, like 8x8) - recon != source
+    // (generator probe: 87 single-sample +-1 diffs in rows 0-31, rows 32-63
+    // exact zeros); recon is pinned to the f32_recon gate line below.
+    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+
+    pixels::Plane plane(64, 64, 4);
+    pixels::Plane recon(64, 64, 4);
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x)
+            plane.at(x, y) = (y < 32) ? static_cast<std::uint8_t>(2 * (x + y + 1)) : 0;
+
+    std::int32_t coeffs[4096] = {0};
+    std::uint8_t modes[4] = {0};
+    pipeline::encodeFrameAuto32x32(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+
+bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+
+    // recon pinned to the f32_recon gate line: row 0 (contains 4 of the 87
+    // +-1 roundtrip diffs), rows 30-31 (the heaviest diff rows), row 32
+    // (zero-region head, exact)
+    const std::uint8_t goldenReconRow0[64] = {
+        2,  4,  6,  8,  10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32,
+        34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64,
+        66, 68, 70, 72, 74, 76, 78, 80, 83, 85, 86, 88, 90, 92, 94, 96,
+        98, 100, 102, 104, 107, 108, 110, 112, 114, 116, 118, 120, 122, 124, 127, 128};
+    const std::uint8_t goldenReconRow30[64] = {
+        62, 65, 66, 68, 71, 73, 74, 77, 79, 81, 82, 85, 87, 88, 91, 92,
+        94, 97, 98, 100, 103, 105, 106, 109, 111, 112, 114, 117, 118, 120, 123, 125,
+        127, 129, 130, 133, 135, 136, 139, 141, 142, 144, 146, 149, 151, 153, 155, 157,
+        159, 160, 162, 165, 167, 168, 170, 172, 174, 176, 179, 180, 182, 184, 186, 188};
+    const std::uint8_t goldenReconRow31[64] = {
+        64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94,
+        96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126,
+        128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158,
+        160, 162, 163, 166, 169, 170, 172, 174, 175, 177, 180, 182, 184, 186, 188, 190};
+bool reconOk = true;
+    for (int x = 0; x < 64; ++x) {
+        if (recon.at(x, 0) != goldenReconRow0[x]) reconOk = false;
+        if (recon.at(x, 30) != goldenReconRow30[x]) reconOk = false;
+        if (recon.at(x, 31) != goldenReconRow31[x]) reconOk = false;
+        if (recon.at(x, 32) != 0) reconOk = false;
+    }
+    CHECK(reconOk);
+}
+
+TEST_CASE("frame auto 32x32 with quantization matches the f32q generator golden") {
+    // golden: golden_gen f32q_modes at qindex 100 (FP quantizer at
+    // n_coeffs=1024, log_scale 1). Modes identical to lossless (1 7 2 2).
+    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+
+    pixels::Plane plane(64, 64, 4);
+    pixels::Plane recon(64, 64, 4);
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x)
+            plane.at(x, y) = (y < 32) ? static_cast<std::uint8_t>(2 * (x + y + 1)) : 0;
+
+    std::int32_t coeffs[4096] = {0};
+    std::uint8_t modes[4] = {0};
+    pipeline::encodeFrameAuto32x32Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+}
+
+TEST_CASE("frame recon 32x32 forced mode matches the f32v generator golden") {
+    // golden: golden_gen f32v_recon (V_PRED forced + DCT over the f32
+    // fixture) - Recon32x32 is gate-pinned from the start (no C7b-style gap).
+    // 32x32 roundtrip lossy (as f32 recon): recon pinned to f32v_recon rows
+    // 0/30/31/32; coeffs pin via f32v_coeffs blk0 head.
+    const std::int32_t goldenBlk0[8] = {-8062, -2346, 0, -260, -1, -94, 0, -48};
+
+    pixels::Plane plane(64, 64, 4);
+    pixels::Plane recon(64, 64, 4);
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x)
+            plane.at(x, y) = (y < 32) ? static_cast<std::uint8_t>(2 * (x + y + 1)) : 0;
+
+std::int32_t coeffs[4096] = {0};
+    pipeline::encodeFrameRecon32x32(plane, recon, coeffs, intra::V_PRED, 0,
+                                    transforms::TxType::DCT_DCT);
+
+    const std::uint8_t goldenReconVRow0[64] = {
+        2,  4,  6,  8,  10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32,
+        34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64,
+        66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96,
+        98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128};
+    const std::uint8_t goldenReconVRow30[64] = {
+        62, 65, 66, 68, 71, 73, 74, 77, 79, 81, 82, 85, 87, 88, 91, 92,
+        94, 97, 98, 100, 103, 105, 106, 109, 111, 112, 114, 117, 118, 120, 123, 125,
+        127, 128, 130, 133, 134, 136, 139, 140, 142, 145, 147, 148, 150, 152, 154, 156,
+        159, 161, 162, 165, 166, 168, 171, 172, 174, 177, 178, 180, 182, 184, 186, 188};
+    const std::uint8_t goldenReconVRow31[64] = {
+        64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94,
+        96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126,
+        128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158,
+        160, 162, 164, 166, 168, 170, 172, 174, 176, 178, 180, 182, 184, 186, 188, 190};
+    bool reconOk = true;
+    for (int x = 0; x < 64; ++x) {
+        if (recon.at(x, 0) != goldenReconVRow0[x]) reconOk = false;
+        if (recon.at(x, 30) != goldenReconVRow30[x]) reconOk = false;
+        if (recon.at(x, 31) != goldenReconVRow31[x]) reconOk = false;
+        if (recon.at(x, 32) != 0) reconOk = false;
+    }
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 8; ++i) {
+        if (coeffs[i] != goldenBlk0[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
+}
+
+TEST_CASE("frame recon 32x32 with quantization matches the f32vq generator golden") {
+    // golden: golden_gen f32vq at qindex 100 (forced V, FP quantizer at
+    // n_coeffs=1024/log_scale 1); recon carries real quantization loss.
+    const std::int32_t goldenBlk0[8] = {-173, -42, 0, -5, 0, -2, 0, -1};
+
+    pixels::Plane plane(64, 64, 4);
+    pixels::Plane recon(64, 64, 4);
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x)
+            plane.at(x, y) = (y < 32) ? static_cast<std::uint8_t>(2 * (x + y + 1)) : 0;
+
+    std::int32_t coeffs[4096] = {0};
+    pipeline::encodeFrameRecon32x32Q(plane, recon, coeffs, intra::V_PRED, 0, 100,
+                                     transforms::TxType::DCT_DCT);
+
+    bool reconHeadOk = true;
+    const std::uint8_t goldenReconRow0[8] = {3, 4, 6, 8, 11, 13, 15, 17};
+    for (int x = 0; x < 8; ++x) {
+        if (recon.at(x, 0) != goldenReconRow0[x]) reconHeadOk = false;
+    }
+    CHECK(reconHeadOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 8; ++i) {
+        if (coeffs[i] != goldenBlk0[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
+}

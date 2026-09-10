@@ -90,6 +90,22 @@ void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std:
 void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                            std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
 
+// L6: 32x32 frame compositions. M1 availability + FR-series REAL recon
+// top-right gather (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]); the
+// 32x32 fwd/inv roundtrip is exact, so recon == source for every block.
+void encodeFrameRecon32x32(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
+
+void encodeFrameAuto32x32(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                          std::uint8_t* modes, transforms::TxType txType);
+
+void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
+                            transforms::TxType txType);
+
+void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+
 // Sum of squared sample differences over the full frame (integer, exact).
 std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 

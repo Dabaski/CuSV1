@@ -906,4 +906,257 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
     }
 }
 
+// ---- L6: 32x32 frame compositions. M1 availability + REAL recon top-right
+// gather (FR-series); 32x32 roundtrip is exact so recon == source.
+void encodeFrameRecon32x32(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType) {
+    const int gridW = src.width() / 32;
+    const int gridH = src.height() / 32;
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 32;
+            const int py = by * 32;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const bool hasAboveLeft = hasTop && hasLeft;
+            const int nTopPx = hasTop ? 32 : 0;
+            const int nLeftPx = hasLeft ? 32 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 32 : 0;
+            const int nBottomLeftPx = 0;
+
+            std::uint8_t above[64] = {0};  // above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
+            std::uint8_t left[64] = {0};
+            if (hasTop) {
+                for (int i = 0; i < 32 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 32; ++i) left[i] = recon.at(px - 1, py + i);
+            }
+            const std::uint8_t aboveLeft =
+                hasAboveLeft ? recon.at(px - 1, py - 1) : static_cast<std::uint8_t>(0);
+
+            std::uint8_t pred[1024] = {0};
+            intra::buildIntraPredictors(pred, 32, mode, angleDelta, 32, 32, aboveLeft, above, nTopPx,
+                                        nTopRightPx, left, nLeftPx, nBottomLeftPx);
+
+            std::int16_t residual[1024] = {0};
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x)
+                    residual[y * 32 + x] =
+                        static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 32 + x]);
+
+            std::int32_t cb[1024] = {0};
+            transforms::fwdTxfm2d32x32(residual, cb, 32, txType);
+            for (int i = 0; i < 1024; ++i) coeffs[(by * gridW + bx) * 1024 + i] = cb[i];
+
+            std::uint8_t tmp[1024] = {0};
+            for (int i = 0; i < 1024; ++i) tmp[i] = pred[i];
+            transforms::invTxfm2dAdd32x32(cb, tmp, 32, txType);
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x) recon.at(px + x, py + y) = tmp[y * 32 + x];
+        }
+    }
+}
+
+void encodeFrameAuto32x32(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                          std::uint8_t* modes, transforms::TxType txType) {
+    const int gridW = src.width() / 32;
+    const int gridH = src.height() / 32;
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 32;
+            const int py = by * 32;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const bool hasAboveLeft = hasTop && hasLeft;
+            const int nTopPx = hasTop ? 32 : 0;
+            const int nLeftPx = hasLeft ? 32 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 32 : 0;
+            const int nBottomLeftPx = 0;
+
+            std::uint8_t above[64] = {0};  // above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
+            std::uint8_t left[64] = {0};
+            if (hasTop) {
+                for (int i = 0; i < 32 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 32; ++i) left[i] = recon.at(px - 1, py + i);
+            }
+            const std::uint8_t aboveLeft =
+                hasAboveLeft ? recon.at(px - 1, py - 1) : static_cast<std::uint8_t>(0);
+
+            intra::NeighborContext nctx;
+            nctx.aboveMode = hasTop
+                                 ? static_cast<intra::PredictionMode>(modes[(by - 1) * gridW + bx])
+                                 : intra::DC_PRED;
+            nctx.leftMode = hasLeft
+                                ? static_cast<intra::PredictionMode>(modes[by * gridW + bx - 1])
+                                : intra::DC_PRED;
+
+            std::uint8_t srcBlk[1024] = {0};
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x) srcBlk[y * 32 + x] = src.at(px + x, py + y);
+
+            const ModeDecision d = decideBlockMode32x32(srcBlk, above, nTopPx, nTopRightPx, left,
+                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+            modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
+
+            std::uint8_t pred[1024] = {0};
+            intra::buildIntraPredictors(pred, 32, d.mode, 0, 32, 32, aboveLeft, above, nTopPx,
+                                        nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
+
+            std::int16_t residual[1024] = {0};
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x)
+                    residual[y * 32 + x] =
+                        static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 32 + x]);
+
+            std::int32_t cb[1024] = {0};
+            transforms::fwdTxfm2d32x32(residual, cb, 32, txType);
+            for (int i = 0; i < 1024; ++i) coeffs[(by * gridW + bx) * 1024 + i] = cb[i];
+
+            std::uint8_t reconBlk[1024] = {0};
+            for (int i = 0; i < 1024; ++i) reconBlk[i] = pred[i];
+            transforms::invTxfm2dAdd32x32(cb, reconBlk, 32, txType);
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x) recon.at(px + x, py + y) = reconBlk[y * 32 + x];
+        }
+    }
+}
+
+void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
+                            transforms::TxType txType) {
+    const int gridW = src.width() / 32;
+    const int gridH = src.height() / 32;
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(qindex, qt);
+    std::int16_t scan[1024];
+    transforms::defaultScan32x32(scan);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 32;
+            const int py = by * 32;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const bool hasAboveLeft = hasTop && hasLeft;
+            const int nTopPx = hasTop ? 32 : 0;
+            const int nLeftPx = hasLeft ? 32 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 32 : 0;
+            const int nBottomLeftPx = 0;
+
+            std::uint8_t above[64] = {0};  // above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
+            std::uint8_t left[64] = {0};
+            if (hasTop) {
+                for (int i = 0; i < 32 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 32; ++i) left[i] = recon.at(px - 1, py + i);
+            }
+            const std::uint8_t aboveLeft =
+                hasAboveLeft ? recon.at(px - 1, py - 1) : static_cast<std::uint8_t>(0);
+
+            std::uint8_t pred[1024] = {0};
+            intra::buildIntraPredictors(pred, 32, mode, angleDelta, 32, 32, aboveLeft, above, nTopPx,
+                                        nTopRightPx, left, nLeftPx, nBottomLeftPx);
+
+            std::int16_t residual[1024] = {0};
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x)
+                    residual[y * 32 + x] =
+                        static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 32 + x]);
+
+            std::int32_t cb[1024] = {0};
+            transforms::fwdTxfm2d32x32(residual, cb, 32, txType);
+            std::int32_t qc[1024] = {0};
+            std::int32_t dq[1024] = {0};
+            std::uint16_t eob = 0;
+            transforms::quantizeFp32x32(cb, qt, scan, qc, dq, &eob);
+            for (int i = 0; i < 1024; ++i) coeffs[(by * gridW + bx) * 1024 + i] = qc[i];
+
+            std::uint8_t blk[1024] = {0};
+            for (int i = 0; i < 1024; ++i) blk[i] = pred[i];
+            transforms::invTxfm2dAdd32x32(dq, blk, 32, txType);
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x) recon.at(px + x, py + y) = blk[y * 32 + x];
+        }
+    }
+}
+
+// L6: D2 policy loop at 32x32 with the FP quantizer wired at a fixed qindex
+// (log_scale 1). SCAN POLICY IS OURS: fixed defaultScan32x32 for every block
+// (see encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
+void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType) {
+    const int gridW = src.width() / 32;
+    const int gridH = src.height() / 32;
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(qindex, qt);
+    std::int16_t scan[1024];
+    transforms::defaultScan32x32(scan);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 32;
+            const int py = by * 32;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const bool hasAboveLeft = hasTop && hasLeft;
+            const int nTopPx = hasTop ? 32 : 0;
+            const int nLeftPx = hasLeft ? 32 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 32 : 0;
+            const int nBottomLeftPx = 0;
+
+            std::uint8_t above[64] = {0};  // above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
+            std::uint8_t left[64] = {0};
+            if (hasTop) {
+                for (int i = 0; i < 32 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 32; ++i) left[i] = recon.at(px - 1, py + i);
+            }
+            const std::uint8_t aboveLeft =
+                hasAboveLeft ? recon.at(px - 1, py - 1) : static_cast<std::uint8_t>(0);
+
+            intra::NeighborContext nctx;
+            nctx.aboveMode = hasTop
+                                 ? static_cast<intra::PredictionMode>(modes[(by - 1) * gridW + bx])
+                                 : intra::DC_PRED;
+            nctx.leftMode = hasLeft
+                                ? static_cast<intra::PredictionMode>(modes[by * gridW + bx - 1])
+                                : intra::DC_PRED;
+
+            std::uint8_t srcBlk[1024] = {0};
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x) srcBlk[y * 32 + x] = src.at(px + x, py + y);
+
+            const ModeDecision d = decideBlockMode32x32(srcBlk, above, nTopPx, nTopRightPx, left,
+                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+            modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
+
+            std::uint8_t pred[1024] = {0};
+            intra::buildIntraPredictors(pred, 32, d.mode, 0, 32, 32, aboveLeft, above, nTopPx,
+                                        nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
+            std::int16_t residual[1024] = {0};
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x)
+                    residual[y * 32 + x] =
+                        static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 32 + x]);
+
+            std::int32_t cb[1024] = {0};
+            transforms::fwdTxfm2d32x32(residual, cb, 32, txType);
+            std::int32_t qc[1024] = {0};
+            std::int32_t dq[1024] = {0};
+            std::uint16_t eob = 0;
+            transforms::quantizeFp32x32(cb, qt, scan, qc, dq, &eob);
+            for (int i = 0; i < 1024; ++i) coeffs[(by * gridW + bx) * 1024 + i] = qc[i];
+
+            std::uint8_t blk[1024] = {0};
+            for (int i = 0; i < 1024; ++i) blk[i] = pred[i];
+            transforms::invTxfm2dAdd32x32(dq, blk, 32, txType);
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x) recon.at(px + x, py + y) = blk[y * 32 + x];
+        }
+    }
+}
+
 }  // namespace pipeline
