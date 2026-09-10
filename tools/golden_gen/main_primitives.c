@@ -204,6 +204,93 @@ int main(void) {
 
     svtd_gen_inv_range_16x16();
 
+    svtd_gen_inv_range_32x32();
+    svtd_gen_inv_range_64x64();
+
+    // ---- L0: 32x32 transforms gate lines ----
+    {
+        // 1D fwd @ cos_bit 12 (the fwd_cos_bit_col/row[3][3] value the 2D uses)
+        const int32_t in32[32] = {200, 80, -50, 30, 100, -20, 60, 10, -35, 95, 5, -70, 45, 25, -15, 55,
+                                  65, -85, 15, -5, 75, -60, 40, 90, -25, 35, 50, -45, 20, -10, 70, -30};
+        int32_t o32[32];
+        svt_av1_fdct32_new(in32, o32, 12, NULL);
+        printf("fdct32:"); for (int i = 0; i < 32; ++i) printf(" %d", o32[i]); printf("\n");
+        av1_fadst32_new(in32, o32, 12, NULL);
+        printf("fadst32:"); for (int i = 0; i < 32; ++i) printf(" %d", o32[i]); printf("\n");
+        // 1D inv @ 12, stage_range 16 (gen_inv_range_32x32 lines)
+        const int32_t i32[32] = {300, -120, 75, 200, -60, 40, 90, -15, 55, -95, 20, 65, -40, 85, -25, 10,
+                                 30, -70, 95, -35, 60, -15, 80, 25, -50, 45, -20, 70, -90, 15, 50, -55};
+        const int8_t sr32[MAX_TXFM_STAGE_NUM] = {16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+                                                 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+                                                 16};
+        svt_av1_idct32_new(i32, o32, 12, sr32);
+        printf("idct32:"); for (int i = 0; i < 32; ++i) printf(" %d", o32[i]); printf("\n");
+        av1_iadst32_new(i32, o32, 12, sr32);
+        printf("iadst32:"); for (int i = 0; i < 32; ++i) printf(" %d", o32[i]); printf("\n");
+
+        // 2D fwd (DCT + ADST); fixture (c*7+r*5+((c*r)&15))%173-86
+        int16_t in[1024];
+        for (int r = 0; r < 32; ++r)
+            for (int c = 0; c < 32; ++c)
+                in[r * 32 + c] = (int16_t)((c * 7 + r * 5 + ((c * r) & 15)) % 173) - 86;
+        int32_t out[1024];
+        svtd_fwd2d32x32(in, 32, out, svt_av1_fdct32_new);
+        printf("fwd2d32_dct:"); for (int i = 0; i < 1024; ++i) printf(" %d", out[i]); printf("\n");
+        svtd_fwd2d32x32(in, 32, out, av1_fadst32_new);
+        printf("fwd2d32_adst:"); for (int i = 0; i < 1024; ++i) printf(" %d", out[i]); printf("\n");
+
+        // 2D inverse add onto a V-pred 32x32
+        int32_t cdct[1024];
+        int32_t cadst[1024];
+        for (int i = 0; i < 1024; ++i) {
+            const int r = i / 32, c = i % 32;
+            cdct[i] = ((r * 13 + c * 29 + 31) % 89) - 44;
+            cadst[i] = ((r * 17 + c * 11 + 7) % 79) - 39;
+        }
+        uint8_t pred[1024];
+        for (int r = 0; r < 32; ++r)
+            for (int c = 0; c < 32; ++c) pred[r * 32 + c] = (uint8_t)(10 + 3 * c);
+        svtd_inv2dadd32x32(cdct, pred, 32, svt_av1_idct32_new);
+        printf("inv2d32_dct_onto_vpred:"); for (int i = 0; i < 1024; ++i) printf(" %d", pred[i]); printf("\n");
+        for (int r = 0; r < 32; ++r)
+            for (int c = 0; c < 32; ++c) pred[r * 32 + c] = (uint8_t)(10 + 3 * c);
+        svtd_inv2dadd32x32(cadst, pred, 32, av1_iadst32_new);
+        printf("inv2d32_adst_onto_vpred:"); for (int i = 0; i < 1024; ++i) printf(" %d", pred[i]); printf("\n");
+
+        // qscan32
+        int16_t scan32[1024];
+        svtd_default_scan_32x32(scan32);
+        printf("qscan32:"); for (int i = 0; i < 1024; ++i) printf(" %d", scan32[i]); printf("\n");
+
+        // log_scale-1 quant gate lines; fixture = fwd2d32_dct output (recomputed
+        // for provenance)
+        SvtdQuantTables t100, t0;
+        svtd_build_quantizer_luma(100, &t100);
+        svtd_build_quantizer_luma(0, &t0);
+        TranLow qc[1024], dq[1024];
+        uint16_t eob = 0;
+        svtd_quantize_fp_32x32(out, &t100, scan32, qc, dq, &eob);
+        printf("q32fp_q100:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", qc[i]);
+        printf(" |");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dq[i]);
+        printf(" | %u\n", eob);
+        svtd_quantize_b_32x32(out, &t100, scan32, qc, dq, &eob);
+        printf("q32b_q100:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", qc[i]);
+        printf(" |");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dq[i]);
+        printf(" | %u\n", eob);
+        svtd_quantize_fp_32x32(out, &t0, scan32, qc, dq, &eob);
+        printf("q32fp_q0:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", qc[i]);
+        printf(" |");
+        for (int i = 0; i < 1024; ++i) printf(" %d", dq[i]);
+        printf(" | %u\n", eob);
+    }
+
+    fprintf(stderr, "CK: L0 done\n"); fflush(stderr);
+
     svtd_gen_inv_range_8x8();
 
     // ---- B16: 16x16 builder goldens (TX_16X16 column) ----

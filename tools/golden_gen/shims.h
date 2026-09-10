@@ -59,13 +59,13 @@ typedef enum {
     EB_THIRTYTWO_BIT = 32,  // Not supported
 } EbBitDepth;
 
-// TxSize: the generator exercises TX_4X4 (=0), TX_8X8 (=1) and TX_16X16 (=2)
-// from SVT's TxSize enum.
-typedef enum { TX_4X4 = 0, TX_8X8 = 1, TX_16X16 = 2 } TxSize;
+// TxSize: the generator exercises TX_4X4 (=0), TX_8X8 (=1), TX_16X16 (=2),
+// TX_32X32 (=3) and TX_64X64 (=4) from SVT's TxSize enum.
+typedef enum { TX_4X4 = 0, TX_8X8 = 1, TX_16X16 = 2, TX_32X32 = 3, TX_64X64 = 4 } TxSize;
 // tx_size_wide/high for the sizes the generator uses (SVT tables in
-// av1_common data; TX_4X4 -> 4x4, TX_8X8 -> 8x8, TX_16X16 -> 16x16).
-static const int32_t tx_size_wide[3] = {4, 8, 16};
-static const int32_t tx_size_high[3] = {4, 8, 16};
+// av1_common data; 4/8/16/32/64).
+static const int32_t tx_size_wide[5] = {4, 8, 16, 32, 64};
+static const int32_t tx_size_high[5] = {4, 8, 16, 32, 64};
 
 // MAX_TXFM_STAGE_NUM - transforms.h; MAX_BLOCK_DIM / MAX_UPSAMPLE_SZ -
 // intra_prediction.h / definitions.h; MAX_TX_SIZE - definitions.h:410
