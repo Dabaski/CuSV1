@@ -27,6 +27,19 @@ void fdct16(const std::int32_t input[16], std::int32_t output[16]);
 // svt_av1_fadst16_new (transforms.c:1714), cos_bit = 13
 void fadst16(const std::int32_t input[16], std::int32_t output[16]);
 
+// svt_av1_fdct32_new (transforms.c:422), cos_bit = 12 (fwd_cos_bit[3][3])
+void fdct32(const std::int32_t input[32], std::int32_t output[32]);
+
+// static av1_fadst32_new (transforms.c:1908), cos_bit = 12
+void fadst32(const std::int32_t input[32], std::int32_t output[32]);
+
+// svt_av1_idct32_new (inv_transforms.c:378), cos_bit = 12; stage_range
+// consumed at the butterfly stages per the C3-style audit (L3 slice)
+void idct32(const std::int32_t input[32], std::int32_t output[32]);
+
+// static av1_iadst32_new (inv_transforms.c:1132), cos_bit = 12
+void iadst32(const std::int32_t input[32], std::int32_t output[32]);
+
 void idct4(const std::int32_t input[4], std::int32_t output[4]);
 
 void iadst4(const std::int32_t input[4], std::int32_t output[4]);

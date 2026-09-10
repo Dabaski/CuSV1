@@ -280,6 +280,39 @@ TEST_CASE("invTxfm2dAdd16x16 matches svt golden 256 samples both TxTypes") {
     CHECK(okAdst);
 }
 
+TEST_CASE("fdct32 matches svt_av1_fdct32_new golden full vector") {
+    // golden: svt_av1_fdct32_new @ cos_bit=12 (fwd_cos_bit_col/row[3][3]),
+    // input {200,80,-50,30,100,-20,60,10,-35,95,5,-70,45,25,-15,55,
+    // 65,-85,15,-5,75,-60,40,90,-25,35,50,-45,20,-10,70,-55} (gate line fdct32)
+    const std::int32_t in[32] = {200, 80, -50, 30, 100, -20, 60, 10, -35, 95, 5, -70, 45, 25, -15, 55,
+                                 65, -85, 15, -5, 75, -60, 40, 90, -25, 35, 50, -45, 20, -10, 70, -30};
+    const std::int32_t golden[32] = {506, 277, 261, 268, 104, 214, 115, 26, 291, 218, 103, 114, 222, 443, 171, 203,
+                                     173, 159, -308, 442, 342, -132, -210, -417, -231, 222, -297, 233, 124, -16, -126, 253};
+    std::int32_t got[32] = {0};
+    transforms::fdct32(in, got);
+    bool ok = true;
+    for (int i = 0; i < 32; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("fadst32 matches svt_av1_fadst32_new golden full vector") {
+    // golden: static av1_fadst32_new (transforms.c:1908) @ cos_bit=12, same
+    // input (gate line fadst32)
+    const std::int32_t in[32] = {200, 80, -50, 30, 100, -20, 60, 10, -35, 95, 5, -70, 45, 25, -15, 55,
+                                 65, -85, 15, -5, 75, -60, 40, 90, -25, 35, 50, -45, 20, -10, 70, -30};
+    const std::int32_t golden[32] = {295, 149, 138, 223, 71, 169, 129, -84, 119, 173, 78, -6, -19, 322, 209, 255,
+                                     287, 465, -238, 302, 646, 422, 352, -19, -213, 305, -244, 125, 218, 172, -94, 297};
+    std::int32_t got[32] = {0};
+    transforms::fadst32(in, got);
+    bool ok = true;
+    for (int i = 0; i < 32; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("fwdTxfm2d16x16 dct matches svt golden full 256") {
     // golden: svtd_fwd2d16x16 (av1_tranform_two_d_core_c @ TX_16X16, DCT_DCT;
     // fwd_shift_16x16 = {2,-2,0} transforms.c:124, cos_bit col 13 / row 12 =
