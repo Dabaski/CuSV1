@@ -573,5 +573,32 @@ int main(void) {
             printf("b9_hm1_4:"); for (int i = 0; i < 16; ++i) printf(" %d", dst[i]); printf("\n");
         }
     }
+    // ---- FR-series: real top-right fixture ----
+    // rows 0-7 = diagonal ramp 10*(x+y+1) (max 230, no overflow), rows 8-15
+    // zero. The four row-1 4x4 blocks are the d2_d45 structure shifted by 3
+    // rows (above row + REAL top-right = the ramp continuation), so D45 wins
+    // with SAD 0 and its zone-1 prediction reads above[4..7] — the extension
+    // must be REAL reconstructed samples, not zeros.
+    {
+        uint8_t src[256];
+        for (int y = 0; y < 16; ++y) {
+            for (int x = 0; x < 16; ++x) {
+                src[y * 16 + x] = (y < 8) ? (uint8_t)(10 * (x + y + 1)) : 0;
+            }
+        }
+        uint8_t recon[256];
+        int32_t coeffs[256];
+        int modes[16] = {0};
+        svtd_frame_auto_4x4_16x16(src, recon, coeffs, modes);
+        printf("fr_modes:");
+        for (int i = 0; i < 16; ++i) printf(" %d", modes[i]);
+        printf("\n");
+        printf("fr_recon:");
+        for (int i = 0; i < 256; ++i) printf(" %d", recon[i]);
+        printf("\n");
+        printf("fr_coeffs:");
+        for (int i = 0; i < 256; ++i) printf(" %d", coeffs[i]);
+        printf("\n");
+    }
     return 0;
 }

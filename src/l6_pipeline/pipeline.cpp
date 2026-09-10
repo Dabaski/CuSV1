@@ -93,10 +93,10 @@ void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::in
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 4 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[8] = {0};  // 2*B: zero extension for nTopRightPx reads (composition semantics)
+            std::uint8_t above[8] = {0};  // 2*B: above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
             std::uint8_t left[4] = {0};
             if (hasTop) {
-                for (int i = 0; i < 4; ++i) {
+                for (int i = 0; i < 4 + nTopRightPx; ++i) {
                     above[i] = recon.at(px + i, py - 1);
                 }
             }
@@ -187,10 +187,10 @@ void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 4 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[8] = {0};  // 2*B: zero extension for nTopRightPx reads (composition semantics)
+            std::uint8_t above[8] = {0};  // 2*B: above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
             std::uint8_t left[4] = {0};
             if (hasTop) {
-                for (int i = 0; i < 4; ++i) {
+                for (int i = 0; i < 4 + nTopRightPx; ++i) {
                     above[i] = recon.at(px + i, py - 1);
                 }
             }
@@ -273,10 +273,10 @@ void encodeFrameRecon8x8(const pixels::Plane& src, pixels::Plane& recon, std::in
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 8 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[16] = {0};
+            std::uint8_t above[16] = {0};  // above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
             std::uint8_t left[16] = {0};
             if (hasTop) {
-                for (int i = 0; i < 8; ++i) above[i] = recon.at(px + i, py - 1);
+                for (int i = 0; i < 8 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
             }
             if (hasLeft) {
                 for (int i = 0; i < 8; ++i) left[i] = recon.at(px - 1, py + i);
@@ -323,10 +323,10 @@ void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 8 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[16] = {0};
+            std::uint8_t above[16] = {0};  // above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
             std::uint8_t left[16] = {0};
             if (hasTop) {
-                for (int i = 0; i < 8; ++i) above[i] = recon.at(px + i, py - 1);
+                for (int i = 0; i < 8 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
             }
             if (hasLeft) {
                 for (int i = 0; i < 8; ++i) left[i] = recon.at(px - 1, py + i);
@@ -400,10 +400,10 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 4 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[8] = {0};  // 2*B: zero extension for nTopRightPx reads (composition semantics)
+            std::uint8_t above[8] = {0};  // 2*B: above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
             std::uint8_t left[4] = {0};
             if (hasTop) {
-                for (int i = 0; i < 4; ++i) {
+                for (int i = 0; i < 4 + nTopRightPx; ++i) {
                     above[i] = recon.at(px + i, py - 1);
                 }
             }
@@ -490,10 +490,10 @@ void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::i
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 8 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[16] = {0};
+            std::uint8_t above[16] = {0};  // above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
             std::uint8_t left[16] = {0};
             if (hasTop) {
-                for (int i = 0; i < 8; ++i) above[i] = recon.at(px + i, py - 1);
+                for (int i = 0; i < 8 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
             }
             if (hasLeft) {
                 for (int i = 0; i < 8; ++i) left[i] = recon.at(px - 1, py + i);
@@ -548,10 +548,10 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 8 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[16] = {0};
+            std::uint8_t above[16] = {0};  // above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
             std::uint8_t left[16] = {0};
             if (hasTop) {
-                for (int i = 0; i < 8; ++i) above[i] = recon.at(px + i, py - 1);
+                for (int i = 0; i < 8 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
             }
             if (hasLeft) {
                 for (int i = 0; i < 8; ++i) left[i] = recon.at(px - 1, py + i);

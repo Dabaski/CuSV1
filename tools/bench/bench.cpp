@@ -254,8 +254,9 @@ public:
         constexpr int kBlk = B * B;
 
         std::uint8_t reconWin[kFrameSize * kFrameSize] = {0};
-        // zero-extended edges (2B): the reference composition and the host
-        // decision both read the [B..2B) extension when nTopRightPx=B
+        // above = B real recon samples + REAL recon top-right (FR1 host
+        // gather: above[B..2B-1] = recon[(py-1)][px+B..px+2B-1], reconstructed
+        // by the M1 raster rule)
         std::uint8_t aboveHost[2 * B] = {0};
         std::uint8_t leftHost[2 * B] = {0};
         std::uint8_t srcBlk[kBlk] = {0};
@@ -272,7 +273,7 @@ public:
 
                 dRecon_.downloadTo(reconWin, sizeof(reconWin));
                 if (hasTop) {
-                    for (int i = 0; i < B; ++i) {
+                    for (int i = 0; i < B + nTopRightPx; ++i) {
                         aboveHost[i] = reconWin[(py - 1) * kStride + px + i];
                     }
                 }
@@ -335,8 +336,8 @@ public:
                 dAl_.uploadFrom(&alArg, sizeof(alArg));
                 dPx_.uploadFrom(&pxArg, sizeof(pxArg));
                 dPy_.uploadFrom(&pyArg, sizeof(pyArg));
-                // zero-extended edges: the reference composition (and the qw8/
-                // d3 goldens) pass a zero-filled extension; matches B8
+                // real edges: above[0..B-1] recon row + REAL recon top-right
+                // in [B..2B) (FR1 gather); matches the host composition
                 if (hasTop) dAbove_.uploadFrom(aboveHost, sizeof(aboveHost));
                 if (hasLeft) dLeft_.uploadFrom(leftHost, sizeof(leftHost));
 

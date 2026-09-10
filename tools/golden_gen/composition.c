@@ -347,6 +347,16 @@ static void svtd_quantize_b_4x4(const TranLow* coeff, const SvtdQuantTables* t, 
                          t->dequant, eob, scan, NULL, NULL, NULL, 0);
 }
 
+// ---- FR-series: frame loops gather REAL reconstructed top-right ------------
+// when nTopRightPx > 0 (above[B..2B-1] = recon[(py-1)*fstride + px + B + i];
+// M1 availability: the row above is fully reconstructed). Helper applied to
+// the shared gather idiom.
+static void svtd_gather_above(uint8_t* above, const uint8_t* recon, int fstride, int px, int py,
+                              int bsz, int nTr) {
+    for (int i = 0; i < bsz; ++i) above[i] = recon[(py - 1) * fstride + px + i];
+    for (int i = 0; i < nTr; ++i) above[bsz + i] = recon[(py - 1) * fstride + px + bsz + i];
+}
+
 // ---- frame-policy composition (8x8 blocks, 2x2 grid = 16x16 frame) ---------
 // Same D2 policy as the 4x4 version, SAD scored with sad8x8 semantics.
 static void svtd_frame_auto_8x8_blocks(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes) {
@@ -364,7 +374,7 @@ static void svtd_frame_auto_8x8_blocks(const uint8_t* src, uint8_t* recon, int32
             uint8_t above[17] = {0};
             uint8_t left[17] = {0};
             uint8_t al = 0;
-            if (hasTop) for (int i = 0; i < bsz; ++i) above[i] = recon[(py - 1) * fstride + px + i];
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, bsz, nTr);
             if (hasLeft) for (int i = 0; i < bsz; ++i) left[i] = recon[(py + i) * fstride + px - 1];
             if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
 
@@ -410,6 +420,64 @@ static void svtd_frame_auto_8x8_blocks(const uint8_t* src, uint8_t* recon, int32
     }
 }
 
+// ---- FR fixture loop: D2 policy, 4x4 blocks, 4x4 grid = 16x16 frame --------
+// svtd_frame_auto_8x8 generalized to gridW=gridH=4, fstride=16 (real
+// top-right gather via svtd_gather_above).
+static void svtd_frame_auto_4x4_16x16(const uint8_t* src, uint8_t* recon, int32_t* coeffs,
+                                      int* modes) {
+    const int fstride = 16;
+    const int gridW = 4, gridH = 4;
+    memset(recon, 0, 256);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 4, py = by * 4;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? 4 : 0;
+            const int nLeft = hasLeft ? 4 : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? 4 : 0;
+            uint8_t above[9] = {0};
+            uint8_t left[9] = {0};
+            uint8_t al = 0;
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, 4, nTr);
+            if (hasLeft) for (int i = 0; i < 4; ++i) left[i] = recon[(py + i) * fstride + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
+
+            const int aboveMode = hasTop ? modes[(by - 1) * gridW + bx] : DC_PRED;
+            const int leftMode = hasLeft ? modes[by * gridW + bx - 1] : DC_PRED;
+            svtd_filt_type = ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED ||
+                               aboveMode == SMOOTH_H_PRED) ||
+                              (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED ||
+                               leftMode == SMOOTH_H_PRED))
+                                 ? 1
+                                 : 0;
+
+            const uint8_t srcblk[16] = {
+                src[(py + 0) * fstride + px + 0], src[(py + 0) * fstride + px + 1],
+                src[(py + 0) * fstride + px + 2], src[(py + 0) * fstride + px + 3],
+                src[(py + 1) * fstride + px + 0], src[(py + 1) * fstride + px + 1],
+                src[(py + 1) * fstride + px + 2], src[(py + 1) * fstride + px + 3],
+                src[(py + 2) * fstride + px + 0], src[(py + 2) * fstride + px + 1],
+                src[(py + 2) * fstride + px + 2], src[(py + 2) * fstride + px + 3],
+                src[(py + 3) * fstride + px + 0], src[(py + 3) * fstride + px + 1],
+                src[(py + 3) * fstride + px + 2], src[(py + 3) * fstride + px + 3]};
+
+            uint32_t best_sad = 0;
+            const int mode = svtd_decide(srcblk, above, nTop, nTr, left, nLeft, 0, al, &best_sad);
+            modes[by * gridW + bx] = mode;
+
+            uint8_t pred[16];
+            svtd_call_builder(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
+            int16_t res[16];
+            for (int i = 0; i < 16; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+            int32_t cb[16];
+            svtd_fwd2d4x4(res, 4, cb, svt_av1_fdct4_new);
+            for (int i = 0; i < 16; ++i) coeffs[(by * gridW + bx) * 16 + i] = cb[i];
+            svtd_inv2dadd4x4(cb, pred, 4, svt_av1_idct4_new);
+            for (int i = 0; i < 16; ++i) recon[(py + (i >> 2)) * fstride + px + (i & 3)] = pred[i];
+        }
+    }
+}
+
 // ---- Q2 frame composition: D2 policy + fixed-qindex quantization -----------
 // Same loop as svtd_frame_auto_8x8 (4x4 blocks), with the FP quantizer wired
 // in: qcoeff = coded coeffs, dqcoeff feeds the inverse. Fixed qindex per run
@@ -433,7 +501,7 @@ static void svtd_frame_auto_4x4_q(const uint8_t* src, uint8_t* recon, int32_t* c
             uint8_t above[9] = {0};
             uint8_t left[9] = {0};
             uint8_t al = 0;
-            if (hasTop) for (int i = 0; i < 4; ++i) above[i] = recon[(py - 1) * fstride + px + i];
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, 4, nTr);
             if (hasLeft) for (int i = 0; i < 4; ++i) left[i] = recon[(py + i) * fstride + px - 1];
             if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
 
@@ -536,7 +604,7 @@ static void svtd_frame_auto_8x8_q(const uint8_t* src, uint8_t* recon, int32_t* c
             uint8_t above[17] = {0};
             uint8_t left[17] = {0};
             uint8_t al = 0;
-            if (hasTop) for (int i = 0; i < bsz; ++i) above[i] = recon[(py - 1) * fstride + px + i];
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, bsz, nTr);
             if (hasLeft) for (int i = 0; i < bsz; ++i) left[i] = recon[(py + i) * fstride + px - 1];
             if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
 
@@ -623,7 +691,7 @@ static void svtd_frame_v_dct_8x8(const uint8_t* src, uint8_t* recon, int32_t* co
             uint8_t above[9] = {0};
             uint8_t left[9] = {0};
             uint8_t al = 0;
-            if (hasTop) for (int i = 0; i < 4; ++i) above[i] = recon[(py - 1) * fstride + px + i];
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, 4, nTr);
             if (hasLeft) for (int i = 0; i < 4; ++i) left[i] = recon[(py + i) * fstride + px - 1];
             if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
             uint8_t pred[16];
@@ -680,7 +748,7 @@ static void svtd_frame_auto_8x8(const uint8_t* src, uint8_t* recon, int32_t* coe
             uint8_t above[9] = {0};
             uint8_t left[9] = {0};
             uint8_t al = 0;
-            if (hasTop) for (int i = 0; i < 4; ++i) above[i] = recon[(py - 1) * fstride + px + i];
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, 4, nTr);
             if (hasLeft) for (int i = 0; i < 4; ++i) left[i] = recon[(py + i) * fstride + px - 1];
             if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
 

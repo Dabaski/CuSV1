@@ -446,7 +446,6 @@ TEST_CASE("frame auto 8x8 matches the generator policy golden bit-exactly") {
     // golden: golden_gen golden_frame b7_modes/b7_recon/b7_coeffs — identical
     // D2 policy over verbatim SVT primitives at TX_8X8, decisions evaluated
     // against RECONSTRUCTED neighbor edges, chosen modes feeding filt_type.
-    // b7_modes: 1 5 6 0 (V, SMOOTH, D157, DC)
     const std::uint8_t srcData[256] = {
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18,
         15,  4, 25,  2, 12,  9, 30,  3, 10, 16,  6, 12,  3, 25, 11,  9,
@@ -464,7 +463,10 @@ TEST_CASE("frame auto 8x8 matches the generator policy golden bit-exactly") {
         18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
         22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18};
-    const std::uint8_t goldenModes[4] = {1, 5, 6, 0};
+    // b7_modes: 1 5 3 0 (V, SMOOTH, D45, DC) - block 2 (the only nTr>0
+    // block) flips D157 -> D45 once D45's zone-1 SAD consumes the REAL
+    // top-right instead of the pre-FR1 fake zeros (FR-series gather).
+    const std::uint8_t goldenModes[4] = {1, 5, 3, 0};
 
     pixels::Plane plane(16, 16, 4);
     pixels::Plane recon(16, 16, 4);
@@ -598,7 +600,7 @@ TEST_CASE("gpu frame round trip matches host encodeFrameRecon4x4") {
     int planeStrideArg = kStride;
     int fwdStrideArg = 4;
     std::uint8_t dummyLeft = 0;
-    std::uint8_t dummyAbove[4] = {0};
+    std::uint8_t dummyAbove[8] = {0};
     gpurt::DeviceBuffer dMode(sizeof(modeArg));
     gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
     gpurt::DeviceBuffer dAm(sizeof(amArg));
@@ -617,7 +619,7 @@ TEST_CASE("gpu frame round trip matches host encodeFrameRecon4x4") {
     gpurt::DeviceBuffer dInvStride(sizeof(int));
     gpurt::DeviceBuffer dPx(sizeof(int));
     gpurt::DeviceBuffer dPy(sizeof(int));
-    gpurt::DeviceBuffer dAbove(4);
+    gpurt::DeviceBuffer dAbove(8);
     gpurt::DeviceBuffer dLeft(1);
     dMode.uploadFrom(&modeArg, sizeof(modeArg));
     dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
@@ -632,11 +634,11 @@ TEST_CASE("gpu frame round trip matches host encodeFrameRecon4x4") {
     int invStride = 4;
     dInvStride.uploadFrom(&invStride, sizeof(invStride));
     dLeft.uploadFrom(&dummyLeft, 1);
-    dAbove.uploadFrom(dummyAbove, 4);
+    dAbove.uploadFrom(dummyAbove, 8);
 
     std::uint8_t reconGot[64] = {0};
     std::int32_t coeffsGot[64] = {0};
-    std::uint8_t aboveHost[4] = {0};
+    std::uint8_t aboveHost[8] = {0};
     std::uint8_t leftHost[1] = {0};
     std::uint8_t aboveLeftHost[1] = {0};
 
@@ -648,16 +650,16 @@ TEST_CASE("gpu frame round trip matches host encodeFrameRecon4x4") {
             const bool hasLeft = bx > 0;
             const int nTopPx = hasTop ? 4 : 0;
             const int nLeftPx = hasLeft ? 4 : 0;
-            const int nTopRightPx = 0;
+            const int nTopRightPx = (hasTop && bx + 1 < 2) ? 4 : 0;
 
             // read edges from device recon
             if (hasTop) {
                 std::uint8_t tmp[64];
                 dRecon.downloadTo(tmp, 64);
-                for (int i = 0; i < 4; ++i) {
+                for (int i = 0; i < 4 + nTopRightPx; ++i) {
                     aboveHost[i] = tmp[(py - 1) * 8 + px + i];
                 }
-                dAbove.uploadFrom(aboveHost, 4);
+                dAbove.uploadFrom(aboveHost, 4 + nTopRightPx);
             }
             if (hasLeft) {
                 std::uint8_t tmp[64];
@@ -831,7 +833,7 @@ TEST_CASE("gpu frame auto matches host encodeFrameAuto4x4 (host decides, gpu exe
     gpurt::DeviceBuffer dInvStride(sizeof(int));
     gpurt::DeviceBuffer dPx(sizeof(int));
     gpurt::DeviceBuffer dPy(sizeof(int));
-    gpurt::DeviceBuffer dAbove(4);
+    gpurt::DeviceBuffer dAbove(8);
     gpurt::DeviceBuffer dLeft(4);
     dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
     dFi.uploadFrom(&fiArg, sizeof(fiArg));
@@ -844,7 +846,7 @@ TEST_CASE("gpu frame auto matches host encodeFrameAuto4x4 (host decides, gpu exe
     std::uint8_t reconGot[64] = {0};
     std::int32_t coeffsGot[64] = {0};
     std::uint8_t modesGot[4] = {0};
-    std::uint8_t aboveHost[4] = {0};
+    std::uint8_t aboveHost[8] = {0};
     std::uint8_t leftHost[4] = {0};
     std::uint8_t alHost[1] = {0};
 
@@ -856,15 +858,15 @@ TEST_CASE("gpu frame auto matches host encodeFrameAuto4x4 (host decides, gpu exe
             const bool hasLeft = bx > 0;
             const int nTopPx = hasTop ? 4 : 0;
             const int nLeftPx = hasLeft ? 4 : 0;
-            const int nTopRightPx = 0;
+            const int nTopRightPx = (hasTop && bx + 1 < 2) ? 4 : 0;
 
             std::uint8_t tmp[64] = {0};
             dRecon.downloadTo(tmp, 64);
             if (hasTop) {
-                for (int i = 0; i < 4; ++i) {
+                for (int i = 0; i < 4 + nTopRightPx; ++i) {
                     aboveHost[i] = tmp[(py - 1) * 8 + px + i];
                 }
-                dAbove.uploadFrom(aboveHost, 4);
+                dAbove.uploadFrom(aboveHost, 4 + nTopRightPx);
             }
             if (hasLeft) {
                 for (int i = 0; i < 4; ++i) {
@@ -1084,6 +1086,84 @@ TEST_CASE("frame auto matches the generator policy golden bit-exactly") {
 
     bool coeffsOk = true;
     for (int i = 0; i < 64; ++i) {
+        if (coeffs[i] != goldenCoeffs[i]) {
+            coeffsOk = false;
+        }
+    }
+    CHECK(coeffsOk);
+}
+
+TEST_CASE("frame auto 4x4 gathers real reconstructed top-right (FR-series fixture)") {
+    // golden: golden_gen fr_modes/fr_recon/fr_coeffs (tools/golden_gen/
+    // main_primitives.c, svtd_frame_auto_4x4_16x16): 16x16 frame, 4x4 grid of
+    // 4x4 blocks; rows 0-7 = diagonal ramp 10*(x+y+1), rows 8-15 zero. The
+    // row-1 blocks replicate the d2_d45 structure: D45's zone-1 prediction
+    // reads above[1+r+c] into the top-right, so its SAD is 0 only when
+    // above[4..7] carry the REAL reconstructed samples
+    // (recon[(py-1)][px+4..px+7], guaranteed reconstructed by the M1 raster
+    // rule). Probe (verbatim primitives) under the pre-FR1 zero-fill: D45
+    // SADs become 900/1300/1700 for row-1 blocks bx0..bx2 and the winners
+    // change (V/D203/D203), so the mode map discriminates the gather.
+    // fr_modes: 1 7 7 7 | 3 3 3 3 | 2 2 2 2 | 0 0 0 0.
+    // NOTE: recon is NOT the discriminator here (4x4 fwd/inv round trip is
+    // exact for every winner, so recon == source under either gather); modes
+    // and coeffs carry the discrimination. recon/coeffs are still pinned to
+    // the committed gate lines.
+    const std::uint8_t goldenModes[16] = {1, 7, 7, 7, 3, 3, 3, 3, 2, 2, 2, 2, 0, 0, 0, 0};
+    const std::uint8_t goldenRecon[256] = {
+        10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170,
+        30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180,
+        40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190,
+        50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200,
+        60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210,
+        70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220,
+        80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230};
+    const std::int32_t goldenCoeffs[256] = {
+        -2785, -356, 0,    -25,  -356, 0,   0,  0,   0,   0,   0,   0,   -25, 0,   0,   0,
+        558,   -257, 5,    -21,  -112, 72,  -1, 5,   74,  -21, -6,  -2,  -25, -8,  16,  0,
+        558,   -257, 5,    -21,  -112, 72,  -1, 5,   74,  -21, -6,  -2,  -25, -8,  16,  0,
+        558,   -257, 5,    -21,  -112, 72,  -1, 5,   74,  -21, -6,  -2,  -25, -8,  16,  0,
+        0,     0,    0,    0,    0,    0,   0,  0,   0,   0,   0,   0,   0,   0,   0,   0,
+        0,     0,    0,    0,    0,    0,   0,  0,   0,   0,   0,   0,   0,   0,   0,   0,
+        0,     0,    0,    0,    0,    0,   0,  0,   0,   0,   0,   0,   0,   0,   0,   0,
+        400,   -268, 40,   -19,  -267, 96,  37, 0,   40,  37,  0,   -15, -19, 0,   -15, -16,
+        -2560, 0,    0,    0,    0,    0,   0,  0,   0,   0,   0,   0,   0,   0,   0,   0};
+    // blocks 9-15 (all-zero rows: H wins with left zeros, DC tie row) are
+    // implicitly zero in the initializer above.
+
+    pixels::Plane plane(16, 16, 4);
+    pixels::Plane recon(16, 16, 4);
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            plane.at(x, y) = (y < 8) ? static_cast<std::uint8_t>(10 * (x + y + 1)) : 0;
+        }
+    }
+
+    std::int32_t coeffs[256] = {0};
+    std::uint8_t modes[16] = {0};
+    pipeline::encodeFrameAuto4x4(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+
+    bool modesOk = true;
+    for (int i = 0; i < 16; ++i) {
+        if (modes[i] != goldenModes[i]) {
+            modesOk = false;
+        }
+    }
+    CHECK(modesOk);
+
+    bool reconOk = true;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            if (recon.at(x, y) != goldenRecon[y * 16 + x]) {
+                reconOk = false;
+            }
+        }
+    }
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 256; ++i) {
         if (coeffs[i] != goldenCoeffs[i]) {
             coeffsOk = false;
         }
@@ -1483,7 +1563,8 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
     // B7 policy loop (8x8 blocks) with the FP quantizer wired in
     // (svtd_quantize_fp_8x8, n_coeffs=64/log_scale 0): qcoeff = coded coeffs,
     // dqcoeff feeds svtd_inv2dadd8x8. Loss feeds back through decisions:
-    // qw8_modes 1 0 2 0 vs lossless b7_modes 1 5 6 0.
+    // qw8_modes 1 0 3 0 vs lossless b7_modes 1 5 3 0 (FR-series: real
+    // top-right gather flipped both block-2 winners to D45).
     // SCAN POLICY IS OURS: fixed defaultScan8x8 for every block; SVT selects
     // per mode/tx type via get_scan_order (coefficients.h:40).
     const std::uint8_t srcData[256] = {
@@ -1503,7 +1584,7 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
         18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
         22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18};
-    const std::uint8_t goldenModes[4] = {1, 0, 2, 0};
+    const std::uint8_t goldenModes[4] = {1, 0, 3, 0};
     const std::uint8_t goldenRecon[256] = {
         19, 1, 9, 8, 18, 0, 6, 18, 13, 14, 10, 0, 21, 9, 7, 15,
         17, 7, 22, 4, 10, 10, 26, 7, 12, 19, 5, 14, 0, 23, 14, 9,
@@ -1513,14 +1594,14 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
         11, 20, 12, 4, 2, 29, 10, 10, 20, 4, 8, 8, 18, 0, 21, 8,
         11, 25, 4, 12, 13, 15, 10, 18, 24, 10, 16, 15, 9, 25, 11, 19,
         18, 25, 17, 23, 5, 30, 16, 22, 16, 6, 0, 7, 18, 0, 6, 13,
-        13, 14, 10, 0, 21, 9, 6, 15, 18, 5, 20, 2, 9, 7, 30, 2,
-        11, 18, 4, 14, 0, 22, 13, 9, 19, 4, 2, 12, 14, 0, 15, 10,
-        9, 25, 0, 8, 12, 17, 4, 16, 27, 3, 19, 19, 0, 31, 11, 17,
-        17, 24, 13, 17, 2, 35, 12, 18, 16, 7, 5, 9, 3, 22, 0, 17,
-        22, 1, 23, 4, 14, 4, 36, 2, 14, 11, 5, 14, 0, 24, 6, 11,
-        20, 3, 8, 7, 18, 0, 21, 8, 10, 22, 1, 5, 14, 13, 7, 14,
-        24, 9, 16, 15, 9, 25, 11, 19, 14, 28, 11, 17, 0, 40, 6, 20,
-        16, 6, 0, 6, 18, 0, 6, 13, 13, 8, 5, 0, 24, 1, 2, 15};
+        10, 15, 6, 0, 23, 1, 3, 20, 18, 8, 19, 4, 11, 6, 33, 2,
+        4, 21, 6, 3, 0, 26, 6, 8, 19, 7, 0, 14, 16, 0, 18, 10,
+        9, 30, 4, 9, 15, 22, 8, 18, 27, 6, 18, 21, 1, 30, 14, 17,
+        15, 24, 11, 21, 3, 28, 13, 20, 16, 11, 4, 11, 5, 20, 0, 17,
+        17, 0, 26, 1, 10, 2, 30, 5, 14, 15, 4, 16, 0, 23, 10, 11,
+        21, 1, 10, 10, 16, 0, 23, 7, 10, 25, 0, 7, 16, 11, 10, 14,
+        26, 2, 9, 20, 5, 16, 12, 14, 15, 31, 10, 19, 1, 39, 9, 20,
+        16, 7, 5, 9, 16, 0, 9, 20, 13, 12, 3, 0, 26, 0, 6, 15};
     const std::int32_t goldenCoeffs[256] = {
         -79, 0, 1, 1, 0, 0, 1, -1, -1, 0, 0, 0, 1, 1, 0, 2,
         1, 0, 0, -1, 0, 0, -1, 1, -1, 0, 0, 0, 0, -1, 0, 0,
@@ -1530,11 +1611,11 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
         -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2,
         0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
         -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
-        -4, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
-        -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2,
-        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
-        -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
-        1, 0, 1, 1, 0, 0, 1, -1, 0, 0, 0, 0, 0, 2, 0, 1,
+        -1, -2, 1, 0, 0, 0, 0, 0, -2, 0, 1, 0, -1, -2, 0, -1,
+        -1, 1, 0, -1, 1, -1, 0, 0, -1, 0, -1, 0, 1, 1, 0, 2,
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, -1,
+        0, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+        1, 0, 1, 1, 0, 0, 0, -1, 0, 0, 0, 0, 0, 2, 0, 1,
         0, 0, 0, 0, 0, 0, -1, 2, 0, 0, 0, 0, -1, 0, -1, 0,
         -1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 0, 1, -1,
         0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 1, 1, -1};
@@ -1761,10 +1842,11 @@ TEST_CASE("gpu frame auto 8x8 with quantization matches host encodeFrameAuto8x8Q
             const int nTopRightPx = (hasTop && bx + 1 < 2) ? 8 : 0;
 
             dRecon.downloadTo(reconWin, 256);
-            // zero-extended above/left arrays: matches the reference
-            // composition the qw8 goldens bake in
+            // above = B real recon samples + REAL recon top-right
+            // (above[8..15] = recon[(py-1)][px+8..px+15], reconstructed by the
+            // M1 raster rule) — mirrors FR1 host gather
             if (hasTop) {
-                for (int i = 0; i < 8; ++i) aboveHost[i] = reconWin[(py - 1) * 16 + px + i];
+                for (int i = 0; i < 16; ++i) aboveHost[i] = reconWin[(py - 1) * 16 + px + i];
             }
             if (hasLeft) {
                 for (int i = 0; i < 8; ++i) leftHost[i] = reconWin[(py + i) * 16 + px - 1];
@@ -1999,11 +2081,11 @@ TEST_CASE("gpu frame auto 8x8 matches host encodeFrameAuto8x8 (host decides, gpu
             const int nTopRightPx = (hasTop && bx + 1 < 2) ? 8 : 0;
 
             dRecon.downloadTo(reconWin, 256);
-            // zero-extended above/left arrays: matches the reference
-            // composition (above[16]={0}, only [0..7] filled) that the
-            // generator b7 goldens bake in
+            // above = B real recon samples + REAL recon top-right
+            // (above[8..15] = recon[(py-1)][px+8..px+15], reconstructed by the
+            // M1 raster rule) — mirrors FR1 host gather
             if (hasTop) {
-                for (int i = 0; i < 8; ++i) aboveHost[i] = reconWin[(py - 1) * 16 + px + i];
+                for (int i = 0; i < 16; ++i) aboveHost[i] = reconWin[(py - 1) * 16 + px + i];
             }
             if (hasLeft) {
                 for (int i = 0; i < 8; ++i) leftHost[i] = reconWin[(py + i) * 16 + px - 1];
@@ -2211,7 +2293,7 @@ TEST_CASE("gpu frame auto 4x4 with quantization matches host encodeFrameAuto4x4Q
     gpurt::DeviceBuffer dInvStride(sizeof(int));
     gpurt::DeviceBuffer dPx(sizeof(int));
     gpurt::DeviceBuffer dPy(sizeof(int));
-    gpurt::DeviceBuffer dAbove(4);
+    gpurt::DeviceBuffer dAbove(8);
     gpurt::DeviceBuffer dLeft(4);
     dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
     dFi.uploadFrom(&fiArg, sizeof(fiArg));
@@ -2225,7 +2307,7 @@ TEST_CASE("gpu frame auto 4x4 with quantization matches host encodeFrameAuto4x4Q
     std::int32_t coeffsGot[64] = {0};
     std::uint8_t modesGot[4] = {0};
     std::uint8_t reconWin[64] = {0};
-    std::uint8_t aboveHost[4] = {0};
+    std::uint8_t aboveHost[8] = {0};
     std::uint8_t leftHost[4] = {0};
     std::uint8_t srcBlk[16] = {0};
 
@@ -2237,11 +2319,11 @@ TEST_CASE("gpu frame auto 4x4 with quantization matches host encodeFrameAuto4x4Q
             const bool hasLeft = bx > 0;
             const int nTopPx = hasTop ? 4 : 0;
             const int nLeftPx = hasLeft ? 4 : 0;
-            const int nTopRightPx = 0;
+            const int nTopRightPx = (hasTop && bx + 1 < 2) ? 4 : 0;
 
             dRecon.downloadTo(reconWin, 64);
             if (hasTop) {
-                for (int i = 0; i < 4; ++i) aboveHost[i] = reconWin[(py - 1) * 8 + px + i];
+                for (int i = 0; i < 4 + nTopRightPx; ++i) aboveHost[i] = reconWin[(py - 1) * 8 + px + i];
             }
             if (hasLeft) {
                 for (int i = 0; i < 4; ++i) leftHost[i] = reconWin[(py + i) * 8 + px - 1];
@@ -2285,7 +2367,7 @@ TEST_CASE("gpu frame auto 4x4 with quantization matches host encodeFrameAuto4x4Q
             dAl.uploadFrom(&alArg, sizeof(alArg));
             dPx.uploadFrom(&pxArg, sizeof(pxArg));
             dPy.uploadFrom(&pyArg, sizeof(pyArg));
-            if (hasTop) dAbove.uploadFrom(aboveHost, 4);
+            if (hasTop) dAbove.uploadFrom(aboveHost, 4 + nTopRightPx);
             if (hasLeft) dLeft.uploadFrom(leftHost, 4);
 
             CUdeviceptr pMode = dMode.get();
