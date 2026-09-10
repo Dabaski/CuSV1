@@ -461,6 +461,187 @@ private:
     std::vector<std::uint8_t> modes_;
 };
 
+// ---- BM2: per-stage single-block kernel timings ----------------------------
+
+template <int B>
+void stageBench(const std::uint8_t* src64, const pixels::Plane& reconRef) {
+    constexpr int kBlk = B * B;
+    const char* tag = (B == 4) ? "4x4" : "8x8";
+
+    const std::string predSrc =
+        (B == 4) ? intra::predictBlockCuSource() : intra::predictBlock8x8CuSource();
+    const std::string ptxPred = *gpurt::compileToPtx(predSrc, "compute_61");
+    const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
+    const std::string ptxSub = *gpurt::compileToPtx(pipeline::subtractCuSource(), "compute_61");
+    const std::vector<std::string> sn = gpurt::ptxEntryNames(ptxSub);
+    const std::string ptxTx = *gpurt::compileToPtx(transforms::fwdTxfmCuSource(), "compute_61");
+    const std::vector<std::string> tn = gpurt::ptxEntryNames(ptxTx);
+    const std::string ptxInv = *gpurt::compileToPtx(transforms::invTxfmCuSource(), "compute_61");
+    const std::vector<std::string> in = gpurt::ptxEntryNames(ptxInv);
+    const std::string ptxQ = *gpurt::compileToPtx(transforms::quantCuSource(), "compute_61");
+    const std::vector<std::string> qn = gpurt::ptxEntryNames(ptxQ);
+    const char* predEntry = (B == 4) ? "predict_block_4x4" : "predict_block_8x8";
+    const char* subEntry = (B == 4) ? "subtract_4x4_plane" : "subtract_8x8_plane";
+    const char* txEntry = (B == 4) ? "fwd_txfm_2d_4x4" : "fwd_txfm_2d_8x8";
+    const char* invEntry = (B == 4) ? "inv_txfm_2d_add_4x4" : "inv_txfm_2d_add_8x8";
+    const char* qEntry = (B == 4) ? "quant_dequant_4x4" : "quant_dequant_8x8";
+    gpurt::Kernel kPred(ptxPred, *std::find(pn.begin(), pn.end(), predEntry));
+    gpurt::Kernel kSub(ptxSub, *std::find(sn.begin(), sn.end(), subEntry));
+    gpurt::Kernel kTx(ptxTx, *std::find(tn.begin(), tn.end(), txEntry));
+    gpurt::Kernel kInv(ptxInv, *std::find(in.begin(), in.end(), invEntry));
+    gpurt::Kernel kQuant(ptxQ, *std::find(qn.begin(), qn.end(), qEntry));
+
+    // one mid-frame block with both edges: block (bx=1, by=1)
+    const int px = B, py = B;
+    std::uint8_t above[2 * B] = {0};
+    std::uint8_t left[2 * B] = {0};
+    for (int i = 0; i < B; ++i) above[i] = reconRef.at(px + i, py - 1);
+    for (int i = 0; i < B; ++i) left[i] = reconRef.at(px - 1, py + i);
+    const int al = reconRef.at(px - 1, py - 1);
+    std::uint8_t srcBlk[kBlk] = {0};
+    for (int y = 0; y < B; ++y) {
+        for (int x = 0; x < B; ++x) {
+            srcBlk[y * B + x] = src64[(py + y) * kFrameSize + px + x];
+        }
+    }
+
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(kQindex, qt);
+    std::int16_t scan[B * B] = {0};
+    if constexpr (B == 4) {
+        transforms::defaultScan4x4(scan);
+    } else {
+        transforms::defaultScan8x8(scan);
+    }
+
+    gpurt::DeviceBuffer dAbove(sizeof(above));
+    gpurt::DeviceBuffer dLeft(sizeof(left));
+    gpurt::DeviceBuffer dPred(kBlk);
+    gpurt::DeviceBuffer dPlane(static_cast<std::size_t>(kFrameSize * kFrameSize));
+    gpurt::DeviceBuffer dResidual(static_cast<std::size_t>(kBlk) * sizeof(std::int16_t));
+    gpurt::DeviceBuffer dBlkCoeffs(static_cast<std::size_t>(kBlk) * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dQcoeffs(static_cast<std::size_t>(kBlk) * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dDqcoeffs(static_cast<std::size_t>(kBlk) * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dEob(sizeof(std::uint16_t));
+    gpurt::DeviceBuffer dQuantFp(sizeof(qt.quantFp));
+    gpurt::DeviceBuffer dDequant(sizeof(qt.dequant));
+    gpurt::DeviceBuffer dRoundFp(sizeof(qt.roundFp));
+    gpurt::DeviceBuffer dScan(sizeof(scan));
+    dAbove.uploadFrom(above, sizeof(above));
+    dLeft.uploadFrom(left, sizeof(left));
+    dPlane.uploadFrom(src64, static_cast<std::size_t>(kFrameSize * kFrameSize));
+    dQuantFp.uploadFrom(qt.quantFp, sizeof(qt.quantFp));
+    dDequant.uploadFrom(qt.dequant, sizeof(qt.dequant));
+    dRoundFp.uploadFrom(qt.roundFp, sizeof(qt.roundFp));
+    dScan.uploadFrom(scan, sizeof(scan));
+
+    int modeArg = intra::V_PRED;
+    int deltaArg = 0;
+    int amArg = 0;
+    int lmArg = intra::V_PRED;
+    int fiArg = -1;
+    int defArg = 0;
+    int nTopArg = B;
+    int nTrArg = B;
+    int nLeftArg = B;
+    int nBlArg = 0;
+    int alArg = al;
+    int typeArg = 0;
+    int planeStrideArg = kFrameSize;
+    int txfmStrideArg = B;
+    int pxArg = px;
+    int pyArg = py;
+    gpurt::DeviceBuffer dMode(sizeof(modeArg));
+    gpurt::DeviceBuffer dDelta(sizeof(deltaArg));
+    gpurt::DeviceBuffer dAm(sizeof(amArg));
+    gpurt::DeviceBuffer dLm(sizeof(lmArg));
+    gpurt::DeviceBuffer dFi(sizeof(fiArg));
+    gpurt::DeviceBuffer dDef(sizeof(defArg));
+    gpurt::DeviceBuffer dNTop(sizeof(nTopArg));
+    gpurt::DeviceBuffer dNTr(sizeof(nTrArg));
+    gpurt::DeviceBuffer dNLeft(sizeof(nLeftArg));
+    gpurt::DeviceBuffer dNBl(sizeof(nBlArg));
+    gpurt::DeviceBuffer dAl(sizeof(alArg));
+    gpurt::DeviceBuffer dType(sizeof(typeArg));
+    gpurt::DeviceBuffer dPlaneStride(sizeof(planeStrideArg));
+    gpurt::DeviceBuffer dTxfmStride(sizeof(txfmStrideArg));
+    gpurt::DeviceBuffer dPx(sizeof(pxArg));
+    gpurt::DeviceBuffer dPy(sizeof(pyArg));
+    dMode.uploadFrom(&modeArg, sizeof(modeArg));
+    dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
+    dAm.uploadFrom(&amArg, sizeof(amArg));
+    dLm.uploadFrom(&lmArg, sizeof(lmArg));
+    dFi.uploadFrom(&fiArg, sizeof(fiArg));
+    dDef.uploadFrom(&defArg, sizeof(defArg));
+    dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
+    dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
+    dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
+    dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
+    dAl.uploadFrom(&alArg, sizeof(alArg));
+    dType.uploadFrom(&typeArg, sizeof(typeArg));
+    dPlaneStride.uploadFrom(&planeStrideArg, sizeof(planeStrideArg));
+    dTxfmStride.uploadFrom(&txfmStrideArg, sizeof(txfmStrideArg));
+    dPx.uploadFrom(&pxArg, sizeof(pxArg));
+    dPy.uploadFrom(&pyArg, sizeof(pyArg));
+
+    CUdeviceptr pMode = dMode.get();
+    CUdeviceptr pDelta = dDelta.get();
+    CUdeviceptr pAm = dAm.get();
+    CUdeviceptr pLm = dLm.get();
+    CUdeviceptr pAbove = dAbove.get();
+    CUdeviceptr pNTop = dNTop.get();
+    CUdeviceptr pNTr = dNTr.get();
+    CUdeviceptr pLeft = dLeft.get();
+    CUdeviceptr pNLeft = dNLeft.get();
+    CUdeviceptr pNBl = dNBl.get();
+    CUdeviceptr pAl = dAl.get();
+    CUdeviceptr pFi = dFi.get();
+    CUdeviceptr pDef = dDef.get();
+    CUdeviceptr pPred = dPred.get();
+    CUdeviceptr pPlane = dPlane.get();
+    CUdeviceptr pPlaneStride = dPlaneStride.get();
+    CUdeviceptr pPx = dPx.get();
+    CUdeviceptr pPy = dPy.get();
+    CUdeviceptr pResidual = dResidual.get();
+    CUdeviceptr pType = dType.get();
+    CUdeviceptr pTxfmStride = dTxfmStride.get();
+    CUdeviceptr pBlkCoeffs = dBlkCoeffs.get();
+    CUdeviceptr pQcoeffs = dQcoeffs.get();
+    CUdeviceptr pDqcoeffs = dDqcoeffs.get();
+    CUdeviceptr pEob = dEob.get();
+    CUdeviceptr pQuantFp = dQuantFp.get();
+    CUdeviceptr pDequant = dDequant.get();
+    CUdeviceptr pRoundFp = dRoundFp.get();
+    CUdeviceptr pScan = dScan.get();
+
+    std::printf("  -- geometry %s (block bx=1 by=1, V_PRED, both edges) --\n", tag);
+    void* argsPred[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft,
+                        &pNBl, &pAl, &pFi, &pDef, &pPred};
+    timeLoop("predict_block", [&] { kPred.launch(1, 1, static_cast<unsigned>(kBlk), 1, argsPred); });
+
+    void* argsSub[] = {&pPlane, &pPlaneStride, &pPx, &pPy, &pPred, &pResidual};
+    timeLoop("subtract_plane", [&] { kSub.launch(1, 1, static_cast<unsigned>(kBlk), 1, argsSub); });
+
+    void* argsTx[] = {&pResidual, &pTxfmStride, &pType, &pBlkCoeffs};
+    timeLoop("fwd_txfm_2d", [&] { kTx.launch(1, 1, static_cast<unsigned>(B), 1, argsTx); });
+
+    void* argsQuant[] = {&pBlkCoeffs, &pQuantFp, &pDequant, &pRoundFp, &pScan, &pQcoeffs,
+                         &pDqcoeffs, &pEob};
+    timeLoop("quant_dequant", [&] {
+        kQuant.launch(1, 1, static_cast<unsigned>(kBlk), 1, argsQuant);
+    });
+
+    void* argsInv[] = {&pDqcoeffs, &pType, &pPred, &pTxfmStride};
+    timeLoop("inv_txfm_2d_add", [&] {
+        kInv.launch(1, 1, static_cast<unsigned>(B), 1, argsInv);
+    });
+    std::printf("  context: composite covers %d blocks/frame; per block the loop issues\n",
+                (kFrameSize / B) * (kFrameSize / B));
+    std::printf("           10 small H2D arg uploads + recon download + recon upload +\n");
+    std::printf("           coeff download + %d launches (lossless) / %d (q100),\n", 4, 5);
+    std::printf("           each a sync point\n");
+}
+
 }  // namespace
 
 int main() {
@@ -545,5 +726,11 @@ int main() {
             timeLoop("gpu 8x8 q100", [&] { g8Q.runFrame(); });
         }
     }
+
+    std::printf("\n== per-stage single-block launches (ONE launch per timed iteration; each\n");
+    std::printf("   Kernel::launch is synchronous, so these numbers are dominated by\n");
+    std::printf("   launch+sync overhead, not kernel work - same caveat as the composite) ==\n");
+    stageBench<4>(src64, recon4L);
+    stageBench<8>(src64, recon8L);
     return 0;
 }
