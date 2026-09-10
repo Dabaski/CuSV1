@@ -2472,4 +2472,452 @@ extern "C" __global__ void predict_block_16x16(
 )CUDB2";
 }
 
+std::string predictBlock32x32CuSource() {
+    // Shared memory sizing arithmetic (32x32, 1024 threads - fits CUDA's
+    // 1024-thread limit, no 4-pixel/thread or tiling mapping needed unlike
+    // 64x64):
+    //   aboveRow = aboveData + 32. Backward reach: aboveRow[-1] (the corner;
+    //   NO upsample at 32x32 - blk_wh = 64 > 16 so use_up32 returns 0 for
+    //   every delta/type), i.e. aboveData[31]. Forward: numTop max 32 raw +
+    //   32 top-right = 64; zone 1 reads above[maxBaseX + 1] where maxBaseX =
+    //   ((32+32)-1) << upA = 63 << 0 = 63 (svt_av1_dr_prediction_z1_c), so
+    //   the max index touched is aboveRow[63] = aboveData[95]; the EDGE
+    //   FILTER operates on nPx = 32 + 1 + 32 = 65 entries
+    //   (aboveRow[-1..63]). Array size 128 covers [0..127] with margin.
+    //   Same arithmetic for leftData (numLeft max 32 + 32 bottom-left = 64;
+    //   zone-3 maxBaseY = 63, leftCol[63] = leftData[95]).
+    //   Corner blend LIVE at 32x32 (txwpx+txhpx = 64 >= 24).
+    //   THREAD-LIMIT DESIGN NOTE (L6c): 1024 threads = CUDA max per block; the
+    //   naive build exceeds sm_61's 65536-reg/block budget (observed
+    //   cuLaunchKernel 701 = out of resources), so the kernel carries
+    //   __launch_bounds__(1024) which caps the compiler at 64 regs/thread -
+    //   one thread per pixel is RETAINED and the register overflow becomes
+    //   local-memory spills (ptxas numbers cited in the slice report).
+    return R"CUDA(
+__constant__ unsigned char sm_w32[32] = {
+    255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74,
+    66, 59, 52, 45, 39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8};
+
+__constant__ unsigned short der32[90] = {
+    0,    0, 0,
+    1023, 0, 0,
+    547,  0, 0,
+    372,  0, 0, 0, 0,
+    273,  0, 0,
+    215,  0, 0,
+    178,  0, 0,
+    151,  0, 0,
+    132,  0, 0,
+    116,  0, 0,
+    102,  0, 0, 0,
+    90,   0, 0,
+    80,   0, 0,
+    71,   0, 0,
+    64,   0, 0,
+    57,   0, 0,
+    51,   0, 0,
+    45,   0, 0, 0,
+    40,   0, 0,
+    35,   0, 0,
+    31,   0, 0,
+    27,   0, 0,
+    23,   0, 0,
+    19,   0, 0,
+    15,   0, 0, 0, 0,
+    11,   0, 0,
+    7,    0, 0,
+    3,    0, 0,
+};
+
+__constant__ signed char taps32[5][8][8] = {
+    {
+        {-6, 10, 0, 0, 0, 12, 0, 0},
+        {-5, 2, 10, 0, 0, 9, 0, 0},
+        {-3, 1, 1, 10, 0, 7, 0, 0},
+        {-3, 1, 1, 2, 10, 5, 0, 0},
+        {-4, 6, 0, 0, 0, 2, 12, 0},
+        {-3, 2, 6, 0, 0, 2, 9, 0},
+        {-3, 2, 2, 6, 0, 2, 7, 0},
+        {-3, 1, 2, 2, 6, 3, 5, 0},
+    },
+    {
+        {-10, 16, 0, 0, 0, 10, 0, 0},
+        {-6, 0, 16, 0, 0, 6, 0, 0},
+        {-4, 0, 0, 16, 0, 4, 0, 0},
+        {-2, 0, 0, 0, 16, 2, 0, 0},
+        {-10, 16, 0, 0, 0, 0, 10, 0},
+        {-6, 0, 16, 0, 0, 0, 6, 0},
+        {-4, 0, 0, 16, 0, 0, 4, 0},
+        {-2, 0, 0, 0, 16, 0, 2, 0},
+    },
+    {
+        {-8, 8, 0, 0, 0, 16, 0, 0},
+        {-8, 0, 8, 0, 0, 16, 0, 0},
+        {-8, 0, 0, 8, 0, 16, 0, 0},
+        {-8, 0, 0, 0, 8, 16, 0, 0},
+        {-4, 4, 0, 0, 0, 0, 16, 0},
+        {-4, 0, 4, 0, 0, 0, 16, 0},
+        {-4, 0, 0, 4, 0, 0, 16, 0},
+        {-4, 0, 0, 0, 4, 0, 16, 0},
+    },
+    {
+        {-2, 8, 0, 0, 0, 10, 0, 0},
+        {-1, 3, 8, 0, 0, 6, 0, 0},
+        {-1, 2, 3, 8, 0, 4, 0, 0},
+        {0, 1, 2, 3, 8, 2, 0, 0},
+        {-1, 4, 0, 0, 0, 3, 10, 0},
+        {-1, 3, 4, 0, 0, 4, 6, 0},
+        {-1, 2, 3, 4, 0, 4, 4, 0},
+        {-1, 2, 2, 3, 4, 3, 3, 0},
+    },
+    {
+        {-12, 14, 0, 0, 0, 14, 0, 0},
+        {-10, 0, 14, 0, 0, 12, 0, 0},
+        {-9, 0, 0, 14, 0, 11, 0, 0},
+        {-8, 0, 0, 0, 14, 10, 0, 0},
+        {-10, 12, 0, 0, 0, 0, 14, 0},
+        {-9, 1, 12, 0, 0, 0, 12, 0},
+        {-8, 0, 0, 12, 0, 1, 11, 0},
+        {-7, 0, 0, 1, 12, 1, 9, 0},
+    },
+};
+)CUDA"
+    R"CUDB1(
+__device__ int abs32(int v) { return v < 0 ? -v : v; }
+
+__device__ int get_dx32(int angle) {
+    if (angle > 0 && angle < 90) return der32[angle];
+    if (angle > 90 && angle < 180) return der32[180 - angle];
+    return 1;
+}
+
+__device__ int get_dy32(int angle) {
+    if (angle > 90 && angle < 180) return der32[angle - 90];
+    if (angle > 180 && angle < 270) return der32[270 - angle];
+    return 1;
+}
+
+__device__ int use_up32(int bs0, int bs1, int delta, int type) {
+    const int d = abs32(delta);
+    const int blkWh = bs0 + bs1;
+    if (d <= 0 || d >= 40) return 0;
+    return type ? (blkWh <= 8) : (blkWh <= 16);
+}
+
+__device__ int filt_str32(int bs0, int bs1, int delta, int type) {
+    const int d = abs32(delta);
+    int strength = 0;
+    const int blkWh = bs0 + bs1;
+    if (type == 0) {
+        if (blkWh <= 8) { if (d >= 56) strength = 1; }
+        else if (blkWh <= 12) { if (d >= 40) strength = 1; }
+        else if (blkWh <= 16) { if (d >= 40) strength = 1; }
+        else if (blkWh <= 24) {
+            if (d >= 8) strength = 1;
+            if (d >= 16) strength = 2;
+            if (d >= 32) strength = 3;
+        } else if (blkWh <= 32) {
+            if (d >= 1) strength = 1;
+            if (d >= 4) strength = 2;
+            if (d >= 32) strength = 3;
+        } else { if (d >= 1) strength = 3; }
+    } else {
+        if (blkWh <= 8) {
+            if (d >= 40) strength = 1;
+            if (d >= 64) strength = 2;
+        } else if (blkWh <= 16) {
+            if (d >= 20) strength = 1;
+            if (d >= 48) strength = 2;
+        } else if (blkWh <= 24) { if (d >= 4) strength = 3; }
+        else { if (d >= 1) strength = 3; }
+    }
+    return strength;
+}
+
+__device__ int edge_tap32(int filt, int j) {
+    if (filt == 1) { const int k[5] = {0, 5, 6, 5, 0}; return k[j]; }
+    if (filt == 2) { const int k[5] = {2, 4, 4, 4, 2}; return k[j]; }
+    const int k[5] = {0, 4, 8, 4, 0}; return k[j];
+}
+
+__device__ void filt_edge32(unsigned char* p, int sz, int strength) {
+    if (!strength) return;
+    unsigned char edge[80];
+    for (int i = 0; i < sz; ++i) edge[i] = p[i];
+    const int filt = strength - 1;
+    for (int i = 1; i < sz; ++i) {
+        int s = 0;
+        for (int j = 0; j < 5; ++j) {
+            int k = i - 2 + j;
+            if (k < 0) k = 0; else if (k > sz - 1) k = sz - 1;
+            s += edge[k] * edge_tap32(filt, j);
+        }
+        s = (s + 8) >> 4;
+        p[i] = (unsigned char)s;
+    }
+}
+
+__device__ int rpos32(int value, int bits) { return (value + (1 << (bits - 1))) >> bits; }
+__device__ int rp_signed32(int value, int bits) {
+    if (value < 0) return -rpos32(-value, bits);
+    return rpos32(value, bits);
+}
+
+)CUDB1"
+    R"CUDB2(
+extern "C" __global__ void __launch_bounds__(1024) predict_block_32x32(
+    const int* mode, const int* angleDelta,
+    const int* aboveMode, const int* leftMode,
+    const unsigned char* aboveRef, const int* nTopPx, const int* nTopRightPx,
+    const unsigned char* leftRef, const int* nLeftPx, const int* nBottomLeftPx,
+    const int* aboveLeft, const int* filterIntraMode, const int* disableEdgeFilter,
+    unsigned char* dst) {
+    __shared__ unsigned char aboveData[128];
+    __shared__ unsigned char leftData[128];
+    __shared__ int kDc;
+    __shared__ int kAngle;
+    __shared__ unsigned char kFi[1024];
+
+    const int idx = threadIdx.x;
+    const int r32 = idx >> 5;
+    const int c32 = idx & 31;
+    unsigned char* aboveRow = aboveData + 32;
+    unsigned char* leftCol = leftData + 32;
+
+    if (idx == 0) {
+        int m = *mode;
+        int needLeft = 0, needAbove = 0, needAboveLeft = 0, pAngle = 0;
+        int isDr = (m >= 1 && m <= 8) ? 1 : 0;
+        if (m == 0) { needLeft = 1; needAbove = 1; }
+        else if (m == 1) { needAbove = 1; }
+        else if (m == 2) { needLeft = 1; }
+        else if (m == 12) { needLeft = 1; needAbove = 1; needAboveLeft = 1; }
+        else if (m >= 9 && m <= 11) { needLeft = 1; needAbove = 1; }
+        if (isDr) {
+            if (m == 1) pAngle = 90;
+            else if (m == 2) pAngle = 180;
+            else if (m == 3) pAngle = 45;
+            else if (m == 4) pAngle = 135;
+            else if (m == 5) pAngle = 113;
+            else if (m == 6) pAngle = 157;
+            else if (m == 7) pAngle = 203;
+            else pAngle = 67;
+            pAngle += (*angleDelta) * 3;
+            if (pAngle <= 90) { needAbove = 1; needLeft = 0; needAboveLeft = 1; }
+            else if (pAngle < 180) { needAbove = 1; needLeft = 1; needAboveLeft = 1; }
+            else { needAbove = 0; needLeft = 1; needAboveLeft = 1; }
+        }
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needLeft = 1; needAbove = 1; needAboveLeft = 1;
+        }
+        const int needRight = isDr ? (pAngle < 90) : 0;
+        const int needBottom = isDr ? (pAngle > 180) : 0;
+        int i;
+        if (needLeft) {
+            const int numLeft = 32 + (needBottom ? 32 : 0);
+            if (*nLeftPx > 0) {
+                for (i = 0; i < *nLeftPx; ++i) leftCol[i] = leftRef[i];
+                if (needBottom && *nBottomLeftPx > 0) {
+                    for (; i < 32 + *nBottomLeftPx; ++i) leftCol[i] = leftRef[i];
+                }
+                for (; i < numLeft; ++i) leftCol[i] = leftCol[i - 1];
+            } else {
+                const unsigned char v = (*nTopPx > 0) ? aboveRef[0] : 129;
+                for (i = 0; i < numLeft; ++i) leftCol[i] = v;
+            }
+        }
+        if (needAbove) {
+            const int numTop = 32 + (needRight ? 32 : 0);
+            if (*nTopPx > 0) {
+                for (i = 0; i < *nTopPx; ++i) aboveRow[i] = aboveRef[i];
+                if (needRight && *nTopRightPx > 0) {
+                    for (i = 32; i < 32 + *nTopRightPx; ++i) aboveRow[i] = aboveRef[i];
+                }
+                for (; i < numTop; ++i) aboveRow[i] = aboveRow[i - 1];
+            } else {
+                const unsigned char v = (*nLeftPx > 0) ? leftRef[0] : 127;
+                for (i = 0; i < numTop; ++i) aboveRow[i] = v;
+            }
+        }
+        if (needAboveLeft) {
+            if (*nTopPx > 0 && *nLeftPx > 0) {
+                aboveRow[-1] = (unsigned char)(*aboveLeft);
+            } else if (*nTopPx > 0) {
+                aboveRow[-1] = aboveRef[0];
+            } else if (*nLeftPx > 0) {
+                aboveRow[-1] = leftRef[0];
+            } else {
+                aboveRow[-1] = 128;
+            }
+            leftCol[-1] = aboveRow[-1];
+        }
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            unsigned char fb[33][33];
+            for (int rr = 0; rr < 33; ++rr)
+                for (int cc = 0; cc < 33; ++cc) fb[rr][cc] = 0;
+            for (int rr = 0; rr < 32; ++rr) fb[rr + 1][0] = leftCol[rr];
+            fb[0][0] = aboveRow[-1];
+            for (int cc = 1; cc < 33; ++cc) fb[0][cc] = aboveRow[cc - 1];
+            for (int rr = 1; rr < 33; rr += 2) {
+                for (int cc = 1; cc < 33; cc += 4) {
+                    const unsigned char p0 = fb[rr - 1][cc - 1];
+                    const unsigned char p1 = fb[rr - 1][cc];
+                    const unsigned char p2 = fb[rr - 1][cc + 1];
+                    const unsigned char p3 = fb[rr - 1][cc + 2];
+                    const unsigned char p4 = fb[rr - 1][cc + 3];
+                    const unsigned char p5 = fb[rr][cc - 1];
+                    const unsigned char p6 = fb[rr + 1][cc - 1];
+                    for (int k = 0; k < 8; ++k) {
+                        const int rOff = k >> 2;
+                        const int cOff = k & 0x03;
+                        int sum = taps32[(*filterIntraMode)][k][0] * p0 +
+                                  taps32[(*filterIntraMode)][k][1] * p1 +
+                                  taps32[(*filterIntraMode)][k][2] * p2 +
+                                  taps32[(*filterIntraMode)][k][3] * p3 +
+                                  taps32[(*filterIntraMode)][k][4] * p4 +
+                                  taps32[(*filterIntraMode)][k][5] * p5 +
+                                  taps32[(*filterIntraMode)][k][6] * p6;
+                        int v = rp_signed32(sum, 4);
+                        if (v < 0) v = 0; else if (v > 255) v = 255;
+                        fb[rr + rOff][cc + cOff] = (unsigned char)v;
+                    }
+                }
+            }
+            for (int rr = 0; rr < 32; ++rr)
+                for (int cc = 0; cc < 32; ++cc) kFi[rr * 32 + cc] = fb[rr + 1][cc + 1];
+        }
+        if (isDr) {
+            // edge filter: strength per svt_aom_intra_edge_filter_strength at
+            // blk_wh = 64 (32+32, the >32 else-branch: d>=1 -> 3);
+            // upsample NEVER fires at 32x32 (use_up32: blkWh 64 > 16)
+            if (!(*disableEdgeFilter)) {
+                const int kFiltType =
+                    (((*aboveMode >= 9 && *aboveMode <= 11) || (*leftMode >= 9 && *leftMode <= 11)) ? 1 : 0);
+                const int abLe = needAboveLeft ? 1 : 0;
+                // corner blend: LIVE at 32x32 (txwpx+txhpx = 64 >= 24)
+                if (needAbove && needLeft && 64 >= 24) {
+                    const int s = (leftCol[0] * 5) + (aboveRow[-1] * 6) + (aboveRow[0] * 5);
+                    aboveRow[-1] = (unsigned char)((s + 8) >> 4);
+                    leftCol[-1] = aboveRow[-1];
+                }
+                if (needAbove && *nTopPx > 0) {
+                    const int strength = filt_str32(32, 32, pAngle - 90, kFiltType);
+                    const int nPx = *nTopPx + abLe + (needRight ? 32 : 0);
+                    filt_edge32(aboveRow - abLe, nPx, strength);
+                }
+                if (needLeft && *nLeftPx > 0) {
+                    const int strength = filt_str32(32, 32, pAngle - 180, kFiltType);
+                    const int nPx = *nLeftPx + abLe + (needBottom ? 32 : 0);
+                    filt_edge32(leftCol - abLe, nPx, strength);
+                }
+            }
+            kAngle = pAngle;
+        }
+        if (m == 0) {
+            int sum = 0;
+            if (*nLeftPx > 0 && *nTopPx > 0) {
+                for (i = 0; i < 32; ++i) sum += aboveRow[i];
+                for (i = 0; i < 32; ++i) sum += leftCol[i];
+                kDc = (sum + 32) / 64;
+            } else if (*nLeftPx > 0) {
+                for (i = 0; i < 32; ++i) sum += leftCol[i];
+                kDc = (sum + 16) / 32;
+            } else if (*nTopPx > 0) {
+                for (i = 0; i < 32; ++i) sum += aboveRow[i];
+                kDc = (sum + 16) / 32;
+            } else {
+                kDc = 128;
+            }
+        }
+    }
+    __syncthreads();
+    int m = *mode;
+    if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+        dst[idx] = kFi[idx];
+    } else if (m == 0) {
+        dst[idx] = (unsigned char)kDc;
+    } else if (m == 12) {
+        const int base = leftCol[r32] + aboveRow[c32] - aboveRow[-1];
+        const int pL = (base > leftCol[r32]) ? base - leftCol[r32] : leftCol[r32] - base;
+        const int pT = (base > aboveRow[c32]) ? base - aboveRow[c32] : aboveRow[c32] - base;
+        const int pTL = (base > aboveRow[-1]) ? base - aboveRow[-1] : aboveRow[-1] - base;
+        dst[idx] = (pL <= pT && pL <= pTL) ? leftCol[r32] : (pT <= pTL) ? aboveRow[c32] : aboveRow[-1];
+    } else if (m >= 9 && m <= 11) {
+        const int below = leftCol[31];
+        const int right = aboveRow[31];
+        if (m == 9) {
+            const int wH = sm_w32[r32], wW = sm_w32[c32];
+            int val = wH * aboveRow[c32] + (256 - wH) * below + wW * leftCol[r32] + (256 - wW) * right;
+            val = (val + 256) >> 9;
+            dst[idx] = (unsigned char)val;
+        } else if (m == 10) {
+            const int wH = sm_w32[r32];
+            int val = wH * aboveRow[c32] + (256 - wH) * below;
+            val = (val + 128) >> 8;
+            dst[idx] = (unsigned char)val;
+        } else {
+            const int wW = sm_w32[c32];
+            int val = wW * leftCol[r32] + (256 - wW) * right;
+            val = (val + 128) >> 8;
+            dst[idx] = (unsigned char)val;
+        }
+    } else if (m >= 1 && m <= 8) {
+        const int angle = kAngle;
+        const int dx = get_dx32(angle);
+        const int dy = get_dy32(angle);
+        if (angle == 90) {
+            dst[idx] = aboveRow[c32];
+        } else if (angle == 180) {
+            dst[idx] = leftCol[r32];
+        } else if (angle < 90) {
+            // upA = 0 always (upsample off at 32x32): maxBaseX = 63 << 0,
+            // above[maxBaseX + 1] reach = aboveRow[64] = aboveData[96] < 128
+            const int maxBaseX = 63;
+            const int xr = dx * (r32 + 1);
+            int base = (xr >> 6) + c32;
+            if (base >= maxBaseX) {
+                dst[idx] = aboveRow[maxBaseX];
+            } else {
+                const int shift = (xr & 0x3F) >> 1;
+                int val = aboveRow[base] * (32 - shift) + aboveRow[base + 1] * shift;
+                val = (val + 16) >> 5;
+                if (val > 255) val = 255;
+                dst[idx] = (unsigned char)val;
+            }
+        } else if (angle < 180) {
+            const int minBaseX = -1;
+            const int xr = -dx * (r32 + 1);
+            int base1 = (xr >> 6) + c32;
+            int val;
+            if (base1 >= minBaseX) {
+                const int shift1 = (xr & 0x3F) >> 1;
+                val = aboveRow[base1] * (32 - shift1) + aboveRow[base1 + 1] * shift1;
+            } else {
+                const int yc = (r32 << 6) - dy * (c32 + 1);
+                const int base2 = yc >> 6;
+                const int shift2 = (yc & 0x3F) >> 1;
+                val = leftCol[base2] * (32 - shift2) + leftCol[base2 + 1] * shift2;
+            }
+            val = (val + 16) >> 5;
+            if (val > 255) val = 255;
+            dst[idx] = (unsigned char)val;
+        } else {
+            const int maxBaseY = 63;
+            const int yc = dy * (c32 + 1);
+            int base = (yc >> 6) + r32;
+            if (base >= maxBaseY) {
+                dst[idx] = leftCol[maxBaseY];
+            } else {
+                const int shift = (yc & 0x3F) >> 1;
+                int val = leftCol[base] * (32 - shift) + leftCol[base + 1] * shift;
+                val = (val + 16) >> 5;
+                if (val > 255) val = 255;
+                dst[idx] = (unsigned char)val;
+            }
+        }
+    }
+}
+)CUDB2";
+}
+
 }  // namespace intra
