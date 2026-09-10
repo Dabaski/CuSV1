@@ -134,7 +134,8 @@ public:
     GpuFrame(const std::uint8_t* src, int qindex)
         : src_(src), quantized_(qindex >= 0), qt_{}, scan_{} {
         const std::string predSrc =
-            (B == 4) ? intra::predictBlockCuSource() : intra::predictBlock8x8CuSource();
+            (B == 4) ? intra::predictBlockCuSource()
+                     : (B == 8) ? intra::predictBlock8x8CuSource() : intra::predictBlock16x16CuSource();
         const std::string ptxPred = *gpurt::compileToPtx(predSrc, "compute_61");
         const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
         const std::string ptxSub = *gpurt::compileToPtx(pipeline::subtractCuSource(), "compute_61");
@@ -143,10 +144,10 @@ public:
         const std::vector<std::string> tn = gpurt::ptxEntryNames(ptxTx);
         const std::string ptxInv = *gpurt::compileToPtx(transforms::invTxfmCuSource(), "compute_61");
         const std::vector<std::string> in = gpurt::ptxEntryNames(ptxInv);
-        const char* predEntry = (B == 4) ? "predict_block_4x4" : "predict_block_8x8";
-        const char* subEntry = (B == 4) ? "subtract_4x4_plane" : "subtract_8x8_plane";
-        const char* txEntry = (B == 4) ? "fwd_txfm_2d_4x4" : "fwd_txfm_2d_8x8";
-        const char* invEntry = (B == 4) ? "inv_txfm_2d_add_4x4" : "inv_txfm_2d_add_8x8";
+        const char* predEntry = (B == 4) ? "predict_block_4x4" : (B == 8) ? "predict_block_8x8" : "predict_block_16x16";
+        const char* subEntry = (B == 4) ? "subtract_4x4_plane" : (B == 8) ? "subtract_8x8_plane" : "subtract_16x16_plane";
+        const char* txEntry = (B == 4) ? "fwd_txfm_2d_4x4" : (B == 8) ? "fwd_txfm_2d_8x8" : "fwd_txfm_2d_16x16";
+        const char* invEntry = (B == 4) ? "inv_txfm_2d_add_4x4" : (B == 8) ? "inv_txfm_2d_add_8x8" : "inv_txfm_2d_add_16x16";
         kPred_ = std::make_unique<gpurt::Kernel>(ptxPred, *std::find(pn.begin(), pn.end(), predEntry));
         kSub_ = std::make_unique<gpurt::Kernel>(ptxSub, *std::find(sn.begin(), sn.end(), subEntry));
         kTx_ = std::make_unique<gpurt::Kernel>(ptxTx, *std::find(tn.begin(), tn.end(), txEntry));
@@ -154,13 +155,16 @@ public:
         if (quantized_) {
             if constexpr (B == 4) {
                 transforms::defaultScan4x4(scan_);
-            } else {
+            } else if constexpr (B == 8) {
                 transforms::defaultScan8x8(scan_);
+            } else {
+                transforms::defaultScan16x16(scan_);
             }
             transforms::buildQuantTables(qindex, qt_);
             const std::string ptxQ = *gpurt::compileToPtx(transforms::quantCuSource(), "compute_61");
             const std::vector<std::string> qn = gpurt::ptxEntryNames(ptxQ);
-            const char* qEntry = (B == 4) ? "quant_dequant_4x4" : "quant_dequant_8x8";
+            const char* qEntry =
+                (B == 4) ? "quant_dequant_4x4" : (B == 8) ? "quant_dequant_8x8" : "quant_dequant_16x16";
             kQuant_ =
                 std::make_unique<gpurt::Kernel>(ptxQ, *std::find(qn.begin(), qn.end(), qEntry));
             dQuantFp_.uploadFrom(qt_.quantFp, sizeof(qt_.quantFp));
@@ -306,8 +310,14 @@ public:
                         static_cast<std::uint8_t>(alVal), nctx);
                     bestSad = d.sad;
                     bestMode = d.mode;
-                } else {
+                } else if constexpr (B == 8) {
                     const auto d = pipeline::decideBlockMode8x8(
+                        srcBlk, aboveHost, nTopPx, nTopRightPx, leftHost, nLeftPx, 0,
+                        static_cast<std::uint8_t>(alVal), nctx);
+                    bestSad = d.sad;
+                    bestMode = d.mode;
+                } else {
+                    const auto d = pipeline::decideBlockMode16x16(
                         srcBlk, aboveHost, nTopPx, nTopRightPx, leftHost, nLeftPx, 0,
                         static_cast<std::uint8_t>(alVal), nctx);
                     bestSad = d.sad;
@@ -467,10 +477,11 @@ private:
 template <int B>
 void stageBench(const std::uint8_t* src64, const pixels::Plane& reconRef) {
     constexpr int kBlk = B * B;
-    const char* tag = (B == 4) ? "4x4" : "8x8";
+    const char* tag = (B == 4) ? "4x4" : (B == 8) ? "8x8" : "16x16";
 
     const std::string predSrc =
-        (B == 4) ? intra::predictBlockCuSource() : intra::predictBlock8x8CuSource();
+            (B == 4) ? intra::predictBlockCuSource()
+                     : (B == 8) ? intra::predictBlock8x8CuSource() : intra::predictBlock16x16CuSource();
     const std::string ptxPred = *gpurt::compileToPtx(predSrc, "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
     const std::string ptxSub = *gpurt::compileToPtx(pipeline::subtractCuSource(), "compute_61");
@@ -481,11 +492,13 @@ void stageBench(const std::uint8_t* src64, const pixels::Plane& reconRef) {
     const std::vector<std::string> in = gpurt::ptxEntryNames(ptxInv);
     const std::string ptxQ = *gpurt::compileToPtx(transforms::quantCuSource(), "compute_61");
     const std::vector<std::string> qn = gpurt::ptxEntryNames(ptxQ);
-    const char* predEntry = (B == 4) ? "predict_block_4x4" : "predict_block_8x8";
-    const char* subEntry = (B == 4) ? "subtract_4x4_plane" : "subtract_8x8_plane";
-    const char* txEntry = (B == 4) ? "fwd_txfm_2d_4x4" : "fwd_txfm_2d_8x8";
-    const char* invEntry = (B == 4) ? "inv_txfm_2d_add_4x4" : "inv_txfm_2d_add_8x8";
-    const char* qEntry = (B == 4) ? "quant_dequant_4x4" : "quant_dequant_8x8";
+    const char* predEntry =
+        (B == 4) ? "predict_block_4x4" : (B == 8) ? "predict_block_8x8" : "predict_block_16x16";
+    const char* subEntry = (B == 4) ? "subtract_4x4_plane" : (B == 8) ? "subtract_8x8_plane" : "subtract_16x16_plane";
+    const char* txEntry = (B == 4) ? "fwd_txfm_2d_4x4" : (B == 8) ? "fwd_txfm_2d_8x8" : "fwd_txfm_2d_16x16";
+    const char* invEntry =
+        (B == 4) ? "inv_txfm_2d_add_4x4" : (B == 8) ? "inv_txfm_2d_add_8x8" : "inv_txfm_2d_add_16x16";
+    const char* qEntry = (B == 4) ? "quant_dequant_4x4" : (B == 8) ? "quant_dequant_8x8" : "quant_dequant_16x16";
     gpurt::Kernel kPred(ptxPred, *std::find(pn.begin(), pn.end(), predEntry));
     gpurt::Kernel kSub(ptxSub, *std::find(sn.begin(), sn.end(), subEntry));
     gpurt::Kernel kTx(ptxTx, *std::find(tn.begin(), tn.end(), txEntry));
@@ -511,8 +524,10 @@ void stageBench(const std::uint8_t* src64, const pixels::Plane& reconRef) {
     std::int16_t scan[B * B] = {0};
     if constexpr (B == 4) {
         transforms::defaultScan4x4(scan);
-    } else {
+    } else if constexpr (B == 8) {
         transforms::defaultScan8x8(scan);
+    } else {
+        transforms::defaultScan16x16(scan);
     }
 
     gpurt::DeviceBuffer dAbove(sizeof(above));
@@ -672,20 +687,28 @@ int main() {
     pixels::Plane recon4Q(kFrameSize, kFrameSize, 4);
     pixels::Plane recon8L(kFrameSize, kFrameSize, 4);
     pixels::Plane recon8Q(kFrameSize, kFrameSize, 4);
+    pixels::Plane recon16L(kFrameSize, kFrameSize, 4);
+    pixels::Plane recon16Q(kFrameSize, kFrameSize, 4);
     std::vector<std::int32_t> coeffs4L(static_cast<std::size_t>(kFrameSize * kFrameSize), 0);
     std::vector<std::int32_t> coeffs4Q(static_cast<std::size_t>(kFrameSize * kFrameSize), 0);
     std::vector<std::int32_t> coeffs8L(static_cast<std::size_t>(kFrameSize * kFrameSize), 0);
     std::vector<std::int32_t> coeffs8Q(static_cast<std::size_t>(kFrameSize * kFrameSize), 0);
+    std::vector<std::int32_t> coeffs16L(static_cast<std::size_t>(kFrameSize * kFrameSize), 0);
+    std::vector<std::int32_t> coeffs16Q(static_cast<std::size_t>(kFrameSize * kFrameSize), 0);
     std::vector<std::uint8_t> modes4L((kFrameSize / 4) * (kFrameSize / 4), 0);
     std::vector<std::uint8_t> modes4Q((kFrameSize / 4) * (kFrameSize / 4), 0);
     std::vector<std::uint8_t> modes8L((kFrameSize / 8) * (kFrameSize / 8), 0);
     std::vector<std::uint8_t> modes8Q((kFrameSize / 8) * (kFrameSize / 8), 0);
+    std::vector<std::uint8_t> modes16L((kFrameSize / 16) * (kFrameSize / 16), 0);
+    std::vector<std::uint8_t> modes16Q((kFrameSize / 16) * (kFrameSize / 16), 0);
 
     std::printf("\n== host frame encode ==\n");
     timeLoop("host 4x4 lossless", [&] { pipeline::encodeFrameAuto4x4(src, recon4L, coeffs4L.data(), modes4L.data(), transforms::TxType::DCT_DCT); });
     timeLoop("host 4x4 q100", [&] { pipeline::encodeFrameAuto4x4Q(src, recon4Q, coeffs4Q.data(), modes4Q.data(), kQindex, transforms::TxType::DCT_DCT); });
     timeLoop("host 8x8 lossless", [&] { pipeline::encodeFrameAuto8x8(src, recon8L, coeffs8L.data(), modes8L.data(), transforms::TxType::DCT_DCT); });
     timeLoop("host 8x8 q100", [&] { pipeline::encodeFrameAuto8x8Q(src, recon8Q, coeffs8Q.data(), modes8Q.data(), kQindex, transforms::TxType::DCT_DCT); });
+    timeLoop("host 16x16 lossless", [&] { pipeline::encodeFrameAuto16x16(src, recon16L, coeffs16L.data(), modes16L.data(), transforms::TxType::DCT_DCT); });
+    timeLoop("host 16x16 q100", [&] { pipeline::encodeFrameAuto16x16Q(src, recon16Q, coeffs16Q.data(), modes16Q.data(), kQindex, transforms::TxType::DCT_DCT); });
 
 
     if (gpurt::deviceCount() == 0) {
@@ -727,11 +750,28 @@ int main() {
             timeLoop("gpu 8x8 q100", [&] { g8Q.runFrame(); });
         }
     }
+    {
+        GpuFrame<16> g16L(src64, -1);
+        if (!g16L.verify(recon16L, coeffs16L.data(), modes16L.data(), false)) {
+            std::printf("  gpu 16x16 lossless VERIFY FAILED; timings withheld\n");
+        } else {
+            timeLoop("gpu 16x16 lossless", [&] { g16L.runFrame(); });
+        }
+    }
+    {
+        GpuFrame<16> g16Q(src64, kQindex);
+        if (!g16Q.verify(recon16Q, coeffs16Q.data(), modes16Q.data(), false)) {
+            std::printf("  gpu 16x16 q100 VERIFY FAILED; timings withheld\n");
+        } else {
+            timeLoop("gpu 16x16 q100", [&] { g16Q.runFrame(); });
+        }
+    }
 
     std::printf("\n== per-stage single-block launches (ONE launch per timed iteration; each\n");
     std::printf("   Kernel::launch is synchronous, so these numbers are dominated by\n");
     std::printf("   launch+sync overhead, not kernel work - same caveat as the composite) ==\n");
     stageBench<4>(src64, recon4L);
     stageBench<8>(src64, recon8L);
+    stageBench<16>(src64, recon16L);
     return 0;
 }
