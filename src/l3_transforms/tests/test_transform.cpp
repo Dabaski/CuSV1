@@ -1484,6 +1484,50 @@ TEST_CASE("quantize b 4x4 matches the Q0 gate vectors across qindices") {
     }
 }
 
+TEST_CASE("fdct64 matches svt_av1_fdct64_new golden full vector") {
+    // golden: svt_av1_fdct64_new @ cos_bit=13 (fwd_cos_bit_col[4][4]), 64-value
+    // input (gate line fdct64)
+    const std::int32_t in[64] = {
+        200, 80, -50, 30, 100, -20, 60, 10, -35, 95, 5, -70, 45, 25, -15, 55,
+        65, -85, 15, -5, 75, -60, 40, 90, -25, 35, 50, -45, 20, -10, 70, -30,
+        -40, 55, 10, -60, 85, -20, 35, -5, 45, -75, 25, 65, -35, 15, -25, 80,
+        5, -15, 40, -55, 25, -65, 15, 35, -45, 20, -10, 60, -85, 30, 50, -20};
+    const std::int32_t golden[64] = {
+        605, 494, 213, 262, 261, 246, 367, 82, 157, 101, 216, 295, -17, 73, 93, 48,
+        355, 274, 281, 56, 98, 208, 23, 133, 303, 259, 505, 393, 38, 180, 322, 82,
+        152, 371, -123, 282, -641, -3, 523, 787, -88, 257, -27, -271, -367, -112, -358, -607,
+        -243, 263, 110, 99, -588, 77, 472, -313, 682, -173, -96, -101, 118, -197, 192, 466};
+    std::int32_t got[64] = {0};
+    transforms::fdct64(in, got);
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("idct64 matches svt_av1_idct64_new golden full vector") {
+    // golden: svt_av1_idct64_new @ cos_bit=12, stage_range 16x12
+    // (gen_inv_range_64x64_dct); input 64 values (gate line idct64)
+    const std::int32_t in[64] = {
+        300, -120, 75, 200, -60, 40, 90, -15, 55, -95, 20, 65, -40, 85, -25, 10,
+        30, -70, 95, -35, 60, -15, 80, 25, -50, 45, -20, 70, -90, 15, 50, -55,
+        35, -65, 90, -30, 55, -10, 75, 20, -45, 40, -15, 65, -85, 10, 45, -50,
+        25, -35, 35, -40, 50, -20, 70, 15, -55, 30, -25, 60, -95, 5, 40, -45};
+    const std::int32_t golden[64] = {
+        717, 320, 271, 289, 213, 222, 375, 336, -140, 184, 136, 154, 20, -6, -24, -228,
+        -41, 57, 86, 136, 83, 192, 23, 40, 146, -156, -35, -214, -26, -75, 226, -396,
+        -290, 544, 221, 326, 124, 325, 138, 698, 150, 463, 348, 423, 360, 482, 383, 1149,
+        580, 848, 662, 692, 260, 44, -686, -262, 1416, 11, 160, 117, 243, 151, 94, 509};
+    std::int32_t got[64] = {0};
+    transforms::idct64(in, got);
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("fwdTxfm2d32x32 matches svt golden full 1024 both TxTypes") {
     // golden: svtd_fwd2d32x32 (av1_tranform_two_d_core_c @ TX_32X32, DCT_DCT +
     // ADST_ADST; fwd_shift_32x32 = {2,-4,0} transforms.c:125, cos_bit col 12 /
