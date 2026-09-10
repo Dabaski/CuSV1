@@ -44,6 +44,11 @@ void fwdTxfm2d4x4(const std::int16_t* input, std::int32_t* output, std::uint32_t
 
 void fwdTxfm2d8x8(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
 
+// av1_tranform_two_d_core_c at TX_16X16: fwd_shift_16x16 = {2,-2,0}
+// (transforms.c:124), cos_bit col 13 / row 12 (fwd_cos_bit_col/row[2][2],
+// transforms.c:19-22)
+void fwdTxfm2d16x16(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
 // svt_av1_inv_txfm2d_add_4x4_c (inv_transforms.c:2591), 8-bit: coeffs -> inv
 // 2D -> add onto pred block in place with clip to [0,255]
 void invTxfm2dAdd4x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
