@@ -488,6 +488,359 @@ void svt_av1_fadst8_new(const int32_t* input, int32_t* output, int8_t cos_bit, c
     bf1[7] = bf0[0];
 }
 
+// ==== SVT-AV1 transforms.c :124 - fwd_shift_16x16 (verbatim extract; do not edit) ====
+static const int8_t fwd_shift_16x16[3] = {2, -2, 0};
+
+// ==== SVT-AV1 transforms.c :268 - svt_av1_fdct16_new (verbatim extract; do not edit) ====
+void svt_av1_fdct16_new(const int32_t* input, int32_t* output, int8_t cos_bit, const int8_t* stage_range) {
+    (void)stage_range;
+    const int32_t* cospi;
+
+    int32_t *bf0, *bf1;
+    int32_t  step[16];
+
+    // stage 0;
+
+    // stage 1;
+    bf1     = output;
+    bf1[0]  = input[0] + input[15];
+    bf1[1]  = input[1] + input[14];
+    bf1[2]  = input[2] + input[13];
+    bf1[3]  = input[3] + input[12];
+    bf1[4]  = input[4] + input[11];
+    bf1[5]  = input[5] + input[10];
+    bf1[6]  = input[6] + input[9];
+    bf1[7]  = input[7] + input[8];
+    bf1[8]  = -input[8] + input[7];
+    bf1[9]  = -input[9] + input[6];
+    bf1[10] = -input[10] + input[5];
+    bf1[11] = -input[11] + input[4];
+    bf1[12] = -input[12] + input[3];
+    bf1[13] = -input[13] + input[2];
+    bf1[14] = -input[14] + input[1];
+    bf1[15] = -input[15] + input[0];
+
+    // stage 2
+    cospi   = cospi_arr(cos_bit);
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = bf0[0] + bf0[7];
+    bf1[1]  = bf0[1] + bf0[6];
+    bf1[2]  = bf0[2] + bf0[5];
+    bf1[3]  = bf0[3] + bf0[4];
+    bf1[4]  = -bf0[4] + bf0[3];
+    bf1[5]  = -bf0[5] + bf0[2];
+    bf1[6]  = -bf0[6] + bf0[1];
+    bf1[7]  = -bf0[7] + bf0[0];
+    bf1[8]  = bf0[8];
+    bf1[9]  = bf0[9];
+    bf1[10] = half_btf(-cospi[32], bf0[10], cospi[32], bf0[13], cos_bit);
+    bf1[11] = half_btf(-cospi[32], bf0[11], cospi[32], bf0[12], cos_bit);
+    bf1[12] = half_btf(cospi[32], bf0[12], cospi[32], bf0[11], cos_bit);
+    bf1[13] = half_btf(cospi[32], bf0[13], cospi[32], bf0[10], cos_bit);
+    bf1[14] = bf0[14];
+    bf1[15] = bf0[15];
+
+    // stage 3
+    cospi   = cospi_arr(cos_bit);
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = bf0[0] + bf0[3];
+    bf1[1]  = bf0[1] + bf0[2];
+    bf1[2]  = -bf0[2] + bf0[1];
+    bf1[3]  = -bf0[3] + bf0[0];
+    bf1[4]  = bf0[4];
+    bf1[5]  = half_btf(-cospi[32], bf0[5], cospi[32], bf0[6], cos_bit);
+    bf1[6]  = half_btf(cospi[32], bf0[6], cospi[32], bf0[5], cos_bit);
+    bf1[7]  = bf0[7];
+    bf1[8]  = bf0[8] + bf0[11];
+    bf1[9]  = bf0[9] + bf0[10];
+    bf1[10] = -bf0[10] + bf0[9];
+    bf1[11] = -bf0[11] + bf0[8];
+    bf1[12] = -bf0[12] + bf0[15];
+    bf1[13] = -bf0[13] + bf0[14];
+    bf1[14] = bf0[14] + bf0[13];
+    bf1[15] = bf0[15] + bf0[12];
+
+    // stage 4
+    cospi   = cospi_arr(cos_bit);
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = half_btf(cospi[32], bf0[0], cospi[32], bf0[1], cos_bit);
+    bf1[1]  = half_btf(-cospi[32], bf0[1], cospi[32], bf0[0], cos_bit);
+    bf1[2]  = half_btf(cospi[48], bf0[2], cospi[16], bf0[3], cos_bit);
+    bf1[3]  = half_btf(cospi[48], bf0[3], -cospi[16], bf0[2], cos_bit);
+    bf1[4]  = bf0[4] + bf0[5];
+    bf1[5]  = -bf0[5] + bf0[4];
+    bf1[6]  = -bf0[6] + bf0[7];
+    bf1[7]  = bf0[7] + bf0[6];
+    bf1[8]  = bf0[8];
+    bf1[9]  = half_btf(-cospi[16], bf0[9], cospi[48], bf0[14], cos_bit);
+    bf1[10] = half_btf(-cospi[48], bf0[10], -cospi[16], bf0[13], cos_bit);
+    bf1[11] = bf0[11];
+    bf1[12] = bf0[12];
+    bf1[13] = half_btf(cospi[48], bf0[13], -cospi[16], bf0[10], cos_bit);
+    bf1[14] = half_btf(cospi[16], bf0[14], cospi[48], bf0[9], cos_bit);
+    bf1[15] = bf0[15];
+
+    // stage 5
+    cospi   = cospi_arr(cos_bit);
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = bf0[2];
+    bf1[3]  = bf0[3];
+    bf1[4]  = half_btf(cospi[56], bf0[4], cospi[8], bf0[7], cos_bit);
+    bf1[5]  = half_btf(cospi[24], bf0[5], cospi[40], bf0[6], cos_bit);
+    bf1[6]  = half_btf(cospi[24], bf0[6], -cospi[40], bf0[5], cos_bit);
+    bf1[7]  = half_btf(cospi[56], bf0[7], -cospi[8], bf0[4], cos_bit);
+    bf1[8]  = bf0[8] + bf0[9];
+    bf1[9]  = -bf0[9] + bf0[8];
+    bf1[10] = -bf0[10] + bf0[11];
+    bf1[11] = bf0[11] + bf0[10];
+    bf1[12] = bf0[12] + bf0[13];
+    bf1[13] = -bf0[13] + bf0[12];
+    bf1[14] = -bf0[14] + bf0[15];
+    bf1[15] = bf0[15] + bf0[14];
+
+    // stage 6
+    cospi   = cospi_arr(cos_bit);
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = bf0[2];
+    bf1[3]  = bf0[3];
+    bf1[4]  = bf0[4];
+    bf1[5]  = bf0[5];
+    bf1[6]  = bf0[6];
+    bf1[7]  = bf0[7];
+    bf1[8]  = half_btf(cospi[60], bf0[8], cospi[4], bf0[15], cos_bit);
+    bf1[9]  = half_btf(cospi[28], bf0[9], cospi[36], bf0[14], cos_bit);
+    bf1[10] = half_btf(cospi[44], bf0[10], cospi[20], bf0[13], cos_bit);
+    bf1[11] = half_btf(cospi[12], bf0[11], cospi[52], bf0[12], cos_bit);
+    bf1[12] = half_btf(cospi[12], bf0[12], -cospi[52], bf0[11], cos_bit);
+    bf1[13] = half_btf(cospi[44], bf0[13], -cospi[20], bf0[10], cos_bit);
+    bf1[14] = half_btf(cospi[28], bf0[14], -cospi[36], bf0[9], cos_bit);
+    bf1[15] = half_btf(cospi[60], bf0[15], -cospi[4], bf0[8], cos_bit);
+
+    // stage 7
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[8];
+    bf1[2]  = bf0[4];
+    bf1[3]  = bf0[12];
+    bf1[4]  = bf0[2];
+    bf1[5]  = bf0[10];
+    bf1[6]  = bf0[6];
+    bf1[7]  = bf0[14];
+    bf1[8]  = bf0[1];
+    bf1[9]  = bf0[9];
+    bf1[10] = bf0[5];
+    bf1[11] = bf0[13];
+    bf1[12] = bf0[3];
+    bf1[13] = bf0[11];
+    bf1[14] = bf0[7];
+    bf1[15] = bf0[15];
+}
+
+// ==== SVT-AV1 transforms.c :1714 - svt_av1_fadst16_new (verbatim extract; do not edit) ====
+void svt_av1_fadst16_new(const int32_t* input, int32_t* output, int8_t cos_bit, const int8_t* stage_range) {
+    (void)stage_range;
+    const int32_t* cospi;
+
+    int32_t *bf0, *bf1;
+    int32_t  step[16];
+
+    // stage 0;
+
+    // stage 1;
+    assert(output != input);
+    bf1     = output;
+    bf1[0]  = input[0];
+    bf1[1]  = -input[15];
+    bf1[2]  = -input[7];
+    bf1[3]  = input[8];
+    bf1[4]  = -input[3];
+    bf1[5]  = input[12];
+    bf1[6]  = input[4];
+    bf1[7]  = -input[11];
+    bf1[8]  = -input[1];
+    bf1[9]  = input[14];
+    bf1[10] = input[6];
+    bf1[11] = -input[9];
+    bf1[12] = input[2];
+    bf1[13] = -input[13];
+    bf1[14] = -input[5];
+    bf1[15] = input[10];
+
+    // stage 2
+    cospi   = cospi_arr(cos_bit);
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = half_btf(cospi[32], bf0[2], cospi[32], bf0[3], cos_bit);
+    bf1[3]  = half_btf(cospi[32], bf0[2], -cospi[32], bf0[3], cos_bit);
+    bf1[4]  = bf0[4];
+    bf1[5]  = bf0[5];
+    bf1[6]  = half_btf(cospi[32], bf0[6], cospi[32], bf0[7], cos_bit);
+    bf1[7]  = half_btf(cospi[32], bf0[6], -cospi[32], bf0[7], cos_bit);
+    bf1[8]  = bf0[8];
+    bf1[9]  = bf0[9];
+    bf1[10] = half_btf(cospi[32], bf0[10], cospi[32], bf0[11], cos_bit);
+    bf1[11] = half_btf(cospi[32], bf0[10], -cospi[32], bf0[11], cos_bit);
+    bf1[12] = bf0[12];
+    bf1[13] = bf0[13];
+    bf1[14] = half_btf(cospi[32], bf0[14], cospi[32], bf0[15], cos_bit);
+    bf1[15] = half_btf(cospi[32], bf0[14], -cospi[32], bf0[15], cos_bit);
+
+    // stage 3
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = bf0[0] + bf0[2];
+    bf1[1]  = bf0[1] + bf0[3];
+    bf1[2]  = bf0[0] - bf0[2];
+    bf1[3]  = bf0[1] - bf0[3];
+    bf1[4]  = bf0[4] + bf0[6];
+    bf1[5]  = bf0[5] + bf0[7];
+    bf1[6]  = bf0[4] - bf0[6];
+    bf1[7]  = bf0[5] - bf0[7];
+    bf1[8]  = bf0[8] + bf0[10];
+    bf1[9]  = bf0[9] + bf0[11];
+    bf1[10] = bf0[8] - bf0[10];
+    bf1[11] = bf0[9] - bf0[11];
+    bf1[12] = bf0[12] + bf0[14];
+    bf1[13] = bf0[13] + bf0[15];
+    bf1[14] = bf0[12] - bf0[14];
+    bf1[15] = bf0[13] - bf0[15];
+
+    // stage 4
+    cospi   = cospi_arr(cos_bit);
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = bf0[2];
+    bf1[3]  = bf0[3];
+    bf1[4]  = half_btf(cospi[16], bf0[4], cospi[48], bf0[5], cos_bit);
+    bf1[5]  = half_btf(cospi[48], bf0[4], -cospi[16], bf0[5], cos_bit);
+    bf1[6]  = half_btf(-cospi[48], bf0[6], cospi[16], bf0[7], cos_bit);
+    bf1[7]  = half_btf(cospi[16], bf0[6], cospi[48], bf0[7], cos_bit);
+    bf1[8]  = bf0[8];
+    bf1[9]  = bf0[9];
+    bf1[10] = bf0[10];
+    bf1[11] = bf0[11];
+    bf1[12] = half_btf(cospi[16], bf0[12], cospi[48], bf0[13], cos_bit);
+    bf1[13] = half_btf(cospi[48], bf0[12], -cospi[16], bf0[13], cos_bit);
+    bf1[14] = half_btf(-cospi[48], bf0[14], cospi[16], bf0[15], cos_bit);
+    bf1[15] = half_btf(cospi[16], bf0[14], cospi[48], bf0[15], cos_bit);
+
+    // stage 5
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = bf0[0] + bf0[4];
+    bf1[1]  = bf0[1] + bf0[5];
+    bf1[2]  = bf0[2] + bf0[6];
+    bf1[3]  = bf0[3] + bf0[7];
+    bf1[4]  = bf0[0] - bf0[4];
+    bf1[5]  = bf0[1] - bf0[5];
+    bf1[6]  = bf0[2] - bf0[6];
+    bf1[7]  = bf0[3] - bf0[7];
+    bf1[8]  = bf0[8] + bf0[12];
+    bf1[9]  = bf0[9] + bf0[13];
+    bf1[10] = bf0[10] + bf0[14];
+    bf1[11] = bf0[11] + bf0[15];
+    bf1[12] = bf0[8] - bf0[12];
+    bf1[13] = bf0[9] - bf0[13];
+    bf1[14] = bf0[10] - bf0[14];
+    bf1[15] = bf0[11] - bf0[15];
+
+    // stage 6
+    cospi   = cospi_arr(cos_bit);
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = bf0[2];
+    bf1[3]  = bf0[3];
+    bf1[4]  = bf0[4];
+    bf1[5]  = bf0[5];
+    bf1[6]  = bf0[6];
+    bf1[7]  = bf0[7];
+    bf1[8]  = half_btf(cospi[8], bf0[8], cospi[56], bf0[9], cos_bit);
+    bf1[9]  = half_btf(cospi[56], bf0[8], -cospi[8], bf0[9], cos_bit);
+    bf1[10] = half_btf(cospi[40], bf0[10], cospi[24], bf0[11], cos_bit);
+    bf1[11] = half_btf(cospi[24], bf0[10], -cospi[40], bf0[11], cos_bit);
+    bf1[12] = half_btf(-cospi[56], bf0[12], cospi[8], bf0[13], cos_bit);
+    bf1[13] = half_btf(cospi[8], bf0[12], cospi[56], bf0[13], cos_bit);
+    bf1[14] = half_btf(-cospi[24], bf0[14], cospi[40], bf0[15], cos_bit);
+    bf1[15] = half_btf(cospi[40], bf0[14], cospi[24], bf0[15], cos_bit);
+
+    // stage 7
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = bf0[0] + bf0[8];
+    bf1[1]  = bf0[1] + bf0[9];
+    bf1[2]  = bf0[2] + bf0[10];
+    bf1[3]  = bf0[3] + bf0[11];
+    bf1[4]  = bf0[4] + bf0[12];
+    bf1[5]  = bf0[5] + bf0[13];
+    bf1[6]  = bf0[6] + bf0[14];
+    bf1[7]  = bf0[7] + bf0[15];
+    bf1[8]  = bf0[0] - bf0[8];
+    bf1[9]  = bf0[1] - bf0[9];
+    bf1[10] = bf0[2] - bf0[10];
+    bf1[11] = bf0[3] - bf0[11];
+    bf1[12] = bf0[4] - bf0[12];
+    bf1[13] = bf0[5] - bf0[13];
+    bf1[14] = bf0[6] - bf0[14];
+    bf1[15] = bf0[7] - bf0[15];
+
+    // stage 8
+    cospi   = cospi_arr(cos_bit);
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = half_btf(cospi[2], bf0[0], cospi[62], bf0[1], cos_bit);
+    bf1[1]  = half_btf(cospi[62], bf0[0], -cospi[2], bf0[1], cos_bit);
+    bf1[2]  = half_btf(cospi[10], bf0[2], cospi[54], bf0[3], cos_bit);
+    bf1[3]  = half_btf(cospi[54], bf0[2], -cospi[10], bf0[3], cos_bit);
+    bf1[4]  = half_btf(cospi[18], bf0[4], cospi[46], bf0[5], cos_bit);
+    bf1[5]  = half_btf(cospi[46], bf0[4], -cospi[18], bf0[5], cos_bit);
+    bf1[6]  = half_btf(cospi[26], bf0[6], cospi[38], bf0[7], cos_bit);
+    bf1[7]  = half_btf(cospi[38], bf0[6], -cospi[26], bf0[7], cos_bit);
+    bf1[8]  = half_btf(cospi[34], bf0[8], cospi[30], bf0[9], cos_bit);
+    bf1[9]  = half_btf(cospi[30], bf0[8], -cospi[34], bf0[9], cos_bit);
+    bf1[10] = half_btf(cospi[42], bf0[10], cospi[22], bf0[11], cos_bit);
+    bf1[11] = half_btf(cospi[22], bf0[10], -cospi[42], bf0[11], cos_bit);
+    bf1[12] = half_btf(cospi[50], bf0[12], cospi[14], bf0[13], cos_bit);
+    bf1[13] = half_btf(cospi[14], bf0[12], -cospi[50], bf0[13], cos_bit);
+    bf1[14] = half_btf(cospi[58], bf0[14], cospi[6], bf0[15], cos_bit);
+    bf1[15] = half_btf(cospi[6], bf0[14], -cospi[58], bf0[15], cos_bit);
+
+    // stage 9
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = bf0[1];
+    bf1[1]  = bf0[14];
+    bf1[2]  = bf0[3];
+    bf1[3]  = bf0[12];
+    bf1[4]  = bf0[5];
+    bf1[5]  = bf0[10];
+    bf1[6]  = bf0[7];
+    bf1[7]  = bf0[8];
+    bf1[8]  = bf0[9];
+    bf1[9]  = bf0[6];
+    bf1[10] = bf0[11];
+    bf1[11] = bf0[4];
+    bf1[12] = bf0[13];
+    bf1[13] = bf0[2];
+    bf1[14] = bf0[15];
+    bf1[15] = bf0[0];
+}
+
 // ==== SVT-AV1 definitions.h :691 - clamp64 (verbatim extract; do not edit) ====
 static INLINE int64_t clamp64(int64_t value, int64_t low, int64_t high) {
     return value < low ? low : (value > high ? high : value);
@@ -498,6 +851,9 @@ static const int8_t inv_shift_4x4[2]   = {0, -4};
 
 // ==== SVT-AV1 inv_transforms.c :19 - inv_shift_8x8 (verbatim extract; do not edit) ====
 static const int8_t inv_shift_8x8[2]   = {-1, -4};
+
+// ==== SVT-AV1 inv_transforms.c :20 - inv_shift_16x16 (verbatim extract; do not edit) ====
+static const int8_t inv_shift_16x16[2] = {-2, -4};
 
 // ==== SVT-AV1 inv_transforms.c :88 - clamp_value (verbatim extract; do not edit) ====
 static INLINE int32_t clamp_value(int32_t value, int8_t bit) {
@@ -828,6 +1184,376 @@ void svt_av1_iadst8_new(const int32_t* input, int32_t* output, int8_t cos_bit, c
     bf1[5] = -bf0[7];
     bf1[6] = bf0[5];
     bf1[7] = -bf0[1];
+}
+
+// ==== SVT-AV1 inv_transforms.c :215 - svt_av1_idct16_new (verbatim extract; do not edit) ====
+void svt_av1_idct16_new(const int32_t* input, int32_t* output, int8_t cos_bit, const int8_t* stage_range) {
+    assert(output != input);
+    const int32_t* cospi = cospi_arr(cos_bit);
+
+    int32_t  stage = 0;
+    int32_t *bf0, *bf1;
+    int32_t  step[16];
+
+    // stage 0;
+
+    // stage 1;
+    stage++;
+    bf1     = output;
+    bf1[0]  = input[0];
+    bf1[1]  = input[8];
+    bf1[2]  = input[4];
+    bf1[3]  = input[12];
+    bf1[4]  = input[2];
+    bf1[5]  = input[10];
+    bf1[6]  = input[6];
+    bf1[7]  = input[14];
+    bf1[8]  = input[1];
+    bf1[9]  = input[9];
+    bf1[10] = input[5];
+    bf1[11] = input[13];
+    bf1[12] = input[3];
+    bf1[13] = input[11];
+    bf1[14] = input[7];
+    bf1[15] = input[15];
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 2
+    stage++;
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = bf0[2];
+    bf1[3]  = bf0[3];
+    bf1[4]  = bf0[4];
+    bf1[5]  = bf0[5];
+    bf1[6]  = bf0[6];
+    bf1[7]  = bf0[7];
+    bf1[8]  = half_btf(cospi[60], bf0[8], -cospi[4], bf0[15], cos_bit);
+    bf1[9]  = half_btf(cospi[28], bf0[9], -cospi[36], bf0[14], cos_bit);
+    bf1[10] = half_btf(cospi[44], bf0[10], -cospi[20], bf0[13], cos_bit);
+    bf1[11] = half_btf(cospi[12], bf0[11], -cospi[52], bf0[12], cos_bit);
+    bf1[12] = half_btf(cospi[52], bf0[11], cospi[12], bf0[12], cos_bit);
+    bf1[13] = half_btf(cospi[20], bf0[10], cospi[44], bf0[13], cos_bit);
+    bf1[14] = half_btf(cospi[36], bf0[9], cospi[28], bf0[14], cos_bit);
+    bf1[15] = half_btf(cospi[4], bf0[8], cospi[60], bf0[15], cos_bit);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 3
+    stage++;
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = bf0[2];
+    bf1[3]  = bf0[3];
+    bf1[4]  = half_btf(cospi[56], bf0[4], -cospi[8], bf0[7], cos_bit);
+    bf1[5]  = half_btf(cospi[24], bf0[5], -cospi[40], bf0[6], cos_bit);
+    bf1[6]  = half_btf(cospi[40], bf0[5], cospi[24], bf0[6], cos_bit);
+    bf1[7]  = half_btf(cospi[8], bf0[4], cospi[56], bf0[7], cos_bit);
+    bf1[8]  = clamp_value(bf0[8] + bf0[9], stage_range[stage]);
+    bf1[9]  = clamp_value(bf0[8] - bf0[9], stage_range[stage]);
+    bf1[10] = clamp_value(-bf0[10] + bf0[11], stage_range[stage]);
+    bf1[11] = clamp_value(bf0[10] + bf0[11], stage_range[stage]);
+    bf1[12] = clamp_value(bf0[12] + bf0[13], stage_range[stage]);
+    bf1[13] = clamp_value(bf0[12] - bf0[13], stage_range[stage]);
+    bf1[14] = clamp_value(-bf0[14] + bf0[15], stage_range[stage]);
+    bf1[15] = clamp_value(bf0[14] + bf0[15], stage_range[stage]);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 4
+    stage++;
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = half_btf(cospi[32], bf0[0], cospi[32], bf0[1], cos_bit);
+    bf1[1]  = half_btf(cospi[32], bf0[0], -cospi[32], bf0[1], cos_bit);
+    bf1[2]  = half_btf(cospi[48], bf0[2], -cospi[16], bf0[3], cos_bit);
+    bf1[3]  = half_btf(cospi[16], bf0[2], cospi[48], bf0[3], cos_bit);
+    bf1[4]  = clamp_value(bf0[4] + bf0[5], stage_range[stage]);
+    bf1[5]  = clamp_value(bf0[4] - bf0[5], stage_range[stage]);
+    bf1[6]  = clamp_value(-bf0[6] + bf0[7], stage_range[stage]);
+    bf1[7]  = clamp_value(bf0[6] + bf0[7], stage_range[stage]);
+    bf1[8]  = bf0[8];
+    bf1[9]  = half_btf(-cospi[16], bf0[9], cospi[48], bf0[14], cos_bit);
+    bf1[10] = half_btf(-cospi[48], bf0[10], -cospi[16], bf0[13], cos_bit);
+    bf1[11] = bf0[11];
+    bf1[12] = bf0[12];
+    bf1[13] = half_btf(-cospi[16], bf0[10], cospi[48], bf0[13], cos_bit);
+    bf1[14] = half_btf(cospi[48], bf0[9], cospi[16], bf0[14], cos_bit);
+    bf1[15] = bf0[15];
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 5
+    stage++;
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = clamp_value(bf0[0] + bf0[3], stage_range[stage]);
+    bf1[1]  = clamp_value(bf0[1] + bf0[2], stage_range[stage]);
+    bf1[2]  = clamp_value(bf0[1] - bf0[2], stage_range[stage]);
+    bf1[3]  = clamp_value(bf0[0] - bf0[3], stage_range[stage]);
+    bf1[4]  = bf0[4];
+    bf1[5]  = half_btf(-cospi[32], bf0[5], cospi[32], bf0[6], cos_bit);
+    bf1[6]  = half_btf(cospi[32], bf0[5], cospi[32], bf0[6], cos_bit);
+    bf1[7]  = bf0[7];
+    bf1[8]  = clamp_value(bf0[8] + bf0[11], stage_range[stage]);
+    bf1[9]  = clamp_value(bf0[9] + bf0[10], stage_range[stage]);
+    bf1[10] = clamp_value(bf0[9] - bf0[10], stage_range[stage]);
+    bf1[11] = clamp_value(bf0[8] - bf0[11], stage_range[stage]);
+    bf1[12] = clamp_value(-bf0[12] + bf0[15], stage_range[stage]);
+    bf1[13] = clamp_value(-bf0[13] + bf0[14], stage_range[stage]);
+    bf1[14] = clamp_value(bf0[13] + bf0[14], stage_range[stage]);
+    bf1[15] = clamp_value(bf0[12] + bf0[15], stage_range[stage]);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 6
+    stage++;
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = clamp_value(bf0[0] + bf0[7], stage_range[stage]);
+    bf1[1]  = clamp_value(bf0[1] + bf0[6], stage_range[stage]);
+    bf1[2]  = clamp_value(bf0[2] + bf0[5], stage_range[stage]);
+    bf1[3]  = clamp_value(bf0[3] + bf0[4], stage_range[stage]);
+    bf1[4]  = clamp_value(bf0[3] - bf0[4], stage_range[stage]);
+    bf1[5]  = clamp_value(bf0[2] - bf0[5], stage_range[stage]);
+    bf1[6]  = clamp_value(bf0[1] - bf0[6], stage_range[stage]);
+    bf1[7]  = clamp_value(bf0[0] - bf0[7], stage_range[stage]);
+    bf1[8]  = bf0[8];
+    bf1[9]  = bf0[9];
+    bf1[10] = half_btf(-cospi[32], bf0[10], cospi[32], bf0[13], cos_bit);
+    bf1[11] = half_btf(-cospi[32], bf0[11], cospi[32], bf0[12], cos_bit);
+    bf1[12] = half_btf(cospi[32], bf0[11], cospi[32], bf0[12], cos_bit);
+    bf1[13] = half_btf(cospi[32], bf0[10], cospi[32], bf0[13], cos_bit);
+    bf1[14] = bf0[14];
+    bf1[15] = bf0[15];
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 7
+    stage++;
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = clamp_value(bf0[0] + bf0[15], stage_range[stage]);
+    bf1[1]  = clamp_value(bf0[1] + bf0[14], stage_range[stage]);
+    bf1[2]  = clamp_value(bf0[2] + bf0[13], stage_range[stage]);
+    bf1[3]  = clamp_value(bf0[3] + bf0[12], stage_range[stage]);
+    bf1[4]  = clamp_value(bf0[4] + bf0[11], stage_range[stage]);
+    bf1[5]  = clamp_value(bf0[5] + bf0[10], stage_range[stage]);
+    bf1[6]  = clamp_value(bf0[6] + bf0[9], stage_range[stage]);
+    bf1[7]  = clamp_value(bf0[7] + bf0[8], stage_range[stage]);
+    bf1[8]  = clamp_value(bf0[7] - bf0[8], stage_range[stage]);
+    bf1[9]  = clamp_value(bf0[6] - bf0[9], stage_range[stage]);
+    bf1[10] = clamp_value(bf0[5] - bf0[10], stage_range[stage]);
+    bf1[11] = clamp_value(bf0[4] - bf0[11], stage_range[stage]);
+    bf1[12] = clamp_value(bf0[3] - bf0[12], stage_range[stage]);
+    bf1[13] = clamp_value(bf0[2] - bf0[13], stage_range[stage]);
+    bf1[14] = clamp_value(bf0[1] - bf0[14], stage_range[stage]);
+    bf1[15] = clamp_value(bf0[0] - bf0[15], stage_range[stage]);
+}
+
+// ==== SVT-AV1 inv_transforms.c :927 - svt_av1_iadst16_new (verbatim extract; do not edit) ====
+void svt_av1_iadst16_new(const int32_t* input, int32_t* output, int8_t cos_bit, const int8_t* stage_range) {
+    assert(output != input);
+    const int32_t* cospi = cospi_arr(cos_bit);
+
+    int32_t  stage = 0;
+    int32_t *bf0, *bf1;
+    int32_t  step[16];
+
+    // stage 0;
+
+    // stage 1;
+    stage++;
+    bf1     = output;
+    bf1[0]  = input[15];
+    bf1[1]  = input[0];
+    bf1[2]  = input[13];
+    bf1[3]  = input[2];
+    bf1[4]  = input[11];
+    bf1[5]  = input[4];
+    bf1[6]  = input[9];
+    bf1[7]  = input[6];
+    bf1[8]  = input[7];
+    bf1[9]  = input[8];
+    bf1[10] = input[5];
+    bf1[11] = input[10];
+    bf1[12] = input[3];
+    bf1[13] = input[12];
+    bf1[14] = input[1];
+    bf1[15] = input[14];
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 2
+    stage++;
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = half_btf(cospi[2], bf0[0], cospi[62], bf0[1], cos_bit);
+    bf1[1]  = half_btf(cospi[62], bf0[0], -cospi[2], bf0[1], cos_bit);
+    bf1[2]  = half_btf(cospi[10], bf0[2], cospi[54], bf0[3], cos_bit);
+    bf1[3]  = half_btf(cospi[54], bf0[2], -cospi[10], bf0[3], cos_bit);
+    bf1[4]  = half_btf(cospi[18], bf0[4], cospi[46], bf0[5], cos_bit);
+    bf1[5]  = half_btf(cospi[46], bf0[4], -cospi[18], bf0[5], cos_bit);
+    bf1[6]  = half_btf(cospi[26], bf0[6], cospi[38], bf0[7], cos_bit);
+    bf1[7]  = half_btf(cospi[38], bf0[6], -cospi[26], bf0[7], cos_bit);
+    bf1[8]  = half_btf(cospi[34], bf0[8], cospi[30], bf0[9], cos_bit);
+    bf1[9]  = half_btf(cospi[30], bf0[8], -cospi[34], bf0[9], cos_bit);
+    bf1[10] = half_btf(cospi[42], bf0[10], cospi[22], bf0[11], cos_bit);
+    bf1[11] = half_btf(cospi[22], bf0[10], -cospi[42], bf0[11], cos_bit);
+    bf1[12] = half_btf(cospi[50], bf0[12], cospi[14], bf0[13], cos_bit);
+    bf1[13] = half_btf(cospi[14], bf0[12], -cospi[50], bf0[13], cos_bit);
+    bf1[14] = half_btf(cospi[58], bf0[14], cospi[6], bf0[15], cos_bit);
+    bf1[15] = half_btf(cospi[6], bf0[14], -cospi[58], bf0[15], cos_bit);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 3
+    stage++;
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = clamp_value(bf0[0] + bf0[8], stage_range[stage]);
+    bf1[1]  = clamp_value(bf0[1] + bf0[9], stage_range[stage]);
+    bf1[2]  = clamp_value(bf0[2] + bf0[10], stage_range[stage]);
+    bf1[3]  = clamp_value(bf0[3] + bf0[11], stage_range[stage]);
+    bf1[4]  = clamp_value(bf0[4] + bf0[12], stage_range[stage]);
+    bf1[5]  = clamp_value(bf0[5] + bf0[13], stage_range[stage]);
+    bf1[6]  = clamp_value(bf0[6] + bf0[14], stage_range[stage]);
+    bf1[7]  = clamp_value(bf0[7] + bf0[15], stage_range[stage]);
+    bf1[8]  = clamp_value(bf0[0] - bf0[8], stage_range[stage]);
+    bf1[9]  = clamp_value(bf0[1] - bf0[9], stage_range[stage]);
+    bf1[10] = clamp_value(bf0[2] - bf0[10], stage_range[stage]);
+    bf1[11] = clamp_value(bf0[3] - bf0[11], stage_range[stage]);
+    bf1[12] = clamp_value(bf0[4] - bf0[12], stage_range[stage]);
+    bf1[13] = clamp_value(bf0[5] - bf0[13], stage_range[stage]);
+    bf1[14] = clamp_value(bf0[6] - bf0[14], stage_range[stage]);
+    bf1[15] = clamp_value(bf0[7] - bf0[15], stage_range[stage]);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 4
+    stage++;
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = bf0[2];
+    bf1[3]  = bf0[3];
+    bf1[4]  = bf0[4];
+    bf1[5]  = bf0[5];
+    bf1[6]  = bf0[6];
+    bf1[7]  = bf0[7];
+    bf1[8]  = half_btf(cospi[8], bf0[8], cospi[56], bf0[9], cos_bit);
+    bf1[9]  = half_btf(cospi[56], bf0[8], -cospi[8], bf0[9], cos_bit);
+    bf1[10] = half_btf(cospi[40], bf0[10], cospi[24], bf0[11], cos_bit);
+    bf1[11] = half_btf(cospi[24], bf0[10], -cospi[40], bf0[11], cos_bit);
+    bf1[12] = half_btf(-cospi[56], bf0[12], cospi[8], bf0[13], cos_bit);
+    bf1[13] = half_btf(cospi[8], bf0[12], cospi[56], bf0[13], cos_bit);
+    bf1[14] = half_btf(-cospi[24], bf0[14], cospi[40], bf0[15], cos_bit);
+    bf1[15] = half_btf(cospi[40], bf0[14], cospi[24], bf0[15], cos_bit);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 5
+    stage++;
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = clamp_value(bf0[0] + bf0[4], stage_range[stage]);
+    bf1[1]  = clamp_value(bf0[1] + bf0[5], stage_range[stage]);
+    bf1[2]  = clamp_value(bf0[2] + bf0[6], stage_range[stage]);
+    bf1[3]  = clamp_value(bf0[3] + bf0[7], stage_range[stage]);
+    bf1[4]  = clamp_value(bf0[0] - bf0[4], stage_range[stage]);
+    bf1[5]  = clamp_value(bf0[1] - bf0[5], stage_range[stage]);
+    bf1[6]  = clamp_value(bf0[2] - bf0[6], stage_range[stage]);
+    bf1[7]  = clamp_value(bf0[3] - bf0[7], stage_range[stage]);
+    bf1[8]  = clamp_value(bf0[8] + bf0[12], stage_range[stage]);
+    bf1[9]  = clamp_value(bf0[9] + bf0[13], stage_range[stage]);
+    bf1[10] = clamp_value(bf0[10] + bf0[14], stage_range[stage]);
+    bf1[11] = clamp_value(bf0[11] + bf0[15], stage_range[stage]);
+    bf1[12] = clamp_value(bf0[8] - bf0[12], stage_range[stage]);
+    bf1[13] = clamp_value(bf0[9] - bf0[13], stage_range[stage]);
+    bf1[14] = clamp_value(bf0[10] - bf0[14], stage_range[stage]);
+    bf1[15] = clamp_value(bf0[11] - bf0[15], stage_range[stage]);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 6
+    stage++;
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = bf0[2];
+    bf1[3]  = bf0[3];
+    bf1[4]  = half_btf(cospi[16], bf0[4], cospi[48], bf0[5], cos_bit);
+    bf1[5]  = half_btf(cospi[48], bf0[4], -cospi[16], bf0[5], cos_bit);
+    bf1[6]  = half_btf(-cospi[48], bf0[6], cospi[16], bf0[7], cos_bit);
+    bf1[7]  = half_btf(cospi[16], bf0[6], cospi[48], bf0[7], cos_bit);
+    bf1[8]  = bf0[8];
+    bf1[9]  = bf0[9];
+    bf1[10] = bf0[10];
+    bf1[11] = bf0[11];
+    bf1[12] = half_btf(cospi[16], bf0[12], cospi[48], bf0[13], cos_bit);
+    bf1[13] = half_btf(cospi[48], bf0[12], -cospi[16], bf0[13], cos_bit);
+    bf1[14] = half_btf(-cospi[48], bf0[14], cospi[16], bf0[15], cos_bit);
+    bf1[15] = half_btf(cospi[16], bf0[14], cospi[48], bf0[15], cos_bit);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 7
+    stage++;
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = clamp_value(bf0[0] + bf0[2], stage_range[stage]);
+    bf1[1]  = clamp_value(bf0[1] + bf0[3], stage_range[stage]);
+    bf1[2]  = clamp_value(bf0[0] - bf0[2], stage_range[stage]);
+    bf1[3]  = clamp_value(bf0[1] - bf0[3], stage_range[stage]);
+    bf1[4]  = clamp_value(bf0[4] + bf0[6], stage_range[stage]);
+    bf1[5]  = clamp_value(bf0[5] + bf0[7], stage_range[stage]);
+    bf1[6]  = clamp_value(bf0[4] - bf0[6], stage_range[stage]);
+    bf1[7]  = clamp_value(bf0[5] - bf0[7], stage_range[stage]);
+    bf1[8]  = clamp_value(bf0[8] + bf0[10], stage_range[stage]);
+    bf1[9]  = clamp_value(bf0[9] + bf0[11], stage_range[stage]);
+    bf1[10] = clamp_value(bf0[8] - bf0[10], stage_range[stage]);
+    bf1[11] = clamp_value(bf0[9] - bf0[11], stage_range[stage]);
+    bf1[12] = clamp_value(bf0[12] + bf0[14], stage_range[stage]);
+    bf1[13] = clamp_value(bf0[13] + bf0[15], stage_range[stage]);
+    bf1[14] = clamp_value(bf0[12] - bf0[14], stage_range[stage]);
+    bf1[15] = clamp_value(bf0[13] - bf0[15], stage_range[stage]);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 8
+    bf0     = output;
+    bf1     = step;
+    bf1[0]  = bf0[0];
+    bf1[1]  = bf0[1];
+    bf1[2]  = half_btf(cospi[32], bf0[2], cospi[32], bf0[3], cos_bit);
+    bf1[3]  = half_btf(cospi[32], bf0[2], -cospi[32], bf0[3], cos_bit);
+    bf1[4]  = bf0[4];
+    bf1[5]  = bf0[5];
+    bf1[6]  = half_btf(cospi[32], bf0[6], cospi[32], bf0[7], cos_bit);
+    bf1[7]  = half_btf(cospi[32], bf0[6], -cospi[32], bf0[7], cos_bit);
+    bf1[8]  = bf0[8];
+    bf1[9]  = bf0[9];
+    bf1[10] = half_btf(cospi[32], bf0[10], cospi[32], bf0[11], cos_bit);
+    bf1[11] = half_btf(cospi[32], bf0[10], -cospi[32], bf0[11], cos_bit);
+    bf1[12] = bf0[12];
+    bf1[13] = bf0[13];
+    bf1[14] = half_btf(cospi[32], bf0[14], cospi[32], bf0[15], cos_bit);
+    bf1[15] = half_btf(cospi[32], bf0[14], -cospi[32], bf0[15], cos_bit);
+    //range_check_buf(stage, input, bf1, size, stage_range[stage]);
+
+    // stage 9
+    bf0     = step;
+    bf1     = output;
+    bf1[0]  = bf0[0];
+    bf1[1]  = -bf0[8];
+    bf1[2]  = bf0[12];
+    bf1[3]  = -bf0[4];
+    bf1[4]  = bf0[6];
+    bf1[5]  = -bf0[14];
+    bf1[6]  = bf0[10];
+    bf1[7]  = -bf0[2];
+    bf1[8]  = bf0[3];
+    bf1[9]  = -bf0[11];
+    bf1[10] = bf0[15];
+    bf1[11] = -bf0[7];
+    bf1[12] = bf0[5];
+    bf1[13] = -bf0[13];
+    bf1[14] = bf0[9];
+    bf1[15] = -bf0[1];
 }
 
 // ==== SVT-AV1 inv_transforms.c :2449 - svt_av1_round_shift_array_c (verbatim extract; do not edit) ====

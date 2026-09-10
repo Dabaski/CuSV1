@@ -127,6 +127,83 @@ int main(void) {
 
     fprintf(stderr, "CK: inv2d8 done\n"); fflush(stderr);
 
+    // ---- 16x16 forward 1D @ cos_bit 13 (C0) ----
+    {
+        const int32_t in16[16] = {200, 80, -50, 30, 100, -20, 60, 10,
+                                  -35, 95, 5, -70, 45, 25, -15, 55};
+        int32_t o16[16];
+        svt_av1_fdct16_new(in16, o16, 13, NULL);
+        printf("fdct16:"); for (int i = 0; i < 16; ++i) printf(" %d", o16[i]); printf("\n");
+        svt_av1_fadst16_new(in16, o16, 13, NULL);
+        printf("fadst16:"); for (int i = 0; i < 16; ++i) printf(" %d", o16[i]); printf("\n");
+    }
+
+    fprintf(stderr, "CK: fwd16 done\n"); fflush(stderr);
+
+    // ---- 16x16 inverse 1D @ cos_bit 12 (C0; stage_range = opt_range 16 per
+    // gen_inv_range_16x16 gate lines below; idct16 consumes indices 3-7,
+    // iadst16 consumes 3/5/7) ----
+    {
+        const int32_t in16[16] = {300, -120, 75, 200, -60, 40, 90, -15,
+                                  55, -95, 20, 65, -40, 85, -25, 10};
+        int32_t o16[16];
+        const int8_t sr16[MAX_TXFM_STAGE_NUM] = {16, 16, 16, 16, 16, 16, 16, 16,
+                                                 16, 16, 16, 16, 16, 16, 16, 16};
+        svt_av1_idct16_new(in16, o16, 12, sr16);
+        printf("idct16:"); for (int i = 0; i < 16; ++i) printf(" %d", o16[i]); printf("\n");
+        svt_av1_iadst16_new(in16, o16, 12, sr16);
+        printf("iadst16:"); for (int i = 0; i < 16; ++i) printf(" %d", o16[i]); printf("\n");
+    }
+
+    fprintf(stderr, "CK: inv16 done\n"); fflush(stderr);
+
+    // ---- 16x16 forward 2D (DCT + ADST), C0 ----
+    // fixture: deterministic 16x16, values in [-105, 105] (int16-safe)
+    {
+        int16_t in[256];
+        for (int r = 0; r < 16; ++r)
+            for (int c = 0; c < 16; ++c)
+                in[r * 16 + c] = (int16_t)((c * 13 + r * 7 + ((c * r) & 31)) % 211) - 105;
+        int32_t out[256];
+        svtd_fwd2d16x16(in, 16, out, svt_av1_fdct16_new);
+        printf("fwd2d16_dct:"); for (int i = 0; i < 256; ++i) printf(" %d", out[i]); printf("\n");
+        svtd_fwd2d16x16(in, 16, out, svt_av1_fadst16_new);
+        printf("fwd2d16_adst:"); for (int i = 0; i < 256; ++i) printf(" %d", out[i]); printf("\n");
+    }
+
+    fprintf(stderr, "CK: fwd2d16 done\n"); fflush(stderr);
+
+    // ---- 16x16 inverse 2D add (DCT + ADST) onto a V-pred 16x16, C0 ----
+    {
+        int32_t cdct16[256];
+        int32_t cadst16[256];
+        for (int i = 0; i < 256; ++i) {
+            const int r = i / 16, c = i % 16;
+            cdct16[i] = ((r * 31 + c * 17 + 45) % 97) - 48;
+            cadst16[i] = ((r * 23 + c * 41 + 13) % 89) - 44;
+        }
+        uint8_t pred[256];
+        for (int r = 0; r < 16; ++r)
+            for (int c = 0; c < 16; ++c) pred[r*16+c] = (uint8_t)(10 + 5*c);
+        svtd_inv2dadd16x16(cdct16, pred, 16, svt_av1_idct16_new);
+        printf("inv2d16_dct_onto_vpred:"); for (int i = 0; i < 256; ++i) printf(" %d", pred[i]); printf("\n");
+        for (int r = 0; r < 16; ++r)
+            for (int c = 0; c < 16; ++c) pred[r*16+c] = (uint8_t)(10 + 5*c);
+        svtd_inv2dadd16x16(cadst16, pred, 16, svt_av1_iadst16_new);
+        printf("inv2d16_adst_onto_vpred:"); for (int i = 0; i < 256; ++i) printf(" %d", pred[i]); printf("\n");
+    }
+
+    fprintf(stderr, "CK: inv2d16 done\n"); fflush(stderr);
+
+    // default scan 16x16 (svt_aom_init_iscan formula at W=H=16)
+    {
+        int16_t scan16[256];
+        svtd_default_scan_16x16(scan16);
+        printf("qscan16:"); for (int i = 0; i < 256; ++i) printf(" %d", scan16[i]); printf("\n");
+    }
+
+    svtd_gen_inv_range_16x16();
+
     svtd_gen_inv_range_8x8();
 
     // ---- B5: 8x8 builder goldens ----
