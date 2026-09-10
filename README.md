@@ -185,6 +185,12 @@ checks during REFACTOR. See `AGENTS.md` for the full rules.
   of truth. See its top-level `LICENSE` and `NOTICE` for terms. This
   project is a derivative port and is not affiliated with or endorsed
   by the SVT-AV1 authors or the Alliance for Open Media.
+  **Reference pinning:** the vendored tree is a 4.2-era snapshot
+  (CHANGELOG 4.2.0, 2026-07-14), NOT byte-identical to the official
+  v4.2.0 tag, and upstream master has diverged further. The snapshot is
+  pinned and is not updated — the target is bit-exact 1:1 with this
+  pinned vendored reference, and updating it would invalidate every
+  committed golden and provenance citation.
 - **doctest** — vendored under `third_party/doctest/`, MIT License.
 - **hardware_docs** — vendored NVIDIA reference material (PTX ISA,
   GP104 whitepaper, Pascal Tuning Guide, nvprof-era Profiler Users

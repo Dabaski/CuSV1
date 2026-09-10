@@ -62,6 +62,21 @@ compile. If you can split a step into two smaller ones, split it.
 - **Commit messages carry measured values only** - register counts, SADs,
   MSEs quoted in a commit message come from an actual run, never from
   memory or estimation.
+- **NEVER make a performance change without a before/after bench
+  measurement** (tools/av1_bench, same config, both numbers in the commit
+  message). A perf claim without paired bench lines is not done.
+- **Citation rule: existence / negative-existence claims are grep-verified
+  against the tree before being written.** Never cite a symbol as missing
+  (or present) without checking; precedent: the HK1 l5 citation edit wrongly
+  dropped compute8x8_sad_kernel_c as nonexistent (it exists at
+  motion_estimation.c:71) and had to be fixed forward in L0.
+- **REFERENCE PINNING**: the project's 1:1 reference is the VENDORED SVT-AV1
+  snapshot in `third_party/SVT-AV1/` - a 4.2-era snapshot (CHANGELOG 4.2.0,
+  2026-07-14) that is NOT byte-identical to the official v4.2.0 tag, and
+  upstream master has diverged further. The vendored tree is pinned and is
+  NOT to be updated without a court order (updating it would invalidate
+  every golden and provenance citation). The north star is therefore
+  "bit-exact 1:1 with the pinned vendored SVT-AV1 reference".
 - **Goldens come from tools/golden_gen** (committed generator), cited with
   generator line + SVT provenance. Hand-traces are commentary, never
   expected values.
@@ -210,7 +225,7 @@ being close to useless. Do not conflate them.
 
 ## Layer map (current)
 
-North star: a working, bit-exact 1:1 port of SVT-AV1 on CUDA 12.2 - every algorithm traceable to the vendored C source.
+North star: a working, bit-exact 1:1 port of SVT-AV1 on CUDA 12.2 - every algorithm traceable to the pinned vendored reference in third_party/SVT-AV1 (REFERENCE PINNING rule above); the target is bit-exact 1:1 with the pinned vendored SVT-AV1 reference, not with upstream.
 
 - l0_core â€” minimal types (Sample, BlockSize) shared across layers.
 - l1_pixels â€” pixels::Plane (strided pixel buffer with padding).
