@@ -772,5 +772,45 @@ int main(void) {
         for (int i = 0; i < 256; ++i) printf(" %d", coeffs[i]);
         printf("\n");
     }
+    // ---- C7: 16x16 frame-policy gate lines (32x32, 2x2 of 16x16) ----
+    // rows 0-15 = ramp 4*(x+y+1) (max 4*31 = 124 < 255; row 15 recon =
+    // above for row-1 blocks; above[j] = 4j+64 and D45 zone-1 pred
+    // above[1+r+c] = 4*(r+c+17) = src[16+r][c] -> SAD 0 only with REAL TR),
+    // rows 16-31 zero.
+    {
+        uint8_t src[1024];
+        for (int y = 0; y < 32; ++y) {
+            for (int x = 0; x < 32; ++x) {
+                src[y * 32 + x] = (y < 16) ? (uint8_t)(4 * (x + y + 1)) : 0;
+            }
+        }
+        uint8_t recon[1024];
+        int32_t coeffs[1024];
+        int modes[4] = {0};
+        svtd_frame_auto_16x16_blocks(src, recon, coeffs, modes);
+        printf("f16_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
+        printf("\n");
+        printf("f16_recon:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", recon[i]);
+        printf("\n");
+        printf("f16_coeffs:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", coeffs[i]);
+        printf("\n");
+
+        uint8_t reconQ[1024];
+        int32_t coeffsQ[1024];
+        int modesQ[4] = {0};
+        svtd_frame_auto_16x16_q(src, reconQ, coeffsQ, modesQ, 100);
+        printf("f16q_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modesQ[i]);
+        printf("\n");
+        printf("f16q_recon:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", reconQ[i]);
+        printf("\n");
+        printf("f16q_coeffs:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", coeffsQ[i]);
+        printf("\n");
+    }
     return 0;
 }

@@ -780,6 +780,143 @@ static void svtd_frame_auto_8x8_q(const uint8_t* src, uint8_t* recon, int32_t* c
     }
 }
 
+// ---- C7: 16x16 frame-policy composition (2x2 grid of 16x16 = 32x32) -------
+// Same D2 policy as the smaller variants, TX_16X16 column; REAL recon
+// top-right gather via svtd_gather_above (fstride 32). Row-1 blocks predict
+// from the reconstructed ramp row 15; block (bx=0, by=1) is the only nTr>0
+// block and its SAD consumes above[16..31].
+static void svtd_default_scan_16x16(int16_t* scan);  // defined with the Q0 scan block below
+
+static void svtd_frame_auto_16x16_blocks(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes) {
+    const int fstride = 32;
+    const int gridW = 2, gridH = 2;
+    const int bsz = 16;
+    memset(recon, 0, 1024);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * bsz, py = by * bsz;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? bsz : 0;
+            const int nLeft = hasLeft ? bsz : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? bsz : 0;
+            uint8_t above[33] = {0};
+            uint8_t left[33] = {0};
+            uint8_t al = 0;
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, bsz, nTr);
+            if (hasLeft) for (int i = 0; i < bsz; ++i) left[i] = recon[(py + i) * fstride + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
+
+            const int aboveMode = hasTop ? modes[(by - 1) * gridW + bx] : DC_PRED;
+            const int leftMode = hasLeft ? modes[by * gridW + bx - 1] : DC_PRED;
+            svtd_filt_type = ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED ||
+                               aboveMode == SMOOTH_H_PRED) ||
+                              (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED ||
+                               leftMode == SMOOTH_H_PRED))
+                                 ? 1
+                                 : 0;
+
+            uint8_t srcblk[256];
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    srcblk[i * bsz + j] = src[(py + i) * fstride + px + j];
+
+            // D2 policy: 13 candidates, SAD scored with the 16x16 sad helper
+            uint32_t best_sad = 0;
+            int mode = -1;
+            for (int m = 0; m <= PAETH_PRED; ++m) {
+                uint8_t pred[256];
+                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+                                     0, al, TX_16X16);
+                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
+                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+            }
+            modes[by * gridW + bx] = mode;
+
+            uint8_t pred[256];
+            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+                                 0, al, TX_16X16);
+            int16_t res[256];
+            for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+            int32_t cb[256];
+            svtd_fwd2d16x16(res, bsz, cb, svt_av1_fdct16_new);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = cb[i];
+            svtd_inv2dadd16x16(cb, pred, bsz, svt_av1_idct16_new);
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    recon[(py + i) * fstride + px + j] = pred[i * bsz + j];
+        }
+    }
+}
+
+// Q variant: same loop with the FP quantizer wired at a fixed qindex
+// (n_coeffs=256, log_scale 0).
+static void svtd_frame_auto_16x16_q(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes,
+                                    int qindex) {
+    const int gridW = 2, gridH = 2;
+    const int bsz = 16;
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(qindex, &t);
+    int16_t scan16[256];
+    svtd_default_scan_16x16(scan16);
+    memset(recon, 0, 1024);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * bsz, py = by * bsz;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? bsz : 0;
+            const int nLeft = hasLeft ? bsz : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? bsz : 0;
+            uint8_t above[33] = {0};
+            uint8_t left[33] = {0};
+            uint8_t al = 0;
+            if (hasTop) svtd_gather_above(above, recon, 32, px, py, bsz, nTr);
+            if (hasLeft) for (int i = 0; i < bsz; ++i) left[i] = recon[(py + i) * 32 + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * 32 + px - 1];
+
+            const int aboveMode = hasTop ? modes[(by - 1) * gridW + bx] : DC_PRED;
+            const int leftMode = hasLeft ? modes[by * gridW + bx - 1] : DC_PRED;
+            svtd_filt_type = ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED ||
+                               aboveMode == SMOOTH_H_PRED) ||
+                              (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED ||
+                               leftMode == SMOOTH_H_PRED))
+                                 ? 1
+                                 : 0;
+
+            uint8_t srcblk[256];
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    srcblk[i * bsz + j] = src[(py + i) * 32 + px + j];
+
+            uint32_t best_sad = 0;
+            int mode = -1;
+            for (int m = 0; m <= PAETH_PRED; ++m) {
+                uint8_t pred[256];
+                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+                                     0, al, TX_16X16);
+                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
+                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+            }
+            modes[by * gridW + bx] = mode;
+
+            uint8_t pred[256];
+            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+                                 0, al, TX_16X16);
+            int16_t res[256];
+            for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+            int32_t cb[256];
+            svtd_fwd2d16x16(res, bsz, cb, svt_av1_fdct16_new);
+            TranLow qc[256], dq[256];
+            uint16_t eob = 0;
+            svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
+            svtd_inv2dadd16x16(dq, pred, bsz, svt_av1_idct16_new);
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    recon[(py + i) * 32 + px + j] = pred[i * bsz + j];
+        }
+    }
+}
+
 // ---- gen_inv_stage_range 8x8 gate line -------------------------------------
 // Mirrors svt_av1_gen_inv_stage_range (inv_transforms.c:44) for TX_8X8 at
 // bd=8, DCT_DCT and ADST_ADST, to settle the stage_range shim. Prints the
