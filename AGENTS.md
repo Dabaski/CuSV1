@@ -175,6 +175,37 @@ being close to useless. Do not conflate them.
   exists) that's run at slice-group boundaries, not per-assertion. If no
   such harness exists yet when the first performance-sensitive kernel lands,
   say so explicitly rather than silently skipping perf verification.
+
+## Benchmark harness (BM-series, tools/bench)
+
+- Run: `cmake --build build --config Release --target av1_bench` then
+  `build\tools\bench\Release\av1_bench.exe` with the CUDA toolkit `bin` on
+  PATH (same requirement as the test exes). Not a ctest.
+- What it reports: GPU name/driver/clocks at run time (nvidia-smi query),
+  host vs GPU composite auto-frame encodes (lossless + q100, 4x4 and 8x8,
+  64x64 frame tiled from the B7 fixture, 30 iters + 3 warmup, median/min),
+  and per-stage single-launch kernel timings (predict/subtract/fwd/quant/
+  inv, both geometries). Every GPU configuration runs an untimed
+  bit-exactness verification vs host first and withholds timings on
+  mismatch. MEASURED VALUES ONLY: every number quoted anywhere comes from
+  an actual run on this machine.
+- Known caveat baked into the tool's output header: the composite loop is
+  HOST decision + per-block synchronous kernel launches — the numbers
+  include per-launch/per-copy sync overhead per block. They measure the
+  current structure, not the kernels' potential.
+- **Rule: perf-relevant slices must quote before/after bench lines** (the
+  same config from this tool, same machine, clocks as recorded at run
+  time). A perf slice without bench lines is not done.
+- Baseline (2026-09-10, RTX 3090, driver 591.86; clocks unlocked, SM clock
+  varied 210-1695 MHz across runs — record what nvidia-smi prints):
+  host 4x4L 0.374 / 4x4Q 0.403 / 8x8L 0.244 / 8x8Q 0.268 ms (median);
+  gpu 4x4L 227.0 / 4x4Q 390.7 / 8x8L 93.4 / 8x8Q 99.5 ms (median);
+  per-stage single launches ~0.056-0.061 ms (4x4 all stages; 8x8 predict
+  0.085, rest ~0.059-0.063 ms).
+- Parked perf candidates (do not build unprompted): per-block launch set
+  elimination (streams/graphs/wavefront), memory pooling, clock locking
+  via NVML. Clock locking is the first candidate: baselines above are
+  noise-sensitive without it.
  
 
 ## Layer map (current)

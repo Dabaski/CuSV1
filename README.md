@@ -8,9 +8,11 @@ JIT-compiled at runtime via NVRTC.
 
 > **Disclaimer:** This project is actively being worked on. Code is
 > incomplete, tests may be red, and APIs will change. Kernels are
-> functionally correct (bit-exact vs SVT's host C where noted) but
-> **not** performance-validated — there is no benchmark harness yet.
-> Expect rough edges. Not ready for production use.
+> functionally correct (bit-exact vs SVT's host C where noted); a
+> benchmark harness exists (`tools/bench/`) but the composite encoder
+> loop is per-block synchronous launches — see `AGENTS.md` for the
+> dated baseline and the known-overhead caveat. Expect rough edges. Not
+> ready for production use.
 
 ## What's implemented
 
@@ -70,6 +72,9 @@ src/
 tools/
   golden_gen/     SVT golden-vector generator (mechanical verbatim
                   extraction from third_party/SVT-AV1, committed)
+  bench/          av1_bench: console benchmark tool (own target, not a
+                  ctest; env + host/GPU frame + per-stage timings;
+                  run the exe with the CUDA toolkit bin on PATH)
 third_party/
   SVT-AV1/        vendored source of truth (do not modify)
   doctest/        test framework
@@ -120,6 +125,19 @@ ctest --test-dir build -R l4_intra
   that mechanically extracts functions verbatim from the vendored
   SVT-AV1 tree (see `tools/golden_gen/README.md`); its validation gate
   diffs generator output against committed tests.
+
+## Benchmarks
+
+`tools/bench/` builds the `av1_bench` console tool: it records the GPU
+name/driver/clocks at run time (nvidia-smi query), then times host and
+GPU composite auto-frame encodes (lossless + q100, 4x4 and 8x8
+geometry, 64x64 frame tiled from the B7 test fixture) plus per-stage
+single-launch kernel timings. Every GPU configuration runs an untimed
+bit-exact verification pass against the host output first and refuses
+to report timings on mismatch. The composite loop is host decision +
+per-block synchronous launches — the tool's header names this known
+overhead. Dated baseline numbers and the bench-before/after rule for
+perf-relevant slices live in `AGENTS.md`.
 
 ## Methodology
 
