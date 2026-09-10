@@ -64,6 +64,12 @@ void invTxfm2dAdd4x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_
 
 void invTxfm2dAdd8x8(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
 
+// svt_av1_inv_txfm2d_add_16x16_c / inv_txfm2d_add_c, TX_16X16: inv_shift_16x16
+// = {-2,-4} (inv_transforms.c:20), cos_bit 12/12 (inv_cos_bit_col/row[2][2]),
+// rows then columns with clamps 16/16; add via clip_pixel_highbd(pred +
+// round_shift(out, 4), 8)
+void invTxfm2dAdd16x16(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
 std::string invTxfmCuSource();
 
 std::string fwdTxfmCuSource();
