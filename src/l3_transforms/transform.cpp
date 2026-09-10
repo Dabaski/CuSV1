@@ -2294,7 +2294,11 @@ void invTxfm2dAdd32x32(const std::int32_t* coeffs, std::uint8_t* dst, std::uint3
 }
 
 std::string fwdTxfmCuSource() {
-    return R"CUDA(
+    // built with += per chunk: adjacent raw literals concatenated would
+    // exceed the MSVC combined-literal limit (~32KB) once the 32-point
+    // device functions landed (C2026); += keeps each literal small.
+    std::string s;
+    s += R"CUDA(
 __constant__ int kCospi[64] = {
     8192, 8190, 8182, 8170, 8153, 8130, 8103, 8071, 8035, 7993, 7946, 7895, 7839, 7779, 7713, 7643,
     7568, 7489, 7405, 7317, 7225, 7128, 7027, 6921, 6811, 6698, 6580, 6458, 6333, 6203, 6070, 5933,
@@ -2398,7 +2402,8 @@ extern "C" __global__ void fwd_txfm_2d_4x4(const short* input, const int* stride
         output[t * 4 + c] = o[c];
     }
 }
-)CUDA" R"CUDB1(
+)CUDA";
+    s += R"CUDB1(
 __device__ void d_fdct8(const int* input, int* output) {
     const int bit = 13;
     int bf0[8];
@@ -2569,14 +2574,417 @@ extern "C" __global__ void fwd_txfm_2d_8x8(const short* input, const int* stride
         output[t * 8 + c] = o[c];
     }
 }
-)CUDB1"
-    R"CUDB2(
+)CUDB1";
+    s += R"CUDB2(
 __constant__ int kC12f[64] = {
     4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036, 4017, 3996, 3973, 3948, 3920, 3889, 3857, 3822,
     3784, 3745, 3703, 3659, 3612, 3564, 3513, 3461, 3406, 3349, 3290, 3229, 3166, 3102, 3035, 2967,
     2896, 2824, 2751, 2675, 2598, 2520, 2440, 2359, 2276, 2191, 2106, 2019, 1931, 1842, 1751, 1660,
     1567, 1474, 1380, 1285, 1189, 1092, 995,  897,  799,  700,  601,  501,  401,  301,  201,  101,
 };
+
+// svt_av1_fdct32_new (transforms.c:422-760) at cos_bit 12
+__device__ void d_fdct32(const int* input, int* output) {
+    const int bit = 12;
+    const int* cospi = kC12f;
+    int bf0[32];
+    int step[32];
+
+    for (int i = 0; i < 16; ++i) {
+        bf0[i] = input[i] + input[31 - i];
+        bf0[31 - i] = -input[31 - i] + input[i];
+    }
+
+    step[0]  = bf0[0] + bf0[15];
+    step[1]  = bf0[1] + bf0[14];
+    step[2]  = bf0[2] + bf0[13];
+    step[3]  = bf0[3] + bf0[12];
+    step[4]  = bf0[4] + bf0[11];
+    step[5]  = bf0[5] + bf0[10];
+    step[6]  = bf0[6] + bf0[9];
+    step[7]  = bf0[7] + bf0[8];
+    step[8]  = -bf0[8] + bf0[7];
+    step[9]  = -bf0[9] + bf0[6];
+    step[10] = -bf0[10] + bf0[5];
+    step[11] = -bf0[11] + bf0[4];
+    step[12] = -bf0[12] + bf0[3];
+    step[13] = -bf0[13] + bf0[2];
+    step[14] = -bf0[14] + bf0[1];
+    step[15] = -bf0[15] + bf0[0];
+    step[16] = bf0[16];
+    step[17] = bf0[17];
+    step[18] = bf0[18];
+    step[19] = bf0[19];
+    step[20] = d_half_btf(-cospi[32], bf0[20], cospi[32], bf0[27], bit);
+    step[21] = d_half_btf(-cospi[32], bf0[21], cospi[32], bf0[26], bit);
+    step[22] = d_half_btf(-cospi[32], bf0[22], cospi[32], bf0[25], bit);
+    step[23] = d_half_btf(-cospi[32], bf0[23], cospi[32], bf0[24], bit);
+    step[24] = d_half_btf(cospi[32], bf0[24], cospi[32], bf0[23], bit);
+    step[25] = d_half_btf(cospi[32], bf0[25], cospi[32], bf0[22], bit);
+    step[26] = d_half_btf(cospi[32], bf0[26], cospi[32], bf0[21], bit);
+    step[27] = d_half_btf(cospi[32], bf0[27], cospi[32], bf0[20], bit);
+    step[28] = bf0[28];
+    step[29] = bf0[29];
+    step[30] = bf0[30];
+    step[31] = bf0[31];
+
+    bf0[0]  = step[0] + step[7];
+    bf0[1]  = step[1] + step[6];
+    bf0[2]  = step[2] + step[5];
+    bf0[3]  = step[3] + step[4];
+    bf0[4]  = -step[4] + step[3];
+    bf0[5]  = -step[5] + step[2];
+    bf0[6]  = -step[6] + step[1];
+    bf0[7]  = -step[7] + step[0];
+    bf0[8]  = step[8];
+    bf0[9]  = step[9];
+    bf0[10] = d_half_btf(-cospi[32], step[10], cospi[32], step[13], bit);
+    bf0[11] = d_half_btf(-cospi[32], step[11], cospi[32], step[12], bit);
+    bf0[12] = d_half_btf(cospi[32], step[12], cospi[32], step[11], bit);
+    bf0[13] = d_half_btf(cospi[32], step[13], cospi[32], step[10], bit);
+    bf0[14] = step[14];
+    bf0[15] = step[15];
+    bf0[16] = step[16] + step[23];
+    bf0[17] = step[17] + step[22];
+    bf0[18] = step[18] + step[21];
+    bf0[19] = step[19] + step[20];
+    bf0[20] = -step[20] + step[19];
+    bf0[21] = -step[21] + step[18];
+    bf0[22] = -step[22] + step[17];
+    bf0[23] = -step[23] + step[16];
+    bf0[24] = -step[24] + step[31];
+    bf0[25] = -step[25] + step[30];
+    bf0[26] = -step[26] + step[29];
+    bf0[27] = -step[27] + step[28];
+    bf0[28] = step[28] + step[27];
+    bf0[29] = step[29] + step[26];
+    bf0[30] = step[30] + step[25];
+    bf0[31] = step[31] + step[24];
+
+    step[0]  = bf0[0] + bf0[3];
+    step[1]  = bf0[1] + bf0[2];
+    step[2]  = -bf0[2] + bf0[1];
+    step[3]  = -bf0[3] + bf0[0];
+    step[4]  = bf0[4];
+    step[5]  = d_half_btf(-cospi[32], bf0[5], cospi[32], bf0[6], bit);
+    step[6]  = d_half_btf(cospi[32], bf0[6], cospi[32], bf0[5], bit);
+    step[7]  = bf0[7];
+    step[8]  = bf0[8] + bf0[11];
+    step[9]  = bf0[9] + bf0[10];
+    step[10] = -bf0[10] + bf0[9];
+    step[11] = -bf0[11] + bf0[8];
+    step[12] = -bf0[12] + bf0[15];
+    step[13] = -bf0[13] + bf0[14];
+    step[14] = bf0[14] + bf0[13];
+    step[15] = bf0[15] + bf0[12];
+    step[16] = bf0[16];
+    step[17] = bf0[17];
+    step[18] = d_half_btf(-cospi[16], bf0[18], cospi[48], bf0[29], bit);
+    step[19] = d_half_btf(-cospi[16], bf0[19], cospi[48], bf0[28], bit);
+    step[20] = d_half_btf(-cospi[48], bf0[20], -cospi[16], bf0[27], bit);
+    step[21] = d_half_btf(-cospi[48], bf0[21], -cospi[16], bf0[26], bit);
+    step[22] = bf0[22];
+    step[23] = bf0[23];
+    step[24] = bf0[24];
+    step[25] = bf0[25];
+    step[26] = d_half_btf(cospi[48], bf0[26], -cospi[16], bf0[21], bit);
+    step[27] = d_half_btf(cospi[48], bf0[27], -cospi[16], bf0[20], bit);
+    step[28] = d_half_btf(cospi[16], bf0[28], cospi[48], bf0[19], bit);
+    step[29] = d_half_btf(cospi[16], bf0[29], cospi[48], bf0[18], bit);
+    step[30] = bf0[30];
+    step[31] = bf0[31];
+
+    bf0[0]  = d_half_btf(cospi[32], step[0], cospi[32], step[1], bit);
+    bf0[1]  = d_half_btf(-cospi[32], step[1], cospi[32], step[0], bit);
+    bf0[2]  = d_half_btf(cospi[48], step[2], cospi[16], step[3], bit);
+    bf0[3]  = d_half_btf(cospi[48], step[3], -cospi[16], step[2], bit);
+    bf0[4]  = step[4] + step[5];
+    bf0[5]  = -step[5] + step[4];
+    bf0[6]  = -step[6] + step[7];
+    bf0[7]  = step[7] + step[6];
+    bf0[8]  = step[8];
+    bf0[9]  = d_half_btf(-cospi[16], step[9], cospi[48], step[14], bit);
+    bf0[10] = d_half_btf(-cospi[48], step[10], -cospi[16], step[13], bit);
+    bf0[11] = step[11];
+    bf0[12] = step[12];
+    bf0[13] = d_half_btf(cospi[48], step[13], -cospi[16], step[10], bit);
+    bf0[14] = d_half_btf(cospi[16], step[14], cospi[48], step[9], bit);
+    bf0[15] = step[15];
+    bf0[16] = step[16] + step[19];
+    bf0[17] = step[17] + step[18];
+    bf0[18] = -step[18] + step[17];
+    bf0[19] = -step[19] + step[16];
+    bf0[20] = -step[20] + step[23];
+    bf0[21] = -step[21] + step[22];
+    bf0[22] = step[22] + step[21];
+    bf0[23] = step[23] + step[20];
+    bf0[24] = step[24] + step[27];
+    bf0[25] = step[25] + step[26];
+    bf0[26] = -step[26] + step[25];
+    bf0[27] = -step[27] + step[24];
+    bf0[28] = -step[28] + step[31];
+    bf0[29] = -step[29] + step[30];
+    bf0[30] = step[30] + step[29];
+    bf0[31] = step[31] + step[28];
+
+    step[0]  = bf0[0];
+    step[1]  = bf0[1];
+    step[2]  = bf0[2];
+    step[3]  = bf0[3];
+    step[4]  = d_half_btf(cospi[56], bf0[4], cospi[8], bf0[7], bit);
+    step[5]  = d_half_btf(cospi[24], bf0[5], cospi[40], bf0[6], bit);
+    step[6]  = d_half_btf(cospi[24], bf0[6], -cospi[40], bf0[5], bit);
+    step[7]  = d_half_btf(cospi[56], bf0[7], -cospi[8], bf0[4], bit);
+    step[8]  = bf0[8] + bf0[9];
+    step[9]  = -bf0[9] + bf0[8];
+    step[10] = -bf0[10] + bf0[11];
+    step[11] = bf0[11] + bf0[10];
+    step[12] = bf0[12] + bf0[13];
+    step[13] = -bf0[13] + bf0[12];
+    step[14] = -bf0[14] + bf0[15];
+    step[15] = bf0[15] + bf0[14];
+    step[16] = bf0[16];
+    step[17] = d_half_btf(-cospi[8], bf0[17], cospi[56], bf0[30], bit);
+    step[18] = d_half_btf(-cospi[56], bf0[18], -cospi[8], bf0[29], bit);
+    step[19] = bf0[19];
+    step[20] = bf0[20];
+    step[21] = d_half_btf(-cospi[40], bf0[21], cospi[24], bf0[26], bit);
+    step[22] = d_half_btf(-cospi[24], bf0[22], -cospi[40], bf0[25], bit);
+    step[23] = bf0[23];
+    step[24] = bf0[24];
+    step[25] = d_half_btf(cospi[24], bf0[25], -cospi[40], bf0[22], bit);
+    step[26] = d_half_btf(cospi[40], bf0[26], cospi[24], bf0[21], bit);
+    step[27] = bf0[27];
+    step[28] = bf0[28];
+    step[29] = d_half_btf(cospi[56], bf0[29], -cospi[8], bf0[18], bit);
+    step[30] = d_half_btf(cospi[8], bf0[30], cospi[56], bf0[17], bit);
+    step[31] = bf0[31];
+
+    bf0[0]  = step[0];
+    bf0[1]  = step[1];
+    bf0[2]  = step[2];
+    bf0[3]  = step[3];
+    bf0[4]  = step[4];
+    bf0[5]  = step[5];
+    bf0[6]  = step[6];
+    bf0[7]  = step[7];
+    bf0[8]  = d_half_btf(cospi[60], step[8], cospi[4], step[15], bit);
+    bf0[9]  = d_half_btf(cospi[28], step[9], cospi[36], step[14], bit);
+    bf0[10] = d_half_btf(cospi[44], step[10], cospi[20], step[13], bit);
+    bf0[11] = d_half_btf(cospi[12], step[11], cospi[52], step[12], bit);
+    bf0[12] = d_half_btf(cospi[12], step[12], -cospi[52], step[11], bit);
+    bf0[13] = d_half_btf(cospi[44], step[13], -cospi[20], step[10], bit);
+    bf0[14] = d_half_btf(cospi[28], step[14], -cospi[36], step[9], bit);
+    bf0[15] = d_half_btf(cospi[60], step[15], -cospi[4], step[8], bit);
+    bf0[16] = step[16] + step[17];
+    bf0[17] = -step[17] + step[16];
+    bf0[18] = -step[18] + step[19];
+    bf0[19] = step[19] + step[18];
+    bf0[20] = step[20] + step[21];
+    bf0[21] = -step[21] + step[20];
+    bf0[22] = -step[22] + step[23];
+    bf0[23] = step[23] + step[22];
+    bf0[24] = step[24] + step[25];
+    bf0[25] = -step[25] + step[24];
+    bf0[26] = -step[26] + step[27];
+    bf0[27] = step[27] + step[26];
+    bf0[28] = step[28] + step[29];
+    bf0[29] = -step[29] + step[28];
+    bf0[30] = -step[30] + step[31];
+    bf0[31] = step[31] + step[30];
+
+    for (int i = 0; i < 16; ++i) step[i] = bf0[i];
+    step[16] = d_half_btf(cospi[62], bf0[16], cospi[2], bf0[31], bit);
+    step[17] = d_half_btf(cospi[30], bf0[17], cospi[34], bf0[30], bit);
+    step[18] = d_half_btf(cospi[46], bf0[18], cospi[18], bf0[29], bit);
+    step[19] = d_half_btf(cospi[14], bf0[19], cospi[50], bf0[28], bit);
+    step[20] = d_half_btf(cospi[54], bf0[20], cospi[10], bf0[27], bit);
+    step[21] = d_half_btf(cospi[22], bf0[21], cospi[42], bf0[26], bit);
+    step[22] = d_half_btf(cospi[38], bf0[22], cospi[26], bf0[25], bit);
+    step[23] = d_half_btf(cospi[6], bf0[23], cospi[58], bf0[24], bit);
+    step[24] = d_half_btf(cospi[6], bf0[24], -cospi[58], bf0[23], bit);
+    step[25] = d_half_btf(cospi[38], bf0[25], -cospi[26], bf0[22], bit);
+    step[26] = d_half_btf(cospi[22], bf0[26], -cospi[42], bf0[21], bit);
+    step[27] = d_half_btf(cospi[54], bf0[27], -cospi[10], bf0[20], bit);
+    step[28] = d_half_btf(cospi[14], bf0[28], -cospi[50], bf0[19], bit);
+    step[29] = d_half_btf(cospi[46], bf0[29], -cospi[18], bf0[18], bit);
+    step[30] = d_half_btf(cospi[30], bf0[30], -cospi[34], bf0[17], bit);
+    step[31] = d_half_btf(cospi[62], bf0[31], -cospi[2], bf0[16], bit);
+
+    output[0]  = step[0];
+    output[1]  = step[16];
+    output[2]  = step[8];
+    output[3]  = step[24];
+    output[4]  = step[4];
+    output[5]  = step[20];
+    output[6]  = step[12];
+    output[7]  = step[28];
+    output[8]  = step[2];
+    output[9]  = step[18];
+    output[10] = step[10];
+    output[11] = step[26];
+    output[12] = step[6];
+    output[13] = step[22];
+    output[14] = step[14];
+    output[15] = step[30];
+    output[16] = step[1];
+    output[17] = step[17];
+    output[18] = step[9];
+    output[19] = step[25];
+    output[20] = step[5];
+    output[21] = step[21];
+    output[22] = step[13];
+    output[23] = step[29];
+    output[24] = step[3];
+    output[25] = step[19];
+    output[26] = step[11];
+    output[27] = step[27];
+    output[28] = step[7];
+    output[29] = step[23];
+    output[30] = step[15];
+    output[31] = step[31];
+}
+
+// static av1_fadst32_new (transforms.c:1908-2314) at cos_bit 12
+)CUDB2";
+    s += R"CUDB3(
+__device__ void d_fadst32(const int* input, int* output) {
+    const int bit = 12;
+    const int* cospi = kC12f;
+    int bf0[32];
+    int step[32];
+
+    static const int idxTab[32] = {0, -32, -16, 16, -8, 24, 8, -24, -4, 28, 12, -20, 4, -28, -12, 20,
+                                   -2, 30, 14, -18, 6, -26, -10, 22, 2, -30, -14, 18, -6, 26, 10, -22};
+    for (int i = 0; i < 32; ++i) {
+        const int j = idxTab[i];
+        bf0[i] = j >= 0 ? input[j] : -input[-1 - j];
+    }
+
+    for (int k = 0; k < 16; ++k) {
+        const int c1 = 4 * k + 1;
+        step[2 * k]     = d_half_btf(cospi[c1], bf0[2 * k], cospi[64 - c1], bf0[2 * k + 1], bit);
+        step[2 * k + 1] = d_half_btf(-cospi[c1], bf0[2 * k + 1], cospi[64 - c1], bf0[2 * k], bit);
+    }
+
+    for (int i = 0; i < 16; ++i) {
+        bf0[i] = step[i] + step[i + 16];
+        bf0[i + 16] = -step[i + 16] + step[i];
+    }
+
+    for (int i = 0; i < 16; ++i) step[i] = bf0[i];
+    step[16] = d_half_btf(cospi[4], bf0[16], cospi[60], bf0[17], bit);
+    step[17] = d_half_btf(-cospi[4], bf0[17], cospi[60], bf0[16], bit);
+    step[18] = d_half_btf(cospi[20], bf0[18], cospi[44], bf0[19], bit);
+    step[19] = d_half_btf(-cospi[20], bf0[19], cospi[44], bf0[18], bit);
+    step[20] = d_half_btf(cospi[36], bf0[20], cospi[28], bf0[21], bit);
+    step[21] = d_half_btf(-cospi[36], bf0[21], cospi[28], bf0[20], bit);
+    step[22] = d_half_btf(cospi[52], bf0[22], cospi[12], bf0[23], bit);
+    step[23] = d_half_btf(-cospi[52], bf0[23], cospi[12], bf0[22], bit);
+    step[24] = d_half_btf(-cospi[60], bf0[24], cospi[4], bf0[25], bit);
+    step[25] = d_half_btf(cospi[60], bf0[25], cospi[4], bf0[24], bit);
+    step[26] = d_half_btf(-cospi[44], bf0[26], cospi[20], bf0[27], bit);
+    step[27] = d_half_btf(cospi[44], bf0[27], cospi[20], bf0[26], bit);
+    step[28] = d_half_btf(-cospi[28], bf0[28], cospi[36], bf0[29], bit);
+    step[29] = d_half_btf(cospi[28], bf0[29], cospi[36], bf0[28], bit);
+    step[30] = d_half_btf(-cospi[12], bf0[30], cospi[52], bf0[31], bit);
+    step[31] = d_half_btf(cospi[12], bf0[31], cospi[52], bf0[30], bit);
+
+    for (int i = 0; i < 8; ++i) {
+        bf0[i] = step[i] + step[i + 8];
+        bf0[i + 8] = -step[i + 8] + step[i];
+        bf0[16 + i] = step[16 + i] + step[24 + i];
+        bf0[24 + i] = -step[24 + i] + step[16 + i];
+    }
+
+    for (int i = 0; i < 8; ++i) step[i] = bf0[i];
+    step[8]  = d_half_btf(cospi[8], bf0[8], cospi[56], bf0[9], bit);
+    step[9]  = d_half_btf(cospi[56], bf0[8], -cospi[8], bf0[9], bit);
+    step[10] = d_half_btf(cospi[40], bf0[10], cospi[24], bf0[11], bit);
+    step[11] = d_half_btf(cospi[24], bf0[10], -cospi[40], bf0[11], bit);
+    step[12] = d_half_btf(-cospi[56], bf0[12], cospi[8], bf0[13], bit);
+    step[13] = d_half_btf(cospi[56], bf0[13], cospi[8], bf0[12], bit);
+    step[14] = d_half_btf(-cospi[24], bf0[14], cospi[40], bf0[15], bit);
+    step[15] = d_half_btf(cospi[24], bf0[15], cospi[40], bf0[14], bit);
+    for (int i = 16; i < 24; ++i) step[i] = bf0[i];
+    step[24] = d_half_btf(cospi[8], bf0[24], cospi[56], bf0[25], bit);
+    step[25] = d_half_btf(-cospi[8], bf0[25], cospi[56], bf0[24], bit);
+    step[26] = d_half_btf(cospi[40], bf0[26], cospi[24], bf0[27], bit);
+    step[27] = d_half_btf(-cospi[40], bf0[27], cospi[24], bf0[26], bit);
+    step[28] = d_half_btf(-cospi[56], bf0[28], cospi[8], bf0[29], bit);
+    step[29] = d_half_btf(cospi[56], bf0[29], cospi[8], bf0[28], bit);
+    step[30] = d_half_btf(-cospi[24], bf0[30], cospi[40], bf0[31], bit);
+    step[31] = d_half_btf(cospi[24], bf0[31], cospi[40], bf0[30], bit);
+
+    for (int q = 0; q < 4; ++q) {
+        const int base = 8 * q;
+        for (int i = 0; i < 4; ++i) {
+            bf0[base + i] = step[base + i] + step[base + 4 + i];
+            bf0[base + 4 + i] = -step[base + 4 + i] + step[base + i];
+        }
+    }
+
+    for (int q = 0; q < 4; ++q) {
+        const int base = 8 * q;
+        step[base]     = bf0[base];
+        step[base + 1] = bf0[base + 1];
+        step[base + 2] = bf0[base + 2];
+        step[base + 3] = bf0[base + 3];
+        step[base + 4] = d_half_btf(cospi[16], bf0[base + 4], cospi[48], bf0[base + 5], bit);
+        step[base + 5] = d_half_btf(-cospi[16], bf0[base + 5], cospi[48], bf0[base + 4], bit);
+        step[base + 6] = d_half_btf(-cospi[48], bf0[base + 6], cospi[16], bf0[base + 7], bit);
+        step[base + 7] = d_half_btf(cospi[48], bf0[base + 7], cospi[16], bf0[base + 6], bit);
+    }
+
+    for (int q = 0; q < 8; ++q) {
+        const int base = 4 * q;
+        bf0[base]     = step[base] + step[base + 2];
+        bf0[base + 1] = step[base + 1] + step[base + 3];
+        bf0[base + 2] = -step[base + 2] + step[base];
+        bf0[base + 3] = -step[base + 3] + step[base + 1];
+    }
+
+    for (int q = 0; q < 8; ++q) {
+        const int base = 4 * q;
+        step[base]     = bf0[base];
+        step[base + 1] = bf0[base + 1];
+        step[base + 2] = d_half_btf(cospi[32], bf0[base + 2], cospi[32], bf0[base + 3], bit);
+        step[base + 3] = d_half_btf(-cospi[32], bf0[base + 3], cospi[32], bf0[base + 2], bit);
+    }
+
+    output[0]  = step[0];
+    output[1]  = -step[16];
+    output[2]  = step[24];
+    output[3]  = -step[8];
+    output[4]  = step[12];
+    output[5]  = -step[28];
+    output[6]  = step[20];
+    output[7]  = -step[4];
+    output[8]  = step[6];
+    output[9]  = -step[22];
+    output[10] = step[30];
+    output[11] = -step[14];
+    output[12] = step[10];
+    output[13] = -step[26];
+    output[14] = step[18];
+    output[15] = -step[2];
+    output[16] = step[3];
+    output[17] = -step[19];
+    output[18] = step[27];
+    output[19] = -step[11];
+    output[20] = step[15];
+    output[21] = -step[31];
+    output[22] = step[23];
+    output[23] = -step[7];
+    output[24] = step[5];
+    output[25] = -step[21];
+    output[26] = step[29];
+    output[27] = -step[13];
+    output[28] = step[9];
+    output[29] = -step[25];
+    output[30] = step[17];
+    output[31] = -step[1];
+}
 
 // svt_av1_fdct16_new (transforms.c:268-420) with the cos_bit parameter
 // (cospi_arr: bit 13 -> kCospi, bit 12 -> kC12f)
@@ -2705,6 +3113,8 @@ __device__ void d_fdct16(const int* input, int* output, int bit) {
     output[15] = step[15];
 }
 
+)CUDB3";
+    s += R"CUDB4(
 // svt_av1_fadst16_new (transforms.c:1714-1906)
 __device__ void d_fadst16(const int* input, int* output, int bit) {
     const int* cospi = (bit == 13) ? kCospi : kC12f;
@@ -2899,11 +3309,49 @@ extern "C" __global__ void fwd_txfm_2d_16x16(const short* input, const int* stri
         output[t * 16 + c] = o[c];
     }
 }
-)CUDB2";
+
+// svt_av1_transform_two_d_core_c at TX_32X32 (L6): shift {2,-4,0}
+// (transforms.c:125), cos_bit col 12 / row 12 (fwd_cos_bit_col/row[3][3]);
+// col pass x4 pre-shift, rounding >>4 post-col, row pass no post-shift.
+// 32 threads, thread t = column for the col pass then row for the row pass.
+extern "C" __global__ void fwd_txfm_2d_32x32(const short* input, const int* stride, const int* txType,
+                                             int* output) {
+    __shared__ int sbuf[1024];
+    const int t = threadIdx.x;
+    int tmp[32];
+    int o[32];
+    for (int r = 0; r < 32; ++r) {
+        tmp[r] = input[r * (*stride) + t] * 4;
+    }
+    if (*txType == 0) {
+        d_fdct32(tmp, o);
+    } else {
+        d_fadst32(tmp, o);
+    }
+    for (int r = 0; r < 32; ++r) {
+        sbuf[r * 32 + t] = d_round_shift(o[r], 4);
+    }
+    __syncthreads();
+    for (int c = 0; c < 32; ++c) {
+        tmp[c] = sbuf[t * 32 + c];
+    }
+    if (*txType == 0) {
+        d_fdct32(tmp, o);
+    } else {
+        d_fadst32(tmp, o);
+    }
+    for (int c = 0; c < 32; ++c) {
+        output[t * 32 + c] = o[c];
+    }
+}
+)CUDB4";
+    return s;
 }
 
 std::string invTxfmCuSource() {
-    return R"CUDA(
+    // built with += per chunk (see fwdTxfmCuSource note)
+    std::string s;
+    s += R"CUDA(
 __constant__ int kC12[64] = {
     4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036, 4017, 3996, 3973, 3948, 3920, 3889, 3857, 3822,
     3784, 3745, 3703, 3659, 3612, 3564, 3513, 3461, 3406, 3349, 3290, 3229, 3166, 3102, 3035, 2967,
@@ -3019,7 +3467,8 @@ extern "C" __global__ void inv_txfm_2d_add_4x4(const int* coeffs, const int* txT
         dst[r * (*stride) + t] = (unsigned char)v;
     }
 }
-)CUDA" R"CUDB1(
+)CUDA";
+    s += R"CUDB1(
 __device__ void d_idct8i(const int* input, int* output) {
     const int bit = 12;
     int bf0[8];
@@ -3176,8 +3625,8 @@ extern "C" __global__ void inv_txfm_2d_add_8x8(const int* coeffs, const int* txT
         dst[r * (*stride) + t] = (unsigned char)v;
     }
 }
-)CUDB1"
-    R"CUDB2(
+)CUDB1";
+    s += R"CUDB2(
 // svt_av1_idct16_new (inv_transforms.c:215-376) at cos_bit 12: stage_range
 // consumed at stages 3-7 only (clamp_value at 16), stages 1-2 unclamped
 __device__ void d_idct16i(const int* input, int* output) {
@@ -3503,7 +3952,413 @@ extern "C" __global__ void inv_txfm_2d_add_16x16(const int* coeffs, const int* t
         dst[r * (*stride) + t] = (unsigned char)v;
     }
 }
+
 )CUDB2";
+    s += R"CUDB3(
+// svt_av1_idct32_new (inv_transforms.c:378-727) at cos_bit 12: clamp at
+// stages 3-9 only (the L3-audited pattern)
+__device__ void d_idct32i(const int* input, int* output) {
+    const int bit = 12;
+    const int* cospi = kC12;
+    int bf0[32];
+    int step[32];
+    const int cr = 16;  // clamp range
+
+    bf0[0]  = input[0];
+    bf0[1]  = input[16];
+    bf0[2]  = input[8];
+    bf0[3]  = input[24];
+    bf0[4]  = input[4];
+    bf0[5]  = input[20];
+    bf0[6]  = input[12];
+    bf0[7]  = input[28];
+    bf0[8]  = input[2];
+    bf0[9]  = input[18];
+    bf0[10] = input[10];
+    bf0[11] = input[26];
+    bf0[12] = input[6];
+    bf0[13] = input[22];
+    bf0[14] = input[14];
+    bf0[15] = input[30];
+    bf0[16] = input[1];
+    bf0[17] = input[17];
+    bf0[18] = input[9];
+    bf0[19] = input[25];
+    bf0[20] = input[5];
+    bf0[21] = input[21];
+    bf0[22] = input[13];
+    bf0[23] = input[29];
+    bf0[24] = input[3];
+    bf0[25] = input[19];
+    bf0[26] = input[11];
+    bf0[27] = input[27];
+    bf0[28] = input[7];
+    bf0[29] = input[23];
+    bf0[30] = input[15];
+    bf0[31] = input[31];
+
+    for (int i = 0; i < 16; ++i) step[i] = bf0[i];
+    step[16] = d_half_btf(cospi[62], bf0[16], -cospi[2], bf0[31], bit);
+    step[17] = d_half_btf(cospi[30], bf0[17], -cospi[34], bf0[30], bit);
+    step[18] = d_half_btf(cospi[46], bf0[18], -cospi[18], bf0[29], bit);
+    step[19] = d_half_btf(cospi[14], bf0[19], -cospi[50], bf0[28], bit);
+    step[20] = d_half_btf(cospi[54], bf0[20], -cospi[10], bf0[27], bit);
+    step[21] = d_half_btf(cospi[22], bf0[21], -cospi[42], bf0[26], bit);
+    step[22] = d_half_btf(cospi[38], bf0[22], -cospi[26], bf0[25], bit);
+    step[23] = d_half_btf(cospi[6], bf0[23], -cospi[58], bf0[24], bit);
+    step[24] = d_half_btf(cospi[58], bf0[23], cospi[6], bf0[24], bit);
+    step[25] = d_half_btf(cospi[26], bf0[22], cospi[38], bf0[25], bit);
+    step[26] = d_half_btf(cospi[42], bf0[21], cospi[22], bf0[26], bit);
+    step[27] = d_half_btf(cospi[10], bf0[20], cospi[54], bf0[27], bit);
+    step[28] = d_half_btf(cospi[50], bf0[19], cospi[14], bf0[28], bit);
+    step[29] = d_half_btf(cospi[18], bf0[18], cospi[46], bf0[29], bit);
+    step[30] = d_half_btf(cospi[34], bf0[17], cospi[30], bf0[30], bit);
+    step[31] = d_half_btf(cospi[2], bf0[16], cospi[62], bf0[31], bit);
+
+    for (int i = 0; i < 8; ++i) bf0[i] = step[i];
+    bf0[8]  = d_half_btf(cospi[60], step[8], -cospi[4], step[15], bit);
+    bf0[9]  = d_half_btf(cospi[28], step[9], -cospi[36], step[14], bit);
+    bf0[10] = d_half_btf(cospi[44], step[10], -cospi[20], step[13], bit);
+    bf0[11] = d_half_btf(cospi[12], step[11], -cospi[52], step[12], bit);
+    bf0[12] = d_half_btf(cospi[52], step[11], cospi[12], step[12], bit);
+    bf0[13] = d_half_btf(cospi[20], step[10], cospi[44], step[13], bit);
+    bf0[14] = d_half_btf(cospi[36], step[9], cospi[28], step[14], bit);
+    bf0[15] = d_half_btf(cospi[4], step[8], cospi[60], step[15], bit);
+    bf0[16] = d_cv(step[16] + step[17], cr);
+    bf0[17] = d_cv(step[16] - step[17], cr);
+    bf0[18] = d_cv(-step[18] + step[19], cr);
+    bf0[19] = d_cv(step[18] + step[19], cr);
+    bf0[20] = d_cv(step[20] + step[21], cr);
+    bf0[21] = d_cv(step[20] - step[21], cr);
+    bf0[22] = d_cv(-step[22] + step[23], cr);
+    bf0[23] = d_cv(step[22] + step[23], cr);
+    bf0[24] = d_cv(step[24] + step[25], cr);
+    bf0[25] = d_cv(step[24] - step[25], cr);
+    bf0[26] = d_cv(-step[26] + step[27], cr);
+    bf0[27] = d_cv(step[26] + step[27], cr);
+    bf0[28] = d_cv(step[28] + step[29], cr);
+    bf0[29] = d_cv(step[28] - step[29], cr);
+    bf0[30] = d_cv(-step[30] + step[31], cr);
+    bf0[31] = d_cv(step[30] + step[31], cr);
+
+    step[0] = bf0[0];
+    step[1] = bf0[1];
+    step[2] = bf0[2];
+    step[3] = bf0[3];
+    step[4] = d_half_btf(cospi[56], bf0[4], -cospi[8], bf0[7], bit);
+    step[5] = d_half_btf(cospi[24], bf0[5], -cospi[40], bf0[6], bit);
+    step[6] = d_half_btf(cospi[40], bf0[5], cospi[24], bf0[6], bit);
+    step[7] = d_half_btf(cospi[8], bf0[4], cospi[56], bf0[7], bit);
+    step[8]  = d_cv(bf0[8] + bf0[9], cr);
+    step[9]  = d_cv(bf0[8] - bf0[9], cr);
+    step[10] = d_cv(-bf0[10] + bf0[11], cr);
+    step[11] = d_cv(bf0[10] + bf0[11], cr);
+    step[12] = d_cv(bf0[12] + bf0[13], cr);
+    step[13] = d_cv(bf0[12] - bf0[13], cr);
+    step[14] = d_cv(-bf0[14] + bf0[15], cr);
+    step[15] = d_cv(bf0[14] + bf0[15], cr);
+    step[16] = bf0[16];
+    step[17] = d_half_btf(-cospi[8], bf0[17], cospi[56], bf0[30], bit);
+    step[18] = d_half_btf(-cospi[56], bf0[18], -cospi[8], bf0[29], bit);
+    step[19] = bf0[19];
+    step[20] = bf0[20];
+    step[21] = d_half_btf(-cospi[40], bf0[21], cospi[24], bf0[26], bit);
+    step[22] = d_half_btf(-cospi[24], bf0[22], -cospi[40], bf0[25], bit);
+    step[23] = bf0[23];
+    step[24] = bf0[24];
+    step[25] = d_half_btf(-cospi[40], bf0[22], cospi[24], bf0[25], bit);
+    step[26] = d_half_btf(cospi[24], bf0[21], cospi[40], bf0[26], bit);
+    step[27] = bf0[27];
+    step[28] = bf0[28];
+    step[29] = d_half_btf(-cospi[8], bf0[18], cospi[56], bf0[29], bit);
+    step[30] = d_half_btf(cospi[56], bf0[17], cospi[8], bf0[30], bit);
+    step[31] = bf0[31];
+
+    bf0[0] = d_half_btf(cospi[32], step[0], cospi[32], step[1], bit);
+    bf0[1] = d_half_btf(cospi[32], step[0], -cospi[32], step[1], bit);
+    bf0[2] = d_half_btf(cospi[48], step[2], -cospi[16], step[3], bit);
+    bf0[3] = d_half_btf(cospi[16], step[2], cospi[48], step[3], bit);
+    bf0[4]  = d_cv(step[4] + step[5], cr);
+    bf0[5]  = d_cv(step[4] - step[5], cr);
+    bf0[6]  = d_cv(-step[6] + step[7], cr);
+    bf0[7]  = d_cv(step[6] + step[7], cr);
+    bf0[8] = step[8];
+    bf0[9]  = d_half_btf(-cospi[16], step[9], cospi[48], step[14], bit);
+    bf0[10] = d_half_btf(-cospi[48], step[10], -cospi[16], step[13], bit);
+    bf0[11] = step[11];
+    bf0[12] = step[12];
+    bf0[13] = d_half_btf(-cospi[16], step[10], cospi[48], step[13], bit);
+    bf0[14] = d_half_btf(cospi[48], step[9], cospi[16], step[14], bit);
+    bf0[15] = step[15];
+    bf0[16] = d_cv(step[16] + step[19], cr);
+    bf0[17] = d_cv(step[17] + step[18], cr);
+    bf0[18] = d_cv(step[17] - step[18], cr);
+    bf0[19] = d_cv(step[16] - step[19], cr);
+    bf0[20] = d_cv(-step[20] + step[23], cr);
+    bf0[21] = d_cv(-step[21] + step[22], cr);
+    bf0[22] = d_cv(step[21] + step[22], cr);
+    bf0[23] = d_cv(step[20] + step[23], cr);
+    bf0[24] = d_cv(step[24] + step[27], cr);
+    bf0[25] = d_cv(step[25] + step[26], cr);
+    bf0[26] = d_cv(step[25] - step[26], cr);
+    bf0[27] = d_cv(step[24] - step[27], cr);
+    bf0[28] = d_cv(-step[28] + step[31], cr);
+    bf0[29] = d_cv(-step[29] + step[30], cr);
+    bf0[30] = d_cv(step[29] + step[30], cr);
+    bf0[31] = d_cv(step[28] + step[31], cr);
+
+    step[0]  = d_cv(bf0[0] + bf0[3], cr);
+    step[1]  = d_cv(bf0[1] + bf0[2], cr);
+    step[2]  = d_cv(bf0[1] - bf0[2], cr);
+    step[3]  = d_cv(bf0[0] - bf0[3], cr);
+    step[4] = bf0[4];
+    step[5] = d_half_btf(-cospi[32], bf0[5], cospi[32], bf0[6], bit);
+    step[6] = d_half_btf(cospi[32], bf0[5], cospi[32], bf0[6], bit);
+    step[7] = bf0[7];
+    step[8]  = d_cv(bf0[8] + bf0[11], cr);
+    step[9]  = d_cv(bf0[9] + bf0[10], cr);
+    step[10] = d_cv(bf0[9] - bf0[10], cr);
+    step[11] = d_cv(bf0[8] - bf0[11], cr);
+    step[12] = d_cv(-bf0[12] + bf0[15], cr);
+    step[13] = d_cv(-bf0[13] + bf0[14], cr);
+    step[14] = d_cv(bf0[13] + bf0[14], cr);
+    step[15] = d_cv(bf0[12] + bf0[15], cr);
+    step[16] = bf0[16];
+    step[17] = bf0[17];
+    step[18] = d_half_btf(-cospi[16], bf0[18], cospi[48], bf0[29], bit);
+    step[19] = d_half_btf(-cospi[16], bf0[19], cospi[48], bf0[28], bit);
+    step[20] = d_half_btf(-cospi[48], bf0[20], -cospi[16], bf0[27], bit);
+    step[21] = d_half_btf(-cospi[48], bf0[21], -cospi[16], bf0[26], bit);
+    step[22] = bf0[22];
+    step[23] = bf0[23];
+    step[24] = bf0[24];
+    step[25] = bf0[25];
+    step[26] = d_half_btf(-cospi[16], bf0[21], cospi[48], bf0[26], bit);
+    step[27] = d_half_btf(-cospi[16], bf0[20], cospi[48], bf0[27], bit);
+    step[28] = d_half_btf(cospi[48], bf0[19], cospi[16], bf0[28], bit);
+    step[29] = d_half_btf(cospi[48], bf0[18], cospi[16], bf0[29], bit);
+    step[30] = bf0[30];
+    step[31] = bf0[31];
+
+    bf0[0]  = d_cv(step[0] + step[7], cr);
+    bf0[1]  = d_cv(step[1] + step[6], cr);
+    bf0[2]  = d_cv(step[2] + step[5], cr);
+    bf0[3]  = d_cv(step[3] + step[4], cr);
+    bf0[4]  = d_cv(step[3] - step[4], cr);
+    bf0[5]  = d_cv(step[2] - step[5], cr);
+    bf0[6]  = d_cv(step[1] - step[6], cr);
+    bf0[7]  = d_cv(step[0] - step[7], cr);
+    bf0[8] = step[8];
+    bf0[9] = step[9];
+    bf0[10] = d_half_btf(-cospi[32], step[10], cospi[32], step[13], bit);
+    bf0[11] = d_half_btf(-cospi[32], step[11], cospi[32], step[12], bit);
+    bf0[12] = d_half_btf(cospi[32], step[11], cospi[32], step[12], bit);
+    bf0[13] = d_half_btf(cospi[32], step[10], cospi[32], step[13], bit);
+    bf0[14] = step[14];
+    bf0[15] = step[15];
+    bf0[16] = d_cv(step[16] + step[23], cr);
+    bf0[17] = d_cv(step[17] + step[22], cr);
+    bf0[18] = d_cv(step[18] + step[21], cr);
+    bf0[19] = d_cv(step[19] + step[20], cr);
+    bf0[20] = d_cv(step[19] - step[20], cr);
+    bf0[21] = d_cv(step[18] - step[21], cr);
+    bf0[22] = d_cv(step[17] - step[22], cr);
+    bf0[23] = d_cv(step[16] - step[23], cr);
+    bf0[24] = d_cv(-step[24] + step[31], cr);
+    bf0[25] = d_cv(-step[25] + step[30], cr);
+    bf0[26] = d_cv(-step[26] + step[29], cr);
+    bf0[27] = d_cv(-step[27] + step[28], cr);
+    bf0[28] = d_cv(step[27] + step[28], cr);
+    bf0[29] = d_cv(step[26] + step[29], cr);
+    bf0[30] = d_cv(step[25] + step[30], cr);
+    bf0[31] = d_cv(step[24] + step[31], cr);
+
+    for (int i = 0; i < 8; ++i) {
+        step[i] = d_cv(bf0[i] + bf0[15 - i], cr);
+        step[8 + i] = d_cv(bf0[7 - i] - bf0[8 + i], cr);
+    }
+    for (int i = 0; i < 16; ++i) step[16 + i] = bf0[16 + i];
+    step[20] = d_half_btf(-cospi[32], bf0[20], cospi[32], bf0[27], bit);
+    step[21] = d_half_btf(-cospi[32], bf0[21], cospi[32], bf0[26], bit);
+    step[22] = d_half_btf(-cospi[32], bf0[22], cospi[32], bf0[25], bit);
+    step[23] = d_half_btf(-cospi[32], bf0[23], cospi[32], bf0[24], bit);
+    step[24] = d_half_btf(cospi[32], bf0[23], cospi[32], bf0[24], bit);
+    step[25] = d_half_btf(cospi[32], bf0[22], cospi[32], bf0[25], bit);
+    step[26] = d_half_btf(cospi[32], bf0[21], cospi[32], bf0[26], bit);
+    step[27] = d_half_btf(cospi[32], bf0[20], cospi[32], bf0[27], bit);
+
+    for (int i = 0; i < 16; ++i) {
+        output[i] = d_cv(step[i] + step[31 - i], cr);
+        output[31 - i] = d_cv(step[i] - step[31 - i], cr);
+    }
+}
+
+)CUDB3";
+    s += R"CUDB4(
+// static av1_iadst32_new (inv_transforms.c:1132-1565) at cos_bit 12: clamp
+// every stage (the L3-audited pattern)
+__device__ void d_iadst32i(const int* input, int* output) {
+    const int bit = 12;
+    const int* cospi = kC12;
+    int bf0[32];
+    int step[32];
+    const int cr = 16;
+
+    static const int idxTab[32] = {0, -32, -16, 16, -8, 24, 8, -24, -4, 28, 12, -20, 4, -28, -12, 20,
+                                   -2, 30, 14, -18, 6, -26, -10, 22, 2, -30, -14, 18, -6, 26, 10, -22};
+    for (int i = 0; i < 32; ++i) {
+        const int j = idxTab[i];
+        bf0[i] = j >= 0 ? input[j] : -input[-1 - j];
+    }
+    for (int i = 0; i < 32; ++i) bf0[i] = d_cv(bf0[i], cr);
+
+    for (int q = 0; q < 16; ++q) {
+        const int base = 2 * q;
+        if (base % 4 == 0) {
+            step[base]     = bf0[base];
+            step[base + 1] = bf0[base + 1];
+        } else {
+            step[base]     = d_half_btf(cospi[32], bf0[base], cospi[32], bf0[base + 1], bit);
+            step[base + 1] = d_half_btf(cospi[32], bf0[base], -cospi[32], bf0[base + 1], bit);
+        }
+    }
+    for (int i = 0; i < 32; ++i) step[i] = d_cv(step[i], cr);
+
+    for (int q = 0; q < 8; ++q) {
+        const int base = 4 * q;
+        bf0[base]     = step[base] + step[base + 2];
+        bf0[base + 1] = step[base + 1] + step[base + 3];
+        bf0[base + 2] = step[base] - step[base + 2];
+        bf0[base + 3] = step[base + 1] - step[base + 3];
+    }
+    for (int i = 0; i < 32; ++i) bf0[i] = d_cv(bf0[i], cr);
+
+    for (int q = 0; q < 4; ++q) {
+        const int base = 8 * q;
+        step[base]     = bf0[base];
+        step[base + 1] = bf0[base + 1];
+        step[base + 2] = bf0[base + 2];
+        step[base + 3] = bf0[base + 3];
+        step[base + 4] = d_half_btf(cospi[16], bf0[base + 4], cospi[48], bf0[base + 5], bit);
+        step[base + 5] = d_half_btf(cospi[48], bf0[base + 4], -cospi[16], bf0[base + 5], bit);
+        step[base + 6] = d_half_btf(-cospi[48], bf0[base + 6], cospi[16], bf0[base + 7], bit);
+        step[base + 7] = d_half_btf(cospi[16], bf0[base + 6], cospi[48], bf0[base + 7], bit);
+    }
+    for (int i = 0; i < 32; ++i) step[i] = d_cv(step[i], cr);
+
+    for (int q = 0; q < 4; ++q) {
+        const int base = 8 * q;
+        for (int i = 0; i < 4; ++i) {
+            bf0[base + i] = step[base + i] + step[base + 4 + i];
+            bf0[base + 4 + i] = step[base + i] - step[base + 4 + i];
+        }
+    }
+    for (int i = 0; i < 32; ++i) bf0[i] = d_cv(bf0[i], cr);
+
+    for (int i = 0; i < 8; ++i) step[i] = bf0[i];
+    step[8]  = d_half_btf(cospi[8], bf0[8], cospi[56], bf0[9], bit);
+    step[9]  = d_half_btf(cospi[56], bf0[8], -cospi[8], bf0[9], bit);
+    step[10] = d_half_btf(cospi[40], bf0[10], cospi[24], bf0[11], bit);
+    step[11] = d_half_btf(cospi[24], bf0[10], -cospi[40], bf0[11], bit);
+    step[12] = d_half_btf(-cospi[56], bf0[12], cospi[8], bf0[13], bit);
+    step[13] = d_half_btf(cospi[8], bf0[12], cospi[56], bf0[13], bit);
+    step[14] = d_half_btf(-cospi[24], bf0[14], cospi[40], bf0[15], bit);
+    step[15] = d_half_btf(cospi[40], bf0[14], cospi[24], bf0[15], bit);
+    for (int i = 16; i < 24; ++i) step[i] = bf0[i];
+    step[24] = d_half_btf(cospi[8], bf0[24], cospi[56], bf0[25], bit);
+    step[25] = d_half_btf(cospi[56], bf0[24], -cospi[8], bf0[25], bit);
+    step[26] = d_half_btf(cospi[40], bf0[26], cospi[24], bf0[27], bit);
+    step[27] = d_half_btf(cospi[24], bf0[26], -cospi[40], bf0[27], bit);
+    step[28] = d_half_btf(-cospi[56], bf0[28], cospi[8], bf0[29], bit);
+    step[29] = d_half_btf(cospi[8], bf0[28], cospi[56], bf0[29], bit);
+    step[30] = d_half_btf(-cospi[24], bf0[30], cospi[40], bf0[31], bit);
+    step[31] = d_half_btf(cospi[40], bf0[30], cospi[24], bf0[31], bit);
+    for (int i = 0; i < 32; ++i) step[i] = d_cv(step[i], cr);
+
+    for (int h = 0; h < 2; ++h) {
+        const int base = 16 * h;
+        for (int i = 0; i < 8; ++i) {
+            bf0[base + i] = step[base + i] + step[base + 8 + i];
+            bf0[base + 8 + i] = step[base + i] - step[base + 8 + i];
+        }
+    }
+    for (int i = 0; i < 32; ++i) bf0[i] = d_cv(bf0[i], cr);
+
+    for (int i = 0; i < 16; ++i) step[i] = bf0[i];
+    step[16] = d_half_btf(cospi[4], bf0[16], cospi[60], bf0[17], bit);
+    step[17] = d_half_btf(cospi[60], bf0[16], -cospi[4], bf0[17], bit);
+    step[18] = d_half_btf(cospi[20], bf0[18], cospi[44], bf0[19], bit);
+    step[19] = d_half_btf(cospi[44], bf0[18], -cospi[20], bf0[19], bit);
+    step[20] = d_half_btf(cospi[36], bf0[20], cospi[28], bf0[21], bit);
+    step[21] = d_half_btf(cospi[28], bf0[20], -cospi[36], bf0[21], bit);
+    step[22] = d_half_btf(cospi[52], bf0[22], cospi[12], bf0[23], bit);
+    step[23] = d_half_btf(cospi[12], bf0[22], -cospi[52], bf0[23], bit);
+    step[24] = d_half_btf(-cospi[60], bf0[24], cospi[4], bf0[25], bit);
+    step[25] = d_half_btf(cospi[4], bf0[24], cospi[60], bf0[25], bit);
+    step[26] = d_half_btf(-cospi[44], bf0[26], cospi[20], bf0[27], bit);
+    step[27] = d_half_btf(cospi[20], bf0[26], cospi[44], bf0[27], bit);
+    step[28] = d_half_btf(-cospi[28], bf0[28], cospi[36], bf0[29], bit);
+    step[29] = d_half_btf(cospi[36], bf0[28], cospi[28], bf0[29], bit);
+    step[30] = d_half_btf(-cospi[12], bf0[30], cospi[52], bf0[31], bit);
+    step[31] = d_half_btf(cospi[52], bf0[30], cospi[12], bf0[31], bit);
+    for (int i = 0; i < 32; ++i) step[i] = d_cv(step[i], cr);
+
+    for (int i = 0; i < 16; ++i) {
+        bf0[i] = d_cv(step[i] + step[16 + i], cr);
+        bf0[16 + i] = d_cv(step[i] - step[16 + i], cr);
+    }
+
+    for (int k = 0; k < 16; ++k) {
+        const int c1 = 4 * k + 1;
+        step[2 * k]     = d_half_btf(cospi[c1], bf0[2 * k], cospi[64 - c1], bf0[2 * k + 1], bit);
+        step[2 * k + 1] = d_half_btf(cospi[64 - c1], bf0[2 * k], -cospi[c1], bf0[2 * k + 1], bit);
+    }
+    for (int i = 0; i < 32; ++i) step[i] = d_cv(step[i], cr);
+
+    static const int permTab[32] = {1, 30, 3, 28, 5, 26, 7, 24, 9, 22, 11, 20, 13, 18, 15, 16,
+                                    17, 14, 19, 12, 21, 10, 23, 8, 25, 6, 27, 4, 29, 2, 31, 0};
+    for (int i = 0; i < 32; ++i) output[i] = d_cv(step[permTab[i]], cr);
+}
+
+// svt_av1_inv_txfm2d_add_c at TX_32X32 (L6): inv_shift_32x32 = {-2,-4} ->
+// rounding >>2 after the row 1D and >>4 at the final add; clamp bit 16 at
+// both 1D inputs; 32 threads, thread t = row for the row pass then column
+// for the col pass.
+extern "C" __global__ void inv_txfm_2d_add_32x32(const int* coeffs, const int* txType,
+                                                 unsigned char* dst, const int* stride) {
+    __shared__ int sbuf[1024];
+    const int t = threadIdx.x;
+    int tmp[32];
+    int o[32];
+    for (int c = 0; c < 32; ++c) {
+        tmp[c] = d_cv(coeffs[t * 32 + c], 16);
+    }
+    if (*txType == 0) {
+        d_idct32i(tmp, o);
+    } else {
+        d_iadst32i(tmp, o);
+    }
+    for (int c = 0; c < 32; ++c) {
+        sbuf[t * 32 + c] = d_rs(o[c], 2);
+    }
+    __syncthreads();
+    for (int r = 0; r < 32; ++r) {
+        tmp[r] = d_cv(sbuf[r * 32 + t], 16);
+    }
+    if (*txType == 0) {
+        d_idct32i(tmp, o);
+    } else {
+        d_iadst32i(tmp, o);
+    }
+    for (int r = 0; r < 32; ++r) {
+        int v = (int)dst[r * (*stride) + t] + d_rs(o[r], 4);
+        if (v < 0) v = 0;
+        else if (v > 255) v = 255;
+        dst[r * (*stride) + t] = (unsigned char)v;
+    }
+}
+)CUDB4";
+    return s;
 }
 
 // svt_aom_eb_av1 dc/ac QTX lookup tables (inv_transforms.c:3412 dc, :3357 ac),
