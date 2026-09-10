@@ -93,7 +93,7 @@ void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::in
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 4 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[4] = {0};
+            std::uint8_t above[8] = {0};  // 2*B: zero extension for nTopRightPx reads (composition semantics)
             std::uint8_t left[4] = {0};
             if (hasTop) {
                 for (int i = 0; i < 4; ++i) {
@@ -187,7 +187,7 @@ void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 4 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[4] = {0};
+            std::uint8_t above[8] = {0};  // 2*B: zero extension for nTopRightPx reads (composition semantics)
             std::uint8_t left[4] = {0};
             if (hasTop) {
                 for (int i = 0; i < 4; ++i) {
@@ -400,7 +400,7 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
             const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 4 : 0;
             const int nBottomLeftPx = 0;
 
-            std::uint8_t above[4] = {0};
+            std::uint8_t above[8] = {0};  // 2*B: zero extension for nTopRightPx reads (composition semantics)
             std::uint8_t left[4] = {0};
             if (hasTop) {
                 for (int i = 0; i < 4; ++i) {

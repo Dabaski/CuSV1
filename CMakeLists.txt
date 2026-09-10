@@ -27,3 +27,7 @@ if(BUILD_TESTING)
   add_subdirectory(src/l5_motion)
   add_subdirectory(src/l6_pipeline)
 endif()
+
+# benchmark tool: own target, not a ctest (tools/bench/README notes inside
+# AGENTS.md). Built alongside the libs; run its exe manually.
+add_subdirectory(tools/bench)
