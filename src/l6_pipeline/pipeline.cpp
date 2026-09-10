@@ -50,6 +50,14 @@ extern "C" __global__ void subtract_16x16_plane(const unsigned char* src, const 
     const int c = idx & 15;
     residual[idx] = (short)(src[(*py + r) * (*srcStride) + (*px + c)] - pred[idx]);
 }
+
+extern "C" __global__ void subtract_32x32_plane(const unsigned char* src, const int* srcStride, const int* px,
+                                                const int* py, const unsigned char* pred, short* residual) {
+    const int idx = threadIdx.x;
+    const int r = idx >> 5;
+    const int c = idx & 31;
+    residual[idx] = (short)(src[(*py + r) * (*srcStride) + (*px + c)] - pred[idx]);
+}
 )CUDA";
 }
 
