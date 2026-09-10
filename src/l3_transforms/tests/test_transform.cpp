@@ -280,6 +280,42 @@ TEST_CASE("invTxfm2dAdd16x16 matches svt golden 256 samples both TxTypes") {
     CHECK(okAdst);
 }
 
+TEST_CASE("idct32 matches svt_av1_idct32_new golden full vector") {
+    // golden: svt_av1_idct32_new @ cos_bit=12 (INV_COS_BIT), stage_range 16x10
+    // (gen_inv_range_32x32_dct), input {300,-120,75,200,...,-55} (gate line
+    // idct32); clamp audit (L3): idct32 clamps ONLY stages 3-9 (clamp_value on
+    // the butterfly adds; stages 1-2 range checks commented out in SVT)
+    const std::int32_t in[32] = {300, -120, 75, 200, -60, 40, 90, -15, 55, -95, 20, 65, -40, 85, -25, 10,
+                                 30, -70, 95, -35, 60, -15, 80, 25, -50, 45, -20, 70, -90, 15, 50, -55};
+    const std::int32_t golden[32] = {559, 209, 287, 268, 58, 151, 26, -124, -26, 129, 115, 74, 16, -169, 15, -133,
+                                     -1, 439, 83, 488, 266, 493, 273, 826, 688, 804, -35, -190, 628, 67, 169, 331};
+    std::int32_t got[32] = {0};
+    transforms::idct32(in, got);
+    bool ok = true;
+    for (int i = 0; i < 32; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("iadst32 matches svt_av1_iadst32_new golden full vector") {
+    // golden: static av1_iadst32_new (inv_transforms.c:1132) @ cos_bit=12, same
+    // input (gate line iadst32); clamp audit (L3): iadst32 clamps EVERY stage
+    // (clamp_buf on the full 32-vector after each of stages 0-11); NO all-zero
+    // early-out at 32
+    const std::int32_t in[32] = {300, -120, 75, 200, -60, 40, 90, -15, 55, -95, 20, 65, -40, 85, -25, 10,
+                                 30, -70, 95, -35, 60, -15, 80, 25, -50, 45, -20, 70, -90, 15, 50, -55};
+    const std::int32_t golden[32] = {219, 264, 101, 349, 196, 209, 240, 64, -99, 35, 90, 115, 98, -91, -129, -113,
+                                     -398, 247, -85, 285, 174, 389, 195, 696, 777, 946, 261, -185, 704, 178, 246, 417};
+    std::int32_t got[32] = {0};
+    transforms::iadst32(in, got);
+    bool ok = true;
+    for (int i = 0; i < 32; ++i) {
+        if (got[i] != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("fdct32 matches svt_av1_fdct32_new golden full vector") {
     // golden: svt_av1_fdct32_new @ cos_bit=12 (fwd_cos_bit_col/row[3][3]),
     // input {200,80,-50,30,100,-20,60,10,-35,95,5,-70,45,25,-15,55,
