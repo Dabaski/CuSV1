@@ -1691,6 +1691,39 @@ void fwdTxfm2d16x16(const std::int16_t* input, std::int32_t* output, std::uint32
     }
 }
 
+// av1_tranform_two_d_core_c (transforms.c:2398) at TX_32X32: fwd_shift_32x32
+// = {2, -4, 0} (transforms.c:125), cos_bit col 12 / row 12 from
+// fwd_cos_bit_col/row[3][3] (transforms.c:19-22)
+void fwdTxfm2d32x32(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type) {
+    TxfmFn txfm = type == TxType::DCT_DCT ? fdct32 : fadst32;
+    std::int32_t buf[32 * 32];
+    std::int32_t tempIn[32];
+    std::int32_t tempOut[32];
+
+    for (std::uint32_t c = 0; c < 32; ++c) {
+        for (std::uint32_t r = 0; r < 32; ++r) {
+            tempIn[r] = input[r * stride + c];
+        }
+        // round_shift_array(..., -shift[0]) with shift[0] = 2 -> x4
+        for (std::uint32_t i = 0; i < 32; ++i) {
+            tempIn[i] *= (1 << 2);
+        }
+        txfm(tempIn, tempOut);
+        // round_shift_array(..., -shift[1]) with shift[1] = -4 -> >>4 rounding
+        for (std::uint32_t i = 0; i < 32; ++i) {
+            tempOut[i] = roundShift(tempOut[i], 4);
+        }
+        for (std::uint32_t r = 0; r < 32; ++r) {
+            buf[r * 32 + c] = tempOut[r];
+        }
+    }
+
+    for (std::uint32_t r = 0; r < 32; ++r) {
+        txfm(buf + r * 32, output + r * 32);
+        // round_shift_array(..., -shift[2]) with shift[2] = 0 -> no-op
+    }
+}
+
 namespace {
 
 using InvTxfmFn = void (*)(const std::int32_t*, std::int32_t*);
