@@ -470,6 +470,182 @@ int main(void) {
 
     fprintf(stderr, "CK: f32 done\n"); fflush(stderr);
 
+    // ---- L7: 64x64 transforms gate lines (DCT-only) ----
+    {
+        // 1D fwd @ cos_bit 13 (fwd_cos_bit_col[4][4])
+        const int32_t in64[64] = {
+            200, 80, -50, 30, 100, -20, 60, 10, -35, 95, 5, -70, 45, 25, -15, 55,
+            65, -85, 15, -5, 75, -60, 40, 90, -25, 35, 50, -45, 20, -10, 70, -30,
+            -40, 55, 10, -60, 85, -20, 35, -5, 45, -75, 25, 65, -35, 15, -25, 80,
+            5, -15, 40, -55, 25, -65, 15, 35, -45, 20, -10, 60, -85, 30, 50, -20};
+        int32_t o64[64];
+        svt_av1_fdct64_new(in64, o64, 13, NULL);
+        printf("fdct64:");
+        for (int i = 0; i < 64; ++i) printf(" %d", o64[i]);
+        printf("\n");
+        // 1D inv @ 12, stage_range 16 (gen_inv_range_64x64_dct line, 12 stages)
+        const int32_t i64[64] = {
+            300, -120, 75, 200, -60, 40, 90, -15, 55, -95, 20, 65, -40, 85, -25, 10,
+            30, -70, 95, -35, 60, -15, 80, 25, -50, 45, -20, 70, -90, 15, 50, -55,
+            35, -65, 90, -30, 55, -10, 75, 20, -45, 40, -15, 65, -85, 10, 45, -50,
+            25, -35, 35, -40, 50, -20, 70, 15, -55, 30, -25, 60, -95, 5, 40, -45};
+        const int8_t sr64[MAX_TXFM_STAGE_NUM] = {16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+                                                 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+                                                 16};
+        svt_av1_idct64_new(i64, o64, 12, sr64);
+        printf("idct64:");
+        for (int i = 0; i < 64; ++i) printf(" %d", o64[i]);
+        printf("\n");
+
+        // 2D fwd DCT; fixture (c*3+r*2+((c*r)&7))%149-74
+        int16_t in[4096];
+        for (int r = 0; r < 64; ++r)
+            for (int c = 0; c < 64; ++c)
+                in[r * 64 + c] = (int16_t)((c * 3 + r * 2 + ((c * r) & 7)) % 149) - 74;
+        int32_t out[4096];
+        svtd_fwd2d64x64(in, 64, out, svt_av1_fdct64_new);
+        printf("fwd2d64_dct:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", out[i]);
+        printf("\n");
+
+        // 2D inverse add DCT onto a V-pred 64x64
+        int32_t cdct[4096];
+        for (int i = 0; i < 4096; ++i) {
+            const int r = i / 64, c = i % 64;
+            cdct[i] = ((r * 7 + c * 19 + 23) % 83) - 41;
+        }
+        uint8_t pred[4096];
+        for (int r = 0; r < 64; ++r)
+            for (int c = 0; c < 64; ++c) pred[r * 64 + c] = (uint8_t)(9 + 2 * c);
+        svtd_inv2dadd64x64(cdct, pred, 64, svt_av1_idct64_new);
+        printf("inv2d64_dct_onto_vpred:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", pred[i]);
+        printf("\n");
+
+        // qscan64
+        int16_t scan64[4096];
+        svtd_default_scan_64x64(scan64);
+        printf("qscan64:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", scan64[i]);
+        printf("\n");
+
+        // log_scale-2 quant gate lines; fixture = fwd2d64_dct output
+        SvtdQuantTables t100, t0;
+        svtd_build_quantizer_luma(100, &t100);
+        svtd_build_quantizer_luma(0, &t0);
+        TranLow qc[4096], dq[4096];
+        uint16_t eob = 0;
+        svtd_quantize_fp_64x64(out, &t100, scan64, qc, dq, &eob);
+        printf("q64fp_q100:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", qc[i]);
+        printf(" |");
+        for (int i = 0; i < 4096; ++i) printf(" %d", dq[i]);
+        printf(" | %u\n", eob);
+        svtd_quantize_b_64x64(out, &t100, scan64, qc, dq, &eob);
+        printf("q64b_q100:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", qc[i]);
+        printf(" |");
+        for (int i = 0; i < 4096; ++i) printf(" %d", dq[i]);
+        printf(" | %u\n", eob);
+        svtd_quantize_fp_64x64(out, &t0, scan64, qc, dq, &eob);
+        printf("q64fp_q0:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", qc[i]);
+        printf(" |");
+        for (int i = 0; i < 4096; ++i) printf(" %d", dq[i]);
+        printf(" | %u\n", eob);
+    }
+
+    fprintf(stderr, "CK: L7 done\n"); fflush(stderr);
+
+    // ---- L9: 64x64 builder + frame gate lines ----
+    // upsample dead at 64x64 (blk_wh = 128 > 16); corner blend LIVE (128>=24)
+    {
+        uint8_t above128[128];
+        uint8_t left128[128];
+        for (int i = 0; i < 128; ++i) {
+            above128[i] = (uint8_t)((13 + 5 * i) % 251);
+            left128[i] = (uint8_t)((7 + 9 * i) % 251);
+        }
+        uint8_t dst[4096];
+        svtd_call_builder_tx(dst, V_PRED, 0, FILTER_INTRA_MODES, 0, above128, 64, 0, above128, 0, 0, 0, TX_64X64);
+        printf("b64_v:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, DC_PRED, 0, FILTER_INTRA_MODES, 0, above128, 64, 0, left128, 64, 0, 7, TX_64X64);
+        printf("b64_dc:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, D45_PRED, 0, FILTER_INTRA_MODES, 0, above128, 64, 64, left128, 64, 0, 7, TX_64X64);
+        printf("b64_d45:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        svtd_call_builder_tx(dst, SMOOTH_PRED, 0, FILTER_INTRA_MODES, 0, above128, 64, 0, left128, 64, 0, 7, TX_64X64);
+        printf("b64_sm:");
+        for (int i = 0; i < 4096; ++i) printf(" %d", dst[i]);
+        printf("\n");
+    }
+
+    fprintf(stderr, "CK: b64 done\n"); fflush(stderr);
+
+    // ---- L9: 64x64 frame-policy gate lines (128x128, 2x2 of 64x64) ----
+    // rows 0-63 = ramp (x+y+1) (max 127 < 255); rows 64-127 zero. block
+    // (bx=0, by=1) is the only nTr>0 block: above[j] = j+64 and D45 zone-1
+    // pred above[1+r+c] = r+c+65 = src[64+r][c] -> SAD 0 only with REAL TR.
+    {
+        uint8_t src[16384];
+        for (int y = 0; y < 128; ++y) {
+            for (int x = 0; x < 128; ++x) {
+                src[y * 128 + x] = (y < 64) ? (uint8_t)(x + y + 1) : 0;
+            }
+        }
+        uint8_t recon[16384];
+        int32_t coeffs[16384];
+        int modes[4] = {0};
+        svtd_frame_auto_64x64_blocks(src, recon, coeffs, modes);
+        printf("f64_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
+        printf("\n");
+        printf("f64_recon:");
+        for (int i = 0; i < 16384; ++i) printf(" %d", recon[i]);
+        printf("\n");
+        printf("f64_coeffs:");
+        for (int i = 0; i < 16384; ++i) printf(" %d", coeffs[i]);
+        printf("\n");
+
+        uint8_t reconQ[16384];
+        int32_t coeffsQ[16384];
+        int modesQ[4] = {0};
+        svtd_frame_auto_64x64_q(src, reconQ, coeffsQ, modesQ, 100);
+        printf("f64q_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modesQ[i]);
+        printf("\n");
+        printf("f64q_coeffs:");
+        for (int i = 0; i < 16384; ++i) printf(" %d", coeffsQ[i]);
+        printf("\n");
+
+        uint8_t reconV[16384];
+        int32_t coeffsV[16384];
+        svtd_frame_v_dct_64x64(src, reconV, coeffsV);
+        printf("f64v_recon:");
+        for (int i = 0; i < 16384; ++i) printf(" %d", reconV[i]);
+        printf("\n");
+        printf("f64v_coeffs:");
+        for (int i = 0; i < 16384; ++i) printf(" %d", coeffsV[i]);
+        printf("\n");
+
+        uint8_t reconVQ[16384];
+        int32_t coeffsVQ[16384];
+        svtd_frame_v_dct_64x64_q(src, reconVQ, coeffsVQ, 100);
+        printf("f64vq_recon:");
+        for (int i = 0; i < 16384; ++i) printf(" %d", reconVQ[i]);
+        printf("\n");
+        printf("f64vq_coeffs:");
+        for (int i = 0; i < 16384; ++i) printf(" %d", coeffsVQ[i]);
+        printf("\n");
+    }
+
+    fprintf(stderr, "CK: f64 done\n"); fflush(stderr);
+
     // ---- B5: 8x8 builder goldens ----
     {
         // (a) V_PRED full-neighbor at TX_8X8
