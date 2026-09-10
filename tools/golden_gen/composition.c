@@ -8,10 +8,10 @@
 // ---- dispatch adapters -----------------------------------------------------
 // SVT builds svt_aom_eb_pred / svt_aom_dc_pred with the intra_pred_sized
 // macro (intra_prediction.c:1402) over every TxSize; the generator
-// instantiates the TX_4X4 column. These adapters forward with bw=bh=4 ???
-// pure plumbing, no arithmetic.
-SvtdPredFn svtd_eb_pred[13][2];
-SvtdPredFn svtd_dc_pred[2][2][2];
+// instantiates the TX_4X4, TX_8X8 and TX_16X16 columns. These adapters
+// forward with the fixed bw=bh per column ??? pure plumbing, no arithmetic.
+SvtdPredFn svtd_eb_pred[13][3];
+SvtdPredFn svtd_dc_pred[2][2][3];
 #define svt_aom_eb_pred svtd_eb_pred
 #define svt_aom_dc_pred svtd_dc_pred
 int32_t svtd_filt_type = 0;  // get_filt_type shim state (see svt_gen.c)
@@ -24,6 +24,11 @@ int32_t svtd_filt_type = 0;  // get_filt_type shim state (see svt_gen.c)
 #define SVTD_ADAPTER8(name, fn) \
     static void name(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) { \
         fn(dst, stride, 8, 8, above, left); \
+    }
+
+#define SVTD_ADAPTER16(name, fn) \
+    static void name(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) { \
+        fn(dst, stride, 16, 16, above, left); \
     }
 
 SVTD_ADAPTER(eb_dc_4x4, dc_predictor)
@@ -47,6 +52,17 @@ SVTD_ADAPTER8(eb_smooth_8x8, smooth_predictor)
 SVTD_ADAPTER8(eb_smooth_v_8x8, smooth_v_predictor)
 SVTD_ADAPTER8(eb_smooth_h_8x8, smooth_h_predictor)
 SVTD_ADAPTER8(eb_paeth_8x8, paeth_predictor)
+
+SVTD_ADAPTER16(eb_dc_16x16, dc_predictor)
+SVTD_ADAPTER16(eb_dc_left_16x16, dc_left_predictor)
+SVTD_ADAPTER16(eb_dc_top_16x16, dc_top_predictor)
+SVTD_ADAPTER16(eb_dc_128_16x16, dc_128_predictor)
+SVTD_ADAPTER16(eb_v_16x16, v_predictor)
+SVTD_ADAPTER16(eb_h_16x16, h_predictor)
+SVTD_ADAPTER16(eb_smooth_16x16, smooth_predictor)
+SVTD_ADAPTER16(eb_smooth_v_16x16, smooth_v_predictor)
+SVTD_ADAPTER16(eb_smooth_h_16x16, smooth_h_predictor)
+SVTD_ADAPTER16(eb_paeth_16x16, paeth_predictor)
 
 static void svtd_populate_dispatch(void) {
     // TX_4X4 column (index 0)
@@ -88,6 +104,26 @@ static void svtd_populate_dispatch(void) {
     svtd_dc_pred[1][0][1] = eb_dc_left_8x8;
     svtd_dc_pred[0][1][1] = eb_dc_top_8x8;
     svtd_dc_pred[0][0][1] = eb_dc_128_8x8;
+
+    // TX_16X16 column (index 2)
+    svtd_eb_pred[DC_PRED][2]      = eb_dc_16x16;
+    svtd_eb_pred[V_PRED][2]       = eb_v_16x16;
+    svtd_eb_pred[H_PRED][2]       = eb_h_16x16;
+    svtd_eb_pred[D45_PRED][2]     = eb_v_16x16;
+    svtd_eb_pred[D135_PRED][2]    = eb_v_16x16;
+    svtd_eb_pred[D113_PRED][2]    = eb_v_16x16;
+    svtd_eb_pred[D157_PRED][2]    = eb_v_16x16;
+    svtd_eb_pred[D203_PRED][2]    = eb_v_16x16;
+    svtd_eb_pred[D67_PRED][2]     = eb_v_16x16;
+    svtd_eb_pred[SMOOTH_PRED][2]  = eb_smooth_16x16;
+    svtd_eb_pred[SMOOTH_V_PRED][2] = eb_smooth_v_16x16;
+    svtd_eb_pred[SMOOTH_H_PRED][2] = eb_smooth_h_16x16;
+    svtd_eb_pred[PAETH_PRED][2]   = eb_paeth_16x16;
+
+    svtd_dc_pred[1][1][2] = eb_dc_16x16;
+    svtd_dc_pred[1][0][2] = eb_dc_left_16x16;
+    svtd_dc_pred[0][1][2] = eb_dc_top_16x16;
+    svtd_dc_pred[0][0][2] = eb_dc_128_16x16;
 }
 
 // ---- forward 2D core -------------------------------------------------------

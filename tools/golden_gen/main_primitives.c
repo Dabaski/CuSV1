@@ -206,6 +206,68 @@ int main(void) {
 
     svtd_gen_inv_range_8x8();
 
+    // ---- B16: 16x16 builder goldens (TX_16X16 column) ----
+    // upsample never fires at 16x16 (blk_wh = 32 > 16, svt_aom_use_intra_edge_upsample)
+    {
+        const uint8_t above16[32] = {11, 22, 33, 44, 55, 66, 77, 88,
+                                     99, 110, 120, 130, 140, 150, 160, 170,
+                                     180, 190, 200, 210, 220, 230, 240, 250,
+                                     245, 235, 225, 215, 205, 195, 185, 175};
+        const uint8_t left16[32] = {5, 15, 25, 35, 45, 55, 65, 75,
+                                    85, 95, 105, 115, 125, 135, 145, 155,
+                                    165, 175, 185, 195, 205, 215, 225, 235,
+                                    245, 250, 240, 230, 220, 210, 200, 190};
+        uint8_t dst[256];
+        // (a) V_PRED full above at TX_16X16
+        svtd_call_builder_tx(dst, V_PRED, 0, FILTER_INTRA_MODES, 0, above16, 16, 0, above16, 0, 0, 0, TX_16X16);
+        printf("b16_v:");
+        for (int i = 0; i < 256; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (b) DC both edges
+        svtd_call_builder_tx(dst, DC_PRED, 0, FILTER_INTRA_MODES, 0, above16, 16, 0, left16, 16, 0, 7, TX_16X16);
+        printf("b16_dc:");
+        for (int i = 0; i < 256; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (c) DC-128 no edges
+        svtd_call_builder_tx(dst, DC_PRED, 0, FILTER_INTRA_MODES, 0, above16, 0, 0, left16, 0, 0, 0, TX_16X16);
+        printf("b16_dc128:");
+        for (int i = 0; i < 256; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (d) D45 zone 1 with REAL top-right 16 (need_right -> numTop 32;
+        // upsample off; strength = filt_str(16,16,-23,0): d 23 -> 2)
+        svtd_call_builder_tx(dst, D45_PRED, 0, FILTER_INTRA_MODES, 0, above16, 16, 16, left16, 16, 0, 7, TX_16X16);
+        printf("b16_d45:");
+        for (int i = 0; i < 256; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (e) D135 zone 2 (above+left, corner 7)
+        svtd_call_builder_tx(dst, D135_PRED, 0, FILTER_INTRA_MODES, 0, above16, 16, 0, left16, 16, 0, 7, TX_16X16);
+        printf("b16_d135:");
+        for (int i = 0; i < 256; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (f) D203 zone 3 (need_bottom -> numLeft 32 extension)
+        svtd_call_builder_tx(dst, D203_PRED, 0, FILTER_INTRA_MODES, 0, above16, 16, 0, left16, 16, 0, 7, TX_16X16);
+        printf("b16_d203:");
+        for (int i = 0; i < 256; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (g) SMOOTH (sm_weight_arrays bs=16 row)
+        svtd_call_builder_tx(dst, SMOOTH_PRED, 0, FILTER_INTRA_MODES, 0, above16, 16, 0, left16, 16, 0, 7, TX_16X16);
+        printf("b16_sm:");
+        for (int i = 0; i < 256; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (h) PAETH
+        svtd_call_builder_tx(dst, PAETH_PRED, 0, FILTER_INTRA_MODES, 0, above16, 16, 0, left16, 16, 0, 7, TX_16X16);
+        printf("b16_paeth:");
+        for (int i = 0; i < 256; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (i) FILTER_V_PRED at TX_16X16 (strips c=1,5,9,13)
+        svtd_call_builder_tx(dst, V_PRED, 0, FILTER_V_PRED /* 1 */, 0, above16 + 1, 16, 0, left16, 16, 0, 10, TX_16X16);
+        printf("b16_fiv:");
+        for (int i = 0; i < 256; ++i) printf(" %d", dst[i]);
+        printf("\n");
+    }
+
+    fprintf(stderr, "CK: b16 done\n"); fflush(stderr);
+
     // ---- B5: 8x8 builder goldens ----
     {
         // (a) V_PRED full-neighbor at TX_8X8

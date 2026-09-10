@@ -318,6 +318,166 @@ TEST_CASE("builder dc128 8x8 fills 128 with no neighbors") {
     CHECK(ok);
 }
 
+// ---- B16: 16x16 builder (TX_16X16 column) ----------------------------------
+// fixture edges shared with the generator (main_primitives.c B16 block):
+// above16[0..15] top, above16[16..31] top-right, left16[0..15] left
+namespace {
+const unsigned char kAbove16[32] = {11, 22, 33, 44, 55, 66, 77, 88,
+                                    99, 110, 120, 130, 140, 150, 160, 170,
+                                    180, 190, 200, 210, 220, 230, 240, 250,
+                                    245, 235, 225, 215, 205, 195, 185, 175};
+const unsigned char kLeft16[32] = {5, 15, 25, 35, 45, 55, 65, 75,
+                                   85, 95, 105, 115, 125, 135, 145, 155,
+                                   165, 175, 185, 195, 205, 215, 225, 235,
+                                   245, 250, 240, 230, 220, 210, 200, 190};
+}  // namespace
+
+TEST_CASE("builder v 16x16 matches svt golden") {
+    // golden: build_intra_predictors TX_16X16 V_PRED, above16[0..15]
+    // gate line b16_v
+    unsigned char dst[256] = {0};
+    intra::buildIntraPredictors(dst, 16, intra::V_PRED, 0, 16, 16, 0, kAbove16, 16, 0, nullptr, 0, 0);
+    const unsigned char goldenRow[16] = {11, 22, 33, 44, 55, 66, 77, 88,
+                                         99, 110, 120, 130, 140, 150, 160, 170};
+    bool ok = true;
+    for (int r = 0; r < 16; ++r) {
+        for (int c = 0; c < 16; ++c) {
+            if (dst[r * 16 + c] != goldenRow[c]) ok = false;
+        }
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder dc 16x16 averages 32 edge samples") {
+    // golden: gate line b16_dc — DC over above16+left16 (sum 2750/32 = 85.94
+    // -> 86 with rounding)
+    unsigned char dst[256] = {0};
+    intra::buildIntraPredictors(dst, 16, intra::DC_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+    bool ok = true;
+    for (int i = 0; i < 256; ++i) {
+        if (dst[i] != 86) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder dc128 16x16 fills 128 with no neighbors") {
+    // golden: gate line b16_dc128
+    unsigned char dst[256] = {0};
+    intra::buildIntraPredictors(dst, 16, intra::DC_PRED, 0, 16, 16, 0, nullptr, 0, 0, nullptr, 0, 0);
+    bool ok = true;
+    for (int i = 0; i < 256; ++i) {
+        if (dst[i] != 128) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder d45 16x16 consumes real top-right zone 1") {
+    // golden: gate line b16_d45 — need_right at p_angle 45: numTop = 32 from
+    // above16+TR; upsample OFF at blk_wh 32 (svt_aom_use_intra_edge_upsample
+    // returns 0); edge filter strength 2 (filt_str(16,16,-23,0): d=23 -> 2).
+    // head from the gate line: 23 33 44 55 66 77 88 99 110 120 130 140 150
+    // 160 170 180 ...
+    unsigned char dst[256] = {0};
+    intra::buildIntraPredictors(dst, 16, intra::D45_PRED, 0, 16, 16, 7, kAbove16, 16, 16, kLeft16, 16, 0);
+    const unsigned char goldenHead[16] = {23, 33, 44, 55, 66, 77, 88, 99,
+                                          110, 120, 130, 140, 150, 160, 170, 180};
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenHead[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder d135 16x16 zone 2 matches svt golden head") {
+    // golden: gate line b16_d135 head
+    unsigned char dst[256] = {0};
+    intra::buildIntraPredictors(dst, 16, intra::D135_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+    const unsigned char goldenHead[16] = {8, 15, 23, 33, 44, 55, 66, 77,
+                                          88, 99, 110, 120, 130, 140, 150, 159};
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenHead[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder d203 16x16 zone 3 extends left edge to 32") {
+    // golden: gate line b16_d203 head — need_bottom: numLeft = 32 (replication
+    // past 16 exercises the extension path)
+    unsigned char dst[256] = {0};
+    intra::buildIntraPredictors(dst, 16, intra::D203_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+    const unsigned char goldenHead[16] = {11, 14, 18, 22, 26, 30, 34, 39,
+                                          43, 47, 51, 56, 60, 64, 68, 73};
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenHead[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder smooth 16x16 uses the bs=16 weight row") {
+    // golden: gate line b16_sm head — sm_weight_arrays[16..31]
+    unsigned char dst[256] = {0};
+    intra::buildIntraPredictors(dst, 16, intra::SMOOTH_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+    const unsigned char goldenHead[16] = {9, 24, 39, 52, 66, 79, 91, 102,
+                                          113, 123, 131, 139, 147, 154, 160, 165};
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenHead[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder paeth 16x16 matches svt golden head") {
+    // golden: gate line b16_paeth head (row 0 = above row: pTop wins on the
+    // flat corner gradient)
+    unsigned char dst[256] = {0};
+    intra::buildIntraPredictors(dst, 16, intra::PAETH_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+    const unsigned char goldenHead[16] = {11, 22, 33, 44, 55, 66, 77, 88,
+                                          99, 110, 120, 130, 140, 150, 160, 170};
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenHead[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder filter-intra 16x16 strips at c=1,5,9,13") {
+    // golden: gate line b16_fiv (FILTER_V_PRED at TX_16X16: fb buffer 17x17,
+    // row strips rr odd, column strips c=1,5,9,13)
+    unsigned char dst[256] = {0};
+    intra::buildIntraPredictors(dst, 16, intra::V_PRED, 0, 16, 16, 10, kAbove16 + 1, 16, 0,
+                                kLeft16, 16, 0, intra::NeighborContext(),
+                                static_cast<int>(intra::FilterIntraMode::FILTER_V_PRED));
+    const unsigned char goldenHead[16] = {19, 31, 43, 54, 65, 77, 88, 99,
+                                          110, 120, 130, 140, 150, 160, 170, 180};
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenHead[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("16x16 upsample never fires (blk_wh 32 exceeds both limits)") {
+    // svt_aom_use_intra_edge_upsample (intra_prediction.c:1773):
+    // type ? (blk_wh <= 8) : (blk_wh <= 16); 16+16 = 32 fails both
+    CHECK(intra::useIntraEdgeUpsample(16, 16, 0, 0) == 0);
+    CHECK(intra::useIntraEdgeUpsample(16, 16, 23, 0) == 0);
+    CHECK(intra::useIntraEdgeUpsample(16, 16, 23, 1) == 0);
+    CHECK(intra::useIntraEdgeUpsample(16, 16, 39, 0) == 0);
+}
+
+TEST_CASE("builder dc128 8x8 fills 128 with no neighbors") {
+    // golden: build_intra_predictors TX_8X8 DC_PRED, no edges — gate line b5_dc128_8
+    unsigned char dst[64] = {0};
+    intra::buildIntraPredictors(dst, 8, intra::DC_PRED, 0, 8, 8, 0, nullptr, 0, 0, nullptr, 0, 0);
+    bool ok = true;
+    for (int i = 0; i < 64; ++i) {
+        if (dst[i] != 128) ok = false;
+    }
+    CHECK(ok);
+}
+
 bool runBlockPredict8x8(gpurt::GpuContext& ctx, int mode, int angleDelta, const unsigned char* above,
                         int nTopPx, int nTopRightPx, const unsigned char* left, int nLeftPx,
                         int nBottomLeftPx, int aboveLeft, const unsigned char* expected,
@@ -365,6 +525,123 @@ bool runBlockPredict8x8(gpurt::GpuContext& ctx, int mode, int angleDelta, const 
         if (got[i] != expected[i]) return false;
     }
     return true;
+}
+
+bool runBlockPredict16x16(gpurt::GpuContext& ctx, int mode, int angleDelta, const unsigned char* above,
+                          int nTopPx, int nTopRightPx, const unsigned char* left, int nLeftPx,
+                          int nBottomLeftPx, int aboveLeft, const unsigned char* expected,
+                          int aboveMode = 0, int leftMode = 0, int filterIntraMode = -1,
+                          int disableEdgeFilter = 0) {
+    (void)ctx;
+    const std::string ptx = *gpurt::compileToPtx(intra::predictBlock16x16CuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "predict_block_16x16");
+    if (it == names.end()) {
+        return false;
+    }
+    gpurt::Kernel k(ptx, *it);
+
+    gpurt::DeviceBuffer dAbove(nTopPx > 0 ? sizeof(unsigned char) * (nTopPx + nTopRightPx) : 1);
+    gpurt::DeviceBuffer dLeft(nLeftPx > 0 ? sizeof(unsigned char) * (nLeftPx + nBottomLeftPx) : 1);
+    gpurt::DeviceBuffer dOut(256);
+    if (nTopPx > 0) dAbove.uploadFrom(above, sizeof(unsigned char) * (nTopPx + nTopRightPx));
+    if (nLeftPx > 0) dLeft.uploadFrom(left, sizeof(unsigned char) * (nLeftPx + nBottomLeftPx));
+
+    int modeArg = mode, deltaArg = angleDelta, amArg = aboveMode, lmArg = leftMode;
+    int fiArg = filterIntraMode, defArg = disableEdgeFilter;
+    int nTopArg = nTopPx, nTrArg = nTopRightPx, nLeftArg = nLeftPx, nBlArg = nBottomLeftPx;
+    int alArg = aboveLeft;
+    gpurt::DeviceBuffer dMode(4), dDelta(4), dAm(4), dLm(4), dFi(4), dDef(4);
+    gpurt::DeviceBuffer dNTop(4), dNTr(4), dNLeft(4), dNBl(4), dAl(4);
+    dMode.uploadFrom(&modeArg, 4); dDelta.uploadFrom(&deltaArg, 4);
+    dAm.uploadFrom(&amArg, 4); dLm.uploadFrom(&lmArg, 4);
+    dFi.uploadFrom(&fiArg, 4); dDef.uploadFrom(&defArg, 4);
+    dNTop.uploadFrom(&nTopArg, 4); dNTr.uploadFrom(&nTrArg, 4);
+    dNLeft.uploadFrom(&nLeftArg, 4); dNBl.uploadFrom(&nBlArg, 4);
+    dAl.uploadFrom(&alArg, 4);
+
+    CUdeviceptr pMode = dMode.get(), pDelta = dDelta.get(), pAm = dAm.get(), pLm = dLm.get();
+    CUdeviceptr pAbove = dAbove.get(), pNTop = dNTop.get(), pNTr = dNTr.get();
+    CUdeviceptr pLeft = dLeft.get(), pNLeft = dNLeft.get(), pNBl = dNBl.get(), pAl = dAl.get();
+    CUdeviceptr pFi = dFi.get(), pDef = dDef.get(), pOut = dOut.get();
+    void* args[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft,
+                    &pNBl, &pAl, &pFi, &pDef, &pOut};
+    k.launch(1, 1, 256, 1, args);
+
+    unsigned char got[256] = {0};
+    dOut.downloadTo(got, 256);
+    for (int i = 0; i < 256; ++i) {
+        if (got[i] != expected[i]) return false;
+    }
+    return true;
+}
+
+TEST_CASE("gpu block predictor 16x16 matches builder across all zones") {
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    // zone sweep mirroring the b16 gate fixtures: V (angle 90 collapse),
+    // D45 w/ real TR (zone 1, extension + clamp), D135 (zone 2),
+    // D203 (zone 3, bottom-left extension), SMOOTH (w16 row), PAETH,
+    // DC both-edges, DC-128, filter-intra strip case
+    bool okV = true, okD45 = true, okD135 = true, okD203 = true, okSm = true, okPa = true;
+    bool okDc = true, okDc128 = true, okFi = true;
+    {
+        unsigned char ref[256] = {0};
+        intra::buildIntraPredictors(ref, 16, intra::V_PRED, 0, 16, 16, 0, kAbove16, 16, 0, nullptr, 0, 0);
+        okV = runBlockPredict16x16(ctx, intra::V_PRED, 0, kAbove16, 16, 0, nullptr, 0, 0, 0, ref);
+    }
+    {
+        unsigned char ref[256] = {0};
+        intra::buildIntraPredictors(ref, 16, intra::D45_PRED, 0, 16, 16, 7, kAbove16, 16, 16, kLeft16, 16, 0);
+        okD45 = runBlockPredict16x16(ctx, intra::D45_PRED, 0, kAbove16, 16, 16, kLeft16, 16, 0, 7, ref);
+    }
+    {
+        unsigned char ref[256] = {0};
+        intra::buildIntraPredictors(ref, 16, intra::D135_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+        okD135 = runBlockPredict16x16(ctx, intra::D135_PRED, 0, kAbove16, 16, 0, kLeft16, 16, 0, 7, ref);
+    }
+    {
+        unsigned char ref[256] = {0};
+        intra::buildIntraPredictors(ref, 16, intra::D203_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+        okD203 = runBlockPredict16x16(ctx, intra::D203_PRED, 0, kAbove16, 16, 0, kLeft16, 16, 0, 7, ref);
+    }
+    {
+        unsigned char ref[256] = {0};
+        intra::buildIntraPredictors(ref, 16, intra::SMOOTH_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+        okSm = runBlockPredict16x16(ctx, intra::SMOOTH_PRED, 0, kAbove16, 16, 0, kLeft16, 16, 0, 7, ref);
+    }
+    {
+        unsigned char ref[256] = {0};
+        intra::buildIntraPredictors(ref, 16, intra::PAETH_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+        okPa = runBlockPredict16x16(ctx, intra::PAETH_PRED, 0, kAbove16, 16, 0, kLeft16, 16, 0, 7, ref);
+    }
+    {
+        unsigned char ref[256] = {0};
+        intra::buildIntraPredictors(ref, 16, intra::DC_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
+        okDc = runBlockPredict16x16(ctx, intra::DC_PRED, 0, kAbove16, 16, 0, kLeft16, 16, 0, 7, ref);
+    }
+    {
+        unsigned char ref[256] = {0};
+        intra::buildIntraPredictors(ref, 16, intra::DC_PRED, 0, 16, 16, 0, nullptr, 0, 0, nullptr, 0, 0);
+        okDc128 = runBlockPredict16x16(ctx, intra::DC_PRED, 0, nullptr, 0, 0, nullptr, 0, 0, 0, ref);
+    }
+    {
+        unsigned char ref[256] = {0};
+        intra::buildIntraPredictors(ref, 16, intra::V_PRED, 0, 16, 16, 10, kAbove16 + 1, 16, 0,
+                                    kLeft16, 16, 0, intra::NeighborContext(),
+                                    static_cast<int>(intra::FilterIntraMode::FILTER_V_PRED));
+        okFi = runBlockPredict16x16(ctx, intra::V_PRED, 0, kAbove16 + 1, 16, 0, kLeft16, 16, 0, 10, ref,
+                                    0, 0, static_cast<int>(intra::FilterIntraMode::FILTER_V_PRED));
+    }
+    CHECK(okV);
+    CHECK(okD45);
+    CHECK(okD135);
+    CHECK(okD203);
+    CHECK(okSm);
+    CHECK(okPa);
+    CHECK(okDc);
+    CHECK(okDc128);
+    CHECK(okFi);
 }
 
 TEST_CASE("gpu block predictor 8x8 v matches builder") {

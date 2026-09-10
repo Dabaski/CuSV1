@@ -59,13 +59,13 @@ typedef enum {
     EB_THIRTYTWO_BIT = 32,  // Not supported
 } EbBitDepth;
 
-// TxSize: the generator exercises TX_4X4 (=0) and TX_8X8 (=1) from SVT's
-// TxSize enum.
-typedef enum { TX_4X4 = 0, TX_8X8 = 1 } TxSize;
+// TxSize: the generator exercises TX_4X4 (=0), TX_8X8 (=1) and TX_16X16 (=2)
+// from SVT's TxSize enum.
+typedef enum { TX_4X4 = 0, TX_8X8 = 1, TX_16X16 = 2 } TxSize;
 // tx_size_wide/high for the sizes the generator uses (SVT tables in
-// av1_common data; TX_4X4 -> 4x4, TX_8X8 -> 8x8).
-static const int32_t tx_size_wide[2] = {4, 8};
-static const int32_t tx_size_high[2] = {4, 8};
+// av1_common data; TX_4X4 -> 4x4, TX_8X8 -> 8x8, TX_16X16 -> 16x16).
+static const int32_t tx_size_wide[3] = {4, 8, 16};
+static const int32_t tx_size_high[3] = {4, 8, 16};
 
 // MAX_TXFM_STAGE_NUM - transforms.h; MAX_BLOCK_DIM / MAX_UPSAMPLE_SZ -
 // intra_prediction.h / definitions.h; MAX_TX_SIZE - definitions.h:410
@@ -89,8 +89,8 @@ typedef void (*TxfmFunc)(const int32_t* input, int32_t* output, int8_t cos_bit,
 // PAETH_PRED + 1). Declared here because build_intra_predictors references
 // them; defined and populated in composition.c.
 typedef void (*SvtdPredFn)(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left);
-extern SvtdPredFn svtd_eb_pred[13][2];
-extern SvtdPredFn svtd_dc_pred[2][2][2];
+extern SvtdPredFn svtd_eb_pred[13][3];
+extern SvtdPredFn svtd_dc_pred[2][2][3];
 #define svt_aom_eb_pred svtd_eb_pred
 #define svt_aom_dc_pred svtd_dc_pred
 
