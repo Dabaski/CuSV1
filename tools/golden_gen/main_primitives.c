@@ -654,6 +654,39 @@ int main(void) {
             for (int i = 0; i < 64; ++i) printf(" %d", dq8[i]);
             printf(" | %u\n", eob8);
         }
+
+        // ---- C6: 16x16 quantization gate lines ----
+        // fixture = the fwd2d16_dct output (recomputed for provenance)
+        {
+            int16_t in16[256];
+            for (int r = 0; r < 16; ++r)
+                for (int c = 0; c < 16; ++c)
+                    in16[r * 16 + c] = (int16_t)((c * 13 + r * 7 + ((c * r) & 31)) % 211) - 105;
+            int32_t cdct16[256];
+            svtd_fwd2d16x16(in16, 16, cdct16, svt_av1_fdct16_new);
+            int16_t scan16[256];
+            svtd_default_scan_16x16(scan16);
+            TranLow qc16[256], dq16[256];
+            uint16_t eob16 = 0;
+            svtd_quantize_fp_16x16(cdct16, &t100, scan16, qc16, dq16, &eob16);
+            printf("q16fp_q100:");
+            for (int i = 0; i < 256; ++i) printf(" %d", qc16[i]);
+            printf(" |");
+            for (int i = 0; i < 256; ++i) printf(" %d", dq16[i]);
+            printf(" | %u\n", eob16);
+            svtd_quantize_b_16x16(cdct16, &t100, scan16, qc16, dq16, &eob16);
+            printf("q16b_q100:");
+            for (int i = 0; i < 256; ++i) printf(" %d", qc16[i]);
+            printf(" |");
+            for (int i = 0; i < 256; ++i) printf(" %d", dq16[i]);
+            printf(" | %u\n", eob16);
+            svtd_quantize_fp_16x16(cdct16, &t0, scan16, qc16, dq16, &eob16);
+            printf("q16fp_q0:");
+            for (int i = 0; i < 256; ++i) printf(" %d", qc16[i]);
+            printf(" |");
+            for (int i = 0; i < 256; ++i) printf(" %d", dq16[i]);
+            printf(" | %u\n", eob16);
+        }
     }
     // ---- QW1: 8x8 frame-policy-with-quant composition (fixed qindex) ----
     {

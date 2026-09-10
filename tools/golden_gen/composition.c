@@ -692,6 +692,21 @@ static void svtd_quantize_b_8x8(const TranLow* coeff, const SvtdQuantTables* t, 
                          t->dequant, eob, scan, NULL, NULL, NULL, 0);
 }
 
+// TX_16X16 FP quantize entry: quantize_fp_helper_c at n_coeffs=256, log_scale
+// 0 (av1_get_tx_scale_tab[TX_16X16] = 0, full_loop.c:22 + :1617).
+static void svtd_quantize_fp_16x16(const TranLow* coeff, const SvtdQuantTables* t, const int16_t* scan,
+                                   TranLow* qcoeff, TranLow* dqcoeff, uint16_t* eob) {
+    quantize_fp_helper_c(coeff, 256, t->zbin, t->round_fp, t->quant_fp, t->quant_shift, qcoeff,
+                         dqcoeff, t->dequant, eob, scan, NULL, NULL, NULL, 0);
+}
+
+// TX_16X16 B quantize entry: svt_aom_quantize_b_c verbatim at log_scale 0.
+static void svtd_quantize_b_16x16(const TranLow* coeff, const SvtdQuantTables* t, const int16_t* scan,
+                                  TranLow* qcoeff, TranLow* dqcoeff, uint16_t* eob) {
+    svt_aom_quantize_b_c(coeff, 256, t->zbin, t->round, t->quant, t->quant_shift, qcoeff, dqcoeff,
+                         t->dequant, eob, scan, NULL, NULL, NULL, 0);
+}
+
 // ---- QW1 frame composition: 8x8 D-policy + fixed-qindex quantization ------
 // Same loop as svtd_frame_auto_8x8_blocks (8x8 blocks, D2 policy), with the
 // FP quantizer wired in at n_coeffs=64/log_scale 0: qcoeff = coded coeffs,
