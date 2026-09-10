@@ -2135,6 +2135,10 @@ InvTxfmFn inv1d16(TxType type) {
     return type == TxType::DCT_DCT ? idct16 : iadst16;
 }
 
+InvTxfmFn inv1d32(TxType type) {
+    return type == TxType::DCT_DCT ? idct32 : iadst32;
+}
+
 // svt_av1_round_shift_array_c (inv_transforms.c:2449)
 void roundShiftArrayIv(std::int32_t* arr, int size, int bit) {
     if (bit == 0) {
@@ -2250,6 +2254,40 @@ void invTxfm2dAdd16x16(const std::int32_t* coeffs, std::uint8_t* dst, std::uint3
         txfmRow(tempIn, tempOut);
         roundShiftArrayIv(tempOut, 16, 4);
         for (std::uint32_t r = 0; r < 16; ++r) {
+            clipPixelAdd(dst + r * stride + c, tempOut[r]);
+        }
+    }
+}
+
+// svt_av1_inv_txfm2d_add_32x32_c / inv_txfm2d_add_c, TX_32X32: rows then
+// columns, inv_shift_32x32 = {-2, -4}, cos_bit 12/12, no flips, clamp bits
+// bd+8=16 and max(bd+6,16)=16; add via clip_pixel_highbd(pred +
+// round_shift(out, 4), 8)
+void invTxfm2dAdd32x32(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type) {
+    InvTxfmFn txfmRow = inv1d32(type);
+    std::int32_t buf[32 * 32];
+    std::int32_t tempIn[32];
+    std::int32_t tempOut[32];
+
+    // rows: clamp 16, 1D, round_shift_array(-shift[0]) = +2 rounding >>2
+    for (std::uint32_t r = 0; r < 32; ++r) {
+        for (std::uint32_t c = 0; c < 32; ++c) {
+            tempIn[c] = coeffs[r * 32 + c];
+        }
+        clampBufIv(tempIn, 32, kInvClampBit);
+        txfmRow(tempIn, buf + r * 32);
+        roundShiftArrayIv(buf + r * 32, 32, 2);
+    }
+
+    // columns: clamp 16, 1D, round_shift_array(-shift[1]) = +4, clip add
+    for (std::uint32_t c = 0; c < 32; ++c) {
+        for (std::uint32_t r = 0; r < 32; ++r) {
+            tempIn[r] = buf[r * 32 + c];
+        }
+        clampBufIv(tempIn, 32, kInvClampBit);
+        txfmRow(tempIn, tempOut);
+        roundShiftArrayIv(tempOut, 32, 4);
+        for (std::uint32_t r = 0; r < 32; ++r) {
             clipPixelAdd(dst + r * stride + c, tempOut[r]);
         }
     }
