@@ -2532,3 +2532,463 @@ TEST_CASE("frame auto 16x16 with quantization matches the f16q generator golden"
     }
     CHECK(coeffsOk);
 }
+TEST_CASE("gpu frame auto 16x16 matches host encodeFrameAuto16x16 (host decides, gpu executes)") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+std::uint8_t srcData[1024];
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            srcData[y * 32 + x] = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
+
+    pixels::Plane plane(32, 32, 4);
+    pixels::Plane reconRef(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) plane.at(x, y) = srcData[y * 32 + x];
+
+    std::int32_t refCoeffs[1024] = {0};
+    std::uint8_t refModes[4] = {0};
+    pipeline::encodeFrameAuto16x16(plane, reconRef, refCoeffs, refModes, transforms::TxType::DCT_DCT);
+
+    const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlock16x16CuSource(), "compute_61");
+    const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
+    gpurt::Kernel kPred(ptxPred, *std::find(pn.begin(), pn.end(), "predict_block_16x16"));
+    const std::string ptxSub = *gpurt::compileToPtx(pipeline::subtractCuSource(), "compute_61");
+    const std::vector<std::string> sn = gpurt::ptxEntryNames(ptxSub);
+    gpurt::Kernel kSub(ptxSub, *std::find(sn.begin(), sn.end(), "subtract_16x16_plane"));
+    const std::string ptxTx = *gpurt::compileToPtx(transforms::fwdTxfmCuSource(), "compute_61");
+    const std::vector<std::string> tn = gpurt::ptxEntryNames(ptxTx);
+    gpurt::Kernel kTx(ptxTx, *std::find(tn.begin(), tn.end(), "fwd_txfm_2d_16x16"));
+    const std::string ptxInv = *gpurt::compileToPtx(transforms::invTxfmCuSource(), "compute_61");
+    const std::vector<std::string> inames = gpurt::ptxEntryNames(ptxInv);
+    gpurt::Kernel kInv(ptxInv, *std::find(inames.begin(), inames.end(), "inv_txfm_2d_add_16x16"));
+
+    constexpr int kStride = 32;
+    gpurt::DeviceBuffer dPlane(sizeof(srcData));
+    gpurt::DeviceBuffer dRecon(1024);
+    gpurt::DeviceBuffer dResidual(256 * sizeof(std::int16_t));
+    gpurt::DeviceBuffer dBlkCoeffs(256 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dPred(256);
+    dPlane.uploadFrom(srcData, sizeof(srcData));
+    std::uint8_t zero[1024] = {0};
+    dRecon.uploadFrom(zero, 1024);
+
+    int amArg = 0;
+    int lmArg = 0;
+    int fiArg = -1;
+    int defArg = 0;
+    int typeArg = 0;
+    int planeStrideArg = kStride;
+    int fwdStrideArg = 16;
+    int invStride = 16;
+    gpurt::DeviceBuffer dMode(sizeof(int));
+    gpurt::DeviceBuffer dDelta(sizeof(int));
+    gpurt::DeviceBuffer dAm(sizeof(amArg));
+    gpurt::DeviceBuffer dLm(sizeof(lmArg));
+    gpurt::DeviceBuffer dFi(sizeof(fiArg));
+    gpurt::DeviceBuffer dDef(sizeof(defArg));
+    gpurt::DeviceBuffer dNTop(sizeof(int));
+    gpurt::DeviceBuffer dNTr(sizeof(int));
+    gpurt::DeviceBuffer dNLeft(sizeof(int));
+    gpurt::DeviceBuffer dNBl(sizeof(int));
+    gpurt::DeviceBuffer dAl(sizeof(int));
+    gpurt::DeviceBuffer dType(sizeof(typeArg));
+    gpurt::DeviceBuffer dPlaneStride(sizeof(planeStrideArg));
+    gpurt::DeviceBuffer dFwdStride(sizeof(fwdStrideArg));
+    gpurt::DeviceBuffer dInvStride(sizeof(int));
+    gpurt::DeviceBuffer dPx(sizeof(int));
+    gpurt::DeviceBuffer dPy(sizeof(int));
+gpurt::DeviceBuffer dAbove(32);
+    gpurt::DeviceBuffer dLeft(32);
+    dDelta.uploadFrom(&defArg, sizeof(defArg));
+    dFi.uploadFrom(&fiArg, sizeof(fiArg));
+    dDef.uploadFrom(&defArg, sizeof(defArg));
+    dType.uploadFrom(&typeArg, sizeof(typeArg));
+    dPlaneStride.uploadFrom(&planeStrideArg, sizeof(planeStrideArg));
+    dFwdStride.uploadFrom(&fwdStrideArg, sizeof(fwdStrideArg));
+    dInvStride.uploadFrom(&invStride, sizeof(invStride));
+
+    std::uint8_t reconGot[1024] = {0};
+    std::int32_t coeffsGot[1024] = {0};
+    std::uint8_t modesGot[4] = {0};
+    std::uint8_t aboveHost[32] = {0};
+    std::uint8_t leftHost[32] = {0};
+
+    for (int by = 0; by < 2; ++by) {
+        for (int bx = 0; bx < 2; ++bx) {
+            const int px = bx * 16;
+            const int py = by * 16;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const int nTopPx = hasTop ? 16 : 0;
+            const int nLeftPx = hasLeft ? 16 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < 2) ? 16 : 0;
+
+            std::uint8_t tmp[1024] = {0};
+            dRecon.downloadTo(tmp, 1024);
+            if (hasTop) {
+                for (int i = 0; i < 16 + nTopRightPx; ++i) {
+                    aboveHost[i] = tmp[(py - 1) * 32 + px + i];
+                }
+                dAbove.uploadFrom(aboveHost, 16 + nTopRightPx);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 16; ++i) leftHost[i] = tmp[(py + i) * 32 + px - 1];
+                dLeft.uploadFrom(leftHost, 16);
+            }
+            int alVal = 0;
+            if (hasTop && hasLeft) alVal = tmp[(py - 1) * 32 + px - 1];
+
+            intra::NeighborContext nctx;
+            nctx.aboveMode = hasTop ? static_cast<intra::PredictionMode>(modesGot[(by - 1) * 2 + bx])
+                                    : intra::DC_PRED;
+            nctx.leftMode = hasLeft ? static_cast<intra::PredictionMode>(modesGot[by * 2 + bx - 1])
+                                    : intra::DC_PRED;
+            std::uint8_t srcBlk[256] = {0};
+            for (int y = 0; y < 16; ++y) {
+                for (int x = 0; x < 16; ++x) {
+                    srcBlk[y * 16 + x] = srcData[(py + y) * 32 + px + x];
+                }
+            }
+            const auto d = pipeline::decideBlockMode16x16(srcBlk, aboveHost, nTopPx, nTopRightPx,
+                                                          leftHost, nLeftPx, 0,
+                                                          static_cast<std::uint8_t>(alVal), nctx);
+            modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
+
+            int modeArg = d.mode;
+            amArg = (int)nctx.aboveMode;
+            lmArg = (int)nctx.leftMode;
+            int deltaArg = 0;
+            int nTopArg = nTopPx;
+            int nTrArg = nTopRightPx;
+            int nLeftArg = nLeftPx;
+            int nBlArg = 0;
+            int alArg = alVal;
+            int pxArg = px;
+            int pyArg = py;
+            dMode.uploadFrom(&modeArg, sizeof(modeArg));
+            dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
+            dAm.uploadFrom(&amArg, sizeof(amArg));
+            dLm.uploadFrom(&lmArg, sizeof(lmArg));
+            dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
+            dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
+            dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
+            dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
+            dAl.uploadFrom(&alArg, sizeof(alArg));
+            dPx.uploadFrom(&pxArg, sizeof(pxArg));
+            dPy.uploadFrom(&pyArg, sizeof(pyArg));
+
+            CUdeviceptr pMode = dMode.get();
+            CUdeviceptr pDelta = dDelta.get();
+            CUdeviceptr pAm = dAm.get();
+            CUdeviceptr pLm = dLm.get();
+            CUdeviceptr pAbove = dAbove.get();
+            CUdeviceptr pNTop = dNTop.get();
+            CUdeviceptr pNTr = dNTr.get();
+            CUdeviceptr pLeft = dLeft.get();
+            CUdeviceptr pNLeft = dNLeft.get();
+CUdeviceptr pNBl = dNBl.get();
+            CUdeviceptr pAl = dAl.get();
+            CUdeviceptr pFi = dFi.get();
+            CUdeviceptr pDef = dDef.get();
+            CUdeviceptr pPred = dPred.get();
+            void* argsPred[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft,
+                                &pNBl,  &pAl,   &pFi, &pDef, &pPred};
+            kPred.launch(1, 1, 256, 1, argsPred);
+
+            CUdeviceptr pPlane = dPlane.get();
+            CUdeviceptr pPlaneStride = dPlaneStride.get();
+            CUdeviceptr pPx = dPx.get();
+            CUdeviceptr pPy = dPy.get();
+            CUdeviceptr pResidual = dResidual.get();
+            void* argsSub[] = {&pPlane, &pPlaneStride, &pPx, &pPy, &pPred, &pResidual};
+            kSub.launch(1, 1, 256, 1, argsSub);
+
+            CUdeviceptr pType = dType.get();
+            CUdeviceptr pFwdStride = dFwdStride.get();
+            CUdeviceptr pBlkCoeffs = dBlkCoeffs.get();
+            void* argsTx[] = {&pResidual, &pFwdStride, &pType, &pBlkCoeffs};
+            kTx.launch(1, 1, 16, 1, argsTx);
+            std::int32_t blk[256] = {0};
+            dBlkCoeffs.downloadTo(blk, sizeof(blk));
+            for (int i = 0; i < 256; ++i) {
+                coeffsGot[(by * 2 + bx) * 256 + i] = blk[i];
+            }
+
+            CUdeviceptr pInvStride = dInvStride.get();
+            void* argsInv[] = {&pBlkCoeffs, &pType, &pPred, &pInvStride};
+            kInv.launch(1, 1, 16, 1, argsInv);
+
+            std::uint8_t blkRecon[256] = {0};
+            dPred.downloadTo(blkRecon, sizeof(blkRecon));
+            for (int y = 0; y < 16; ++y) {
+                for (int x = 0; x < 16; ++x) {
+                    reconGot[(py + y) * 32 + px + x] = blkRecon[y * 16 + x];
+                }
+            }
+            dRecon.uploadFrom(reconGot, 1024);
+        }
+    }
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modesGot[i] != refModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+
+    bool reconOk = true;
+    for (int i = 0; i < 1024; ++i) {
+        if (reconGot[i] != reconRef.at(i & 31, i >> 5)) reconOk = false;
+    }
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 1024; ++i) {
+        if (coeffsGot[i] != refCoeffs[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
+}
+TEST_CASE("gpu frame auto 16x16 with quantization matches host encodeFrameAuto16x16Q") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    std::uint8_t srcData[1024];
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            srcData[y * 32 + x] = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
+
+    pixels::Plane plane(32, 32, 4);
+    pixels::Plane reconRef(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) plane.at(x, y) = srcData[y * 32 + x];
+    std::int32_t refCoeffs[1024] = {0};
+    std::uint8_t refModes[4] = {0};
+    pipeline::encodeFrameAuto16x16Q(plane, reconRef, refCoeffs, refModes, 100, transforms::TxType::DCT_DCT);
+
+    const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlock16x16CuSource(), "compute_61");
+    const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
+    gpurt::Kernel kPred(ptxPred, *std::find(pn.begin(), pn.end(), "predict_block_16x16"));
+    const std::string ptxSub = *gpurt::compileToPtx(pipeline::subtractCuSource(), "compute_61");
+    const std::vector<std::string> sn = gpurt::ptxEntryNames(ptxSub);
+    gpurt::Kernel kSub(ptxSub, *std::find(sn.begin(), sn.end(), "subtract_16x16_plane"));
+    const std::string ptxTx = *gpurt::compileToPtx(transforms::fwdTxfmCuSource(), "compute_61");
+    const std::vector<std::string> tn = gpurt::ptxEntryNames(ptxTx);
+    gpurt::Kernel kTx(ptxTx, *std::find(tn.begin(), tn.end(), "fwd_txfm_2d_16x16"));
+    const std::string ptxQ = *gpurt::compileToPtx(transforms::quantCuSource(), "compute_61");
+    const std::vector<std::string> qn = gpurt::ptxEntryNames(ptxQ);
+    gpurt::Kernel kQuant(ptxQ, *std::find(qn.begin(), qn.end(), "quant_dequant_16x16"));
+    const std::string ptxInv = *gpurt::compileToPtx(transforms::invTxfmCuSource(), "compute_61");
+    const std::vector<std::string> inames = gpurt::ptxEntryNames(ptxInv);
+    gpurt::Kernel kInv(ptxInv, *std::find(inames.begin(), inames.end(), "inv_txfm_2d_add_16x16"));
+
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(100, qt);
+    std::int16_t scan[256];
+    transforms::defaultScan16x16(scan);
+
+    gpurt::DeviceBuffer dPlane(sizeof(srcData));
+    gpurt::DeviceBuffer dRecon(1024);
+    gpurt::DeviceBuffer dResidual(256 * sizeof(std::int16_t));
+    gpurt::DeviceBuffer dBlkCoeffs(256 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dQcoeffs(256 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dDqcoeffs(256 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dEob(sizeof(std::uint16_t));
+    gpurt::DeviceBuffer dPred(256);
+    gpurt::DeviceBuffer dQuantFp(sizeof(qt.quantFp));
+    gpurt::DeviceBuffer dDequant(sizeof(qt.dequant));
+    gpurt::DeviceBuffer dRoundFp(sizeof(qt.roundFp));
+    gpurt::DeviceBuffer dScan(sizeof(scan));
+    dPlane.uploadFrom(srcData, sizeof(srcData));
+    std::uint8_t zero[1024] = {0};
+    dRecon.uploadFrom(zero, 1024);
+    dQuantFp.uploadFrom(qt.quantFp, sizeof(qt.quantFp));
+    dDequant.uploadFrom(qt.dequant, sizeof(qt.dequant));
+    dRoundFp.uploadFrom(qt.roundFp, sizeof(qt.roundFp));
+    dScan.uploadFrom(scan, sizeof(scan));
+
+    int amArg = 0;
+    int lmArg = 0;
+    int fiArg = -1;
+    int defArg = 0;
+    int typeArg = 0;
+    int planeStrideArg = 32;
+    int fwdStrideArg = 16;
+    int invStride = 16;
+    gpurt::DeviceBuffer dMode(sizeof(int));
+    gpurt::DeviceBuffer dDelta(sizeof(int));
+    gpurt::DeviceBuffer dAm(sizeof(amArg));
+    gpurt::DeviceBuffer dLm(sizeof(lmArg));
+    gpurt::DeviceBuffer dFi(sizeof(fiArg));
+    gpurt::DeviceBuffer dDef(sizeof(defArg));
+    gpurt::DeviceBuffer dNTop(sizeof(int));
+    gpurt::DeviceBuffer dNTr(sizeof(int));
+    gpurt::DeviceBuffer dNLeft(sizeof(int));
+    gpurt::DeviceBuffer dNBl(sizeof(int));
+    gpurt::DeviceBuffer dAl(sizeof(int));
+    gpurt::DeviceBuffer dType(sizeof(typeArg));
+    gpurt::DeviceBuffer dPlaneStride(sizeof(planeStrideArg));
+    gpurt::DeviceBuffer dFwdStride(sizeof(fwdStrideArg));
+    gpurt::DeviceBuffer dInvStride(sizeof(int));
+    gpurt::DeviceBuffer dPx(sizeof(int));
+    gpurt::DeviceBuffer dPy(sizeof(int));
+    gpurt::DeviceBuffer dAbove(32);
+    gpurt::DeviceBuffer dLeft(32);
+    dDelta.uploadFrom(&defArg, sizeof(defArg));
+    dFi.uploadFrom(&fiArg, sizeof(fiArg));
+    dDef.uploadFrom(&defArg, sizeof(defArg));
+    dType.uploadFrom(&typeArg, sizeof(typeArg));
+    dPlaneStride.uploadFrom(&planeStrideArg, sizeof(planeStrideArg));
+    dFwdStride.uploadFrom(&fwdStrideArg, sizeof(fwdStrideArg));
+    dInvStride.uploadFrom(&invStride, sizeof(invStride));
+
+    std::uint8_t reconGot[1024] = {0};
+    std::int32_t coeffsGot[1024] = {0};
+    std::uint8_t modesGot[4] = {0};
+    std::uint8_t aboveHost[32] = {0};
+    std::uint8_t leftHost[32] = {0};
+
+    for (int by = 0; by < 2; ++by) {
+        for (int bx = 0; bx < 2; ++bx) {
+            const int px = bx * 16;
+            const int py = by * 16;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const int nTopPx = hasTop ? 16 : 0;
+            const int nLeftPx = hasLeft ? 16 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < 2) ? 16 : 0;
+
+            std::uint8_t tmp[1024] = {0};
+            dRecon.downloadTo(tmp, 1024);
+            if (hasTop) {
+                for (int i = 0; i < 16 + nTopRightPx; ++i) {
+                    aboveHost[i] = tmp[(py - 1) * 32 + px + i];
+                }
+                dAbove.uploadFrom(aboveHost, 16 + nTopRightPx);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 16; ++i) leftHost[i] = tmp[(py + i) * 32 + px - 1];
+                dLeft.uploadFrom(leftHost, 16);
+            }
+            int alVal = 0;
+            if (hasTop && hasLeft) alVal = tmp[(py - 1) * 32 + px - 1];
+
+            intra::NeighborContext nctx;
+            nctx.aboveMode = hasTop ? static_cast<intra::PredictionMode>(modesGot[(by - 1) * 2 + bx])
+                                    : intra::DC_PRED;
+            nctx.leftMode = hasLeft ? static_cast<intra::PredictionMode>(modesGot[by * 2 + bx - 1])
+                                    : intra::DC_PRED;
+            std::uint8_t srcBlk[256] = {0};
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x) srcBlk[y * 16 + x] = srcData[(py + y) * 32 + px + x];
+            const auto d = pipeline::decideBlockMode16x16(srcBlk, aboveHost, nTopPx, nTopRightPx,
+                                                          leftHost, nLeftPx, 0,
+                                                          static_cast<std::uint8_t>(alVal), nctx);
+            modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
+
+            int modeArg = d.mode;
+            amArg = (int)nctx.aboveMode;
+            lmArg = (int)nctx.leftMode;
+            int deltaArg = 0;
+            int nTopArg = nTopPx;
+            int nTrArg = nTopRightPx;
+            int nLeftArg = nLeftPx;
+            int nBlArg = 0;
+            int alArg = alVal;
+            int pxArg = px;
+            int pyArg = py;
+            dMode.uploadFrom(&modeArg, sizeof(modeArg));
+            dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
+            dAm.uploadFrom(&amArg, sizeof(amArg));
+            dLm.uploadFrom(&lmArg, sizeof(lmArg));
+            dNTop.uploadFrom(&nTopArg, sizeof(nTopArg));
+            dNTr.uploadFrom(&nTrArg, sizeof(nTrArg));
+            dNLeft.uploadFrom(&nLeftArg, sizeof(nLeftArg));
+            dNBl.uploadFrom(&nBlArg, sizeof(nBlArg));
+            dAl.uploadFrom(&alArg, sizeof(alArg));
+            dPx.uploadFrom(&pxArg, sizeof(pxArg));
+            dPy.uploadFrom(&pyArg, sizeof(pyArg));
+            if (hasTop) dAbove.uploadFrom(aboveHost, 16 + nTopRightPx);
+            if (hasLeft) dLeft.uploadFrom(leftHost, 16);
+
+            CUdeviceptr pMode = dMode.get();
+            CUdeviceptr pDelta = dDelta.get();
+            CUdeviceptr pAm = dAm.get();
+            CUdeviceptr pLm = dLm.get();
+            CUdeviceptr pAbove = dAbove.get();
+            CUdeviceptr pNTop = dNTop.get();
+            CUdeviceptr pNTr = dNTr.get();
+            CUdeviceptr pLeft = dLeft.get();
+            CUdeviceptr pNLeft = dNLeft.get();
+            CUdeviceptr pNBl = dNBl.get();
+            CUdeviceptr pAl = dAl.get();
+            CUdeviceptr pFi = dFi.get();
+            CUdeviceptr pDef = dDef.get();
+            CUdeviceptr pPred = dPred.get();
+            void* argsPred[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft,
+                                &pNBl,  &pAl,   &pFi, &pDef, &pPred};
+            kPred.launch(1, 1, 256, 1, argsPred);
+
+            CUdeviceptr pPlane = dPlane.get();
+            CUdeviceptr pPlaneStride = dPlaneStride.get();
+            CUdeviceptr pPx = dPx.get();
+            CUdeviceptr pPy = dPy.get();
+            CUdeviceptr pResidual = dResidual.get();
+            void* argsSub[] = {&pPlane, &pPlaneStride, &pPx, &pPy, &pPred, &pResidual};
+            kSub.launch(1, 1, 256, 1, argsSub);
+
+            CUdeviceptr pType = dType.get();
+            CUdeviceptr pFwdStride = dFwdStride.get();
+            CUdeviceptr pBlkCoeffs = dBlkCoeffs.get();
+            void* argsTx[] = {&pResidual, &pFwdStride, &pType, &pBlkCoeffs};
+            kTx.launch(1, 1, 16, 1, argsTx);
+
+            CUdeviceptr pQuantFp = dQuantFp.get();
+            CUdeviceptr pDequant = dDequant.get();
+            CUdeviceptr pRoundFp = dRoundFp.get();
+            CUdeviceptr pScan = dScan.get();
+            CUdeviceptr pQcoeffs = dQcoeffs.get();
+            CUdeviceptr pDqcoeffs = dDqcoeffs.get();
+            CUdeviceptr pEob = dEob.get();
+            void* argsQuant[] = {&pBlkCoeffs, &pQuantFp, &pDequant, &pRoundFp, &pScan,
+                                 &pQcoeffs, &pDqcoeffs, &pEob};
+            kQuant.launch(1, 1, 256, 1, argsQuant);
+            std::int32_t blkQ[256] = {0};
+            dQcoeffs.downloadTo(blkQ, sizeof(blkQ));
+            for (int i = 0; i < 256; ++i) coeffsGot[(by * 2 + bx) * 256 + i] = blkQ[i];
+
+            CUdeviceptr pInvStride = dInvStride.get();
+            void* argsInv[] = {&pDqcoeffs, &pType, &pPred, &pInvStride};
+            kInv.launch(1, 1, 16, 1, argsInv);
+
+            std::uint8_t blkRecon[256] = {0};
+            dPred.downloadTo(blkRecon, sizeof(blkRecon));
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x) reconGot[(py + y) * 32 + px + x] = blkRecon[y * 16 + x];
+            dRecon.uploadFrom(reconGot, 1024);
+        }
+    }
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modesGot[i] != refModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+
+    bool reconOk = true;
+    for (int i = 0; i < 1024; ++i) {
+        if (reconGot[i] != reconRef.at(i & 31, i >> 5)) reconOk = false;
+    }
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 1024; ++i) {
+        if (coeffsGot[i] != refCoeffs[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
+}
