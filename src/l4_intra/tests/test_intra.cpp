@@ -722,6 +722,130 @@ TEST_CASE("hk2 delta enumeration 16x16: gpu == host for all 8 dr modes x deltas 
     CHECK(allOk);
 }
 
+// ---- B32: 32x16 builder fixtures (L6) ---------------------------------------
+// generator fixture: above64[i] = (11+7i)%251, left64[i] = (5+11i)%251
+namespace {
+const unsigned char kAbove32[64] = {
+    11,  18,  25,  32,  39,  46,  53,  60,  67,  74,  81,  88,  95, 102, 109, 116,
+    123, 130, 137, 144, 151, 158, 165, 172, 179, 186, 193, 200, 207, 214, 221, 228,
+    235, 242, 249, 5,   12,  19,  26,  33,  40,  47,  54,  61,  68,  75,  82,  89,
+    96, 103, 110, 117, 124, 131, 138, 145, 152, 159, 166, 173, 180, 187, 194, 201};
+const unsigned char kLeft32[64] = {
+    5,  16,  27,  38,  49,  60,  71,  82,  93, 104, 115, 126, 137, 148, 159, 170,
+    181, 192, 203, 214, 225, 236, 247, 3,  14,  25,  36,  47,  58,  69,  80,  91,
+    102, 113, 124, 135, 146, 157, 168, 179, 190, 201, 212, 223, 234, 245, 0,  11,
+    22,  33,  44,  55,  66,  77,  88,  99, 110, 121, 132, 143, 154, 165, 176, 187};
+}  // namespace
+
+TEST_CASE("builder v 32x32 matches svt golden") {
+    // golden: gate line b32_v - above64[0..31]
+    unsigned char dst[1024] = {0};
+    intra::buildIntraPredictors(dst, 32, intra::V_PRED, 0, 32, 32, 0, kAbove32, 32, 0, nullptr, 0, 0);
+    const unsigned char goldenRow[16] = {11, 18, 25, 32, 39, 46, 53, 60,
+                                         67, 74, 81, 88, 95, 102, 109, 116};
+    bool ok = true;
+    for (int r = 0; r < 32; ++r) {
+        for (int c = 0; c < 32; ++c) {
+            if (dst[r * 32 + c] != kAbove32[c]) ok = false;
+        }
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder dc 32x32 and dc128 32x32 match svt golden heads") {
+    // golden: gate lines b32_dc / b32_dc128
+    unsigned char dst[1024] = {0};
+    intra::buildIntraPredictors(dst, 32, intra::DC_PRED, 0, 32, 32, 7, kAbove32, 32, 0, kLeft32, 32, 0);
+    bool dcOk = true;
+    for (int i = 0; i < 1024; ++i) {
+        if (dst[i] != 112) dcOk = false;
+    }
+    CHECK(dcOk);
+
+    unsigned char dst2[1024] = {0};
+    intra::buildIntraPredictors(dst2, 32, intra::DC_PRED, 0, 32, 32, 0, nullptr, 0, 0, nullptr, 0, 0);
+    bool dc128Ok = true;
+    for (int i = 0; i < 1024; ++i) {
+        if (dst2[i] != 128) dc128Ok = false;
+    }
+    CHECK(dc128Ok);
+}
+
+TEST_CASE("builder d45 32x16 consumes real top-right zone 1") {
+    // golden: gate line b32_d45 head - need_right: numTop = 64; strength 3
+    // (filt_str(32,32,-23,0): blkWh 64 > 32 -> 3); upsample OFF (64 > 16)
+    unsigned char dst[1024] = {0};
+    intra::buildIntraPredictors(dst, 32, intra::D45_PRED, 0, 32, 32, 7, kAbove32, 32, 32, kLeft32, 32, 0);
+    const unsigned char goldenHead[16] = {18, 25, 32, 39, 46, 53, 60, 67,
+                                          74, 81, 88, 95, 102, 109, 116, 123};
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenHead[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("builder d135/d203 32x32 zones 2/3 match svt golden heads") {
+    // golden: gate lines b32_d135 / b32_d203 heads
+    unsigned char dst[1024] = {0};
+    intra::buildIntraPredictors(dst, 32, intra::D135_PRED, 0, 32, 32, 7, kAbove32, 32, 0, kLeft32, 32, 0);
+    const unsigned char golden135[16] = {8, 13, 19, 25, 32, 39, 46, 53,
+                                         60, 67, 74, 81, 88, 95, 102, 109};
+    bool ok135 = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != golden135[i]) ok135 = false;
+    }
+    CHECK(ok135);
+
+    unsigned char dst2[1024] = {0};
+    intra::buildIntraPredictors(dst2, 32, intra::D203_PRED, 0, 32, 32, 7, kAbove32, 32, 0, kLeft32, 32, 0);
+    const unsigned char golden203[16] = {14, 17, 20, 24, 28, 33, 37, 42,
+                                         47, 51, 56, 61, 65, 70, 74, 79};
+    bool ok203 = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst2[i] != golden203[i]) ok203 = false;
+    }
+    CHECK(ok203);
+}
+
+TEST_CASE("builder smooth/paeth 32x32 match svt golden heads") {
+    // golden: gate lines b32_sm / b32_paeth heads
+    unsigned char dst[1024] = {0};
+    intra::buildIntraPredictors(dst, 32, intra::SMOOTH_PRED, 0, 32, 32, 7, kAbove32, 32, 0, kLeft32, 32, 0);
+    const unsigned char goldenSm[16] = {9, 19, 29, 39, 48, 58, 67, 76,
+                                        84, 93, 101, 110, 118, 125, 132, 140};
+    bool okSm = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenSm[i]) okSm = false;
+    }
+    CHECK(okSm);
+
+    unsigned char dstP[1024] = {0};
+    intra::buildIntraPredictors(dstP, 32, intra::PAETH_PRED, 0, 32, 32, 7, kAbove32, 32, 0, kLeft32, 32, 0);
+    const unsigned char goldenPa[16] = {11, 18, 25, 32, 39, 46, 53, 60,
+                                        67, 74, 81, 88, 95, 102, 109, 116};
+    bool okPa = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dstP[i] != goldenPa[i]) okPa = false;
+    }
+    CHECK(okPa);
+}
+
+TEST_CASE("builder filter-intra 32x32 matches svt golden head") {
+    // golden: gate line b32_fiv head (FILTER_V_PRED at TX_32X32)
+    unsigned char dst[1024] = {0};
+    intra::buildIntraPredictors(dst, 32, intra::V_PRED, 0, 32, 32, 10, kAbove32 + 1, 32, 0,
+                                kLeft32, 32, 0, intra::NeighborContext(),
+                                static_cast<int>(intra::FilterIntraMode::FILTER_V_PRED));
+    const unsigned char goldenHead[16] = {15, 23, 31, 38, 45, 53, 60, 67,
+                                          74, 81, 88, 95, 102, 109, 116, 123};
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (dst[i] != goldenHead[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
 TEST_CASE("gpu block predictor 8x8 v matches builder") {
     if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
     gpurt::GpuContext ctx;
