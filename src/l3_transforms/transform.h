@@ -151,6 +151,18 @@ void quantizeB16x16(const std::int32_t* coeff, const QuantTables& tables, const 
 // (coefficients.c:345-363) at W=H=16
 void defaultScan16x16(std::int16_t scan[256]);
 
+// TX_32X32 entries (L5): same helpers at n_coeffs=1024, log_scale 1
+// (av1_get_tx_scale_tab[TX_32X32] = 1, full_loop.c:22)
+void quantizeFp32x32(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
+
+void quantizeB32x32(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                    std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
+
+// default (up-right diagonal) scan for 32x32, same svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=32
+void defaultScan32x32(std::int16_t scan[1024]);
+
 std::string quantCuSource();
 
 }  // namespace transforms

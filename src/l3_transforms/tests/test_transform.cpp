@@ -1145,6 +1145,68 @@ TEST_CASE("quantize fp/b 16x16 match the C6 gate vectors") {
     }
 }
 
+TEST_CASE("quantize fp/b 32x32 match the L0 log_scale-1 gate vectors") {
+    // goldens: golden_gen qscan32 / q32fp_q100 / q32b_q100 / q32fp_q0.
+    // log_scale = av1_get_tx_scale_tab[TX_32X32] = 1 (full_loop.c:22); the
+    // escalated arithmetic (rounding ROUND_POWER_OF_TWO(round, log_scale)
+    // full_loop.c:228, threshold << (1+log_scale) :244, >> (16-log_scale)
+    // :246, dq >> log_scale :249; b: zbins :36, round add :67, >>(16-log_scale
+    // +AOM_QM_BITS) :69-70, dq :74) is proven by the gate lines BEFORE the
+    // host port. fp-vs-b discriminator live at log_scale 1 on this fixture:
+    // qc[1] 2 (fp) vs 1 (b) and qc[5] 1 (fp) vs 0 (b). fixture = fwd2d32_dct
+    // of the L0 formula (the gate recomputes it into a dedicated outDct
+    // buffer after the ADST pass claims the shared one).
+    std::int16_t scan32[1024];
+    transforms::defaultScan32x32(scan32);
+    {
+        // qscan32 spot: head 16
+        const std::int16_t ref[16] = {0, 1, 32, 64, 33, 2, 3, 34, 65, 96, 128, 97, 66, 35, 4, 5};
+        bool scanOk = true;
+        for (int i = 0; i < 16; ++i) {
+            if (scan32[i] != ref[i]) scanOk = false;
+        }
+        CHECK(scanOk);
+    }
+
+    std::int16_t in32[1024];
+    for (int r = 0; r < 32; ++r) {
+        for (int c = 0; c < 32; ++c) {
+            in32[r * 32 + c] = static_cast<std::int16_t>((c * 7 + r * 5 + ((c * r) & 15)) % 173) - 86;
+        }
+    }
+    std::int32_t cdct32[1024];
+    transforms::fwdTxfm2d32x32(in32, cdct32, 32, transforms::TxType::DCT_DCT);
+
+    transforms::QuantTables t100;
+    transforms::buildQuantTables(100, t100);
+    {
+        std::int32_t qc[1024] = {0};
+        std::int32_t dq[1024] = {0};
+        std::uint16_t eob = 0;
+        transforms::quantizeFp32x32(cdct32, t100, scan32, qc, dq, &eob);
+        bool ok = true;
+        const std::int32_t qcHead[8] = {0, 2, 2, -5, 0, 1, -4, -2};
+        for (int i = 0; i < 8; ++i) {
+            if (qc[i] != qcHead[i]) ok = false;
+        }
+        if (qc[23] != -2) ok = false;  // fp discriminator at log_scale 1
+        CHECK(ok);
+    }
+    {
+        std::int32_t qc[1024] = {0};
+        std::int32_t dq[1024] = {0};
+        std::uint16_t eob = 0;
+        transforms::quantizeB32x32(cdct32, t100, scan32, qc, dq, &eob);
+        bool ok = true;
+        const std::int32_t qcHead[8] = {0, 1, 2, -5, 0, 0, -4, -2};
+        for (int i = 0; i < 8; ++i) {
+            if (qc[i] != qcHead[i]) ok = false;
+        }
+        if (qc[23] != -2) ok = false;  // b agrees with fp at the [23] position under this fixture
+        CHECK(ok);
+    }
+}
+
 TEST_CASE("gpu quant_dequant_8x8 matches host quantizeFp8x8 (dct + adst)") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");
@@ -1742,4 +1804,83 @@ TEST_CASE("invTxfm2dAdd32x32 matches svt golden 1024 samples both TxTypes") {
         if (pred[i] != goldenAdst[i]) okAdst = false;
     }
     CHECK(okAdst);
+}
+
+TEST_CASE("gpu quant_dequant_32x32 matches host quantizeFp32x32 full 1024") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    // fixture = fwd2d32_dct of the L0 formula (same as the gate's fixture)
+    std::int16_t in32[1024];
+    for (int r = 0; r < 32; ++r) {
+        for (int c = 0; c < 32; ++c) {
+            in32[r * 32 + c] = static_cast<std::int16_t>((c * 7 + r * 5 + ((c * r) & 15)) % 173) - 86;
+        }
+    }
+    std::int32_t cdct32[1024];
+    transforms::fwdTxfm2d32x32(in32, cdct32, 32, transforms::TxType::DCT_DCT);
+    std::int16_t scan32[1024];
+    transforms::defaultScan32x32(scan32);
+
+    const std::string ptx = *gpurt::compileToPtx(transforms::quantCuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "quant_dequant_32x32");
+    REQUIRE(it != names.end());
+    gpurt::Kernel k(ptx, *it);
+
+    transforms::QuantTables t_probe;
+    transforms::buildQuantTables(100, t_probe);
+
+    gpurt::DeviceBuffer dCoeff(1024 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dQuantFp(sizeof(t_probe.quantFp));
+    gpurt::DeviceBuffer dDequant(sizeof(t_probe.dequant));
+    gpurt::DeviceBuffer dRoundFp(sizeof(t_probe.roundFp));
+    gpurt::DeviceBuffer dScan(sizeof(scan32));
+    gpurt::DeviceBuffer dQcoeff(1024 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dDqcoeff(1024 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dEob(sizeof(std::uint16_t));
+    dScan.uploadFrom(scan32, sizeof(scan32));
+
+    CUdeviceptr pCoeff = dCoeff.get();
+    CUdeviceptr pQuantFp = dQuantFp.get();
+    CUdeviceptr pDequant = dDequant.get();
+    CUdeviceptr pRoundFp = dRoundFp.get();
+    CUdeviceptr pScan = dScan.get();
+    CUdeviceptr pQcoeff = dQcoeff.get();
+    CUdeviceptr pDqcoeff = dDqcoeff.get();
+    CUdeviceptr pEob = dEob.get();
+    void* args[] = {&pCoeff, &pQuantFp, &pDequant, &pRoundFp, &pScan, &pQcoeff, &pDqcoeff, &pEob};
+
+    for (int pass = 0; pass < 2; ++pass) {
+        const int q = pass == 0 ? 100 : 0;
+        transforms::QuantTables t;
+        transforms::buildQuantTables(q, t);
+        dQuantFp.uploadFrom(t.quantFp, sizeof(t.quantFp));
+        dDequant.uploadFrom(t.dequant, sizeof(t.dequant));
+        dRoundFp.uploadFrom(t.roundFp, sizeof(t.roundFp));
+        dCoeff.uploadFrom(cdct32, 1024 * sizeof(std::int32_t));
+
+        std::int32_t refQc[1024] = {0};
+        std::int32_t refDq[1024] = {0};
+        std::uint16_t refEob = 0;
+        transforms::quantizeFp32x32(cdct32, t, scan32, refQc, refDq, &refEob);
+
+        k.launch(1, 1, 1024, 1, args);
+
+        std::int32_t gotQc[1024] = {0};
+        std::int32_t gotDq[1024] = {0};
+        std::uint16_t gotEob = 0;
+        dQcoeff.downloadTo(gotQc, sizeof(gotQc));
+        dDqcoeff.downloadTo(gotDq, sizeof(gotDq));
+        dEob.downloadTo(&gotEob, sizeof(gotEob));
+        bool ok = true;
+        for (int i = 0; i < 1024; ++i) {
+            if (gotQc[i] != refQc[i] || gotDq[i] != refDq[i]) ok = false;
+        }
+        if (gotEob != refEob) ok = false;
+        CHECK(ok);
+    }
 }

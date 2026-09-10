@@ -3613,13 +3613,22 @@ void defaultScan4x4(std::int16_t scan[16]) {
     }
 }
 
-// quantize_fp_helper_c (full_loop.c:222) at log_scale 0, qm/iqm NULL branch.
-// Size-parameterized over n_coeffs (the C helper's own parameter); the 4x4/8x8
-// wrappers pass 16/64.
+// quantize_fp_helper_c (full_loop.c:222), qm/iqm NULL branch.
+// Size-parameterized over n_coeffs AND log_scale (the C helper's own
+// parameters): rounding = ROUND_POWER_OF_TWO(round_ptr, log_scale) (:228),
+// threshold (abs_coeff << (1+log_scale)) (:244), tmp32 >> (16-log_scale)
+// (:246), dq >> log_scale (:249). The 4x4/8x8/16x16 wrappers pass log_scale 0
+// (av1_get_tx_scale_tab = 0, full_loop.c:22); the 32x32 wrapper passes 1.
 void quantizeFpN(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
-                 int nCoeffs, std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+                 int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                 std::uint16_t* eob) {
     int eobVal = -1;
-    const std::int32_t rounding[2] = {tables.roundFp[0], tables.roundFp[1]};
+    // ROUND_POWER_OF_TWO(round_ptr[k], logScale) (full_loop.c:228, macro
+    // definitions.h:457; logScale 0 degenerates to the identity - the Q-audit
+    // finding)
+    const std::int32_t rounding[2] = {
+        static_cast<std::int32_t>((tables.roundFp[0] + ((1 << logScale) >> 1)) >> logScale),
+        static_cast<std::int32_t>((tables.roundFp[1] + ((1 << logScale) >> 1)) >> logScale)};
     for (int i = 0; i < nCoeffs; ++i) {
         qcoeff[i] = 0;
         dqcoeff[i] = 0;
@@ -3631,18 +3640,18 @@ void quantizeFpN(const std::int32_t* coeff, const QuantTables& tables, const std
         const std::int32_t coeffSign = coeffVal < 0 ? -1 : 0;
         std::int32_t absCoeff = (coeffVal ^ coeffSign) - coeffSign;
         std::int32_t tmp32 = 0;
-        if ((absCoeff << (1 + 0)) >= thresh) {
+        if ((absCoeff << (1 + logScale)) >= thresh) {
             std::int64_t clamped = absCoeff + rounding[rc != 0];
             if (clamped < -32768) clamped = -32768;
             if (clamped > 32767) clamped = 32767;
             absCoeff = static_cast<std::int32_t>(clamped);
-            tmp32 = static_cast<std::int32_t>((absCoeff * tables.quantFp[rc != 0]) >> (16 - 0));
+            tmp32 = static_cast<std::int32_t>((absCoeff * tables.quantFp[rc != 0]) >> (16 - logScale));
             if (tmp32) {
                 qcoeff[rc] = (tmp32 ^ coeffSign) - coeffSign;
                 const std::int32_t absDqcoeff =
                     static_cast<std::int32_t>((static_cast<std::int64_t>(tmp32) *
                                                tables.dequant[rc != 0]) >>
-                                              0);
+                                              logScale);
                 dqcoeff[rc] = (absDqcoeff ^ coeffSign) - coeffSign;
             }
         }
@@ -3655,20 +3664,27 @@ void quantizeFpN(const std::int32_t* coeff, const QuantTables& tables, const std
 
 void quantizeFp4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
                    std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
-    quantizeFpN(coeff, tables, scan, 16, qcoeff, dqcoeff, eob);
+    quantizeFpN(coeff, tables, scan, 16, 0, qcoeff, dqcoeff, eob);
 }
 
 void quantizeFp8x8(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
                    std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
-    quantizeFpN(coeff, tables, scan, 64, qcoeff, dqcoeff, eob);
+    quantizeFpN(coeff, tables, scan, 64, 0, qcoeff, dqcoeff, eob);
 }
 
 // svt_aom_quantize_b_c (full_loop.c:31) at log_scale 0, qm/iqm NULL branch
 // (wt = 1 << AOM_QM_BITS = 1 << 5, inv_transforms.h:27). Size-parameterized
-// over n_coeffs like the C original.
+// over n_coeffs AND log_scale (the C original's parameters): zbins
+// ROUND_POWER_OF_TWO(zbin, log_scale) (full_loop.c:36), round add
+// ROUND_POWER_OF_TWO(round, log_scale) (:67), tmp32
+// >> (16 - log_scale + AOM_QM_BITS) (:69-70), dq >> log_scale (:74).
 void quantizeBN(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
-                int nCoeffs, std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
-    const std::int32_t zbins[2] = {tables.zbin[0], tables.zbin[1]};
+                int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                std::uint16_t* eob) {
+    // ROUND_POWER_OF_TWO(zbin, logScale) (definitions.h:457; identity at 0)
+    const std::int32_t zbins[2] = {
+        static_cast<std::int32_t>((tables.zbin[0] + ((1 << logScale) >> 1)) >> logScale),
+        static_cast<std::int32_t>((tables.zbin[1] + ((1 << logScale) >> 1)) >> logScale)};
     const std::int32_t nzbins[2] = {zbins[0] * -1, zbins[1] * -1};
     int nonZeroCount = nCoeffs;
     int eobVal = -1;
@@ -3699,21 +3715,21 @@ void quantizeBN(const std::int32_t* coeff, const QuantTables& tables, const std:
 
         const std::int32_t wt = (1 << 5);
         if (absCoeff * wt >= (zbins[rc != 0] << 5)) {
-            // full_loop.c:67: ROUND_POWER_OF_TWO(round_ptr[rc != 0], 0) is the
-            // identity at log_scale 0 (roundShift(x, 0) would shift by 1<<-1,
-            // UB) â€” add the round value directly
-            std::int64_t tmp = absCoeff + tables.round[rc != 0];
+            // full_loop.c:67: ROUND_POWER_OF_TWO(round_ptr[rc != 0], logScale)
+            // (identity at logScale 0 - the Q-audit finding)
+            std::int64_t tmp =
+                absCoeff + ((tables.round[rc != 0] + ((1 << logScale) >> 1)) >> logScale);
             if (tmp < -32768) tmp = -32768;
             if (tmp > 32767) tmp = 32767;
             tmp *= wt;
             std::int32_t tmp32 = static_cast<std::int32_t>(
                 ((((tmp * tables.quant[rc != 0]) >> 16) + tmp) * tables.quantShift[rc != 0]) >>
-                (16 - 0 + 5));
+                (16 - logScale + 5));
             qcoeff[rc] = (tmp32 ^ coeffSign) - coeffSign;
             const std::int32_t absDqcoeff =
                 static_cast<std::int32_t>((static_cast<std::int64_t>(tmp32) *
                                            tables.dequant[rc != 0]) >>
-                                          0);
+                                          logScale);
             dqcoeff[rc] = (absDqcoeff ^ coeffSign) - coeffSign;
 
             if (tmp32) {
@@ -3726,23 +3742,55 @@ void quantizeBN(const std::int32_t* coeff, const QuantTables& tables, const std:
 
 void quantizeB4x4(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
-    quantizeBN(coeff, tables, scan, 16, qcoeff, dqcoeff, eob);
+    quantizeBN(coeff, tables, scan, 16, 0, qcoeff, dqcoeff, eob);
 }
 
 void quantizeB8x8(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
                   std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
-    quantizeBN(coeff, tables, scan, 64, qcoeff, dqcoeff, eob);
+    quantizeBN(coeff, tables, scan, 64, 0, qcoeff, dqcoeff, eob);
 }
 
 // TX_16X16 entries (C6): same helpers at n_coeffs=256, log_scale 0
 void quantizeFp16x16(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
                      std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
-    quantizeFpN(coeff, tables, scan, 256, qcoeff, dqcoeff, eob);
+    quantizeFpN(coeff, tables, scan, 256, 0, qcoeff, dqcoeff, eob);
 }
 
 void quantizeB16x16(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
-    quantizeBN(coeff, tables, scan, 256, qcoeff, dqcoeff, eob);
+    quantizeBN(coeff, tables, scan, 256, 0, qcoeff, dqcoeff, eob);
+}
+
+// TX_32X32 entries (L5): same helpers at n_coeffs=1024, log_scale 1
+void quantizeFp32x32(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeFpN(coeff, tables, scan, 1024, 1, qcoeff, dqcoeff, eob);
+}
+
+void quantizeB32x32(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                    std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeBN(coeff, tables, scan, 1024, 1, qcoeff, dqcoeff, eob);
+}
+
+// default (up-right diagonal) scan for 32x32, svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=32
+void defaultScan32x32(std::int16_t scan[1024]) {
+    const int W = 32, H = 32;
+    int idx = 0;
+    for (int d = 0; d < W + H - 1; ++d) {
+        const int rlo = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
+        const int rhi = d < (H - 1) ? d : (H - 1);
+        const int incr = (H > W) ? 1 : (W > H) ? 0 : (d & 1);
+        if (incr) {
+            for (int r = rlo; r <= rhi; ++r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        } else {
+            for (int r = rhi; r >= rlo; --r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        }
+    }
 }
 
 // default (up-right diagonal) scan for 8x8, svt_aom_init_iscan formula
@@ -3903,6 +3951,50 @@ extern "C" __global__ void quant_dequant_16x16(const int* coeff, const short* qu
     if (t == 0) {
         int m = -1;
         for (int i = 0; i < 256; ++i) {
+            if (eobPos[i] > m) m = eobPos[i];
+        }
+        *eob = (unsigned short)(m + 1);
+    }
+}
+
+// TX_32X32 entry (L5): same fp helper at n_coeffs=1024, log_scale 1
+// (av1_get_tx_scale_tab[TX_32X32] = 1, full_loop.c:22) - the escalated
+// arithmetic per full_loop.c:228/:244/:246/:249: rounding =
+// ROUND_POWER_OF_TWO(roundFp, 1) (precomputed here per-thread on the table
+// value), threshold << 2, quant >> 15 (16 - log_scale), dq >> 1; 1024
+// threads, thread t = scan position t; eobPos[1024] shared (4096 B).
+extern "C" __global__ void quant_dequant_32x32(const int* coeff, const short* quantFp,
+                                               const short* dequant, const short* roundFp,
+                                               const short* scan, int* qcoeff, int* dqcoeff,
+                                               unsigned short* eob) {
+    __shared__ int eobPos[1024];
+    const int t = threadIdx.x;
+    const int rc = scan[t];
+    qcoeff[rc] = 0;
+    dqcoeff[rc] = 0;
+    const int rounding = (roundFp[rc != 0] + 1) >> 1;  // ROUND_POWER_OF_TWO(round, 1)
+    const int thresh = dequant[rc != 0];
+    const int coeffVal = coeff[rc];
+    const int coeffSign = coeffVal < 0 ? -1 : 0;
+    int absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+    int tmp32 = 0;
+    if ((absCoeff << 2) >= thresh) {
+        long long clamped = absCoeff + rounding;
+        if (clamped < -32768) clamped = -32768;
+        if (clamped > 32767) clamped = 32767;
+        absCoeff = (int)clamped;
+        tmp32 = (int)((absCoeff * quantFp[rc != 0]) >> 15);
+        if (tmp32) {
+            qcoeff[rc] = (tmp32 ^ coeffSign) - coeffSign;
+            const int absDq = (int)(((long long)tmp32 * dequant[rc != 0]) >> 1);
+            dqcoeff[rc] = (absDq ^ coeffSign) - coeffSign;
+        }
+    }
+    eobPos[t] = tmp32 ? t : -1;
+    __syncthreads();
+    if (t == 0) {
+        int m = -1;
+        for (int i = 0; i < 1024; ++i) {
             if (eobPos[i] > m) m = eobPos[i];
         }
         *eob = (unsigned short)(m + 1);

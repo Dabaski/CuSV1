@@ -263,30 +263,34 @@ int main(void) {
         printf("qscan32:"); for (int i = 0; i < 1024; ++i) printf(" %d", scan32[i]); printf("\n");
 
         // log_scale-1 quant gate lines; fixture = fwd2d32_dct output (recomputed
-        // for provenance)
+        // into a dedicated buffer - the shared `out` now holds the ADST pass)
         SvtdQuantTables t100, t0;
         svtd_build_quantizer_luma(100, &t100);
         svtd_build_quantizer_luma(0, &t0);
-        TranLow qc[1024], dq[1024];
-        uint16_t eob = 0;
-        svtd_quantize_fp_32x32(out, &t100, scan32, qc, dq, &eob);
+        {
+            int32_t outDct[1024];
+            svtd_fwd2d32x32(in, 32, outDct, svt_av1_fdct32_new);
+            TranLow qc[1024], dq[1024];
+            uint16_t eob = 0;
+            svtd_quantize_fp_32x32(outDct, &t100, scan32, qc, dq, &eob);
         printf("q32fp_q100:");
         for (int i = 0; i < 1024; ++i) printf(" %d", qc[i]);
         printf(" |");
         for (int i = 0; i < 1024; ++i) printf(" %d", dq[i]);
         printf(" | %u\n", eob);
-        svtd_quantize_b_32x32(out, &t100, scan32, qc, dq, &eob);
+        svtd_quantize_b_32x32(outDct, &t100, scan32, qc, dq, &eob);
         printf("q32b_q100:");
         for (int i = 0; i < 1024; ++i) printf(" %d", qc[i]);
         printf(" |");
         for (int i = 0; i < 1024; ++i) printf(" %d", dq[i]);
         printf(" | %u\n", eob);
-        svtd_quantize_fp_32x32(out, &t0, scan32, qc, dq, &eob);
+        svtd_quantize_fp_32x32(outDct, &t0, scan32, qc, dq, &eob);
         printf("q32fp_q0:");
         for (int i = 0; i < 1024; ++i) printf(" %d", qc[i]);
         printf(" |");
         for (int i = 0; i < 1024; ++i) printf(" %d", dq[i]);
         printf(" | %u\n", eob);
+        }
     }
 
     fprintf(stderr, "CK: L0 done\n"); fflush(stderr);

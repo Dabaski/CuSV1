@@ -631,6 +631,28 @@ ModeDecision decideBlockMode16x16(const std::uint8_t* src, const std::uint8_t* a
     return best;
 }
 
+// L5 policy (32x32): all 13 PredictionModes, sad32x32-scored
+// (bit-exact with svt_nxm_sad_kernel_helper_c at 32x32), lowest wins,
+// tie-break = lowest mode index. Primitives are 1:1 SVT.
+ModeDecision decideBlockMode32x32(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                                  int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                  int nBottomLeftPx, std::uint8_t aboveLeft,
+                                  const intra::NeighborContext& neighbors) {
+    ModeDecision best{intra::DC_PRED, 0};
+    bool haveBest = false;
+    for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
+        std::uint8_t pred[1024] = {0};
+        intra::buildIntraPredictors(pred, 32, m, 0, 32, 32, aboveLeft, aboveRef, nTopPx, nTopRightPx,
+                                    leftRef, nLeftPx, nBottomLeftPx, neighbors);
+        const std::uint32_t sad = motion::sad32x32(src, 32, pred, 32);
+        if (!haveBest || sad < best.sad) {
+            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad};
+            haveBest = true;
+        }
+    }
+    return best;
+}
+
 // ---- C7: 16x16 frame compositions. M1 availability + REAL recon top-right
 // gather (FR-series); 16x16 roundtrip is exact so recon == source.
 void encodeFrameRecon16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
