@@ -26,64 +26,70 @@ twins are held to bit-exact agreement with the SVT host reference.
   `DeviceBuffer`, `Kernel`, `compileToPtx`, `ptxEntryNames`; kernel
   sources are CUDA C++ strings compiled for `compute_61`.
 - **l3_transforms** — SVT-AV1 fixed-point transforms, 4x4 / 8x8 /
-  16x16 / 32x32: `fdct4`/`fadst4`, `fdct8`/`fadst8`,
-  `fdct16`/`fadst16` and `fdct32`/`fadst32` forward with
-  `cospi`/`sinpi` tables, `halfBtf`, `roundShift` (fdct16/fadst16 are
-  cos_bit-parameterized — 16x16 is the one geometry where col 13 /
-  row 12 differ); 2D forward `fwdTxfm2d4x4`/`fwdTxfm2d8x8`/
-  `fwdTxfm2d16x16`/`fwdTxfm2d32x32` and inverse `invTxfm2dAdd4x4`/
-  `invTxfm2dAdd8x8`/`invTxfm2dAdd16x16`/`invTxfm2dAdd32x32` (fwd
-  shifts {2,0,0}/{2,-1,0}/{2,-2,0}/{2,-4,0}, inv
-  {0,-4}/{-1,-4}/{-2,-4}/{-2,-4}, 8-bit clip add; the inverse clamps
-  only where SVT consumes stage_range — idct16 stages 3-7, iadst16
-  stages 3/5/7, idct32 stages 3-9, iadst32 every stage, no all-zero
-  early-out at 16 or 32); 4x4/8x8/16x16 each have bit-exact GPU
-  twins (`fwd_txfm_2d_*` / `inv_txfm_2d_add_*`); 32x32 is host-only
-  so far. Integer only. Quantizer stage: `buildQuantTables` (luma
-  rows of `svt_av1_build_quantizer`, sharpness=0), `defaultScan4x4`/
-  `defaultScan8x8`/`defaultScan16x16`/`defaultScan32x32` (iscan
-  formula), `quantizeFp4x4`/`quantizeB4x4` +
-  `quantizeFp8x8`/`quantizeB8x8` + `quantizeFp16x16`/`quantizeB16x16`
-  + `quantizeFp32x32`/`quantizeB32x32` (verbatim
-  `quantize_fp_helper_c` / `svt_aom_quantize_b_c` semantics,
-  log_scale 0 at 4x4/8x8/16x16 and 1 at 32x32 — the only non-zero
-  scale in the table; dc/ac unified via dequant table index — this
-  SVT tree has no `av1_quantize_dc`); GPU twins `quant_dequant_4x4` /
-  `quant_dequant_8x8` / `quant_dequant_16x16` / `quant_dequant_32x32`
-  (quantize + dequant in one launch, bit-exact vs the host fp path,
-  TxType-agnostic). 64x64 is extracted in the generator
-  (`fdct64`/`idct64`) but not ported: this tree admits only DCT_DCT
-  there (`av1_txfm_type_ls[4]` = DCT64/INVALID/INVALID/IDENTITY64 —
-  no ADST at 64x64).
+  16x16 / 32x32 / 64x64: `fdct4`/`fadst4`, `fdct8`/`fadst8`,
+  `fdct16`/`fadst16`, `fdct32`/`fadst32` and `fdct64`/`idct64`
+  forward/inverse with `cospi`/`sinpi` tables, `halfBtf`, `roundShift`
+  (fdct16/fadst16 are cos_bit-parameterized — 16x16 is the one
+  geometry where col 13 / row 12 differ; fdct64B is
+  cos_bit-parameterized — 64x64 col 13 / row 10 is the only pass below
+  12; 64x64 is DCT-ONLY, no ADST exists in this tree:
+  `av1_txfm_type_ls[4]` = DCT64/INVALID/INVALID/IDENTITY64);
+  2D forward `fwdTxfm2d4x4`/`fwdTxfm2d8x8`/`fwdTxfm2d16x16`/
+  `fwdTxfm2d32x32`/`fwdTxfm2d64x64` and inverse
+  `invTxfm2dAdd4x4`/`invTxfm2dAdd8x8`/`invTxfm2dAdd16x16`/
+  `invTxfm2dAdd32x32`/`invTxfm2dAdd64x64` (fwd shifts
+  {2,0,0}/{2,-1,0}/{2,-2,0}/{2,-4,0}/{0,-2,-2}, inv
+  {0,-4}/{-1,-4}/{-2,-4}/{-2,-4}/{-2,-4}, 8-bit clip add; the inverse
+  clamps only where SVT consumes stage_range — idct16 stages 3-7,
+  iadst16 stages 3/5/7, idct32 stages 3-9, iadst32 every stage,
+  idct64 clamped at 16-bit range, no all-zero early-out at 16 or 32);
+  every size has bit-exact GPU twins (`fwd_txfm_2d_*` /
+  `inv_txfm_2d_add_*`). Integer only. Quantizer stage:
+  `buildQuantTables` (luma rows of `svt_av1_build_quantizer`,
+  sharpness=0), `defaultScan4x4`/`defaultScan8x8`/`defaultScan16x16`/
+  `defaultScan32x32`/`defaultScan64x64` (iscan formula),
+  `quantizeFp4x4`/`quantizeB4x4` + `quantizeFp8x8`/`quantizeB8x8` +
+  `quantizeFp16x16`/`quantizeB16x16` + `quantizeFp32x32`/`quantizeB32x32`
+  + `quantizeFp64x64`/`quantizeB64x64` (verbatim
+  `quantize_fp_helper_c` / `svt_aom_quantize_b_c` semantics, log_scale
+  0 at 4x4/8x8/16x16, 1 at 32x32, 2 at 64x64; dc/ac unified via
+  dequant table index — this SVT tree has no `av1_quantize_dc`); GPU
+  twins `quant_dequant_4x4` / `quant_dequant_8x8` /
+  `quant_dequant_16x16` / `quant_dequant_32x32` /
+  `quant_dequant_64x64` (quantize + dequant in one launch, bit-exact
+  vs the host fp path, TxType-agnostic).
 - **l4_intra** — `buildIntraPredictors` (1:1 with SVT, luma,
-  size-generic over 4/8/16/32, DC availability variants,
+  size-generic over 4/8/16/32/64, DC availability variants,
   missing-neighbor fills), `dr_z1`/`z2`/`z3` + `drPredictor`, edge
   filter / upsample (with `disable_edge_filter` config and `filt_type`
   neighbor plumbing), filter-intra, smoothPredict family; GPU twins
-  `predict_block_4x4`, `predict_block_8x8`, `predict_block_16x16`
-  and `predict_block_32x32` (1024 threads — the CUDA block maximum —
-  one thread per pixel under `__launch_bounds__(1024)`; the corner
-  blend is live at 16x16 and 32x32 but dead at 4x4/8x8, and edge
-  upsample never fires at 16x16 or 32x32); GPU == host
-  verified for all 8 dr modes x angle deltas at every size.
+  `predict_block_4x4`, `predict_block_8x8`, `predict_block_16x16`,
+  `predict_block_32x32` (1024 threads — the CUDA block maximum —
+  one thread per pixel under `__launch_bounds__(1024)`) and
+  `predict_block_64x64` (1024 threads, four pixels per thread
+  p = t + 1024k; filter-intra is not signalable at 64x64 so the 64
+  kernel has no FI path; the corner blend is live at 16x16/32x32/64x64
+  but dead at 4x4/8x8, and edge upsample never fires above 8x8); GPU
+  == host verified for all 8 dr modes x angle deltas at every size.
 - **l5_motion** — `motion::sad4x4` / `sad8x8` / `sad16x16` /
-  `sad32x32` (strided uint8; sad8x8 mirrors SVT's dedicated
-  `compute8x8_sad_kernel_c`, the other three mirror
+  `sad32x32` / `sad64x64` (strided uint8; sad8x8 mirrors SVT's
+  dedicated `compute8x8_sad_kernel_c`, the rest mirror
   `svt_nxm_sad_kernel_helper_c` at their dims) + GPU kernels for
-  4x4/8x8; the 16x16 and 32x32 D2 policies score host-side.
+  4x4/8x8; the 16x16/32x32/64x64 D2 policies score host-side.
 - **l6_pipeline** — block and frame composition and mode decision at
-  4x4 / 8x8 / 16x16 (32x32 decision is in, 32x32 frame loops in
-  progress).
+  4x4 / 8x8 / 16x16 / 32x32 / 64x64.
   Block level: `encodeBlock4x4` = plane window (l1) +
   `buildIntraPredictors` (l4) -> int16 residual (no clamp) ->
   `fwdTxfm2d4x4` (l3); `encodeRecon4x4` adds the inverse round trip.
   Frame level: `encodeFrameRecon4x4`/`encodeFrameRecon8x8`/
-  `encodeFrameRecon16x16` run a raster grid with recon-only
+  `encodeFrameRecon16x16`/`encodeFrameRecon32x32`/
+  `encodeFrameRecon64x64` run a raster grid with recon-only
   neighbors; `frameMse8` is the integer frame SSE; the D2 policy
-  (`decideBlockMode4x4`/`8x8`/`16x16`/`32x32`) scores all 13
+  (`decideBlockMode4x4`/`8x8`/`16x16`/`32x32`/`64x64`) scores all 13
   PredictionModes by SAD (project-defined policy, SVT primitives);
   primitives); the Auto variants (`encodeFrameAuto4x4`/
-  `encodeFrameAuto8x8`/`encodeFrameAuto16x16`) drive full frames —
+  `encodeFrameAuto8x8`/`encodeFrameAuto16x16`/`encodeFrameAuto32x32`/
+  `encodeFrameAuto64x64`) drive full frames —
   each block's mode chosen against RECONSTRUCTED edges, with the
   FR-series REAL top-right gather (above[B..2B-1] come from the
   reconstructed row above, not zeros), the chosen modes feeding
@@ -175,8 +181,9 @@ ctest --test-dir build -R l4_intra
 
 `tools/bench/` builds the `av1_bench` console tool: it records the GPU
 name/driver/clocks at run time (nvidia-smi query), then times host and
-GPU composite auto-frame encodes (lossless + q100, 4x4, 8x8 and 16x16
-geometry, 64x64 frame tiled from the B7 test fixture) plus per-stage
+GPU composite auto-frame encodes (lossless + q100, 4x4, 8x8, 16x16,
+32x32 and 64x64 geometry — 64-frame tiled from the B7 fixture for
+4/8/16, 128-frame for 32, 256-frame for 64) plus per-stage
 single-launch kernel timings. Every GPU configuration runs an untimed
 bit-exact verification pass against the host output first and refuses
 to report timings on mismatch. The composite loop is host decision +
