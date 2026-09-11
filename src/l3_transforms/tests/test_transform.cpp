@@ -1986,3 +1986,79 @@ TEST_CASE("gpu quant_dequant_32x32 matches host quantizeFp32x32 full 1024") {
         CHECK(ok);
     }
 }
+
+TEST_CASE("gpu quant_dequant_64x64 matches host quantizeFp64x64 full 4096") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    // fixture = fwd2d64_dct of the L7 formula (same as the gate's fixture)
+    std::int16_t in64[4096];
+    for (int r = 0; r < 64; ++r) {
+        for (int c = 0; c < 64; ++c) {
+            in64[r * 64 + c] = static_cast<std::int16_t>((c * 3 + r * 2 + ((c * r) & 7)) % 149) - 74;
+        }
+    }
+    std::int32_t cdct64[4096];
+    transforms::fwdTxfm2d64x64(in64, cdct64, 64, transforms::TxType::DCT_DCT);
+    std::int16_t scan64[4096];
+    transforms::defaultScan64x64(scan64);
+
+    const std::string ptx = *gpurt::compileToPtx(transforms::quantCuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "quant_dequant_64x64");
+    REQUIRE(it != names.end());
+    gpurt::Kernel k(ptx, *it);
+
+    gpurt::DeviceBuffer dCoeff(4096 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dQuantFp(sizeof(transforms::QuantTables{}.quantFp));
+    gpurt::DeviceBuffer dDequant(sizeof(transforms::QuantTables{}.dequant));
+    gpurt::DeviceBuffer dRoundFp(sizeof(transforms::QuantTables{}.roundFp));
+    gpurt::DeviceBuffer dScan(sizeof(scan64));
+    gpurt::DeviceBuffer dQcoeff(4096 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dDqcoeff(4096 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dEob(sizeof(std::uint16_t));
+    dScan.uploadFrom(scan64, sizeof(scan64));
+
+    CUdeviceptr pCoeff = dCoeff.get();
+    CUdeviceptr pQuantFp = dQuantFp.get();
+    CUdeviceptr pDequant = dDequant.get();
+    CUdeviceptr pRoundFp = dRoundFp.get();
+    CUdeviceptr pScan = dScan.get();
+    CUdeviceptr pQcoeff = dQcoeff.get();
+    CUdeviceptr pDqcoeff = dDqcoeff.get();
+    CUdeviceptr pEob = dEob.get();
+    void* args[] = {&pCoeff, &pQuantFp, &pDequant, &pRoundFp, &pScan, &pQcoeff, &pDqcoeff, &pEob};
+
+    for (int pass = 0; pass < 2; ++pass) {
+        const int q = pass == 0 ? 100 : 0;
+        transforms::QuantTables t;
+        transforms::buildQuantTables(q, t);
+        dQuantFp.uploadFrom(t.quantFp, sizeof(t.quantFp));
+        dDequant.uploadFrom(t.dequant, sizeof(t.dequant));
+        dRoundFp.uploadFrom(t.roundFp, sizeof(t.roundFp));
+        dCoeff.uploadFrom(cdct64, 4096 * sizeof(std::int32_t));
+
+        std::int32_t refQc[4096] = {0};
+        std::int32_t refDq[4096] = {0};
+        std::uint16_t refEob = 0;
+        transforms::quantizeFp64x64(cdct64, t, scan64, refQc, refDq, &refEob);
+
+        k.launch(1, 1, 1024, 1, args);
+
+        std::int32_t gotQc[4096] = {0};
+        std::int32_t gotDq[4096] = {0};
+        std::uint16_t gotEob = 0;
+        dQcoeff.downloadTo(gotQc, sizeof(gotQc));
+        dDqcoeff.downloadTo(gotDq, sizeof(gotDq));
+        dEob.downloadTo(&gotEob, sizeof(gotEob));
+        bool ok = true;
+        for (int i = 0; i < 4096; ++i) {
+            if (gotQc[i] != refQc[i] || gotDq[i] != refDq[i]) ok = false;
+        }
+        if (gotEob != refEob) ok = false;
+        CHECK(ok);
+    }
+}

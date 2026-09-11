@@ -8135,6 +8135,54 @@ extern "C" __global__ void quant_dequant_32x32(const int* coeff, const short* qu
         *eob = (unsigned short)(m + 1);
     }
 }
+
+// TX_64X64 entry (L9): same fp helper at n_coeffs=4096, log_scale 2
+// (av1_get_tx_scale_tab[TX_64X64] = 2, full_loop.c:22) - escalated arithmetic:
+// rounding = ROUND_POWER_OF_TWO(roundFp, 2), threshold << 3, quant >> 14
+// (16 - log_scale), dq >> 2; 4096 coeffs / 1024 threads = 4 scan positions
+// per thread (t, t+1024, t+2048, t+3072); eobPos[1024] shared (4096 B).
+extern "C" __global__ void quant_dequant_64x64(const int* coeff, const short* quantFp,
+                                               const short* dequant, const short* roundFp,
+                                               const short* scan, int* qcoeff, int* dqcoeff,
+                                               unsigned short* eob) {
+    __shared__ int eobPos[1024];
+    const int t = threadIdx.x;
+    int bestPos = -1;
+    for (int k = 0; k < 4; ++k) {
+        const int pos = t + 1024 * k;
+        const int rc = scan[pos];
+        qcoeff[rc] = 0;
+        dqcoeff[rc] = 0;
+        const int rounding = (roundFp[rc != 0] + 3) >> 2;  // ROUND_POWER_OF_TWO(round, 2)
+        const int thresh = dequant[rc != 0];
+        const int coeffVal = coeff[rc];
+        const int coeffSign = coeffVal < 0 ? -1 : 0;
+        int absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+        int tmp32 = 0;
+        if ((absCoeff << 3) >= thresh) {
+            long long clamped = absCoeff + rounding;
+            if (clamped < -32768) clamped = -32768;
+            if (clamped > 32767) clamped = 32767;
+            absCoeff = (int)clamped;
+            tmp32 = (int)((absCoeff * quantFp[rc != 0]) >> 14);
+            if (tmp32) {
+                qcoeff[rc] = (tmp32 ^ coeffSign) - coeffSign;
+                const int absDq = (int)(((long long)tmp32 * dequant[rc != 0]) >> 2);
+                dqcoeff[rc] = (absDq ^ coeffSign) - coeffSign;
+            }
+        }
+        if (tmp32 && pos > bestPos) bestPos = pos;
+    }
+    eobPos[t] = bestPos;
+    __syncthreads();
+    if (t == 0) {
+        int m = -1;
+        for (int i = 0; i < 1024; ++i) {
+            if (eobPos[i] > m) m = eobPos[i];
+        }
+        *eob = (unsigned short)(m + 1);
+    }
+}
 )CUDA";
 }
 
