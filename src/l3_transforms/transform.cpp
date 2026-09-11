@@ -29,6 +29,15 @@ const std::int32_t kCospi12[64] = {
 // svt_aom_eb_av1_sinpi_arr_data[2], the cos_bit=12 row
 const std::int32_t kSinpi12[5] = {0, 1321, 2482, 3344, 3803};
 
+// svt_aom_eb_av1_cospi_arr_data[1], the cos_bit=10 row (fwd_cos_bit_row[4][4]
+// = 10, the TX_64X64 row pass - the only pass below 12). VERBATIM row 0 of
+// svt_aom_eb_av1_cospi_arr_data (7-row table, cos_bit_min = 10).
+const std::int32_t kCospi10[64] = {
+    1024, 1024, 1023, 1021, 1019, 1016, 1013, 1009, 1004, 999, 993, 987, 980, 972, 964, 955,
+    946, 936, 926, 915, 903, 891, 878, 865, 851, 837, 822, 807, 792, 775, 759, 742,
+    724, 706, 688, 669, 650, 630, 610, 590, 569, 548, 526, 505, 483, 460, 438, 415,
+    392, 369, 345, 321, 297, 273, 249, 224, 200, 175, 150, 125, 100, 75, 50, 25};
+
 // inv_transforms.c:88 clamp_value, fixed clamp bit (16 for 8-bit, per
 // svt_av1_gen_inv_stage_range)
 constexpr int kInvClampBit = 16;
@@ -736,9 +745,12 @@ void fadst8(const std::int32_t input[8], std::int32_t output[8]) {
 }
 
 // cospi_arr(cos_bit) (inv_transforms.h): per-bit cospi table row. The host
-// keeps the bit-13 (fwd) and bit-12 (INV_COS_BIT) rows.
+// keeps the bit-13 (fwd), bit-12 (INV_COS_BIT) and bit-10 (TX_64X64 row pass,
+// fwd_cos_bit_row[4][4]) rows.
 const std::int32_t* cospiRow(int cosBit) {
-    return cosBit == 13 ? kCospi13 : kCospi12;
+    if (cosBit == 13) return kCospi13;
+    if (cosBit == 10) return kCospi10;
+    return kCospi12;
 }
 
 // svt_av1_fdct16_new (transforms.c:268-420), cos_bit parameter (13 for the
@@ -1333,8 +1345,11 @@ void fdct32(const std::int32_t input[32], std::int32_t output[32]) {
 // structure preserved (bf0/bf1 alternation), ported mechanically from the
 // committed extract svt_gen.c (only mechanical renames: half_btf -> halfBtf)
 void fdct64(const std::int32_t input[64], std::int32_t output[64]) {
-    const int8_t cosBit = 13;
-    const std::int32_t* cospi = kCospi13;
+    fdct64B(input, output, 13);
+}
+
+void fdct64B(const std::int32_t input[64], std::int32_t output[64], int cosBit) {
+    const std::int32_t* cospi = cospiRow(cosBit);
     std::int32_t step[64];
     std::int32_t* bf0;
     std::int32_t* bf1;
@@ -3683,7 +3698,7 @@ void fwdTxfm2d64x64(const std::int16_t* input, std::int32_t* output, std::uint32
             tempIn[r] = input[r * stride + c];
         }
         // round_shift_array(..., -shift[0]) with shift[0] = 0 -> no-op
-        fdct64(tempIn, tempOut);
+        fdct64B(tempIn, tempOut, 13);  // cos_bit col 13
         // round_shift_array(..., -shift[1]) with shift[1] = -2 -> >>2 rounding
         for (std::uint32_t i = 0; i < 64; ++i) {
             tempOut[i] = roundShift(tempOut[i], 2);
@@ -3694,7 +3709,7 @@ void fwdTxfm2d64x64(const std::int16_t* input, std::int32_t* output, std::uint32
     }
 
     for (std::uint32_t r = 0; r < 64; ++r) {
-        fdct64(buf + r * 64, output + r * 64);
+        fdct64B(buf + r * 64, output + r * 64, 10);  // cos_bit row 10
         // round_shift_array(..., -shift[2]) with shift[2] = -2 -> >>2 rounding
         for (std::uint32_t i = 0; i < 64; ++i) {
             output[r * 64 + i] = roundShift(output[r * 64 + i], 2);

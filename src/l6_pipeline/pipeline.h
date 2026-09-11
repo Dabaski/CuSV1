@@ -106,6 +106,23 @@ void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std:
 void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                            std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
 
+// L9: 64x64 frame compositions. M1 availability + FR-series REAL recon
+// top-right gather (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]). DCT-only
+// at 64x64. The 64x64 fwd net shift is 0 (2-2-2) - the roundtrip is lossy
+// like 8x8/32x32 (recon != source).
+void encodeFrameRecon64x64(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
+
+void encodeFrameAuto64x64(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                          std::uint8_t* modes, transforms::TxType txType);
+
+void encodeFrameRecon64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
+                            transforms::TxType txType);
+
+void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+
 // Sum of squared sample differences over the full frame (integer, exact).
 std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 

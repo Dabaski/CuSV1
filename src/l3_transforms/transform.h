@@ -41,8 +41,10 @@ void idct32(const std::int32_t input[32], std::int32_t output[32]);
 void iadst32(const std::int32_t input[32], std::int32_t output[32]);
 
 // svt_av1_fdct64_new (transforms.c:762), cos_bit = 13 (fwd_cos_bit_col[4][4]);
-// verbatim body (pointer-swap structure preserved)
+// verbatim body (pointer-swap structure preserved). B variant takes cos_bit
+// (TX_64X64 row pass uses 10 per fwd_cos_bit_row[4][4])
 void fdct64(const std::int32_t input[64], std::int32_t output[64]);
+void fdct64B(const std::int32_t input[64], std::int32_t output[64], int cosBit);
 
 // svt_av1_idct64_new (inv_transforms.c:1567), cos_bit = 12; clamp stages per
 // the source audit; DCT-only (no ADST at 64x64, inv_transforms.h:196)

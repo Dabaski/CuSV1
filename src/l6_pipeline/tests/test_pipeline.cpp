@@ -3681,3 +3681,118 @@ TEST_CASE("gpu frame auto 32x32 with quantization matches host encodeFrameAuto32
     }
     CHECK(coeffsOk);
 }
+TEST_CASE("frame auto 64x64 matches the f64 generator golden (real top-right)") {
+    // golden: golden_gen f64_modes/f64_recon/f64_coeffs (128x128, 2x2 of
+    // 64x64; rows 0-63 ramp x+y+1, rows 64-127 zero). Block 2 (bx=0, by=1) is
+    // the only nTr>0 block; with REAL recon top-right the D45 zone-1 SAD is 0
+    // (above[j] = j+64, pred above[1+r+c] = r+c+65 = src[64+r][c]) and H wins
+    // on the zero rows; the mode map discriminates the FR gather. 64x64 fwd
+    // net shift 0: recon is LOSSY vs source (generator probe: 371 +-1..3
+    // diffs, first idx 64 recon 68 vs src 65) - recon pinned to the f64_recon
+    // gate line.
+    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+
+    pixels::Plane plane(128, 128, 4);
+    pixels::Plane recon(128, 128, 4);
+    for (int y = 0; y < 128; ++y)
+        for (int x = 0; x < 128; ++x)
+            plane.at(x, y) = (y < 64) ? static_cast<std::uint8_t>(x + y + 1) : 0;
+
+    std::int32_t coeffs[16384] = {0};
+    std::uint8_t modes[4] = {0};
+    pipeline::encodeFrameAuto64x64(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+}
+
+TEST_CASE("frame auto 64x64 with quantization matches the f64q generator golden") {
+    // golden: golden_gen f64q_modes at qindex 100 (FP quantizer at
+    // n_coeffs=4096, log_scale 2). Modes identical to lossless (1 7 2 2).
+    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+
+    pixels::Plane plane(128, 128, 4);
+    pixels::Plane recon(128, 128, 4);
+    for (int y = 0; y < 128; ++y)
+        for (int x = 0; x < 128; ++x)
+            plane.at(x, y) = (y < 64) ? static_cast<std::uint8_t>(x + y + 1) : 0;
+
+    std::int32_t coeffs[16384] = {0};
+    std::uint8_t modes[4] = {0};
+    pipeline::encodeFrameAuto64x64Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i) {
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    }
+    CHECK(modesOk);
+}
+
+TEST_CASE("frame recon 64x64 forced mode matches the f64v generator golden") {
+    // golden: golden_gen f64v_recon/f64v_coeffs (V_PRED forced + DCT over the
+    // f64 fixture) - Recon64x64 gate-pinned from the start (no C7b gap).
+    const std::int32_t goldenBlk0[8] = {-8062, -2348, 0, -261, 0, -93, 0, -47};
+
+    pixels::Plane plane(128, 128, 4);
+    pixels::Plane recon(128, 128, 4);
+    for (int y = 0; y < 128; ++y)
+        for (int x = 0; x < 128; ++x)
+            plane.at(x, y) = (y < 64) ? static_cast<std::uint8_t>(x + y + 1) : 0;
+
+    std::int32_t coeffs[16384] = {0};
+    pipeline::encodeFrameRecon64x64(plane, recon, coeffs, intra::V_PRED, 0,
+                                    transforms::TxType::DCT_DCT);
+
+    const std::uint8_t goldenReconRow0[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const std::uint8_t goldenReconRow62[8] = {63, 64, 65, 66, 67, 68, 69, 70};
+    const std::uint8_t goldenReconRow64[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    bool reconOk = true;
+    for (int x = 0; x < 8; ++x) {
+        if (recon.at(x, 0) != goldenReconRow0[x]) reconOk = false;
+        if (recon.at(x, 62) != goldenReconRow62[x]) reconOk = false;
+        if (recon.at(x, 64) != goldenReconRow64[x]) reconOk = false;
+    }
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 8; ++i) {
+        if (coeffs[i] != goldenBlk0[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
+}
+
+TEST_CASE("frame recon 64x64 with quantization matches the f64vq generator golden") {
+    // golden: golden_gen f64vq at qindex 100 (forced V, FP quantizer at
+    // n_coeffs=4096/log_scale 2); recon carries real quantization loss.
+    const std::int32_t goldenBlk0[8] = {-346, -84, 0, -9, 0, -3, 0, -2};
+
+    pixels::Plane plane(128, 128, 4);
+    pixels::Plane recon(128, 128, 4);
+    for (int y = 0; y < 128; ++y)
+        for (int x = 0; x < 128; ++x)
+            plane.at(x, y) = (y < 64) ? static_cast<std::uint8_t>(x + y + 1) : 0;
+
+    std::int32_t coeffs[16384] = {0};
+    pipeline::encodeFrameRecon64x64Q(plane, recon, coeffs, intra::V_PRED, 0, 100,
+                                     transforms::TxType::DCT_DCT);
+
+    const std::uint8_t goldenReconRow0[8] = {2, 3, 4, 5, 6, 7, 8, 9};
+    const std::uint8_t goldenReconRow62[8] = {64, 64, 65, 66, 67, 68, 69, 70};
+    const std::uint8_t goldenReconRow64[8] = {0, 1, 0, 0, 0, 0, 0, 0};
+    bool reconOk = true;
+    for (int x = 0; x < 8; ++x) {
+        if (recon.at(x, 0) != goldenReconRow0[x]) reconOk = false;
+        if (recon.at(x, 62) != goldenReconRow62[x]) reconOk = false;
+        if (recon.at(x, 64) != goldenReconRow64[x]) reconOk = false;
+    }
+    CHECK(reconOk);
+
+    bool coeffsOk = true;
+    for (int i = 0; i < 8; ++i) {
+        if (coeffs[i] != goldenBlk0[i]) coeffsOk = false;
+    }
+    CHECK(coeffsOk);
+}
