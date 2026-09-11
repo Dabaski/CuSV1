@@ -1207,6 +1207,64 @@ TEST_CASE("quantize fp/b 32x32 match the L0 log_scale-1 gate vectors") {
     }
 }
 
+TEST_CASE("quantize fp/b 64x64 match the L0 log_scale-2 gate vectors") {
+    // goldens: golden_gen qscan64 / q64fp_q100 / q64b_q100 / q64fp_q0.
+    // log_scale = av1_get_tx_scale_tab[TX_64X64] = 2 (full_loop.c:22); the
+    // escalated arithmetic is proven by the gate lines BEFORE the host port.
+    // fp-vs-b discriminator live at log_scale 2 on this fixture: qc[6] -7 (fp)
+    // vs -6 (b). fixture = fwd2d64_dct of the L7 formula (the gate recomputes
+    // it). DCT-only at 64x64 (no ADST in this tree) but the helpers are
+    // TxType-agnostic.
+    std::int16_t scan64[4096];
+    transforms::defaultScan64x64(scan64);
+    {
+        const std::int16_t ref[16] = {0, 1, 64, 128, 65, 2, 3, 66, 129, 192, 256, 193, 130, 67, 4, 5};
+        bool scanOk = true;
+        for (int i = 0; i < 16; ++i) {
+            if (scan64[i] != ref[i]) scanOk = false;
+        }
+        CHECK(scanOk);
+    }
+
+    std::int16_t in64[4096];
+    for (int r = 0; r < 64; ++r) {
+        for (int c = 0; c < 64; ++c) {
+            in64[r * 64 + c] = static_cast<std::int16_t>((c * 3 + r * 2 + ((c * r) & 7)) % 149) - 74;
+        }
+    }
+    std::int32_t cdct64[4096];
+    transforms::fwdTxfm2d64x64(in64, cdct64, 64, transforms::TxType::DCT_DCT);
+
+    transforms::QuantTables t100;
+    transforms::buildQuantTables(100, t100);
+    {
+        std::int32_t qc[4096] = {0};
+        std::int32_t dq[4096] = {0};
+        std::uint16_t eob = 0;
+        transforms::quantizeFp64x64(cdct64, t100, scan64, qc, dq, &eob);
+        bool ok = true;
+        const std::int32_t qcHead[8] = {7, 8, 13, -18, 2, -8, -7, -2};
+        for (int i = 0; i < 8; ++i) {
+            if (qc[i] != qcHead[i]) ok = false;
+        }
+        if (qc[6] != -7) ok = false;  // fp discriminator at log_scale 2
+        CHECK(ok);
+    }
+    {
+        std::int32_t qc[4096] = {0};
+        std::int32_t dq[4096] = {0};
+        std::uint16_t eob = 0;
+        transforms::quantizeB64x64(cdct64, t100, scan64, qc, dq, &eob);
+        bool ok = true;
+        const std::int32_t qcHead[8] = {7, 8, 13, -18, 2, -8, -6, -2};
+        for (int i = 0; i < 8; ++i) {
+            if (qc[i] != qcHead[i]) ok = false;
+        }
+        if (qc[6] != -6) ok = false;  // b discriminator
+        CHECK(ok);
+    }
+}
+
 TEST_CASE("gpu quant_dequant_8x8 matches host quantizeFp8x8 (dct + adst)") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");

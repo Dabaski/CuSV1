@@ -3668,6 +3668,40 @@ void fwdTxfm2d32x32(const std::int16_t* input, std::int32_t* output, std::uint32
     }
 }
 
+// av1_tranform_two_d_core_c (transforms.c:2398) at TX_64X64: fwd_shift_64x64
+// = {0, -2, -2} (transforms.c:126), cos_bit col 13 / row 10 from
+// fwd_cos_bit_col/row[4][4] (transforms.c:19-22). DCT-ONLY at 64x64 (no ADST
+// exists in this tree, inv_transforms.h:196).
+void fwdTxfm2d64x64(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type) {
+    (void)type;  // DCT-only
+    std::int32_t buf[64 * 64];
+    std::int32_t tempIn[64];
+    std::int32_t tempOut[64];
+
+    for (std::uint32_t c = 0; c < 64; ++c) {
+        for (std::uint32_t r = 0; r < 64; ++r) {
+            tempIn[r] = input[r * stride + c];
+        }
+        // round_shift_array(..., -shift[0]) with shift[0] = 0 -> no-op
+        fdct64(tempIn, tempOut);
+        // round_shift_array(..., -shift[1]) with shift[1] = -2 -> >>2 rounding
+        for (std::uint32_t i = 0; i < 64; ++i) {
+            tempOut[i] = roundShift(tempOut[i], 2);
+        }
+        for (std::uint32_t r = 0; r < 64; ++r) {
+            buf[r * 64 + c] = tempOut[r];
+        }
+    }
+
+    for (std::uint32_t r = 0; r < 64; ++r) {
+        fdct64(buf + r * 64, output + r * 64);
+        // round_shift_array(..., -shift[2]) with shift[2] = -2 -> >>2 rounding
+        for (std::uint32_t i = 0; i < 64; ++i) {
+            output[r * 64 + i] = roundShift(output[r * 64 + i], 2);
+        }
+    }
+}
+
 namespace {
 
 using InvTxfmFn = void (*)(const std::int32_t*, std::int32_t*);
@@ -3837,6 +3871,40 @@ void invTxfm2dAdd32x32(const std::int32_t* coeffs, std::uint8_t* dst, std::uint3
         txfmRow(tempIn, tempOut);
         roundShiftArrayIv(tempOut, 32, 4);
         for (std::uint32_t r = 0; r < 32; ++r) {
+            clipPixelAdd(dst + r * stride + c, tempOut[r]);
+        }
+    }
+}
+
+// svt_av1_inv_txfm2d_add_64x64_c / inv_txfm2d_add_c, TX_64X64: rows then
+// columns, inv_shift_64x64 = {-2, -4}, cos_bit 12/12, no flips, clamp bits
+// bd+8=16 and max(bd+6,16)=16; add via clip_pixel_highbd(pred +
+// round_shift(out, 4), 8). DCT-ONLY at 64x64.
+void invTxfm2dAdd64x64(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type) {
+    (void)type;  // DCT-only
+    std::int32_t buf[64 * 64];
+    std::int32_t tempIn[64];
+    std::int32_t tempOut[64];
+
+    // rows: clamp 16, 1D, round_shift_array(-shift[0]) = +2 rounding >>2
+    for (std::uint32_t r = 0; r < 64; ++r) {
+        for (std::uint32_t c = 0; c < 64; ++c) {
+            tempIn[c] = coeffs[r * 64 + c];
+        }
+        clampBufIv(tempIn, 64, kInvClampBit);
+        idct64(tempIn, buf + r * 64);
+        roundShiftArrayIv(buf + r * 64, 64, 2);
+    }
+
+    // columns: clamp 16, 1D, round_shift_array(-shift[1]) = +4, clip add
+    for (std::uint32_t c = 0; c < 64; ++c) {
+        for (std::uint32_t r = 0; r < 64; ++r) {
+            tempIn[r] = buf[r * 64 + c];
+        }
+        clampBufIv(tempIn, 64, kInvClampBit);
+        idct64(tempIn, tempOut);
+        roundShiftArrayIv(tempOut, 64, 4);
+        for (std::uint32_t r = 0; r < 64; ++r) {
             clipPixelAdd(dst + r * stride + c, tempOut[r]);
         }
     }
@@ -6174,6 +6242,39 @@ void quantizeFp32x32(const std::int32_t* coeff, const QuantTables& tables, const
 void quantizeB32x32(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
     quantizeBN(coeff, tables, scan, 1024, 1, qcoeff, dqcoeff, eob);
+}
+
+// TX_64X64 entries (L9): same helpers at n_coeffs=4096, log_scale 2
+// (av1_get_tx_scale_tab[TX_64X64] = 2, full_loop.c:22)
+void quantizeFp64x64(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeFpN(coeff, tables, scan, 4096, 2, qcoeff, dqcoeff, eob);
+}
+
+void quantizeB64x64(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                    std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    quantizeBN(coeff, tables, scan, 4096, 2, qcoeff, dqcoeff, eob);
+}
+
+// default (up-right diagonal) scan for 64x64, svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=64
+void defaultScan64x64(std::int16_t scan[4096]) {
+    const int W = 64, H = 64;
+    int idx = 0;
+    for (int d = 0; d < W + H - 1; ++d) {
+        const int rlo = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
+        const int rhi = d < (H - 1) ? d : (H - 1);
+        const int incr = (H > W) ? 1 : (W > H) ? 0 : (d & 1);
+        if (incr) {
+            for (int r = rlo; r <= rhi; ++r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        } else {
+            for (int r = rhi; r >= rlo; --r) {
+                scan[idx++] = static_cast<std::int16_t>(r * W + (d - r));
+            }
+        }
+    }
 }
 
 // default (up-right diagonal) scan for 32x32, svt_aom_init_iscan formula

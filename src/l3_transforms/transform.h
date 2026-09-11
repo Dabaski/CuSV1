@@ -84,6 +84,18 @@ void fwdTxfm2d16x16(const std::int16_t* input, std::int32_t* output, std::uint32
 // transforms.c:19-22)
 void fwdTxfm2d32x32(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
 
+// av1_tranform_two_d_core_c at TX_64X64: fwd_shift_64x64 = {0,-2,-2}
+// (transforms.c:126), cos_bit col 13 / row 10 (fwd_cos_bit_col/row[4][4],
+// transforms.c:19-22). DCT-ONLY at 64x64 (no ADST exists in this tree,
+// inv_transforms.h:196) - type must be DCT_DCT.
+void fwdTxfm2d64x64(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// svt_av1_inv_txfm2d_add_64x64_c / inv_txfm2d_add_c, TX_64X64:
+// inv_shift_64x64 = {-2,-4} (inv_transforms.c:22), cos_bit 12/12, rows then
+// columns with clamps 16/16; add via clip_pixel_highbd(pred +
+// round_shift(out, 4), 8). DCT-only.
+void invTxfm2dAdd64x64(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
 // svt_av1_inv_txfm2d_add_4x4_c (inv_transforms.c:2591), 8-bit: coeffs -> inv
 // 2D -> add onto pred block in place with clip to [0,255]
 void invTxfm2dAdd4x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
@@ -170,6 +182,19 @@ void quantizeB32x32(const std::int32_t* coeff, const QuantTables& tables, const 
 // default (up-right diagonal) scan for 32x32, same svt_aom_init_iscan formula
 // (coefficients.c:345-363) at W=H=32
 void defaultScan32x32(std::int16_t scan[1024]);
+
+// TX_64X64 entries (L9): same helpers at n_coeffs=4096, log_scale 2
+// (av1_get_tx_scale_tab[TX_64X64] = 2, full_loop.c:22). DCT-only at 64x64
+// (no ADST exists in this tree), but the fp/b helpers are TxType-agnostic.
+void quantizeFp64x64(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
+
+void quantizeB64x64(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                    std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob);
+
+// default (up-right diagonal) scan for 64x64, same svt_aom_init_iscan formula
+// (coefficients.c:345-363) at W=H=64
+void defaultScan64x64(std::int16_t scan[4096]);
 
 std::string quantCuSource();
 
