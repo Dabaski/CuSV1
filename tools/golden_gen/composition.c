@@ -36,10 +36,47 @@ int32_t svtd_filt_type = 0;  // get_filt_type shim state (see svt_gen.c)
         fn(dst, stride, 32, 32, above, left); \
     }
 
-#define SVTD_ADAPTER64(name, fn) \
-    static void name(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) { \
-        fn(dst, stride, 64, 64, above, left); \
-    }
+// L7 (A4): plain static functions instead of a backslash-continued macro -
+// the backslash-newline lines trip git diff --check ("trailing whitespace").
+static void eb_dc_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    dc_predictor(dst, stride, 64, 64, above, left);
+}
+
+static void eb_dc_left_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    dc_left_predictor(dst, stride, 64, 64, above, left);
+}
+
+static void eb_dc_top_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    dc_top_predictor(dst, stride, 64, 64, above, left);
+}
+
+static void eb_dc_128_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    dc_128_predictor(dst, stride, 64, 64, above, left);
+}
+
+static void eb_v_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    v_predictor(dst, stride, 64, 64, above, left);
+}
+
+static void eb_h_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    h_predictor(dst, stride, 64, 64, above, left);
+}
+
+static void eb_smooth_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    smooth_predictor(dst, stride, 64, 64, above, left);
+}
+
+static void eb_smooth_v_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    smooth_v_predictor(dst, stride, 64, 64, above, left);
+}
+
+static void eb_smooth_h_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    smooth_h_predictor(dst, stride, 64, 64, above, left);
+}
+
+static void eb_paeth_64x64(uint8_t* dst, ptrdiff_t stride, const uint8_t* above, const uint8_t* left) {
+    paeth_predictor(dst, stride, 64, 64, above, left);
+}
 
 SVTD_ADAPTER(eb_dc_4x4, dc_predictor)
 SVTD_ADAPTER(eb_dc_left_4x4, dc_left_predictor)
@@ -84,17 +121,6 @@ SVTD_ADAPTER32(eb_smooth_32x32, smooth_predictor)
 SVTD_ADAPTER32(eb_smooth_v_32x32, smooth_v_predictor)
 SVTD_ADAPTER32(eb_smooth_h_32x32, smooth_h_predictor)
 SVTD_ADAPTER32(eb_paeth_32x32, paeth_predictor)
-
-SVTD_ADAPTER64(eb_dc_64x64, dc_predictor)
-SVTD_ADAPTER64(eb_dc_left_64x64, dc_left_predictor)
-SVTD_ADAPTER64(eb_dc_top_64x64, dc_top_predictor)
-SVTD_ADAPTER64(eb_dc_128_64x64, dc_128_predictor)
-SVTD_ADAPTER64(eb_v_64x64, v_predictor)
-SVTD_ADAPTER64(eb_h_64x64, h_predictor)
-SVTD_ADAPTER64(eb_smooth_64x64, smooth_predictor)
-SVTD_ADAPTER64(eb_smooth_v_64x64, smooth_v_predictor)
-SVTD_ADAPTER64(eb_smooth_h_64x64, smooth_h_predictor)
-SVTD_ADAPTER64(eb_paeth_64x64, paeth_predictor)
 
 static void svtd_populate_dispatch(void) {
     // TX_4X4 column (index 0)
