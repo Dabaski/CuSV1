@@ -1353,8 +1353,8 @@ void fdct64B(const std::int32_t input[64], std::int32_t output[64], int cosBit) 
     std::int32_t step[64];
     std::int32_t* bf0;
     std::int32_t* bf1;
-        
-        
+
+
     // stage 0;
 
     // stage 1;
@@ -2119,8 +2119,8 @@ void idct64(const std::int32_t input[64], std::int32_t output[64]) {
     int32_t stage = 0;
     // clampValue2Arg shim: the verbatim body calls clamp_value(x, stage_range[stage]);
     // clampValue(value, bit) is the same two-arg form here
-        
-            
+
+
     // stage 0;
 
     // stage 1;
@@ -4989,8 +4989,8 @@ __device__ void d_fdct64(const int* input, int* output, int bit) {
     int* bf0;
     int* bf1;
     int step[64];
-        
-        
+
+
     // stage 0;
 
     // stage 1;
@@ -6799,7 +6799,7 @@ __device__ void d_idct64i(const int* input, int* output) {
     int stage = 0;
 
 
-            
+
     // stage 0;
 
     // stage 1;

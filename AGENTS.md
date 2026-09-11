@@ -1,11 +1,11 @@
-﻿ AGENTS.md
- 
+ AGENTS.md
+
 ## Prime directive: incremental TDD only (Uncle Bob's Three Laws)
- 
+
 You do not write a feature, function, or file in one pass. You follow Robert C.
 Martin's Three Laws of TDD as a **nano-cycle** â€” run on almost a second-by-second
 basis, not test-file-by-test-file:
- 
+
 1. You may not write production code until you have written a failing test.
 2. You may not write more of a test than is sufficient to fail â€” and a
    compilation/syntax error counts as a failure.
@@ -16,13 +16,13 @@ order of test-vs-code, it's staying in small, always-verified steps instead of
 writing a pile of code and hoping it's right. Treat "one behavior" as far
 smaller than a feature: often one assertion, sometimes just enough to fail to
 compile. If you can split a step into two smaller ones, split it.
- 
+
 **Never write implementation code before there is a failing test that requires it.**
 **Never write more test than is needed to fail (including "fails to compile").**
 **Never write more implementation than the minimum needed to pass the current test.**
- 
+
 ## The loop (repeat constantly â€” this is a nano-cycle, not a per-feature cycle)
- 
+
 1. **Pick the smallest next slice.** Smaller than you think. One assertion,
    or one line that won't even compile yet. Not "handle the whole function" â€”
    just the next tiny fact about its behavior.
@@ -90,7 +90,7 @@ compile. If you can split a step into two smaller ones, split it.
   angleDelta divergence caught in the QW audit; both were invisible to the
   spot-checked subset of modes.
 
- 
+
 - Do not write test and implementation in the same edit/commit.
 - Do not write a test you already know will pass â€” if it passes on first run
   without new code, you skipped ahead or the test is too weak.
@@ -104,9 +104,9 @@ compile. If you can split a step into two smaller ones, split it.
 - If you get stuck failing the same test after a couple of honest attempts,
   stop and explain what you're seeing rather than guessing repeatedly.
 ## Test command
- 
+
 Determine the project's test command before starting work. Check, in order:
- 
+
 1. `package.json` â†’ `npm test`, `npm run test`, or `yarn test` / `pnpm test`
 2. `Cargo.toml` â†’ `cargo test` (optionally `cargo test -p <crate>` for workspace members)
 3. `pyproject.toml` / `setup.py` / `pytest.ini` â†’ `pytest`
@@ -117,13 +117,13 @@ Determine the project's test command before starting work. Check, in order:
 If no test runner exists yet, the first task is to add the minimal test
 harness for the language/framework in use â€” itself done via the nano-cycle
 (the first test: "the test runner can run a trivial passing test").
- 
+
 Run the full suite with whatever command applies. Run a single test by name
 or file when iterating on one RED/GREEN step, then always re-run the full
 suite before moving on.
- 
+
 ## General dev environment guidance
- 
+
 - **Before writing any code**, read the project's existing structure,
   conventions, and neighboring files. Mimic the style already present â€”
   naming, formatting, imports, error handling, logging.
@@ -148,12 +148,12 @@ suite before moving on.
   commands where possible. When a Windows-specific tool is needed, quote
   paths containing spaces and prefer full cmdlet names in PowerShell.
 ## CUDA/GPU-specific addendum (SVT-AV1 CUDA 12.2 port)
- 
+
 The Three Laws still apply, but "GREEN" needs sharper definitions for GPU
 code than for ordinary application code. Correctness and performance are
 separate axes here, and a naive kernel can be functionally correct while
 being close to useless. Do not conflate them.
- 
+
 - **Correctness-green is not performance-acceptable.** A passing kernel test
   only claims "produces correct output," never "is fast enough to ship."
   Do not mark a slice as done, or move on to the next slice, on the strength
@@ -221,7 +221,7 @@ being close to useless. Do not conflate them.
   elimination (streams/graphs/wavefront), memory pooling, clock locking
   via NVML. Clock locking is the first candidate: baselines above are
   noise-sensitive without it.
- 
+
 
 ## Layer map (current)
 
