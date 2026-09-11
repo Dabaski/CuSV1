@@ -148,6 +148,13 @@ ModeDecision decideBlockMode32x32(const std::uint8_t* src, const std::uint8_t* a
                                   int nBottomLeftPx, std::uint8_t aboveLeft,
                                   const intra::NeighborContext& neighbors = intra::NeighborContext());
 
+// L9 policy generalized to 64x64 blocks: same D2 policy scored with
+// motion::sad64x64 (bit-exact with svt_nxm_sad_kernel_helper_c at 64x64).
+ModeDecision decideBlockMode64x64(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                                  int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                  int nBottomLeftPx, std::uint8_t aboveLeft,
+                                  const intra::NeighborContext& neighbors = intra::NeighborContext());
+
 void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                         std::uint8_t* modes, transforms::TxType txType);
 
