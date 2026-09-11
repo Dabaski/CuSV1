@@ -26,9 +26,11 @@ twins are held to bit-exact agreement with the SVT host reference.
   `DeviceBuffer`, `Kernel`, `compileToPtx`, `ptxEntryNames`; kernel
   sources are CUDA C++ strings compiled for `compute_61`.
 - **l3_transforms** — SVT-AV1 fixed-point transforms, 4x4 / 8x8 /
-  16x16 / 32x32 / 64x64: `fdct4`/`fadst4`, `fdct8`/`fadst8`,
-  `fdct16`/`fadst16`, `fdct32`/`fadst32` and `fdct64`/`idct64`
-  forward/inverse with `cospi`/`sinpi` tables, `halfBtf`, `roundShift`
+  16x16 / 32x32 / 64x64: forward `fdct4`/`fadst4`, `fdct8`/`fadst8`,
+  `fdct16`/`fadst16`, `fdct32`/`fadst32`, `fdct64` and inverse
+  `idct4`/`iadst4`, `idct8`/`iadst8`, `idct16`/`iadst16`,
+  `idct32`/`iadst32`, `idct64` with `cospi`/`sinpi` tables, `halfBtf`,
+  `roundShift`
   (fdct16/fadst16 are cos_bit-parameterized — 16x16 is the one
   geometry where col 13 / row 12 differ; fdct64B is
   cos_bit-parameterized — 64x64 col 13 / row 10 is the only pass below
@@ -86,8 +88,8 @@ twins are held to bit-exact agreement with the SVT host reference.
   `encodeFrameRecon64x64` run a raster grid with recon-only
   neighbors; `frameMse8` is the integer frame SSE; the D2 policy
   (`decideBlockMode4x4`/`8x8`/`16x16`/`32x32`/`64x64`) scores all 13
-  PredictionModes by SAD (project-defined policy, SVT primitives);
-  primitives); the Auto variants (`encodeFrameAuto4x4`/
+  PredictionModes by SAD (project-defined policy, SVT primitives); the
+  Auto variants (`encodeFrameAuto4x4`/
   `encodeFrameAuto8x8`/`encodeFrameAuto16x16`/`encodeFrameAuto32x32`/
   `encodeFrameAuto64x64`) drive full frames —
   each block's mode chosen against RECONSTRUCTED edges, with the
