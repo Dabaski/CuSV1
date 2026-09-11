@@ -1,7 +1,11 @@
 # PV — function-by-function provenance table
 
-Every port artifact in `src/` traced to the pinned vendored reference
-(`third_party/SVT-AV1/`, REFERENCE PINNING rule in `AGENTS.md`). Status
+Every port artifact in `src/l3_transforms`, `src/l4_intra`, `src/l5_motion`
+and `src/l6_pipeline` (plus the l2 runtime and fixture classification below)
+traced to the pinned vendored reference (`third_party/SVT-AV1/`, REFERENCE
+PINNING rule in `AGENTS.md`). l0_core/l1_pixels are infrastructure with no
+SVT symbol to trace (single policy row in the classification section).
+Status
 vocabulary:
 
 - **exact** — the SVT body is ported with the arithmetic text unchanged;
@@ -94,17 +98,21 @@ port (tests in test_transform.cpp).
 
 | SVT symbol | Port artifact(s) | Status | Notes |
 | --- | --- | --- | --- |
-| av1_tranform_two_d_core_c / quantize / iscan via l3 | `encodeFrameRecon4x4..64x64`, `encodeFrameAuto4x4..64x64`, `encodeFrameRecon4x4Q..64x64Q`, `encodeFrameAuto4x4Q..64x64Q` (pipeline.cpp:1195+ for the 32x32 block, :1386 for Auto64x64Q) | adapted | composition: plane window (l1) + buildIntraPredictors (l4) -> int16 residual -> fwdTxfm2d -> invTxfm2dAdd; M1 availability + FR-series REAL recon top-right gather follow SVT's raster decode order |
+| av1_tranform_two_d_core_c / quantize / iscan via l3 | `encodeFrameRecon4x4..64x64`, `encodeFrameAuto4x4..64x64`, `encodeFrameAuto4x4Q` + `encodeFrameRecon8x8Q..64x64Q` + `encodeFrameAuto8x8Q..64x64Q` (pipeline.cpp:1195+ for the 32x32 block, :1386 for Auto64x64Q) | adapted | composition: plane window (l1) + buildIntraPredictors (l4) -> int16 residual -> fwdTxfm2d -> invTxfm2dAdd; M1 availability + FR-series REAL recon top-right gather follow SVT's raster decode order; note: there is no encodeFrameRecon4x4Q in the tree (the 4x4 quantized API is encodeFrameAuto4x4Q alone, pipeline.h:58) |
 | — | `decideBlockMode4x4/8x8/16x16/32x32/64x64` (decideBlockMode64x64 at :679) | policy | D2 policy is OURS: all 13 PredictionModes scored by SAD (SVT primitives), lowest wins, tie = lowest mode index; SVT selects modes via RD/trellis machinery we do not port |
 | — | fixed `defaultScan*` for every block in the Q frame loops | policy | SVT selects scan order per mode/tx-type via get_scan_order; ours is fixed default scan (named in each loop's comment) |
 | — | `NeighborContext` (filt_type plumbing) | policy | carries the two neighbor modes the generator shim needs; value semantics match enc_intra_prediction.c:186 |
 
-## GPU runtime (l2_gpurt) and fixtures
+## GPU runtime (l2_gpurt), infrastructure, and fixtures
 
 - l2_gpurt (NVRTC JIT + driver API): **policy** (our infrastructure; no SVT
   counterpart).
+- l0_core (Sample, BlockSize) and l1_pixels (pixels::Plane strided buffer):
+  **policy** — infrastructure with no SVT symbol to trace (they exist so the
+  layers above can hold SVT-shaped data; the data layout they carry is
+  defined by the SVT calls listed above).
 - Test/golden fixtures (ramp frames, (11+7i)%251-style edge arrays, corner
-  fill 7/127/128 regimes): **policy** — fixtures are ours; the code under
+  fill 7/127/128 regimes): **policy** - fixtures are ours; the code under
   test is SVT's.
 - `svtd_gather_above` / frame drivers in tools/golden_gen/composition.c:
   **adapted** — documented specializations of the SVT composition with the
