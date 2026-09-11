@@ -58,6 +58,18 @@ extern "C" __global__ void subtract_32x32_plane(const unsigned char* src, const 
     const int c = idx & 31;
     residual[idx] = (short)(src[(*py + r) * (*srcStride) + (*px + c)] - pred[idx]);
 }
+
+// L9: 4096 pixels > 1024-thread max -> 4 pixels per thread (p = idx + 1024k)
+extern "C" __global__ void subtract_64x64_plane(const unsigned char* src, const int* srcStride, const int* px,
+                                                const int* py, const unsigned char* pred, short* residual) {
+    const int idx = threadIdx.x;
+    for (int k = 0; k < 4; ++k) {
+        const int p = idx + 1024 * k;
+        const int r = p >> 6;
+        const int c = p & 63;
+        residual[p] = (short)(src[(*py + r) * (*srcStride) + (*px + c)] - pred[p]);
+    }
+}
 )CUDA";
 }
 
