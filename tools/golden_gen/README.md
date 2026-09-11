@@ -14,10 +14,19 @@ above each). No golden is hand-typed.
 - `shims.h` — plumbing only (typedefs, RTCD name resolutions like
   `svt_av1_dr_prediction_z1 -> ..._c`, `clip_pixel`), each citing its SVT
   header. No arithmetic.
-- `composition.c` — wires the extracts together: dispatch-table population,
-  the two 4x4 2D cores (documented specializations of
-  `av1_tranform_two_d_core_c` / `inv_txfm2d_add_c` to TX_4X4/8-bit), and the
-  frame-policy driver.
+- `composition.c` — wires the extracts together: dispatch-table population
+  (`svtd_eb_pred[13][5]` / `svtd_dc_pred[2][2][5]`, the TX_32X32 and
+  TX_64X64 columns populated via SVTD_ADAPTER32/SVTD_ADAPTER64), the four 2D
+  cores (documented specializations of `av1_tranform_two_d_core_c` /
+  `inv_txfm2d_add_c` to TX_4X4/8-bit, TX_32X32 with fwd_shift_32x32 =
+  {2,-4,0} and cos_bit 12/12, and TX_64X64 DCT-only with fwd_shift_64x64 =
+  {0,-2,-2} and cos_bit col 13 / row 10), the default scans up to 64x64
+  (svt_aom_init_iscan at W=H=32/64), the log_scale 1/2 quantizer entries
+  (`svtd_quantize_fp_32x32/_b_32x32/_64x64/_b_64x64`, n_coeffs 1024/4096),
+  and the frame-policy drivers (`svtd_frame_auto_32x32_blocks/_q`,
+  `svtd_frame_v_dct_32x32/_q`, `svtd_frame_auto_64x64_blocks/_q`,
+  `svtd_frame_v_dct_64x64/_q` — 2x2 grids on 64x64 / 128x128 frames with the
+  FR-series REAL recon top-right gather).
 - `main_primitives.c` — per-primitive golden dump (diffed against
   `expected_primitives.txt` by the validation gate).
 - `main_frame.c` — frame-policy composition: raster 4x4 loop where each
@@ -28,7 +37,7 @@ above each). No golden is hand-typed.
 ## Regeneration
 
 ```
-pwsh tools/golden_gen/extract.ps1        # regenerates svt_gen.c from SVT
+powershell -ExecutionPolicy Bypass -File tools/golden_gen/extract.ps1
 cmake -S tools/golden_gen -B build/golden_gen
 cmake --build build/golden_gen --config Release
 build\golden_gen\Release\golden_primitives.exe   # diff vs expected_primitives.txt
@@ -40,8 +49,16 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | Extracted symbol | SVT file | What it feeds |
 | --- | --- | --- |
 | svt_av1_fdct4_new / svt_av1_fadst4_new | Codec/transforms.c | l3 fwd goldens |
-| fwd_shift_4x4, fwd_cos_bit_col/row | Codec/transforms.c | fwd 2D core config |
+| svt_av1_fdct8_new / svt_av1_fadst8_new, svt_av1_fdct16_new / svt_av1_fadst16_new | Codec/transforms.c | l3 fwd goldens (8x8/16x16) |
+| svt_av1_fdct32_new, static av1_fadst32_new | Codec/transforms.c | l3 fwd goldens (32x32; fadst32 is static - extractor pattern matches the static name) |
+| svt_av1_fdct64_new | Codec/transforms.c:762 | l3 fwd golden fdct64 (DCT-only) |
+| fwd_shift_4x4/8x8/16x16/32x32/64x64, fwd_cos_bit_col/row | Codec/transforms.c | fwd 2D core config (fwd_shift_64x64 = {0,-2,-2}; cos_bit row[4][4] = 10, the only pass below 12) |
 | svt_av1_idct4_new / svt_av1_iadst4_new | Codec/inv_transforms.c | l3 inverse goldens |
+| svt_av1_idct8_new/iadst8_new, svt_av1_idct16_new/iadst16_new | Codec/inv_transforms.c | l3 inverse goldens (8x8/16x16) |
+| svt_av1_idct32_new, static av1_iadst32_new | Codec/inv_transforms.c | l3 inverse goldens (32x32) |
+| svt_av1_idct64_new | Codec/inv_transforms.c:1567 | l3 inverse golden idct64 (DCT-only; no ADST at 64x64, av1_txfm_type_ls[4] = DCT64/INVALID/INVALID/IDENTITY64, inv_transforms.h:196) |
+| inv_shift_4x4/8x8/16x16/32x32/64x64, INV_COS_BIT, inv_cos_bit_col/row | Codec/inv_transforms.{c,h} | inv 2D core config (inv_shift_64x64 = {-2,-4}) |
+| svt_av1_gen_inv_stage_range (recomputed inline, cited) | Codec/inv_transforms.c:44, inv_transforms.h:221-222 | gen_inv_range_{8x8,16x16,32x32_dct,64x64_dct} gate lines (stage_range shim per size; 64x64 DCT-only, 12 x 16) |
 | half_btf, round_shift, round_shift_array_c, clamp_value, clamp_buf, clamp64 | Codec/inv_transforms.{c,h}, definitions.h | transform helpers |
 | inv_shift_4x4, INV_COS_BIT, inv_cos_bit_col/row | Codec/inv_transforms.{c,h} | inv 2D core config |
 | svt_aom_eb_av1_cospi_arr_data / sinpi_arr_data | Codec/inv_transforms.c | cos_bit 12/13 table rows |
@@ -55,9 +72,9 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | build_intra_predictors (get_filt_type shimmed) | Codec/enc_intra_prediction.c | whole prediction path |
 | svt_av1_upsample_intra_edge_c | C_DEFAULT/intra_prediction_c.c | edge upsample |
 | FILTER_INTRA_SCALE_BITS, eb_av1_filter_intra_taps, svt_av1_filter_intra_predictor_c | C_DEFAULT/filterintra_c.c | filter-intra |
-| svt_nxm_sad_kernel_helper_c | C_DEFAULT/compute_sad_c.c | SAD scoring |
-| svt_aom_quantize_b_c, quantize_fp_helper_c | Codec/full_loop.c:31, :222 | Q1 quantize (fp = TX_4X4 via log_scale 0, full_loop.c:286) |
-| dc_qlookup_QTX, ac_qlookup_QTX, svt_aom_dc/ac_quant_qtx, svt_aom_get_qzbin_factor, svt_aom_invert_quant | Codec/inv_transforms.c:3412, :3357, :3467, :3484, :3501, :3516 | Q0/Q1 quantizer tables |
+| svt_nxm_sad_kernel_helper_c | C_DEFAULT/compute_sad_c.c | SAD scoring (4x4/16x16/32x32/64x64 dims; 8x8 has its own dedicated kernel in motion_estimation.c:71) |
+| svt_aom_quantize_b_c, quantize_fp_helper_c | Codec/full_loop.c:31, :222 | quantize entries at log_scale = av1_get_tx_scale_tab[TxSize] = 0/0/0/1/2 (full_loop.c:22; fp at TX_4X4 via log_scale 0, full_loop.c:286; escalated arithmetic at :228/:244/:246/:249 and b at :36/:67/:69-70/:74) |
+| dc_qlookup_QTX, ac_qlookup_QTX, svt_aom_dc/ac_quant_qtx, svt_aom_get_qzbin_factor, svt_aom_invert_quant | Codec/inv_transforms.c:3412, :3357, :3467, :3484, :3501, :3516 | quantizer tables (qindex {0,1,100,200,255}) |
 | TranLow, QmVal, clamp, MINQ, MAXQ, QINDEX_RANGE | Codec/definitions.h:986, :987, :687, :1641-1643 | quantizer plumbing |
 | AOM_QM_BITS | Codec/inv_transforms.h:27 | quantizer plumbing |
 | EbBitDepth (shim, full enum) | API/EbSvtAv1Formats.h:101 | get_qzbin_factor switch needs all enumerators |
@@ -71,13 +88,29 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **71/71 lines identical** (55 primitives + 16 Q0
-quantizer lines: default scan 4x4, luma quantizer tables at qindex
-{0,1,100,200,255}, and fp/b quantize+dequantize+eob vectors for the
-d3_coeffs block-0 fixture). The frame-policy golden (`golden_frame.exe`) is
-captured for D3.
+that file — currently **178/178 lines identical**, covering:
+
+- transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
+  DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
+  64x64 (DCT-only), gen_inv_range stage-range lines for 8x8/16x16/32x32/64x64;
+- quantizer: qscan4x4..64x64 (default scan up to 4096 coeffs), luma quantizer
+  tables at qindex {0,1,100,200,255}, fp/b quantize+dequantize+eob vectors at
+  log_scale 0/1/2 with fp-vs-b discriminators;
+- builder gate lines: b4/b8/b16/b32/b64 families (V/DC/DC128/D45/D135/D203/
+  smooth/paeth/fiv) with the upsample/corner-blend regime differences per
+  size;
+- frame-policy gate lines: f16/f32/f64 mode maps + recon + coeffs (lossless
+  + q100) and forced-mode f16v/f32v/f64v (+q) recon/coeffs captured from the
+  SVT-composed drivers (`svtd_frame_auto_*` / `svtd_frame_v_dct_*`).
+
+The frame-policy golden (`golden_frame.exe`) is captured for D3.
 
 Q0 deviation note: this SVT tree has no `av1_quantize_dc` — dc/ac handling is
 unified inside the quantize helpers via `dequant_ptr[rc != 0]` /
 `quant_ptr[rc != 0]` indexing (full_loop.c:239, :246). The "dc path" is table
 index 0 of the extracted helpers.
+
+REFERENCE PINNING note: every extract targets the vendored snapshot in
+`third_party/SVT-AV1/` (4.2-era, CHANGELOG 4.2.0 dated 2026-07-14, NOT
+byte-identical to the official v4.2.0 tag). The pinned tree is the sole 1:1
+reference; updating it would invalidate every golden line above.
