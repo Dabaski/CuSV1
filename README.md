@@ -95,11 +95,16 @@ twins are held to bit-exact agreement with the SVT host reference.
   reconstructed row above, not zeros), the chosen modes feeding
   `NeighborContext` (filt_type live). Quantized variants
   (`encodeFrameAuto4x4Q`, `encodeFrameRecon8x8Q`/`encodeFrameAuto8x8Q`,
-  `encodeFrameRecon16x16Q`/`encodeFrameAuto16x16Q`) wire the FP
+  `encodeFrameRecon16x16Q`/`encodeFrameAuto16x16Q`,
+  `encodeFrameRecon32x32Q`/`encodeFrameAuto32x32Q`,
+  `encodeFrameRecon64x64Q`/`encodeFrameAuto64x64Q`) wire the FP
   quantizer at a fixed qindex after the forward transform (qcoeff =
   coded coefficients, dequantized coefficients feed the inverse —
-  quantization loss feeds back through decisions). The 16x16 fwd/inv
-  roundtrip is exact (recon == source); 8x8 is lossy by design.
+  quantization loss feeds back through decisions; log_scale 1 at
+  32x32, log_scale 2 at 64x64 per `av1_get_tx_scale_tab`). The 16x16
+  fwd/inv roundtrip is exact (recon == source); 8x8/32x32/64x64 are
+  lossy by design (64x64 DCT-only within our TxType scope — no ADST
+  is signalable at TX_64X64 in this tree).
   GPU path `predict_block_*` + `subtract_*_plane` +
   `fwd_txfm_2d_*` (+ `quant_dequant_*` in the quantized loops) +
   `inv_txfm_2d_add_*` at every size, bit-exact vs host; the GPU
@@ -116,10 +121,10 @@ src/
   l1_pixels/      strided pixel buffers
   l2_gpurt/       NVRTC JIT + driver-API runtime
   l3_transforms/  fixed-point forward/inverse transforms, 4x4+8x8+16x16
-                  +32x32, quantizer (host + GPU)
-  l4_intra/       intra prediction, 4x4+8x8+16x16+32x32 (host + GPU)
+                  +32x32+64x64 (DCT-only at 64x64), quantizer (host + GPU)
+  l4_intra/       intra prediction, 4x4+8x8+16x16+32x32+64x64 (host + GPU)
   l5_motion/      SAD / motion (host; GPU kernels for 4x4/8x8)
-  l6_pipeline/    block + frame composition, 4x4+8x8+16x16 (host + GPU)
+  l6_pipeline/    block + frame composition, 4x4..64x64 (host + GPU)
 tools/
   golden_gen/     SVT golden-vector generator (mechanical verbatim
                   extraction from third_party/SVT-AV1, committed)
@@ -127,7 +132,8 @@ tools/
                   ctest; env + host/GPU frame + per-stage timings;
                   run the exe with the CUDA toolkit bin on PATH)
 third_party/
-  SVT-AV1/        vendored source of truth (do not modify)
+  SVT-AV1/        vendored source of truth (do not modify; pinned
+                  snapshot — see Third-party notices)
   doctest/        test framework
   hardware_docs/  perf-axis reference only (PTX ISA, GP104 whitepaper,
                   Pascal Tuning Guide, nvprof-era Profiler Users Guides
@@ -135,7 +141,9 @@ third_party/
 docs/             design/research notes (e.g. native FFmpeg CUDA
                   AV1 encoder integration)
 CMakeLists.txt    top-level build
-AGENTS.md         TDD methodology + CUDA-specific GREEN rules
+AGENTS.md         TDD methodology + CUDA-specific GREEN rules + standing
+                  rules (bench-before/after, citation verification,
+                  REFERENCE PINNING)
 ```
 
 ## Target hardware
