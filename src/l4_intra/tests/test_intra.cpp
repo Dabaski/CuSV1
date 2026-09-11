@@ -959,6 +959,131 @@ TEST_CASE("gpu block predictor 32x32 matches builder across all zones") {
     CHECK(okFi);
 }
 
+namespace {
+const unsigned char kAbove64[128] = {
+    13,  18,  23,  28,  33,  38,  43,  48,  53,  58,  63,  68,  73,  78,  83,  88,
+    93,  98, 103, 108, 113, 118, 123, 128, 133, 138, 143, 148, 153, 158, 163, 168,
+    173, 178, 183, 188, 193, 198, 203, 208, 213, 218, 223, 228, 233, 238, 243, 248,
+    2,   7,  12,  17,  22,  27,  32,  37,  42,  47,  52,  57,  62,  67,  72,  77,
+    82,  87,  92,  97, 102, 107, 112, 117, 122, 127, 132, 137, 142, 147, 152, 157,
+    162, 167, 172, 177, 182, 187, 192, 197, 202, 207, 212, 217, 222, 227, 232, 237,
+    242, 247, 1,   6,  11,  16,  21,  26,  31,  36,  41,  46,  51,  56,  61,  66,
+    71,  76,  81,  86,  91,  96, 101, 106, 111, 116, 121, 126, 131, 136, 141, 146};
+const unsigned char kLeft64[128] = {
+    7,  16,  25,  34,  43,  52,  61,  70,  79,  88,  97, 106, 115, 124, 133, 142,
+    151, 160, 169, 178, 187, 196, 205, 214, 223, 232, 241, 250, 8,  17,  26,  35,
+    44,  53,  62,  71,  80,  89,  98, 107, 116, 125, 134, 143, 152, 161, 170, 179,
+    188, 197, 206, 215, 224, 233, 242, 0,   9,  18,  27,  36,  45,  54,  63,  72,
+    81,  90,  99, 108, 117, 126, 135, 144, 153, 162, 171, 180, 189, 198, 207, 216,
+    225, 234, 243, 1,  10,  19,  28,  37,  46,  55,  64,  73,  82,  91, 100, 109,
+    118, 127, 136, 145, 154, 163, 172, 181, 190, 199, 208, 217, 226, 235, 244, 2,
+    11,  20,  29,  38,  47,  56,  65,  74,  83,  92, 101, 110, 119, 128, 137, 146};
+}  // namespace
+
+bool runBlockPredict64x64(gpurt::GpuContext& ctx, int mode, int angleDelta, const unsigned char* above,
+                          int nTopPx, int nTopRightPx, const unsigned char* left, int nLeftPx,
+                          int nBottomLeftPx, int aboveLeft, const unsigned char* expected,
+                          int aboveMode = 0, int leftMode = 0, int filterIntraMode = -1,
+                          int disableEdgeFilter = 0) {
+    (void)ctx;
+    const std::string ptx = *gpurt::compileToPtx(intra::predictBlock64x64CuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "predict_block_64x64");
+    if (it == names.end()) {
+        return false;
+    }
+    gpurt::Kernel k(ptx, *it);
+
+    gpurt::DeviceBuffer dAbove(nTopPx > 0 ? sizeof(unsigned char) * (nTopPx + nTopRightPx) : 1);
+    gpurt::DeviceBuffer dLeft(nLeftPx > 0 ? sizeof(unsigned char) * (nLeftPx + nBottomLeftPx) : 1);
+    gpurt::DeviceBuffer dOut(4096);
+    if (nTopPx > 0) dAbove.uploadFrom(above, sizeof(unsigned char) * (nTopPx + nTopRightPx));
+    if (nLeftPx > 0) dLeft.uploadFrom(left, sizeof(unsigned char) * (nLeftPx + nBottomLeftPx));
+
+    int modeArg = mode, deltaArg = angleDelta, amArg = aboveMode, lmArg = leftMode;
+    int fiArg = filterIntraMode, defArg = disableEdgeFilter;
+    int nTopArg = nTopPx, nTrArg = nTopRightPx, nLeftArg = nLeftPx, nBlArg = nBottomLeftPx;
+    int alArg = aboveLeft;
+    gpurt::DeviceBuffer dMode(4), dDelta(4), dAm(4), dLm(4), dFi(4), dDef(4);
+    gpurt::DeviceBuffer dNTop(4), dNTr(4), dNLeft(4), dNBl(4), dAl(4);
+    dMode.uploadFrom(&modeArg, 4); dDelta.uploadFrom(&deltaArg, 4);
+    dAm.uploadFrom(&amArg, 4); dLm.uploadFrom(&lmArg, 4);
+    dFi.uploadFrom(&fiArg, 4); dDef.uploadFrom(&defArg, 4);
+    dNTop.uploadFrom(&nTopArg, 4); dNTr.uploadFrom(&nTrArg, 4);
+    dNLeft.uploadFrom(&nLeftArg, 4); dNBl.uploadFrom(&nBlArg, 4);
+    dAl.uploadFrom(&alArg, 4);
+
+    CUdeviceptr pMode = dMode.get(), pDelta = dDelta.get(), pAm = dAm.get(), pLm = dLm.get();
+    CUdeviceptr pAbove = dAbove.get(), pNTop = dNTop.get(), pNTr = dNTr.get();
+    CUdeviceptr pLeft = dLeft.get(), pNLeft = dNLeft.get(), pNBl = dNBl.get(), pAl = dAl.get();
+    CUdeviceptr pFi = dFi.get(), pDef = dDef.get(), pOut = dOut.get();
+    void* args[] = {&pMode, &pDelta, &pAm, &pLm, &pAbove, &pNTop, &pNTr, &pLeft, &pNLeft,
+                    &pNBl, &pAl, &pFi, &pDef, &pOut};
+    k.launch(1, 1, 1024, 1, args);
+
+    unsigned char got[4096] = {0};
+    dOut.downloadTo(got, 4096);
+    for (int i = 0; i < 4096; ++i) {
+        if (got[i] != expected[i]) return false;
+    }
+    return true;
+}
+
+TEST_CASE("gpu block predictor 64x64 matches builder across all zones") {
+    if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
+    gpurt::GpuContext ctx;
+    bool okV = true, okD45 = true, okD135 = true, okD203 = true, okSm = true, okPa = true;
+    bool okDc = true, okDc128 = true;
+    {
+        unsigned char ref[4096] = {0};
+        intra::buildIntraPredictors(ref, 64, intra::V_PRED, 0, 64, 64, 0, kAbove64, 64, 0, nullptr, 0, 0);
+        okV = runBlockPredict64x64(ctx, intra::V_PRED, 0, kAbove64, 64, 0, nullptr, 0, 0, 0, ref);
+    }
+    {
+        unsigned char ref[4096] = {0};
+        intra::buildIntraPredictors(ref, 64, intra::D45_PRED, 0, 64, 64, 7, kAbove64, 64, 64, kLeft64, 64, 0);
+        okD45 = runBlockPredict64x64(ctx, intra::D45_PRED, 0, kAbove64, 64, 64, kLeft64, 64, 0, 7, ref);
+    }
+    {
+        unsigned char ref[4096] = {0};
+        intra::buildIntraPredictors(ref, 64, intra::D135_PRED, 0, 64, 64, 7, kAbove64, 64, 0, kLeft64, 64, 0);
+        okD135 = runBlockPredict64x64(ctx, intra::D135_PRED, 0, kAbove64, 64, 0, kLeft64, 64, 0, 7, ref);
+    }
+    {
+        unsigned char ref[4096] = {0};
+        intra::buildIntraPredictors(ref, 64, intra::D203_PRED, 0, 64, 64, 7, kAbove64, 64, 0, kLeft64, 64, 0);
+        okD203 = runBlockPredict64x64(ctx, intra::D203_PRED, 0, kAbove64, 64, 0, kLeft64, 64, 0, 7, ref);
+    }
+    {
+        unsigned char ref[4096] = {0};
+        intra::buildIntraPredictors(ref, 64, intra::SMOOTH_PRED, 0, 64, 64, 7, kAbove64, 64, 0, kLeft64, 64, 0);
+        okSm = runBlockPredict64x64(ctx, intra::SMOOTH_PRED, 0, kAbove64, 64, 0, kLeft64, 64, 0, 7, ref);
+    }
+    {
+        unsigned char ref[4096] = {0};
+        intra::buildIntraPredictors(ref, 64, intra::PAETH_PRED, 0, 64, 64, 7, kAbove64, 64, 0, kLeft64, 64, 0);
+        okPa = runBlockPredict64x64(ctx, intra::PAETH_PRED, 0, kAbove64, 64, 0, kLeft64, 64, 0, 7, ref);
+    }
+    {
+        unsigned char ref[4096] = {0};
+        intra::buildIntraPredictors(ref, 64, intra::DC_PRED, 0, 64, 64, 7, kAbove64, 64, 0, kLeft64, 64, 0);
+        okDc = runBlockPredict64x64(ctx, intra::DC_PRED, 0, kAbove64, 64, 0, kLeft64, 64, 0, 7, ref);
+    }
+    {
+        unsigned char ref[4096] = {0};
+        intra::buildIntraPredictors(ref, 64, intra::DC_PRED, 0, 64, 64, 0, nullptr, 0, 0, nullptr, 0, 0);
+        okDc128 = runBlockPredict64x64(ctx, intra::DC_PRED, 0, nullptr, 0, 0, nullptr, 0, 0, 0, ref);
+    }
+    CHECK(okV);
+    CHECK(okD45);
+    CHECK(okD135);
+    CHECK(okD203);
+    CHECK(okSm);
+    CHECK(okPa);
+    CHECK(okDc);
+    CHECK(okDc128);
+}
+
 TEST_CASE("gpu block predictor 8x8 v matches builder") {
     if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
     gpurt::GpuContext ctx;

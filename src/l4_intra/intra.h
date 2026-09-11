@@ -70,6 +70,8 @@ std::string predictBlock16x16CuSource();
 
 std::string predictBlock32x32CuSource();
 
+std::string predictBlock64x64CuSource();
+
 int edgeFilterStrength(int bs0, int bs1, int delta, int type);
 
 int useIntraEdgeUpsample(int bs0, int bs1, int delta, int type);
