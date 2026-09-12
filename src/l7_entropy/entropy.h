@@ -1,5 +1,6 @@
 #pragma once
 
+#include <climits>
 #include <cstdint>
 
 namespace entropy {
@@ -12,6 +13,8 @@ namespace entropy {
 #define CDF_PROB_BITS 15
 #define CDF_PROB_TOP (1 << CDF_PROB_BITS)
 #define AOM_ICDF(x) (CDF_PROB_TOP - (x))
+// OD_EC_WINDOW_SIZE (bitstream_unit.h:97); CHAR_BIT from <climits> above.
+#define OD_EC_WINDOW_SIZE ((std::int32_t)sizeof(OdEcWindow) * CHAR_BIT)
 
 // entcode.h (bitstream_unit.h:84-92)
 #define EC_PROB_SHIFT 6
@@ -57,6 +60,45 @@ int odEcEncTell(const OdEcEnc* enc);
 // svt_od_ec_enc_tell_frac (bitstream_unit.c:406-408) -> svt_od_ec_tell_frac
 // (bitstream_unit.c:369-395). Number of bits scaled by 2**OD_BITRES.
 std::uint32_t odEcEncTellFrac(const OdEcEnc* enc);
+
+// ---------------------------------------------------------------------------
+// Decoder side: entdec.h:21-51 / entdec.c (pinned vendored aom_dsp subtree).
+// ---------------------------------------------------------------------------
+// The entropy decoder context (entdec.h:27-51).
+struct OdEcDec {
+    /*The start of the current input buffer.*/
+    const unsigned char* buf;
+    /*An offset used to keep track of tell after reaching the end of the stream.
+      This is constant throughout most of the decoding process, but becomes
+       important once we hit the end of the buffer and stop incrementing bptr
+       (and instead pretend cnt has lots of bits).*/
+    std::int32_t tell_offs;
+    /*The end of the current input buffer.*/
+    const unsigned char* end;
+    /*The read pointer for the entropy-coded bits.*/
+    const unsigned char* bptr;
+    /*The difference between the high end of the current range, (low + rng), and
+       the coded value, minus 1.
+      This stores up to OD_EC_WINDOW_SIZE bits of that difference, but the
+       decoder only uses the top 16 bits of the window to decode the next symbol.
+      As we shift up during renormalization, if we don't have enough bits left in
+       the window to fill the top 16, we'll read in more bits of the coded
+       value.*/
+    OdEcWindow dif;
+    /*The number of values in the current range.*/
+    std::uint16_t rng;
+    /*The number of bits of data in the current value.*/
+    std::int16_t cnt;
+};
+
+// od_ec_dec_init (entdec.c:143-153)
+void odEcDecInit(OdEcDec* dec, const unsigned char* buf, std::uint32_t storage);
+
+// od_ec_decode_bool_q15 (entdec.c:158-182)
+// Decode a single binary value.
+// f: The probability that the bit is one, scaled by 32768.
+// Return: The value decoded (0 or 1).
+int odEcDecodeBoolQ15(OdEcDec* dec, unsigned f);
 
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes);

@@ -97,3 +97,16 @@ TEST_CASE("odEcEncTell and odEcEncTellFrac match gate values") {
     CHECK(entropy::odEcEncTell(&enc) == 78);
     CHECK(entropy::odEcEncTellFrac(&enc) == 624);
 }
+
+TEST_CASE("odEcDecodeBoolQ15 round-trips the bool_eq gate bytes") {
+    // Gate bytes ec_enc_bool_eq 2 b2 e8 decoded back through
+    // od_ec_decode_bool_q15 (entdec.c:158-182) at f = 16384 = the
+    // aom_read_bit probability (bitreader.h:71-75).
+    unsigned char data[2] = {0xb2, 0xe8};
+    entropy::OdEcDec dec;
+    entropy::odEcDecInit(&dec, data, 2);
+    const int bits[12] = {1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0};
+    for (int i = 0; i < 12; ++i) {
+        CHECK(entropy::odEcDecodeBoolQ15(&dec, 16384) == bits[i]);
+    }
+}

@@ -244,4 +244,110 @@ std::uint32_t odEcEncTellFrac(const OdEcEnc* enc) {
     return odEcTellFrac((std::uint32_t)odEcEncTell(enc), enc->rng);
 }
 
+// OD_EC_LOTS_OF_BITS (entdec.c:74)
+// This is meant to be a large, positive constant that can still be efficiently
+//    loaded as an immediate (on platforms like ARM, for example).
+// Even relatively modest values like 100 would work fine.
+static const std::int32_t kOdEcLotsOfBits = 0x4000;
+
+// od_ec_dec_refill (entdec.c:78-115)
+// The return value of od_ec_dec_tell does not change across an od_ec_dec_refill
+//    call.
+static void odEcDecRefill(OdEcDec* dec) {
+    std::int32_t s;
+    OdEcWindow dif;
+    std::int16_t cnt;
+    const unsigned char* bptr;
+    const unsigned char* end;
+    dif = dec->dif;
+    cnt = dec->cnt;
+    bptr = dec->bptr;
+    end = dec->end;
+    s = OD_EC_WINDOW_SIZE - 9 - (cnt + 15);
+    for (; s >= 0 && bptr < end; s -= 8, bptr++) {
+        /*Each time a byte is inserted into the window (dif), bptr advances and cnt
+           is incremented by 8, so the total number of consumed bits (the return
+           value of od_ec_dec_tell) does not change.*/
+        dif ^= (OdEcWindow)bptr[0] << s;
+        cnt = static_cast<std::int16_t>(cnt + 8);
+    }
+    if (bptr >= end) {
+        /*We've reached the end of the buffer. It is perfectly valid for us to need
+           to fill the window with additional bits past the end of the buffer (and
+           this happens in normal operation). These bits should all just be taken
+           as zero. But we cannot increment bptr past 'end' (this is undefined
+           behavior), so we start to increment dec->tell_offs. We also don't want
+           to keep testing bptr against 'end', so we set cnt to OD_EC_LOTS_OF_BITS
+           and adjust dec->tell_offs so that the total number of unconsumed bits in
+           the window (dec->cnt - dec->tell_offs) does not change. This effectively
+           puts lots of zero bits into the window, and means we won't try to refill
+           it from the buffer for a very long time (at which point we'll put lots
+           of zero bits into the window again).*/
+        dec->tell_offs += kOdEcLotsOfBits - cnt;
+        cnt = kOdEcLotsOfBits;
+    }
+    dec->dif = dif;
+    dec->cnt = cnt;
+    dec->bptr = bptr;
+}
+
+// od_ec_dec_normalize (entdec.c:125-138)
+// Takes updated dif and range values, renormalizes them so that
+// 32768 <= rng < 65536 (reading more bytes from the stream into dif if
+// necessary), and stores them back in the decoder context.
+static int odEcDecNormalize(OdEcDec* dec, OdEcWindow dif, unsigned rng, int ret) {
+    // assert(rng <= 65535U);
+    /*The number of leading zeros in the 16-bit binary representation of rng.*/
+    // OD_ILOG_NZ(rng) = svt_log2f(rng) + 1 (bitstream_unit.h:55)
+    int d = 16 - (getMsb(rng) + 1);
+    /*d bits in dec->dif are consumed.*/
+    dec->cnt = static_cast<std::int16_t>(dec->cnt - d);
+    /*This is equivalent to shifting in 1's instead of 0's.*/
+    dec->dif = ((dif + 1) << d) - 1;
+    dec->rng = static_cast<std::uint16_t>(rng << d);
+    if (dec->cnt < 0) odEcDecRefill(dec);
+    return ret;
+}
+
+// od_ec_dec_init (entdec.c:143-153)
+// Initializes the decoder.
+// buf: The input buffer to use.
+// storage: The size in bytes of the input buffer.
+void odEcDecInit(OdEcDec* dec, const unsigned char* buf, std::uint32_t storage) {
+    dec->buf = buf;
+    dec->tell_offs = 10 - (OD_EC_WINDOW_SIZE - 8);
+    dec->end = buf + storage;
+    dec->bptr = buf;
+    dec->dif = ((OdEcWindow)1 << (OD_EC_WINDOW_SIZE - 1)) - 1;
+    dec->rng = 0x8000;
+    dec->cnt = -15;
+    odEcDecRefill(dec);
+}
+
+// od_ec_decode_bool_q15 (entdec.c:158-182)
+// Decode a single binary value.
+// f: The probability that the bit is one, scaled by 32768.
+// Return: The value decoded (0 or 1).
+int odEcDecodeBoolQ15(OdEcDec* dec, unsigned f) {
+    OdEcWindow dif;
+    OdEcWindow vw;
+    unsigned r;
+    unsigned r_new;
+    unsigned v;
+    int ret;
+    dif = dec->dif;
+    r = dec->rng;
+    v = ((r >> 8) * (std::uint32_t)(f >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT));
+    v += EC_MIN_PROB;
+    vw = (OdEcWindow)v << (OD_EC_WINDOW_SIZE - 16);
+    ret = 1;
+    r_new = v;
+    if (dif >= vw) {
+        r_new = r - v;
+        dif -= vw;
+        ret = 0;
+    }
+    return odEcDecNormalize(dec, dif, r_new, ret);
+}
+
 }  // namespace entropy
