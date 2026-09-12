@@ -36,3 +36,27 @@ TEST_CASE("odEcEncodeBoolEqQ15 12-bit sequence matches gate bytes") {
     CHECK((unsigned)buf[0] == 0xb2);
     CHECK((unsigned)buf[1] == 0xe8);
 }
+
+TEST_CASE("odEcEncodeBoolQ15 f=16384 and f=8192 match gate bytes") {
+    // Gate: ec_enc_bool_f16384 2 69 40 (8 bits {0,1,1,0,1,0,0,1},
+    // svt_od_ec_encode_bool_q15 bitstream_unit.c:252-269) and
+    // ec_enc_bool_f8192 2 bb e0 (same bits, f = 8192).
+    entropy::OdEcEnc enc{};
+    unsigned char buf[64] = {0};
+    enc.buf = buf;
+    entropy::odEcEncReset(&enc);
+    const int bits[8] = {0, 1, 1, 0, 1, 0, 0, 1};
+    for (int i = 0; i < 8; ++i) entropy::odEcEncodeBoolQ15(&enc, bits[i], 16384);
+    std::uint32_t n = 0;
+    entropy::odEcEncDone(&enc, &n);
+    REQUIRE(n == 2);
+    CHECK((unsigned)buf[0] == 0x69);
+    CHECK((unsigned)buf[1] == 0x40);
+    enc.buf = buf;
+    entropy::odEcEncReset(&enc);
+    for (int i = 0; i < 8; ++i) entropy::odEcEncodeBoolQ15(&enc, bits[i], 8192);
+    entropy::odEcEncDone(&enc, &n);
+    REQUIRE(n == 2);
+    CHECK((unsigned)buf[0] == 0xbb);
+    CHECK((unsigned)buf[1] == 0xe0);
+}

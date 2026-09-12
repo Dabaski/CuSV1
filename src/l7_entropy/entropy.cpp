@@ -142,6 +142,23 @@ void odEcEncodeBoolEqQ15(OdEcEnc* enc, int val) {
     odEcEncNormalize(enc, l, r);
 }
 
+// svt_od_ec_encode_bool_q15 (bitstream_unit.c:252-269)
+// Encode a single binary value.
+// val: The value to encode (0 or 1).
+// f: The probability that the val is one, scaled by 32768.
+void odEcEncodeBoolQ15(OdEcEnc* enc, int val, std::uint32_t f) {
+    OdEcWindow l = enc->low;
+    std::uint32_t r = enc->rng;
+    // EB_ASSUME(f <= 32768) dropped (definitions.h:516 MSVC branch, no-op)
+    std::uint32_t v = ((r >> 8) * (f >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT)) + EC_MIN_PROB;
+    r -= v;
+    if (val) {
+        l += r;
+        r = v;
+    }
+    odEcEncNormalize(enc, l, r);
+}
+
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 // Indicates that there are no more symbols to encode.
 // All remaining output bytes are flushed to the output buffer.

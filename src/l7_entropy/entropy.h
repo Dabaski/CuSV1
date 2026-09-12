@@ -38,6 +38,12 @@ void odEcEncReset(OdEcEnc* enc);
 // svt_od_ec_encode_bool_eq_q15 (bitstream_unit.c:232-247)
 void odEcEncodeBoolEqQ15(OdEcEnc* enc, int val);
 
+// svt_od_ec_encode_bool_q15 (bitstream_unit.c:252-269)
+// Encode a single binary value.
+// val: The value to encode (0 or 1).
+// f: The probability that the val is one, scaled by 32768.
+void odEcEncodeBoolQ15(OdEcEnc* enc, int val, std::uint32_t f);
+
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes);
 
