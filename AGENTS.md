@@ -103,6 +103,23 @@ compile. If you can split a step into two smaller ones, split it.
   of small slices before writing any test. Show that list before starting the loop.
 - If you get stuck failing the same test after a couple of honest attempts,
   stop and explain what you're seeing rather than guessing repeatedly.
+
+## Parallel-work protocol
+
+- Each agent works ONLY its assigned partition (directories named in the
+  assignment). Any file outside it requires a court order first.
+- The GATE (`tools/golden_gen`) and `expected_primitives.txt` are SHARED
+  infrastructure: generator additions are serialized - one agent's gate-line
+  additions per commit, rebase before adding; never edit
+  `expected_primitives.txt` concurrently. Coordinate via the user.
+- Every commit: full 7/7 suite green + GATE diff 0 (per AGENTS.md).
+  If the suite is red at your commit time because the OTHER agent's WIP broke
+  it, halt and report - do not fix another partition.
+- Commit cadence unchanged: one slice = one commit, RED evidence, measured
+  values, citation rule.
+- Branch strategy: both agents commit to master sequentially through the user
+  (small slices make rebasing trivial); no force-push.
+
 ## Test command
 
 Determine the project's test command before starting work. Check, in order:
@@ -235,5 +252,4 @@ North star: a working, bit-exact 1:1 port of SVT-AV1 on CUDA 12.2 - every algori
 - l5_motion — motion::sad4x4 / sad8x8 / sad16x16 / sad32x32 / sad64x64 (strided uint8) + GPU kernels for 4x4 and 8x8 only; the 16x16 / 32x32 / 64x64 D2 policies score host-side (frame GPU tests are host-decides-gpu-executes, like 8x8). Provenance: sad8x8 mirrors the dedicated 8x8 kernel compute8x8_sad_kernel_c (motion_estimation.c:71); sad4x4 / sad16x16 / sad32x32 / sad64x64 mirror svt_nxm_sad_kernel_helper_c at those dims (compute_sad_c.c:21). (HK1 correction: both citations restored - the HK1 edit had dropped compute8x8_sad_kernel_c, which does exist at motion_estimation.c:71.)
 - l6_pipeline - block + frame composition and DECISION at all five geometries: 4x4 (encodeBlock4x4 / encodeRecon4x4 / encodeFrameRecon4x4 / encodeFrameAuto4x4 / encodeFrameAuto4x4Q), 8x8 (encodeFrameRecon8x8 / Auto8x8 / Recon8x8Q / Auto8x8Q), 16x16 (encodeFrameRecon16x16 / Auto16x16 / Recon16x16Q / Auto16x16Q), 32x32 (encodeFrameRecon32x32 / Auto32x32 / Recon32x32Q / Auto32x32Q + decideBlockMode32x32) and 64x64 (encodeFrameRecon64x64 / Auto64x64 / Recon64x64Q / Auto64x64Q + decideBlockMode64x64, DCT-only within our TxType scope) - raster grids, intra-only, each block predicting from RECONSTRUCTED neighbors (M1 availability rules) with the FR-series REAL recon top-right gather in every variant (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]; row above fully reconstructed by raster order). Each Auto variant's mode is CHOSEN by the D2 SAD policy per geometry (decideBlockMode4x4/8x8/16x16/32x32/64x64 - policy is ours; primitives 1:1) evaluated against reconstructed edges; chosen modes feed NeighborContext (filt_type live) = plane window (l1) + buildIntraPredictors (l4) -> int16 residual (no clamp) -> fwdTxfm2d (l3) -> invTxfm2dAdd (l3 inverse) onto the same predictor. GPU frame paths: per-block kernel chains (predict_block / subtract_4x4..64x64_plane / fwd_txfm_2d / quant_dequant / inv_txfm_2d_add), edges gathered host-side from the device recon buffer; ALL FIVE geometries are bit-exact vs host in both lossless and q100 GPU frame tests. The 16x16 fwd/inv roundtrip is exact (recon == source at 16x16); 8x8 / 32x32 / 64x64 are lossy by design (fwd shift sums -2, 0 for 64). Goldens captured from SVT's own C in the committed generator (tools/golden_gen).
 - third_party/ â€” vendored SVT-AV1 (1:1 source of truth), doctest, hardware docs (perf-axis only: PTX ISA, GP104 whitepaper, Pascal Tuning Guide, Nsight-focused guides; CUDA 12.2 profiling is ncu, not nvprof).
-
 
