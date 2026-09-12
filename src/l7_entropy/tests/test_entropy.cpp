@@ -60,3 +60,22 @@ TEST_CASE("odEcEncodeBoolQ15 f=16384 and f=8192 match gate bytes") {
     CHECK((unsigned)buf[0] == 0xbb);
     CHECK((unsigned)buf[1] == 0xe0);
 }
+
+TEST_CASE("odEcEncodeCdfQ15 13-symbol sequence matches gate bytes") {
+    // Gate: ec_enc_cdf13 5 23 97 49 00 d4 (10 symbols {0,5,12,3,5,5,1,0,7,9}
+    // through the fixture icdf13, svt_od_ec_encode_cdf_q15
+    // bitstream_unit.c:279-301). Same fixture icdf as the EC0 driver
+    // (main_primitives.c): monotonically non-increasing, icdf[12] = 0.
+    static const std::uint16_t icdf13[13] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0};
+    entropy::OdEcEnc enc{};
+    unsigned char buf[64] = {0};
+    enc.buf = buf;
+    entropy::odEcEncReset(&enc);
+    const int syms[10] = {0, 5, 12, 3, 5, 5, 1, 0, 7, 9};
+    for (int i = 0; i < 10; ++i) entropy::odEcEncodeCdfQ15(&enc, syms[i], icdf13, 13);
+    std::uint32_t n = 0;
+    entropy::odEcEncDone(&enc, &n);
+    REQUIRE(n == 5);
+    const unsigned char expected[5] = {0x23, 0x97, 0x49, 0x00, 0xd4};
+    for (int i = 0; i < 5; ++i) CHECK(buf[i] == expected[i]);
+}

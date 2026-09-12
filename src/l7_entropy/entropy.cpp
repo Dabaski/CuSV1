@@ -159,6 +159,21 @@ void odEcEncodeBoolQ15(OdEcEnc* enc, int val, std::uint32_t f) {
     odEcEncNormalize(enc, l, r);
 }
 
+// svt_od_ec_encode_cdf_q15 (bitstream_unit.c:279-301)
+void odEcEncodeCdfQ15(OdEcEnc* enc, int s, const std::uint16_t* icdf, int nsyms) {
+    OdEcWindow l = enc->low;
+    std::uint32_t r = enc->rng;
+    const std::uint32_t r_hi = r >> 8;
+    const std::uint32_t temp = EC_MIN_PROB * (nsyms - 1 - s);
+    if (0 < s) {
+        std::uint32_t u = (r_hi * (icdf[s - 1] >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT)) + temp + EC_MIN_PROB;
+        l += r - u;
+        r = u;
+    }
+    r -= (r_hi * (icdf[s] >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT)) + temp;
+    odEcEncNormalize(enc, l, r);
+}
+
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 // Indicates that there are no more symbols to encode.
 // All remaining output bytes are flushed to the output buffer.

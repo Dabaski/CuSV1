@@ -44,6 +44,12 @@ void odEcEncodeBoolEqQ15(OdEcEnc* enc, int val);
 // f: The probability that the val is one, scaled by 32768.
 void odEcEncodeBoolQ15(OdEcEnc* enc, int val, std::uint32_t f);
 
+// svt_od_ec_encode_cdf_q15 (bitstream_unit.c:279-301)
+// Encodes a symbol given a cumulative distribution function (CDF) table in
+// Q15. s: The index of the symbol to encode. icdf: 32768 minus the CDF.
+// nsyms: The number of symbols in the alphabet (at most 16).
+void odEcEncodeCdfQ15(OdEcEnc* enc, int s, const std::uint16_t* icdf, int nsyms);
+
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes);
 
