@@ -26,6 +26,9 @@ $files = @{
     "full_loop.c"        = (Get-Content (Join-Path $src "Codec\full_loop.c") -Raw)
     "definitions.h"      = (Get-Content (Join-Path $src "Codec\definitions.h") -Raw)
     "common_utils.c"     = (Get-Content (Join-Path $src "Codec\common_utils.c") -Raw)
+    "bitstream_unit.c"   = (Get-Content (Join-Path $src "Codec\bitstream_unit.c") -Raw)
+    "bitstream_unit.h"   = (Get-Content (Join-Path $src "Codec\bitstream_unit.h") -Raw)
+    "cabac_context_model.h" = (Get-Content (Join-Path $src "Codec\cabac_context_model.h") -Raw)
 }
 # normalize line endings to LF so multi-line patterns match regardless of
 # how this script was saved
@@ -76,6 +79,26 @@ function Extract-Macro([string]$text, [string]$pattern, [string]$label) {
     }
     $body = $text.Substring($lineStart, $pos - $lineStart).TrimEnd()
     return @{ body = $body; line = $loc.line }
+}
+
+# Extract a verbatim LINE RANGE: from the line containing $start through the
+# line containing $end (both included). For declaration blocks that contain
+# no braces, where Extract-Block cannot find the extent.
+function Extract-Lines([string]$text, [string]$start, [string]$end, [string]$label) {
+    $a = Find-Line $text $start
+    $b = Find-Line $text $end
+    if ($b.idx -lt $a.idx) { throw "end pattern before start pattern for $label" }
+    $lineEnd = $text.IndexOf("`n", $b.idx)
+    if ($lineEnd -lt 0) { $lineEnd = $text.Length }
+    $body = $text.Substring($a.idx, $lineEnd - $a.idx).TrimEnd()
+    return @{ body = $body; line = $a.line }
+}
+
+function Emit-Lines([string]$file, [string]$start, [string]$end, [string]$label) {
+    $r = Extract-Lines $files[$file] $start $end $label
+    Emit ""
+    Emit "// ==== SVT-AV1 $file :$($r.line) - $label (verbatim line-range extract; do not edit) ===="
+    Emit $r.body
 }
 
 function Emit-Macro([string]$file, [string]$pattern, [string]$label) {
@@ -249,6 +272,52 @@ Emit-Verbatim "inv_transforms.c" "int32_t svt_aom_get_qzbin_factor" "svt_aom_get
 Emit-Verbatim "inv_transforms.c" "void svt_aom_invert_quant" "svt_aom_invert_quant"
 Emit-Verbatim "full_loop.c" "void svt_aom_quantize_b_c" "svt_aom_quantize_b_c"
 Emit-Verbatim "full_loop.c" "static void quantize_fp_helper_c" "quantize_fp_helper_c"
+
+# ---- entropy coder, encoder side (EC0) ----
+# CDF probability plumbing first (cabac_context_model.h:38-47), then the
+# od_ec window typedef + encoder context (bitstream_unit.h:92-120), byte
+# swap + HToBE64 (bitstream_unit.h:154-218), then the encoder functions
+# (bitstream_unit.c:77-408) in dependency order.
+Emit-Macro "cabac_context_model.h" "#define CDF_PROB_BITS" "CDF_PROB_BITS"
+Emit-Macro "cabac_context_model.h" "#define CDF_PROB_TOP" "CDF_PROB_TOP"
+Emit-Macro "cabac_context_model.h" "#define AOM_ICDF" "AOM_ICDF"
+Emit-Macro "bitstream_unit.h" "#define EC_PROB_SHIFT" "EC_PROB_SHIFT"
+Emit-Macro "bitstream_unit.h" "#define EC_MIN_PROB" "EC_MIN_PROB"
+Emit-Macro "bitstream_unit.h" "#define OD_BITRES" "OD_BITRES"
+Emit-Macro "bitstream_unit.h" "#define OD_ICDF" "OD_ICDF"
+Emit-Macro "bitstream_unit.h" "typedef uint64_t OdEcWindow" "OdEcWindow"
+Emit-Macro "bitstream_unit.h" "#define OD_EC_WINDOW_SIZE" "OD_EC_WINDOW_SIZE"
+Emit-Macro "bitstream_unit.h" "#define OD_MEASURE_EC_OVERHEAD" "OD_MEASURE_EC_OVERHEAD"
+Emit-Verbatim "bitstream_unit.h" "typedef struct OdEcEnc" "OdEcEnc"
+# Encoder prototypes (bitstream_unit.h:122-131): the bitstream_unit.c extracts
+# call each other (svt_od_ec_enc_init -> svt_od_ec_enc_reset); SVT declares
+# them in this header block. OD_ARG_NONNULL / OD_WARN_UNUSED_RESULT resolve
+# in shims.h.
+Emit-Lines "bitstream_unit.h" "/*See entenc.c for further documentation.*/" "uint32_t svt_od_ec_enc_tell_frac" "encoder prototypes"
+Emit-Verbatim "bitstream_unit.h" "static inline uint64_t BSwap64" "BSwap64"
+# Documented deviation #2: the WORDS_BIGENDIAN #if guard around the HToLE/HToBE
+# macro family (bitstream_unit.h:148-164) is dropped; the little-endian branch
+# line is taken verbatim. The generator targets LE hosts (x86-64) only, where
+# the guard's #else branch is the live one.
+Emit-Macro "bitstream_unit.h" "#define HToBE64(X) BSwap64(X)" "HToBE64"
+# svt_log2f = get_msb (definitions.h:592); the portable #else get_msb body
+# (definitions.h:628-644) is extracted verbatim - same value floor(log2(n)).
+# Must precede the encoder functions (od_ec_enc_normalize uses svt_log2f).
+Emit-Macro "definitions.h" "#define svt_log2f get_msb" "svt_log2f"
+Emit-Verbatim "definitions.h" "/*static*/ INLINE int32_t get_msb" "get_msb"
+Emit-Verbatim "bitstream_unit.c" "static inline void propagate_carry_bwd" "propagate_carry_bwd"
+Emit-Verbatim "bitstream_unit.c" "static NOINLINE void od_ec_enc_flush" "od_ec_enc_flush"
+Emit-Verbatim "bitstream_unit.c" "static inline void svt_od_ec_enc_normalize" "svt_od_ec_enc_normalize"
+Emit-Verbatim "bitstream_unit.c" "void svt_od_ec_enc_init" "svt_od_ec_enc_init"
+Emit-Verbatim "bitstream_unit.c" "void svt_od_ec_enc_reset" "svt_od_ec_enc_reset"
+Emit-Verbatim "bitstream_unit.c" "void svt_od_ec_enc_clear" "svt_od_ec_enc_clear"
+Emit-Verbatim "bitstream_unit.c" "void svt_od_ec_encode_bool_eq_q15" "svt_od_ec_encode_bool_eq_q15"
+Emit-Verbatim "bitstream_unit.c" "void svt_od_ec_encode_bool_q15" "svt_od_ec_encode_bool_q15"
+Emit-Verbatim "bitstream_unit.c" "void svt_od_ec_encode_cdf_q15" "svt_od_ec_encode_cdf_q15"
+Emit-Verbatim "bitstream_unit.c" "unsigned char* svt_od_ec_enc_done" "svt_od_ec_enc_done"
+Emit-Verbatim "bitstream_unit.c" "int svt_od_ec_enc_tell" "svt_od_ec_enc_tell"
+Emit-Verbatim "bitstream_unit.c" "uint32_t svt_od_ec_tell_frac" "svt_od_ec_tell_frac"
+Emit-Verbatim "bitstream_unit.c" "uint32_t svt_od_ec_enc_tell_frac" "svt_od_ec_enc_tell_frac"
 
 # ---- build_intra_predictors with the documented get_filt_type shim ----
 $r = Extract-Block $files["enc_intra_prediction.c"] "static void build_intra_predictors(const MacroBlockD* xd" "build_intra_predictors"

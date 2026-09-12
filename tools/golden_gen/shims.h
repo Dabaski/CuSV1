@@ -31,6 +31,18 @@ static inline int svtd_clip(int v, int lo, int hi) { return v < lo ? lo : (v > h
 // EB_ABS_DIFF - Utility.h
 #define EB_ABS_DIFF(a, b) (abs((int)((a)) - (int)((b))))
 
+// EB_LIKELY/EB_UNLIKELY - definitions.h:500-516; __builtin_expect under
+// GNUC, identity expression under MSVC (the generator's toolchain).
+#define EB_UNLIKELY(x) (x)
+// EB_ASSUME - definitions.h:514-516; __builtin_assume under GNUC, no-op
+// under MSVC.
+#define EB_ASSUME(x) ((void)0)
+
+// OD_WARN_UNUSED_RESULT / OD_ARG_NONNULL - bitstream_unit.h:57-75; GNUC
+// function attributes, empty under MSVC.
+#define OD_WARN_UNUSED_RESULT
+#define OD_ARG_NONNULL(x)
+
 #include <stdlib.h>
 
 // RTCD dispatch names resolve to the _c implementations in the generator

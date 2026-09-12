@@ -5690,6 +5690,350 @@ static void quantize_fp_helper_c(const TranLow* coeff_ptr, intptr_t n_coeffs, co
     *eob_ptr = eob + 1;
 }
 
+// ==== SVT-AV1 cabac_context_model.h :39 - CDF_PROB_BITS (verbatim extract; do not edit) ====
+#define CDF_PROB_BITS 15
+
+// ==== SVT-AV1 cabac_context_model.h :40 - CDF_PROB_TOP (verbatim extract; do not edit) ====
+#define CDF_PROB_TOP (1 << CDF_PROB_BITS)
+
+// ==== SVT-AV1 cabac_context_model.h :47 - AOM_ICDF (verbatim extract; do not edit) ====
+#define AOM_ICDF(x) (CDF_PROB_TOP - (x))
+
+// ==== SVT-AV1 bitstream_unit.h :85 - EC_PROB_SHIFT (verbatim extract; do not edit) ====
+#define EC_PROB_SHIFT 6
+
+// ==== SVT-AV1 bitstream_unit.h :86 - EC_MIN_PROB (verbatim extract; do not edit) ====
+#define EC_MIN_PROB 4 // must be <= (1<<EC_PROB_SHIFT)/16
+
+// ==== SVT-AV1 bitstream_unit.h :90 - OD_BITRES (verbatim extract; do not edit) ====
+#define OD_BITRES (3)
+
+// ==== SVT-AV1 bitstream_unit.h :92 - OD_ICDF (verbatim extract; do not edit) ====
+#define OD_ICDF AOM_ICDF
+
+// ==== SVT-AV1 bitstream_unit.h :96 - OdEcWindow (verbatim extract; do not edit) ====
+typedef uint64_t OdEcWindow;
+
+// ==== SVT-AV1 bitstream_unit.h :97 - OD_EC_WINDOW_SIZE (verbatim extract; do not edit) ====
+#define OD_EC_WINDOW_SIZE ((int32_t)sizeof(OdEcWindow) * CHAR_BIT)
+
+// ==== SVT-AV1 bitstream_unit.h :98 - OD_MEASURE_EC_OVERHEAD (verbatim extract; do not edit) ====
+#define OD_MEASURE_EC_OVERHEAD (0)
+
+// ==== SVT-AV1 bitstream_unit.h :101 - OdEcEnc (verbatim extract; do not edit) ====
+typedef struct OdEcEnc {
+    /*The low end of the current range.*/
+    OdEcWindow low;
+    /*The number of values in the current range.
+      Widened to uint32_t to eliminate uxth zero-extension instructions on ARM64.
+      Value is always in [0x8000, 0xFFFF] post-normalize.*/
+    uint32_t rng;
+    /*The number of bits of data in the current value.*/
+    int16_t cnt;
+    /*Nonzero if an error occurred.*/
+    int16_t error;
+    /*Buffered output. Borrowed from OutputBitstreamUnit via aom_start_encode().*/
+    unsigned char* buf;
+    /*Write pointer: next byte to write. Invariant: ptr = buf + (bytes written).*/
+    unsigned char* ptr;
+#if OD_MEASURE_EC_OVERHEAD
+    double entropy;
+    int    nb_symbols;
+#endif
+} OdEcEnc;
+
+// ==== SVT-AV1 bitstream_unit.h :122 - encoder prototypes (verbatim line-range extract; do not edit) ====
+/*See entenc.c for further documentation.*/
+void svt_od_ec_enc_init(OdEcEnc* enc) OD_ARG_NONNULL(1);
+void svt_od_ec_enc_reset(OdEcEnc* enc) OD_ARG_NONNULL(1);
+void svt_od_ec_encode_bool_eq_q15(OdEcEnc* enc, int32_t val) OD_ARG_NONNULL(1);
+void svt_od_ec_encode_bool_q15(OdEcEnc* enc, int32_t val, unsigned f_q15) OD_ARG_NONNULL(1);
+void svt_od_ec_encode_cdf_q15(OdEcEnc* enc, int32_t s, const uint16_t* cdf, int32_t nsyms) OD_ARG_NONNULL(1)
+    OD_ARG_NONNULL(3);
+OD_WARN_UNUSED_RESULT uint8_t* svt_od_ec_enc_done(OdEcEnc* enc, uint32_t* nbytes) OD_ARG_NONNULL(1) OD_ARG_NONNULL(2);
+OD_WARN_UNUSED_RESULT int32_t  svt_od_ec_enc_tell(const OdEcEnc* enc) OD_ARG_NONNULL(1);
+OD_WARN_UNUSED_RESULT uint32_t svt_od_ec_enc_tell_frac(const OdEcEnc* enc) OD_ARG_NONNULL(1);
+
+// ==== SVT-AV1 bitstream_unit.h :203 - BSwap64 (verbatim extract; do not edit) ====
+static inline uint64_t BSwap64(uint64_t x) {
+#if defined(HAVE_BUILTIN_BSWAP64)
+    return __builtin_bswap64(x);
+#elif defined(__x86_64__)
+    uint64_t swapped_bytes;
+    __asm__ volatile("bswapq %0" : "=r"(swapped_bytes) : "0"(x));
+    return swapped_bytes;
+#elif defined(_MSC_VER)
+    return (uint64_t)_byteswap_uint64(x);
+#else // generic code for swapping 64-bit values (suggested by bdb@)
+    x = ((x & 0xffffffff00000000ull) >> 32) | ((x & 0x00000000ffffffffull) << 32);
+    x = ((x & 0xffff0000ffff0000ull) >> 16) | ((x & 0x0000ffff0000ffffull) << 16);
+    x = ((x & 0xff00ff00ff00ff00ull) >> 8) | ((x & 0x00ff00ff00ff00ffull) << 8);
+    return x;
+#endif // HAVE_BUILTIN_BSWAP64
+}
+
+// ==== SVT-AV1 bitstream_unit.h :162 - HToBE64 (verbatim extract; do not edit) ====
+#define HToBE64(X) BSwap64(X)
+
+// ==== SVT-AV1 definitions.h :592 - svt_log2f (verbatim extract; do not edit) ====
+#define svt_log2f get_msb
+
+// ==== SVT-AV1 definitions.h :628 - get_msb (verbatim extract; do not edit) ====
+/*static*/ INLINE int32_t get_msb(uint32_t n) {
+    int32_t  log   = 0;
+    uint32_t value = n;
+    int32_t  i;
+
+    assert(n != 0);
+
+    for (i = 4; i >= 0; --i) {
+        const int32_t  shift = (1 << i);
+        const uint32_t x     = value >> shift;
+        if (x != 0) {
+            value = x;
+            log += shift;
+        }
+    }
+    return log;
+}
+
+// ==== SVT-AV1 bitstream_unit.c :77 - propagate_carry_bwd (verbatim extract; do not edit) ====
+static inline void propagate_carry_bwd(unsigned char* ptr) {
+    while (!++*--ptr) {}
+}
+
+// ==== SVT-AV1 bitstream_unit.c :110 - od_ec_enc_flush (verbatim extract; do not edit) ====
+static NOINLINE void od_ec_enc_flush(OdEcEnc* enc, OdEcWindow low, unsigned rng, int c, int d) {
+    // Need to add 1 byte here since enc->cnt always counts 1 byte less
+    // (enc->cnt = -9) to ensure correct operation
+    int s              = c + d;
+    int num_bits_ready = (s & ~7) + 8;
+
+    // Update "c" to contain the number of non-ready bits in "low". Since "low"
+    // has 64-bit capacity, we need to add the (64 - 40) cushion bits and take
+    // off the number of ready bits.
+    c += 24 - num_bits_ready;
+
+    // Extract ready bits from low
+    uint64_t output = low >> c;
+
+    // Separate carry bit from data
+    uint64_t mask = (uint64_t)1 << num_bits_ready;
+
+    if (output & mask) {
+        assert(enc->ptr > enc->buf);
+        propagate_carry_bwd(enc->ptr);
+    }
+
+    // Write to buffer. Carry bit will be shifted away, no need to mask
+    // output &= mask - 1;
+    const uint64_t reg = HToBE64(output << (64 - num_bits_ready));
+    memcpy(enc->ptr, &reg, 8);
+
+    enc->ptr += num_bits_ready >> 3;
+
+    low &= (((uint64_t)1 << c) - 1);
+
+    enc->low = low << d;
+    enc->rng = rng << d;
+    enc->cnt = (s & 7) - 8;
+}
+
+// ==== SVT-AV1 bitstream_unit.c :151 - svt_od_ec_enc_normalize (verbatim extract; do not edit) ====
+static inline void svt_od_ec_enc_normalize(OdEcEnc* enc, OdEcWindow low, unsigned rng) {
+    int c = enc->cnt;
+    assert(rng <= 65535U);
+    /*The number of leading zeros in the 16-bit binary representation of rng.*/
+    int d = 15 - svt_log2f(rng);
+
+    /* We flush every time "low" cannot safely and efficiently accommodate any
+       more data. Overall, c must not exceed 63 at the time of byte flush out. To
+       facilitate this, "c+d" cannot exceed 56-bits because we have to keep 1 byte
+       for carry. Also, we need to subtract 16 because we want to keep room for
+       the next symbol worth "d"-bits (max 15). An alternate condition would be if
+       (e < d), where e = number of leading zeros in "low", indicating there is
+       not enough rooom to accommodate "rng" worth of "d"-bits in "low". However,
+       this approach needs additional computations: (i) compute "e", (ii) push
+       the leading 0x00's as a special case.
+    */
+    if (EB_UNLIKELY(c + d >= 40)) { // 56 - 16
+        od_ec_enc_flush(enc, low, rng, c, d);
+    } else {
+        enc->low = low << d;
+        enc->rng = rng << d;
+        enc->cnt = c + d;
+    }
+}
+
+// ==== SVT-AV1 bitstream_unit.c :179 - svt_od_ec_enc_init (verbatim extract; do not edit) ====
+void svt_od_ec_enc_init(OdEcEnc* enc) {
+    enc->buf = NULL;
+    svt_od_ec_enc_reset(enc);
+}
+
+// ==== SVT-AV1 bitstream_unit.c :185 - svt_od_ec_enc_reset (verbatim extract; do not edit) ====
+void svt_od_ec_enc_reset(OdEcEnc* enc) {
+    enc->ptr = enc->buf;
+    enc->low = 0;
+    enc->rng = 0x8000;
+    /*This is initialized to -9 so that it crosses zero after we've accumulated
+       one byte + one carry bit.*/
+    enc->cnt   = -9;
+    enc->error = 0;
+#if OD_MEASURE_EC_OVERHEAD
+    enc->entropy    = 0;
+    enc->nb_symbols = 0;
+#endif
+}
+
+// ==== SVT-AV1 bitstream_unit.c :200 - svt_od_ec_enc_clear (verbatim extract; do not edit) ====
+void svt_od_ec_enc_clear(OdEcEnc* enc) {
+    // EC borrows its buffer from OutputBitstreamUnit; nothing to free.
+    enc->buf = NULL;
+    enc->ptr = NULL;
+}
+
+// ==== SVT-AV1 bitstream_unit.c :232 - svt_od_ec_encode_bool_eq_q15 (verbatim extract; do not edit) ====
+void svt_od_ec_encode_bool_eq_q15(OdEcEnc* enc, int val) {
+    OdEcWindow l = enc->low;
+    uint32_t   r = enc->rng;
+    assert(32768U <= r);
+    uint32_t v = ((r >> 8) << (CDF_PROB_BITS - 1 - 7)) + EC_MIN_PROB;
+    r -= v;
+    if (val) {
+        l += r;
+        r = v;
+    }
+    svt_od_ec_enc_normalize(enc, l, r);
+#if OD_MEASURE_EC_OVERHEAD
+    enc->entropy -= OD_LOG2((double)(val ? f : (32768 - f)) / 32768.);
+    enc->nb_symbols++;
+#endif
+}
+
+// ==== SVT-AV1 bitstream_unit.c :252 - svt_od_ec_encode_bool_q15 (verbatim extract; do not edit) ====
+void svt_od_ec_encode_bool_q15(OdEcEnc* enc, int val, uint32_t f) {
+    assert(f < 32768U);
+    OdEcWindow l = enc->low;
+    uint32_t   r = enc->rng;
+    assert(32768U <= r);
+    EB_ASSUME(f <= 32768);
+    uint32_t v = ((r >> 8) * (f >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT)) + EC_MIN_PROB;
+    r -= v;
+    if (val) {
+        l += r;
+        r = v;
+    }
+    svt_od_ec_enc_normalize(enc, l, r);
+#if OD_MEASURE_EC_OVERHEAD
+    enc->entropy -= OD_LOG2((double)(val ? f : (32768 - f)) / 32768.);
+    enc->nb_symbols++;
+#endif
+}
+
+// ==== SVT-AV1 bitstream_unit.c :279 - svt_od_ec_encode_cdf_q15 (verbatim extract; do not edit) ====
+void svt_od_ec_encode_cdf_q15(OdEcEnc* enc, int s, const uint16_t* icdf, int nsyms) {
+    assert(s >= 0);
+    assert(s < nsyms);
+    assert(icdf[nsyms - 1] == OD_ICDF(CDF_PROB_TOP));
+
+    OdEcWindow l = enc->low;
+    uint32_t   r = enc->rng;
+    assert(32768U <= r);
+    assert(7 - EC_PROB_SHIFT >= 0);
+    const uint32_t r_hi = r >> 8;
+    const uint32_t temp = EC_MIN_PROB * (nsyms - 1 - s);
+    if (0 < s) {
+        uint32_t u = (r_hi * (icdf[s - 1] >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT)) + temp + EC_MIN_PROB;
+        l += r - u;
+        r = u;
+    }
+    r -= (r_hi * (icdf[s] >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT)) + temp;
+    svt_od_ec_enc_normalize(enc, l, r);
+#if OD_MEASURE_EC_OVERHEAD
+    enc->entropy -= OD_LOG2((double)(OD_ICDF(fh) - OD_ICDF(fl)) / CDF_PROB_TOP.);
+    enc->nb_symbols++;
+#endif
+}
+
+// ==== SVT-AV1 bitstream_unit.c :309 - svt_od_ec_enc_done (verbatim extract; do not edit) ====
+unsigned char* svt_od_ec_enc_done(OdEcEnc* enc, uint32_t* nbytes) {
+    if (enc->error) {
+        return NULL;
+    }
+#if OD_MEASURE_EC_OVERHEAD
+    {
+        uint32_t tell;
+        /* Don't count the 1 bit we lose to raw bits as overhead. */
+        tell = od_ec_enc_tell(enc) - 1;
+        fprintf(stderr, "overhead: %f%%\n", 100 * (tell - enc->entropy) / enc->entropy);
+        fprintf(stderr, "efficiency: %f bits/symbol\n", (double)tell / enc->nb_symbols);
+    }
+#endif
+
+    int c = enc->cnt;
+
+    /*We output the minimum number of bits that ensures that the symbols encoded
+       thus far will be decoded correctly regardless of the bits that follow.*/
+    OdEcWindow m = 0x3FFF;
+    OdEcWindow e = ((enc->low + m) & ~m) | (m + 1);
+    OdEcWindow v = e >> (c + 16);
+    if (v & 0x0100) {
+        assert(enc->ptr > enc->buf);
+        propagate_carry_bwd(enc->ptr);
+    }
+    do {
+        *enc->ptr++ = (unsigned char)((e >> (c + 16)) & 0xFF);
+
+        c -= 8;
+    } while (10 + c > 0);
+
+    *nbytes = (uint32_t)(enc->ptr - enc->buf);
+
+    return enc->buf;
+}
+
+// ==== SVT-AV1 bitstream_unit.c :354 - svt_od_ec_enc_tell (verbatim extract; do not edit) ====
+int svt_od_ec_enc_tell(const OdEcEnc* enc) {
+    /*The 10 here counteracts the offset of -9 baked into cnt, and adds 1 extra
+       bit, which we reserve for terminating the stream.*/
+    return (enc->cnt + 10) + (int)(enc->ptr - enc->buf) * 8;
+}
+
+// ==== SVT-AV1 bitstream_unit.c :369 - svt_od_ec_tell_frac (verbatim extract; do not edit) ====
+uint32_t svt_od_ec_tell_frac(uint32_t nbits_total, uint32_t rng) {
+    uint32_t nbits;
+    int      l;
+    int      i;
+    /*To handle the non-integral number of bits still left in the encoder/decoder
+       state, we compute the worst-case number of bits of val that must be
+       encoded to ensure that the value is inside the range for any possible
+       subsequent bits.
+      The computation here is independent of val itself (the decoder does not
+       even track that value), even though the real number of bits used after
+       od_ec_enc_done() may be 1 smaller if rng is a power of two and the
+       corresponding trailing bits of val are all zeros.
+      If we did try to track that special case, then coding a value with a
+       probability of 1/(1 << n) might sometimes appear to use more than n bits.
+      This may help explain the surprising result that a newly initialized
+       encoder or decoder claims to have used 1 bit.*/
+    nbits = nbits_total << OD_BITRES;
+    l     = 0;
+    for (i = OD_BITRES; i-- > 0;) {
+        int b;
+        rng = rng * rng >> 15;
+        b   = (int)(rng >> 16);
+        l   = l << 1 | b;
+        rng >>= b;
+    }
+    return nbits - l;
+}
+
+// ==== SVT-AV1 bitstream_unit.c :406 - svt_od_ec_enc_tell_frac (verbatim extract; do not edit) ====
+uint32_t svt_od_ec_enc_tell_frac(const OdEcEnc* enc) {
+    return svt_od_ec_tell_frac(svt_od_ec_enc_tell(enc), enc->rng);
+}
+
 // ==== SVT-AV1 enc_intra_prediction.c :40 - build_intra_predictors (verbatim EXCEPT the flagged get_filt_type shim) ====
 static void build_intra_predictors(const MacroBlockD* xd, uint8_t* top_neigh_array, uint8_t* left_neigh_array,
                                    // const uint8_t *ref,    int32_t ref_stride,
