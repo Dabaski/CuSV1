@@ -25,6 +25,7 @@ $files = @{
     "compute_sad_c.c"    = (Get-Content (Join-Path $src "C_DEFAULT\compute_sad_c.c") -Raw)
     "full_loop.c"        = (Get-Content (Join-Path $src "Codec\full_loop.c") -Raw)
     "definitions.h"      = (Get-Content (Join-Path $src "Codec\definitions.h") -Raw)
+    "common_utils.c"     = (Get-Content (Join-Path $src "Codec\common_utils.c") -Raw)
 }
 # normalize line endings to LF so multi-line patterns match regardless of
 # how this script was saved
@@ -120,6 +121,18 @@ foreach ($d in @(
     @("definitions.h", "#define ANGLE_STEP", "ANGLE_STEP"))) {
     Emit-Macro $d[0] $d[1] $d[2]
 }
+
+# ---- common_utils.c: chroma (UV) mode folding (CH0) ----
+# g_uv2y maps UvPredictionMode -> luma PredictionMode (UV_CFL_PRED ->
+# DC_PRED, common_utils.c:14-31); get_uv_mode (common_utils.h:130-133) is
+# the accessor.
+Emit-Verbatim "common_utils.c" "const PredictionMode g_uv2y" "g_uv2y"
+Emit-Verbatim "common_utils.c" "const PredictionMode fimode_to_intradir" "fimode_to_intradir"
+
+# UvPredictionMode enum (definitions.h:1210-1227): UV_DC..UV_PAETH +
+# UV_CFL_PRED, then UV_INTRA_MODES / UV_MODE_INVALID.
+Emit-Verbatim "definitions.h" "typedef enum ATTRIBUTE_PACKED {
+    UV_DC_PRED," "UvPredictionMode"
 
 # ---- inv_transforms.h: helpers ----
 Emit-Macro "inv_transforms.h" "#define INV_COS_BIT" "INV_COS_BIT"

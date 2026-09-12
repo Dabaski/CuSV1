@@ -62,6 +62,8 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | svt_av1_idct8_new/iadst8_new, svt_av1_idct16_new/iadst16_new | Codec/inv_transforms.c | l3 inverse goldens (8x8/16x16) |
 | svt_av1_idct32_new, static av1_iadst32_new | Codec/inv_transforms.c | l3 inverse goldens (32x32) |
 | svt_av1_idct64_new | Codec/inv_transforms.c:1567 | l3 inverse golden idct64 (DCT-only; no ADST at 64x64, av1_txfm_type_ls[4] = DCT64/INVALID/INVALID/IDENTITY64, inv_transforms.h:196) |
+| g_uv2y, fimode_to_intradir | Codec/common_utils.c:14, :33 | CH0 chroma fold: get_uv_mode (common_utils.h:130-133) maps UvPredictionMode -> luma PredictionMode (UV_CFL_PRED -> DC_PRED); chroma never uses FI (enc_intra_prediction.c:641) |
+| UvPredictionMode enum | Codec/definitions.h:1210-1227 | UV_DC..UV_PAETH + UV_CFL_PRED (+UV_INTRA_MODES/UV_MODE_INVALID sentinels) |
 | inv_shift_4x4/8x8/16x16/32x32/64x64, INV_COS_BIT, inv_cos_bit_col/row | Codec/inv_transforms.{c,h} | inv 2D core config (inv_shift_64x64 = {-2,-4}) |
 | svt_av1_gen_inv_stage_range (recomputed inline, cited) | Codec/inv_transforms.c:44, inv_transforms.h:221-222 | gen_inv_range_{8x8,16x16,32x32_dct,64x64_dct} gate lines (stage_range shim per size; 64x64 DCT-only, 12 x 16) |
 | half_btf, round_shift, round_shift_array_c, clamp_value, clamp_buf, clamp64 | Codec/inv_transforms.{c,h}, definitions.h | transform helpers |

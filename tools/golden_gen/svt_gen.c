@@ -73,6 +73,49 @@ typedef enum ATTRIBUTE_PACKED {
 // ==== SVT-AV1 definitions.h :1307 - ANGLE_STEP (verbatim extract; do not edit) ====
 #define ANGLE_STEP 3
 
+// ==== SVT-AV1 common_utils.c :14 - g_uv2y (verbatim extract; do not edit) ====
+const PredictionMode g_uv2y[16] = {
+    DC_PRED, // UV_DC_PRED
+    V_PRED, // UV_V_PRED
+    H_PRED, // UV_H_PRED
+    D45_PRED, // UV_D45_PRED
+    D135_PRED, // UV_D135_PRED
+    D113_PRED, // UV_D113_PRED
+    D157_PRED, // UV_D157_PRED
+    D203_PRED, // UV_D203_PRED
+    D67_PRED, // UV_D67_PRED
+    SMOOTH_PRED, // UV_SMOOTH_PRED
+    SMOOTH_V_PRED, // UV_SMOOTH_V_PRED
+    SMOOTH_H_PRED, // UV_SMOOTH_H_PRED
+    PAETH_PRED, // UV_PAETH_PRED
+    DC_PRED, // UV_CFL_PRED
+    INTRA_INVALID, // UV_INTRA_MODES
+    INTRA_INVALID, // UV_MODE_INVALID
+};
+
+// ==== SVT-AV1 common_utils.c :33 - fimode_to_intradir (verbatim extract; do not edit) ====
+const PredictionMode fimode_to_intradir[FILTER_INTRA_MODES] = {DC_PRED, V_PRED, H_PRED, D157_PRED, DC_PRED};
+
+// ==== SVT-AV1 definitions.h :1210 - UvPredictionMode (verbatim extract; do not edit) ====
+typedef enum ATTRIBUTE_PACKED {
+    UV_DC_PRED, // Average of above and left pixels
+    UV_V_PRED, // Vertical
+    UV_H_PRED, // Horizontal
+    UV_D45_PRED, // Directional 45  degree
+    UV_D135_PRED, // Directional 135 degree
+    UV_D113_PRED, // Directional 113 degree
+    UV_D157_PRED, // Directional 157 degree
+    UV_D203_PRED, // Directional 203 degree
+    UV_D67_PRED, // Directional 67  degree
+    UV_SMOOTH_PRED, // Combination of horizontal and vertical interpolation
+    UV_SMOOTH_V_PRED, // Vertical interpolation
+    UV_SMOOTH_H_PRED, // Horizontal interpolation
+    UV_PAETH_PRED, // Predict from the direction of smallest gradient
+    UV_CFL_PRED, // Chroma-from-Luma
+    UV_INTRA_MODES,
+    UV_MODE_INVALID, // For uv_mode in inter blocks
+} UvPredictionMode;
+
 // ==== SVT-AV1 inv_transforms.h :24 - INV_COS_BIT (verbatim extract; do not edit) ====
 #define INV_COS_BIT 12
 

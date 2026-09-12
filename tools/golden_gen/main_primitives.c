@@ -1220,5 +1220,68 @@ int main(void) {
         for (int i = 0; i < 1024; ++i) printf(" %d", coeffsQ[i]);
         printf("\n");
     }
+
+    // ---- CH0: chroma (UV) builder gate lines at 4x4 ----
+    // SVT chroma flow: uv_mode folds to the LUMA primitive set via g_uv2y
+    // (get_uv_mode, common_utils.h:130-133; UV_CFL_PRED -> DC_PRED,
+    // common_utils.c:28) and chroma NEVER uses filter-intra
+    // (enc_intra_prediction.c:641 passes FILTER_INTRA_MODES for plane != 0).
+    // The predictors themselves are plane-agnostic. Fixture policy (OURS —
+    // SVT has no fixtures): UV-subsampled edges aboveUV[8] = (5+3i)%237,
+    // leftUV[8] = (11+7i)%237, corner 13 (distinct from every luma fixture
+    // so these lines cannot alias a luma line).
+    {
+        const uint8_t aboveUV[8] = {5, 8, 11, 14, 17, 20, 23, 26};
+        const uint8_t leftUV[8] = {11, 18, 25, 32, 39, 46, 53, 60};
+        uint8_t dst[16];
+        // (0) the fold table itself
+        printf("uv2y:");
+        for (int i = 0; i < 16; ++i) printf(" %d", g_uv2y[i]);
+        printf("\n");
+        // (a) UV_V_PRED delta 0 (folds to V_PRED; above-only)
+        svtd_call_builder_tx(dst, g_uv2y[UV_V_PRED], 0, FILTER_INTRA_MODES, 0, aboveUV, 4, 0,
+                             aboveUV, 0, 0, 0, TX_4X4);
+        printf("bc4_uvv:");
+        for (int i = 0; i < 16; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (b) UV_DC_PRED both edges
+        svtd_call_builder_tx(dst, g_uv2y[UV_DC_PRED], 0, FILTER_INTRA_MODES, 0, aboveUV, 4, 0,
+                             leftUV, 4, 0, 13, TX_4X4);
+        printf("bc4_uvdc:");
+        for (int i = 0; i < 16; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (c) UV_D45_PRED delta 0, REAL top-right (nTop 4 + nTr 4 = 8)
+        svtd_call_builder_tx(dst, g_uv2y[UV_D45_PRED], 0, FILTER_INTRA_MODES, 0, aboveUV, 4, 4,
+                             leftUV, 4, 0, 13, TX_4X4);
+        printf("bc4_uvd45:");
+        for (int i = 0; i < 16; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (d) UV_D45_PRED delta -1 (p_angle 42, zone 1, dx = der[42])
+        svtd_call_builder_tx(dst, g_uv2y[UV_D45_PRED], -1, FILTER_INTRA_MODES, 0, aboveUV, 4, 4,
+                             leftUV, 4, 0, 13, TX_4X4);
+        printf("bc4_uvd45m1:");
+        for (int i = 0; i < 16; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (e) UV_CFL_PRED above-only: folds to DC_PRED with no left edge ->
+        // dc_top path; discriminates the fold target (DC) from any other
+        // interpretation
+        svtd_call_builder_tx(dst, g_uv2y[UV_CFL_PRED], 0, FILTER_INTRA_MODES, 0, aboveUV, 4, 0,
+                             aboveUV, 0, 0, 0, TX_4X4);
+        printf("bc4_uvcfl:");
+        for (int i = 0; i < 16; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (f) UV_SMOOTH_PRED (folds to SMOOTH, sm_weight_arrays bs=4 row)
+        svtd_call_builder_tx(dst, g_uv2y[UV_SMOOTH_PRED], 0, FILTER_INTRA_MODES, 0, aboveUV, 4, 0,
+                             leftUV, 4, 0, 13, TX_4X4);
+        printf("bc4_uvsmooth:");
+        for (int i = 0; i < 16; ++i) printf(" %d", dst[i]);
+        printf("\n");
+        // (g) UV_PAETH_PRED (folds to PAETH; base vs left/top/topLeft)
+        svtd_call_builder_tx(dst, g_uv2y[UV_PAETH_PRED], 0, FILTER_INTRA_MODES, 0, aboveUV, 4, 0,
+                             leftUV, 4, 0, 13, TX_4X4);
+        printf("bc4_uvpaeth:");
+        for (int i = 0; i < 16; ++i) printf(" %d", dst[i]);
+        printf("\n");
+    }
     return 0;
 }
