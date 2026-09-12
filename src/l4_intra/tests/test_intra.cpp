@@ -2525,3 +2525,67 @@ TEST_CASE("chroma builder 4x4 matches the bc4 generator goldens") {
         CHECK(ok);
     }
 }
+// ---- CH2: GPU chroma prediction --------------------------------------------
+// ENUMERATION OF WHAT CHANGES (stated per the outline): NOTHING in the
+// kernels. The predict_block_* kernels take a luma mode + angleDelta +
+// filterIntraMode; SVT's chroma path is the same primitives fed the FOLDED
+// mode at the call site (enc_intra_prediction.c:587-588 folds uv_mode before
+// svt_av1_predict_intra_block; :641 passes FILTER_INTRA_MODES for plane != 0).
+// The GPU chroma test therefore folds uv2y HOST-side (exactly the SVT call
+// site) and drives the UNCHANGED 4x4/8x8 kernels. Coverage: all 14 UV modes
+// at delta 0 (incl. UV_CFL_PRED -> the DC fold) + the 8 dr modes at deltas
+// -1/+1 = 30 combos per size, 60 total. Verification-by-enumeration (FX1
+// precedent, R-series historical-RED citation); the kernel math itself is
+// already HK2/FX1-enumerated at the luma level.
+
+TEST_CASE("chroma gpu 4x4 == host for all 14 uv modes (delta 0) + dr at -1/+1") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+    const std::uint8_t aboveUV[8] = {5, 8, 11, 14, 17, 20, 23, 26};
+    const std::uint8_t leftUV[8] = {11, 18, 25, 32, 39, 46, 53, 60};
+    bool allOk = true;
+    for (int m = 0; m < intra::UV_CFL_PRED + 1; ++m) {
+        const auto uvMode = static_cast<intra::UvPredictionMode>(m);
+        const int deltas[3] = {-1, 0, 1};
+        for (int di = 0; di < 3; ++di) {
+            const int delta = deltas[di];
+            const bool isDr = m >= intra::UV_V_PRED && m <= intra::UV_D67_PRED;
+            if (delta != 0 && !isDr) continue;  // angle delta only signalable on dr modes
+            const int folded = intra::uv2y(uvMode);
+            std::uint8_t ref[16] = {0};
+            intra::buildIntraPredictorsUv(ref, 4, uvMode, delta, 4, 4, 13, aboveUV, 4, 4, leftUV, 4, 0);
+            const bool ok = runBlockPredict(ctx, folded, delta, aboveUV, 4, 4, leftUV, 4, 0, 13, ref);
+            if (!ok) allOk = false;
+        }
+    }
+    CHECK(allOk);
+}
+
+TEST_CASE("chroma gpu 8x8 == host for all 14 uv modes (delta 0) + dr at -1/+1") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+    const std::uint8_t aboveUV[16] = {5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47, 50};
+    const std::uint8_t leftUV[16] = {11, 18, 25, 32, 39, 46, 53, 60, 67, 74, 81, 88, 95, 102, 109, 116};
+    bool allOk = true;
+    for (int m = 0; m < intra::UV_CFL_PRED + 1; ++m) {
+        const auto uvMode = static_cast<intra::UvPredictionMode>(m);
+        const int deltas[3] = {-1, 0, 1};
+        for (int di = 0; di < 3; ++di) {
+            const int delta = deltas[di];
+            const bool isDr = m >= intra::UV_V_PRED && m <= intra::UV_D67_PRED;
+            if (delta != 0 && !isDr) continue;
+            const int folded = intra::uv2y(uvMode);
+            std::uint8_t ref[64] = {0};
+            intra::buildIntraPredictorsUv(ref, 8, uvMode, delta, 8, 8, 13, aboveUV, 8, 8, leftUV, 8, 0);
+            const bool ok = runBlockPredict8x8(ctx, folded, delta, aboveUV, 8, 8, leftUV, 8, 0, 13, ref);
+            if (!ok) allOk = false;
+        }
+    }
+    CHECK(allOk);
+}
