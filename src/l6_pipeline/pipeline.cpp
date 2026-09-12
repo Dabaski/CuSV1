@@ -1456,4 +1456,284 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
     }
 }
 
+// ---- CH3: chroma (4:2:0) frame compositions --------------------------------
+// The UV plane is its own plane; per-plane availability (the chroma
+// above/left mbmi of enc_intra_prediction.c:28-33 maps to the same
+// hasTop/hasLeft raster logic on the UV grid). Dispatch: uv_mode folds via
+// intra::uv2y (get_uv_mode, common_utils.h:130-133); the builder never sees
+// FI (enc_intra_prediction.c:641). The D2 policy scores the 13 folded UV
+// candidates (uv modes 0..12; UV_CFL_PRED is NOT a candidate - policy
+// named; its prediction-surface fold is DC and DC_PRED is a candidate).
+ModeDecision decideBlockModeUv16x16(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                                    int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                    int nBottomLeftPx, std::uint8_t aboveLeft,
+                                    const intra::NeighborContext& neighbors) {
+    ModeDecision best{intra::DC_PRED, 0};
+    bool haveBest = false;
+    for (int m = 0; m < intra::UV_CFL_PRED; ++m) {
+        std::uint8_t pred[256] = {0};
+        intra::buildIntraPredictorsUv(pred, 16, static_cast<intra::UvPredictionMode>(m), 0, 16, 16,
+                                      aboveLeft, aboveRef, nTopPx, nTopRightPx, leftRef, nLeftPx,
+                                      nBottomLeftPx, neighbors);
+        const std::uint32_t sad = motion::sad16x16(src, 16, pred, 16);
+        if (!haveBest || sad < best.sad) {
+            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad};
+            haveBest = true;
+        }
+    }
+    return best;
+}
+
+void encodeFrameReconChroma16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                                 intra::UvPredictionMode mode, int angleDelta, transforms::TxType txType) {
+    const int gridW = src.width() / 16;
+    const int gridH = src.height() / 16;
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 16;
+            const int py = by * 16;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const bool hasAboveLeft = hasTop && hasLeft;
+            const int nTopPx = hasTop ? 16 : 0;
+            const int nLeftPx = hasLeft ? 16 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 16 : 0;
+            const int nBottomLeftPx = 0;
+
+            std::uint8_t above[32] = {0};  // above[B..2B-1] = REAL recon top-right (M1: row above fully reconstructed)
+            std::uint8_t left[32] = {0};
+            if (hasTop) {
+                for (int i = 0; i < 16 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 16; ++i) left[i] = recon.at(px - 1, py + i);
+            }
+            const std::uint8_t aboveLeft =
+                hasAboveLeft ? recon.at(px - 1, py - 1) : static_cast<std::uint8_t>(0);
+
+            std::uint8_t pred[256] = {0};
+            intra::buildIntraPredictorsUv(pred, 16, mode, angleDelta, 16, 16, aboveLeft, above,
+                                          nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx);
+
+            std::int16_t residual[256] = {0};
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x)
+                    residual[y * 16 + x] =
+                        static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 16 + x]);
+
+            std::int32_t cb[256] = {0};
+            transforms::fwdTxfm2d16x16(residual, cb, 16, txType);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = cb[i];
+
+            std::uint8_t blk[256] = {0};
+            for (int i = 0; i < 256; ++i) blk[i] = pred[i];
+            transforms::invTxfm2dAdd16x16(cb, blk, 16, txType);
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = blk[y * 16 + x];
+        }
+    }
+}
+
+void encodeFrameAutoChroma16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                                std::uint8_t* modes, transforms::TxType txType) {
+    const int gridW = src.width() / 16;
+    const int gridH = src.height() / 16;
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 16;
+            const int py = by * 16;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const bool hasAboveLeft = hasTop && hasLeft;
+            const int nTopPx = hasTop ? 16 : 0;
+            const int nLeftPx = hasLeft ? 16 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 16 : 0;
+            const int nBottomLeftPx = 0;
+
+            std::uint8_t above[32] = {0};
+            std::uint8_t left[32] = {0};
+            if (hasTop) {
+                for (int i = 0; i < 16 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 16; ++i) left[i] = recon.at(px - 1, py + i);
+            }
+            const std::uint8_t aboveLeft =
+                hasAboveLeft ? recon.at(px - 1, py - 1) : static_cast<std::uint8_t>(0);
+
+            // neighbor modes are UV modes (numerically the folded luma
+            // values); the chroma smooth check (svt_aom_is_smooth on
+            // uv_mode, intra_prediction.c:139-140) is numerically the luma
+            // smooth set because UV_SMOOTH_* folds to SMOOTH_*.
+            intra::NeighborContext nctx;
+            nctx.aboveMode = hasTop
+                                 ? static_cast<intra::PredictionMode>(modes[(by - 1) * gridW + bx])
+                                 : intra::DC_PRED;
+            nctx.leftMode = hasLeft
+                                ? static_cast<intra::PredictionMode>(modes[by * gridW + bx - 1])
+                                : intra::DC_PRED;
+
+            std::uint8_t srcBlk[256] = {0};
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x) srcBlk[y * 16 + x] = src.at(px + x, py + y);
+
+            const ModeDecision d = decideBlockModeUv16x16(srcBlk, above, nTopPx, nTopRightPx, left,
+                                                          nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+            modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
+
+            std::uint8_t pred[256] = {0};
+            intra::buildIntraPredictorsUv(pred, 16, static_cast<intra::UvPredictionMode>(d.mode), 0,
+                                          16, 16, aboveLeft, above, nTopPx, nTopRightPx, left,
+                                          nLeftPx, nBottomLeftPx, nctx);
+            std::int16_t residual[256] = {0};
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x)
+                    residual[y * 16 + x] =
+                        static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 16 + x]);
+
+            std::int32_t cb[256] = {0};
+            transforms::fwdTxfm2d16x16(residual, cb, 16, txType);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = cb[i];
+
+            std::uint8_t blk[256] = {0};
+            for (int i = 0; i < 256; ++i) blk[i] = pred[i];
+            transforms::invTxfm2dAdd16x16(cb, blk, 16, txType);
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = blk[y * 16 + x];
+        }
+    }
+}
+
+void encodeFrameReconChroma16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                                  intra::UvPredictionMode mode, int angleDelta, std::int32_t qindex,
+                                  transforms::TxType txType) {
+    const int gridW = src.width() / 16;
+    const int gridH = src.height() / 16;
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(qindex, qt);
+    std::int16_t scan[256];
+    transforms::defaultScan16x16(scan);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 16;
+            const int py = by * 16;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const bool hasAboveLeft = hasTop && hasLeft;
+            const int nTopPx = hasTop ? 16 : 0;
+            const int nLeftPx = hasLeft ? 16 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 16 : 0;
+            const int nBottomLeftPx = 0;
+
+            std::uint8_t above[32] = {0};
+            std::uint8_t left[32] = {0};
+            if (hasTop) {
+                for (int i = 0; i < 16 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 16; ++i) left[i] = recon.at(px - 1, py + i);
+            }
+            const std::uint8_t aboveLeft =
+                hasAboveLeft ? recon.at(px - 1, py - 1) : static_cast<std::uint8_t>(0);
+
+            std::uint8_t pred[256] = {0};
+            intra::buildIntraPredictorsUv(pred, 16, mode, angleDelta, 16, 16, aboveLeft, above,
+                                          nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx);
+            std::int16_t residual[256] = {0};
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x)
+                    residual[y * 16 + x] =
+                        static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 16 + x]);
+
+            std::int32_t cb[256] = {0};
+            transforms::fwdTxfm2d16x16(residual, cb, 16, txType);
+            std::int32_t qc[256] = {0};
+            std::int32_t dq[256] = {0};
+            std::uint16_t eob = 0;
+            transforms::quantizeFp16x16(cb, qt, scan, qc, dq, &eob);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
+
+            std::uint8_t blk[256] = {0};
+            for (int i = 0; i < 256; ++i) blk[i] = pred[i];
+            transforms::invTxfm2dAdd16x16(dq, blk, 16, txType);
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = blk[y * 16 + x];
+        }
+    }
+}
+
+void encodeFrameAutoChroma16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                                 std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType) {
+    const int gridW = src.width() / 16;
+    const int gridH = src.height() / 16;
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(qindex, qt);
+    std::int16_t scan[256];
+    transforms::defaultScan16x16(scan);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 16;
+            const int py = by * 16;
+            const bool hasTop = by > 0;
+            const bool hasLeft = bx > 0;
+            const bool hasAboveLeft = hasTop && hasLeft;
+            const int nTopPx = hasTop ? 16 : 0;
+            const int nLeftPx = hasLeft ? 16 : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < gridW) ? 16 : 0;
+            const int nBottomLeftPx = 0;
+
+            std::uint8_t above[32] = {0};
+            std::uint8_t left[32] = {0};
+            if (hasTop) {
+                for (int i = 0; i < 16 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
+            }
+            if (hasLeft) {
+                for (int i = 0; i < 16; ++i) left[i] = recon.at(px - 1, py + i);
+            }
+            const std::uint8_t aboveLeft =
+                hasAboveLeft ? recon.at(px - 1, py - 1) : static_cast<std::uint8_t>(0);
+
+            intra::NeighborContext nctx;
+            nctx.aboveMode = hasTop
+                                 ? static_cast<intra::PredictionMode>(modes[(by - 1) * gridW + bx])
+                                 : intra::DC_PRED;
+            nctx.leftMode = hasLeft
+                                ? static_cast<intra::PredictionMode>(modes[by * gridW + bx - 1])
+                                : intra::DC_PRED;
+
+            std::uint8_t srcBlk[256] = {0};
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x) srcBlk[y * 16 + x] = src.at(px + x, py + y);
+
+            const ModeDecision d = decideBlockModeUv16x16(srcBlk, above, nTopPx, nTopRightPx, left,
+                                                          nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+            modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
+
+            std::uint8_t pred[256] = {0};
+            intra::buildIntraPredictorsUv(pred, 16, static_cast<intra::UvPredictionMode>(d.mode), 0,
+                                          16, 16, aboveLeft, above, nTopPx, nTopRightPx, left,
+                                          nLeftPx, nBottomLeftPx, nctx);
+            std::int16_t residual[256] = {0};
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x)
+                    residual[y * 16 + x] =
+                        static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 16 + x]);
+
+            std::int32_t cb[256] = {0};
+            transforms::fwdTxfm2d16x16(residual, cb, 16, txType);
+            std::int32_t qc[256] = {0};
+            std::int32_t dq[256] = {0};
+            std::uint16_t eob = 0;
+            transforms::quantizeFp16x16(cb, qt, scan, qc, dq, &eob);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
+
+            std::uint8_t blk[256] = {0};
+            for (int i = 0; i < 256; ++i) blk[i] = pred[i];
+            transforms::invTxfm2dAdd16x16(dq, blk, 16, txType);
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = blk[y * 16 + x];
+        }
+    }
+}
+
 }  // namespace pipeline

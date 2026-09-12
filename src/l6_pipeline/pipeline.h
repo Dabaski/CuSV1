@@ -123,9 +123,6 @@ void encodeFrameRecon64x64Q(const pixels::Plane& src, pixels::Plane& recon, std:
 void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                            std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
 
-// Sum of squared sample differences over the full frame (integer, exact).
-std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
-
 // D2 mode decision — THE POLICY IS THIS PROJECT'S, NOT SVT's: SVT's real
 // mode decision is full RD with rate costs. The 1:1 guarantee covers every
 // primitive (predict / transform / SAD); the policy (SAD-only, fixed
@@ -137,6 +134,36 @@ struct ModeDecision {
     intra::PredictionMode mode;
     std::uint32_t sad;
 };
+
+// ---- CH3: chroma (4:2:0) frame compositions --------------------------------
+// The UV plane is its own plane (32x32 = the 4:2:0 decimation of a 64x64
+// luma frame), blocks are UV-sized, availability is per-plane (chroma
+// above/left mbmi). Dispatch: uv_mode folds via intra::uv2y (get_uv_mode,
+// common_utils.h:130-133) and the builder never sees FI
+// (enc_intra_prediction.c:641). The D2 policy scores the 13 folded UV
+// candidates (uv modes 0..12; UV_CFL_PRED is NOT a candidate - the
+// mode-decision CFL combine is out of scope, its prediction-surface fold is
+// DC and DC_PRED is a candidate; policy named).
+ModeDecision decideBlockModeUv16x16(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                                    int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                    int nBottomLeftPx, std::uint8_t aboveLeft,
+                                    const intra::NeighborContext& neighbors = intra::NeighborContext());
+
+void encodeFrameReconChroma16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                                 intra::UvPredictionMode mode, int angleDelta, transforms::TxType txType);
+
+void encodeFrameAutoChroma16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                                std::uint8_t* modes, transforms::TxType txType);
+
+void encodeFrameReconChroma16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                                  intra::UvPredictionMode mode, int angleDelta, std::int32_t qindex,
+                                  transforms::TxType txType);
+
+void encodeFrameAutoChroma16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
+                                 std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+
+// Sum of squared sample differences over the full frame (integer, exact).
+std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 
 ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
                                 int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,

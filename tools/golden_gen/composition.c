@@ -1555,6 +1555,230 @@ static void svtd_quantize_b_64x64(const TranLow* coeff, const SvtdQuantTables* t
                          t->dequant, eob, scan, NULL, NULL, NULL, 2);
 }
 
+// ---- CH3: chroma frame-policy composition (4:2:0) --------------------------
+// UV plane 32x32 (the 4:2:0 box average ((sum+2)>>2) of a 64x64 luma fixture
+// with rows 0-31 = ramp x+y+1 and rows 32-63 = 0 -> UV rows 0-15 =
+// 2*(i+j+2), rows 16-31 = 0), 2x2 grid of 16x16 UV blocks. SVT chroma
+// dispatch: candidate uv_mode folds to the luma primitive set via g_uv2y
+// (get_uv_mode, common_utils.h:130-133) and the builder never sees FI
+// (enc_intra_prediction.c:641). The D2 policy scores the 13 folded
+// candidates (uv modes 0..12; UV_CFL_PRED is NOT a candidate - the
+// mode-decision CFL combine is out of scope, its prediction-surface fold is
+// DC and DC_PRED is a candidate; policy named). Neighbor modes stored as UV
+// modes (numerically the folded values, so the smooth check in the shim
+// matches svt_aom_is_smooth's uv_mode set). REAL recon top-right gather.
+static void svtd_frame_chroma_auto_16x16_blocks(const uint8_t* src, uint8_t* recon, int32_t* coeffs,
+                                                int* modes) {
+    const int fstride = 32;
+    const int gridW = 2, gridH = 2;
+    const int bsz = 16;
+    memset(recon, 0, 1024);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * bsz, py = by * bsz;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? bsz : 0;
+            const int nLeft = hasLeft ? bsz : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? bsz : 0;
+            uint8_t above[33] = {0};
+            uint8_t left[33] = {0};
+            uint8_t al = 0;
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, bsz, nTr);
+            if (hasLeft) for (int i = 0; i < bsz; ++i) left[i] = recon[(py + i) * fstride + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
+
+            // chroma filt_type source: chroma_above_mbmi / chroma_left_mbmi
+            // (enc_intra_prediction.c:28-33); the smooth test on uv_mode
+            // (intra_prediction.c:139-140) is numerically the luma smooth
+            // set because UV_SMOOTH_* folds to SMOOTH_* (g_uv2y).
+            const int aboveMode = hasTop ? modes[(by - 1) * gridW + bx] : DC_PRED;
+            const int leftMode = hasLeft ? modes[by * gridW + bx - 1] : DC_PRED;
+            svtd_filt_type = ((aboveMode == UV_SMOOTH_PRED || aboveMode == UV_SMOOTH_V_PRED ||
+                               aboveMode == UV_SMOOTH_H_PRED) ||
+                              (leftMode == UV_SMOOTH_PRED || leftMode == UV_SMOOTH_V_PRED ||
+                               leftMode == UV_SMOOTH_H_PRED))
+                                 ? 1
+                                 : 0;
+
+            uint8_t srcblk[256];
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    srcblk[i * bsz + j] = src[(py + i) * fstride + px + j];
+
+            // D2 policy over the UV candidate set: uv modes 0..12 folded via
+            // g_uv2y (identity on 0..12); CFL excluded as a candidate.
+            uint32_t best_sad = 0;
+            int mode = -1;
+            for (int m = 0; m < UV_CFL_PRED; ++m) {
+                uint8_t pred[256];
+                svtd_call_builder_tx(pred, g_uv2y[m], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr,
+                                     left, nLeft, 0, al, TX_16X16);
+                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
+                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+            }
+            modes[by * gridW + bx] = mode;
+
+            uint8_t pred[256];
+            svtd_call_builder_tx(pred, g_uv2y[mode], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr,
+                                 left, nLeft, 0, al, TX_16X16);
+            int16_t res[256];
+            for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+            int32_t cb[256];
+            svtd_fwd2d16x16(res, bsz, cb, svt_av1_fdct16_new);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = cb[i];
+            svtd_inv2dadd16x16(cb, pred, bsz, svt_av1_idct16_new);
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    recon[(py + i) * fstride + px + j] = pred[i * bsz + j];
+        }
+    }
+}
+
+static void svtd_frame_chroma_auto_16x16_q(const uint8_t* src, uint8_t* recon, int32_t* coeffs,
+                                           int* modes, int qindex) {
+    const int fstride = 32;
+    const int gridW = 2, gridH = 2;
+    const int bsz = 16;
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(qindex, &t);
+    int16_t scan16[256];
+    svtd_default_scan_16x16(scan16);
+    memset(recon, 0, 1024);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * bsz, py = by * bsz;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? bsz : 0;
+            const int nLeft = hasLeft ? bsz : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? bsz : 0;
+            uint8_t above[33] = {0};
+            uint8_t left[33] = {0};
+            uint8_t al = 0;
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, bsz, nTr);
+            if (hasLeft) for (int i = 0; i < bsz; ++i) left[i] = recon[(py + i) * fstride + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
+
+            const int aboveMode = hasTop ? modes[(by - 1) * gridW + bx] : UV_DC_PRED;
+            const int leftMode = hasLeft ? modes[by * gridW + bx - 1] : UV_DC_PRED;
+            svtd_filt_type = ((aboveMode == UV_SMOOTH_PRED || aboveMode == UV_SMOOTH_V_PRED ||
+                               aboveMode == UV_SMOOTH_H_PRED) ||
+                              (leftMode == UV_SMOOTH_PRED || leftMode == UV_SMOOTH_V_PRED ||
+                               leftMode == UV_SMOOTH_H_PRED))
+                                 ? 1
+                                 : 0;
+
+            uint8_t srcblk[256];
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    srcblk[i * bsz + j] = src[(py + i) * fstride + px + j];
+
+            uint32_t best_sad = 0;
+            int mode = -1;
+            for (int m = 0; m < UV_CFL_PRED; ++m) {
+                uint8_t pred[256];
+                svtd_call_builder_tx(pred, g_uv2y[m], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr,
+                                     left, nLeft, 0, al, TX_16X16);
+                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
+                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+            }
+            modes[by * gridW + bx] = mode;
+
+            uint8_t pred[256];
+            svtd_call_builder_tx(pred, g_uv2y[mode], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr,
+                                 left, nLeft, 0, al, TX_16X16);
+            int16_t res[256];
+            for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+            int32_t cb[256];
+            svtd_fwd2d16x16(res, bsz, cb, svt_av1_fdct16_new);
+            TranLow qc[256], dq[256];
+            uint16_t eob = 0;
+            svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
+            svtd_inv2dadd16x16(dq, pred, bsz, svt_av1_idct16_new);
+            for (int i = 0; i < bsz; ++i)
+                for (int j = 0; j < bsz; ++j)
+                    recon[(py + i) * fstride + px + j] = pred[i * bsz + j];
+        }
+    }
+}
+
+// Forced-mode (UV_V_PRED + DCT) chroma frame composition.
+static void svtd_frame_chroma_v_dct_16x16(const uint8_t* src, uint8_t* recon, int32_t* coeffs) {
+    const int fstride = 32;
+    const int gridW = 2, gridH = 2;
+    memset(recon, 0, 1024);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 16, py = by * 16;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? 16 : 0;
+            const int nLeft = hasLeft ? 16 : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? 16 : 0;
+            uint8_t above[33] = {0};
+            uint8_t left[33] = {0};
+            uint8_t al = 0;
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, 16, nTr);
+            if (hasLeft) for (int i = 0; i < 16; ++i) left[i] = recon[(py + i) * fstride + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
+            uint8_t pred[256];
+            // forced UV_V_PRED folds to V_PRED (g_uv2y[UV_V_PRED] = V_PRED)
+            svtd_call_builder_tx(pred, g_uv2y[UV_V_PRED], 0, FILTER_INTRA_MODES, 0, above, nTop,
+                                 nTr, left, nLeft, 0, al, TX_16X16);
+            int16_t res[256];
+            for (int i = 0; i < 256; ++i)
+                res[i] = (int16_t)(src[(py + (i >> 4)) * fstride + px + (i & 15)] - pred[i]);
+            int32_t cb[256];
+            svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = cb[i];
+            svtd_inv2dadd16x16(cb, pred, 16, svt_av1_idct16_new);
+            for (int i = 0; i < 256; ++i)
+                recon[(py + (i >> 4)) * fstride + px + (i & 15)] = pred[i];
+        }
+    }
+}
+
+// Q variant of the forced-mode chroma composition.
+static void svtd_frame_chroma_v_dct_16x16_q(const uint8_t* src, uint8_t* recon, int32_t* coeffs,
+                                            int qindex) {
+    const int fstride = 32;
+    const int gridW = 2, gridH = 2;
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(qindex, &t);
+    int16_t scan16[256];
+    svtd_default_scan_16x16(scan16);
+    memset(recon, 0, 1024);
+    for (int by = 0; by < gridH; ++by) {
+        for (int bx = 0; bx < gridW; ++bx) {
+            const int px = bx * 16, py = by * 16;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? 16 : 0;
+            const int nLeft = hasLeft ? 16 : 0;
+            const int nTr = (hasTop && bx + 1 < gridW) ? 16 : 0;
+            uint8_t above[33] = {0};
+            uint8_t left[33] = {0};
+            uint8_t al = 0;
+            if (hasTop) svtd_gather_above(above, recon, fstride, px, py, 16, nTr);
+            if (hasLeft) for (int i = 0; i < 16; ++i) left[i] = recon[(py + i) * fstride + px - 1];
+            if (hasTop && hasLeft) al = recon[(py - 1) * fstride + px - 1];
+            uint8_t pred[256];
+            svtd_call_builder_tx(pred, g_uv2y[UV_V_PRED], 0, FILTER_INTRA_MODES, 0, above, nTop,
+                                 nTr, left, nLeft, 0, al, TX_16X16);
+            int16_t res[256];
+            for (int i = 0; i < 256; ++i)
+                res[i] = (int16_t)(src[(py + (i >> 4)) * fstride + px + (i & 15)] - pred[i]);
+            int32_t cb[256];
+            svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+            TranLow qc[256], dq[256];
+            uint16_t eob = 0;
+            svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
+            for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
+            svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
+            for (int i = 0; i < 256; ++i)
+                recon[(py + (i >> 4)) * fstride + px + (i & 15)] = pred[i];
+        }
+    }
+}
+
 // ---- L7: 64x64 frame-policy composition (2x2 grid of 64x64 = 128x128) -----
 // Same D2 policy, TX_64X64 column; REAL recon top-right gather via
 // svtd_gather_above (fstride 128). Rows 64-127 of the frame are zero.

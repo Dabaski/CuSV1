@@ -1283,5 +1283,63 @@ int main(void) {
         for (int i = 0; i < 16; ++i) printf(" %d", dst[i]);
         printf("\n");
     }
+
+    // ---- CH3: chroma frame-policy gate lines (4:2:0) ----
+    // UV plane 32x32 = 4:2:0 box average ((sum+2)>>2) of a 64x64 luma fixture
+    // with rows 0-31 = ramp x+y+1, rows 32-63 = 0: UV rows 0-15 = 2*(i+j+2),
+    // rows 16-31 = 0. 2x2 grid of 16x16 UV blocks; the chroma fold (g_uv2y)
+    // and FI-free builder are inside svtd_frame_chroma_*.
+    {
+        uint8_t srcUV[1024];
+        for (int i = 0; i < 32; ++i) {
+            for (int j = 0; j < 32; ++j) {
+                srcUV[i * 32 + j] = (i < 16) ? (uint8_t)(2 * (i + j + 2)) : 0;
+            }
+        }
+        uint8_t recon[1024];
+        int32_t coeffs[1024];
+        int modes[4] = {0};
+        svtd_frame_chroma_auto_16x16_blocks(srcUV, recon, coeffs, modes);
+        printf("bcf16_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
+        printf("\n");
+        printf("bcf16_recon:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", recon[i]);
+        printf("\n");
+        printf("bcf16_coeffs:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", coeffs[i]);
+        printf("\n");
+
+        uint8_t reconQ[1024];
+        int32_t coeffsQ[1024];
+        int modesQ[4] = {0};
+        svtd_frame_chroma_auto_16x16_q(srcUV, reconQ, coeffsQ, modesQ, 100);
+        printf("bcf16q_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modesQ[i]);
+        printf("\n");
+        printf("bcf16q_coeffs:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", coeffsQ[i]);
+        printf("\n");
+
+        uint8_t reconV[1024];
+        int32_t coeffsV[1024];
+        svtd_frame_chroma_v_dct_16x16(srcUV, reconV, coeffsV);
+        printf("bcf16v_recon:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", reconV[i]);
+        printf("\n");
+        printf("bcf16v_coeffs:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", coeffsV[i]);
+        printf("\n");
+
+        uint8_t reconVQ[1024];
+        int32_t coeffsVQ[1024];
+        svtd_frame_chroma_v_dct_16x16_q(srcUV, reconVQ, coeffsVQ, 100);
+        printf("bcf16vq_recon:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", reconVQ[i]);
+        printf("\n");
+        printf("bcf16vq_coeffs:");
+        for (int i = 0; i < 1024; ++i) printf(" %d", coeffsVQ[i]);
+        printf("\n");
+    }
     return 0;
 }
