@@ -3,6 +3,26 @@
 // tools/golden_gen/expected_primitives.txt (validation gate).
 #include "composition.c"
 
+// ---- entropy coder ground floor (EC0) ----
+// Drivers mirror aom_start_encode (bitstream_unit.h:230-236): point
+// ec.buf at a fixed buffer, then svt_od_ec_enc_reset.
+static uint8_t ec_buf[1024];
+static OdEcEnc ec_enc;
+static od_ec_dec ec_dec;
+static void ec_reset(void) {
+    ec_enc.buf = ec_buf;
+    svt_od_ec_enc_reset(&ec_enc);
+}
+static void ec_print_bytes(const char* name, uint32_t n) {
+    printf("%s %u", name, n);
+    for (uint32_t i = 0; i < n; ++i) printf(" %02x", ec_buf[i]);
+    printf("\n");
+}
+// Fixed fixture iCDF, 13 symbols (EC0 fixture data, not a golden):
+// monotonically non-increasing, icdf[12] = 0 (svt_od_ec_encode_cdf_q15
+// precondition, bitstream_unit.c:282). Skewed toward low indices.
+static const uint16_t ec_icdf13[13] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0};
+
 int main(void) {
     svtd_populate_dispatch();
     fprintf(stderr, "CK: dispatch\n"); fflush(stderr);
@@ -1340,6 +1360,81 @@ int main(void) {
         printf("bcf16vq_coeffs:");
         for (int i = 0; i < 1024; ++i) printf(" %d", coeffsVQ[i]);
         printf("\n");
+    }
+
+    // ---- entropy coder ground floor (EC0) ----
+    {
+        // 1) bool_eq sequence (aom_write_bit path, bitstream_unit.h:255-257)
+        ec_reset();
+        const int bits[12] = {1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0};
+        for (int i = 0; i < 12; ++i) svt_od_ec_encode_bool_eq_q15(&ec_enc, bits[i]);
+        uint32_t n = 0;
+        svt_od_ec_enc_done(&ec_enc, &n);
+        ec_print_bytes("ec_enc_bool_eq", n);
+        // decode side of the same bits: aom_read_bit resolves to
+        // od_ec_decode_bool_q15(f=16384) (bitreader.h:71-75, aom_read's
+        // (0x7FFFFF-(128<<15)+128)>>8 = 16384)
+        od_ec_dec_init(&ec_dec, ec_buf, n);
+        int rd[12], bad = 0;
+        for (int i = 0; i < 12; ++i) { rd[i] = od_ec_decode_bool_q15(&ec_dec, 16384); if (rd[i] != bits[i]) bad = 1; }
+        printf("ec_roundtrip_bool_eq %d", rd[0]);
+        for (int i = 1; i < 12; ++i) printf(" %d", rd[i]);
+        printf("\n");
+        if (bad) { fprintf(stderr, "EC0 roundtrip bool_eq FAILED\n"); return 1; }
+    }
+    {
+        // 2) bool with explicit f (svt_od_ec_encode_bool_q15)
+        ec_reset();
+        const int bits[8] = {0, 1, 1, 0, 1, 0, 0, 1};
+        for (int i = 0; i < 8; ++i) svt_od_ec_encode_bool_q15(&ec_enc, bits[i], 16384);
+        uint32_t n = 0;
+        svt_od_ec_enc_done(&ec_enc, &n);
+        ec_print_bytes("ec_enc_bool_f16384", n);
+        uint8_t snap[64];
+        memcpy(snap, ec_buf, n);
+        od_ec_dec_init(&ec_dec, ec_buf, n);
+        int bad = 0;
+        for (int i = 0; i < 8; ++i) if (od_ec_decode_bool_q15(&ec_dec, 16384) != bits[i]) bad = 1;
+        if (bad) { fprintf(stderr, "EC0 roundtrip bool f16384 FAILED\n"); return 1; }
+        // bool_eq over the same bits: provable equivalence
+        // (bitstream_unit.h:267-270) - byte-identical output
+        ec_reset();
+        for (int i = 0; i < 8; ++i) svt_od_ec_encode_bool_eq_q15(&ec_enc, bits[i]);
+        uint32_t n2 = 0;
+        svt_od_ec_enc_done(&ec_enc, &n2);
+        printf("ec_booleq_vs_bool16384 %d\n", (n2 == n) ? 1 : 0);
+        if (n2 != n || memcmp(snap, ec_buf, n)) {
+            fprintf(stderr, "EC0 bool_eq/bool16384 equivalence FAILED\n");
+            return 1;
+        }
+        // different f, same decoder
+        ec_reset();
+        for (int i = 0; i < 8; ++i) svt_od_ec_encode_bool_q15(&ec_enc, bits[i], 8192);
+        uint32_t nf = 0;
+        svt_od_ec_enc_done(&ec_enc, &nf);
+        ec_print_bytes("ec_enc_bool_f8192", nf);
+        od_ec_dec_init(&ec_dec, ec_buf, nf);
+        printf("ec_roundtrip_bool_f8192");
+        for (int i = 0; i < 8; ++i) printf(" %d", od_ec_decode_bool_q15(&ec_dec, 8192));
+        printf("\n");
+    }
+    {
+        // 3) cdf sequence, 13-symbol fixture icdf
+        ec_reset();
+        const int syms[10] = {0, 5, 12, 3, 5, 5, 1, 0, 7, 9};
+        for (int i = 0; i < 10; ++i) svt_od_ec_encode_cdf_q15(&ec_enc, syms[i], ec_icdf13, 13);
+        uint32_t n = 0;
+        svt_od_ec_enc_done(&ec_enc, &n);
+        ec_print_bytes("ec_enc_cdf13", n);
+        od_ec_dec_init(&ec_dec, ec_buf, n);
+        int rd[10], bad = 0;
+        for (int i = 0; i < 10; ++i) { rd[i] = od_ec_decode_cdf_q15(&ec_dec, ec_icdf13, 13); if (rd[i] != syms[i]) bad = 1; }
+        printf("ec_roundtrip_cdf13 %d", rd[0]);
+        for (int i = 1; i < 10; ++i) printf(" %d", rd[i]);
+        printf("\n");
+        if (bad) { fprintf(stderr, "EC0 roundtrip cdf13 FAILED\n"); return 1; }
+        // tell/tell_frac at the end of the cdf run (encoder side)
+        printf("ec_tell %d %u\n", svt_od_ec_enc_tell(&ec_enc), svt_od_ec_enc_tell_frac(&ec_enc));
     }
     return 0;
 }
