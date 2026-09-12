@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <cstdio>
 #include <cstring>
 
 #include "entropy.h"
@@ -237,4 +238,73 @@ TEST_CASE("odEcReaderInit/odEcReadSymbol adapted round-trip matches gate") {
         CHECK(entropy::odEcReadSymbol(&r, cdf, 2) == syms[i]);
     }
     for (int i = 0; i < 3; ++i) CHECK(cdf[i] == expectedCdf[i]);
+}
+
+TEST_CASE("KF luma-mode symbol sequence matches gate bytes and round-trips") {
+    // Gate: eckf_ctx 0 0 1 0 2 1 3 2 3 3, eckf_bytes 3 47 bd 40,
+    // eckf_rt 0 1 1 1 4 2 0 0 0, eckf_cdf_eq 1. The 5-block fixture mirrors
+    // write_intra_frame_mode_info order (entropy_coding.c:1026-1040 + the
+    // filter-intra pair :5047-5060) with fixture neighbors both sides and
+    // adaptation on.
+    static const int topModes[5]  = {0, 1, 2, 3, 8};  // DC, V, H, D45, D67
+    static const int leftModes[5] = {0, 0, 1, 2, 3};
+    static const entropy::BlockSize bsize[5] = {entropy::BLOCK_16X16, entropy::BLOCK_8X8, entropy::BLOCK_4X4, entropy::BLOCK_32X32, entropy::BLOCK_64X64};
+    static const entropy::PredictionMode mode[5] = {entropy::DC_PRED, entropy::V_PRED, entropy::H_PRED, entropy::DC_PRED, entropy::DC_PRED};
+    static const int delta[5] = {0, 1, 0, 0, 0};
+    static const entropy::FilterIntraMode fiMode[5] = {entropy::FILTER_V_PRED, entropy::FILTER_INTRA_MODES, entropy::FILTER_INTRA_MODES, entropy::FILTER_INTRA_MODES, entropy::FILTER_INTRA_MODES};
+    static const int expectedCtx[10] = {0, 0, 1, 0, 2, 1, 3, 2, 3, 3};
+    static const unsigned char expectedBytes[3] = {0x47, 0xbd, 0x40};
+
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc);
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR);
+
+    entropy::AomWriter w{};
+    unsigned char buf[64] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    int ctxPairs[10];
+    for (int b = 0; b < 5; ++b) {
+        int topCtx, leftCtx;
+        entropy::getKfYModeCtx(1, leftModes[b], 1, topModes[b], &topCtx, &leftCtx);
+        ctxPairs[2 * b] = topCtx;
+        ctxPairs[2 * b + 1] = leftCtx;
+        entropy::writeKfLumaMode(&w, &fc, bsize[b], mode[b], topCtx, leftCtx, delta[b]);
+        if (entropy::filterIntraAllowed(1, bsize[b], 0, (std::uint32_t)mode[b])) {
+            entropy::writeFilterIntra(&w, &fc, bsize[b], fiMode[b]);
+        }
+    }
+    for (int i = 0; i < 10; ++i) CHECK(ctxPairs[i] == expectedCtx[i]);
+    entropy::odEcStopEncode(&w);
+    REQUIRE(w.pos == 3);
+    for (int i = 0; i < 3; ++i) CHECK(buf[i] == expectedBytes[i]);
+
+    // reader round-trip with adaptation (fresh default CDFs)
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    static const int wantRt[9] = {0, 1, 1, 1, 4, 2, 0, 0, 0};
+    int ri = 0;
+    for (int b = 0; b < 5; ++b) {
+        int topCtx, leftCtx;
+        entropy::getKfYModeCtx(1, leftModes[b], 1, topModes[b], &topCtx, &leftCtx);
+        int d = 0;
+        int m = (int)entropy::readKfLumaMode(&r, &fcR, bsize[b], topCtx, leftCtx, &d);
+        CHECK(m == wantRt[ri++]);
+        if (bsize[b] >= entropy::BLOCK_8X8 && entropy::isDirectionalMode(mode[b])) {
+            CHECK(d == wantRt[ri++]);  // gate rt carries the raw delta symbol
+				                    // (delta + MAX_ANGLE_DELTA)
+        }
+        if (entropy::filterIntraAllowed(1, bsize[b], 0, (std::uint32_t)mode[b])) {
+            entropy::FilterIntraMode f;
+            const int flag = entropy::readFilterIntra(&r, &fcR, bsize[b], &f);
+            CHECK(flag == wantRt[ri++]);
+            if (flag) CHECK((int)f == wantRt[ri++]);
+        }
+    }
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
 }

@@ -13,6 +13,7 @@ namespace entropy {
 #define CDF_PROB_BITS 15
 #define CDF_PROB_TOP (1 << CDF_PROB_BITS)
 #define AOM_ICDF(x) (CDF_PROB_TOP - (x))
+#define CDF_SIZE(x) ((x) + 1)  // cabac_context_model.h:38
 // OD_EC_WINDOW_SIZE (bitstream_unit.h:97); CHAR_BIT from <climits> above.
 #define OD_EC_WINDOW_SIZE ((std::int32_t)sizeof(OdEcWindow) * CHAR_BIT)
 
@@ -156,6 +157,134 @@ int odEcReadCdf(AomReader* r, const AomCdfProb* cdf, int nsymbs);
 
 // aom_read_symbol_ (bitreader.h:92-98)
 int odEcReadSymbol(AomReader* r, AomCdfProb* cdf, int nsymbs);
+
+// ---------------------------------------------------------------------------
+// Intra-frame (key-frame) symbol surface (EC3).
+// ---------------------------------------------------------------------------
+// BlockSize - definitions.h:883-905 (verbatim order; BLOCK_SIZES_ALL
+// sentinel). Deviation: l0_core carries a project-minimal 2-value
+// BlockSize; this layer mirrors the full SVT enum because the CDF tables
+// (filter_intra_cdfs) index by it.
+enum BlockSize {
+    BLOCK_4X4,
+    BLOCK_4X8,
+    BLOCK_8X4,
+    BLOCK_8X8,
+    BLOCK_8X16,
+    BLOCK_16X8,
+    BLOCK_16X16,
+    BLOCK_16X32,
+    BLOCK_32X16,
+    BLOCK_32X32,
+    BLOCK_32X64,
+    BLOCK_64X32,
+    BLOCK_64X64,
+    BLOCK_64X128,
+    BLOCK_128X64,
+    BLOCK_128X128,
+    BLOCK_4X16,
+    BLOCK_16X4,
+    BLOCK_8X32,
+    BLOCK_32X8,
+    BLOCK_16X64,
+    BLOCK_64X16,
+    BLOCK_SIZES_ALL,
+};
+
+// PredictionMode, intra subset (definitions.h:1169-1206: the intra modes and
+// the INTRA_MODES sentinel; the inter modes NEARESTMV..MB_MODE_COUNT are not
+// part of this layer's surface).
+enum PredictionMode {
+    DC_PRED,     // Average of above and left pixels
+    V_PRED,      // Vertical
+    H_PRED,      // Horizontal
+    D45_PRED,    // Directional 45 degree
+    D135_PRED,   // Directional 135 degree
+    D113_PRED,   // Directional 113 degree
+    D157_PRED,   // Directional 157 degree
+    D203_PRED,   // Directional 203 degree
+    D67_PRED,    // Directional 67  degree
+    SMOOTH_PRED, // Combination of horizontal and vertical interpolation
+    SMOOTH_V_PRED, // Vertical interpolation
+    SMOOTH_H_PRED, // Horizontal interpolation
+    PAETH_PRED,
+    INTRA_MODES = PAETH_PRED + 1, // PAETH_PRED has to be the last intra mode.
+};
+
+// FilterIntraMode (definitions.h:1295-1302)
+enum FilterIntraMode {
+    FILTER_DC_PRED,
+    FILTER_V_PRED,
+    FILTER_H_PRED,
+    FILTER_D157_PRED,
+    FILTER_PAETH_PRED,
+    FILTER_INTRA_MODES,
+};
+
+#define KF_MODE_CONTEXTS 5      // cabac_context_model.h:262
+#define DIRECTIONAL_MODES 8     // definitions.h:1305
+#define MAX_ANGLE_DELTA 3       // definitions.h:1306
+
+// av1_is_directional_mode (intra_prediction.h:206-208)
+inline int isDirectionalMode(PredictionMode mode) {
+    return mode >= V_PRED && mode <= D67_PRED;
+}
+
+// block_size_wide/high (common_utils.c:286-291)
+extern const std::uint8_t blockSizeWide[BLOCK_SIZES_ALL];
+extern const std::uint8_t blockSizeHigh[BLOCK_SIZES_ALL];
+// intra_mode_context (common_utils.c:134-148)
+extern const std::uint8_t intraModeContext[INTRA_MODES];
+
+// FRAME_CONTEXT slice (cabac_context_model.h:299-345, the four tables this
+// layer writes/reads).
+struct EcFrameContext {
+    AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+    AomCdfProb angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+    AomCdfProb filter_intra_cdfs[BLOCK_SIZES_ALL][CDF_SIZE(2)];
+    AomCdfProb filter_intra_mode_cdf[CDF_SIZE(FILTER_INTRA_MODES)];
+};
+
+// Initialize from the SVT default tables (cabac_context_model.c:59-97,
+// :614-623; RESET-INIT equivalent of svt_aom_av1_setup_frame_context
+// COPY_CDF, cabac_context_model.c:740-767 for these four tables).
+void initDefaultEcFrameContext(EcFrameContext* fc);
+
+// Bitwise equality of the four tables (test-side adapted-cdf comparison).
+int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b);
+
+// svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021), flattened:
+// SVT reads neighbor modes from xd (left_available/up_available derefs);
+// the host port takes them explicitly. Unavailable -> DC_PRED context.
+void getKfYModeCtx(int left_available, int left_mode, int up_available, int up_mode,
+                   int* above_ctx, int* left_ctx);
+
+// svt_aom_filter_intra_allowed_bsize (mode_decision.c:108-112)
+int filterIntraAllowedBsize(BlockSize bs);
+
+// svt_aom_filter_intra_allowed (mode_decision.c:115-119)
+int filterIntraAllowed(std::uint8_t enable_filter_intra, BlockSize bsize,
+                       std::uint8_t palette_size, std::uint32_t mode);
+
+// encode_intra_luma_mode_kf_av1 (entropy_coding.c:1026-1040): mode symbol
+// from kf_y_cdf[above_ctx][left_ctx], then the angle-delta symbol when
+// bsize >= BLOCK_8X8 and the mode is directional. Deviation: the context
+// pair is passed in (SVT derives it inside from blk_ptr->av1xd).
+void writeKfLumaMode(AomWriter* w, EcFrameContext* fc, BlockSize bsize,
+                     PredictionMode mode, int above_ctx, int left_ctx, int angle_delta);
+
+// Decode side of the same surface: mode symbol, then the angle-delta symbol
+// indexed by the DECODED mode (delta out as delta + MAX_ANGLE_DELTA).
+PredictionMode readKfLumaMode(AomReader* r, EcFrameContext* fc, BlockSize bsize,
+                              int above_ctx, int left_ctx, int* angle_delta);
+
+// Filter-intra pair (entropy_coding.c:5050-5058): flag symbol
+// (fi_mode != FILTER_INTRA_MODES) then, when set, the FI mode symbol.
+void writeFilterIntra(AomWriter* w, EcFrameContext* fc, BlockSize bsize,
+                      FilterIntraMode fi_mode);
+// Return: the flag value (fi_mode != FILTER_INTRA_MODES).
+int readFilterIntra(AomReader* r, EcFrameContext* fc, BlockSize bsize,
+                    FilterIntraMode* fi_mode);
 
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes);

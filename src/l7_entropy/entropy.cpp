@@ -465,4 +465,198 @@ int odEcReadSymbol(AomReader* r, AomCdfProb* cdf, int nsymbs) {
     return ret;
 }
 
+// ---------------------------------------------------------------------------
+// EC3: intra-frame (key-frame) symbol surface.
+// ---------------------------------------------------------------------------
+// CDF initializer macros, verbatim (cabac_context_model.h:50-65). The
+// AOM_CDF* tables below are then byte-identical text with the SVT source.
+#define AOM_EXPAND_LIST(x) x
+#define AOM_CDF2(a0) AOM_ICDF(a0), 0
+#define AOM_CDF3(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF2(__VA_ARGS__))
+#define AOM_CDF4(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF3(__VA_ARGS__))
+#define AOM_CDF5(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF4(__VA_ARGS__))
+#define AOM_CDF6(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF5(__VA_ARGS__))
+#define AOM_CDF7(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF6(__VA_ARGS__))
+#define AOM_CDF8(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF7(__VA_ARGS__))
+#define AOM_CDF9(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF8(__VA_ARGS__))
+#define AOM_CDF10(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF9(__VA_ARGS__))
+#define AOM_CDF11(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF10(__VA_ARGS__))
+#define AOM_CDF12(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF11(__VA_ARGS__))
+#define AOM_CDF13(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF12(__VA_ARGS__))
+#define AOM_CDF14(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF13(__VA_ARGS__))
+#define AOM_CDF15(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF14(__VA_ARGS__))
+#define AOM_CDF16(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF15(__VA_ARGS__))
+
+// intra_mode_context (common_utils.c:134-148, verbatim)
+const std::uint8_t intraModeContext[INTRA_MODES] = {
+    0,
+    1,
+    2,
+    3,
+    4,
+    4,
+    4,
+    4,
+    3,
+    0,
+    1,
+    2,
+    0,
+};
+
+// block_size_wide / block_size_high (common_utils.c:286-291, verbatim)
+const std::uint8_t blockSizeWide[BLOCK_SIZES_ALL] = {4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32,
+                                                     64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64};
+
+const std::uint8_t blockSizeHigh[BLOCK_SIZES_ALL] = {4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64,
+                                                     32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16};
+
+// svt_aom_default_kf_y_mode_cdf (cabac_context_model.c:59-85, verbatim)
+static const AomCdfProb kf_y_mode_cdf_default[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)] = {
+    {{AOM_CDF13(15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466)},
+     {AOM_CDF13(12016, 18066, 19516, 20303, 20719, 21444, 21888, 23032, 24434, 28658, 30172, 31409)},
+     {AOM_CDF13(10052, 10771, 22296, 22788, 23055, 23239, 24133, 25620, 26160, 29336, 29929, 31567)},
+     {AOM_CDF13(14091, 15406, 16442, 18808, 19136, 19546, 19998, 22096, 24746, 29585, 30958, 32462)},
+     {AOM_CDF13(12122, 13265, 15603, 16501, 18609, 20033, 22391, 25583, 26437, 30261, 31073, 32475)}},
+    {{AOM_CDF13(10023, 19585, 20848, 21440, 21832, 22760, 23089, 24023, 25381, 29014, 30482, 31436)},
+     {AOM_CDF13( 5983, 24099, 24560, 24886, 25066, 25795, 25913, 26423, 27610, 29905, 31276, 31794)},
+     {AOM_CDF13( 7444, 12781, 20177, 20728, 21077, 21607, 22170, 23405, 24469, 27915, 29090, 30492)},
+     {AOM_CDF13( 8537, 14689, 15432, 17087, 17408, 18172, 18408, 19825, 24649, 29153, 31096, 32210)},
+     {AOM_CDF13( 7543, 14231, 15496, 16195, 17905, 20717, 21984, 24516, 26001, 29675, 30981, 31994)}},
+    {{AOM_CDF13(12613, 13591, 21383, 22004, 22312, 22577, 23401, 25055, 25729, 29538, 30305, 32077)},
+     {AOM_CDF13( 9687, 13470, 18506, 19230, 19604, 20147, 20695, 22062, 23219, 27743, 29211, 30907)},
+     {AOM_CDF13( 6183,  6505, 26024, 26252, 26366, 26434, 27082, 28354, 28555, 30467, 30794, 32086)},
+     {AOM_CDF13(10718, 11734, 14954, 17224, 17565, 17924, 18561, 21523, 23878, 28975, 30287, 32252)},
+     {AOM_CDF13( 9194,  9858, 16501, 17263, 18424, 19171, 21563, 25961, 26561, 30072, 30737, 32463)}},
+    {{AOM_CDF13(12602, 14399, 15488, 18381, 18778, 19315, 19724, 21419, 25060, 29696, 30917, 32409)},
+     {AOM_CDF13( 8203, 13821, 14524, 17105, 17439, 18131, 18404, 19468, 25225, 29485, 31158, 32342)},
+     {AOM_CDF13( 8451,  9731, 15004, 17643, 18012, 18425, 19070, 21538, 24605, 29118, 30078, 32018)},
+     {AOM_CDF13( 7714,  9048,  9516, 16667, 16817, 16994, 17153, 18767, 26743, 30389, 31536, 32528)},
+     {AOM_CDF13( 8843, 10280, 11496, 15317, 16652, 17943, 19108, 22718, 25769, 29953, 30983, 32485)}},
+    {{AOM_CDF13(12578, 13671, 15979, 16834, 19075, 20913, 22989, 25449, 26219, 30214, 31150, 32477)},
+     {AOM_CDF13( 9563, 13626, 15080, 15892, 17756, 20863, 22207, 24236, 25380, 29653, 31143, 32277)},
+     {AOM_CDF13( 8356,  8901, 17616, 18256, 19350, 20106, 22598, 25947, 26466, 29900, 30523, 32261)},
+     {AOM_CDF13(10835, 11815, 13124, 16042, 17018, 18039, 18947, 22753, 24615, 29489, 30883, 32482)},
+     {AOM_CDF13( 7618,  8288,  9859, 10509, 15386, 18657, 22903, 28776, 29180, 31355, 31802, 32593)}}
+};
+
+// default_angle_delta_cdf (cabac_context_model.c:87-96, verbatim)
+static const AomCdfProb angle_delta_cdf_default[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)] = {
+    {AOM_CDF7( 2180,  5032,  7567, 22776, 26989, 30217)},
+    {AOM_CDF7( 2301,  5608,  8801, 23487, 26974, 30330)},
+    {AOM_CDF7( 3780, 11018, 13699, 19354, 23083, 31286)},
+    {AOM_CDF7( 4581, 11226, 15147, 17138, 21834, 28397)},
+    {AOM_CDF7( 1737, 10927, 14509, 19588, 22745, 28823)},
+    {AOM_CDF7( 2664, 10176, 12485, 17650, 21600, 30495)},
+    {AOM_CDF7( 2240, 11096, 15453, 20341, 22561, 28917)},
+    {AOM_CDF7( 3605, 10428, 12459, 17676, 21244, 30655)}
+};
+
+// default_filter_intra_mode_cdf (cabac_context_model.c:614-616, verbatim)
+static const AomCdfProb filter_intra_mode_cdf_default[CDF_SIZE(FILTER_INTRA_MODES)] = {
+    AOM_CDF5( 8949, 12776, 17211, 29558)
+};
+
+// default_filter_intra_cdfs (cabac_context_model.c:618-623, verbatim)
+static const AomCdfProb filter_intra_cdfs_default[BLOCK_SIZES_ALL][CDF_SIZE(2)] = {
+    {AOM_CDF2( 4621)}, {AOM_CDF2( 6743)}, {AOM_CDF2( 5893)}, {AOM_CDF2( 7866)}, {AOM_CDF2(12551)}, {AOM_CDF2( 9394)},
+    {AOM_CDF2(12408)}, {AOM_CDF2(14301)}, {AOM_CDF2(12756)}, {AOM_CDF2(22343)}, {AOM_CDF2(16384)}, {AOM_CDF2(16384)},
+    {AOM_CDF2(16384)}, {AOM_CDF2(16384)}, {AOM_CDF2(16384)}, {AOM_CDF2(16384)}, {AOM_CDF2(12770)}, {AOM_CDF2(10368)},
+    {AOM_CDF2(20229)}, {AOM_CDF2(18101)}, {AOM_CDF2(16384)}, {AOM_CDF2(16384)}
+};
+
+// COPY_CDF equivalent for the four tables (cabac_context_model.c:740-741,
+// :767 - the kf_y_cdf/angle_delta_cdf/filter_intra rows of
+// svt_aom_av1_setup_frame_context).
+void initDefaultEcFrameContext(EcFrameContext* fc) {
+    memcpy(fc->kf_y_cdf, kf_y_mode_cdf_default, sizeof(fc->kf_y_cdf));
+    memcpy(fc->angle_delta_cdf, angle_delta_cdf_default, sizeof(fc->angle_delta_cdf));
+    memcpy(fc->filter_intra_cdfs, filter_intra_cdfs_default, sizeof(fc->filter_intra_cdfs));
+    memcpy(fc->filter_intra_mode_cdf, filter_intra_mode_cdf_default, sizeof(fc->filter_intra_mode_cdf));
+}
+
+int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
+    return memcmp(a->kf_y_cdf, b->kf_y_cdf, sizeof(a->kf_y_cdf)) == 0 &&
+           memcmp(a->angle_delta_cdf, b->angle_delta_cdf, sizeof(a->angle_delta_cdf)) == 0 &&
+           memcmp(a->filter_intra_cdfs, b->filter_intra_cdfs, sizeof(a->filter_intra_cdfs)) == 0 &&
+           memcmp(a->filter_intra_mode_cdf, b->filter_intra_mode_cdf, sizeof(a->filter_intra_mode_cdf)) == 0;
+}
+
+// svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021), flattened
+// (neighbor modes as explicit args; unavailable -> DC_PRED).
+void getKfYModeCtx(int left_available, int left_mode, int up_available, int up_mode,
+                   int* above_ctx, int* left_ctx) {
+    int intra_luma_left_mode = DC_PRED;
+    int intra_luma_top_mode  = DC_PRED;
+    if (left_available) {
+        intra_luma_left_mode = left_mode;
+    }
+    if (up_available) {
+        intra_luma_top_mode = up_mode;
+    }
+
+    *above_ctx = intraModeContext[intra_luma_top_mode];
+    *left_ctx  = intraModeContext[intra_luma_left_mode];
+}
+
+// svt_aom_filter_intra_allowed_bsize (mode_decision.c:108-112)
+int filterIntraAllowedBsize(BlockSize bs) {
+    // CONFIG_ENABLE_FILTER_INTRA == 1 on this build config
+    return blockSizeWide[bs] <= 32 && blockSizeHigh[bs] <= 32;
+}
+
+// svt_aom_filter_intra_allowed (mode_decision.c:115-119)
+int filterIntraAllowed(std::uint8_t enable_filter_intra, BlockSize bsize,
+                       std::uint8_t palette_size, std::uint32_t mode) {
+    return enable_filter_intra && mode == DC_PRED && palette_size == 0 && filterIntraAllowedBsize(bsize);
+}
+
+// encode_intra_luma_mode_kf_av1 (entropy_coding.c:1026-1040)
+void writeKfLumaMode(AomWriter* w, EcFrameContext* fc, BlockSize bsize,
+                     PredictionMode mode, int above_ctx, int left_ctx, int angle_delta) {
+    odEcWriteSymbol(w, mode, fc->kf_y_cdf[above_ctx][left_ctx], INTRA_MODES);
+
+    if (bsize >= BLOCK_8X8 && isDirectionalMode(mode)) {
+        odEcWriteSymbol(w,
+                        angle_delta + MAX_ANGLE_DELTA,
+                        fc->angle_delta_cdf[mode - V_PRED],
+                        2 * MAX_ANGLE_DELTA + 1);
+    }
+}
+
+// Decode side of encode_intra_luma_mode_kf_av1: angle CDF indexed by the
+// DECODED mode (entropy_coding.c:1030-1037 reader semantics). *angle_delta
+// receives the RAW decoded symbol (delta + MAX_ANGLE_DELTA), matching the
+// gate's eckf_rt accounting.
+PredictionMode readKfLumaMode(AomReader* r, EcFrameContext* fc, BlockSize bsize,
+                              int above_ctx, int left_ctx, int* angle_delta) {
+    const PredictionMode m = (PredictionMode)odEcReadSymbol(r, fc->kf_y_cdf[above_ctx][left_ctx], INTRA_MODES);
+    if (bsize >= BLOCK_8X8 && isDirectionalMode(m)) {
+        *angle_delta = odEcReadSymbol(r, fc->angle_delta_cdf[m - V_PRED], 2 * MAX_ANGLE_DELTA + 1);
+    } else {
+        *angle_delta = 0;
+    }
+    return m;
+}
+
+// Filter-intra pair (entropy_coding.c:5050-5058)
+void writeFilterIntra(AomWriter* w, EcFrameContext* fc, BlockSize bsize,
+                      FilterIntraMode fi_mode) {
+    odEcWriteSymbol(w, fi_mode != FILTER_INTRA_MODES, fc->filter_intra_cdfs[bsize], 2);
+    if (fi_mode != FILTER_INTRA_MODES) {
+        odEcWriteSymbol(w, fi_mode, fc->filter_intra_mode_cdf, FILTER_INTRA_MODES);
+    }
+}
+
+int readFilterIntra(AomReader* r, EcFrameContext* fc, BlockSize bsize,
+                    FilterIntraMode* fi_mode) {
+    const int f = odEcReadSymbol(r, fc->filter_intra_cdfs[bsize], 2);
+    if (f) {
+        *fi_mode = (FilterIntraMode)odEcReadSymbol(r, fc->filter_intra_mode_cdf, FILTER_INTRA_MODES);
+    } else {
+        *fi_mode = FILTER_INTRA_MODES;
+    }
+    return f;
+}
+
 }  // namespace entropy
