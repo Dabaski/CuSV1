@@ -94,11 +94,18 @@ struct OdEcDec {
 // od_ec_dec_init (entdec.c:143-153)
 void odEcDecInit(OdEcDec* dec, const unsigned char* buf, std::uint32_t storage);
 
+int odEcDecodeBoolQ15(OdEcDec* dec, unsigned f);
+
 // od_ec_decode_bool_q15 (entdec.c:158-182)
 // Decode a single binary value.
 // f: The probability that the bit is one, scaled by 32768.
 // Return: The value decoded (0 or 1).
 int odEcDecodeBoolQ15(OdEcDec* dec, unsigned f);
+
+// od_ec_decode_cdf_q15 (entdec.c:193-223)
+// Decodes a symbol given an inverse cumulative distribution function (CDF)
+// table in Q15. Return: The decoded symbol s.
+int odEcDecodeCdfQ15(OdEcDec* dec, const std::uint16_t* icdf, int nsyms);
 
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes);

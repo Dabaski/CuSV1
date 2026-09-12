@@ -350,4 +350,39 @@ int odEcDecodeBoolQ15(OdEcDec* dec, unsigned f) {
     return odEcDecNormalize(dec, dif, r_new, ret);
 }
 
+// od_ec_decode_cdf_q15 (entdec.c:193-223)
+// Decodes a symbol given an inverse cumulative distribution function (CDF)
+// table in Q15.
+// icdf: CDF_PROB_TOP minus the CDF, such that symbol s falls in the range
+//        [s > 0 ? (CDF_PROB_TOP - icdf[s - 1]) : 0, CDF_PROB_TOP - icdf[s]).
+//        The values must be monotonically non-increasing, and icdf[nsyms - 1]
+//         must be 0.
+// nsyms: The number of symbols in the alphabet.
+//        This should be at most 16.
+// Return: The decoded symbol s.
+int odEcDecodeCdfQ15(OdEcDec* dec, const std::uint16_t* icdf, int nsyms) {
+    OdEcWindow dif;
+    unsigned r;
+    unsigned c;
+    unsigned u;
+    unsigned v;
+    int ret;
+    dif = dec->dif;
+    r = dec->rng;
+    const int N = nsyms - 1;
+
+    c = (unsigned)(dif >> (OD_EC_WINDOW_SIZE - 16));
+    v = r;
+    ret = -1;
+    do {
+        u = v;
+        v = ((r >> 8) * (std::uint32_t)(icdf[++ret] >> EC_PROB_SHIFT) >>
+             (7 - EC_PROB_SHIFT));
+        v += EC_MIN_PROB * (N - ret);
+    } while (c < v);
+    r = u - v;
+    dif -= (OdEcWindow)v << (OD_EC_WINDOW_SIZE - 16);
+    return odEcDecNormalize(dec, dif, r, ret);
+}
+
 }  // namespace entropy

@@ -110,3 +110,16 @@ TEST_CASE("odEcDecodeBoolQ15 round-trips the bool_eq gate bytes") {
         CHECK(entropy::odEcDecodeBoolQ15(&dec, 16384) == bits[i]);
     }
 }
+
+TEST_CASE("odEcDecodeCdfQ15 round-trips the cdf13 gate bytes") {
+    // Gate bytes ec_enc_cdf13 5 23 97 49 00 d4 decoded back through
+    // od_ec_decode_cdf_q15 (entdec.c:193-223) with the same fixture icdf13.
+    static const std::uint16_t icdf13[13] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0};
+    unsigned char data[5] = {0x23, 0x97, 0x49, 0x00, 0xd4};
+    entropy::OdEcDec dec;
+    entropy::odEcDecInit(&dec, data, 5);
+    const int syms[10] = {0, 5, 12, 3, 5, 5, 1, 0, 7, 9};
+    for (int i = 0; i < 10; ++i) {
+        CHECK(entropy::odEcDecodeCdfQ15(&dec, icdf13, 13) == syms[i]);
+    }
+}
