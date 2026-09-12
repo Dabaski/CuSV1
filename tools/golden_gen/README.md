@@ -84,6 +84,26 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | TranLow, QmVal, clamp, MINQ, MAXQ, QINDEX_RANGE | Codec/definitions.h:986, :987, :687, :1641-1643 | quantizer plumbing |
 | AOM_QM_BITS | Codec/inv_transforms.h:27 | quantizer plumbing |
 | EbBitDepth (shim, full enum) | API/EbSvtAv1Formats.h:101 | get_qzbin_factor switch needs all enumerators |
+| CDF_PROB_BITS/CDF_PROB_TOP/AOM_ICDF | Codec/cabac_context_model.h:39, :40, :47 | EC0 entropy-coder plumbing |
+| EC_PROB_SHIFT/EC_MIN_PROB/OD_BITRES/OD_ICDF/OD_ILOG_NZ, OdEcWindow, OD_EC_WINDOW_SIZE, OD_MEASURE_EC_OVERHEAD, OdEcEnc struct | Codec/bitstream_unit.h:85-120 | EC0 od_ec encoder context |
+| encoder prototypes (Emit-Lines block) | Codec/bitstream_unit.h:122-131 | EC0: the .c extracts call each other; SVT declares them here |
+| BSwap64 + HToBE64 line | Codec/bitstream_unit.h:203, :162 | EC0: od_ec_enc_flush byte write (see deviation note 2 below) |
+| svt_log2f = get_msb macro + portable get_msb body | Codec/definitions.h:592, :628-644 | EC0: rng leading-zero count in normalize/refill paths |
+| svt_od_ec_encode_* / enc_done / tell / tell_frac, od_ec_enc_flush, propagate_carry_bwd | Codec/bitstream_unit.c:77-408 | EC0 encoder side |
+| od_ec_dec typedef + struct | third_party/aom_dsp/inc/entdec.h:21, :27-51 | EC0 decoder context (vendored aom_dsp subtree, referenced by the pinned tree's test/CMakeLists.txt:82) |
+| od_ec_dec_refill/normalize/init, decode_bool_q15/decode_cdf_q15, dec_tell/tell_frac | third_party/aom_dsp/src/entdec.c:78-283 | EC0 decoder side |
+
+Second documented deviation (EC0): the WORDS_BIGENDIAN `#if` guard around the
+HToLE/HToBE macro family (bitstream_unit.h:148-164) is dropped; the
+little-endian branch line `#define HToBE64(X) BSwap64(X)` is taken verbatim.
+The generator targets LE hosts (x86-64) only, where the guard's `#else`
+branch is the live one.
+
+Deviation note (EC0): `od_ec_dec_bits_` (third_party/aom_dsp/inc/entdec.h:64)
+is DECLARED in the pinned tree but has NO definition anywhere in it
+(grep-verified). Raw-bits decode is therefore unported; the
+`od_ec_dec_bits` macro (entdec.h:24) and `OD_ACC_STR` (entdec.h:23) stay
+unextracted with it. Not needed by the intra-frame symbol subset (EC3).
 
 The only textual substitution inside an extract: `get_filt_type(xd, plane)`
 inside `build_intra_predictors` is replaced by a generator-controlled global
@@ -94,7 +114,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **178/178 lines identical**, covering:
+that file — currently **204/204 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -107,7 +127,11 @@ that file — currently **178/178 lines identical**, covering:
   size;
 - frame-policy gate lines: f16/f32/f64 mode maps + recon + coeffs (lossless
   + q100) and forced-mode f16v/f32v/f64v (+q) recon/coeffs captured from the
-  SVT-composed drivers (`svtd_frame_auto_*` / `svtd_frame_v_dct_*`).
+  SVT-composed drivers (`svtd_frame_auto_*` / `svtd_frame_v_dct_*`);
+- entropy-coder gate lines (EC0): bool_eq / bool(f) / cdf13 encode byte
+  dumps, decode-back symbol lines, the bool_eq-vs-bool(f=16384) equivalence,
+  and enc tell/tell_frac (round-trip equality is also asserted in-generator;
+  the generator exits nonzero on mismatch).
 
 The frame-policy golden (`golden_frame.exe`) is captured for D3.
 
