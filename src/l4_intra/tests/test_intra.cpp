@@ -646,8 +646,9 @@ TEST_CASE("gpu block predictor 16x16 matches builder across all zones") {
 
 // ---- HK2: R-series delta enumeration, completed ----------------------------
 // ONE loop-driven test per geometry: GPU kernel == host builder for ALL dr
-// modes (V_PRED..D67_PRED) x deltas {-3,-2,-1,+1,+2,+3} (delta=0 is covered
-// by the per-mode zone tests above). 48 combos per geometry.
+// modes (V_PRED..D67_PRED) x deltas {-3,-2,-1,+1,+2,+3}. 48 combos per
+// geometry at 4x4/8x8/16x16 (delta=0 covered by the per-mode zone tests at
+// those three sizes); FX1 covers all 56 combos incl. delta 0 at 32x32/64x64.
 // HOST-PIN REASONING (stated per the R-series rule): the host builder is
 // 1:1-pinned against verbatim-SVT gate goldens at representative
 // (mode, delta) combos - b9_vd1_8 / b9_hm1_8 / b9_vd1_4 / b9_hm1_4
