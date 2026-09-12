@@ -1436,5 +1436,32 @@ int main(void) {
         // tell/tell_frac at the end of the cdf run (encoder side)
         printf("ec_tell %d %u\n", svt_od_ec_enc_tell(&ec_enc), svt_od_ec_enc_tell_frac(&ec_enc));
     }
+    {
+        // 4) decoder tell at the end of the cdf13 decode (EC2; entdec.c:231-237)
+        od_ec_dec_init(&ec_dec, ec_buf, 5);
+        for (int i = 0; i < 10; ++i) od_ec_decode_cdf_q15(&ec_dec, ec_icdf13, 13);
+        printf("ec_dec_tell %d\n", od_ec_dec_tell(&ec_dec));
+    }
+    {
+        // 5) CDF adaptation (EC2; update_cdf, cabac_context_model.h:76-105).
+        // Binary CDF {16384, 0} + counter: 40 val=0 updates, per-step icdf[0]
+        // snapshot - walks the counter through 0..39 so the rate transitions
+        // (4 + (count>>4) + (nsymbs>3)) at count 16 and 32 are all covered.
+        static uint16_t cdf2[3] = {16384, 0, 0};
+        printf("ecupd_cdf2_seq");
+        for (int i = 0; i < 40; ++i) {
+            update_cdf(cdf2, 0, 2);
+            printf(" %u", cdf2[0]);
+        }
+        printf("\n");
+        // 13-symbol CDF (12 icdf values + terminator 0 + counter 0): the EC0
+        // symbol sequence, full 14-word dump afterwards (counter = 10).
+        static uint16_t cdf13[14] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0, 0};
+        const int syms[10] = {0, 5, 12, 3, 5, 5, 1, 0, 7, 9};
+        for (int i = 0; i < 10; ++i) update_cdf(cdf13, syms[i], 13);
+        printf("ecupd_cdf13_full");
+        for (int i = 0; i < 14; ++i) printf(" %u", cdf13[i]);
+        printf("\n");
+    }
     return 0;
 }

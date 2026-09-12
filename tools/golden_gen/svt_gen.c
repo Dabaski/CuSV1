@@ -6242,6 +6242,41 @@ uint32_t od_ec_dec_tell_frac(const od_ec_dec *dec) {
   return od_ec_tell_frac(od_ec_dec_tell(dec), dec->rng);
 }
 
+// ==== SVT-AV1 cabac_context_model.h :31 - AomCdfProb (verbatim extract; do not edit) ====
+typedef uint16_t AomCdfProb;
+
+// ==== SVT-AV1 cabac_context_model.h :76 - update_cdf (verbatim extract; do not edit) ====
+static INLINE void update_cdf(AomCdfProb* cdf, int val, int nsymbs) {
+    assert(nsymbs < 17);
+    const int count = cdf[nsymbs];
+    cdf[nsymbs] += (count < 32);
+
+    // rate is computed in the spec as:
+    //  3 + ( cdf[N] > 15 ) + ( cdf[N] > 31 ) + Min(FloorLog2(N), 2)
+    // In this case cdf[N] is |count|.
+    // Min(FloorLog2(N), 2) is 1 for nsymbs == {2, 3} and 2 for all
+    // nsymbs > 3. So the equation becomes:
+    //  4 + (count > 15) + (count > 31) + (nsymbs > 3).
+    // Note that the largest value for count is 32 (it is not incremented beyond
+    // 32). So using that information:
+    //  count >> 4 is 0 for count from 0 to 15.
+    //  count >> 4 is 1 for count from 16 to 31.
+    //  count >> 4 is 2 for count == 32.
+    // Now, the equation becomes:
+    //  4 + (count >> 4) + (nsymbs > 3).
+    const int rate = 4 + (count >> 4) + (nsymbs > 3);
+
+    EB_ASSUME(val < nsymbs);
+
+    int i = 0;
+    for (; i < val; i++) {
+        cdf[i] += (CDF_PROB_TOP - cdf[i]) >> rate;
+    }
+    for (; i < nsymbs - 1; i++) {
+        cdf[i] -= cdf[i] >> rate;
+    }
+}
+
 // ==== SVT-AV1 enc_intra_prediction.c :40 - build_intra_predictors (verbatim EXCEPT the flagged get_filt_type shim) ====
 static void build_intra_predictors(const MacroBlockD* xd, uint8_t* top_neigh_array, uint8_t* left_neigh_array,
                                    // const uint8_t *ref,    int32_t ref_stride,

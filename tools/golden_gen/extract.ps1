@@ -342,6 +342,10 @@ Emit-Verbatim "entdec.c" "int od_ec_dec_tell" "od_ec_dec_tell"
 Emit-Verbatim "entdec.c" "uint32_t od_ec_tell_frac" "od_ec_tell_frac"
 Emit-Verbatim "entdec.c" "uint32_t od_ec_dec_tell_frac" "od_ec_dec_tell_frac"
 
+# ---- CDF adaptation (EC2) ----
+Emit-Macro "cabac_context_model.h" "typedef uint16_t AomCdfProb" "AomCdfProb"
+Emit-Verbatim "cabac_context_model.h" "static INLINE void update_cdf" "update_cdf"
+
 # ---- build_intra_predictors with the documented get_filt_type shim ----
 $r = Extract-Block $files["enc_intra_prediction.c"] "static void build_intra_predictors(const MacroBlockD* xd" "build_intra_predictors"
 $shimmed = $r.body.Replace("const int32_t filt_type   = get_filt_type(xd, plane);", "const int32_t filt_type   = svtd_filt_type; /* SHIM: get_filt_type(xd, plane) replaced by generator shim (enc_intra_prediction.c:186); svtd_filt_type set per call */")
