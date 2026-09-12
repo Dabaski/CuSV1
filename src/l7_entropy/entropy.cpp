@@ -200,4 +200,48 @@ unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes) {
     return enc->buf;
 }
 
+// svt_od_ec_enc_tell (bitstream_unit.c:354-358)
+// Returns the number of bits "used" by the encoded symbols so far.
+int odEcEncTell(const OdEcEnc* enc) {
+    /*The 10 here counteracts the offset of -9 baked into cnt, and adds 1 extra
+       bit, which we reserve for terminating the stream.*/
+    return (enc->cnt + 10) + (int)(enc->ptr - enc->buf) * 8;
+}
+
+// svt_od_ec_tell_frac (bitstream_unit.c:369-395)
+// Given the current total integer number of bits used and the current value
+// of rng, computes the fraction number of bits used to OD_BITRES precision.
+std::uint32_t odEcTellFrac(std::uint32_t nbitsTotal, std::uint32_t rng) {
+    std::uint32_t nbits;
+    int      l;
+    int      i;
+    /*To handle the non-integral number of bits still left in the encoder/decoder
+       state, we compute the worst-case number of bits of val that must be
+       encoded to ensure that the value is inside the range for any possible
+       subsequent bits.
+      The computation here is independent of val itself (the decoder does not
+       even track that value), even though the real number of bits used after
+       od_ec_enc_done() may be 1 smaller if rng is a power of two and the
+       corresponding trailing bits of val are all zeros.
+      If we did try to track that special case, then coding a value with a
+       probability of 1/(1 << n) might sometimes appear to use more than n bits.
+      This may help explain the surprising result that a newly initialized
+       encoder or decoder claims to have used 1 bit.*/
+    nbits = nbitsTotal << OD_BITRES;
+    l     = 0;
+    for (i = OD_BITRES; i-- > 0;) {
+        int b;
+        rng = rng * rng >> 15;
+        b   = (int)(rng >> 16);
+        l   = l << 1 | b;
+        rng >>= b;
+    }
+    return nbits - l;
+}
+
+// svt_od_ec_enc_tell_frac (bitstream_unit.c:406-408)
+std::uint32_t odEcEncTellFrac(const OdEcEnc* enc) {
+    return odEcTellFrac((std::uint32_t)odEcEncTell(enc), enc->rng);
+}
+
 }  // namespace entropy

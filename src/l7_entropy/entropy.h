@@ -50,6 +50,14 @@ void odEcEncodeBoolQ15(OdEcEnc* enc, int val, std::uint32_t f);
 // nsyms: The number of symbols in the alphabet (at most 16).
 void odEcEncodeCdfQ15(OdEcEnc* enc, int s, const std::uint16_t* icdf, int nsyms);
 
+// svt_od_ec_enc_tell (bitstream_unit.c:354-358)
+// Returns the number of bits "used" by the encoded symbols so far.
+int odEcEncTell(const OdEcEnc* enc);
+
+// svt_od_ec_enc_tell_frac (bitstream_unit.c:406-408) -> svt_od_ec_tell_frac
+// (bitstream_unit.c:369-395). Number of bits scaled by 2**OD_BITRES.
+std::uint32_t odEcEncTellFrac(const OdEcEnc* enc);
+
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes);
 
