@@ -1,5 +1,7 @@
 #include <doctest.h>
 
+#include <cstring>
+
 #include "entropy.h"
 
 // EC1 tolerance note: integer-only port, bit-exact vs the SVT C - every
@@ -16,4 +18,21 @@ TEST_CASE("odEcEncReset initial state") {
     CHECK(enc.cnt == -9);
     CHECK(enc.low == 0);
     CHECK(enc.error == 0);
+}
+
+TEST_CASE("odEcEncodeBoolEqQ15 12-bit sequence matches gate bytes") {
+    // Gate: ec_enc_bool_eq 2 b2 e8 (fixed bits 1,0,1,1,0,0,1,0,1,1,1,0,
+    // svt_od_ec_encode_bool_eq_q15 bitstream_unit.c:232-247 through
+    // svt_od_ec_enc_done bitstream_unit.c:309-343).
+    entropy::OdEcEnc enc{};
+    unsigned char buf[64] = {0};
+    enc.buf = buf;
+    entropy::odEcEncReset(&enc);
+    const int bits[12] = {1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0};
+    for (int i = 0; i < 12; ++i) entropy::odEcEncodeBoolEqQ15(&enc, bits[i]);
+    std::uint32_t n = 0;
+    CHECK(entropy::odEcEncDone(&enc, &n) != nullptr);
+    REQUIRE(n == 2);
+    CHECK((unsigned)buf[0] == 0xb2);
+    CHECK((unsigned)buf[1] == 0xe8);
 }

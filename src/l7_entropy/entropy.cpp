@@ -1,11 +1,120 @@
 // l7_entropy - host port of the SVT od_ec range coder (EC1).
 // Encoder: Source/Lib/Codec/bitstream_unit.c (pinned vendored tree).
 // Bodies are verbatim ports with camelCase names; member/field names keep
-// their SVT spellings. Integer-only, bit-exact.
+// their SVT spellings. Integer-only, bit-exact. MSVC toolchain: the
+// OD_MEASURE_EC_OVERHEAD blocks are #if'd out upstream (0) and omitted;
+// EB_UNLIKELY(x) resolves to (x) (definitions.h:508 MSVC branch);
+// OD_WARN_UNUSED_RESULT/OD_ARG_NONNULL are empty attributes
+// (bitstream_unit.h:57-75 MSVC branch); NOINLINE is an icache hint, dropped.
 
 #include "entropy.h"
 
+#include <cstring>
+#include <intrin.h>
+
 namespace entropy {
+
+// get_msb, portable #else body (definitions.h:628-644): returns
+// (int32_t)floor(log2(n)). n must be > 0. svt_log2f aliases this
+// (definitions.h:592).
+static inline int getMsb(std::uint32_t n) {
+    int  log   = 0;
+    std::uint32_t value = n;
+    int  i;
+
+    for (i = 4; i >= 0; --i) {
+        const int      shift = (1 << i);
+        const std::uint32_t x     = value >> shift;
+        if (x != 0) {
+            value = x;
+            log += shift;
+        }
+    }
+    return log;
+}
+
+// HToBE64(X) = BSwap64(X) on little-endian hosts (bitstream_unit.h:162,
+// WORDS_BIGENDIAN branch dropped; MSVC _byteswap_uint64 path of
+// bitstream_unit.h:211).
+static inline std::uint64_t bswap64(std::uint64_t x) {
+    return _byteswap_uint64(x);
+}
+
+// propagate_carry_bwd (bitstream_unit.c:77-79)
+// ptr points one past the last written byte; propagate carry backward
+static inline void propagateCarryBwd(unsigned char* ptr) {
+    while (!++*--ptr) {}
+}
+
+// od_ec_enc_flush (bitstream_unit.c:110-144)
+// Flush accumulated bytes from the arithmetic coder to the output buffer.
+// This is the cold path of normalize, kept out-of-line to reduce icache
+// pressure on the hot (no-flush) path.
+// Returns the residual low value after flushing.
+static void odEcEncFlush(OdEcEnc* enc, OdEcWindow low, unsigned rng, int c, int d) {
+    // Need to add 1 byte here since enc->cnt always counts 1 byte less
+    // (enc->cnt = -9) to ensure correct operation
+    int s              = c + d;
+    int num_bits_ready = (s & ~7) + 8;
+
+    // Update "c" to contain the number of non-ready bits in "low". Since "low"
+    // has 64-bit capacity, we need to add the (64 - 40) cushion bits and take
+    // off the number of ready bits.
+    c += 24 - num_bits_ready;
+
+    // Extract ready bits from low
+    std::uint64_t output = low >> c;
+
+    // Separate carry bit from data
+    std::uint64_t mask = (std::uint64_t)1 << num_bits_ready;
+
+    if (output & mask) {
+        propagateCarryBwd(enc->ptr);
+    }
+
+    // Write to buffer. Carry bit will be shifted away, no need to mask
+    // output &= mask - 1;
+    const std::uint64_t reg = bswap64(output << (64 - num_bits_ready));
+    memcpy(enc->ptr, &reg, 8);
+
+    enc->ptr += num_bits_ready >> 3;
+
+    low &= (((std::uint64_t)1 << c) - 1);
+
+    enc->low = low << d;
+    enc->rng = rng << d;
+    enc->cnt = static_cast<std::int16_t>((s & 7) - 8);
+}
+
+// svt_od_ec_enc_normalize (bitstream_unit.c:151-174)
+// Takes updated low and range values, renormalizes them so that
+// 32768 <= rng < 65536 (flushing bytes from low to the output buffer if
+// necessary), and stores them back in the encoder context.
+static inline void odEcEncNormalize(OdEcEnc* enc, OdEcWindow low, unsigned rng) {
+    int c = enc->cnt;
+    // assert(rng <= 65535U);
+    /*The number of leading zeros in the 16-bit binary representation of rng.*/
+    // svt_log2f(rng) = get_msb (definitions.h:592, portable body :628-644)
+    int d = 15 - getMsb(rng);
+
+    /* We flush every time "low" cannot safely and efficiently accommodate any
+       more data. Overall, c must not exceed 63 at the time of byte flush out. To
+       facilitate this, "c+d" cannot exceed 56-bits because we have to keep 1 byte
+       for carry. Also, we need to subtract 16 because we want to keep room for
+       the next symbol worth "d"-bits (max 15). An alternate condition would be if
+       (e < d), where e = number of leading zeros in "low", indicating there is
+       not enough rooom to accommodate "rng" worth of "d"-bits in "low". However,
+       this approach needs additional computations: (i) compute "e", (ii) push
+       the leading 0x00's as a special case.
+    */
+    if (c + d >= 40) {  // 56 - 16 (EB_UNLIKELY dropped, definitions.h:508)
+        odEcEncFlush(enc, low, rng, c, d);
+    } else {
+        enc->low = low << d;
+        enc->rng = rng << d;
+        enc->cnt = static_cast<std::int16_t>(c + d);
+    }
+}
 
 // svt_od_ec_enc_reset (bitstream_unit.c:185-197)
 void odEcEncReset(OdEcEnc* enc) {
@@ -16,6 +125,47 @@ void odEcEncReset(OdEcEnc* enc) {
        one byte + one carry bit.*/
     enc->cnt   = -9;
     enc->error = 0;
+}
+
+// svt_od_ec_encode_bool_eq_q15 (bitstream_unit.c:232-247)
+// Encode a single binary value with 1/2 probability.
+// val: The value to encode (0 or 1).
+void odEcEncodeBoolEqQ15(OdEcEnc* enc, int val) {
+    OdEcWindow l = enc->low;
+    std::uint32_t r = enc->rng;
+    std::uint32_t v = ((r >> 8) << (CDF_PROB_BITS - 1 - 7)) + EC_MIN_PROB;
+    r -= v;
+    if (val) {
+        l += r;
+        r = v;
+    }
+    odEcEncNormalize(enc, l, r);
+}
+
+// svt_od_ec_enc_done (bitstream_unit.c:309-343)
+// Indicates that there are no more symbols to encode.
+// All remaining output bytes are flushed to the output buffer.
+// odEcEncReset should be called before using the encoder again.
+unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes) {
+    int c = enc->cnt;
+
+    /*We output the minimum number of bits that ensures that the symbols encoded
+       thus far will be decoded correctly regardless of the bits that follow.*/
+    OdEcWindow m = 0x3FFF;
+    OdEcWindow e = ((enc->low + m) & ~m) | (m + 1);
+    OdEcWindow v = e >> (c + 16);
+    if (v & 0x0100) {
+        propagateCarryBwd(enc->ptr);
+    }
+    do {
+        *enc->ptr++ = (unsigned char)((e >> (c + 16)) & 0xFF);
+
+        c -= 8;
+    } while (10 + c > 0);
+
+    *nbytes = (std::uint32_t)(enc->ptr - enc->buf);
+
+    return enc->buf;
 }
 
 }  // namespace entropy
