@@ -92,6 +92,15 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | svt_od_ec_encode_* / enc_done / tell / tell_frac, od_ec_enc_flush, propagate_carry_bwd | Codec/bitstream_unit.c:77-408 | EC0 encoder side |
 | od_ec_dec typedef + struct | third_party/aom_dsp/inc/entdec.h:21, :27-51 | EC0 decoder context (vendored aom_dsp subtree, referenced by the pinned tree's test/CMakeLists.txt:82) |
 | od_ec_dec_refill/normalize/init, decode_bool_q15/decode_cdf_q15, dec_tell/tell_frac | third_party/aom_dsp/src/entdec.c:78-283 | EC0 decoder side |
+| AomCdfProb, update_cdf | Codec/cabac_context_model.h:31, :76-105 | EC2: the one CDF adaptation primitive in the pinned tree (shared by aom_write_symbol and aom_read_symbol_) |
+| AomWriter struct, aom_stop_encode, aom_write_symbol (nsymbs==2 -> bool specialization + allow_update_cdf) | Codec/bitstream_unit.h:222-228, :245-253, :265-279 | EC2: adapted writer surface (OutputBitstreamUnit opaque via shims.h; aom_start_encode/ensure_capacity glue not extracted) |
+| ACCT_STR macros, aom_read_cdf macro, aom_reader struct/typedef, aom_reader_init, aom_read_cdf_, aom_read_symbol_ | third_party/aom_dsp/inc/bitreader.h:20-47, :84-98 + src/bitreader.c:14-22 | EC2: reader-side wrapper (decode + update_cdf) |
+| CONFIG_ENABLE_FILTER_INTRA (=1 line) | API/EbConfigMacros.h:203 | EC3: non-RTC defaults are live (generator builds with neither RTC_BUILD nor MINIMAL_BUILD, CMakeLists.txt:53/86); deviation note 3 |
+| KF_MODE_CONTEXTS, CDF_SIZE, AOM_CDF2..AOM_CDF16 macro family | Codec/cabac_context_model.h:262, :38, :50-65 | EC3: CDF table plumbing |
+| BlockSize enum, DIRECTIONAL_MODES, MAX_ANGLE_DELTA | Codec/definitions.h:883-905, :1305, :1306 | EC3: symbol surface enums |
+| intra_mode_context, block_size_wide/high | Codec/common_utils.c:134-148, :286-291 | EC3: KF mode contexts + FI allowed predicate |
+| svt_aom_default_kf_y_mode_cdf, default_angle_delta_cdf, default_filter_intra_mode_cdf, default_filter_intra_cdfs | Codec/cabac_context_model.c:59, :87, :614, :618 | EC3: default CDF tables (verbatim) |
+| svt_aom_filter_intra_allowed_bsize, svt_aom_filter_intra_allowed | Codec/mode_decision.c:108-119 | EC3: FI signalling predicate (DC_PRED-only, palette 0, bsize <= 32x32) |
 
 Second documented deviation (EC0): the WORDS_BIGENDIAN `#if` guard around the
 HToLE/HToBE macro family (bitstream_unit.h:148-164) is dropped; the
@@ -114,7 +123,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **204/204 lines identical**, covering:
+that file — currently **219/219 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -131,7 +140,35 @@ that file — currently **204/204 lines identical**, covering:
 - entropy-coder gate lines (EC0): bool_eq / bool(f) / cdf13 encode byte
   dumps, decode-back symbol lines, the bool_eq-vs-bool(f=16384) equivalence,
   and enc tell/tell_frac (round-trip equality is also asserted in-generator;
-  the generator exits nonzero on mismatch).
+  the generator exits nonzero on mismatch);
+- CDF adaptation gate lines (EC2): binary-CDF 40-step adaptation snapshots
+  (counter through the rate-4/5/6 transitions), 13-symbol adapted dump,
+  dec tell, and adapted-symbol wrapper round-trips at 2 and 13 symbols
+  (writer/reader adapted CDFs end identical);
+- EC3 intra-frame KF symbol lines: eckf_ctx (context pairs via
+  intra_mode_context), eckf_bytes (mode + angle-delta + filter-intra pair
+  with adaptation), eckf_rt (decode-back), eckf_cdf_eq.
+
+## EC3 scope statement
+
+The EC3 symbol surface is the key-frame (intra-only) luma syntax, chosen to
+match what l6_pipeline (intra-only luma, 4x4..64x64, D2-chosen modes) and the
+l4 FI machinery actually produce and can decode:
+
+- IN scope: kf luma-mode symbol (13 symbols, kf_y_cdf[top_ctx][left_ctx],
+  entropy_coding.c:1030, contexts from svt_aom_get_kf_y_mode_ctx :1004-1021 +
+  intra_mode_context, DC_PRED on unavailable neighbors); angle-delta symbol
+  (7 symbols, only when bsize >= BLOCK_8X8 and the mode is directional,
+  :1032-1037); filter-intra flag (2 symbols) + filter-intra-mode symbol (5
+  symbols) gated by svt_aom_filter_intra_allowed (:5047-5060,
+  mode_decision.c:108-119 - DC_PRED only, palette 0, bsize <= 32x32).
+- DEFERRED (named): chroma uv_mode/CFL alphas/chroma angle-delta
+  (encode_intra_chroma_mode_av1 :1077-1095 - the CH-agent boundary; deferred
+  to CH coordination per the approved plan); the nonkey y_mode_cdf path
+  (:1046-1058 - the pipeline is intra-only); tx_type (:317 - ext_tx sets,
+  out of the current TxType scope); palette (:4362), intrabc (:4401),
+  coefficient/token coding (separate series); od_ec_dec_bits raw bits
+  (declared-undefined in the pinned tree, EC0 deviation).
 
 The frame-policy golden (`golden_frame.exe`) is captured for D3.
 
