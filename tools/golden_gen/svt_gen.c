@@ -6324,6 +6324,194 @@ static INLINE void aom_write_symbol(AomWriter* w, int symb, AomCdfProb* cdf, int
 #define aom_read_cdf(r, cdf, nsymbs, ACCT_STR_NAME) \
   aom_read_cdf_(r, cdf, nsymbs ACCT_STR_ARG(ACCT_STR_NAME))
 
+// ==== SVT-AV1 EbConfigMacros.h :203 - CONFIG_ENABLE_FILTER_INTRA (verbatim extract; do not edit) ====
+#define CONFIG_ENABLE_FILTER_INTRA          1
+
+// ==== SVT-AV1 cabac_context_model.h :38 - CDF_SIZE (verbatim extract; do not edit) ====
+#define CDF_SIZE(x) ((x) + 1)
+
+// ==== SVT-AV1 cabac_context_model.h :50 - AOM_EXPAND_LIST (verbatim extract; do not edit) ====
+#define AOM_EXPAND_LIST(x) x
+
+// ==== SVT-AV1 cabac_context_model.h :51 - AOM_CDF2 (verbatim extract; do not edit) ====
+#define AOM_CDF2(a0)  AOM_ICDF(a0), 0
+
+// ==== SVT-AV1 cabac_context_model.h :52 - AOM_CDF3 (verbatim extract; do not edit) ====
+#define AOM_CDF3(a0,  ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF2(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :53 - AOM_CDF4 (verbatim extract; do not edit) ====
+#define AOM_CDF4(a0,  ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF3(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :54 - AOM_CDF5 (verbatim extract; do not edit) ====
+#define AOM_CDF5(a0,  ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF4(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :55 - AOM_CDF6 (verbatim extract; do not edit) ====
+#define AOM_CDF6(a0,  ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF5(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :56 - AOM_CDF7 (verbatim extract; do not edit) ====
+#define AOM_CDF7(a0,  ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF6(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :57 - AOM_CDF8 (verbatim extract; do not edit) ====
+#define AOM_CDF8(a0,  ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF7(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :58 - AOM_CDF9 (verbatim extract; do not edit) ====
+#define AOM_CDF9(a0,  ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF8(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :59 - AOM_CDF10 (verbatim extract; do not edit) ====
+#define AOM_CDF10(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF9(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :60 - AOM_CDF11 (verbatim extract; do not edit) ====
+#define AOM_CDF11(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF10(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :61 - AOM_CDF12 (verbatim extract; do not edit) ====
+#define AOM_CDF12(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF11(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :62 - AOM_CDF13 (verbatim extract; do not edit) ====
+#define AOM_CDF13(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF12(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :63 - AOM_CDF14 (verbatim extract; do not edit) ====
+#define AOM_CDF14(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF13(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :64 - AOM_CDF15 (verbatim extract; do not edit) ====
+#define AOM_CDF15(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF14(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :65 - AOM_CDF16 (verbatim extract; do not edit) ====
+#define AOM_CDF16(a0, ...) AOM_ICDF(a0), AOM_EXPAND_LIST(AOM_CDF15(__VA_ARGS__))
+
+// ==== SVT-AV1 cabac_context_model.h :262 - KF_MODE_CONTEXTS (verbatim extract; do not edit) ====
+#define KF_MODE_CONTEXTS 5
+
+// ==== SVT-AV1 definitions.h :882 - BlockSize (verbatim extract; do not edit) ====
+typedef enum ATTRIBUTE_PACKED {
+    BLOCK_4X4,
+    BLOCK_4X8,
+    BLOCK_8X4,
+    BLOCK_8X8,
+    BLOCK_8X16,
+    BLOCK_16X8,
+    BLOCK_16X16,
+    BLOCK_16X32,
+    BLOCK_32X16,
+    BLOCK_32X32,
+    BLOCK_32X64,
+    BLOCK_64X32,
+    BLOCK_64X64,
+    BLOCK_64X128,
+    BLOCK_128X64,
+    BLOCK_128X128,
+    BLOCK_4X16,
+    BLOCK_16X4,
+    BLOCK_8X32,
+    BLOCK_32X8,
+    BLOCK_16X64,
+    BLOCK_64X16,
+    BLOCK_SIZES_ALL,
+    BLOCK_SIZES   = BLOCK_4X16,
+    BLOCK_INVALID = 255,
+    BLOCK_LARGEST = (BLOCK_SIZES - 1)
+} BlockSize;
+
+// ==== SVT-AV1 definitions.h :1305 - DIRECTIONAL_MODES (verbatim extract; do not edit) ====
+#define DIRECTIONAL_MODES 8
+
+// ==== SVT-AV1 definitions.h :1306 - MAX_ANGLE_DELTA (verbatim extract; do not edit) ====
+#define MAX_ANGLE_DELTA 3
+
+// ==== SVT-AV1 common_utils.c :134 - intra_mode_context (verbatim extract; do not edit) ====
+const uint8_t intra_mode_context[INTRA_MODES] = {
+    0,
+    1,
+    2,
+    3,
+    4,
+    4,
+    4,
+    4,
+    3,
+    0,
+    1,
+    2,
+    0,
+};
+
+// ==== SVT-AV1 common_utils.c :286 - block_size_wide (verbatim extract; do not edit) ====
+const uint8_t block_size_wide[BLOCK_SIZES_ALL] = {4,  4,  8,  8,   8,   16, 16, 16, 32, 32, 32,
+                                                  64, 64, 64, 128, 128, 4,  16, 8,  32, 16, 64};
+
+// ==== SVT-AV1 common_utils.c :289 - block_size_high (verbatim extract; do not edit) ====
+const uint8_t block_size_high[BLOCK_SIZES_ALL] = {4,  8,  4,   8,  16,  8,  16, 32, 16, 32, 64,
+                                                  32, 64, 128, 64, 128, 16, 4,  32, 8,  64, 16};
+
+// ==== SVT-AV1 cabac_context_model.c :59 - svt_aom_default_kf_y_mode_cdf (verbatim extract; do not edit) ====
+const AomCdfProb svt_aom_default_kf_y_mode_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)] = {
+    {{AOM_CDF13(15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466)},
+     {AOM_CDF13(12016, 18066, 19516, 20303, 20719, 21444, 21888, 23032, 24434, 28658, 30172, 31409)},
+     {AOM_CDF13(10052, 10771, 22296, 22788, 23055, 23239, 24133, 25620, 26160, 29336, 29929, 31567)},
+     {AOM_CDF13(14091, 15406, 16442, 18808, 19136, 19546, 19998, 22096, 24746, 29585, 30958, 32462)},
+     {AOM_CDF13(12122, 13265, 15603, 16501, 18609, 20033, 22391, 25583, 26437, 30261, 31073, 32475)}},
+    {{AOM_CDF13(10023, 19585, 20848, 21440, 21832, 22760, 23089, 24023, 25381, 29014, 30482, 31436)},
+     {AOM_CDF13( 5983, 24099, 24560, 24886, 25066, 25795, 25913, 26423, 27610, 29905, 31276, 31794)},
+     {AOM_CDF13( 7444, 12781, 20177, 20728, 21077, 21607, 22170, 23405, 24469, 27915, 29090, 30492)},
+     {AOM_CDF13( 8537, 14689, 15432, 17087, 17408, 18172, 18408, 19825, 24649, 29153, 31096, 32210)},
+     {AOM_CDF13( 7543, 14231, 15496, 16195, 17905, 20717, 21984, 24516, 26001, 29675, 30981, 31994)}},
+    {{AOM_CDF13(12613, 13591, 21383, 22004, 22312, 22577, 23401, 25055, 25729, 29538, 30305, 32077)},
+     {AOM_CDF13( 9687, 13470, 18506, 19230, 19604, 20147, 20695, 22062, 23219, 27743, 29211, 30907)},
+     {AOM_CDF13( 6183,  6505, 26024, 26252, 26366, 26434, 27082, 28354, 28555, 30467, 30794, 32086)},
+     {AOM_CDF13(10718, 11734, 14954, 17224, 17565, 17924, 18561, 21523, 23878, 28975, 30287, 32252)},
+     {AOM_CDF13( 9194,  9858, 16501, 17263, 18424, 19171, 21563, 25961, 26561, 30072, 30737, 32463)}},
+    {{AOM_CDF13(12602, 14399, 15488, 18381, 18778, 19315, 19724, 21419, 25060, 29696, 30917, 32409)},
+     {AOM_CDF13( 8203, 13821, 14524, 17105, 17439, 18131, 18404, 19468, 25225, 29485, 31158, 32342)},
+     {AOM_CDF13( 8451,  9731, 15004, 17643, 18012, 18425, 19070, 21538, 24605, 29118, 30078, 32018)},
+     {AOM_CDF13( 7714,  9048,  9516, 16667, 16817, 16994, 17153, 18767, 26743, 30389, 31536, 32528)},
+     {AOM_CDF13( 8843, 10280, 11496, 15317, 16652, 17943, 19108, 22718, 25769, 29953, 30983, 32485)}},
+    {{AOM_CDF13(12578, 13671, 15979, 16834, 19075, 20913, 22989, 25449, 26219, 30214, 31150, 32477)},
+     {AOM_CDF13( 9563, 13626, 15080, 15892, 17756, 20863, 22207, 24236, 25380, 29653, 31143, 32277)},
+     {AOM_CDF13( 8356,  8901, 17616, 18256, 19350, 20106, 22598, 25947, 26466, 29900, 30523, 32261)},
+     {AOM_CDF13(10835, 11815, 13124, 16042, 17018, 18039, 18947, 22753, 24615, 29489, 30883, 32482)},
+     {AOM_CDF13( 7618,  8288,  9859, 10509, 15386, 18657, 22903, 28776, 29180, 31355, 31802, 32593)}}
+};
+
+// ==== SVT-AV1 cabac_context_model.c :87 - default_angle_delta_cdf (verbatim extract; do not edit) ====
+static const AomCdfProb default_angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)] = {
+    {AOM_CDF7( 2180,  5032,  7567, 22776, 26989, 30217)},
+    {AOM_CDF7( 2301,  5608,  8801, 23487, 26974, 30330)},
+    {AOM_CDF7( 3780, 11018, 13699, 19354, 23083, 31286)},
+    {AOM_CDF7( 4581, 11226, 15147, 17138, 21834, 28397)},
+    {AOM_CDF7( 1737, 10927, 14509, 19588, 22745, 28823)},
+    {AOM_CDF7( 2664, 10176, 12485, 17650, 21600, 30495)},
+    {AOM_CDF7( 2240, 11096, 15453, 20341, 22561, 28917)},
+    {AOM_CDF7( 3605, 10428, 12459, 17676, 21244, 30655)}
+};
+
+// ==== SVT-AV1 cabac_context_model.c :614 - default_filter_intra_mode_cdf (verbatim extract; do not edit) ====
+static const AomCdfProb default_filter_intra_mode_cdf[CDF_SIZE(FILTER_INTRA_MODES)] = {
+    AOM_CDF5( 8949, 12776, 17211, 29558)
+};
+
+// ==== SVT-AV1 cabac_context_model.c :618 - default_filter_intra_cdfs (verbatim extract; do not edit) ====
+static const AomCdfProb default_filter_intra_cdfs[BLOCK_SIZES_ALL][CDF_SIZE(2)] = {
+    {AOM_CDF2( 4621)}, {AOM_CDF2( 6743)}, {AOM_CDF2( 5893)}, {AOM_CDF2( 7866)}, {AOM_CDF2(12551)}, {AOM_CDF2( 9394)},
+    {AOM_CDF2(12408)}, {AOM_CDF2(14301)}, {AOM_CDF2(12756)}, {AOM_CDF2(22343)}, {AOM_CDF2(16384)}, {AOM_CDF2(16384)},
+    {AOM_CDF2(16384)}, {AOM_CDF2(16384)}, {AOM_CDF2(16384)}, {AOM_CDF2(16384)}, {AOM_CDF2(12770)}, {AOM_CDF2(10368)},
+    {AOM_CDF2(20229)}, {AOM_CDF2(18101)}, {AOM_CDF2(16384)}, {AOM_CDF2(16384)}
+};
+
+// ==== SVT-AV1 mode_decision.c :108 - svt_aom_filter_intra_allowed_bsize (verbatim extract; do not edit) ====
+int svt_aom_filter_intra_allowed_bsize(BlockSize bs) {
+    if (!CONFIG_ENABLE_FILTER_INTRA) {
+        return 0; // filter_intra off -> const-folds, cascades DCE
+    }
+    return block_size_wide[bs] <= 32 && block_size_high[bs] <= 32;
+}
+
+// ==== SVT-AV1 mode_decision.c :115 - svt_aom_filter_intra_allowed (verbatim extract; do not edit) ====
+int svt_aom_filter_intra_allowed(uint8_t enable_filter_intra, BlockSize bsize, uint8_t palette_size, uint32_t mode) {
+    if (!CONFIG_ENABLE_FILTER_INTRA) {
+        return 0; // filter_intra off
+    }
+    return enable_filter_intra && mode == DC_PRED && palette_size == 0 && svt_aom_filter_intra_allowed_bsize(bsize);
+}
+
 // ==== SVT-AV1 bitreader.h :40 - aom_reader struct (verbatim extract; do not edit) ====
 struct aom_reader {
   const uint8_t *buffer;

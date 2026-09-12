@@ -29,9 +29,12 @@ $files = @{
     "full_loop.c"        = (Get-Content (Join-Path $src "Codec\full_loop.c") -Raw)
     "definitions.h"      = (Get-Content (Join-Path $src "Codec\definitions.h") -Raw)
     "common_utils.c"     = (Get-Content (Join-Path $src "Codec\common_utils.c") -Raw)
+    "mode_decision.c"    = (Get-Content (Join-Path $src "Codec\mode_decision.c") -Raw)
+    "EbConfigMacros.h"   = (Get-Content (Join-Path $repo "third_party\SVT-AV1\Source\API\EbConfigMacros.h") -Raw)
     "bitstream_unit.c"   = (Get-Content (Join-Path $src "Codec\bitstream_unit.c") -Raw)
     "bitstream_unit.h"   = (Get-Content (Join-Path $src "Codec\bitstream_unit.h") -Raw)
     "cabac_context_model.h" = (Get-Content (Join-Path $src "Codec\cabac_context_model.h") -Raw)
+    "cabac_context_model.c" = (Get-Content (Join-Path $src "Codec\cabac_context_model.c") -Raw)
     "entdec.c"           = (Get-Content (Join-Path $src3p "src\entdec.c") -Raw)
     "entdec.h"           = (Get-Content (Join-Path $src3p "inc\entdec.h") -Raw)
     "bitreader.h"        = (Get-Content (Join-Path $src3p "inc\bitreader.h") -Raw)
@@ -356,6 +359,46 @@ Emit-Verbatim "bitstream_unit.h" "static INLINE void aom_write_symbol" "aom_writ
 Emit-Macro "bitreader.h" "#define ACCT_STR_PARAM" "ACCT_STR_PARAM"
 Emit-Macro "bitreader.h" "#define ACCT_STR_ARG" "ACCT_STR_ARG"
 Emit-Macro "bitreader.h" "#define aom_read_cdf" "aom_read_cdf macro"
+
+# ---- intra-frame symbol surface (EC3) ----
+# Non-RTC config defaults (EbConfigMacros.h:190-204): the generator builds
+# with neither RTC_BUILD nor MINIMAL_BUILD, so the non-RTC section is the
+# live one. Documented deviation #3: the CONFIG_ENABLE_FILTER_INTRA line is
+# selected by VALUE (the =1 line, :203) and the RTC/MINIMAL #ifndef guard is
+# dropped - on this build config it resolves to 1, making filter-intra
+# signallable (mode_decision.c:108-119 predicate).
+Emit-Macro "EbConfigMacros.h" "#define CONFIG_ENABLE_FILTER_INTRA          1" "CONFIG_ENABLE_FILTER_INTRA"
+Emit-Macro "cabac_context_model.h" "#define CDF_SIZE" "CDF_SIZE"
+Emit-Macro "cabac_context_model.h" "#define AOM_EXPAND_LIST" "AOM_EXPAND_LIST"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF2" "AOM_CDF2"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF3" "AOM_CDF3"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF4" "AOM_CDF4"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF5" "AOM_CDF5"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF6" "AOM_CDF6"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF7" "AOM_CDF7"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF8" "AOM_CDF8"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF9" "AOM_CDF9"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF10" "AOM_CDF10"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF11" "AOM_CDF11"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF12" "AOM_CDF12"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF13" "AOM_CDF13"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF14" "AOM_CDF14"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF15" "AOM_CDF15"
+Emit-Macro "cabac_context_model.h" "#define AOM_CDF16" "AOM_CDF16"
+Emit-Macro "cabac_context_model.h" "#define KF_MODE_CONTEXTS" "KF_MODE_CONTEXTS"
+Emit-Verbatim "definitions.h" "typedef enum ATTRIBUTE_PACKED {
+    BLOCK_4X4," "BlockSize"
+Emit-Macro "definitions.h" "#define DIRECTIONAL_MODES" "DIRECTIONAL_MODES"
+Emit-Macro "definitions.h" "#define MAX_ANGLE_DELTA" "MAX_ANGLE_DELTA"
+Emit-Verbatim "common_utils.c" "const uint8_t intra_mode_context" "intra_mode_context"
+Emit-Verbatim "common_utils.c" "const uint8_t block_size_wide" "block_size_wide"
+Emit-Verbatim "common_utils.c" "const uint8_t block_size_high" "block_size_high"
+Emit-Verbatim "cabac_context_model.c" "const AomCdfProb svt_aom_default_kf_y_mode_cdf" "svt_aom_default_kf_y_mode_cdf"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_angle_delta_cdf" "default_angle_delta_cdf"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_filter_intra_mode_cdf" "default_filter_intra_mode_cdf"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_filter_intra_cdfs" "default_filter_intra_cdfs"
+Emit-Verbatim "mode_decision.c" "int svt_aom_filter_intra_allowed_bsize" "svt_aom_filter_intra_allowed_bsize"
+Emit-Verbatim "mode_decision.c" "int svt_aom_filter_intra_allowed(uint8_t enable_filter_intra" "svt_aom_filter_intra_allowed"
 Emit-Verbatim "bitreader.h" "struct aom_reader" "aom_reader struct"
 Emit-Macro "bitreader.h" "typedef struct aom_reader aom_reader;" "aom_reader typedef"
 Emit-Verbatim "bitreader.c" "int aom_reader_init" "aom_reader_init"
