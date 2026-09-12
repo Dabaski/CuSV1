@@ -8,10 +8,16 @@ SVT symbol to trace (single policy row in the classification section).
 Status
 vocabulary:
 
-- **exact** — the SVT body is ported with the arithmetic text unchanged;
-  only mechanical renames were applied (identifier/table-parameter renames,
-  C++ `std::` spellings). Bit-exactness is gate-proven by
-  `tools/golden_gen` (expected_primitives.txt, 178 lines).
+- **exact (mech)** — the SVT body was ported mechanically from the committed
+  verbatim extract (`svt_gen.c`) with identifier/table renames only; the
+  arithmetic text is byte-derived from the extract. Currently exactly two
+  ports: `fdct64`/`fdct64B` and `idct64`.
+- **exact (hand)** — hand-transcribed from the SVT source with the
+  arithmetic text unchanged (mechanical renames, C++ `std::` spellings);
+  bit-exactness is gate-proven by `tools/golden_gen`
+  (expected_primitives.txt, 178 lines). All pre-extract-era ports (the
+  C-series 4x4/8x8/16x16 kernels, the L-series 32x32 kernels, the helpers,
+  and all of l4/l5) are this class.
 - **adapted** — SVT structure is preserved but the port changes shape:
   thread mapping, buffer ownership, parameterization, or a documented
   specialization of a generic SVT function. The per-sample arithmetic is
@@ -28,30 +34,30 @@ is in `tools/golden_gen/README.md`.
 
 | SVT symbol (file:line) | Port artifact(s) | Status | Notes |
 | --- | --- | --- | --- |
-| svt_av1_fdct4_new (transforms.c) | `fdct4` (transform.cpp:3469) | exact | hand transcription, gate fdct4 |
-| svt_av1_fadst4_new | `fadst4` (:3495) | exact | gate fadst4 |
-| svt_av1_fdct8_new | `fdct8` (:608) | exact | gate fdct8 |
-| svt_av1_fadst8_new | `fadst8` (:678) | exact | gate fadst8 |
-| svt_av1_fdct16_new | `fdct16` (:1059), cos_bit-parameterized | exact | gate fdct16 (col 13 / row 12) |
-| svt_av1_fadst16_new | `fadst16` (:1063), cos_bit-parameterized | exact | gate fadst16 |
-| svt_av1_fdct32_new | `fdct32` (:1069), cos_bit 12 fixed | exact | gate fdct32 |
-| svt_av1_fadst32_new (static, transforms.c:1908) | `fadst32` (:2895) | exact | gate fadst32 |
-| svt_av1_fdct64_new (transforms.c:762) | `fdct64`/`fdct64B` (:1347/:1351) | exact | DCT-only; mechanical port of the verbatim extract, SVT pointer-swap structure preserved (bf0/bf1 alternation); fdct64B takes cos_bit (col 13 / row 10) |
-| svt_av1_idct4_new | `idct4` (:87) | exact | gate idct4 |
-| svt_av1_iadst4_new | `iadst4` (:115) | exact | gate iadst4 |
-| svt_av1_idct8_new | `idct8` (:161) | exact | clamps only where SVT consumes stage_range |
-| svt_av1_iadst8_new | `iadst8` (:222) | exact | |
-| svt_av1_idct16_new | `idct16` (:302) | exact | clamp stages 3-7 |
-| svt_av1_iadst16_new | `iadst16` (:437) | exact | clamp stages 3/5/7; no all-zero early-out at 16 |
-| svt_av1_idct32_new (inv_transforms.c:378) | `idct32` (:3077) | exact | clamps ONLY stages 3-9 (audited) |
-| svt_av1_iadst32_new (static, inv_transforms.c:1132) | `iadst32` (:3328) | exact | clamps EVERY stage; no all-zero early-out at 32 |
-| svt_av1_idct64_new (inv_transforms.c:1567) | `idct64` (:2112) | exact | mechanical extract port; clamp bit 16 every stage via stageRange shim (gen_inv_range_64x64_dct) |
-| round_shift / half_btf (inv_transforms.h) | `roundShift` / `halfBtf` | exact | pure renames |
-| clamp_value / clamp_buf (inv_transforms.c) | `clampValue` / `clampBufIv` | exact | |
+| svt_av1_fdct4_new (transforms.c) | `fdct4` (transform.cpp:3469) | exact (hand) | hand transcription, gate fdct4 |
+| svt_av1_fadst4_new | `fadst4` (:3495) | exact (hand) | gate fadst4 |
+| svt_av1_fdct8_new | `fdct8` (:608) | exact (hand) | gate fdct8 |
+| svt_av1_fadst8_new | `fadst8` (:678) | exact (hand) | gate fadst8 |
+| svt_av1_fdct16_new | `fdct16` (:1059), cos_bit-parameterized | exact (hand) | gate fdct16 (col 13 / row 12) |
+| svt_av1_fadst16_new | `fadst16` (:1063), cos_bit-parameterized | exact (hand) | gate fadst16 |
+| svt_av1_fdct32_new | `fdct32` (:1069), cos_bit 12 fixed | exact (hand) | gate fdct32 |
+| svt_av1_fadst32_new (static, transforms.c:1908) | `fadst32` (:2895) | exact (hand) | gate fadst32 |
+| svt_av1_fdct64_new (transforms.c:762) | `fdct64`/`fdct64B` (:1347/:1351) | exact (mech) | DCT-only; mechanical port of the verbatim extract, SVT pointer-swap structure preserved (bf0/bf1 alternation); fdct64B takes cos_bit (col 13 / row 10) |
+| svt_av1_idct4_new | `idct4` (:87) | exact (hand) | gate idct4 |
+| svt_av1_iadst4_new | `iadst4` (:115) | exact (hand) | gate iadst4 |
+| svt_av1_idct8_new | `idct8` (:161) | exact (hand) | clamps only where SVT consumes stage_range |
+| svt_av1_iadst8_new | `iadst8` (:222) | exact (hand) | |
+| svt_av1_idct16_new | `idct16` (:302) | exact (hand) | clamp stages 3-7 |
+| svt_av1_iadst16_new | `iadst16` (:437) | exact (hand) | clamp stages 3/5/7; no all-zero early-out at 16 |
+| svt_av1_idct32_new (inv_transforms.c:378) | `idct32` (:3077) | exact (hand) | clamps ONLY stages 3-9 (audited) |
+| svt_av1_iadst32_new (static, inv_transforms.c:1132) | `iadst32` (:3328) | exact (hand) | clamps EVERY stage; no all-zero early-out at 32 |
+| svt_av1_idct64_new (inv_transforms.c:1567) | `idct64` (:2112) | exact (mech) | mechanical extract port; clamp bit 16 every stage via stageRange shim (gen_inv_range_64x64_dct) |
+| round_shift / half_btf (inv_transforms.h) | `roundShift` / `halfBtf` | exact (hand) | pure renames |
+| clamp_value / clamp_buf (inv_transforms.c) | `clampValue` / `clampBufIv` | exact (hand) | |
 | svt_aom_eb_av1_cospi/sinpi_arr_data (inv_transforms.c) | `kCospi13`/`kCospi12`/`kCospi10`/`kSinpi*` + `cospiRow` | adapted | table ROWS verbatim; the 7-row table flattened to the three used rows (13/12/10), cospiRow = cospi_arr(cos_bit) mirror |
-| fwd_shift_4x4/8x8/16x16/32x32/64x64 (transforms.c) | shift constants in fwdTxfm2d* | exact | {2,0,0}/{2,-1,0}/{2,-2,0}/{2,-4,0}/{0,-2,-2} |
-| inv_shift_4x4/8x8/16x16/32x32/64x64 (inv_transforms.c:21-22) | shift constants in invTxfm2dAdd* | exact | {0,-4}/{-1,-4}/{-2,-4}/{-2,-4}/{-2,-4} |
-| fwd_cos_bit_col/row, inv_cos_bit_col/row (transforms.c:19-22, inv_transforms.h:32-41) | cos_bit constants (13/13, 13/13, 13/12, 12/12, 13/10; inv 12/12) | exact | read from the extracted tables, cited |
+| fwd_shift_4x4/8x8/16x16/32x32/64x64 (transforms.c) | shift constants in fwdTxfm2d* | exact (hand) | {2,0,0}/{2,-1,0}/{2,-2,0}/{2,-4,0}/{0,-2,-2} |
+| inv_shift_4x4/8x8/16x16/32x32/64x64 (inv_transforms.c:21-22) | shift constants in invTxfm2dAdd* | exact (hand) | {0,-4}/{-1,-4}/{-2,-4}/{-2,-4}/{-2,-4} |
+| fwd_cos_bit_col/row, inv_cos_bit_col/row (transforms.c:19-22, inv_transforms.h:32-41) | cos_bit constants (13/13, 13/13, 13/12, 12/12, 13/10; inv 12/12) | exact (hand) | read from the extracted tables, cited |
 | av1_tranform_two_d_core_c (transforms.c:2398) | `fwdTxfm2d4x4..64x64` | adapted | generic core specialized per size: bd=8 fixed, no flips, fixed TxType column; col/row 1D calls + round_shift_array(-shift) structure preserved |
 | inv_txfm2d_add_c / svt_av1_inv_txfm2d_add_64x64_c | `invTxfm2dAdd4x4..64x64` | adapted | same specialization; clamps only where SVT consumes stage_range; clip_pixel_highbd add |
 | av1_txfm_type_ls (inv_transforms.h:196) | 64x64 DCT-only scope | exact (finding) | {DCT64, INVALID, INVALID, IDENTITY64} — no ADST signalable at TX_64X64; IDENTITY64 column parked, not ported |
@@ -73,25 +79,25 @@ port (tests in test_transform.cpp).
 
 | SVT symbol (file:line) | Port artifact(s) | Status | Notes |
 | --- | --- | --- | --- |
-| build_intra_predictors (enc_intra_prediction.c:159) | `buildIntraPredictors` (:455) | exact | the ONE extract substitution: get_filt_type(xd, plane) -> svtd_filt_type generator shim, flagged inline in svt_gen.c; the host port mirrors that shim with intra::NeighborContext carrying the same two mode values |
-| svt_av1_dr_prediction_z1/z2/z3_c (intra_prediction.c) | `drZ1`/`drZ2`/`drZ3` (:202/:236/:262) | exact | gate-verified per zone |
-| svt_aom_dr_predictor + eb_dr_intra_derivative + get_dx/get_dy | `drPredictor` (:734) + `getDx`/`getDy` (:345/:355) + `drIntraDerivative` (:312, verbatim table) | exact | |
-| dc/dc_left/dc_top/dc_128/v/h/paeth predictors (intra_prediction.c) | inline dispatch arms inside `buildIntraPredictors` (DC_PRED :631, V_PRED :660, H_PRED :666, PAETH_PRED :672 — paeth_predictor_single mirrored inline via std::abs) | exact | |
-| smooth/smooth_v/smooth_h predictors (intra_prediction.c) + sm_weight_arrays (:25) | `smoothPredict`/`smoothVPredict`/`smoothHPredict` (:365/:389/:408) + `smWeightArrays` (:291, verbatim table) | exact | |
-| svt_aom_intra_edge_filter_strength + svt_av1_filter_intra_edge_c + filter_intra_edge_corner | `edgeFilterStrength`/`filterIntraEdge` (:95) + corner-blend path | exact | |
-| svt_aom_use_intra_edge_upsample + svt_av1_upsample_intra_edge_c | `useUpsample` + `upsampleIntraEdge` (:760) | exact | dead above 8x8 (blk_wh > 16), audited per size |
-| eb_av1_filter_intra_taps + svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c) | `filterIntraPredictor` (:694) | exact | verbatim asserts bw<=32 retained — FI is NOT signalable at 64x64 |
-| sm_weight_arrays (intra_prediction.c:25) | `sm_w` rows + `sm_w32`/`sm_w64` GPU constants | exact | bs=16/32/64 rows verbatim |
-| mode_to_angle_map / extend_modes / av1_is_directional_mode | `kModeToAngle` (:451) / `kExtendModes` (:435) / `isDrMode` inline test | exact | |
-| Corner-blend regime (enc_intra_prediction.c:600-604) | in builder + 16/32/64 GPU kernels | exact | txwpx+txhpx >= 24; live at 16/32/64, dead at 4/8 |
+| build_intra_predictors (enc_intra_prediction.c:159) | `buildIntraPredictors` (:455) | exact (hand) | the ONE extract substitution: get_filt_type(xd, plane) -> svtd_filt_type generator shim, flagged inline in svt_gen.c; the host port mirrors that shim with intra::NeighborContext carrying the same two mode values |
+| svt_av1_dr_prediction_z1/z2/z3_c (intra_prediction.c) | `drZ1`/`drZ2`/`drZ3` (:202/:236/:262) | exact (hand) | gate-verified per zone |
+| svt_aom_dr_predictor + eb_dr_intra_derivative + get_dx/get_dy | `drPredictor` (:734) + `getDx`/`getDy` (:345/:355) + `drIntraDerivative` (:312, verbatim table) | exact (hand) | |
+| dc/dc_left/dc_top/dc_128/v/h/paeth predictors (intra_prediction.c) | inline dispatch arms inside `buildIntraPredictors` (DC_PRED :631, V_PRED :660, H_PRED :666, PAETH_PRED :672 — paeth_predictor_single mirrored inline via std::abs) | exact (hand) | |
+| smooth/smooth_v/smooth_h predictors (intra_prediction.c) + sm_weight_arrays (:25) | `smoothPredict`/`smoothVPredict`/`smoothHPredict` (:365/:389/:408) + `smWeightArrays` (:291, verbatim table) | exact (hand) | |
+| svt_aom_intra_edge_filter_strength + svt_av1_filter_intra_edge_c + filter_intra_edge_corner | `edgeFilterStrength`/`filterIntraEdge` (:95) + corner-blend path | exact (hand) | |
+| svt_aom_use_intra_edge_upsample + svt_av1_upsample_intra_edge_c | `useUpsample` + `upsampleIntraEdge` (:760) | exact (hand) | dead above 8x8 (blk_wh > 16), audited per size |
+| eb_av1_filter_intra_taps + svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c) | `filterIntraPredictor` (:694) | exact (hand) | verbatim asserts bw<=32 retained — FI is NOT signalable at 64x64 |
+| sm_weight_arrays (intra_prediction.c:25) | `sm_w` rows + `sm_w32`/`sm_w64` GPU constants | exact (hand) | bs=16/32/64 rows verbatim |
+| mode_to_angle_map / extend_modes / av1_is_directional_mode | `kModeToAngle` (:451) / `kExtendModes` (:435) / `isDrMode` inline test | exact (hand) | |
+| Corner-blend regime (enc_intra_prediction.c:600-604) | in builder + 16/32/64 GPU kernels | exact (hand) | txwpx+txhpx >= 24; live at 16/32/64, dead at 4/8 |
 | — | GPU `predict_block_4x4/8x8/16x16/32x32/64x64` | adapted | per-sample arithmetic 1:1 with the host builder (which is exact); launch mapping ours (256 threads at 4/8/16; 1024 threads at 32/64 — 64x64 = FOUR pixels per thread p = t + 1024k, the stated thread-map design); edge-buffer ownership reworked for shared memory; filter-intra path absent at 64x64 (not signalable) |
 
 ## l5_motion (src/l5_motion/motion.cpp)
 
 | SVT symbol (file:line) | Port artifact(s) | Status | Notes |
 | --- | --- | --- | --- |
-| compute8x8_sad_kernel_c (motion_estimation.c:71) | `sad8x8` (:5) | exact | dedicated 8x8 kernel mirrored; GPU 8x8 kernel adapted from it (accumulators per-thread, warp-reduce) |
-| svt_nxm_sad_kernel_helper_c (compute_sad_c.c:21) | `sad4x4` (:95), `sad16x16` (:44), `sad32x32` (:61), `sad64x64` (:78) | exact | dim loops unrolled to the template dims |
+| compute8x8_sad_kernel_c (motion_estimation.c:71) | `sad8x8` (:5) | exact (hand) | dedicated 8x8 kernel mirrored; GPU 8x8 kernel adapted from it (accumulators per-thread, warp-reduce) |
+| svt_nxm_sad_kernel_helper_c (compute_sad_c.c:21) | `sad4x4` (:95), `sad16x16` (:44), `sad32x32` (:61), `sad64x64` (:78) | exact (hand) | dim loops unrolled to the template dims |
 | — | GPU sad 4x4/8x8 kernels | adapted | same sums; 16x16/32x32/64x64 score host-side by design |
 
 ## l6_pipeline (src/l6_pipeline/pipeline.cpp)

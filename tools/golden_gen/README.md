@@ -16,12 +16,17 @@ above each). No golden is hand-typed.
   header. No arithmetic.
 - `composition.c` — wires the extracts together: dispatch-table population
   (`svtd_eb_pred[13][5]` / `svtd_dc_pred[2][2][5]`, the TX_32X32 and
-  TX_64X64 columns populated via SVTD_ADAPTER32/SVTD_ADAPTER64), the four 2D
-  cores (documented specializations of `av1_tranform_two_d_core_c` /
-  `inv_txfm2d_add_c` to TX_4X4/8-bit, TX_32X32 with fwd_shift_32x32 =
-  {2,-4,0} and cos_bit 12/12, and TX_64X64 DCT-only with fwd_shift_64x64 =
-  {0,-2,-2} and cos_bit col 13 / row 10), the default scans up to 64x64
-  (svt_aom_init_iscan at W=H=32/64), the log_scale 1/2 quantizer entries
+  TX_64X64 columns populated via the SVTD_ADAPTER32 adapters and plain
+  64x64 static functions), the FIVE 2D core pairs — documented
+  specializations of `av1_tranform_two_d_core_c` / `inv_txfm2d_add_c`,
+  all five enumerated:
+  TX_4X4 (fwd_shift {2,0,0}, cos_bit 13/13),
+  TX_8X8 ({2,-1,0}, 13/13),
+  TX_16X16 ({2,-2,0}, col 13 / row 12),
+  TX_32X32 ({2,-4,0}, 12/12),
+  TX_64X64 (DCT-only, {0,-2,-2}, col 13 / row 10);
+  the default scans up to 64x64 (svt_aom_init_iscan at W=H=32/64), the
+  log_scale 1/2 quantizer entries
   (`svtd_quantize_fp_32x32/_b_32x32/_64x64/_b_64x64`, n_coeffs 1024/4096),
   and the frame-policy drivers (`svtd_frame_auto_32x32_blocks/_q`,
   `svtd_frame_v_dct_32x32/_q`, `svtd_frame_auto_64x64_blocks/_q`,
@@ -60,7 +65,6 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | inv_shift_4x4/8x8/16x16/32x32/64x64, INV_COS_BIT, inv_cos_bit_col/row | Codec/inv_transforms.{c,h} | inv 2D core config (inv_shift_64x64 = {-2,-4}) |
 | svt_av1_gen_inv_stage_range (recomputed inline, cited) | Codec/inv_transforms.c:44, inv_transforms.h:221-222 | gen_inv_range_{8x8,16x16,32x32_dct,64x64_dct} gate lines (stage_range shim per size; 64x64 DCT-only, 12 x 16) |
 | half_btf, round_shift, round_shift_array_c, clamp_value, clamp_buf, clamp64 | Codec/inv_transforms.{c,h}, definitions.h | transform helpers |
-| inv_shift_4x4, INV_COS_BIT, inv_cos_bit_col/row | Codec/inv_transforms.{c,h} | inv 2D core config |
 | svt_aom_eb_av1_cospi_arr_data / sinpi_arr_data | Codec/inv_transforms.c | cos_bit 12/13 table rows |
 | sm_weight_arrays, sm_weights_sanity_checks, divide_round | Codec/intra_prediction.c | smoothPredict |
 | eb_dr_intra_derivative, get_dx, get_dy | Codec/intra_prediction.c | drZ1/2/3 + drPredictor |
