@@ -123,3 +123,43 @@ TEST_CASE("odEcDecodeCdfQ15 round-trips the cdf13 gate bytes") {
         CHECK(entropy::odEcDecodeCdfQ15(&dec, icdf13, 13) == syms[i]);
     }
 }
+
+TEST_CASE("encoder and decoder are mutually consistent on a mixed sequence") {
+    // Integration round-trip (no new primitive): every expected byte/symbol
+    // side is gate-verified bit-exact (EC0 lines); this composes both sides
+    // and asserts f(g(x)) == x, including the f extremes 128 and 32767
+    // (f < 32768 precondition, bitstream_unit.c:253).
+    entropy::OdEcEnc enc{};
+    unsigned char buf[128] = {0};
+    enc.buf = buf;
+    entropy::odEcEncReset(&enc);
+    static const std::uint16_t icdf13[13] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0};
+    const int plan[24][3] = {
+        {0, 0, 0}, {1, 16384, 0}, {2, 0, 1}, {3, 8192, 0}, {4, 0, 0},
+        {5, 32767, 1}, {6, 128, 0}, {7, 16384, 1}, {8, 0, 0}, {9, 4096, 1},
+        {10, 0, 0}, {11, 16384, 1}, {12, 0, 0}, {5, 8192, 0}, {2, 16384, 1},
+        {0, 0, 0}, {12, 16384, 0}, {1, 2048, 1}, {3, 16384, 0}, {0, 0, 0},
+        {7, 16384, 1}, {11, 16384, 0}, {4, 16384, 1}, {9, 0, 0},
+    };
+    for (int i = 0; i < 24; ++i) {
+        if (plan[i][2] == 0) {
+            // plain bit at f = 16384 default or the plan's f
+            entropy::odEcEncodeBoolQ15(&enc, plan[i][0] & 1, (std::uint32_t)plan[i][1]);
+        } else {
+            entropy::odEcEncodeCdfQ15(&enc, plan[i][0] % 13, icdf13, 13);
+        }
+    }
+    std::uint32_t n = 0;
+    entropy::odEcEncDone(&enc, &n);
+    REQUIRE(n > 0);
+    REQUIRE(n < 128);
+    entropy::OdEcDec dec;
+    entropy::odEcDecInit(&dec, buf, n);
+    for (int i = 0; i < 24; ++i) {
+        if (plan[i][2] == 0) {
+            CHECK(entropy::odEcDecodeBoolQ15(&dec, (unsigned)plan[i][1]) == (plan[i][0] & 1));
+        } else {
+            CHECK(entropy::odEcDecodeCdfQ15(&dec, icdf13, 13) == plan[i][0] % 13);
+        }
+    }
+}
