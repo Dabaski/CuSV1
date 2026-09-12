@@ -385,4 +385,34 @@ int odEcDecodeCdfQ15(OdEcDec* dec, const std::uint16_t* icdf, int nsyms) {
     return odEcDecNormalize(dec, dif, r, ret);
 }
 
+// update_cdf (cabac_context_model.h:76-105)
+// CDF adaptation: rate is computed in the spec as
+//  3 + ( cdf[N] > 15 ) + ( cdf[N] > 31 ) + Min(FloorLog2(N), 2)
+// which this SVT tree reduces to 4 + (count >> 4) + (nsymbs > 3) (the
+// in-file derivation, cabac_context_model.h:81-93).
+void updateCdf(AomCdfProb* cdf, int val, int nsymbs) {
+    const int count = cdf[nsymbs];
+    cdf[nsymbs] = static_cast<std::uint16_t>(cdf[nsymbs] + (count < 32));
+
+    const int rate = 4 + (count >> 4) + (nsymbs > 3);
+
+    int i = 0;
+    for (; i < val; i++) {
+        cdf[i] = static_cast<std::uint16_t>(cdf[i] + ((CDF_PROB_TOP - cdf[i]) >> rate));
+    }
+    for (; i < nsymbs - 1; i++) {
+        cdf[i] = static_cast<std::uint16_t>(cdf[i] - (cdf[i] >> rate));
+    }
+}
+
+// od_ec_dec_tell (entdec.c:231-237)
+// Returns the number of bits "used" by the decoded symbols so far.
+int odEcDecTell(const OdEcDec* dec) {
+    /*There is a window of bits stored in dec->dif. The difference
+      (dec->bptr - dec->buf) tells us how many bytes have been read into this
+      window. The difference (dec->cnt - dec->tell_offs) tells us how many of
+      the bits in that window remain unconsumed.*/
+    return (int)((dec->bptr - dec->buf) * 8 - dec->cnt + dec->tell_offs);
+}
+
 }  // namespace entropy

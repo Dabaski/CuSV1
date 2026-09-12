@@ -107,6 +107,18 @@ int odEcDecodeBoolQ15(OdEcDec* dec, unsigned f);
 // table in Q15. Return: The decoded symbol s.
 int odEcDecodeCdfQ15(OdEcDec* dec, const std::uint16_t* icdf, int nsyms);
 
+// AomCdfProb (cabac_context_model.h:31)
+typedef std::uint16_t AomCdfProb;
+
+// update_cdf (cabac_context_model.h:76-105)
+// CDF adaptation: cdf[nsymbs] is the adaptation counter; the update rate is
+// 4 + (count >> 4) + (nsymbs > 3) per the in-file spec derivation.
+void updateCdf(AomCdfProb* cdf, int val, int nsymbs);
+
+// od_ec_dec_tell (entdec.c:231-237)
+// Returns the number of bits "used" by the decoded symbols so far.
+int odEcDecTell(const OdEcDec* dec);
+
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes);
 

@@ -163,3 +163,38 @@ TEST_CASE("encoder and decoder are mutually consistent on a mixed sequence") {
         }
     }
 }
+
+TEST_CASE("updateCdf binary sequence matches gate") {
+    // Gate: ecupd_cdf2_seq - 40 val=0 updates on {16384, 0} + counter
+    // (update_cdf, cabac_context_model.h:76-105). The snapshot list walks
+    // the counter through the rate transitions at count 16 (rate 5) and
+    // count 32 (rate 6).
+    static const std::uint16_t expected[40] = {15360, 14400, 13500, 12657, 11866, 11125, 10430, 9779, 9168, 8595, 8058, 7555, 7083, 6641, 6226, 5837, 5655, 5479, 5308, 5143, 4983, 4828, 4678, 4532, 4391, 4254, 4122, 3994, 3870, 3750, 3633, 3520, 3465, 3411, 3358, 3306, 3255, 3205, 3155, 3106};
+    std::uint16_t cdf[3] = {16384, 0, 0};
+    for (int i = 0; i < 40; ++i) {
+        entropy::updateCdf(cdf, 0, 2);
+        CHECK(cdf[0] == expected[i]);
+    }
+    CHECK(cdf[2] == 32);  // counter stops at 32 (count < 32 precondition)
+}
+
+TEST_CASE("updateCdf 13-symbol full dump matches gate") {
+    // Gate: ecupd_cdf13_full - the EC0 10-symbol sequence, full 14-word
+    // dump (12 icdf values + terminator + counter=10).
+    static const std::uint16_t expected[14] = {26618, 22265, 19354, 15597, 13048, 8660, 7205, 5123, 4177, 2425, 1842, 1333, 0, 10};
+    std::uint16_t cdf[14] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0, 0};
+    const int syms[10] = {0, 5, 12, 3, 5, 5, 1, 0, 7, 9};
+    for (int i = 0; i < 10; ++i) entropy::updateCdf(cdf, syms[i], 13);
+    for (int i = 0; i < 14; ++i) CHECK(cdf[i] == expected[i]);
+}
+
+TEST_CASE("odEcDecTell matches gate after cdf13 decode") {
+    // Gate: ec_dec_tell 6 - od_ec_dec_tell (entdec.c:231-237) after
+    // decoding the cdf13 gate bytes.
+    unsigned char data[5] = {0x23, 0x97, 0x49, 0x00, 0xd4};
+    entropy::OdEcDec dec;
+    entropy::odEcDecInit(&dec, data, 5);
+    static const std::uint16_t icdf13[13] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0};
+    for (int i = 0; i < 10; ++i) entropy::odEcDecodeCdfQ15(&dec, icdf13, 13);
+    CHECK(entropy::odEcDecTell(&dec) == 6);
+}
