@@ -11,8 +11,8 @@ JIT-compiled at runtime via NVRTC.
 > functionally correct (bit-exact vs SVT's host C where noted); a
 > benchmark harness exists (`tools/bench/`) but the composite encoder
 > loop is per-block synchronous launches — see `AGENTS.md` for the
-> dated baseline and the known-overhead caveat. Expect rough edges. Not
-> ready for production use.
+> dated baseline and the known-overhead caveat. Expect rough edges.
+> Not ready for production use.
 
 ## What's implemented
 
@@ -30,13 +30,12 @@ twins are held to bit-exact agreement with the SVT host reference.
   `fdct16`/`fadst16`, `fdct32`/`fadst32`, `fdct64` and inverse
   `idct4`/`iadst4`, `idct8`/`iadst8`, `idct16`/`iadst16`,
   `idct32`/`iadst32`, `idct64` with `cospi`/`sinpi` tables, `halfBtf`,
-  `roundShift`
-  (fdct16/fadst16 are cos_bit-parameterized — 16x16 is the one
-  geometry where col 13 / row 12 differ; fdct64B is
-  cos_bit-parameterized — 64x64 col 13 / row 10 is the only pass below
-  12; 64x64 is DCT-ONLY, no ADST exists in this tree:
-  `av1_txfm_type_ls[4]` = DCT64/INVALID/INVALID/IDENTITY64);
-  2D forward `fwdTxfm2d4x4`/`fwdTxfm2d8x8`/`fwdTxfm2d16x16`/
+  `roundShift` (fdct16/fadst16 are cos_bit-parameterized — 16x16 is
+  the one geometry where col 13 / row 12 differ; fdct64B is
+  cos_bit-parameterized — 64x64 col 13 / row 10 is the only pass
+  below 12; 64x64 is DCT-ONLY, no ADST exists in this tree:
+  `av1_txfm_type_ls[4]` = DCT64/INVALID/INVALID/IDENTITY64); 2D
+  forward `fwdTxfm2d4x4`/`fwdTxfm2d8x8`/`fwdTxfm2d16x16`/
   `fwdTxfm2d32x32`/`fwdTxfm2d64x64` and inverse
   `invTxfm2dAdd4x4`/`invTxfm2dAdd8x8`/`invTxfm2dAdd16x16`/
   `invTxfm2dAdd32x32`/`invTxfm2dAdd64x64` (fwd shifts
@@ -91,8 +90,8 @@ twins are held to bit-exact agreement with the SVT host reference.
   PredictionModes by SAD (project-defined policy, SVT primitives); the
   Auto variants (`encodeFrameAuto4x4`/
   `encodeFrameAuto8x8`/`encodeFrameAuto16x16`/`encodeFrameAuto32x32`/
-  `encodeFrameAuto64x64`) drive full frames —
-  each block's mode chosen against RECONSTRUCTED edges, with the
+  `encodeFrameAuto64x64`) drive full frames — each block's mode chosen
+  against RECONSTRUCTED edges, with the
   FR-series REAL top-right gather (above[B..2B-1] come from the
   reconstructed row above, not zeros), the chosen modes feeding
   `NeighborContext` (filt_type live). Quantized variants
@@ -192,8 +191,8 @@ ctest --test-dir build -R l4_intra
 `tools/bench/` builds the `av1_bench` console tool: it records the GPU
 name/driver/clocks at run time (nvidia-smi query), then times host and
 GPU composite auto-frame encodes (lossless + q100, 4x4, 8x8, 16x16,
-32x32 and 64x64 geometry — 64-frame tiled from the B7 fixture for
-4/8/16, 128-frame for 32, 256-frame for 64) plus per-stage
+32x32 and 64x64 geometry — 64x64 frame tiled from the B7 fixture for
+4x4/8x8/16x16, 128x128 for 32x32, 256x256 for 64x64) plus per-stage
 single-launch kernel timings. Every GPU configuration runs an untimed
 bit-exact verification pass against the host output first and refuses
 to report timings on mismatch. The composite loop is host decision +
