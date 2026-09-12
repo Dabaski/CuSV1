@@ -1514,5 +1514,124 @@ int main(void) {
         printf("\n");
         printf("ecsym_cdf13_cdf_eq %d\n", memcmp(cdf13w, cdf13r, sizeof(cdf13w)) == 0);
     }
+    {
+        // 8) intra-frame KF luma-mode symbol surface (EC3).
+        // Write order mirrors encode_intra_luma_mode_kf_av1
+        // (entropy_coding.c:1026-1040) then the filter-intra pair
+        // (:5047-5060, gated by svt_aom_filter_intra_allowed
+        // mode_decision.c:115-119). Contexts mirror
+        // svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021): available
+        // neighbor mode -> intra_mode_context[mode]; unavailable -> DC_PRED
+        // context. Fixture neighbors (not decoded data).
+        static AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+        memcpy(kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(kf_y_cdf));
+        static AomCdfProb angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+        memcpy(angle_delta_cdf, default_angle_delta_cdf, sizeof(angle_delta_cdf));
+        static AomCdfProb filter_intra_cdfs[BLOCK_SIZES_ALL][CDF_SIZE(2)];
+        memcpy(filter_intra_cdfs, default_filter_intra_cdfs, sizeof(filter_intra_cdfs));
+        static AomCdfProb filter_intra_mode_cdf[CDF_SIZE(FILTER_INTRA_MODES)];
+        memcpy(filter_intra_mode_cdf, default_filter_intra_mode_cdf, sizeof(filter_intra_mode_cdf));
+
+        struct EcKfBlock {
+            BlockSize bsize;
+            PredictionMode mode;
+            int angle_delta;        // -MAX_ANGLE_DELTA..MAX_ANGLE_DELTA
+            int fi_signaled;        // svt_aom_filter_intra_allowed result
+            FilterIntraMode fi_mode; // FILTER_INTRA_MODES = flag 0
+            int top_mode;           // neighbor fixture: -1 = unavailable
+            int left_mode;
+        };
+        const struct EcKfBlock blocks[5] = {
+            {BLOCK_16X16, DC_PRED, 0, 1, FILTER_V_PRED, DC_PRED, DC_PRED},
+            {BLOCK_8X8, V_PRED, 1, 0, FILTER_INTRA_MODES, V_PRED, DC_PRED},
+            {BLOCK_4X4, H_PRED, 0, 0, FILTER_INTRA_MODES, H_PRED, V_PRED},
+            {BLOCK_32X32, DC_PRED, 0, 1, FILTER_INTRA_MODES, D45_PRED, H_PRED},
+            {BLOCK_64X64, DC_PRED, 0, 0, FILTER_INTRA_MODES, D67_PRED, D45_PRED},
+        };
+        AomWriter w;
+        w.ec.buf = ec_buf;
+        svt_od_ec_enc_reset(&w.ec);
+        w.allow_update_cdf = 1;
+        w.pos              = 0;
+
+        printf("eckf_ctx");
+        for (int b = 0; b < 5; ++b) {
+            const int top_ctx  = intra_mode_context[blocks[b].top_mode < 0 ? DC_PRED : (PredictionMode)blocks[b].top_mode];
+            const int left_ctx = intra_mode_context[blocks[b].left_mode < 0 ? DC_PRED : (PredictionMode)blocks[b].left_mode];
+            printf(" %d %d", top_ctx, left_ctx);
+            aom_write_symbol(&w, blocks[b].bsize >= BLOCK_4X4 ? blocks[b].mode : blocks[b].mode, kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+            if (blocks[b].bsize >= BLOCK_8X8 && av1_is_directional_mode(blocks[b].mode)) {
+                aom_write_symbol(&w, blocks[b].angle_delta + MAX_ANGLE_DELTA, angle_delta_cdf[blocks[b].mode - V_PRED], 2 * MAX_ANGLE_DELTA + 1);
+            }
+            const int fi_allowed = svt_aom_filter_intra_allowed(1, blocks[b].bsize, 0, blocks[b].mode);
+            if (fi_allowed != blocks[b].fi_signaled) { fprintf(stderr, "EC3 fi_allowed mismatch block %d\n", b); return 1; }
+            if (fi_allowed) {
+                aom_write_symbol(&w, blocks[b].fi_mode != FILTER_INTRA_MODES, filter_intra_cdfs[blocks[b].bsize], 2);
+                if (blocks[b].fi_mode != FILTER_INTRA_MODES) {
+                    aom_write_symbol(&w, blocks[b].fi_mode, filter_intra_mode_cdf, FILTER_INTRA_MODES);
+                }
+            }
+        }
+        printf("\n");
+        aom_stop_encode(&w);
+        printf("eckf_bytes %u", w.pos);
+        for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", ec_buf[i]);
+        printf("\n");
+
+        // decode back: identical fixture context computation, fresh cdfs
+        static AomCdfProb kf_y_cdf_r[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+        memcpy(kf_y_cdf_r, svt_aom_default_kf_y_mode_cdf, sizeof(kf_y_cdf_r));
+        static AomCdfProb angle_delta_cdf_r[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+        memcpy(angle_delta_cdf_r, default_angle_delta_cdf, sizeof(angle_delta_cdf_r));
+        static AomCdfProb filter_intra_cdfs_r[BLOCK_SIZES_ALL][CDF_SIZE(2)];
+        memcpy(filter_intra_cdfs_r, default_filter_intra_cdfs, sizeof(filter_intra_cdfs_r));
+        static AomCdfProb filter_intra_mode_cdf_r[CDF_SIZE(FILTER_INTRA_MODES)];
+        memcpy(filter_intra_mode_cdf_r, default_filter_intra_mode_cdf, sizeof(filter_intra_mode_cdf_r));
+        aom_reader r;
+        if (aom_reader_init(&r, ec_buf, w.pos)) { fprintf(stderr, "EC3 reader init FAILED\n"); return 1; }
+        r.allow_update_cdf = 1;
+        printf("eckf_rt");
+        int rt_bad = 0;
+        for (int b = 0; b < 5; ++b) {
+            const int top_ctx  = intra_mode_context[blocks[b].top_mode < 0 ? DC_PRED : (PredictionMode)blocks[b].top_mode];
+            const int left_ctx = intra_mode_context[blocks[b].left_mode < 0 ? DC_PRED : (PredictionMode)blocks[b].left_mode];
+            const int m = aom_read_symbol_(&r, kf_y_cdf_r[top_ctx][left_ctx], INTRA_MODES);
+            if (m != blocks[b].mode) rt_bad = 1;
+            printf(" %d", m);
+            if (blocks[b].bsize >= BLOCK_8X8 && av1_is_directional_mode(blocks[b].mode)) {
+                const int d = aom_read_symbol_(&r, angle_delta_cdf_r[blocks[b].mode - V_PRED], 2 * MAX_ANGLE_DELTA + 1);
+                if (d != blocks[b].angle_delta + MAX_ANGLE_DELTA) rt_bad = 1;
+                printf(" %d", d);
+            }
+            if (blocks[b].fi_signaled) {
+                const int f = aom_read_symbol_(&r, filter_intra_cdfs_r[blocks[b].bsize], 2);
+                const int want = blocks[b].fi_mode != FILTER_INTRA_MODES;
+                if (f != want) rt_bad = 1;
+                printf(" %d", f);
+                if (f) {
+                    const int fm = aom_read_symbol_(&r, filter_intra_mode_cdf_r, FILTER_INTRA_MODES);
+                    if (fm != blocks[b].fi_mode) rt_bad = 1;
+                    printf(" %d", fm);
+                }
+            }
+        }
+        printf("\n");
+        if (rt_bad) { fprintf(stderr, "EC3 roundtrip FAILED\n"); return 1; }
+        // adapted cdf equality: every touched table
+        int cdf_eq = 1;
+        for (int t = 0; t < 5; ++t) {
+            const int top_ctx  = intra_mode_context[blocks[t].top_mode < 0 ? DC_PRED : (PredictionMode)blocks[t].top_mode];
+            const int left_ctx = intra_mode_context[blocks[t].left_mode < 0 ? DC_PRED : (PredictionMode)blocks[t].left_mode];
+            if (memcmp(kf_y_cdf[top_ctx][left_ctx], kf_y_cdf_r[top_ctx][left_ctx], sizeof(kf_y_cdf[0][0]))) cdf_eq = 0;
+            if (blocks[t].bsize >= BLOCK_8X8 && av1_is_directional_mode(blocks[t].mode)) {
+                if (memcmp(angle_delta_cdf[blocks[t].mode - V_PRED], angle_delta_cdf_r[blocks[t].mode - V_PRED], sizeof(angle_delta_cdf[0]))) cdf_eq = 0;
+            }
+            if (blocks[t].fi_signaled) {
+                if (memcmp(filter_intra_cdfs[blocks[t].bsize], filter_intra_cdfs_r[blocks[t].bsize], sizeof(filter_intra_cdfs[0]))) cdf_eq = 0;
+            }
+        }
+        if (memcmp(filter_intra_mode_cdf, filter_intra_mode_cdf_r, sizeof(filter_intra_mode_cdf))) cdf_eq = 0;
+        printf("eckf_cdf_eq %d\n", cdf_eq);
+    }
     return 0;
 }
