@@ -119,6 +119,44 @@ void updateCdf(AomCdfProb* cdf, int val, int nsymbs);
 // Returns the number of bits "used" by the decoded symbols so far.
 int odEcDecTell(const OdEcDec* dec);
 
+// ---------------------------------------------------------------------------
+// Symbol wrappers with adaptation (EC2).
+// ---------------------------------------------------------------------------
+// AomWriter - bitstream_unit.h:222-228. Deviation: buffer_parent dropped
+// (host port owns its buffer; aom_start_encode/ensure_capacity glue not
+// ported - the caller assigns ec.buf), pos kept for odEcStopEncode
+// semantics.
+struct AomWriter {
+    OdEcEnc ec;
+    std::uint32_t allow_update_cdf;
+    std::uint32_t pos;
+};
+
+// aom_write_symbol (bitstream_unit.h:265-279): nsymbs == 2 routes to
+// odEcEncodeBoolQ15 at the CURRENT adapted cdf[0]; otherwise the cdf path;
+// then updateCdf when allow_update_cdf.
+void odEcWriteSymbol(AomWriter* w, int symb, AomCdfProb* cdf, int nsymbs);
+
+// aom_stop_encode (bitstream_unit.h:245-253): flushes and stores the byte
+// count in w->pos.
+void odEcStopEncode(AomWriter* w);
+
+// aom_reader - bitreader.h:40-47. Deviation: buffer/buffer_end pointers
+// dropped (only used by find_begin/find_end/has_overflowed, not ported).
+struct AomReader {
+    OdEcDec ec;
+    std::uint8_t allow_update_cdf;
+};
+
+// aom_reader_init (bitreader.c:14-22)
+int odEcReaderInit(AomReader* r, const unsigned char* buffer, std::uint32_t size);
+
+// aom_read_cdf_ (bitreader.h:84-90)
+int odEcReadCdf(AomReader* r, const AomCdfProb* cdf, int nsymbs);
+
+// aom_read_symbol_ (bitreader.h:92-98)
+int odEcReadSymbol(AomReader* r, AomCdfProb* cdf, int nsymbs);
+
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes);
 

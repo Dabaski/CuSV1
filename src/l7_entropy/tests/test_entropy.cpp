@@ -198,3 +198,43 @@ TEST_CASE("odEcDecTell matches gate after cdf13 decode") {
     for (int i = 0; i < 10; ++i) entropy::odEcDecodeCdfQ15(&dec, icdf13, 13);
     CHECK(entropy::odEcDecTell(&dec) == 6);
 }
+
+TEST_CASE("odEcWriteSymbol/odEcStopEncode adapted binary path matches gate") {
+    // Gate: ecsym_cdf2 2 f9 d8, ecsym_cdf2_cdf 8613 0 8 - 8 symbols
+    // {1,0,1,1,0,1,0,0} through aom_write_symbol (bitstream_unit.h:265-279,
+    // nsymbs==2 routes to odEcEncodeBoolQ15 at the CURRENT adapted cdf[0])
+    // with allow_update_cdf = 1, start CDF = AOM_CDF2(28672) = {4096, 0}
+    // + counter.
+    entropy::AomWriter w{};
+    unsigned char buf[64] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    std::uint16_t cdf[3] = {4096, 0, 0};
+    const int syms[8] = {1, 0, 1, 1, 0, 1, 0, 0};
+    for (int i = 0; i < 8; ++i) entropy::odEcWriteSymbol(&w, syms[i], cdf, 2);
+    entropy::odEcStopEncode(&w);
+    REQUIRE(w.pos == 2);
+    CHECK((unsigned)buf[0] == 0xf9);
+    CHECK((unsigned)buf[1] == 0xd8);
+    CHECK(cdf[0] == 8613);
+    CHECK(cdf[1] == 0);
+    CHECK(cdf[2] == 8);
+}
+
+TEST_CASE("odEcReaderInit/odEcReadSymbol adapted round-trip matches gate") {
+    // Gate: ecsym_cdf2_rt 1 0 1 1 0 1 0 0 + ecsym_cdf2_cdf_eq 1
+    // (aom_reader_init bitreader.c:14-22 + aom_read_symbol_ bitreader.h:92-98).
+    unsigned char data[2] = {0xf9, 0xd8};
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, data, 2) == 0);
+    r.allow_update_cdf = 1;
+    std::uint16_t cdf[3] = {4096, 0, 0};
+    const int syms[8] = {1, 0, 1, 1, 0, 1, 0, 0};
+    const std::uint16_t expectedCdf[3] = {8613, 0, 8};
+    for (int i = 0; i < 8; ++i) {
+        CHECK(entropy::odEcReadSymbol(&r, cdf, 2) == syms[i]);
+    }
+    for (int i = 0; i < 3; ++i) CHECK(cdf[i] == expectedCdf[i]);
+}

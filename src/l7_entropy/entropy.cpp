@@ -415,4 +415,54 @@ int odEcDecTell(const OdEcDec* dec) {
     return (int)((dec->bptr - dec->buf) * 8 - dec->cnt + dec->tell_offs);
 }
 
+// aom_write_symbol (bitstream_unit.h:265-279)
+void odEcWriteSymbol(AomWriter* w, int symb, AomCdfProb* cdf, int nsymbs) {
+    if (nsymbs == 2) {
+        // Binary CDF specialization: route directly to the optimal bool encoder.
+        // For nsyms==2, the CDF encode path is provably equivalent to
+        // svt_od_ec_encode_bool_q15(enc, symb, cdf[0]).
+        // When nsymbs is a compile-time constant 2, this branch folds away.
+        odEcEncodeBoolQ15(&w->ec, symb, cdf[0]);
+    } else {
+        odEcEncodeCdfQ15(&w->ec, symb, cdf, nsymbs);
+    }
+
+    if (w->allow_update_cdf) {
+        updateCdf(cdf, symb, nsymbs);
+    }
+}
+
+// aom_stop_encode (bitstream_unit.h:245-253)
+void odEcStopEncode(AomWriter* w) {
+    std::uint32_t bytes = 0;
+    unsigned char* data = odEcEncDone(&w->ec, &bytes);
+    if (!data) {
+        return;
+    }
+    w->pos = bytes;
+}
+
+// aom_reader_init (bitreader.c:14-22)
+int odEcReaderInit(AomReader* r, const unsigned char* buffer, std::uint32_t size) {
+    if (size && !buffer) {
+        return 1;
+    }
+    odEcDecInit(&r->ec, buffer, size);
+    return 0;
+}
+
+// aom_read_cdf_ (bitreader.h:84-90)
+int odEcReadCdf(AomReader* r, const AomCdfProb* cdf, int nsymbs) {
+    // assert(cdf != NULL);
+    return odEcDecodeCdfQ15(&r->ec, cdf, nsymbs);
+}
+
+// aom_read_symbol_ (bitreader.h:92-98)
+int odEcReadSymbol(AomReader* r, AomCdfProb* cdf, int nsymbs) {
+    int ret;
+    ret = odEcReadCdf(r, cdf, nsymbs);
+    if (r->allow_update_cdf) updateCdf(cdf, ret, nsymbs);
+    return ret;
+}
+
 }  // namespace entropy
