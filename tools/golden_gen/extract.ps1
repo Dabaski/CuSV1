@@ -34,6 +34,8 @@ $files = @{
     "cabac_context_model.h" = (Get-Content (Join-Path $src "Codec\cabac_context_model.h") -Raw)
     "entdec.c"           = (Get-Content (Join-Path $src3p "src\entdec.c") -Raw)
     "entdec.h"           = (Get-Content (Join-Path $src3p "inc\entdec.h") -Raw)
+    "bitreader.h"        = (Get-Content (Join-Path $src3p "inc\bitreader.h") -Raw)
+    "bitreader.c"        = (Get-Content (Join-Path $src3p "src\bitreader.c") -Raw)
 }
 # normalize line endings to LF so multi-line patterns match regardless of
 # how this script was saved
@@ -345,6 +347,20 @@ Emit-Verbatim "entdec.c" "uint32_t od_ec_dec_tell_frac" "od_ec_dec_tell_frac"
 # ---- CDF adaptation (EC2) ----
 Emit-Macro "cabac_context_model.h" "typedef uint16_t AomCdfProb" "AomCdfProb"
 Emit-Verbatim "cabac_context_model.h" "static INLINE void update_cdf" "update_cdf"
+# Symbol wrappers with adaptation (EC2): the writer carries allow_update_cdf
+# and the nsymbs==2 -> bool-encoder specialization (bitstream_unit.h:265-279);
+# the reader side mirrors it (bitreader.h:84-98, bitreader.c:14-22).
+Emit-Verbatim "bitstream_unit.h" "typedef struct AomWriter" "AomWriter"
+Emit-Verbatim "bitstream_unit.h" "static INLINE void aom_stop_encode" "aom_stop_encode"
+Emit-Verbatim "bitstream_unit.h" "static INLINE void aom_write_symbol" "aom_write_symbol"
+Emit-Macro "bitreader.h" "#define ACCT_STR_PARAM" "ACCT_STR_PARAM"
+Emit-Macro "bitreader.h" "#define ACCT_STR_ARG" "ACCT_STR_ARG"
+Emit-Macro "bitreader.h" "#define aom_read_cdf" "aom_read_cdf macro"
+Emit-Verbatim "bitreader.h" "struct aom_reader" "aom_reader struct"
+Emit-Macro "bitreader.h" "typedef struct aom_reader aom_reader;" "aom_reader typedef"
+Emit-Verbatim "bitreader.c" "int aom_reader_init" "aom_reader_init"
+Emit-Verbatim "bitreader.h" "static INLINE int aom_read_cdf_" "aom_read_cdf_"
+Emit-Verbatim "bitreader.h" "static INLINE int aom_read_symbol_" "aom_read_symbol_"
 
 # ---- build_intra_predictors with the documented get_filt_type shim ----
 $r = Extract-Block $files["enc_intra_prediction.c"] "static void build_intra_predictors(const MacroBlockD* xd" "build_intra_predictors"

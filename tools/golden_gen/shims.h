@@ -92,6 +92,12 @@ static const int32_t tx_size_high[5] = {4, 8, 16, 32, 64};
 // get_filt_type, which the generator shims out (see svt_gen.c).
 typedef void MacroBlockD;
 
+// OutputBitstreamUnit is opaque here: AomWriter only holds a pointer to it
+// (bitstream_unit.h:227) for buffer-ownership glue the generator does not
+// exercise (the drivers point ec.buf at their own buffer, aom_start_encode
+// bitstream_unit.h:230-236).
+typedef void OutputBitstreamUnit;
+
 // TxfmFunc - inv_transforms.h:259
 typedef void (*TxfmFunc)(const int32_t* input, int32_t* output, int8_t cos_bit,
                          const int8_t* stage_range);

@@ -6277,6 +6277,93 @@ static INLINE void update_cdf(AomCdfProb* cdf, int val, int nsymbs) {
     }
 }
 
+// ==== SVT-AV1 bitstream_unit.h :222 - AomWriter (verbatim extract; do not edit) ====
+typedef struct AomWriter {
+    OdEcEnc  ec;
+    uint32_t allow_update_cdf;
+    uint32_t pos;
+    // save a pointer to the container holding the buffer, in case the buffer must be resized
+    OutputBitstreamUnit* buffer_parent;
+} AomWriter;
+
+// ==== SVT-AV1 bitstream_unit.h :245 - aom_stop_encode (verbatim extract; do not edit) ====
+static INLINE void aom_stop_encode(AomWriter* w) {
+    uint32_t bytes = 0;
+    uint8_t* data  = svt_od_ec_enc_done(&w->ec, &bytes);
+    if (!data) {
+        return;
+    }
+    // EC wrote directly to buffer_parent's buffer ??? no memcpy needed.
+    w->pos = bytes;
+}
+
+// ==== SVT-AV1 bitstream_unit.h :265 - aom_write_symbol (verbatim extract; do not edit) ====
+static INLINE void aom_write_symbol(AomWriter* w, int symb, AomCdfProb* cdf, int nsymbs) {
+    if (nsymbs == 2) {
+        // Binary CDF specialization: route directly to the optimal bool encoder.
+        // For nsyms==2, the CDF encode path is provably equivalent to
+        // svt_od_ec_encode_bool_q15(enc, symb, cdf[0]).
+        // When nsymbs is a compile-time constant 2, this branch folds away.
+        svt_od_ec_encode_bool_q15(&w->ec, symb, cdf[0]);
+    } else {
+        svt_od_ec_encode_cdf_q15(&w->ec, symb, cdf, nsymbs);
+    }
+
+    if (w->allow_update_cdf) {
+        update_cdf(cdf, symb, nsymbs);
+    }
+}
+
+// ==== SVT-AV1 bitreader.h :20 - ACCT_STR_PARAM (verbatim extract; do not edit) ====
+#define ACCT_STR_PARAM
+
+// ==== SVT-AV1 bitreader.h :21 - ACCT_STR_ARG (verbatim extract; do not edit) ====
+#define ACCT_STR_ARG(s)
+
+// ==== SVT-AV1 bitreader.h :31 - aom_read_cdf macro (verbatim extract; do not edit) ====
+#define aom_read_cdf(r, cdf, nsymbs, ACCT_STR_NAME) \
+  aom_read_cdf_(r, cdf, nsymbs ACCT_STR_ARG(ACCT_STR_NAME))
+
+// ==== SVT-AV1 bitreader.h :40 - aom_reader struct (verbatim extract; do not edit) ====
+struct aom_reader {
+  const uint8_t *buffer;
+  const uint8_t *buffer_end;
+  od_ec_dec ec;
+  uint8_t allow_update_cdf;
+};
+
+// ==== SVT-AV1 bitreader.h :47 - aom_reader typedef (verbatim extract; do not edit) ====
+typedef struct aom_reader aom_reader;
+
+// ==== SVT-AV1 bitreader.c :14 - aom_reader_init (verbatim extract; do not edit) ====
+int aom_reader_init(aom_reader *r, const uint8_t *buffer, size_t size) {
+    if (size && !buffer) {
+        return 1;
+    }
+    r->buffer_end = buffer + size;
+    r->buffer     = buffer;
+    od_ec_dec_init(&r->ec, buffer, (uint32_t)size);
+    return 0;
+}
+
+// ==== SVT-AV1 bitreader.h :84 - aom_read_cdf_ (verbatim extract; do not edit) ====
+static INLINE int aom_read_cdf_(aom_reader *r, const AomCdfProb *cdf,
+                                int nsymbs ACCT_STR_PARAM) {
+  int symb;
+  assert(cdf != NULL);
+  symb = od_ec_decode_cdf_q15(&r->ec, cdf, nsymbs);
+  return symb;
+}
+
+// ==== SVT-AV1 bitreader.h :92 - aom_read_symbol_ (verbatim extract; do not edit) ====
+static INLINE int aom_read_symbol_(aom_reader *r, AomCdfProb *cdf,
+                                   int nsymbs ACCT_STR_PARAM) {
+  int ret;
+  ret = aom_read_cdf(r, cdf, nsymbs, ACCT_STR_NAME);
+  if (r->allow_update_cdf) update_cdf(cdf, ret, nsymbs);
+  return ret;
+}
+
 // ==== SVT-AV1 enc_intra_prediction.c :40 - build_intra_predictors (verbatim EXCEPT the flagged get_filt_type shim) ====
 static void build_intra_predictors(const MacroBlockD* xd, uint8_t* top_neigh_array, uint8_t* left_neigh_array,
                                    // const uint8_t *ref,    int32_t ref_stride,

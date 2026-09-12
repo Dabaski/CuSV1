@@ -1463,5 +1463,56 @@ int main(void) {
         for (int i = 0; i < 14; ++i) printf(" %u", cdf13[i]);
         printf("\n");
     }
+    {
+        // 6) writer wrapper with adaptation (aom_write_symbol,
+        // bitstream_unit.h:265-279): binary CDF = AOM_CDF2(28672) expansion
+        // {4096, 0} + counter, 8 symbols, allow_update_cdf = 1.
+        AomWriter w;
+        w.ec.buf = ec_buf;
+        svt_od_ec_enc_reset(&w.ec);
+        w.allow_update_cdf = 1;
+        w.pos              = 0;
+        static uint16_t cdf2w[3] = {4096, 0, 0};
+        const int syms2[8] = {1, 0, 1, 1, 0, 1, 0, 0};
+        for (int i = 0; i < 8; ++i) aom_write_symbol(&w, syms2[i], cdf2w, 2);
+        aom_stop_encode(&w);
+        printf("ecsym_cdf2 %u", w.pos);
+        for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", ec_buf[i]);
+        printf("\n");
+        printf("ecsym_cdf2_cdf %u %u %u\n", cdf2w[0], cdf2w[1], cdf2w[2]);
+        // reader side (aom_reader_init bitreader.c:14-22 + aom_read_symbol_
+        // bitreader.h:92-98 with adaptation): same start CDF, symbols must
+        // round-trip and the adapted CDFs must end identical.
+        aom_reader r;
+        if (aom_reader_init(&r, ec_buf, w.pos)) { fprintf(stderr, "EC2 reader init FAILED\n"); return 1; }
+        r.allow_update_cdf = 1;
+        static uint16_t cdf2r[3] = {4096, 0, 0};
+        printf("ecsym_cdf2_rt");
+        for (int i = 0; i < 8; ++i) printf(" %d", aom_read_symbol_(&r, cdf2r, 2));
+        printf("\n");
+        printf("ecsym_cdf2_cdf_eq %d\n", memcmp(cdf2w, cdf2r, sizeof(cdf2w)) == 0);
+        // 7) 13-symbol variant through both wrappers with adaptation
+        w.ec.buf = ec_buf;
+        svt_od_ec_enc_reset(&w.ec);
+        w.allow_update_cdf = 1;
+        w.pos              = 0;
+        static uint16_t cdf13w[14] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0, 0};
+        const int syms13[10] = {0, 5, 12, 3, 5, 5, 1, 0, 7, 9};
+        for (int i = 0; i < 10; ++i) aom_write_symbol(&w, syms13[i], cdf13w, 13);
+        aom_stop_encode(&w);
+        printf("ecsym_cdf13 %u", w.pos);
+        for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", ec_buf[i]);
+        printf("\n");
+        printf("ecsym_cdf13_cdf");
+        for (int i = 0; i < 14; ++i) printf(" %u", cdf13w[i]);
+        printf("\n");
+        if (aom_reader_init(&r, ec_buf, w.pos)) { fprintf(stderr, "EC2 reader init FAILED\n"); return 1; }
+        r.allow_update_cdf = 1;
+        static uint16_t cdf13r[14] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0, 0};
+        printf("ecsym_cdf13_rt");
+        for (int i = 0; i < 10; ++i) printf(" %d", aom_read_symbol_(&r, cdf13r, 13));
+        printf("\n");
+        printf("ecsym_cdf13_cdf_eq %d\n", memcmp(cdf13w, cdf13r, sizeof(cdf13w)) == 0);
+    }
     return 0;
 }
