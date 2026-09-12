@@ -1,5 +1,6 @@
 #include "intra.h"
 
+#include <cassert>
 #include <cstdlib>
 
 namespace intra {
@@ -507,7 +508,19 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
 
     int i;
     if (needLeft) {
-        const int needBottom = (isDrMode && pAngle > 180) || (!!(kExtendModes[mode] & kNeedBottomLeft) && !isDrMode);
+        // SVT order (enc_intra_prediction.c:102-108): extend_modes flag, then
+        // the use_filter_intra zero, then the dr override. Textually mirrored
+        // 1:1. The FI clause is semantically dead today: no INTRA_MODES entry
+        // except D45/D67 carries NEED_BOTTOMLEFT and both are directional, so
+        // the dr override below produces the same value the collapsed
+        // expression did; kept for parity and future-mode safety.
+        int needBottom = !!(kExtendModes[mode] & kNeedBottomLeft);  // SVT :102
+        if (useFilterIntra) {
+            needBottom = 0;  // SVT :103-105
+        }
+        if (isDrMode) {
+            needBottom = pAngle > 180;  // SVT :106-108
+        }
         const int numLeftPixelsNeeded = txhpx + (needBottom ? txwpx : 0);
         i = 0;
         if (nLeftPx > 0) {
@@ -538,7 +551,19 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
     }
 
     if (needAbove) {
-        const int needRight = (isDrMode && pAngle < 90) || (!!(kExtendModes[mode] & kNeedAboveRight) && !isDrMode);
+        // SVT order (enc_intra_prediction.c:135-141): extend_modes flag, then
+        // the use_filter_intra zero, then the dr override. Textually mirrored
+        // 1:1. The FI clause is semantically dead today: every NEED_ABOVERIGHT
+        // mode (D45/D67) is directional and the dr override follows - the
+        // clause exists in SVT to guard a future non-dr mode gaining the
+        // flag while FI is active.
+        int needRight = !!(kExtendModes[mode] & kNeedAboveRight);  // SVT :135
+        if (useFilterIntra) {
+            needRight = 0;  // SVT :136-138
+        }
+        if (isDrMode) {
+            needRight = pAngle < 90;  // SVT :139-141
+        }
         const int numTopPixelsNeeded = txwpx + (needRight ? txhpx : 0);
         if (nTopPx > 0) {
             for (int j = 0; j < nTopPx; j++) {
@@ -591,6 +616,12 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
         int upsampleAbove = 0;
         int upsampleLeft  = 0;
 
+        // dr-branch re-derivation of the edge extents: this is the VALUE SVT's dr
+// override (enc_intra_prediction.c:106-108 / :139-141) produces, re-derived
+// inside the dr path. The extend_modes flag term (:102/:135) and the
+// use_filter_intra zero (:103-105 / :136-138) are structurally unreachable
+// here: this code only runs when isDrMode, and the host FI dispatch returned
+// earlier (useFilterIntra -> filterIntraPredictor -> return).
         const int needRight  = pAngle < 90;
         const int needBottom = pAngle > 180;
 
@@ -693,6 +724,8 @@ void buildIntraPredictors(std::uint8_t* dst, int dstStride, int mode, int angleD
 // svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c:70), bw x bh
 void filterIntraPredictor(std::uint8_t* dst, int dstStride, const std::uint8_t* above,
                           const std::uint8_t* left, int mode, int bw, int bh) {
+    // mirror of the verbatim SVT assert (C_DEFAULT/filterintra_c.c:77)
+    assert(bw <= 32 && bh <= 32);
     std::uint8_t buffer[33][33] = {};
 
     for (int r = 0; r < bh; ++r) {
@@ -1301,8 +1334,27 @@ extern "C" __global__ void predict_block_4x4(
                 needAboveLeft = 1;
             }
         }
-        const int needRight = isDr ? (pAngle < 90) : 0;
-        const int needBottom = isDr ? (pAngle > 180) : 0;
+// SVT order (enc_intra_prediction.c:102-108 / :135-141), textually
+        // mirrored: extend_modes flag, then the use_filter_intra zero, then
+        // the dr override. The flag term contributes 0 here: no mode this
+        // kernel dispatches besides dr (D45/D67 = m 3/8) carries
+        // NEED_ABOVERIGHT/NEED_BOTTOMLEFT. The FI clause is semantically
+        // dead today for the same reason; kept for parity and future-mode
+        // safety.
+        int needRight = 0;  // extend_modes flag term (SVT :135): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needRight = 0;  // use_filter_intra (SVT :136-138)
+        }
+        if (isDr) {
+            needRight = pAngle < 90;  // dr override (SVT :139-141)
+        }
+        int needBottom = 0;  // extend_modes flag term (SVT :102): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needBottom = 0;  // use_filter_intra (SVT :103-105)
+        }
+        if (isDr) {
+            needBottom = pAngle > 180;  // dr override (SVT :106-108)
+        }
         int i;
         if (needLeft) {
             const int numLeft = 4 + (needBottom ? 4 : 0);
@@ -1346,6 +1398,8 @@ extern "C" __global__ void predict_block_4x4(
                 }
             }
         }
+)CUDB2"
+    R"CUDB3(
         if (needAboveLeft) {
             // enc_intra_prediction.c availability fill: the raw aboveLeft is
             // used only when both edges exist; otherwise derive from the
@@ -1566,7 +1620,7 @@ extern "C" __global__ void predict_block_4x4(
         }
     }
 }
-)CUDB2";
+)CUDB3";
 }
 
 std::string predictBlock8x8CuSource() {
@@ -1812,8 +1866,27 @@ extern "C" __global__ void predict_block_8x8(
         if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
             needLeft = 1; needAbove = 1; needAboveLeft = 1;
         }
-        const int needRight = isDr ? (pAngle < 90) : 0;
-        const int needBottom = isDr ? (pAngle > 180) : 0;
+// SVT order (enc_intra_prediction.c:102-108 / :135-141), textually
+        // mirrored: extend_modes flag, then the use_filter_intra zero, then
+        // the dr override. The flag term contributes 0 here: no mode this
+        // kernel dispatches besides dr (D45/D67 = m 3/8) carries
+        // NEED_ABOVERIGHT/NEED_BOTTOMLEFT. The FI clause is semantically
+        // dead today for the same reason; kept for parity and future-mode
+        // safety.
+        int needRight = 0;  // extend_modes flag term (SVT :135): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needRight = 0;  // use_filter_intra (SVT :136-138)
+        }
+        if (isDr) {
+            needRight = pAngle < 90;  // dr override (SVT :139-141)
+        }
+        int needBottom = 0;  // extend_modes flag term (SVT :102): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needBottom = 0;  // use_filter_intra (SVT :103-105)
+        }
+        if (isDr) {
+            needBottom = pAngle > 180;  // dr override (SVT :106-108)
+        }
         int i;
         if (needLeft) {
             const int numLeft = 8 + (needBottom ? 8 : 0);
@@ -2259,8 +2332,27 @@ extern "C" __global__ void predict_block_16x16(
         if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
             needLeft = 1; needAbove = 1; needAboveLeft = 1;
         }
-        const int needRight = isDr ? (pAngle < 90) : 0;
-        const int needBottom = isDr ? (pAngle > 180) : 0;
+// SVT order (enc_intra_prediction.c:102-108 / :135-141), textually
+        // mirrored: extend_modes flag, then the use_filter_intra zero, then
+        // the dr override. The flag term contributes 0 here: no mode this
+        // kernel dispatches besides dr (D45/D67 = m 3/8) carries
+        // NEED_ABOVERIGHT/NEED_BOTTOMLEFT. The FI clause is semantically
+        // dead today for the same reason; kept for parity and future-mode
+        // safety.
+        int needRight = 0;  // extend_modes flag term (SVT :135): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needRight = 0;  // use_filter_intra (SVT :136-138)
+        }
+        if (isDr) {
+            needRight = pAngle < 90;  // dr override (SVT :139-141)
+        }
+        int needBottom = 0;  // extend_modes flag term (SVT :102): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needBottom = 0;  // use_filter_intra (SVT :103-105)
+        }
+        if (isDr) {
+            needBottom = pAngle > 180;  // dr override (SVT :106-108)
+        }
         int i;
         if (needLeft) {
             const int numLeft = 16 + (needBottom ? 16 : 0);
@@ -2710,8 +2802,27 @@ extern "C" __global__ void __launch_bounds__(1024) predict_block_32x32(
         if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
             needLeft = 1; needAbove = 1; needAboveLeft = 1;
         }
-        const int needRight = isDr ? (pAngle < 90) : 0;
-        const int needBottom = isDr ? (pAngle > 180) : 0;
+// SVT order (enc_intra_prediction.c:102-108 / :135-141), textually
+        // mirrored: extend_modes flag, then the use_filter_intra zero, then
+        // the dr override. The flag term contributes 0 here: no mode this
+        // kernel dispatches besides dr (D45/D67 = m 3/8) carries
+        // NEED_ABOVERIGHT/NEED_BOTTOMLEFT. The FI clause is semantically
+        // dead today for the same reason; kept for parity and future-mode
+        // safety.
+        int needRight = 0;  // extend_modes flag term (SVT :135): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needRight = 0;  // use_filter_intra (SVT :136-138)
+        }
+        if (isDr) {
+            needRight = pAngle < 90;  // dr override (SVT :139-141)
+        }
+        int needBottom = 0;  // extend_modes flag term (SVT :102): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needBottom = 0;  // use_filter_intra (SVT :103-105)
+        }
+        if (isDr) {
+            needBottom = pAngle > 180;  // dr override (SVT :106-108)
+        }
         int i;
         if (needLeft) {
             const int numLeft = 32 + (needBottom ? 32 : 0);
@@ -2941,10 +3052,11 @@ std::string predictBlock64x64CuSource() {
     //   = leftData[191] < 256). Corner blend LIVE at 64x64 (128 >= 24).
     //   Upsample dead at 64x64 (blk_wh = 128 > 16, use_up64 returns 0).
     //   FILTER-INTRA IS NOT SIGNALABLE AT 64x64 (AV1 restricts FI to block
-    //   sizes <= 32x32; the kernel takes filterIntraMode and asserts/ignores
-    //   it at 64 - host buildIntraPredictors is size-generic but SVT never
-    //   dispatches FI at TX_64X64; deviation named: no FI path in the 64x64
-    //   kernel).
+    //   sizes <= 32x32; the host asserts this via filterIntraPredictor's
+    //   bw/bh <= 32 assert, mirror of filterintra_c.c:77); the kernel
+    //   IGNORES the filterIntraMode argument at 64 - host buildIntraPredictors
+    //   is size-generic but SVT never dispatches FI at TX_64X64; deviation
+    //   named: no FI path in the 64x64 kernel.
     return R"CUDA(
 __constant__ unsigned char sm_w64[64] = {
     255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150,
@@ -3098,8 +3210,27 @@ extern "C" __global__ void __launch_bounds__(1024) predict_block_64x64(
             else if (pAngle < 180) { needAbove = 1; needLeft = 1; needAboveLeft = 1; }
             else { needAbove = 0; needLeft = 1; needAboveLeft = 1; }
         }
-        const int needRight = isDr ? (pAngle < 90) : 0;
-        const int needBottom = isDr ? (pAngle > 180) : 0;
+// SVT order (enc_intra_prediction.c:102-108 / :135-141), textually
+        // mirrored: extend_modes flag, then the use_filter_intra zero, then
+        // the dr override. The flag term contributes 0 here: no mode this
+        // kernel dispatches besides dr (D45/D67 = m 3/8) carries
+        // NEED_ABOVERIGHT/NEED_BOTTOMLEFT. The FI clause is semantically
+        // dead today for the same reason; kept for parity and future-mode
+        // safety.
+        int needRight = 0;  // extend_modes flag term (SVT :135): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needRight = 0;  // use_filter_intra (SVT :136-138)
+        }
+        if (isDr) {
+            needRight = pAngle < 90;  // dr override (SVT :139-141)
+        }
+        int needBottom = 0;  // extend_modes flag term (SVT :102): 0 for every non-dr dispatched mode
+        if (*filterIntraMode >= 0 && *filterIntraMode <= 4) {
+            needBottom = 0;  // use_filter_intra (SVT :103-105)
+        }
+        if (isDr) {
+            needBottom = pAngle > 180;  // dr override (SVT :106-108)
+        }
         int i;
         if (needLeft) {
             const int numLeft = 64 + (needBottom ? 64 : 0);
