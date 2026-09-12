@@ -13,6 +13,30 @@ int filtType(const NeighborContext& neighbors) {
     return (aboveSmooth || leftSmooth) ? 1 : 0;
 }
 
+// get_uv_mode (common_utils.h:130-133) = g_uv2y[mode]
+// (common_utils.c:14-31, verbatim): the 13 UV modes fold identity to luma
+// 0..12, UV_CFL_PRED -> DC_PRED, sentinels -> INTRA_INVALID (= MB_MODE_COUNT
+// = 25, verified by the uv2y gate line).
+int uv2y(UvPredictionMode mode) {
+    static const int kUv2y[16] = {DC_PRED, V_PRED, H_PRED, D45_PRED, D135_PRED, D113_PRED, D157_PRED,
+                                  D203_PRED, D67_PRED, SMOOTH_PRED, SMOOTH_V_PRED, SMOOTH_H_PRED,
+                                  PAETH_PRED, DC_PRED, 25, 25};
+    return kUv2y[mode];
+}
+
+// Chroma entry: fold uv_mode -> luma mode, then the size-generic builder
+// with FILTER_INTRA_MODES. Chroma never uses FI (enc_intra_prediction.c:641
+// passes FILTER_INTRA_MODES for plane != 0); the predictor math is
+// plane-agnostic (the dc_pred/eb_pred tables are plane-generic).
+void buildIntraPredictorsUv(std::uint8_t* dst, int dstStride, UvPredictionMode mode, int angleDelta,
+                            int txwpx, int txhpx, std::uint8_t aboveLeft, const std::uint8_t* aboveRef,
+                            int nTopPx, int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                            int nBottomLeftPx, const NeighborContext& neighbors, int disableEdgeFilter) {
+    buildIntraPredictors(dst, dstStride, static_cast<PredictionMode>(uv2y(mode)), angleDelta, txwpx,
+                         txhpx, aboveLeft, aboveRef, nTopPx, nTopRightPx, leftRef, nLeftPx,
+                         nBottomLeftPx, neighbors, -1, disableEdgeFilter != 0);
+}
+
 int edgeFilterStrength(int bs0, int bs1, int delta, int type) {
     const int d        = std::abs(delta);
     int       strength = 0;

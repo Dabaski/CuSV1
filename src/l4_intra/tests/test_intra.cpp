@@ -2441,3 +2441,87 @@ TEST_CASE("gpu block predictor dr corner fill derives above-left from left edge 
     bool ok = runBlockPredict(ctx, intra::D113_PRED, 0, nullptr, 0, 0, left, 4, 0, 0, ref);
     CHECK(ok);
 }
+
+// ---- CH1: chroma (UV) prediction — fold + size-generic builder -------------
+// SVT chroma flow: uv_mode folds to the LUMA primitive set via g_uv2y
+// (get_uv_mode, common_utils.h:130-133; UV_CFL_PRED -> DC_PRED,
+// common_utils.c:28) and chroma NEVER uses filter-intra
+// (enc_intra_prediction.c:641 passes FILTER_INTRA_MODES for plane != 0).
+// The predictors themselves are plane-agnostic.
+
+TEST_CASE("chroma uv2y fold table matches svt golden full vector") {
+    // golden: golden_gen uv2y (g_uv2y, common_utils.c:14-31 verbatim): the 13
+    // UV modes fold identity to luma 0..12, UV_CFL_PRED -> DC_PRED, and the
+    // sentinels UV_INTRA_MODES/UV_MODE_INVALID -> INTRA_INVALID (25).
+    const std::int32_t golden[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 25, 25};
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        if (intra::uv2y(static_cast<intra::UvPredictionMode>(i)) != golden[i]) ok = false;
+    }
+    CHECK(ok);
+}
+
+TEST_CASE("chroma builder 4x4 matches the bc4 generator goldens") {
+    // goldens: golden_gen bc4_* lines. Fixture matches the generator:
+    // aboveUV[8] = (5+3i)%237, leftUV[8] = (11+7i)%237, corner 13. Every
+    // call goes through the fold + FILTER_INTRA_MODES like SVT's plane loop
+    // (enc_intra_prediction.c:587-588, :641).
+    const std::uint8_t aboveUV[8] = {5, 8, 11, 14, 17, 20, 23, 26};
+    const std::uint8_t leftUV[8] = {11, 18, 25, 32, 39, 46, 53, 60};
+    {
+        const std::uint8_t golden[16] = {5, 8, 11, 14, 5, 8, 11, 14, 5, 8, 11, 14, 5, 8, 11, 14};
+        std::uint8_t dst[16] = {0};
+        intra::buildIntraPredictorsUv(dst, 4, intra::UV_V_PRED, 0, 4, 4, 0, aboveUV, 4, 0, nullptr, 0, 0);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) if (dst[i] != golden[i]) ok = false;
+        CHECK(ok);
+    }
+    {
+        const std::uint8_t golden[16] = {16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};
+        std::uint8_t dst[16] = {0};
+        intra::buildIntraPredictorsUv(dst, 4, intra::UV_DC_PRED, 0, 4, 4, 13, aboveUV, 4, 0, leftUV, 4, 0);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) if (dst[i] != golden[i]) ok = false;
+        CHECK(ok);
+    }
+    {
+        const std::uint8_t golden[16] = {8, 11, 14, 17, 11, 14, 17, 20, 14, 17, 20, 23, 17, 20, 23, 26};
+        std::uint8_t dst[16] = {0};
+        intra::buildIntraPredictorsUv(dst, 4, intra::UV_D45_PRED, 0, 4, 4, 13, aboveUV, 4, 4, leftUV, 4, 0);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) if (dst[i] != golden[i]) ok = false;
+        CHECK(ok);
+    }
+    {
+        const std::uint8_t golden[16] = {8, 11, 14, 17, 12, 15, 18, 21, 15, 18, 21, 24, 18, 21, 24, 26};
+        std::uint8_t dst[16] = {0};
+        intra::buildIntraPredictorsUv(dst, 4, intra::UV_D45_PRED, -1, 4, 4, 13, aboveUV, 4, 4, leftUV, 4, 0);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) if (dst[i] != golden[i]) ok = false;
+        CHECK(ok);
+    }
+    {
+        const std::uint8_t golden[16] = {10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10};
+        std::uint8_t dst[16] = {0};
+        intra::buildIntraPredictorsUv(dst, 4, intra::UV_CFL_PRED, 0, 4, 4, 0, aboveUV, 4, 0, nullptr, 0, 0);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) if (dst[i] != golden[i]) ok = false;
+        CHECK(ok);
+    }
+    {
+        const std::uint8_t golden[16] = {8, 10, 12, 14, 17, 17, 18, 18, 24, 22, 21, 21, 29, 25, 23, 23};
+        std::uint8_t dst[16] = {0};
+        intra::buildIntraPredictorsUv(dst, 4, intra::UV_SMOOTH_PRED, 0, 4, 4, 13, aboveUV, 4, 0, leftUV, 4, 0);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) if (dst[i] != golden[i]) ok = false;
+        CHECK(ok);
+    }
+    {
+        const std::uint8_t golden[16] = {5, 8, 11, 11, 13, 13, 18, 18, 13, 25, 25, 25, 32, 32, 32, 32};
+        std::uint8_t dst[16] = {0};
+        intra::buildIntraPredictorsUv(dst, 4, intra::UV_PAETH_PRED, 0, 4, 4, 13, aboveUV, 4, 0, leftUV, 4, 0);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) if (dst[i] != golden[i]) ok = false;
+        CHECK(ok);
+    }
+}
