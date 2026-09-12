@@ -1029,6 +1029,62 @@ bool runBlockPredict64x64(gpurt::GpuContext& ctx, int mode, int angleDelta, cons
     return true;
 }
 
+// ---- FX1: HK2 delta enumeration completed at 32x32 and 64x64 ----------------
+// Loop-driven: GPU kernel == host builder for ALL dr modes
+// (V_PRED..D67_PRED) x ALL deltas {-3,-2,-1,0,+1,+2,+3} = 8 x 7 = 56 combos
+// per geometry, 112 total. Delta 0 is INCLUDED (closes the reviewer's gap):
+// at delta 0 the V/H entries are the plain V/H paths and D45/D67 exercise
+// the zone-1/zone-3 angle paths - this is FULL (mode, delta) coverage at
+// both geometries, no zone-test caveat. HOST-PIN REASONING (R-series rule):
+// the host builder is gate-pinned against verbatim-SVT goldens at
+// representative (mode, delta) combos, so any kernel dispatch divergence at
+// an enumerated pair shows up here as GPU != host. Post-R/L steady state:
+// expected all-green on first build - verification-by-enumeration, with the
+// R-series historical-RED citation per the HK2 precedent (HK2 itself was
+// accepted on the same basis). If ANY combo fails: halt and investigate.
+// Edges: above = first 2B of kAbove32/kAbove64 (B above + B top-right),
+// left = kLeft32/kLeft64, corner 7, both neighbor modes DC (filt_type 0).
+
+TEST_CASE("fx1 delta enumeration 32x32: gpu == host for all 8 dr modes x deltas -3..3 (incl 0)") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+    bool allOk = true;
+    for (int m = intra::V_PRED; m <= intra::D67_PRED; ++m) {
+        for (int delta = -3; delta <= 3; ++delta) {
+            unsigned char ref[1024] = {0};
+            intra::buildIntraPredictors(ref, 32, static_cast<intra::PredictionMode>(m), delta, 32, 32,
+                                        7, kAbove32, 32, 32, kLeft32, 32, 0);
+            const bool ok =
+                runBlockPredict32x32(ctx, m, delta, kAbove32, 32, 32, kLeft32, 32, 0, 7, ref);
+            if (!ok) allOk = false;
+        }
+    }
+    CHECK(allOk);
+}
+
+TEST_CASE("fx1 delta enumeration 64x64: gpu == host for all 8 dr modes x deltas -3..3 (incl 0)") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+    bool allOk = true;
+    for (int m = intra::V_PRED; m <= intra::D67_PRED; ++m) {
+        for (int delta = -3; delta <= 3; ++delta) {
+            unsigned char ref[4096] = {0};
+            intra::buildIntraPredictors(ref, 64, static_cast<intra::PredictionMode>(m), delta, 64, 64,
+                                        7, kAbove64, 64, 64, kLeft64, 64, 0);
+            const bool ok =
+                runBlockPredict64x64(ctx, m, delta, kAbove64, 64, 64, kLeft64, 64, 0, 7, ref);
+            if (!ok) allOk = false;
+        }
+    }
+    CHECK(allOk);
+}
+
 TEST_CASE("gpu block predictor 64x64 matches builder across all zones") {
     if (gpurt::deviceCount() == 0) { MESSAGE("SKIP: no CUDA device"); return; }
     gpurt::GpuContext ctx;
