@@ -5711,6 +5711,9 @@ static void quantize_fp_helper_c(const TranLow* coeff_ptr, intptr_t n_coeffs, co
 // ==== SVT-AV1 bitstream_unit.h :92 - OD_ICDF (verbatim extract; do not edit) ====
 #define OD_ICDF AOM_ICDF
 
+// ==== SVT-AV1 bitstream_unit.h :55 - OD_ILOG_NZ (verbatim extract; do not edit) ====
+#define OD_ILOG_NZ(_x) (svt_log2f(_x) + 1)
+
 // ==== SVT-AV1 bitstream_unit.h :96 - OdEcWindow (verbatim extract; do not edit) ====
 typedef uint64_t OdEcWindow;
 
@@ -6032,6 +6035,211 @@ uint32_t svt_od_ec_tell_frac(uint32_t nbits_total, uint32_t rng) {
 // ==== SVT-AV1 bitstream_unit.c :406 - svt_od_ec_enc_tell_frac (verbatim extract; do not edit) ====
 uint32_t svt_od_ec_enc_tell_frac(const OdEcEnc* enc) {
     return svt_od_ec_tell_frac(svt_od_ec_enc_tell(enc), enc->rng);
+}
+
+// ==== SVT-AV1 entdec.h :21 - od_ec_dec typedef (verbatim extract; do not edit) ====
+typedef struct od_ec_dec od_ec_dec;
+
+// ==== SVT-AV1 entdec.h :27 - od_ec_dec struct (verbatim extract; do not edit) ====
+struct od_ec_dec {
+  /*The start of the current input buffer.*/
+  const unsigned char *buf;
+  /*An offset used to keep track of tell after reaching the end of the stream.
+    This is constant throughout most of the decoding process, but becomes
+     important once we hit the end of the buffer and stop incrementing bptr
+     (and instead pretend cnt has lots of bits).*/
+  int32_t tell_offs;
+  /*The end of the current input buffer.*/
+  const unsigned char *end;
+  /*The read pointer for the entropy-coded bits.*/
+  const unsigned char *bptr;
+  /*The difference between the high end of the current range, (low + rng), and
+     the coded value, minus 1.
+    This stores up to OD_EC_WINDOW_SIZE bits of that difference, but the
+     decoder only uses the top 16 bits of the window to decode the next symbol.
+    As we shift up during renormalization, if we don't have enough bits left in
+     the window to fill the top 16, we'll read in more bits of the coded
+     value.*/
+  OdEcWindow dif;
+  /*The number of values in the current range.*/
+  uint16_t rng;
+  /*The number of bits of data in the current value.*/
+  int16_t cnt;
+};
+
+// ==== SVT-AV1 entdec.c :74 - OD_EC_LOTS_OF_BITS (verbatim extract; do not edit) ====
+#define OD_EC_LOTS_OF_BITS (0x4000)
+
+// ==== SVT-AV1 entdec.c :78 - od_ec_dec_refill (verbatim extract; do not edit) ====
+static void od_ec_dec_refill(od_ec_dec *dec) {
+  int s;
+  OdEcWindow dif;
+  int16_t cnt;
+  const unsigned char *bptr;
+  const unsigned char *end;
+  dif = dec->dif;
+  cnt = dec->cnt;
+  bptr = dec->bptr;
+  end = dec->end;
+  s = OD_EC_WINDOW_SIZE - 9 - (cnt + 15);
+  for (; s >= 0 && bptr < end; s -= 8, bptr++) {
+    /*Each time a byte is inserted into the window (dif), bptr advances and cnt
+       is incremented by 8, so the total number of consumed bits (the return
+       value of od_ec_dec_tell) does not change.*/
+    assert(s <= OD_EC_WINDOW_SIZE - 8);
+    dif ^= (OdEcWindow)bptr[0] << s;
+    cnt += 8;
+  }
+  if (bptr >= end) {
+    /*We've reached the end of the buffer. It is perfectly valid for us to need
+       to fill the window with additional bits past the end of the buffer (and
+       this happens in normal operation). These bits should all just be taken
+       as zero. But we cannot increment bptr past 'end' (this is undefined
+       behavior), so we start to increment dec->tell_offs. We also don't want
+       to keep testing bptr against 'end', so we set cnt to OD_EC_LOTS_OF_BITS
+       and adjust dec->tell_offs so that the total number of unconsumed bits in
+       the window (dec->cnt - dec->tell_offs) does not change. This effectively
+       puts lots of zero bits into the window, and means we won't try to refill
+       it from the buffer for a very long time (at which point we'll put lots
+       of zero bits into the window again).*/
+    dec->tell_offs += OD_EC_LOTS_OF_BITS - cnt;
+    cnt = OD_EC_LOTS_OF_BITS;
+  }
+  dec->dif = dif;
+  dec->cnt = cnt;
+  dec->bptr = bptr;
+}
+
+// ==== SVT-AV1 entdec.c :125 - od_ec_dec_normalize (verbatim extract; do not edit) ====
+static int od_ec_dec_normalize(od_ec_dec *dec, OdEcWindow dif, unsigned rng,
+                               int ret) {
+  int d;
+  assert(rng <= 65535U);
+  /*The number of leading zeros in the 16-bit binary representation of rng.*/
+  d = 16 - OD_ILOG_NZ(rng);
+  /*d bits in dec->dif are consumed.*/
+  dec->cnt -= d;
+  /*This is equivalent to shifting in 1's instead of 0's.*/
+  dec->dif = ((dif + 1) << d) - 1;
+  dec->rng = rng << d;
+  if (dec->cnt < 0) od_ec_dec_refill(dec);
+  return ret;
+}
+
+// ==== SVT-AV1 entdec.c :143 - od_ec_dec_init (verbatim extract; do not edit) ====
+void od_ec_dec_init(od_ec_dec *dec, const unsigned char *buf,
+                    uint32_t storage) {
+  dec->buf = buf;
+  dec->tell_offs = 10 - (OD_EC_WINDOW_SIZE - 8);
+  dec->end = buf + storage;
+  dec->bptr = buf;
+  dec->dif = ((OdEcWindow)1 << (OD_EC_WINDOW_SIZE - 1)) - 1;
+  dec->rng = 0x8000;
+  dec->cnt = -15;
+  od_ec_dec_refill(dec);
+}
+
+// ==== SVT-AV1 entdec.c :158 - od_ec_decode_bool_q15 (verbatim extract; do not edit) ====
+int od_ec_decode_bool_q15(od_ec_dec *dec, unsigned f) {
+  OdEcWindow dif;
+  OdEcWindow vw;
+  unsigned r;
+  unsigned r_new;
+  unsigned v;
+  int ret;
+  assert(0 < f);
+  assert(f < 32768U);
+  dif = dec->dif;
+  r = dec->rng;
+  assert(dif >> (OD_EC_WINDOW_SIZE - 16) < r);
+  assert(32768U <= r);
+  v = ((r >> 8) * (uint32_t)(f >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT));
+  v += EC_MIN_PROB;
+  vw = (OdEcWindow)v << (OD_EC_WINDOW_SIZE - 16);
+  ret = 1;
+  r_new = v;
+  if (dif >= vw) {
+    r_new = r - v;
+    dif -= vw;
+    ret = 0;
+  }
+  return od_ec_dec_normalize(dec, dif, r_new, ret);
+}
+
+// ==== SVT-AV1 entdec.c :193 - od_ec_decode_cdf_q15 (verbatim extract; do not edit) ====
+int od_ec_decode_cdf_q15(od_ec_dec *dec, const uint16_t *icdf, int nsyms) {
+  OdEcWindow dif;
+  unsigned r;
+  unsigned c;
+  unsigned u;
+  unsigned v;
+  int ret;
+  (void)nsyms;
+  dif = dec->dif;
+  r = dec->rng;
+  const int N = nsyms - 1;
+
+  assert(dif >> (OD_EC_WINDOW_SIZE - 16) < r);
+  assert(icdf[nsyms - 1] == OD_ICDF(CDF_PROB_TOP));
+  assert(32768U <= r);
+  assert(7 - EC_PROB_SHIFT >= 0);
+  c = (unsigned)(dif >> (OD_EC_WINDOW_SIZE - 16));
+  v = r;
+  ret = -1;
+  do {
+    u = v;
+    v = ((r >> 8) * (uint32_t)(icdf[++ret] >> EC_PROB_SHIFT) >>
+         (7 - EC_PROB_SHIFT));
+    v += EC_MIN_PROB * (N - ret);
+  } while (c < v);
+  assert(v < u);
+  assert(u <= r);
+  r = u - v;
+  dif -= (OdEcWindow)v << (OD_EC_WINDOW_SIZE - 16);
+  return od_ec_dec_normalize(dec, dif, r, ret);
+}
+
+// ==== SVT-AV1 entdec.c :231 - od_ec_dec_tell (verbatim extract; do not edit) ====
+int od_ec_dec_tell(const od_ec_dec *dec) {
+  /*There is a window of bits stored in dec->dif. The difference
+     (dec->bptr - dec->buf) tells us how many bytes have been read into this
+     window. The difference (dec->cnt - dec->tell_offs) tells us how many of
+     the bits in that window remain unconsumed.*/
+  return (int)((dec->bptr - dec->buf) * 8 - dec->cnt + dec->tell_offs);
+}
+
+// ==== SVT-AV1 entdec.c :248 - od_ec_tell_frac (verbatim extract; do not edit) ====
+uint32_t od_ec_tell_frac(uint32_t nbits_total, uint32_t rng) {
+  uint32_t nbits;
+  int      l;
+  int      i;
+  /*To handle the non-integral number of bits still left in the encoder/decoder
+     state, we compute the worst-case number of bits of val that must be
+     encoded to ensure that the value is inside the range for any possible
+     subsequent bits.
+    The computation here is independent of val itself (the decoder does not
+     even track that value), even though the real number of bits used after
+     od_ec_enc_done() may be 1 smaller if rng is a power of two and the
+     corresponding trailing bits of val are all zeros.
+    If we did try to track that special case, then coding a value with a
+     probability of 1/(1 << n) might sometimes appear to use more than n bits.
+    This may help explain the surprising result that a newly initialized
+     encoder or decoder claims to have used 1 bit.*/
+  nbits = nbits_total << OD_BITRES;
+  l     = 0;
+  for (i = OD_BITRES; i-- > 0;) {
+    int b;
+    rng = rng * rng >> 15;
+    b   = (int)(rng >> 16);
+    l   = l << 1 | b;
+    rng >>= b;
+  }
+  return nbits - l;
+}
+
+// ==== SVT-AV1 entdec.c :282 - od_ec_dec_tell_frac (verbatim extract; do not edit) ====
+uint32_t od_ec_dec_tell_frac(const od_ec_dec *dec) {
+  return od_ec_tell_frac(od_ec_dec_tell(dec), dec->rng);
 }
 
 // ==== SVT-AV1 enc_intra_prediction.c :40 - build_intra_predictors (verbatim EXCEPT the flagged get_filt_type shim) ====

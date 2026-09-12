@@ -8,6 +8,8 @@
 
 #include <stdint.h>
 #include <stddef.h>
+// CHAR_BIT for OD_EC_WINDOW_SIZE (bitstream_unit.h:97)
+#include <limits.h>
 
 // SVT uses INLINE/NOINLINE/ATTRIBUTE_PACKED macros (EbConfigMacros etc.).
 // SVT writes `static INLINE` itself, so INLINE expands to plain `inline`.

@@ -12,6 +12,9 @@ $ErrorActionPreference = "Stop"
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $src  = Join-Path $repo "third_party\SVT-AV1\Source\Lib"
+# Decoder side lives in the vendored aom_dsp subtree of the pinned tree
+# (referenced by third_party/SVT-AV1/test/CMakeLists.txt:82).
+$src3p = Join-Path $repo "third_party\SVT-AV1\third_party\aom_dsp"
 
 $files = @{
     "transforms.c"       = (Get-Content (Join-Path $src "Codec\transforms.c") -Raw)
@@ -29,6 +32,8 @@ $files = @{
     "bitstream_unit.c"   = (Get-Content (Join-Path $src "Codec\bitstream_unit.c") -Raw)
     "bitstream_unit.h"   = (Get-Content (Join-Path $src "Codec\bitstream_unit.h") -Raw)
     "cabac_context_model.h" = (Get-Content (Join-Path $src "Codec\cabac_context_model.h") -Raw)
+    "entdec.c"           = (Get-Content (Join-Path $src3p "src\entdec.c") -Raw)
+    "entdec.h"           = (Get-Content (Join-Path $src3p "inc\entdec.h") -Raw)
 }
 # normalize line endings to LF so multi-line patterns match regardless of
 # how this script was saved
@@ -285,6 +290,7 @@ Emit-Macro "bitstream_unit.h" "#define EC_PROB_SHIFT" "EC_PROB_SHIFT"
 Emit-Macro "bitstream_unit.h" "#define EC_MIN_PROB" "EC_MIN_PROB"
 Emit-Macro "bitstream_unit.h" "#define OD_BITRES" "OD_BITRES"
 Emit-Macro "bitstream_unit.h" "#define OD_ICDF" "OD_ICDF"
+Emit-Macro "bitstream_unit.h" "#define OD_ILOG_NZ" "OD_ILOG_NZ"
 Emit-Macro "bitstream_unit.h" "typedef uint64_t OdEcWindow" "OdEcWindow"
 Emit-Macro "bitstream_unit.h" "#define OD_EC_WINDOW_SIZE" "OD_EC_WINDOW_SIZE"
 Emit-Macro "bitstream_unit.h" "#define OD_MEASURE_EC_OVERHEAD" "OD_MEASURE_EC_OVERHEAD"
@@ -318,6 +324,23 @@ Emit-Verbatim "bitstream_unit.c" "unsigned char* svt_od_ec_enc_done" "svt_od_ec_
 Emit-Verbatim "bitstream_unit.c" "int svt_od_ec_enc_tell" "svt_od_ec_enc_tell"
 Emit-Verbatim "bitstream_unit.c" "uint32_t svt_od_ec_tell_frac" "svt_od_ec_tell_frac"
 Emit-Verbatim "bitstream_unit.c" "uint32_t svt_od_ec_enc_tell_frac" "svt_od_ec_enc_tell_frac"
+
+# ---- entropy coder, decoder side (EC0) ----
+# entdec.c emits in source order (refill -> normalize -> init -> decode_bool
+# -> decode_cdf -> tell -> tell_frac -> dec_tell_frac): every use follows its
+# definition, no prototypes needed. The od_ec_dec struct (entdec.h:27-51)
+# precedes them; it only needs OdEcWindow (already extracted).
+Emit-Macro "entdec.h" "typedef struct od_ec_dec od_ec_dec;" "od_ec_dec typedef"
+Emit-Verbatim "entdec.h" "struct od_ec_dec {" "od_ec_dec struct"
+Emit-Macro "entdec.c" "#define OD_EC_LOTS_OF_BITS" "OD_EC_LOTS_OF_BITS"
+Emit-Verbatim "entdec.c" "static void od_ec_dec_refill" "od_ec_dec_refill"
+Emit-Verbatim "entdec.c" "static int od_ec_dec_normalize" "od_ec_dec_normalize"
+Emit-Verbatim "entdec.c" "void od_ec_dec_init" "od_ec_dec_init"
+Emit-Verbatim "entdec.c" "int od_ec_decode_bool_q15" "od_ec_decode_bool_q15"
+Emit-Verbatim "entdec.c" "int od_ec_decode_cdf_q15" "od_ec_decode_cdf_q15"
+Emit-Verbatim "entdec.c" "int od_ec_dec_tell" "od_ec_dec_tell"
+Emit-Verbatim "entdec.c" "uint32_t od_ec_tell_frac" "od_ec_tell_frac"
+Emit-Verbatim "entdec.c" "uint32_t od_ec_dec_tell_frac" "od_ec_dec_tell_frac"
 
 # ---- build_intra_predictors with the documented get_filt_type shim ----
 $r = Extract-Block $files["enc_intra_prediction.c"] "static void build_intra_predictors(const MacroBlockD* xd" "build_intra_predictors"
