@@ -595,6 +595,11 @@ const std::uint8_t partitionContextLookupAbove[BLOCK_SIZES_ALL] = {31, 31, 30, 3
 
 const std::uint8_t partitionContextLookupLeft[BLOCK_SIZES_ALL] = {31, 30, 31, 30, 28, 30, 28, 24, 28, 24, 16, 24, 16, 0, 16, 0, 28, 31, 24, 30, 16, 28};
 
+// default_skip_cdfs (cabac_context_model.c:594-596, verbatim)
+static const AomCdfProb skip_cdfs_default[SKIP_CONTEXTS][CDF_SIZE(2)] = {
+    {AOM_CDF2(31671)}, {AOM_CDF2(16515)}, {AOM_CDF2(4576)}
+};
+
 // COPY_CDF equivalent for the four tables (cabac_context_model.c:740-741,
 // :767 - the kf_y_cdf/angle_delta_cdf/filter_intra rows of
 // svt_aom_av1_setup_frame_context).
@@ -604,6 +609,7 @@ void initDefaultEcFrameContext(EcFrameContext* fc) {
     memcpy(fc->filter_intra_cdfs, filter_intra_cdfs_default, sizeof(fc->filter_intra_cdfs));
     memcpy(fc->filter_intra_mode_cdf, filter_intra_mode_cdf_default, sizeof(fc->filter_intra_mode_cdf));
     memcpy(fc->partition_cdf, partition_cdf_default, sizeof(fc->partition_cdf));
+    memcpy(fc->skip_cdfs, skip_cdfs_default, sizeof(fc->skip_cdfs));
 }
 
 int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
@@ -611,7 +617,8 @@ int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
            memcmp(a->angle_delta_cdf, b->angle_delta_cdf, sizeof(a->angle_delta_cdf)) == 0 &&
            memcmp(a->filter_intra_cdfs, b->filter_intra_cdfs, sizeof(a->filter_intra_cdfs)) == 0 &&
            memcmp(a->filter_intra_mode_cdf, b->filter_intra_mode_cdf, sizeof(a->filter_intra_mode_cdf)) == 0 &&
-           memcmp(a->partition_cdf, b->partition_cdf, sizeof(a->partition_cdf)) == 0;
+           memcmp(a->partition_cdf, b->partition_cdf, sizeof(a->partition_cdf)) == 0 &&
+           memcmp(a->skip_cdfs, b->skip_cdfs, sizeof(a->skip_cdfs)) == 0;
 }
 
 // svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021), flattened
@@ -808,6 +815,24 @@ void updatePartitionContext(std::uint8_t* above, std::uint8_t* left, int mi_row,
     const int mi_h = blockSizeHigh[bsize] >> 2;
     for (int j = 0; j < mi_w; ++j) above[mi_col + j] = partitionContextLookupAbove[bsize];
     for (int i = 0; i < mi_h; ++i) left[(mi_row + i) & 15] = partitionContextLookupLeft[bsize];
+}
+
+// av1_get_skip_context (entropy_coding.c:983-989) flattened
+int getSkipContext(int above_available, int above_skip, int left_available, int left_skip) {
+    const int above_skip_flag = above_available ? above_skip : 0;
+    const int left_skip_flag  = left_available ? left_skip : 0;
+    return (std::uint8_t)(above_skip_flag + left_skip_flag);
+}
+
+// encode_skip_coeff_av1 (entropy_coding.c:995-1000)
+void writeSkip(AomWriter* w, EcFrameContext* fc, int ctx, int skip) {
+    odEcWriteSymbol(w, skip ? 1 : 0, fc->skip_cdfs[ctx], 2);
+}
+
+// aom read_skip_txfm semantics (decodemv.c, out-of-tree BSF4 arbiter) minus
+// the SEG_LVL_SKIP implicit-1 branch (segmentation deferred)
+int readSkip(AomReader* r, EcFrameContext* fc, int ctx) {
+    return odEcReadSymbol(r, fc->skip_cdfs[ctx], 2);
 }
 
 }  // namespace entropy

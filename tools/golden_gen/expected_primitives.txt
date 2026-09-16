@@ -227,3 +227,7 @@ ecpart_bytes 1 b5
 ecpart_rt 3 0 0 0 0
 ecpart_cdf_eq 1
 ecpart_gather 10923 0 10380 0 1
+ecskip_ctx 0 1 2 0
+ecskip_bytes 2 f8 0c
+ecskip_rt 1 0 0 1
+ecskip_cdf_eq 1

@@ -434,6 +434,15 @@ Emit-Verbatim "cabac_context_model.h" "static INLINE void partition_gather_vert_
 Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_partition_cdf" "default_partition_cdf"
 Emit-Verbatim "entropy_coding.c" "int32_t svt_aom_partition_cdf_length" "svt_aom_partition_cdf_length"
 
+# ---- skip symbol surface (ECP2) ----
+# skip_cdfs (cabac_context_model.h:323, SKIP_CONTEXTS definitions.h:1313);
+# defaults (cabac_context_model.c:594-596, COPY_CDF :781); the symbol is the
+# FIRST arithmetic-coded symbol of each I_SLICE block for our config
+# (write_modes_b :4980-4985 via encode_skip_coeff_av1 :995-1000, context =
+# above_skip + left_skip of the neighbor mbmis, :983-989).
+Emit-Macro "definitions.h" "#define SKIP_CONTEXTS" "SKIP_CONTEXTS"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_skip_cdfs" "default_skip_cdfs"
+
 # ---- build_intra_predictors with the documented get_filt_type shim ----
 $r = Extract-Block $files["enc_intra_prediction.c"] "static void build_intra_predictors(const MacroBlockD* xd" "build_intra_predictors"
 $shimmed = $r.body.Replace("const int32_t filt_type   = get_filt_type(xd, plane);", "const int32_t filt_type   = svtd_filt_type; /* SHIM: get_filt_type(xd, plane) replaced by generator shim (enc_intra_prediction.c:186); svtd_filt_type set per call */")

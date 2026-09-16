@@ -433,3 +433,46 @@ TEST_CASE("partition symbol surface matches gate (ratified 32x32 frame walk)") {
     CHECK(entropy::odEcReadSymbol(&r2, gr, 2) == 1);
     CHECK(entropy::odEcReadSymbol(&r2, gr, 2) == 0);
 }
+
+TEST_CASE("skip symbol surface matches gate (context combos)") {
+    // Gate: ecskip_ctx 0 1 2 0, ecskip_bytes 2 f8 0c, ecskip_rt 1 0 0 1,
+    // ecskip_cdf_eq 1 (tools/golden_gen/main_primitives.c ECP2 block).
+    // The skip symbol is the FIRST arithmetic-coded symbol of each I_SLICE
+    // block for our config (write_modes_b entropy_coding.c:4980-4985 via
+    // encode_skip_coeff_av1 :995-1000; segmentation disabled). Context =
+    // av1_get_skip_context (:983-989): above_skip + left_skip of the
+    // neighbor mbmis, unavailable -> 0; all three SKIP_CONTEXTS
+    // (definitions.h:1313) and both symbols exercised. Read twin = the aom
+    // read_skip_txfm semantics (decodemv.c, out-of-tree BSF4 arbiter) minus
+    // the SEG_LVL_SKIP implicit-1 branch (segmentation surface, deferred).
+    CHECK(entropy::getSkipContext(0, 0, 0, 0) == 0);
+    CHECK(entropy::getSkipContext(1, 1, 0, 0) == 1);
+    CHECK(entropy::getSkipContext(1, 1, 1, 1) == 2);
+    CHECK(entropy::getSkipContext(1, 0, 1, 0) == 0);
+
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc);
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR);
+
+    entropy::AomWriter w{};
+    unsigned char buf[64] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    static const int ctx[4] = {0, 1, 2, 0};
+    static const int skip[4] = {1, 0, 0, 1};
+    for (int b = 0; b < 4; ++b) entropy::writeSkip(&w, &fc, ctx[b], skip[b]);
+    entropy::odEcStopEncode(&w);
+    REQUIRE(w.pos == 2);
+    CHECK((unsigned)buf[0] == 0xf8);
+    CHECK((unsigned)buf[1] == 0x0c);
+
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    for (int b = 0; b < 4; ++b) CHECK(entropy::readSkip(&r, &fcR, ctx[b]) == skip[b]);
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+}

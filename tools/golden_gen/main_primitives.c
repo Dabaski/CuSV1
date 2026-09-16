@@ -2005,5 +2005,67 @@ int main(void) {
             printf(" %d\n", (s1 == 1 && s2 == 0) ? 1 : 0);
         }
     }
+
+    // ---- ECP2: l7 skip symbol gate lines (court-ordered exception) ---------
+    // The skip symbol is the FIRST arithmetic-coded symbol of each I_SLICE
+    // block for our config (write_modes_b entropy_coding.c:4980-4985 via
+    // encode_skip_coeff_av1 :995-1000; segmentation disabled -> no segment
+    // id, no SEG_LVL_SKIP). Context = av1_get_skip_context (:983-989):
+    // above_skip + left_skip of the neighbor mbmis, unavailable -> 0.
+    // Fixture combos per the ratified gate: both edges unavailable, mixed,
+    // both available - all three SKIP_CONTEXTS exercised, both symbols.
+    {
+        static const struct {
+            int aAv, aSkip, lAv, lSkip, skip;
+        } skip_blocks[4] = {
+            {0, 0, 0, 0, 1},  // ctx 0, symbol 1 (first block)
+            {1, 1, 0, 0, 0},  // ctx 1, symbol 0
+            {1, 1, 1, 1, 0},  // ctx 2, symbol 0
+            {1, 0, 1, 0, 1},  // ctx 0, symbol 1 (adaptation on ctx 0 twice)
+        };
+        static AomCdfProb skip_cdf[SKIP_CONTEXTS][CDF_SIZE(2)];
+        memcpy(skip_cdf, default_skip_cdfs, sizeof(skip_cdf));
+
+        AomWriter w;
+        w.ec.buf = ec_buf;
+        svt_od_ec_enc_reset(&w.ec);
+        w.allow_update_cdf = 1;
+        w.pos              = 0;
+
+        printf("ecskip_ctx");
+        for (int b = 0; b < 4; ++b) {
+            const int ctx = (skip_blocks[b].aAv ? skip_blocks[b].aSkip : 0) +
+                (skip_blocks[b].lAv ? skip_blocks[b].lSkip : 0);
+            printf(" %d", ctx);
+            aom_write_symbol(&w, skip_blocks[b].skip, skip_cdf[ctx], 2);
+        }
+        printf("\n");
+        aom_stop_encode(&w);
+        printf("ecskip_bytes %u", w.pos);
+        for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", ec_buf[i]);
+        printf("\n");
+
+        static AomCdfProb skip_cdf_r[SKIP_CONTEXTS][CDF_SIZE(2)];
+        memcpy(skip_cdf_r, default_skip_cdfs, sizeof(skip_cdf_r));
+        aom_reader r;
+        if (aom_reader_init(&r, ec_buf, w.pos)) { fprintf(stderr, "ECP2 reader init FAILED\n"); return 1; }
+        r.allow_update_cdf = 1;
+        printf("ecskip_rt");
+        int rt_bad = 0;
+        for (int b = 0; b < 4; ++b) {
+            const int ctx = (skip_blocks[b].aAv ? skip_blocks[b].aSkip : 0) +
+                (skip_blocks[b].lAv ? skip_blocks[b].lSkip : 0);
+            const int s = aom_read_symbol_(&r, skip_cdf_r[ctx], 2);
+            if (s != skip_blocks[b].skip) rt_bad = 1;
+            printf(" %d", s);
+        }
+        printf("\n");
+        if (rt_bad) { fprintf(stderr, "ECP2 roundtrip FAILED\n"); return 1; }
+        int cdf_eq = 1;
+        for (int i = 0; i < SKIP_CONTEXTS; ++i) {
+            if (memcmp(skip_cdf[i], skip_cdf_r[i], sizeof(skip_cdf[0]))) cdf_eq = 0;
+        }
+        printf("ecskip_cdf_eq %d\n", cdf_eq);
+    }
     return 0;
 }

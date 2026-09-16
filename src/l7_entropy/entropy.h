@@ -235,6 +235,9 @@ enum FilterIntraMode {
 #define PARTITION_BLOCK_SIZES 5
 #define PARTITION_CONTEXTS (PARTITION_BLOCK_SIZES * PARTITION_PLOFFSET)
 
+// definitions.h:1313 (verbatim value)
+#define SKIP_CONTEXTS 3
+
 // PartitionType (definitions.h:911-925, verbatim order).
 enum PartitionType {
     PARTITION_NONE,
@@ -271,6 +274,7 @@ struct EcFrameContext {
     AomCdfProb filter_intra_cdfs[BLOCK_SIZES_ALL][CDF_SIZE(2)];
     AomCdfProb filter_intra_mode_cdf[CDF_SIZE(FILTER_INTRA_MODES)];
     AomCdfProb partition_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+    AomCdfProb skip_cdfs[SKIP_CONTEXTS][CDF_SIZE(2)];
 };
 
 // Initialize from the SVT default tables (cabac_context_model.c:59-97,
@@ -334,6 +338,21 @@ PartitionType readPartition(AomReader* r, EcFrameContext* fc, BlockSize bsize, i
 // owns >= 16 entries).
 void updatePartitionContext(std::uint8_t* above, std::uint8_t* left, int mi_row, int mi_col,
                             BlockSize bsize);
+
+// av1_get_skip_context (entropy_coding.c:983-989) flattened: above_skip +
+// left_skip of the neighbor mbmis, unavailable edges -> 0.
+int getSkipContext(int above_available, int above_skip, int left_available, int left_skip);
+
+// encode_skip_coeff_av1 (entropy_coding.c:995-1000): the skip symbol from
+// skip_cdfs[ctx], 2 symbols - the FIRST arithmetic-coded symbol of each
+// I_SLICE block for our config (write_modes_b :4980-4985, segmentation off;
+// the commented write_skip lines :4978/:5123 are superseded aom-style calls).
+void writeSkip(AomWriter* w, EcFrameContext* fc, int ctx, int skip);
+
+// Read twin with the aom read_skip_txfm semantics (decodemv.c, out-of-tree
+// BSF4 arbiter; no aom code extracted) minus the SEG_LVL_SKIP implicit-1
+// branch - the segmentation surface is deferred with segmentation itself.
+int readSkip(AomReader* r, EcFrameContext* fc, int ctx);
 
 // encode_intra_luma_mode_kf_av1 (entropy_coding.c:1026-1040): mode symbol
 // from kf_y_cdf[above_ctx][left_ctx], then the angle-delta symbol when

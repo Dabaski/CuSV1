@@ -6687,6 +6687,14 @@ int32_t svt_aom_partition_cdf_length(BlockSize bsize) {
     }
 }
 
+// ==== SVT-AV1 definitions.h :1313 - SKIP_CONTEXTS (verbatim extract; do not edit) ====
+#define SKIP_CONTEXTS 3
+
+// ==== SVT-AV1 cabac_context_model.c :594 - default_skip_cdfs (verbatim extract; do not edit) ====
+static const AomCdfProb default_skip_cdfs[SKIP_CONTEXTS][CDF_SIZE(2)] = {
+    {AOM_CDF2(31671)}, {AOM_CDF2(16515)}, {AOM_CDF2(4576)}
+};
+
 // ==== SVT-AV1 enc_intra_prediction.c :40 - build_intra_predictors (verbatim EXCEPT the flagged get_filt_type shim) ====
 static void build_intra_predictors(const MacroBlockD* xd, uint8_t* top_neigh_array, uint8_t* left_neigh_array,
                                    // const uint8_t *ref,    int32_t ref_stride,

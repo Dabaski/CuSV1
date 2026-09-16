@@ -105,6 +105,7 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | cdf_element_prob, partition_gather_horz_alike, partition_gather_vert_alike | Codec/cabac_context_model.h:373-405 | ECP1: XOR-edge 2-symbol gathered cdfs (entropy_coding.c:970-977) |
 | default_partition_cdf | Codec/cabac_context_model.c:134-155 | ECP1: 20-row partition cdf defaults (PARTITION_CONTEXTS = 5 * 4) |
 | svt_aom_partition_cdf_length | Codec/entropy_coding.c:922-930 | ECP1: partition alphabet 10/10/10/4/8 (16/32/64/8x8/128) |
+| SKIP_CONTEXTS, default_skip_cdfs | Codec/definitions.h:1313, Codec/cabac_context_model.c:594-596 | ECP2: skip symbol cdfs (the FIRST arithmetic-coded symbol of each I_SLICE block, write_modes_b :4980-4985 via encode_skip_coeff_av1 :995-1000; context av1_get_skip_context :983-989) |
 
 Second documented deviation (EC0): the WORDS_BIGENDIAN `#if` guard around the
 HToLE/HToBE macro family (bitstream_unit.h:148-164) is dropped; the
@@ -127,7 +128,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **229/229 lines identical**, covering:
+that file — currently **233/233 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -171,6 +172,13 @@ that file — currently **229/229 lines identical**, covering:
   the structural tree itself). Writer walk = encode_partition_av1
   (entropy_coding.c:932-981); reader walk = the aom read_partition
   semantics (decodeframe.c:1266-1293, out-of-tree arbiter).
+- ECP2 skip-symbol gate lines (court-ordered l7 exception): ecskip_ctx
+  (context combos 0 1 2 0 - both edges unavailable, mixed, both available,
+  all three SKIP_CONTEXTS), ecskip_bytes 2 f8 0c, ecskip_rt 1 0 0 1,
+  ecskip_cdf_eq. Symbol order mirrors write_modes_b :4980-4985 (first
+  arithmetic-coded symbol of each I_SLICE block via encode_skip_coeff_av1
+  :995-1000, the ACTIVE skip write; the :4978/:5123 write_skip comments are
+  superseded aom-style calls - court ruling C1).
 
 ## EC3 scope statement
 
