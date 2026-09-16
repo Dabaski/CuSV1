@@ -6695,6 +6695,227 @@ static const AomCdfProb default_skip_cdfs[SKIP_CONTEXTS][CDF_SIZE(2)] = {
     {AOM_CDF2(31671)}, {AOM_CDF2(16515)}, {AOM_CDF2(4576)}
 };
 
+// ==== SVT-AV1 entropy_coding.h :116 - AomWriteBitBuffer (verbatim extract; do not edit) ====
+typedef struct AomWriteBitBuffer {
+    uint8_t* bit_buffer;
+    uint32_t bit_offset;
+} AomWriteBitBuffer;
+
+// ==== SVT-AV1 entropy_coding.h :121 - wb prototypes (verbatim line-range extract; do not edit) ====
+int32_t  svt_aom_wb_is_byte_aligned(const AomWriteBitBuffer* wb);
+uint32_t svt_aom_wb_bytes_written(const AomWriteBitBuffer* wb);
+
+void svt_aom_wb_write_bit(AomWriteBitBuffer* wb, int32_t bit);
+void svt_aom_wb_write_literal(AomWriteBitBuffer* wb, int32_t data, int32_t bits);
+
+void svt_aom_wb_write_inv_signed_literal(AomWriteBitBuffer* wb, int32_t data, int32_t bits);
+
+// ==== SVT-AV1 av1_structs.h :23 - ObuType (verbatim extract; do not edit) ====
+typedef enum ATTRIBUTE_PACKED {
+    OBU_SEQUENCE_HEADER        = 1,
+    OBU_TEMPORAL_DELIMITER     = 2,
+    OBU_FRAME_HEADER           = 3,
+    OBU_TILE_GROUP             = 4,
+    OBU_METADATA               = 5,
+    OBU_FRAME                  = 6,
+    OBU_REDUNDANT_FRAME_HEADER = 7,
+    OBU_PADDING                = 15,
+} ObuType;
+
+// ==== SVT-AV1 definitions.h :1493 - AomCodecErr (verbatim extract; do not edit) ====
+typedef enum AomCodecErr {
+    /*!\brief Operation completed without error */
+    SVT_AOM_CODEC_OK,
+    /*!\brief Unspecified error */
+    SVT_AOM_CODEC_ERROR,
+    /*!\brief Memory operation failed */
+    SVT_AOM_CODEC_MEM_ERROR,
+    /*!\brief ABI version mismatch */
+    SVT_AOM_CODEC_ABI_MISMATCH,
+    /*!\brief Algorithm does not have required capability */
+    SVT_AOM_CODEC_INCAPABLE,
+    /*!\brief The given Bitstream is not supported.
+    *
+    * The Bitstream was unable to be parsed at the highest level. The decoder
+    * is unable to proceed. This error \ref SHOULD be treated as fatal to the
+    * stream. */
+    SVT_AOM_CODEC_UNSUP_BITSTREAM,
+    /*!\brief Encoded Bitstream uses an unsupported feature
+    *
+    * The decoder does not implement a feature required by the encoder. This
+    * return code should only be used for features that prevent future
+    * pictures from being properly decoded. This error \ref MAY be treated as
+    * fatal to the stream or \ref MAY be treated as fatal to the current GOP.
+    */
+    SVT_AOM_CODEC_UNSUP_FEATURE,
+    /*!\brief The coded data for this stream is corrupt or incomplete
+    *
+    * There was a problem decoding the current frame.  This return code
+    * should only be used for failures that prevent future pictures from
+    * being properly decoded. This error \ref MAY be treated as fatal to the
+    * stream or \ref MAY be treated as fatal to the current GOP. If decoding
+    * is continued for the current GOP, artifacts may be present.
+    */
+    SVT_AOM_CODEC_CORRUPT_FRAME,
+    /*!\brief An application-supplied parameter is not valid.
+    *
+    */
+    SVT_AOM_CODEC_INVALID_PARAM,
+    /*!\brief An iterator reached the end of list.
+    *
+    */
+    SVT_AOM_CODEC_LIST_END
+} AomCodecErr;
+
+// ==== SVT-AV1 EbSvtAv1.h :122 - EbErrorType (verbatim extract; do not edit) ====
+typedef enum EbErrorType {
+    EB_ErrorNone                   = 0,
+    EB_DecUnsupportedBitstream     = (int32_t)0x40001000,
+    EB_DecNoOutputPicture          = (int32_t)0x40001004,
+    EB_DecDecodingError            = (int32_t)0x40001008,
+    EB_Corrupt_Frame               = (int32_t)0x4000100C,
+    EB_ErrorInsufficientResources  = (int32_t)0x80001000,
+    EB_ErrorUndefined              = (int32_t)0x80001001,
+    EB_ErrorInvalidComponent       = (int32_t)0x80001004,
+    EB_ErrorBadParameter           = (int32_t)0x80001005,
+    EB_ErrorDestroyThreadFailed    = (int32_t)0x80002012,
+    EB_ErrorSemaphoreUnresponsive  = (int32_t)0x80002021,
+    EB_ErrorDestroySemaphoreFailed = (int32_t)0x80002022,
+    EB_ErrorCreateMutexFailed      = (int32_t)0x80002030,
+    EB_ErrorMutexUnresponsive      = (int32_t)0x80002031,
+    EB_ErrorDestroyMutexFailed     = (int32_t)0x80002032,
+    EB_NoErrorEmptyQueue           = (int32_t)0x80002033,
+    EB_NoErrorFifoShutdown         = (int32_t)0x80002034,
+    EB_ErrorMax                    = 0x7FFFFFFF
+} EbErrorType;
+
+// ==== SVT-AV1 entropy_coding.c :1310 - k_maximum_leb_128_size (verbatim extract; do not edit) ====
+static const size_t   k_maximum_leb_128_size  = 8;
+
+// ==== SVT-AV1 entropy_coding.c :1311 - k_maximum_leb_128_value (verbatim extract; do not edit) ====
+static const uint64_t k_maximum_leb_128_value = 0xFFFFFFFFFFFFFF; // 2 ^ 56 - 1
+
+// ==== SVT-AV1 entropy_coding.c :1313 - svt_aom_uleb_size_in_bytes (verbatim extract; do not edit) ====
+size_t svt_aom_uleb_size_in_bytes(uint64_t value) {
+    size_t size = 0;
+    do {
+        ++size;
+    } while ((value >>= 7) != 0);
+    return size;
+}
+
+// ==== SVT-AV1 entropy_coding.c :1321 - svt_aom_uleb_encode (verbatim extract; do not edit) ====
+int32_t svt_aom_uleb_encode(uint64_t value, size_t available, uint8_t* coded_value, size_t* coded_size) {
+    const size_t leb_size = svt_aom_uleb_size_in_bytes(value);
+    if (value > k_maximum_leb_128_value || leb_size > k_maximum_leb_128_size || leb_size > available || !coded_value ||
+        !coded_size) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < leb_size; ++i) {
+        uint8_t byte = value & 0x7f;
+        value >>= 7;
+
+        if (value != 0) {
+            byte |= 0x80; // Signal that more bytes follow.
+        }
+
+        *(coded_value + i) = byte;
+    }
+
+    *coded_size = leb_size;
+    return 0;
+}
+
+// ==== SVT-AV1 entropy_coding.c :1343 - svt_aom_wb_is_byte_aligned (verbatim extract; do not edit) ====
+int32_t svt_aom_wb_is_byte_aligned(const AomWriteBitBuffer* wb) {
+    return (wb->bit_offset % CHAR_BIT == 0);
+}
+
+// ==== SVT-AV1 entropy_coding.c :1347 - svt_aom_wb_bytes_written (verbatim extract; do not edit) ====
+uint32_t svt_aom_wb_bytes_written(const AomWriteBitBuffer* wb) {
+    return wb->bit_offset / CHAR_BIT + (wb->bit_offset % CHAR_BIT > 0);
+}
+
+// ==== SVT-AV1 entropy_coding.c :1351 - svt_aom_wb_write_bit_inlined (verbatim extract; do not edit) ====
+INLINE static void svt_aom_wb_write_bit_inlined(AomWriteBitBuffer* wb, int32_t bit) {
+    const int32_t off = (int32_t)wb->bit_offset;
+    const int32_t p   = off / CHAR_BIT;
+    const int32_t q   = CHAR_BIT - 1 - off % CHAR_BIT;
+    if (q == CHAR_BIT - 1) {
+        // zero next char and write bit
+        wb->bit_buffer[p] = (uint8_t)(bit << q);
+    } else {
+        wb->bit_buffer[p] &= ~(1 << q);
+        wb->bit_buffer[p] |= bit << q;
+    }
+    wb->bit_offset = off + 1;
+}
+
+// ==== SVT-AV1 entropy_coding.c :1365 - svt_aom_wb_write_literal_inlined (verbatim extract; do not edit) ====
+INLINE static void svt_aom_wb_write_literal_inlined(AomWriteBitBuffer* wb, int32_t data, int32_t bits) {
+    int32_t bit;
+    for (bit = bits - 1; bit >= 0; bit--) {
+        svt_aom_wb_write_bit(wb, (data >> bit) & 1);
+    }
+}
+
+// ==== SVT-AV1 entropy_coding.c :1372 - svt_aom_wb_write_bit (verbatim extract; do not edit) ====
+void NOINLINE svt_aom_wb_write_bit(AomWriteBitBuffer* wb, int32_t bit) {
+    svt_aom_wb_write_bit_inlined(wb, bit);
+}
+
+// ==== SVT-AV1 entropy_coding.c :1376 - svt_aom_wb_write_literal (verbatim extract; do not edit) ====
+void NOINLINE svt_aom_wb_write_literal(AomWriteBitBuffer* wb, int32_t data, int32_t bits) {
+    svt_aom_wb_write_literal_inlined(wb, data, bits);
+}
+
+// ==== SVT-AV1 entropy_coding.c :1380 - svt_aom_wb_write_inv_signed_literal (verbatim extract; do not edit) ====
+void NOINLINE svt_aom_wb_write_inv_signed_literal(AomWriteBitBuffer* wb, int32_t data, int32_t bits) {
+    svt_aom_wb_write_literal_inlined(wb, data, bits + 1);
+}
+
+// ==== SVT-AV1 entropy_coding.c :3639 - write_obu_header (verbatim extract; do not edit) ====
+static uint32_t write_obu_header(ObuType obu_type, int32_t obuExtension, uint8_t* const dst) {
+    AomWriteBitBuffer wb   = {dst, 0};
+    uint32_t          size = 0;
+
+    svt_aom_wb_write_literal(&wb, 0, 1); // forbidden bit.
+    svt_aom_wb_write_literal(&wb, (int32_t)obu_type, 4);
+    svt_aom_wb_write_literal(&wb, obuExtension ? 1 : 0, 1);
+    svt_aom_wb_write_literal(&wb, 1, 1); // obu_has_payload_length_field
+    svt_aom_wb_write_literal(&wb, 0, 1); // reserved
+
+    if (obuExtension) {
+        svt_aom_wb_write_literal(&wb, obuExtension & 0xFF, 8);
+    }
+    size = svt_aom_wb_bytes_written(&wb);
+    return size;
+}
+
+// ==== SVT-AV1 entropy_coding.c :3656 - write_uleb_obu_size (verbatim extract; do not edit) ====
+static int32_t write_uleb_obu_size(uint32_t obu_header_size, uint32_t obu_payload_size, uint8_t* dest) {
+    const uint32_t obu_size       = obu_payload_size;
+    const uint32_t offset         = obu_header_size;
+    size_t         coded_obu_size = 0;
+
+    if (svt_aom_uleb_encode(obu_size, sizeof(obu_size), dest + offset, &coded_obu_size) != 0) {
+        return SVT_AOM_CODEC_ERROR;
+    }
+
+    return SVT_AOM_CODEC_OK;
+}
+
+// ==== SVT-AV1 entropy_coding.c :3953 - svt_aom_encode_td_av1 (verbatim extract; do not edit) ====
+EbErrorType svt_aom_encode_td_av1(uint8_t* output_bitstream_ptr) {
+    assert(output_bitstream_ptr != NULL);
+
+    // move data and insert OBU_TD preceded by optional 4 byte size
+    // OBUs are preceded/succeeded by an unsigned leb128 coded integer.
+    write_uleb_obu_size(write_obu_header(OBU_TEMPORAL_DELIMITER, 0, output_bitstream_ptr), 0, output_bitstream_ptr);
+    return EB_ErrorNone;
+}
+
 // ==== SVT-AV1 enc_intra_prediction.c :40 - build_intra_predictors (verbatim EXCEPT the flagged get_filt_type shim) ====
 static void build_intra_predictors(const MacroBlockD* xd, uint8_t* top_neigh_array, uint8_t* left_neigh_array,
                                    // const uint8_t *ref,    int32_t ref_stride,

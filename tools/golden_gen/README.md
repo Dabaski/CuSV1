@@ -106,6 +106,12 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | default_partition_cdf | Codec/cabac_context_model.c:134-155 | ECP1: 20-row partition cdf defaults (PARTITION_CONTEXTS = 5 * 4) |
 | svt_aom_partition_cdf_length | Codec/entropy_coding.c:922-930 | ECP1: partition alphabet 10/10/10/4/8 (16/32/64/8x8/128) |
 | SKIP_CONTEXTS, default_skip_cdfs | Codec/definitions.h:1313, Codec/cabac_context_model.c:594-596 | ECP2: skip symbol cdfs (the FIRST arithmetic-coded symbol of each I_SLICE block, write_modes_b :4980-4985 via encode_skip_coeff_av1 :995-1000; context av1_get_skip_context :983-989) |
+| AomWriteBitBuffer, wb prototypes | Codec/entropy_coding.h:116-127 | BSF2: raw-bit-writer struct + prototypes (the .c extracts call svt_aom_wb_write_bit before its definition, :1368 -> :1372) |
+| k_maximum_leb_128_size/value, svt_aom_uleb_size_in_bytes, svt_aom_uleb_encode | Codec/entropy_coding.c:1310-1341 | BSF2: uleb128 ground floor |
+| svt_aom_wb_is_byte_aligned, svt_aom_wb_bytes_written, wb_write_bit/literal(+_inlined)/inv_signed_literal | Codec/entropy_coding.c:1343-1382 | BSF2: raw bit/literal writers + alignment/size probes |
+| write_obu_header, write_uleb_obu_size, svt_aom_encode_td_av1 | Codec/entropy_coding.c:3639-3666, :3953-3960 | BSF2: OBU header (forbidden 0/type 4b/ext/has_size hardcoded 1 :3646/reserved), uleb obu size, temporal delimiter (2 bytes 12 00) |
+| ObuType, AomCodecErr | Codec/av1_structs.h:22-32, Codec/definitions.h:1493-1535 | BSF2: OBU type enum (TD=2/SPS=1/FRAME=6) + codec return codes (OK/ERROR consumed by write_uleb_obu_size) |
+| EbErrorType (EB_ErrorNone) | API/EbSvtAv1.h:122-124 | BSF2: TD return type (only EB_ErrorNone consumed by svt_aom_encode_td_av1) |
 
 Second documented deviation (EC0): the WORDS_BIGENDIAN `#if` guard around the
 HToLE/HToBE macro family (bitstream_unit.h:148-164) is dropped; the
@@ -128,7 +134,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **233/233 lines identical**, covering:
+that file — currently **238/238 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -179,6 +185,14 @@ that file — currently **233/233 lines identical**, covering:
   arithmetic-coded symbol of each I_SLICE block via encode_skip_coeff_av1
   :995-1000, the ACTIVE skip write; the :4978/:5123 write_skip comments are
   superseded aom-style calls - court ruling C1).
+- BSF2 bitstream ground-floor gate lines: obu_hdr (header byte per type -
+  SPS 0x0a / TD 0x12 / FRAME 0x32, has_size hardcoded 1), td_bytes 2 12 00
+  a7 (the temporal delimiter is exactly 2 bytes, poison tail intact),
+  uleb boundary classes 0/127/128/255/16383/16384 (1/1/2/2/2/3 bytes; note
+  16383 = ff 7f - the measured value, not the intuitive ff 3f), wblit
+  (bit+literal+inv_signed_literal packing across byte boundaries = 20 bits
+  -> 3 bytes aa bf 60 with byte 3 untouched), wbalign (zero-pad to byte
+  alignment -> 3 whole bytes, aligned).
 
 ## EC3 scope statement
 

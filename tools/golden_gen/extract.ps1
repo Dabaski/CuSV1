@@ -36,6 +36,9 @@ $files = @{
     "cabac_context_model.h" = (Get-Content (Join-Path $src "Codec\cabac_context_model.h") -Raw)
     "cabac_context_model.c" = (Get-Content (Join-Path $src "Codec\cabac_context_model.c") -Raw)
     "entropy_coding.c" = (Get-Content (Join-Path $src "Codec\entropy_coding.c") -Raw)
+    "entropy_coding.h" = (Get-Content (Join-Path $src "Codec\entropy_coding.h") -Raw)
+    "av1_structs.h" = (Get-Content (Join-Path $src "Codec\av1_structs.h") -Raw)
+    "EbSvtAv1.h" = (Get-Content (Join-Path $repo "third_party\SVT-AV1\Source\API\EbSvtAv1.h") -Raw)
     "entdec.c"           = (Get-Content (Join-Path $src3p "src\entdec.c") -Raw)
     "entdec.h"           = (Get-Content (Join-Path $src3p "inc\entdec.h") -Raw)
     "bitreader.h"        = (Get-Content (Join-Path $src3p "inc\bitreader.h") -Raw)
@@ -442,6 +445,41 @@ Emit-Verbatim "entropy_coding.c" "int32_t svt_aom_partition_cdf_length" "svt_aom
 # above_skip + left_skip of the neighbor mbmis, :983-989).
 Emit-Macro "definitions.h" "#define SKIP_CONTEXTS" "SKIP_CONTEXTS"
 Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_skip_cdfs" "default_skip_cdfs"
+
+# ---- bitstream ground floor (BSF2, l8_bitstream) ----
+# Raw-bit-writer + container primitives, all from entropy_coding.{h,c}
+# (the pinned packer's ground floor). AomWriteBitBuffer (entropy_coding.h:
+# 116-119); uleb helpers (:1313-1341 with their file-scope constants
+# :1310-1311); wb byte-alignment/size (:1343-1349); bit/literal writers
+# (:1351-1382); OBU header (:3639-3654), uleb obu size (:3656-3666), the
+# temporal delimiter (:3953-3960). ObuType (av1_structs.h:22-32),
+# AomCodecErr (definitions.h:1493-1535, only OK/ERROR consumed by
+# write_uleb_obu_size), EbErrorType (API/EbSvtAv1.h, only EB_ErrorNone
+# consumed by the TD extract). CHAR_BIT resolves via shims.h <limits.h>.
+Emit-Verbatim "entropy_coding.h" "typedef struct AomWriteBitBuffer" "AomWriteBitBuffer"
+# entropy_coding.h:121-127 prototypes: the .c extracts call
+# svt_aom_wb_write_bit before its definition (:1368 -> :1372); the original
+# TU sees these declarations via the header include.
+Emit-Lines "entropy_coding.h" "int32_t  svt_aom_wb_is_byte_aligned" "void svt_aom_wb_write_inv_signed_literal" "wb prototypes"
+# Enums consumed by the function extracts (must precede them).
+Emit-Verbatim "av1_structs.h" "typedef enum ATTRIBUTE_PACKED {
+    OBU_SEQUENCE_HEADER" "ObuType"
+Emit-Verbatim "definitions.h" "typedef enum AomCodecErr" "AomCodecErr"
+Emit-Verbatim "EbSvtAv1.h" "typedef enum EbErrorType" "EbErrorType"
+Emit-Macro "entropy_coding.c" "static const size_t   k_maximum_leb_128_size" "k_maximum_leb_128_size"
+Emit-Macro "entropy_coding.c" "static const uint64_t k_maximum_leb_128_value" "k_maximum_leb_128_value"
+Emit-Verbatim "entropy_coding.c" "size_t svt_aom_uleb_size_in_bytes" "svt_aom_uleb_size_in_bytes"
+Emit-Verbatim "entropy_coding.c" "int32_t svt_aom_uleb_encode" "svt_aom_uleb_encode"
+Emit-Verbatim "entropy_coding.c" "int32_t svt_aom_wb_is_byte_aligned" "svt_aom_wb_is_byte_aligned"
+Emit-Verbatim "entropy_coding.c" "uint32_t svt_aom_wb_bytes_written" "svt_aom_wb_bytes_written"
+Emit-Verbatim "entropy_coding.c" "INLINE static void svt_aom_wb_write_bit_inlined" "svt_aom_wb_write_bit_inlined"
+Emit-Verbatim "entropy_coding.c" "INLINE static void svt_aom_wb_write_literal_inlined" "svt_aom_wb_write_literal_inlined"
+Emit-Verbatim "entropy_coding.c" "void NOINLINE svt_aom_wb_write_bit" "svt_aom_wb_write_bit"
+Emit-Verbatim "entropy_coding.c" "void NOINLINE svt_aom_wb_write_literal" "svt_aom_wb_write_literal"
+Emit-Verbatim "entropy_coding.c" "void NOINLINE svt_aom_wb_write_inv_signed_literal" "svt_aom_wb_write_inv_signed_literal"
+Emit-Verbatim "entropy_coding.c" "static uint32_t write_obu_header" "write_obu_header"
+Emit-Verbatim "entropy_coding.c" "static int32_t write_uleb_obu_size" "write_uleb_obu_size"
+Emit-Verbatim "entropy_coding.c" "EbErrorType svt_aom_encode_td_av1" "svt_aom_encode_td_av1"
 
 # ---- build_intra_predictors with the documented get_filt_type shim ----
 $r = Extract-Block $files["enc_intra_prediction.c"] "static void build_intra_predictors(const MacroBlockD* xd" "build_intra_predictors"

@@ -2067,5 +2067,62 @@ int main(void) {
         }
         printf("ecskip_cdf_eq %d\n", cdf_eq);
     }
+
+    // ---- BSF2: l8_bitstream ground-floor gate lines -------------------------
+    // Raw-bit-writer + container primitives (entropy_coding.{h,c} extracts):
+    // OBU header bytes per type (write_obu_header :3639-3654 - forbidden 0 /
+    // type 4b / ext 0 / has_size 1 hardcoded :3646 / reserved 0); the
+    // temporal delimiter (svt_aom_encode_td_av1 :3953-3960 = header + uleb
+    // size 0 -> 2 bytes 12 00); uleb boundary classes (svt_aom_uleb_size_in
+    // _bytes :1313-1319 + svt_aom_uleb_encode :1321-1341); literal/bit
+    // packing across byte boundaries (wb_write_bit :1372-1374, write_literal
+    // :1376-1378, write_inv_signed_literal :1380-1382 = bits+1 two's
+    // complement) with wb_bytes_written / wb_is_byte_aligned probes
+    // (:1343-1349) and an untouchbed-poison tail proving the write extent.
+    {
+        // (1) OBU header bytes per type (sequential offsets, one byte each)
+        memset(ec_buf, 0, 8);
+        const uint32_t sps_hdr = write_obu_header(OBU_SEQUENCE_HEADER, 0, ec_buf);
+        const uint32_t td_hdr  = write_obu_header(OBU_TEMPORAL_DELIMITER, 0, ec_buf + sps_hdr);
+        const uint32_t frm_hdr = write_obu_header(OBU_FRAME, 0, ec_buf + sps_hdr + td_hdr);
+        printf("obu_hdr %u %02x %u %02x %u %02x\n", sps_hdr, ec_buf[0], td_hdr, ec_buf[1], frm_hdr, ec_buf[2]);
+
+        // (2) temporal delimiter: exactly 2 bytes 12 00, poison tail intact
+        memset(ec_buf, 0xA7, 8);
+        svt_aom_encode_td_av1(ec_buf);
+        printf("td_bytes 2 %02x %02x %02x\n", ec_buf[0], ec_buf[1], ec_buf[2]);
+
+        // (3) uleb boundary classes: 1-byte at 0/127, 2-byte at 128/255/16383,
+        // 3-byte at 16384 (sizes via svt_aom_uleb_size_in_bytes)
+        printf("uleb");
+        static const uint64_t uvals[6] = {0, 127, 128, 255, 16383, 16384};
+        for (int i = 0; i < 6; ++i) {
+            uint8_t out[8] = {0};
+            size_t sz = 0;
+            svt_aom_uleb_encode(uvals[i], sizeof(out), out, &sz);
+            printf(" %llu:%u:", (unsigned long long)uvals[i],
+                   (unsigned)svt_aom_uleb_size_in_bytes(uvals[i]));
+            for (size_t j = 0; j < sz; ++j) printf("%02x", out[j]);
+        }
+        printf("\n");
+
+        // (4) literal/bit packing: 1 bit(1) + 3-bit literal(2) + 8-bit
+        // literal(0xAB) + inv_signed_literal(-5, 6 bits -> 7 written) +
+        // 1 bit(0) = 20 bits -> 3 bytes, not byte-aligned, byte 3 untouched
+        AomWriteBitBuffer wb = {ec_buf, 0};
+        memset(ec_buf, 0x00, 16);
+        svt_aom_wb_write_bit(&wb, 1);
+        svt_aom_wb_write_literal(&wb, 0x2, 3);
+        svt_aom_wb_write_literal(&wb, 0xAB, 8);
+        svt_aom_wb_write_inv_signed_literal(&wb, -5, 6);
+        svt_aom_wb_write_bit(&wb, 0);
+        printf("wblit %u %d %02x %02x %02x %02x\n", svt_aom_wb_bytes_written(&wb),
+               svt_aom_wb_is_byte_aligned(&wb), ec_buf[0], ec_buf[1], ec_buf[2], ec_buf[3]);
+
+        // (5) pad to byte alignment with zero bits (the byte_alignment()
+        // pattern): 24 bits -> 3 whole bytes, aligned
+        while (!svt_aom_wb_is_byte_aligned(&wb)) svt_aom_wb_write_bit(&wb, 0);
+        printf("wbalign %u %d\n", svt_aom_wb_bytes_written(&wb), svt_aom_wb_is_byte_aligned(&wb));
+    }
     return 0;
 }

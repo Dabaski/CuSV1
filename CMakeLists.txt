@@ -26,6 +26,7 @@ if(BUILD_TESTING)
   add_subdirectory(src/l4_intra)
   add_subdirectory(src/l5_motion)
   add_subdirectory(src/l7_entropy)
+  add_subdirectory(src/l8_bitstream)
   add_subdirectory(src/l6_pipeline)
 endif()
 
