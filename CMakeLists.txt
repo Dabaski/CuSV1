@@ -25,8 +25,8 @@ if(BUILD_TESTING)
   add_subdirectory(src/l3_transforms)
   add_subdirectory(src/l4_intra)
   add_subdirectory(src/l5_motion)
-  add_subdirectory(src/l6_pipeline)
   add_subdirectory(src/l7_entropy)
+  add_subdirectory(src/l6_pipeline)
 endif()
 
 # benchmark tool: own target, not a ctest (tools/bench/README notes inside

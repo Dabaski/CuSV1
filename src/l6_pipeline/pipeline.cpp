@@ -748,9 +748,17 @@ void encodeFrameRecon16x16(const pixels::Plane& src, pixels::Plane& recon, std::
 }
 
 void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          std::uint8_t* modes, transforms::TxType txType) {
+                          std::uint8_t* modes, transforms::TxType txType, entropy::AomWriter* w,
+                          entropy::EcFrameContext* fc) {
     const int gridW = src.width() / 16;
     const int gridH = src.height() / 16;
+    // BSF1 symbol emission (D5): kf y mode + angle delta + FI flag=0 only.
+    if (w && fc) {
+        entropy::initDefaultEcFrameContext(fc);
+        entropy::odEcEncReset(&w->ec);
+        w->allow_update_cdf = 1;
+        w->pos = 0;
+    }
     for (int by = 0; by < gridH; ++by) {
         for (int bx = 0; bx < gridW; ++bx) {
             const int px = bx * 16;
@@ -790,6 +798,18 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
                                                         nLeftPx, nBottomLeftPx, aboveLeft, nctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
+            if (w && fc) {
+                int topCtx = 0, leftCtx = 0;
+                entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
+                                       hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode), &topCtx, &leftCtx);
+                entropy::writeKfLumaMode(w, fc, entropy::BLOCK_16X16,
+                                         static_cast<entropy::PredictionMode>(d.mode), topCtx, leftCtx, 0);
+                if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0,
+                                                static_cast<std::uint32_t>(d.mode))) {
+                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_16X16, entropy::FILTER_INTRA_MODES);
+                }
+            }
+
             std::uint8_t pred[256] = {0};
             intra::buildIntraPredictors(pred, 16, d.mode, 0, 16, 16, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
@@ -811,6 +831,7 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
                 for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = reconBlk[y * 16 + x];
         }
     }
+    if (w) entropy::odEcStopEncode(w);
 }
 
 void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
@@ -876,9 +897,17 @@ void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std:
 // SCAN POLICY IS OURS: fixed defaultScan16x16 for every block (see
 // encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
 void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType) {
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           entropy::AomWriter* w, entropy::EcFrameContext* fc) {
     const int gridW = src.width() / 16;
     const int gridH = src.height() / 16;
+    // BSF1 symbol emission (D5): identical surface to the lossless variant.
+    if (w && fc) {
+        entropy::initDefaultEcFrameContext(fc);
+        entropy::odEcEncReset(&w->ec);
+        w->allow_update_cdf = 1;
+        w->pos = 0;
+    }
     transforms::QuantTables qt;
     transforms::buildQuantTables(qindex, qt);
     std::int16_t scan[256];
@@ -922,6 +951,18 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
                                                         nLeftPx, nBottomLeftPx, aboveLeft, nctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
+            if (w && fc) {
+                int topCtx = 0, leftCtx = 0;
+                entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
+                                       hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode), &topCtx, &leftCtx);
+                entropy::writeKfLumaMode(w, fc, entropy::BLOCK_16X16,
+                                         static_cast<entropy::PredictionMode>(d.mode), topCtx, leftCtx, 0);
+                if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0,
+                                                static_cast<std::uint32_t>(d.mode))) {
+                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_16X16, entropy::FILTER_INTRA_MODES);
+                }
+            }
+
             std::uint8_t pred[256] = {0};
             intra::buildIntraPredictors(pred, 16, d.mode, 0, 16, 16, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
@@ -946,6 +987,7 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = blk[y * 16 + x];
         }
     }
+    if (w) entropy::odEcStopEncode(w);
 }
 
 // ---- L6: 32x32 frame compositions. M1 availability + REAL recon top-right

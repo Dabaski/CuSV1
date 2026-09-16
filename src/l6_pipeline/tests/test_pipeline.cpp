@@ -2532,6 +2532,98 @@ TEST_CASE("frame auto 16x16 with quantization matches the f16q generator golden"
     }
     CHECK(coeffsOk);
 }
+TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
+    // Gate: bsf1_modes 1 7 0 0, bsf1_ctx 0 0 0 1 1 0 4 0,
+    // bsf1_bytes 3 7f f8 b0, bsf1_rt 1 3 7 3 0 0 0 0, bsf1_cdf_eq 1
+    // (tools/golden_gen/main_primitives.c BSF1 block). f16dc fixture: top
+    // half = f16 ramp (rows 0-15: 4*(x+y+1)), bottom-left 16x16 flat 94,
+    // bottom-right 16x16 flat 126 - the D2 policy decides {V, D203, DC, DC},
+    // covering the FI flag=0 write path (DC blocks) that the f16 fixture
+    // lacks. Emission is symbols only per D5: kf y mode
+    // (entropy_coding.c:1026-1040 via writeKfLumaMode) + angle delta
+    // (directional, 16x16 >= 8x8, delta 0 -> raw symbol 3) + filter-intra
+    // flag=0 (writeFilterIntra with FILTER_INTRA_MODES) where
+    // filterIntraAllowed (mode_decision.c:108-119, DC_PRED-only). No
+    // partition/skip symbols (ECP1/ECP2), no tile assembly (BSF3/BSF4).
+    pixels::Plane plane(32, 32, 4);
+    pixels::Plane recon(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) {
+            if (y < 16)
+                plane.at(x, y) = static_cast<std::uint8_t>(4 * (x + y + 1));
+            else if (x < 16)
+                plane.at(x, y) = 94;
+            else
+                plane.at(x, y) = 126;
+        }
+
+    const std::uint8_t goldenModes[4] = {1, 7, 0, 0};
+    const unsigned char goldenBytes[3] = {0x7f, 0xf8, 0xb0};
+
+    std::int32_t coeffs[1024] = {0};
+    std::uint8_t modes[4] = {0};
+    entropy::EcFrameContext fc;
+    entropy::AomWriter w{};
+    unsigned char buf[64] = {0};
+    w.ec.buf = buf;
+    pipeline::encodeFrameAuto16x16(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT, &w, &fc);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i)
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    CHECK(modesOk);
+
+    REQUIRE(w.pos == 3);
+    for (int i = 0; i < 3; ++i) CHECK((unsigned)buf[i] == goldenBytes[i]);
+
+    // reader round-trip with adaptation: contexts recomputed from the
+    // DECIDED neighbor modes (DC_PRED when unavailable), fresh default CDFs
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR);
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    static const int wantRt[8] = {1, 3, 7, 3, 0, 0, 0, 0};
+    int ri = 0;
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const bool hasTop = by > 0, hasLeft = bx > 0;
+        const int topMode = hasTop ? modes[(by - 1) * 2 + bx] : 0;
+        const int leftMode = hasLeft ? modes[by * 2 + bx - 1] : 0;
+        int topCtx, leftCtx;
+        entropy::getKfYModeCtx(hasLeft ? 1 : 0, leftMode, hasTop ? 1 : 0, topMode, &topCtx, &leftCtx);
+        int delta = 0;
+        const int m = (int)entropy::readKfLumaMode(&r, &fcR, entropy::BLOCK_16X16, topCtx, leftCtx, &delta);
+        CHECK(m == wantRt[ri++]);
+        if (entropy::isDirectionalMode((entropy::PredictionMode)modes[b])) {
+            CHECK(delta == wantRt[ri++]);  // raw symbol (delta + MAX_ANGLE_DELTA)
+        }
+        if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0, (std::uint32_t)modes[b])) {
+            entropy::FilterIntraMode f;
+            CHECK(entropy::readFilterIntra(&r, &fcR, entropy::BLOCK_16X16, &f) == wantRt[ri++]);
+        }
+    }
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+
+    // Q variant: same decided modes and identical symbol stream (lossless
+    // and q100 decisions coincide for this fixture, as for f16/f16q)
+    pixels::Plane reconQ(32, 32, 4);
+    std::int32_t coeffsQ[1024] = {0};
+    std::uint8_t modesQ[4] = {0};
+    entropy::EcFrameContext fcQ;
+    entropy::AomWriter wQ{};
+    unsigned char bufQ[64] = {0};
+    wQ.ec.buf = bufQ;
+    pipeline::encodeFrameAuto16x16Q(plane, reconQ, coeffsQ, modesQ, 100, transforms::TxType::DCT_DCT, &wQ, &fcQ);
+    bool modesQOk = true;
+    for (int i = 0; i < 4; ++i)
+        if (modesQ[i] != goldenModes[i]) modesQOk = false;
+    CHECK(modesQOk);
+    REQUIRE(wQ.pos == 3);
+    for (int i = 0; i < 3; ++i) CHECK((unsigned)bufQ[i] == goldenBytes[i]);
+    CHECK(entropy::ecFrameCdfsEqual(&fcQ, &fcR) == 1);
+}
+
 TEST_CASE("gpu frame auto 16x16 matches host encodeFrameAuto16x16 (host decides, gpu executes)") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");

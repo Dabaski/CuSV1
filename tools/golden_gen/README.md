@@ -123,7 +123,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **219/219 lines identical**, covering:
+that file — currently **224/224 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -148,6 +148,15 @@ that file — currently **219/219 lines identical**, covering:
 - EC3 intra-frame KF symbol lines: eckf_ctx (context pairs via
   intra_mode_context), eckf_bytes (mode + angle-delta + filter-intra pair
   with adaptation), eckf_rt (decode-back), eckf_cdf_eq.
+- BSF1 l6-emission gate lines: bsf1_modes (f16dc fixture — top half = f16
+  ramp, bottom-left 16x16 flat 94, bottom-right 16x16 flat 126 — decided by
+  the same svtd_frame_auto_16x16_blocks D2 driver to {V, D203, DC, DC}),
+  bsf1_ctx (context pairs from the DECIDED neighbor modes,
+  unavailable -> DC_PRED context), bsf1_bytes (the kf y mode + angle-delta +
+  filter-intra flag=0 symbol stream over that frame, adaptation on),
+  bsf1_rt (decode-back in write order), bsf1_cdf_eq. Symbols only per the
+  ratified D5: no partition/skip symbols (ECP1/ECP2), no tile assembly
+  (BSF3/BSF4).
 
 ## EC3 scope statement
 

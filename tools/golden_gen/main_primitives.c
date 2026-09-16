@@ -1633,5 +1633,133 @@ int main(void) {
         if (memcmp(filter_intra_mode_cdf, filter_intra_mode_cdf_r, sizeof(filter_intra_mode_cdf))) cdf_eq = 0;
         printf("eckf_cdf_eq %d\n", cdf_eq);
     }
+
+    // ---- BSF1: l6 16x16 frame symbol emission gate lines -------------------
+    // f16dc fixture: top half identical to f16 (rows 0-15 ramp 4*(x+y+1)),
+    // bottom-left 16x16 flat 94 (DC(top-only) of the ramp row 15 above =
+    // mean(64..124 step 4) = 94 -> SAD 0 wins) and bottom-right 16x16 flat
+    // 126 (DC of above mean 158 and left 94 = 126 -> SAD 0 wins), so the
+    // D2 policy decides {directional, directional, DC, DC} and the frame
+    // covers the FI flag=0 write path (DC blocks) that f16 lacks.
+    // Emission mirrors the write_modes_b I_SLICE symbol order
+    // (entropy_coding.c:4977-5113): per block, contexts from the DECIDED
+    // neighbor modes via svt_aom_get_kf_y_mode_ctx (:1004-1021,
+    // unavailable -> DC_PRED), mode symbol encode_intra_luma_mode_kf_av1
+    // (:1026-1040, angle delta when bsize >= 8x8 and directional), then the
+    // filter-intra flag (:5047-5060) where svt_aom_filter_intra_allowed
+    // (mode_decision.c:108-119). l6 emits FILTER_INTRA_MODES (flag 0) only;
+    // partition/skip symbols are ECP1/ECP2 (court-ordered exception), tile
+    // assembly is BSF3/BSF4.
+    {
+        uint8_t src[1024];
+        for (int y = 0; y < 32; ++y) {
+            for (int x = 0; x < 32; ++x) {
+                if (y < 16)
+                    src[y * 32 + x] = (uint8_t)(4 * (x + y + 1));
+                else if (x < 16)
+                    src[y * 32 + x] = 94;
+                else
+                    src[y * 32 + x] = 126;
+            }
+        }
+        uint8_t recon[1024];
+        int32_t coeffs[1024];
+        int modes[4] = {0};
+        svtd_frame_auto_16x16_blocks(src, recon, coeffs, modes);
+        printf("bsf1_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
+        printf("\n");
+
+        static AomCdfProb bsf1_kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+        memcpy(bsf1_kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(bsf1_kf_y_cdf));
+        static AomCdfProb bsf1_angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+        memcpy(bsf1_angle_delta_cdf, default_angle_delta_cdf, sizeof(bsf1_angle_delta_cdf));
+        static AomCdfProb bsf1_filter_intra_cdfs[BLOCK_SIZES_ALL][CDF_SIZE(2)];
+        memcpy(bsf1_filter_intra_cdfs, default_filter_intra_cdfs, sizeof(bsf1_filter_intra_cdfs));
+
+        AomWriter w;
+        w.ec.buf = ec_buf;
+        svt_od_ec_enc_reset(&w.ec);
+        w.allow_update_cdf = 1;
+        w.pos              = 0;
+
+        printf("bsf1_ctx");
+        for (int b = 0; b < 4; ++b) {
+            const int bx = b % 2, by = b / 2;
+            const int top_mode  = by > 0 ? modes[(by - 1) * 2 + bx] : DC_PRED;
+            const int left_mode = bx > 0 ? modes[by * 2 + bx - 1] : DC_PRED;
+            const int top_ctx   = intra_mode_context[top_mode];
+            const int left_ctx  = intra_mode_context[left_mode];
+            printf(" %d %d", top_ctx, left_ctx);
+            aom_write_symbol(&w, modes[b], bsf1_kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+            if (BLOCK_16X16 >= BLOCK_8X8 && av1_is_directional_mode((PredictionMode)modes[b])) {
+                aom_write_symbol(&w, MAX_ANGLE_DELTA, bsf1_angle_delta_cdf[modes[b] - V_PRED],
+                                 2 * MAX_ANGLE_DELTA + 1);
+            }
+            if (svt_aom_filter_intra_allowed(1, BLOCK_16X16, 0, (uint32_t)modes[b])) {
+                aom_write_symbol(&w, 0, bsf1_filter_intra_cdfs[BLOCK_16X16], 2);  // flag 0: l6 emits FILTER_INTRA_MODES
+            }
+        }
+        printf("\n");
+        aom_stop_encode(&w);
+        printf("bsf1_bytes %u", w.pos);
+        for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", ec_buf[i]);
+        printf("\n");
+
+        // decode back: fresh default cdfs, identical context computation
+        static AomCdfProb bsf1_kf_y_cdf_r[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+        memcpy(bsf1_kf_y_cdf_r, svt_aom_default_kf_y_mode_cdf, sizeof(bsf1_kf_y_cdf_r));
+        static AomCdfProb bsf1_angle_delta_cdf_r[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+        memcpy(bsf1_angle_delta_cdf_r, default_angle_delta_cdf, sizeof(bsf1_angle_delta_cdf_r));
+        static AomCdfProb bsf1_filter_intra_cdfs_r[BLOCK_SIZES_ALL][CDF_SIZE(2)];
+        memcpy(bsf1_filter_intra_cdfs_r, default_filter_intra_cdfs, sizeof(bsf1_filter_intra_cdfs_r));
+        aom_reader r;
+        if (aom_reader_init(&r, ec_buf, w.pos)) { fprintf(stderr, "BSF1 reader init FAILED\n"); return 1; }
+        r.allow_update_cdf = 1;
+        printf("bsf1_rt");
+        int rt_bad = 0;
+        for (int b = 0; b < 4; ++b) {
+            const int bx = b % 2, by = b / 2;
+            const int top_mode  = by > 0 ? modes[(by - 1) * 2 + bx] : DC_PRED;
+            const int left_mode = bx > 0 ? modes[by * 2 + bx - 1] : DC_PRED;
+            const int top_ctx   = intra_mode_context[top_mode];
+            const int left_ctx  = intra_mode_context[left_mode];
+            const int m = aom_read_symbol_(&r, bsf1_kf_y_cdf_r[top_ctx][left_ctx], INTRA_MODES);
+            if (m != modes[b]) rt_bad = 1;
+            printf(" %d", m);
+            if (av1_is_directional_mode((PredictionMode)modes[b])) {
+                const int d = aom_read_symbol_(&r, bsf1_angle_delta_cdf_r[modes[b] - V_PRED],
+                                               2 * MAX_ANGLE_DELTA + 1);
+                if (d != MAX_ANGLE_DELTA) rt_bad = 1;
+                printf(" %d", d);
+            }
+            if (svt_aom_filter_intra_allowed(1, BLOCK_16X16, 0, (uint32_t)modes[b])) {
+                const int f = aom_read_symbol_(&r, bsf1_filter_intra_cdfs_r[BLOCK_16X16], 2);
+                if (f != 0) rt_bad = 1;
+                printf(" %d", f);
+            }
+        }
+        printf("\n");
+        if (rt_bad) { fprintf(stderr, "BSF1 roundtrip FAILED\n"); return 1; }
+        int cdf_eq = 1;
+        for (int b = 0; b < 4; ++b) {
+            const int bx = b % 2, by = b / 2;
+            const int top_mode  = by > 0 ? modes[(by - 1) * 2 + bx] : DC_PRED;
+            const int left_mode = bx > 0 ? modes[by * 2 + bx - 1] : DC_PRED;
+            const int top_ctx   = intra_mode_context[top_mode];
+            const int left_ctx  = intra_mode_context[left_mode];
+            if (memcmp(bsf1_kf_y_cdf[top_ctx][left_ctx], bsf1_kf_y_cdf_r[top_ctx][left_ctx],
+                       sizeof(bsf1_kf_y_cdf[0][0]))) cdf_eq = 0;
+            if (av1_is_directional_mode((PredictionMode)modes[b])) {
+                if (memcmp(bsf1_angle_delta_cdf[modes[b] - V_PRED], bsf1_angle_delta_cdf_r[modes[b] - V_PRED],
+                           sizeof(bsf1_angle_delta_cdf[0]))) cdf_eq = 0;
+            }
+            if (svt_aom_filter_intra_allowed(1, BLOCK_16X16, 0, (uint32_t)modes[b])) {
+                if (memcmp(bsf1_filter_intra_cdfs[BLOCK_16X16], bsf1_filter_intra_cdfs_r[BLOCK_16X16],
+                           sizeof(bsf1_filter_intra_cdfs[0]))) cdf_eq = 0;
+            }
+        }
+        printf("bsf1_cdf_eq %d\n", cdf_eq);
+    }
     return 0;
 }

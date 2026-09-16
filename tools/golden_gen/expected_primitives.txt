@@ -217,3 +217,8 @@ eckf_ctx 0 0 1 0 2 1 3 2 3 3
 eckf_bytes 3 47 bd 40
 eckf_rt 0 1 1 1 4 2 0 0 0
 eckf_cdf_eq 1
+bsf1_modes: 1 7 0 0
+bsf1_ctx 0 0 0 1 1 0 4 0
+bsf1_bytes 3 7f f8 b0
+bsf1_rt 1 3 7 3 0 0 0 0
+bsf1_cdf_eq 1

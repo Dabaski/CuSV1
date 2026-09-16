@@ -7,6 +7,7 @@
 #include <intra.h>
 #include <motion.h>
 #include <transform.h>
+#include <entropy.h>
 
 namespace pipeline {
 
@@ -80,15 +81,30 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
 void encodeFrameRecon16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                            intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
 
+// BSF1: optional key-frame luma symbol emission (D5: symbols only). When w
+// != null, the frame emits, per block in raster order: the kf y mode symbol
+// (writeKfLumaMode, entropy_coding.c:1026-1040) with the context pair from
+// the DECIDED neighbor modes (getKfYModeCtx, :1004-1021; DC_PRED context
+// when unavailable), the angle-delta symbol when the decided mode is
+// directional (delta 0), and the filter-intra flag=0 symbol
+// (writeFilterIntra with FILTER_INTRA_MODES) where filterIntraAllowed
+// (mode_decision.c:108-119). fc is initialized via initDefaultEcFrameContext
+// and returned ADAPTED (the caller reads the same stream back with it). The
+// caller assigns w->ec.buf; the function resets the encoder, forces
+// allow_update_cdf = 1 and finishes with odEcStopEncode. No partition/skip
+// symbols (ECP1/ECP2) and no tile assembly (BSF3/BSF4) at this stage. GPU
+// frame paths are unchanged (host-decision-path bookkeeping only).
 void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          std::uint8_t* modes, transforms::TxType txType);
+                          std::uint8_t* modes, transforms::TxType txType,
+                          entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr);
 
 void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                             intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
                             transforms::TxType txType);
 
 void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr);
 
 // L6: 32x32 frame compositions. M1 availability + FR-series REAL recon
 // top-right gather (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]); the
