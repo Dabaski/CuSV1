@@ -225,6 +225,33 @@ enum FilterIntraMode {
 #define DIRECTIONAL_MODES 8     // definitions.h:1305
 #define MAX_ANGLE_DELTA 3       // definitions.h:1306
 
+// ---------------------------------------------------------------------------
+// Partition symbol surface (ECP1, court-ordered l7 exception).
+// ---------------------------------------------------------------------------
+// definitions.h:334 (verbatim value): fresh neighbor-array cells.
+#define INVALID_NEIGHBOR_DATA 0xFFu
+// definitions.h:943-945 (verbatim).
+#define PARTITION_PLOFFSET 4  // number of probability models per block size
+#define PARTITION_BLOCK_SIZES 5
+#define PARTITION_CONTEXTS (PARTITION_BLOCK_SIZES * PARTITION_PLOFFSET)
+
+// PartitionType (definitions.h:911-925, verbatim order).
+enum PartitionType {
+    PARTITION_NONE,
+    PARTITION_HORZ,
+    PARTITION_VERT,
+    PARTITION_SPLIT,
+    PARTITION_HORZ_A, // HORZ split and the top partition is split again
+    PARTITION_HORZ_B, // HORZ split and the bottom partition is split again
+    PARTITION_VERT_A, // VERT split and the left partition is split again
+    PARTITION_VERT_B, // VERT split and the right partition is split again
+    PARTITION_HORZ_4, // 4:1 horizontal partition
+    PARTITION_VERT_4, // 4:1 vertical partition
+    EXT_PARTITION_TYPES,
+    PARTITION_TYPES = PARTITION_SPLIT + 1,
+    PARTITION_INVALID = 255,
+};
+
 // av1_is_directional_mode (intra_prediction.h:206-208)
 inline int isDirectionalMode(PredictionMode mode) {
     return mode >= V_PRED && mode <= D67_PRED;
@@ -236,13 +263,14 @@ extern const std::uint8_t blockSizeHigh[BLOCK_SIZES_ALL];
 // intra_mode_context (common_utils.c:134-148)
 extern const std::uint8_t intraModeContext[INTRA_MODES];
 
-// FRAME_CONTEXT slice (cabac_context_model.h:299-345, the four tables this
+// FRAME_CONTEXT slice (cabac_context_model.h:299-345, the tables this
 // layer writes/reads).
 struct EcFrameContext {
     AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
     AomCdfProb angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
     AomCdfProb filter_intra_cdfs[BLOCK_SIZES_ALL][CDF_SIZE(2)];
     AomCdfProb filter_intra_mode_cdf[CDF_SIZE(FILTER_INTRA_MODES)];
+    AomCdfProb partition_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
 };
 
 // Initialize from the SVT default tables (cabac_context_model.c:59-97,
@@ -265,6 +293,47 @@ int filterIntraAllowedBsize(BlockSize bs);
 // svt_aom_filter_intra_allowed (mode_decision.c:115-119)
 int filterIntraAllowed(std::uint8_t enable_filter_intra, BlockSize bsize,
                        std::uint8_t palette_size, std::uint32_t mode);
+
+// svt_aom_partition_cdf_length (entropy_coding.c:922-930): 10 symbols
+// (EXT_PARTITION_TYPES) for 16x16/32x32/64x64, 4 (PARTITION_TYPES) for 8x8,
+// 8 for 128x128.
+int partitionCdfLength(BlockSize bsize);
+
+// partition_gather_horz_alike / partition_gather_vert_alike
+// (cabac_context_model.h:378-405, verbatim semantics): 2-symbol temporaries
+// for the has_rows/has_cols XOR edges.
+void partitionGatherHorzAlike(AomCdfProb* out, const AomCdfProb* in, BlockSize bsize);
+void partitionGatherVertAlike(AomCdfProb* out, const AomCdfProb* in, BlockSize bsize);
+
+// entropy_coding.c:945-960 flattened: raw context BYTES (fresh cells carry
+// INVALID_NEIGHBOR_DATA and map to 0); ctx = (left*2 + above) + bsl*4 with
+// above/left = (byte >> bsl) & 1, bsl from the square partition point.
+int partitionPlaneContext(std::uint8_t above_byte, std::uint8_t left_byte, BlockSize bsize);
+
+// encode_partition_av1 (entropy_coding.c:932-981) flattened. The caller
+// owns the is_partition_point guard (bsize >= BLOCK_8X8, :935) and derives
+// has_rows/has_cols with the px rule (:941-943). Forced split (both edges
+// absent) writes NOTHING (:962-965); both edges -> full symbol (alphabet
+// per partitionCdfLength); XOR edges -> gathered 2-symbol temporary
+// (:970-977) whose adaptation is discarded, matching the SVT writer.
+void writePartition(AomWriter* w, EcFrameContext* fc, BlockSize bsize, int has_rows, int has_cols,
+                    std::uint8_t above_byte, std::uint8_t left_byte, PartitionType p);
+
+// Read twin with the aom read_partition semantics (decodeframe.c:1266-1293,
+// the out-of-tree BSF4 conformance arbiter; no aom code extracted): forced
+// split -> PARTITION_SPLIT with no symbol; gathered branches read the
+// temporary via the NON-adapting cdf read (aom:1284/:1291), consistent with
+// the writer discarding the temporary's adaptation.
+PartitionType readPartition(AomReader* r, EcFrameContext* fc, BlockSize bsize, int has_rows,
+                            int has_cols, std::uint8_t above_byte, std::uint8_t left_byte);
+
+// coding_loop.c:1700-1713: each CODED block writes
+// partition_context_lookup[bsize] (definitions.h:1551-1573) over its mi
+// extent. above is indexed by mi_col (caller owns mi_cols entries); left is
+// indexed (mi_row & 15) - MAX_MIB_MASK for the ratified sb_size 64 (caller
+// owns >= 16 entries).
+void updatePartitionContext(std::uint8_t* above, std::uint8_t* left, int mi_row, int mi_col,
+                            BlockSize bsize);
 
 // encode_intra_luma_mode_kf_av1 (entropy_coding.c:1026-1040): mode symbol
 // from kf_y_cdf[above_ctx][left_ctx], then the angle-delta symbol when

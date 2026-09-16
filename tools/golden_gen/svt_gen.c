@@ -6552,6 +6552,141 @@ static INLINE int aom_read_symbol_(aom_reader *r, AomCdfProb *cdf,
   return ret;
 }
 
+// ==== SVT-AV1 definitions.h :334 - INVALID_NEIGHBOR_DATA (verbatim extract; do not edit) ====
+#define INVALID_NEIGHBOR_DATA 0xFFu
+
+// ==== SVT-AV1 definitions.h :942 - PartitionContextType (verbatim extract; do not edit) ====
+typedef char PartitionContextType;
+
+// ==== SVT-AV1 definitions.h :911 - PartitionType (verbatim extract; do not edit) ====
+typedef enum ATTRIBUTE_PACKED {
+    PARTITION_NONE,
+    PARTITION_HORZ,
+    PARTITION_VERT,
+    PARTITION_SPLIT,
+    PARTITION_HORZ_A, // HORZ split and the top partition is split again
+    PARTITION_HORZ_B, // HORZ split and the bottom partition is split again
+    PARTITION_VERT_A, // VERT split and the left partition is split again
+    PARTITION_VERT_B, // VERT split and the right partition is split again
+    PARTITION_HORZ_4, // 4:1 horizontal partition
+    PARTITION_VERT_4, // 4:1 vertical partition
+    EXT_PARTITION_TYPES,
+    PARTITION_TYPES   = PARTITION_SPLIT + 1,
+    PARTITION_INVALID = 255
+} PartitionType;
+
+// ==== SVT-AV1 definitions.h :943 - PARTITION_PLOFFSET (verbatim extract; do not edit) ====
+#define PARTITION_PLOFFSET 4 // number of probability models per block size
+
+// ==== SVT-AV1 definitions.h :944 - PARTITION_BLOCK_SIZES (verbatim extract; do not edit) ====
+#define PARTITION_BLOCK_SIZES 5
+
+// ==== SVT-AV1 definitions.h :945 - PARTITION_CONTEXTS (verbatim extract; do not edit) ====
+#define PARTITION_CONTEXTS (PARTITION_BLOCK_SIZES * PARTITION_PLOFFSET)
+
+// ==== SVT-AV1 definitions.h :1547 - partition_context_lookup (verbatim line-range extract; do not edit) ====
+static const struct
+{
+    PartitionContextType above;
+    PartitionContextType left;
+} partition_context_lookup[BLOCK_SIZES_ALL] = {
+    { 31, 31 },  // 4X4   - {0b11111, 0b11111}
+    { 31, 30 },  // 4X8   - {0b11111, 0b11110}
+    { 30, 31 },  // 8X4   - {0b11110, 0b11111}
+    { 30, 30 },  // 8X8   - {0b11110, 0b11110}
+    { 30, 28 },  // 8X16  - {0b11110, 0b11100}
+    { 28, 30 },  // 16X8  - {0b11100, 0b11110}
+    { 28, 28 },  // 16X16 - {0b11100, 0b11100}
+    { 28, 24 },  // 16X32 - {0b11100, 0b11000}
+    { 24, 28 },  // 32X16 - {0b11000, 0b11100}
+    { 24, 24 },  // 32X32 - {0b11000, 0b11000}
+    { 24, 16 },  // 32X64 - {0b11000, 0b10000}
+    { 16, 24 },  // 64X32 - {0b10000, 0b11000}
+    { 16, 16 },  // 64X64 - {0b10000, 0b10000}
+    { 16, 0 },   // 64X128- {0b10000, 0b00000}
+    { 0, 16 },   // 128X64- {0b00000, 0b10000}
+    { 0, 0 },    // 128X128-{0b00000, 0b00000}
+    { 31, 28 },  // 4X16  - {0b11111, 0b11100}
+    { 28, 31 },  // 16X4  - {0b11100, 0b11111}
+    { 30, 24 },  // 8X32  - {0b11110, 0b11000}
+    { 24, 30 },  // 32X8  - {0b11000, 0b11110}
+    { 28, 16 },  // 16X64 - {0b11100, 0b10000}
+    { 16, 28 },  // 64X16 - {0b10000, 0b11100}
+};
+
+// ==== SVT-AV1 cabac_context_model.h :373 - cdf_element_prob (verbatim extract; do not edit) ====
+static AomCdfProb cdf_element_prob(const AomCdfProb* const cdf, size_t element) {
+    assert(cdf != NULL);
+    return (element > 0 ? cdf[element - 1] : CDF_PROB_TOP) - cdf[element];
+}
+
+// ==== SVT-AV1 cabac_context_model.h :378 - partition_gather_horz_alike (verbatim extract; do not edit) ====
+static INLINE void partition_gather_horz_alike(AomCdfProb* out, const AomCdfProb* const in, BlockSize bsize) {
+    out[0] = CDF_PROB_TOP;
+    out[0] -= cdf_element_prob(in, PARTITION_HORZ);
+    out[0] -= cdf_element_prob(in, PARTITION_SPLIT);
+    out[0] -= cdf_element_prob(in, PARTITION_HORZ_A);
+    out[0] -= cdf_element_prob(in, PARTITION_HORZ_B);
+    out[0] -= cdf_element_prob(in, PARTITION_VERT_A);
+    if (bsize != BLOCK_128X128) {
+        out[0] -= cdf_element_prob(in, PARTITION_HORZ_4);
+    }
+    out[0] = AOM_ICDF(out[0]);
+    out[1] = AOM_ICDF(CDF_PROB_TOP);
+    out[2] = 0;
+}
+
+// ==== SVT-AV1 cabac_context_model.h :393 - partition_gather_vert_alike (verbatim extract; do not edit) ====
+static INLINE void partition_gather_vert_alike(AomCdfProb* out, const AomCdfProb* const in, BlockSize bsize) {
+    out[0] = CDF_PROB_TOP;
+    out[0] -= cdf_element_prob(in, PARTITION_VERT);
+    out[0] -= cdf_element_prob(in, PARTITION_SPLIT);
+    out[0] -= cdf_element_prob(in, PARTITION_HORZ_A);
+    out[0] -= cdf_element_prob(in, PARTITION_VERT_A);
+    out[0] -= cdf_element_prob(in, PARTITION_VERT_B);
+    if (bsize != BLOCK_128X128) {
+        out[0] -= cdf_element_prob(in, PARTITION_VERT_4);
+    }
+    out[0] = AOM_ICDF(out[0]);
+    out[1] = AOM_ICDF(CDF_PROB_TOP);
+    out[2] = 0;
+}
+
+// ==== SVT-AV1 cabac_context_model.c :134 - default_partition_cdf (verbatim extract; do not edit) ====
+static const AomCdfProb default_partition_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)] = {
+    {AOM_CDF4(19132, 25510, 30392)},
+    {AOM_CDF4(13928, 19855, 28540)},
+    {AOM_CDF4(12522, 23679, 28629)},
+    {AOM_CDF4( 9896, 18783, 25853)},
+    {AOM_CDF10(15597, 20929, 24571, 26706, 27664, 28821, 29601, 30571, 31902)},
+    {AOM_CDF10( 7925, 11043, 16785, 22470, 23971, 25043, 26651, 28701, 29834)},
+    {AOM_CDF10( 5414, 13269, 15111, 20488, 22360, 24500, 25537, 26336, 32117)},
+    {AOM_CDF10( 2662,  6362,  8614, 20860, 23053, 24778, 26436, 27829, 31171)},
+    {AOM_CDF10(18462, 20920, 23124, 27647, 28227, 29049, 29519, 30178, 31544)},
+    {AOM_CDF10( 7689,  9060, 12056, 24992, 25660, 26182, 26951, 28041, 29052)},
+    {AOM_CDF10( 6015,  9009, 10062, 24544, 25409, 26545, 27071, 27526, 32047)},
+    {AOM_CDF10( 1394,  2208,  2796, 28614, 29061, 29466, 29840, 30185, 31899)},
+    {AOM_CDF10(20137, 21547, 23078, 29566, 29837, 30261, 30524, 30892, 31724)},
+    {AOM_CDF10( 6732,  7490,  9497, 27944, 28250, 28515, 28969, 29630, 30104)},
+    {AOM_CDF10( 5945,  7663,  8348, 28683, 29117, 29749, 30064, 30298, 32238)},
+    {AOM_CDF10(  870,  1212,  1487, 31198, 31394, 31574, 31743, 31881, 32332)},
+    {AOM_CDF8(27899, 28219, 28529, 32484, 32539, 32619, 32639)},
+    {AOM_CDF8( 6607,  6990,  8268, 32060, 32219, 32338, 32371)},
+    {AOM_CDF8( 5429,  6676,  7122, 32027, 32227, 32531, 32582)},
+    {AOM_CDF8(  711,   966,  1172, 32448, 32538, 32617, 32664)}
+};
+
+// ==== SVT-AV1 entropy_coding.c :922 - svt_aom_partition_cdf_length (verbatim extract; do not edit) ====
+int32_t svt_aom_partition_cdf_length(BlockSize bsize) {
+    if (bsize <= BLOCK_8X8) {
+        return PARTITION_TYPES;
+    } else if (bsize == BLOCK_128X128) {
+        return EXT_PARTITION_TYPES - 2;
+    } else {
+        return EXT_PARTITION_TYPES;
+    }
+}
+
 // ==== SVT-AV1 enc_intra_prediction.c :40 - build_intra_predictors (verbatim EXCEPT the flagged get_filt_type shim) ====
 static void build_intra_predictors(const MacroBlockD* xd, uint8_t* top_neigh_array, uint8_t* left_neigh_array,
                                    // const uint8_t *ref,    int32_t ref_stride,

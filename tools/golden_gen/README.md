@@ -101,6 +101,10 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | intra_mode_context, block_size_wide/high | Codec/common_utils.c:134-148, :286-291 | EC3: KF mode contexts + FI allowed predicate |
 | svt_aom_default_kf_y_mode_cdf, default_angle_delta_cdf, default_filter_intra_mode_cdf, default_filter_intra_cdfs | Codec/cabac_context_model.c:59, :87, :614, :618 | EC3: default CDF tables (verbatim) |
 | svt_aom_filter_intra_allowed_bsize, svt_aom_filter_intra_allowed | Codec/mode_decision.c:108-119 | EC3: FI signalling predicate (DC_PRED-only, palette 0, bsize <= 32x32) |
+| INVALID_NEIGHBOR_DATA, PARTITION_PLOFFSET/PARTITION_BLOCK_SIZES/PARTITION_CONTEXTS, PartitionType enum, partition_context_lookup | Codec/definitions.h:334, :911-925, :943-945, :1547-1573 | ECP1: partition context derivation inputs (fresh 0xFF cells -> 0; ctx = (left*2+above) + bsl*4) |
+| cdf_element_prob, partition_gather_horz_alike, partition_gather_vert_alike | Codec/cabac_context_model.h:373-405 | ECP1: XOR-edge 2-symbol gathered cdfs (entropy_coding.c:970-977) |
+| default_partition_cdf | Codec/cabac_context_model.c:134-155 | ECP1: 20-row partition cdf defaults (PARTITION_CONTEXTS = 5 * 4) |
+| svt_aom_partition_cdf_length | Codec/entropy_coding.c:922-930 | ECP1: partition alphabet 10/10/10/4/8 (16/32/64/8x8/128) |
 
 Second documented deviation (EC0): the WORDS_BIGENDIAN `#if` guard around the
 HToLE/HToBE macro family (bitstream_unit.h:148-164) is dropped; the
@@ -123,7 +127,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **224/224 lines identical**, covering:
+that file — currently **229/229 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -157,6 +161,16 @@ that file — currently **224/224 lines identical**, covering:
   bsf1_rt (decode-back in write order), bsf1_cdf_eq. Symbols only per the
   ratified D5: no partition/skip symbols (ECP1/ECP2), no tile assembly
   (BSF3/BSF4).
+- ECP1 partition-symbol gate lines (court-ordered l7 exception): ecpart_ctx
+  (context sequence 8 4 4 4 4 for the ratified structural tree - 64x64
+  forced SPLIT with no symbol, coded 10-symbol SPLIT at 32x32 ctx 8, four
+  coded 10-symbol NONEs at 16x16 ctx 4; settles the BSF0 hand-prediction of
+  ctx 7 to the measured 4), ecpart_bytes 1 b5, ecpart_rt 3 0 0 0 0,
+  ecpart_cdf_eq, ecpart_gather 10923 0 10380 0 1 (XOR-edge gathered
+  2-symbol branches from the fresh row-8 cdf + round-trip; unreachable in
+  the structural tree itself). Writer walk = encode_partition_av1
+  (entropy_coding.c:932-981); reader walk = the aom read_partition
+  semantics (decodeframe.c:1266-1293, out-of-tree arbiter).
 
 ## EC3 scope statement
 

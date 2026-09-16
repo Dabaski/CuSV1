@@ -35,6 +35,7 @@ $files = @{
     "bitstream_unit.h"   = (Get-Content (Join-Path $src "Codec\bitstream_unit.h") -Raw)
     "cabac_context_model.h" = (Get-Content (Join-Path $src "Codec\cabac_context_model.h") -Raw)
     "cabac_context_model.c" = (Get-Content (Join-Path $src "Codec\cabac_context_model.c") -Raw)
+    "entropy_coding.c" = (Get-Content (Join-Path $src "Codec\entropy_coding.c") -Raw)
     "entdec.c"           = (Get-Content (Join-Path $src3p "src\entdec.c") -Raw)
     "entdec.h"           = (Get-Content (Join-Path $src3p "inc\entdec.h") -Raw)
     "bitreader.h"        = (Get-Content (Join-Path $src3p "inc\bitreader.h") -Raw)
@@ -404,6 +405,34 @@ Emit-Macro "bitreader.h" "typedef struct aom_reader aom_reader;" "aom_reader typ
 Emit-Verbatim "bitreader.c" "int aom_reader_init" "aom_reader_init"
 Emit-Verbatim "bitreader.h" "static INLINE int aom_read_cdf_" "aom_read_cdf_"
 Emit-Verbatim "bitreader.h" "static INLINE int aom_read_symbol_" "aom_read_symbol_"
+
+# ---- partition symbol surface (ECP1) ----
+# Context derivation inputs (entropy_coding.c:945-960): partition_context_lookup
+# (definitions.h:1547-1574) written per coded block over the block's mi extent
+# (coding_loop.c:1700-1713); INVALID_NEIGHBOR_DATA (definitions.h:334, 0xFF)
+# fresh cells map to 0. Alphabet per svt_aom_partition_cdf_length
+# (entropy_coding.c:922-930): 10 symbols (EXT_PARTITION_TYPES) for 16x16/32x32/
+# 64x64, 4 (PARTITION_TYPES) for 8x8, 8 for 128x128. Gather helpers
+# (cabac_context_model.h:373-405) feed the XOR-edge 2-symbol branches
+# (:970-977). default_partition_cdf (cabac_context_model.c:134-155,
+# PARTITION_CONTEXTS = PARTITION_BLOCK_SIZES * PARTITION_PLOFFSET = 20 rows).
+Emit-Macro "definitions.h" "#define INVALID_NEIGHBOR_DATA" "INVALID_NEIGHBOR_DATA"
+Emit-Macro "definitions.h" "typedef char PartitionContextType;" "PartitionContextType"
+Emit-Verbatim "definitions.h" "typedef enum ATTRIBUTE_PACKED {
+    PARTITION_NONE," "PartitionType"
+Emit-Macro "definitions.h" "#define PARTITION_PLOFFSET" "PARTITION_PLOFFSET"
+Emit-Macro "definitions.h" "#define PARTITION_BLOCK_SIZES" "PARTITION_BLOCK_SIZES"
+Emit-Macro "definitions.h" "#define PARTITION_CONTEXTS" "PARTITION_CONTEXTS"
+Emit-Lines "definitions.h" "static const struct
+{
+    PartitionContextType above;" "};
+
+/* clang-format on */" "partition_context_lookup"
+Emit-Verbatim "cabac_context_model.h" "static AomCdfProb cdf_element_prob" "cdf_element_prob"
+Emit-Verbatim "cabac_context_model.h" "static INLINE void partition_gather_horz_alike" "partition_gather_horz_alike"
+Emit-Verbatim "cabac_context_model.h" "static INLINE void partition_gather_vert_alike" "partition_gather_vert_alike"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_partition_cdf" "default_partition_cdf"
+Emit-Verbatim "entropy_coding.c" "int32_t svt_aom_partition_cdf_length" "svt_aom_partition_cdf_length"
 
 # ---- build_intra_predictors with the documented get_filt_type shim ----
 $r = Extract-Block $files["enc_intra_prediction.c"] "static void build_intra_predictors(const MacroBlockD* xd" "build_intra_predictors"

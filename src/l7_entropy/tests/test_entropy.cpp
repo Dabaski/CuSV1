@@ -308,3 +308,128 @@ TEST_CASE("KF luma-mode symbol sequence matches gate bytes and round-trips") {
     }
     CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
 }
+TEST_CASE("partition symbol surface matches gate (ratified 32x32 frame walk)") {
+    // Gate: ecpart_ctx 8 4 4 4 4, ecpart_bytes 1 b5, ecpart_rt 3 0 0 0 0,
+    // ecpart_cdf_eq 1, ecpart_gather 10923 0 10380 0 1
+    // (tools/golden_gen/main_primitives.c ECP1 block). Ratified structural
+    // keyframe tree: 32x32 frame inside sb_size 64 - 64x64 forced SPLIT (no
+    // symbol), coded 10-symbol SPLIT at 32x32 (ctx 8), four coded 10-symbol
+    // NONEs at 16x16 (ctx 4). Alphabet per svt_aom_partition_cdf_length
+    // (entropy_coding.c:922-930), enumerated: 10 (EXT_PARTITION_TYPES) for
+    // 16x16 / 32x32 / 64x64, 4 (PARTITION_TYPES) for 8x8, 8 for 128x128.
+    // Contexts: partition_context_lookup (definitions.h:1551-1574) written
+    // per coded block over the mi extent (coding_loop.c:1700-1713);
+    // ctx = (left*2+above) + bsl*PARTITION_PLOFFSET with (byte >> bsl) & 1
+    // and INVALID_NEIGHBOR_DATA (0xFF, definitions.h:334) -> 0
+    // (entropy_coding.c:945-960). Gather helpers (cabac_context_model.h:
+    // 378-405) pin the XOR-edge 2-symbol branches (:970-977).
+    CHECK(entropy::partitionCdfLength(entropy::BLOCK_16X16) == 10);
+    CHECK(entropy::partitionCdfLength(entropy::BLOCK_32X32) == 10);
+    CHECK(entropy::partitionCdfLength(entropy::BLOCK_64X64) == 10);
+    CHECK(entropy::partitionCdfLength(entropy::BLOCK_8X8) == 4);
+    CHECK(entropy::partitionCdfLength(entropy::BLOCK_128X128) == 8);
+
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc);
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR);
+
+    entropy::AomWriter w{};
+    unsigned char buf[64] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    // fresh partition-context state (INVALID_NEIGHBOR_DATA everywhere)
+    std::uint8_t aboveCtx[8];
+    std::uint8_t leftCtx[16];
+    memset(aboveCtx, INVALID_NEIGHBOR_DATA, sizeof(aboveCtx));
+    memset(leftCtx, INVALID_NEIGHBOR_DATA, sizeof(leftCtx));
+
+    int ctxSeq[5];
+    int nctx = 0;
+    // recursive walk is unrolled for the fixed ratified tree (mi grid 8x8):
+    // 64x64 forced SPLIT; 32x32 coded SPLIT; four 16x16 coded NONEs.
+    // (hbs px rule: (mi*4 + blockSizeWide/2) < 32, entropy_coding.c:941-943.)
+    struct Node {
+        int miRow, miCol;
+        entropy::BlockSize bsize;
+    };
+    const entropy::BlockSize sub32 = entropy::BLOCK_32X32;
+    const entropy::BlockSize sub16 = entropy::BLOCK_16X16;
+    // 64x64 @(0,0): hbs 32px, 0+32 < 32 false -> forced SPLIT, no symbol.
+    // children at mi step 8: only (0,0) in frame.
+    {
+        // 32x32 @(0,0): hbs 16px -> both edges -> coded SPLIT (ctx 8)
+        ctxSeq[nctx++] = entropy::partitionPlaneContext(aboveCtx[0], leftCtx[0], sub32);
+        entropy::writePartition(&w, &fc, sub32, 1, 1, aboveCtx[0], leftCtx[0], entropy::PARTITION_SPLIT);
+        // 16x16 leaves at mi (0,0),(0,2),(2,0),(2,2): coded NONEs
+        const Node leaves[4] = {{0, 0, sub16}, {0, 2, sub16}, {2, 0, sub16}, {2, 2, sub16}};
+        for (int i = 0; i < 4; ++i) {
+            const int r = leaves[i].miRow, c = leaves[i].miCol;
+            ctxSeq[nctx++] = entropy::partitionPlaneContext(aboveCtx[c], leftCtx[r & 15], sub16);
+            entropy::writePartition(&w, &fc, sub16, 1, 1, aboveCtx[c], leftCtx[r & 15],
+                                    entropy::PARTITION_NONE);
+            entropy::updatePartitionContext(aboveCtx, leftCtx, r, c, sub16);
+        }
+    }
+    {
+        const int wantCtx[5] = {8, 4, 4, 4, 4};
+        for (int i = 0; i < 5; ++i) CHECK(ctxSeq[i] == wantCtx[i]);
+    }
+    entropy::odEcStopEncode(&w);
+    REQUIRE(w.pos == 1);
+    CHECK((unsigned)buf[0] == 0xb5);
+
+    // reader twin: fresh state + fresh default cdfs, same fixed walk
+    std::uint8_t aboveR[8];
+    std::uint8_t leftR[16];
+    memset(aboveR, INVALID_NEIGHBOR_DATA, sizeof(aboveR));
+    memset(leftR, INVALID_NEIGHBOR_DATA, sizeof(leftR));
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    const entropy::PartitionType wantRt[5] = {entropy::PARTITION_SPLIT, entropy::PARTITION_NONE,
+                                              entropy::PARTITION_NONE, entropy::PARTITION_NONE,
+                                              entropy::PARTITION_NONE};
+    int ri = 0;
+    entropy::PartitionType p;
+    p = entropy::readPartition(&r, &fcR, sub32, 1, 1, aboveR[0], leftR[0]);
+    CHECK(p == wantRt[ri++]);
+    const Node leaves[4] = {{0, 0, sub16}, {0, 2, sub16}, {2, 0, sub16}, {2, 2, sub16}};
+    for (int i = 0; i < 4; ++i) {
+        p = entropy::readPartition(&r, &fcR, sub16, 1, 1, aboveR[leaves[i].miCol],
+                                   leftR[leaves[i].miRow & 15]);
+        CHECK(p == wantRt[ri++]);
+        entropy::updatePartitionContext(aboveR, leftR, leaves[i].miRow, leaves[i].miCol, sub16);
+    }
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+
+    // gathered 2-symbol branches (entropy_coding.c:970-977): fixture gathers
+    // from the FRESH row-8 cdf (32x32, ctx 8), round-trip with adaptation
+    entropy::AomCdfProb gh[CDF_SIZE(2)];
+    entropy::AomCdfProb gv[CDF_SIZE(2)];
+    entropy::partitionGatherHorzAlike(gh, fc.partition_cdf[8], entropy::BLOCK_32X32);
+    entropy::partitionGatherVertAlike(gv, fc.partition_cdf[8], entropy::BLOCK_32X32);
+    CHECK((int)gh[0] == 10923);
+    CHECK((int)gv[0] == 10380);
+    entropy::AomCdfProb gw[CDF_SIZE(2)];
+    memcpy(gw, gh, sizeof(gw));
+    entropy::AomWriter w2{};
+    unsigned char buf2[64] = {0};
+    w2.ec.buf = buf2;
+    entropy::odEcEncReset(&w2.ec);
+    w2.allow_update_cdf = 1;
+    w2.pos = 0;
+    entropy::odEcWriteSymbol(&w2, 1, gw, 2);
+    entropy::odEcWriteSymbol(&w2, 0, gw, 2);
+    entropy::odEcStopEncode(&w2);
+    entropy::AomCdfProb gr[CDF_SIZE(2)];
+    memcpy(gr, gh, sizeof(gr));
+    entropy::AomReader r2;
+    REQUIRE(entropy::odEcReaderInit(&r2, buf2, w2.pos) == 0);
+    r2.allow_update_cdf = 1;
+    CHECK(entropy::odEcReadSymbol(&r2, gr, 2) == 1);
+    CHECK(entropy::odEcReadSymbol(&r2, gr, 2) == 0);
+}

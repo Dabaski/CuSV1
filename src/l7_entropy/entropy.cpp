@@ -565,6 +565,36 @@ static const AomCdfProb filter_intra_cdfs_default[BLOCK_SIZES_ALL][CDF_SIZE(2)] 
     {AOM_CDF2(20229)}, {AOM_CDF2(18101)}, {AOM_CDF2(16384)}, {AOM_CDF2(16384)}
 };
 
+// default_partition_cdf (cabac_context_model.c:134-155, verbatim)
+static const AomCdfProb partition_cdf_default[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)] = {
+    {AOM_CDF4(19132, 25510, 30392)},
+    {AOM_CDF4(13928, 19855, 28540)},
+    {AOM_CDF4(12522, 23679, 28629)},
+    {AOM_CDF4( 9896, 18783, 25853)},
+    {AOM_CDF10(15597, 20929, 24571, 26706, 27664, 28821, 29601, 30571, 31902)},
+    {AOM_CDF10( 7925, 11043, 16785, 22470, 23971, 25043, 26651, 28701, 29834)},
+    {AOM_CDF10( 5414, 13269, 15111, 20488, 22360, 24500, 25537, 26336, 32117)},
+    {AOM_CDF10( 2662,  6362,  8614, 20860, 23053, 24778, 26436, 27829, 31171)},
+    {AOM_CDF10(18462, 20920, 23124, 27647, 28227, 29049, 29519, 30178, 31544)},
+    {AOM_CDF10( 7689,  9060, 12056, 24992, 25660, 26182, 26951, 28041, 29052)},
+    {AOM_CDF10( 6015,  9009, 10062, 24544, 25409, 26545, 27071, 27526, 32047)},
+    {AOM_CDF10( 1394,  2208,  2796, 28614, 29061, 29466, 29840, 30185, 31899)},
+    {AOM_CDF10(20137, 21547, 23078, 29566, 29837, 30261, 30524, 30892, 31724)},
+    {AOM_CDF10( 6732,  7490,  9497, 27944, 28250, 28515, 28969, 29630, 30104)},
+    {AOM_CDF10( 5945,  7663,  8348, 28683, 29117, 29749, 30064, 30298, 32238)},
+    {AOM_CDF10(  870,  1212,  1487, 31198, 31394, 31574, 31743, 31881, 32332)},
+    {AOM_CDF8(27899, 28219, 28529, 32484, 32539, 32619, 32639)},
+    {AOM_CDF8( 6607,  6990,  8268, 32060, 32219, 32338, 32371)},
+    {AOM_CDF8( 5429,  6676,  7122, 32027, 32227, 32531, 32582)},
+    {AOM_CDF8(  711,   966,  1172, 32448, 32538, 32617, 32664)}
+};
+
+// partition_context_lookup (definitions.h:1551-1573, verbatim values in
+// BlockSize enum order: above/left bit masks)
+const std::uint8_t partitionContextLookupAbove[BLOCK_SIZES_ALL] = {31, 31, 30, 30, 30, 28, 28, 28, 24, 24, 24, 16, 16, 16, 0, 0, 31, 28, 30, 24, 28, 16};
+
+const std::uint8_t partitionContextLookupLeft[BLOCK_SIZES_ALL] = {31, 30, 31, 30, 28, 30, 28, 24, 28, 24, 16, 24, 16, 0, 16, 0, 28, 31, 24, 30, 16, 28};
+
 // COPY_CDF equivalent for the four tables (cabac_context_model.c:740-741,
 // :767 - the kf_y_cdf/angle_delta_cdf/filter_intra rows of
 // svt_aom_av1_setup_frame_context).
@@ -573,13 +603,15 @@ void initDefaultEcFrameContext(EcFrameContext* fc) {
     memcpy(fc->angle_delta_cdf, angle_delta_cdf_default, sizeof(fc->angle_delta_cdf));
     memcpy(fc->filter_intra_cdfs, filter_intra_cdfs_default, sizeof(fc->filter_intra_cdfs));
     memcpy(fc->filter_intra_mode_cdf, filter_intra_mode_cdf_default, sizeof(fc->filter_intra_mode_cdf));
+    memcpy(fc->partition_cdf, partition_cdf_default, sizeof(fc->partition_cdf));
 }
 
 int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
     return memcmp(a->kf_y_cdf, b->kf_y_cdf, sizeof(a->kf_y_cdf)) == 0 &&
            memcmp(a->angle_delta_cdf, b->angle_delta_cdf, sizeof(a->angle_delta_cdf)) == 0 &&
            memcmp(a->filter_intra_cdfs, b->filter_intra_cdfs, sizeof(a->filter_intra_cdfs)) == 0 &&
-           memcmp(a->filter_intra_mode_cdf, b->filter_intra_mode_cdf, sizeof(a->filter_intra_mode_cdf)) == 0;
+           memcmp(a->filter_intra_mode_cdf, b->filter_intra_mode_cdf, sizeof(a->filter_intra_mode_cdf)) == 0 &&
+           memcmp(a->partition_cdf, b->partition_cdf, sizeof(a->partition_cdf)) == 0;
 }
 
 // svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021), flattened
@@ -657,6 +689,125 @@ int readFilterIntra(AomReader* r, EcFrameContext* fc, BlockSize bsize,
         *fi_mode = FILTER_INTRA_MODES;
     }
     return f;
+}
+
+// ---------------------------------------------------------------------------
+// ECP1: partition symbol surface (court-ordered l7 exception).
+// ---------------------------------------------------------------------------
+// svt_aom_partition_cdf_length (entropy_coding.c:922-930)
+int partitionCdfLength(BlockSize bsize) {
+    if (bsize <= BLOCK_8X8) {
+        return PARTITION_TYPES;
+    } else if (bsize == BLOCK_128X128) {
+        return EXT_PARTITION_TYPES - 2;
+    } else {
+        return EXT_PARTITION_TYPES;
+    }
+}
+
+// cdf_element_prob (cabac_context_model.h:373-376)
+static int cdfElementProb(const AomCdfProb* cdf, std::size_t element) {
+    return (element > 0 ? cdf[element - 1] : CDF_PROB_TOP) - cdf[element];
+}
+
+// partition_gather_horz_alike (cabac_context_model.h:378-391). The SVT text
+// accumulates into the uint16 out[0] and finishes with AOM_ICDF(out[0]); the
+// intermediate is CDF_PROB_TOP - sum(probs) and stays within uint16 range,
+// spelled here with an int accumulator and explicit casts (same values).
+void partitionGatherHorzAlike(AomCdfProb* out, const AomCdfProb* in, BlockSize bsize) {
+    int acc = CDF_PROB_TOP;
+    acc -= cdfElementProb(in, PARTITION_HORZ);
+    acc -= cdfElementProb(in, PARTITION_SPLIT);
+    acc -= cdfElementProb(in, PARTITION_HORZ_A);
+    acc -= cdfElementProb(in, PARTITION_HORZ_B);
+    acc -= cdfElementProb(in, PARTITION_VERT_A);
+    if (bsize != BLOCK_128X128) {
+        acc -= cdfElementProb(in, PARTITION_HORZ_4);
+    }
+    out[0] = static_cast<AomCdfProb>(CDF_PROB_TOP - acc);
+    out[1] = AOM_ICDF(CDF_PROB_TOP);
+    out[2] = 0;
+}
+
+// partition_gather_vert_alike (cabac_context_model.h:393-405)
+void partitionGatherVertAlike(AomCdfProb* out, const AomCdfProb* in, BlockSize bsize) {
+    int acc = CDF_PROB_TOP;
+    acc -= cdfElementProb(in, PARTITION_VERT);
+    acc -= cdfElementProb(in, PARTITION_SPLIT);
+    acc -= cdfElementProb(in, PARTITION_HORZ_A);
+    acc -= cdfElementProb(in, PARTITION_VERT_A);
+    acc -= cdfElementProb(in, PARTITION_VERT_B);
+    if (bsize != BLOCK_128X128) {
+        acc -= cdfElementProb(in, PARTITION_VERT_4);
+    }
+    out[0] = static_cast<AomCdfProb>(CDF_PROB_TOP - acc);
+    out[1] = AOM_ICDF(CDF_PROB_TOP);
+    out[2] = 0;
+}
+
+// entropy_coding.c:945-960 flattened. bsl = mi_size_wide_log2[bsize] -
+// mi_size_wide_log2[BLOCK_8X8]; mi_size_wide_log2 == svt_log2f(px >> 2) for
+// the square partition points the caller guards (:935). Fresh cells
+// (INVALID_NEIGHBOR_DATA, definitions.h:334) map to 0 (:950-951).
+int partitionPlaneContext(std::uint8_t above_byte, std::uint8_t left_byte, BlockSize bsize) {
+    const int bsl = getMsb(blockSizeWide[bsize] >> 2) - 1;
+    const int above = ((above_byte == (std::uint8_t)INVALID_NEIGHBOR_DATA ? 0 : above_byte) >> bsl) & 1;
+    const int left = ((left_byte == (std::uint8_t)INVALID_NEIGHBOR_DATA ? 0 : left_byte) >> bsl) & 1;
+    return (left * 2 + above) + bsl * PARTITION_PLOFFSET;
+}
+
+// encode_partition_av1 (entropy_coding.c:932-981) flattened (the caller
+// guards is_partition_point :935 and derives has_rows/has_cols :941-943).
+void writePartition(AomWriter* w, EcFrameContext* fc, BlockSize bsize, int has_rows, int has_cols,
+                    std::uint8_t above_byte, std::uint8_t left_byte, PartitionType p) {
+    const int ctx = partitionPlaneContext(above_byte, left_byte, bsize);
+    if (!has_rows && !has_cols) {
+        return;  // forced SPLIT, NO symbol (:962-965)
+    }
+    if (has_rows && has_cols) {
+        odEcWriteSymbol(w, p, fc->partition_cdf[ctx], partitionCdfLength(bsize));
+    } else if (!has_rows && has_cols) {
+        AomCdfProb g[CDF_SIZE(2)];
+        partitionGatherVertAlike(g, fc->partition_cdf[ctx], bsize);
+        odEcWriteSymbol(w, p == PARTITION_SPLIT, g, 2);
+    } else {
+        AomCdfProb g[CDF_SIZE(2)];
+        partitionGatherHorzAlike(g, fc->partition_cdf[ctx], bsize);
+        odEcWriteSymbol(w, p == PARTITION_SPLIT, g, 2);
+    }
+}
+
+// aom read_partition (decodeframe.c:1266-1293 semantics; out-of-tree BSF4
+// arbiter, no aom code extracted). Gathered branches read the temporary via
+// the NON-adapting odEcReadCdf (aom:1284/:1291) - consistent with the writer
+// discarding the temporary's adaptation.
+PartitionType readPartition(AomReader* r, EcFrameContext* fc, BlockSize bsize, int has_rows,
+                            int has_cols, std::uint8_t above_byte, std::uint8_t left_byte) {
+    const int ctx = partitionPlaneContext(above_byte, left_byte, bsize);
+    if (!has_rows && !has_cols) return PARTITION_SPLIT;
+    if (has_rows && has_cols) {
+        return (PartitionType)odEcReadSymbol(r, fc->partition_cdf[ctx], partitionCdfLength(bsize));
+    }
+    if (!has_rows && has_cols) {
+        AomCdfProb g[CDF_SIZE(2)];
+        partitionGatherVertAlike(g, fc->partition_cdf[ctx], bsize);
+        return odEcReadCdf(r, g, 2) ? PARTITION_SPLIT : PARTITION_HORZ;
+    }
+    AomCdfProb g[CDF_SIZE(2)];
+    partitionGatherHorzAlike(g, fc->partition_cdf[ctx], bsize);
+    return odEcReadCdf(r, g, 2) ? PARTITION_SPLIT : PARTITION_VERT;
+}
+
+// coding_loop.c:1700-1713 (the NA writes over the block extent, == the aom
+// memset semantics): lookup bytes from partition_context_lookup
+// (definitions.h:1551-1573). left indexing (mi_row & 15) = MAX_MIB_MASK for
+// the ratified sb_size 64.
+void updatePartitionContext(std::uint8_t* above, std::uint8_t* left, int mi_row, int mi_col,
+                            BlockSize bsize) {
+    const int mi_w = blockSizeWide[bsize] >> 2;
+    const int mi_h = blockSizeHigh[bsize] >> 2;
+    for (int j = 0; j < mi_w; ++j) above[mi_col + j] = partitionContextLookupAbove[bsize];
+    for (int i = 0; i < mi_h; ++i) left[(mi_row + i) & 15] = partitionContextLookupLeft[bsize];
 }
 
 }  // namespace entropy
