@@ -568,3 +568,78 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     for (int i = 0; i < 16; ++i) CHECK(rc4[i] == qc4[i]);
     CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
 }
+
+TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accumulation)") {
+    // Gate: ecblk_ctx 0 2 2 2, ecblk_bytes 18, ecblk_rt 21 21 0 0, ecblk_cdf_eq 1
+    // (composition.c TS2 block). 64x32 frame, 2x2 of 16x16 blocks, raster
+    // order, NA accumulates after each block. txb_skip_ctx = 0 always
+    // (plane_bsize == tx_bsize, :298-299); dc_sign_ctx covers 0/1/2.
+    // The skip_contexts table branch (:301-308) and the chroma branch
+    // (:310-314) are dead for whole-block luma TUs (plane_bsize == tx_bsize
+    // always) — ported in l7 for the range rule but never exercised here.
+    static const int px[4][2] = {{0, 0}, {16, 0}, {0, 16}, {16, 16}};
+    static const int mi[4][2] = {{0, 0}, {0, 4}, {4, 0}, {4, 4}};
+    static const int wantCtx[4] = {0, 2, 2, 2};
+
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(100, qt);
+    std::int16_t scan16[256];
+    transforms::defaultScan16x16(scan16);
+
+    // quantize all 4 blocks (same as the generator fixture)
+    std::int32_t qc[4][256];
+    std::uint16_t eob[4];
+    pixels::Plane src(64, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 64; ++x)
+            src.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x % 32 + y + 1)) : 0;
+    for (int b = 0; b < 4; ++b) {
+        std::int16_t res[256];
+        for (int i = 0; i < 256; ++i) res[i] = static_cast<std::int16_t>(src.at(px[b][0] + i % 16, px[b][1] + i / 16));
+        std::int32_t cb[256] = {0};
+        transforms::fwdTxfm2d16x16(res, cb, 16, transforms::TxType::DCT_DCT);
+        std::int32_t dq[256] = {0};
+        transforms::quantizeFp16x16(cb, qt, scan16, qc[b], dq, &eob[b]);
+    }
+
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc);
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR);
+
+    entropy::AomWriter w{};
+    unsigned char buf[128] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    entropy::DcSignLevelCoeffNa na;
+    memset(&na, 0xFF, sizeof(na));  // INVALID_NEIGHBOR_DATA everywhere
+
+    for (int b = 0; b < 4; ++b) {
+        entropy::writeBlockCoeffs(&w, &fc, &na, qc[b], scan16, entropy::TX_16X16,
+                                  entropy::BLOCK_16X16, eob[b], mi[b][0], mi[b][1]);
+    }
+    entropy::odEcStopEncode(&w);
+    REQUIRE(w.pos == 18);
+    static const unsigned char wantBytes[18] = {0x32, 0x06, 0x83, 0x20, 0x6a, 0x0a, 0xcc, 0x5f,
+                                                0x01, 0x6c, 0x34, 0xb6, 0x4e, 0x34, 0x45, 0xac,
+                                                0x67, 0xcc};
+    for (int i = 0; i < 18; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    entropy::DcSignLevelCoeffNa naR;
+    memset(&naR, 0xFF, sizeof(naR));
+
+    for (int b = 0; b < 4; ++b) {
+        std::int32_t rc[256] = {0};
+        const int reob = entropy::readBlockCoeffs(&r, &fcR, &naR, rc, scan16, entropy::TX_16X16,
+                                                  entropy::BLOCK_16X16, mi[b][0], mi[b][1]);
+        CHECK(reob == (int)eob[b]);
+        for (int i = 0; i < 256; ++i) CHECK(rc[i] == qc[b][i]);
+    }
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+}

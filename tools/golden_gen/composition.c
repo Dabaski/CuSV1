@@ -2919,3 +2919,170 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
     if (memcmp(fc.eob_flag_cdf1024, fc_r.eob_flag_cdf1024, sizeof(fc.eob_flag_cdf1024))) return 7;
     return 0;
 }
+// ---- TS2: per-block txb-ctx + NA gate lines --------------------------------
+// The 4-block 64x32 fixture with q100 quantized residuals, NA accumulation
+// across blocks. Reuses the TS1 writer/reader + frame context.
+
+// helper: compute eob from quantized coefficients (last nonzero scan idx + 1)
+static int svtd_eob_from_coeffs(const TranLow* coeff, const int16_t* scan, TxSize tx_size) {
+    const int width = get_txb_wide(tx_size);
+    const int height = get_txb_high(tx_size);
+    int last = 0;
+    for (int i = 0; i < width * height; ++i) {
+        if (coeff[i] != 0) last = i + 1;
+    }
+    // find the scan position of the last nonzero raster coefficient
+    int eob = 0;
+    for (int c = 0; c < width * height; ++c) {
+        if (coeff[scan[c]] != 0) eob = c + 1;
+    }
+    return eob;
+}
+
+static int svtd_ts2_drive(uint8_t* buf) {
+    // 64x32 frame from the f16 fixture pattern
+    uint8_t src[2048];
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 64; ++x) src[y * 64 + x] = (y < 16) ? (uint8_t)(4 * (x % 32 + y + 1)) : 0;
+
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(100, &t);
+    int16_t scan16[256];
+    svtd_default_scan_16x16(scan16);
+
+    Ts1FrameContext fc;
+    ts1_init(&fc);
+    Ts1FrameContext fc_r;
+    ts1_init(&fc_r);
+
+    // dc-sign-level NA: above[16] (64px / 4), left[8] (32px / 4)
+    uint8_t above_na[16];
+    uint8_t left_na[8];
+    memset(above_na, (int)INVALID_NEIGHBOR_DATA, sizeof(above_na));
+    memset(left_na, (int)INVALID_NEIGHBOR_DATA, sizeof(left_na));
+
+    AomWriter w;
+    w.ec.buf = buf;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    // 2x2 grid of 16x16 blocks, raster order
+    static const int mi_pos[4][2] = {{0, 0}, {0, 4}, {4, 0}, {4, 4}};
+    static const int px_pos[4][2] = {{0, 0}, {16, 0}, {0, 16}, {16, 16}};
+    printf("ecblk_ctx");
+    for (int b = 0; b < 4; ++b) {
+        const int r = px_pos[b][1], c = px_pos[b][0];
+        uint8_t srcblk[256];
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(r + i) * 64 + c + j];
+        int16_t res[256];
+        for (int i = 0; i < 256; ++i) res[i] = (int16_t)srcblk[i];  // DC pred = 0
+        int32_t cb[256];
+        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        TranLow qc[256], dq[256];
+        uint16_t eob = 0;
+        svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
+
+        // derive txb ctx (simplified get_txb_ctx, whole-block 16x16 in 64x32)
+        const int tx_w = eb_tx_size_wide_unit[TX_16X16];
+        const int tx_h = eb_tx_size_high_unit[TX_16X16];
+        uint8_t* above_ptr = &above_na[px_pos[b][0] / 4];
+        uint8_t* left_ptr = &left_na[px_pos[b][1] / 4];
+        int16_t dc_sign = 0;
+        if (above_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_w; ++k) dc_sign += ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        if (left_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_h; ++k) dc_sign += ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+        printf(" %d", dc_sign_ctx);
+
+        const int eob_tok = svtd_eob_from_coeffs(qc, scan16, TX_16X16);
+        svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx);
+
+        // NA update
+        int32_t cul = 0;
+        for (int q = 0; q < eob_tok; ++q) cul += abs((int)qc[scan16[q]]);
+        cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+        if (eob_tok > 0) {
+            if (qc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+            else if (qc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+        }
+        for (int k = 0; k < tx_w; ++k) above_ptr[k] = (uint8_t)cul;
+        for (int k = 0; k < tx_h; ++k) left_ptr[k] = (uint8_t)cul;
+    }
+    printf("\n");
+    aom_stop_encode(&w);
+    printf("ecblk_bytes %u", w.pos);
+    for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
+    printf("\n");
+
+    // read twin
+    uint8_t above_r[16];
+    uint8_t left_r[8];
+    memset(above_r, (int)INVALID_NEIGHBOR_DATA, sizeof(above_r));
+    memset(left_r, (int)INVALID_NEIGHBOR_DATA, sizeof(left_r));
+    aom_reader r;
+    if (aom_reader_init(&r, buf, w.pos)) return 2;
+    r.allow_update_cdf = 1;
+    printf("ecblk_rt");
+    int rt_bad = 0;
+    for (int b = 0; b < 4; ++b) {
+        uint8_t srcblk[256];
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(px_pos[b][1] + i) * 64 + px_pos[b][0] + j];
+        int16_t res[256];
+        for (int i = 0; i < 256; ++i) res[i] = (int16_t)srcblk[i];
+        int32_t cb[256];
+        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        TranLow qc[256], dq[256];
+        uint16_t eob_q = 0;
+        svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob_q);
+
+        const int tx_w = eb_tx_size_wide_unit[TX_16X16];
+        const int tx_h = eb_tx_size_high_unit[TX_16X16];
+        uint8_t* above_ptr = &above_r[px_pos[b][0] / 4];
+        uint8_t* left_ptr = &left_r[px_pos[b][1] / 4];
+        int16_t dc_sign = 0;
+        if (above_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_w; ++k) dc_sign += ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        if (left_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_h; ++k) dc_sign += ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+
+        TranLow rc[256];
+        memset(rc, 0, sizeof(rc));
+        const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx);
+        printf(" %d", reob);
+        if (reob != (int)eob_q) rt_bad = 1;
+        for (int i = 0; i < 256; ++i) if (rc[i] != qc[i]) rt_bad = 1;
+
+        // NA update (read side)
+        int32_t cul = 0;
+        for (int q = 0; q < reob; ++q) cul += abs((int)rc[scan16[q]]);
+        cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+        if (reob > 0) {
+            if (rc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+            else if (rc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+        }
+        for (int k = 0; k < tx_w; ++k) above_ptr[k] = (uint8_t)cul;
+        for (int k = 0; k < tx_h; ++k) left_ptr[k] = (uint8_t)cul;
+    }
+    printf("\n");
+    if (rt_bad) { fprintf(stderr, "TS2 roundtrip FAILED\n"); return 3; }
+
+    int cdf_eq = 1;
+    if (memcmp(fc.txb_skip_cdf, fc_r.txb_skip_cdf, sizeof(fc.txb_skip_cdf))) cdf_eq = 0;
+    if (memcmp(fc.dc_sign_cdf, fc_r.dc_sign_cdf, sizeof(fc.dc_sign_cdf))) cdf_eq = 0;
+    if (memcmp(fc.coeff_base_eob_cdf, fc_r.coeff_base_eob_cdf, sizeof(fc.coeff_base_eob_cdf))) cdf_eq = 0;
+    if (memcmp(fc.coeff_base_cdf, fc_r.coeff_base_cdf, sizeof(fc.coeff_base_cdf))) cdf_eq = 0;
+    if (memcmp(fc.coeff_br_cdf, fc_r.coeff_br_cdf, sizeof(fc.coeff_br_cdf))) cdf_eq = 0;
+    if (memcmp(fc.eob_extra_cdf, fc_r.eob_extra_cdf, sizeof(fc.eob_extra_cdf))) cdf_eq = 0;
+    if (memcmp(fc.eob_flag_cdf64, fc_r.eob_flag_cdf64, sizeof(fc.eob_flag_cdf64))) cdf_eq = 0;
+    printf("ecblk_cdf_eq %d\n", cdf_eq);
+    return 0;
+}

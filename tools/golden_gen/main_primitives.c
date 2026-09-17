@@ -2022,5 +2022,13 @@ int main(void) {
         if (rc) { fprintf(stderr, "TS1 drive FAILED rc=%d\n", rc); return 1; }
         printf("ectok_cdf_eq 1\n");
     }
+
+    // ---- TS2 gate lines ----
+    {
+        static uint8_t blk_buf[1024];
+        memset(blk_buf, 0, sizeof(blk_buf));
+        const int rc2 = svtd_ts2_drive(blk_buf);
+        if (rc2) { fprintf(stderr, "TS2 drive FAILED rc=%d\n", rc2); return 1; }
+    }
     return 0;
 }

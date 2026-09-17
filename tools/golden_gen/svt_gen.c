@@ -7594,6 +7594,71 @@ static const int8_t txsize_log2_minus4[TX_SIZES_ALL] = {
     5, // TX_64X16
 };
 
+// ==== SVT-AV1 definitions.h :324 - MAX_TXB_COUNT (verbatim extract; do not edit) ====
+#define MAX_TXB_COUNT 16 // Maximum number of transform blocks per depth
+
+// ==== SVT-AV1 definitions.h :375 - MAX_VARTX_DEPTH (verbatim extract; do not edit) ====
+#define MAX_VARTX_DEPTH 2
+
+// ==== SVT-AV1 transforms.c :24 - tx_blocks_per_depth (verbatim extract; do not edit) ====
+const uint8_t tx_blocks_per_depth[BLOCK_SIZES_ALL][MAX_VARTX_DEPTH + 1] = {
+    {1, 1, 1}, // BLOCK_4X4
+    {1, 1, 1}, // BLOCK_4X8
+    {1, 1, 1}, // BLOCK_8X4
+    {1, 4, 4}, // BLOCK_8X8
+    {1, 2, 8}, // BLOCK_8X16
+    {1, 2, 8}, // BLOCK_16X8
+    {1, 4, 16}, // BLOCK_16X16
+    {1, 2, 8}, // BLOCK_16X32
+    {1, 2, 8}, // BLOCK_32X16
+    {1, 4, 16}, // BLOCK_32X32
+    {1, 2, 8}, // BLOCK_32X64
+    {1, 2, 8}, // BLOCK_64X32
+    {1, 4, 16}, // BLOCK_64X64
+    {2, 2, 2}, // BLOCK_64X128
+    {2, 2, 2}, // BLOCK_128X64
+    {4, 4, 4}, // BLOCK_128X128
+    {1, 2, 4}, // BLOCK_4X16
+    {1, 2, 4}, // BLOCK_16X4
+    {1, 2, 4}, // BLOCK_8X32
+    {1, 2, 4}, // BLOCK_32X8
+    {1, 2, 4}, // BLOCK_16X64
+    {1, 2, 4} // BLOCK_64X16
+};
+
+// ==== SVT-AV1 inv_transforms.h :319 - txsize_to_bsize (verbatim extract; do not edit) ====
+static const BlockSize txsize_to_bsize[TX_SIZES_ALL] = {
+    BLOCK_4X4, // TX_4X4
+    BLOCK_8X8, // TX_8X8
+    BLOCK_16X16, // TX_16X16
+    BLOCK_32X32, // TX_32X32
+    BLOCK_64X64, // TX_64X64
+    BLOCK_4X8, // TX_4X8
+    BLOCK_8X4, // TX_8X4
+    BLOCK_8X16, // TX_8X16
+    BLOCK_16X8, // TX_16X8
+    BLOCK_16X32, // TX_16X32
+    BLOCK_32X16, // TX_32X16
+    BLOCK_32X64, // TX_32X64
+    BLOCK_64X32, // TX_64X32
+    BLOCK_4X16, // TX_4X16
+    BLOCK_16X4, // TX_16X4
+    BLOCK_8X32, // TX_8X32
+    BLOCK_32X8, // TX_32X8
+    BLOCK_16X64, // TX_16X64
+    BLOCK_64X16, // TX_64X16
+};
+
+// ==== SVT-AV1 common_utils.c :65 - eb_tx_size_wide_unit (verbatim extract; do not edit) ====
+const int32_t eb_tx_size_wide_unit[TX_SIZES_ALL] = {
+    1, 2, 4, 8, 16, 1, 2, 2, 4, 4, 8, 8, 16, 1, 4, 2, 8, 4, 16,
+};
+
+// ==== SVT-AV1 common_utils.c :69 - eb_tx_size_high_unit (verbatim extract; do not edit) ====
+const int32_t eb_tx_size_high_unit[TX_SIZES_ALL] = {
+    1, 2, 4, 8, 16, 2, 1, 4, 2, 8, 4, 16, 8, 4, 1, 8, 2, 16, 4,
+};
+
 // ==== SVT-AV1 cabac_context_model.c :801 - av1_default_dc_sign_cdfs (verbatim extract; do not edit) ====
 static const AomCdfProb av1_default_dc_sign_cdfs[TOKEN_CDF_Q_CTXS][PLANE_TYPES][DC_SIGN_CONTEXTS][CDF_SIZE(2)] = {
     {{{AOM_CDF2(128 * 125)}, {AOM_CDF2(128 * 102)}, {AOM_CDF2(128 * 147)}},

@@ -120,6 +120,7 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | get_eob_pos_token, get_txsize_entropy_ctx | Codec/entropy_coding.h:94-102, :110-112 | TS1: eob position token + entropy tx size |
 | write_golomb | Codec/entropy_coding.c:236-243 | TS1: golomb writer (the l7 ports the read twin from aom decodetxb.c) |
 | ObuType, AomCodecErr, EbErrorType extracts (BSF2) unchanged | | |
+| tx_blocks_per_depth, txsize_to_bsize, eb_tx_size_wide_unit/high_unit | Codec/transforms.c:24-46, Codec/inv_transforms.h:319-339, Codec/common_utils.c:65-72 | TS2: per-block TU loop bookkeeping |
 | EbErrorType (EB_ErrorNone) | API/EbSvtAv1.h:122-124 | BSF2: TD return type (only EB_ErrorNone consumed by svt_aom_encode_td_av1) |
 
 Second documented deviation (EC0): the WORDS_BIGENDIAN `#if` guard around the
@@ -143,7 +144,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **245/245 lines identical**, covering:
+that file — currently **249/249 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -212,6 +213,15 @@ that file — currently **245/245 lines identical**, covering:
   no tx-type symbol. The eb_av1_nz_map_ctx_offset[19] per-position offset
   LUT (coefficients.c:24-303) is the critical context input - extracted
   whole, consumed by get_nz_map_ctx_from_stats.
+- TS2 per-block txb-ctx + NA gate lines: ecblk_ctx 0 2 2 2 (dc_sign_ctx
+  across the 4-block 64x32 grid — fresh NA at (0,0) → 0, accumulated
+  neighbors → 2 for the rest), ecblk_bytes 18 (the 4-block token stream
+  through od_ec with adaptation), ecblk_rt 21 21 0 0 (block 2 eob 0 =
+  txb_skip-only), ecblk_cdf_eq 1. The NA model: above[16]/left[8] uint8_t
+  arrays, packed (dc_sign << 6 | cul_level), sweep + OR-accumulate per
+  svt_aom_get_txb_ctx :248-315. txb_skip_ctx = 0 always (whole-block TUs,
+  :298-299); the skip_contexts table branch and the chroma branch are
+  ported but dead for our luma whole-block case.
 - BSF3 structural-keyframe assembly gate lines: sps_obu 11 0a 09 10 00 00
   02 27 fe 60 c2 a0 (the ratified sequence header - 9-byte payload = 66
   field bits + the trailing 1 bit, phase-2 uleb rewrite :3925-3948),

@@ -1191,6 +1191,181 @@ int readGolomb(AomReader* r) {
     return x - 1;
 }
 
+// ---------------------------------------------------------------------------
+// TS2: per-block tables + getTxbCtx + per-block loop.
+// ---------------------------------------------------------------------------
+// tx_blocks_per_depth (transforms.c:24-46, verbatim)
+const std::uint8_t txBlocksPerDepth[22][3] = {
+    {1, 1, 1}, // BLOCK_4X4
+    {1, 1, 1}, // BLOCK_4X8
+    {1, 1, 1}, // BLOCK_8X4
+    {1, 4, 4}, // BLOCK_8X8
+    {1, 2, 8}, // BLOCK_8X16
+    {1, 2, 8}, // BLOCK_16X8
+    {1, 4, 16}, // BLOCK_16X16
+    {1, 2, 8}, // BLOCK_16X32
+    {1, 2, 8}, // BLOCK_32X16
+    {1, 4, 16}, // BLOCK_32X32
+    {1, 2, 8}, // BLOCK_32X64
+    {1, 2, 8}, // BLOCK_64X32
+    {1, 4, 16}, // BLOCK_64X64
+    {2, 2, 2}, // BLOCK_64X128
+    {2, 2, 2}, // BLOCK_128X64
+    {4, 4, 4}, // BLOCK_128X128
+    {1, 2, 4}, // BLOCK_4X16
+    {1, 2, 4}, // BLOCK_16X4
+    {1, 2, 4}, // BLOCK_8X32
+    {1, 2, 4}, // BLOCK_32X8
+    {1, 2, 4}, // BLOCK_16X64
+    {1, 2, 4} // BLOCK_64X16
+};
+
+// tx_depth_to_tx_size (common_utils.c:95-115, verbatim)
+const TxSize txDepthToTxSize[3][22] = {
+    {TX_4X4, TX_4X8, TX_8X4, TX_8X8, TX_8X16, TX_16X8, TX_16X16,
+     TX_16X32, TX_32X16, TX_32X32, TX_32X64, TX_64X32, TX_64X64,
+     TX_64X64, TX_64X64, TX_64X64, TX_4X16, TX_16X4, TX_8X32, TX_32X8, TX_16X64, TX_64X16},
+    {TX_4X4, TX_4X8, TX_8X4, TX_4X4, TX_8X8, TX_8X8, TX_8X8,
+     TX_16X16, TX_16X16, TX_16X16, TX_32X32, TX_32X32, TX_32X32,
+     TX_64X64, TX_64X64, TX_64X64, TX_4X8, TX_8X4, TX_8X16, TX_16X8, TX_16X32, TX_32X16},
+    {TX_4X4, TX_4X8, TX_8X4, TX_8X8, TX_4X4, TX_4X4, TX_4X4, TX_8X8, TX_8X8, TX_8X8, TX_16X16, TX_16X16, TX_16X16,
+     TX_64X64, TX_64X64, TX_64X64, TX_4X4, TX_4X4, TX_8X8, TX_8X8, TX_16X16, TX_16X16}
+};
+
+// txsize_to_bsize (inv_transforms.h:319-339, verbatim)
+const BlockSize txsizeToBsize[TX_SIZES_ALL] = {
+    BLOCK_4X4, BLOCK_8X8, BLOCK_16X16, BLOCK_32X32, BLOCK_64X64,
+    BLOCK_4X8, BLOCK_8X4, BLOCK_8X16, BLOCK_16X8, BLOCK_16X32, BLOCK_32X16,
+    BLOCK_32X64, BLOCK_64X32, BLOCK_4X16, BLOCK_16X4, BLOCK_8X32, BLOCK_32X8,
+    BLOCK_16X64, BLOCK_64X16
+};
+
+// eb_tx_size_wide_unit / eb_tx_size_high_unit (common_utils.c:65-72, verbatim)
+const std::int32_t ebTxSizeWideUnit[TX_SIZES_ALL] = {1, 2, 4, 8, 16, 1, 2, 2, 4, 4, 8, 8, 16, 1, 4, 2, 8, 4, 16};
+const std::int32_t ebTxSizeHighUnit[TX_SIZES_ALL] = {1, 2, 4, 8, 16, 2, 1, 4, 2, 8, 4, 16, 8, 4, 1, 8, 2, 16, 4};
+
+// entropy_coding.c:248-315 port. plane 0 (LUMA); the NA's above/left arrays
+// passed explicitly. The dc_sign signs table {0, -1, 1} (:256) and the OR
+// accumulation (:264-285), dc_sign_ctx derivation (:288-294), then:
+//   plane 0 && plane_bsize == tx_bsize -> txb_skip_ctx = 0 (:298-299)
+//   plane 0 && plane_bsize != tx_bsize -> skip_contexts table (:301-308)
+//   plane != 0 -> chroma path (:310-314) â€” dead for our luma TUs, ported
+//   for the range rule.
+void getTxbCtx(const std::uint8_t* above_ptr, const std::uint8_t* left_ptr, int txb_w_unit,
+               int txb_h_unit, int plane, BlockSize plane_bsize, TxSize tx_size,
+               int* txb_skip_ctx, int* dc_sign_ctx) {
+    static const int8_t signs[3] = {0, -1, 1};
+    int16_t dc_sign = 0;
+    int32_t top = 0;
+    int32_t left = 0;
+
+    if (above_ptr[0] != INVALID_NEIGHBOR_DATA) {
+        for (int32_t k = 0; k < txb_w_unit; ++k) {
+            std::uint8_t v = above_ptr[k];
+            std::uint8_t sign = v >> COEFF_CONTEXT_BITS;
+            dc_sign += signs[sign];
+            top |= v;
+        }
+    }
+    if (left_ptr[0] != INVALID_NEIGHBOR_DATA) {
+        for (int32_t k = 0; k < txb_h_unit; ++k) {
+            std::uint8_t v = left_ptr[k];
+            std::uint8_t sign = v >> COEFF_CONTEXT_BITS;
+            dc_sign += signs[sign];
+            left |= v;
+        }
+    }
+
+    if (dc_sign > 0) {
+        *dc_sign_ctx = 2;
+    } else if (dc_sign < 0) {
+        *dc_sign_ctx = 1;
+    } else {
+        *dc_sign_ctx = 0;
+    }
+
+    const BlockSize tx_bsize = txsizeToBsize[tx_size];
+    if (plane == 0) {
+        if (plane_bsize == tx_bsize) {
+            *txb_skip_ctx = 0;
+        } else {
+            static const std::uint8_t skip_contexts[5][5] = {
+                {1, 2, 2, 2, 3}, {1, 4, 4, 4, 5}, {1, 4, 4, 4, 5}, {1, 4, 4, 4, 5}, {1, 4, 4, 4, 6}};
+            top &= COEFF_CONTEXT_MASK;
+            left &= COEFF_CONTEXT_MASK;
+            const int32_t max = AOMMIN(top | left, 4);
+            const int32_t min = AOMMIN(AOMMIN(top, left), 4);
+            *txb_skip_ctx = skip_contexts[min][max];
+        }
+    } else {
+        const int32_t ctx_base = ((left != 0) + (top != 0));
+        // eb_num_pels_log2_lookup simplified: our TUs are square, the
+        // plane/tx bsize comparison is always >= for our whole-block case
+        // -> ctx_offset = 10 for larger plane, 7 otherwise. Dead for luma
+        // whole-block TUs.
+        const int32_t ctx_offset = (blockSizeWide[plane_bsize] * blockSizeHigh[plane_bsize] >
+                                    blockSizeWide[tx_bsize] * blockSizeHigh[tx_bsize]) ? 10 : 7;
+        *txb_skip_ctx = static_cast<int16_t>(ctx_base + ctx_offset);
+    }
+}
+
+// entropy_coding.c:757-820 tx_depth=0 path (whole-block TU, txb_count=1).
+// eob is the quantizer output (entropy_coding.c:592 blk_ptr->eob.y[txb_itr]).
+// The NA update (:596-603) packs cul_level + dc_sign and writes to the
+// above/left arrays over the TU's mi extent.
+static void setDcSign(int* cul_level, int dc_val) {
+    if (dc_val < 0) {
+        *cul_level |= 1 << COEFF_CONTEXT_BITS;
+    } else if (dc_val > 0) {
+        *cul_level += 2 << COEFF_CONTEXT_BITS;
+    }
+}
+
+void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
+                      const std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
+                      BlockSize bsize, int eob, int mi_row, int mi_col) {
+    const int tx_w_unit = static_cast<int>(ebTxSizeWideUnit[tx_size]);
+    const int tx_h_unit = static_cast<int>(ebTxSizeHighUnit[tx_size]);
+    int txb_skip_ctx = 0, dc_sign_ctx = 0;
+    getTxbCtx(&na->above[mi_col], &na->left[mi_row], tx_w_unit, tx_h_unit, 0, bsize, tx_size,
+              &txb_skip_ctx, &dc_sign_ctx);
+
+    writeTxbCoeffs(w, fc, coeff, scan, tx_size, eob, txb_skip_ctx, dc_sign_ctx);
+
+    // cul_level: sum of abs levels (entropy_coding.c:487/:510 accumulation,
+    // clamped at :541), then set_dc_sign (:542). NA update: write the packed
+    // byte to above[mi_col..mi_col+tx_w_unit-1] and left[mi_row..mi_row+tx_h_unit-1]
+    // (entropy_coding.c:596-603 NA write over the TU extent).
+    int32_t cul_level = 0;
+    for (int c = 0; c < eob; ++c) {
+        cul_level += std::abs(coeff[scan[c]]);
+    }
+    cul_level = AOMMIN(cul_level, COEFF_CONTEXT_MASK);
+    setDcSign(&cul_level, coeff[0]);
+    for (int k = 0; k < tx_w_unit; ++k) na->above[mi_col + k] = static_cast<std::uint8_t>(cul_level);
+    for (int k = 0; k < tx_h_unit; ++k) na->left[mi_row + k] = static_cast<std::uint8_t>(cul_level);
+}
+
+int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
+                    std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
+                    BlockSize bsize, int mi_row, int mi_col) {
+    const int tx_w_unit = static_cast<int>(ebTxSizeWideUnit[tx_size]);
+    const int tx_h_unit = static_cast<int>(ebTxSizeHighUnit[tx_size]);
+    int txb_skip_ctx = 0, dc_sign_ctx = 0;
+    getTxbCtx(&na->above[mi_col], &na->left[mi_row], tx_w_unit, tx_h_unit, 0, bsize, tx_size,
+              &txb_skip_ctx, &dc_sign_ctx);
+
+    const int eob = readTxbCoeffs(r, fc, coeff, scan, tx_size, txb_skip_ctx, dc_sign_ctx);
+    // NA update: same as the writer (aom read side: av1_set_entropy_contexts)
+    int32_t cul_level = 0;
+    for (int c = 0; c < eob; ++c) cul_level += std::abs(coeff[scan[c]]);
+    cul_level = AOMMIN(cul_level, COEFF_CONTEXT_MASK);
+    if (eob > 0) setDcSign(&cul_level, coeff[scan[0]]);
+    for (int k = 0; k < tx_w_unit; ++k) na->above[mi_col + k] = static_cast<std::uint8_t>(cul_level);
+    for (int k = 0; k < tx_h_unit; ++k) na->left[mi_row + k] = static_cast<std::uint8_t>(cul_level);
+    return eob;
+}
+
 // entropy_coding.c:355-544 (LUMA DCT_DCT port)
 void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
                     const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,

@@ -243,3 +243,7 @@ ectok_eob 21 10 0
 ectok_bytes 16 32 06 83 20 6a 0a cc 5f 00 5a a8 31 e2 de 8c c0
 ectok_rt 21 10 0
 ectok_cdf_eq 1
+ecblk_ctx 0 2 2 2
+ecblk_bytes 18 32 06 83 20 6a 0a cc 5f 01 6c 34 b6 4e 34 45 ac 67 cc
+ecblk_rt 21 21 0 0
+ecblk_cdf_eq 1

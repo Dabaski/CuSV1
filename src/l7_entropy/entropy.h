@@ -481,6 +481,47 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
 int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
                   const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx);
 
+// ---------------------------------------------------------------------------
+// TS2: per-block coefficient loop. The dc-sign-level NA model: two flat
+// arrays (above/left), one uint8_t per 4-pixel unit. Packed: bits 7-6 =
+// dc_sign (0=none, 1=neg, 2=pos), bits 5-0 = cul_level (COEFF_CONTEXT_BITS).
+// ---------------------------------------------------------------------------
+struct DcSignLevelCoeffNa {
+    std::uint8_t above[64];   // per mi column (max 64x64/4 = 16, padded)
+    std::uint8_t left[64];    // per mi row
+};
+
+// svt_aom_get_txb_ctx (entropy_coding.c:248-315) flattened: the NA's
+// above/left arrays passed explicitly. plane_bsize == tx_bsize for our
+// whole-block TUs -> txb_skip_ctx = 0 (:298-299). The skip_contexts table
+// branch (:301-308) and the chroma branch (:310-314) are ported for the
+// range rule but dead for our whole-block luma TUs.
+void getTxbCtx(const std::uint8_t* above_ptr, const std::uint8_t* left_ptr, int txb_w_unit,
+               int txb_h_unit, int plane, BlockSize plane_bsize, TxSize tx_size,
+               int* txb_skip_ctx, int* dc_sign_ctx);
+
+// tx_blocks_per_depth (transforms.c:24-46, verbatim; [BLOCK_SIZES_ALL][MAX_VARTX_DEPTH+1])
+extern const std::uint8_t txBlocksPerDepth[22][3];
+// tx_depth_to_tx_size (common_utils.c:95-115, verbatim)
+extern const TxSize txDepthToTxSize[3][22];
+// txsize_to_bsize (inv_transforms.h:319-339, verbatim)
+extern const BlockSize txsizeToBsize[TX_SIZES_ALL];
+// eb_tx_size_wide_unit / eb_tx_size_high_unit (common_utils.c:65-72, verbatim)
+extern const std::int32_t ebTxSizeWideUnit[TX_SIZES_ALL];
+extern const std::int32_t ebTxSizeHighUnit[TX_SIZES_ALL];
+
+// Per-block token loop (entropy_coding.c:757-820 tx_depth=0 path): for our
+// whole-block TUs (tx_depth=0, txb_count=1), the loop is:
+//   getTxbCtx -> writeTxbCoeffs -> NA update. The NA update packs
+//   cul_level (clamped to COEFF_CONTEXT_MASK) + set_dc_sign into a uint8_t
+//   and writes it to the above/left arrays over the TU's mi extent.
+void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
+                      const std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
+                      BlockSize bsize, int eob, int mi_row, int mi_col);
+int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
+                    std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
+                    BlockSize bsize, int mi_row, int mi_col);
+
 // encode_intra_luma_mode_kf_av1 (entropy_coding.c:1026-1040): mode symbol
 // from kf_y_cdf[above_ctx][left_ctx], then the angle-delta symbol when
 // bsize >= BLOCK_8X8 and the mode is directional. Deviation: the context

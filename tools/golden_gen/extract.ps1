@@ -554,6 +554,13 @@ Emit-Verbatim "entropy_coding.h" "static INLINE TxSize get_txsize_entropy_ctx" "
 Emit-Verbatim "entropy_coding.c" "static INLINE void write_golomb" "write_golomb"
 Emit-Lines "inv_transforms.h" "static const int8_t txsize_log2_minus4" "5, // TX_64X16" "txsize_log2_minus4"
 Emit "};"  # closes the extracted txsize_log2_minus4 line-range
+# TS2: per-block bookkeeping tables
+Emit-Macro "definitions.h" "#define MAX_TXB_COUNT " "MAX_TXB_COUNT"
+Emit-Macro "definitions.h" "#define MAX_VARTX_DEPTH" "MAX_VARTX_DEPTH"
+Emit-Verbatim "transforms.c" "const uint8_t tx_blocks_per_depth" "tx_blocks_per_depth"
+Emit-Verbatim "inv_transforms.h" "static const BlockSize txsize_to_bsize" "txsize_to_bsize"
+Emit-Verbatim "common_utils.c" "const int32_t eb_tx_size_wide_unit" "eb_tx_size_wide_unit"
+Emit-Verbatim "common_utils.c" "const int32_t eb_tx_size_high_unit" "eb_tx_size_high_unit"
 Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_dc_sign_cdfs" "av1_default_dc_sign_cdfs"
 Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_txb_skip_cdfs" "av1_default_txb_skip_cdfs"
 Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_eob_extra_cdfs" "av1_default_eob_extra_cdfs"
