@@ -2410,7 +2410,7 @@ static void svtd_bsf3_frame_header(AomWriteBitBuffer* wb) {
     svt_aom_wb_write_bit(wb, 1);         // show_frame (:3338)
     // showable_frame skipped (show_frame = 1, :3340-3342); error_resilient
     // skipped (KEY_FRAME && show_frame, :3343-3347)
-    svt_aom_wb_write_bit(wb, 1);  // disable_cdf_update (:3350; ratified)
+    svt_aom_wb_write_bit(wb, 0);  // disable_cdf_update (:3350; BSF4-fix: SVT keyframe default 0, resource_coordination_process.c:360 - the ec coupling ec_process.c:101 allow_update_cdf = !disable_cdf_update requires 0 for the adapted emission)
     svt_aom_wb_write_bit(wb, 0);  // allow_screen_content_tools - bit IS written (force == 2, :3352-3353)
     // force_integer_mv skipped (asc = 0, :3358-3366)
     svt_aom_wb_write_bit(wb, 0);  // frame_size_override_flag (:3386; frame == max dims, :3368-3371)
@@ -2420,8 +2420,13 @@ static void svtd_bsf3_frame_header(AomWriteBitBuffer* wb) {
     // = 0); superres skipped ENTIRELY (enable_superres = 0 -> no bit,
     // :2636-2639); render size:
     svt_aom_wb_write_bit(wb, 0);  // render_and_frame_size_different (:2616-2624; frame_resize_enabled = 0)
-    // allow_intrabc skipped (asc = 0, :3472-3474); refresh_frame_context
-    // skipped (might_bwd_adapt = !reduced && !disable_cdf_update = 0, :3548-3554)
+    // allow_intrabc skipped (asc = 0, :3472-3474)
+    // might_bwd_adapt = !reduced && !disable_cdf_update = 1 (:3548) -> ONE
+    // bit (BSF4-fix: the region is now LIVE): refresh_frame_context ==
+    // REFRESH_FRAME_CONTEXT_DISABLED = 1 (default resource_coordination_
+    // process.c:381; no other writer assignment - :3550 is the
+    // large_scale_tile path, grep-verified)
+    svt_aom_wb_write_bit(wb, 1);  // refresh_frame_context == DISABLED (:3553)
     // write_tile_info (:3556 -> :2581-2614): single tile, sb 64 vs 32x32
     // frame -> sbCols = sbRows = 1 -> log2_tile_cols = log2_tile_rows = 0 =
     // min = max -> increment/terminator bits = 0 (:2410-2425);

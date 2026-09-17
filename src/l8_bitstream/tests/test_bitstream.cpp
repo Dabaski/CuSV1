@@ -149,9 +149,9 @@ TEST_CASE("structural keyframe TU assembly matches gate") {
     unsigned char fhBuf[64] = {0};
     const std::uint32_t fhSize = bitstream::writeFrameHeader(fhBuf);
     REQUIRE(fhSize == 3);
-    CHECK((unsigned)fhBuf[0] == 0x18);
-    CHECK((unsigned)fhBuf[1] == 0x80);
-    CHECK((unsigned)fhBuf[2] == 0x08);
+    CHECK((unsigned)fhBuf[0] == 0x10);
+    CHECK((unsigned)fhBuf[1] == 0xc0);
+    CHECK((unsigned)fhBuf[2] == 0x04);
 
     // full TU: TD + SPS + OBU_FRAME (svt_aom_encode_td_av1 :3953-3960 +
     // svt_aom_encode_sps_av1 :3925-3948 + svt_aom_write_frame_header_av1
@@ -162,7 +162,7 @@ TEST_CASE("structural keyframe TU assembly matches gate") {
         bitstream::assembleStructuralKeyframeTU(tuBuf, tileBuf, w.pos);
     REQUIRE(tuSize == 23);
     static const unsigned char wantTu[23] = {0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27,
-                                             0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x08, 0x18, 0x80, 0x08,
+                                             0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x08, 0x10, 0xc0, 0x04,
                                              0xc5, 0x2d, 0xb8, 0x76, 0x0c};
     for (int i = 0; i < 23; ++i) CHECK((unsigned)tuBuf[i] == wantTu[i]);
 }
@@ -177,7 +177,7 @@ TEST_CASE("structural keyframe .obu file equals the composed TU and the gate byt
     // external decode check (aomdec/dav1d - neither found on this machine's
     // PATH at BSF4 time; see the slice report).
     static const unsigned char wantTu[23] = {0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27,
-                                             0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x08, 0x18, 0x80, 0x08,
+                                             0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x08, 0x10, 0xc0, 0x04,
                                              0xc5, 0x2d, 0xb8, 0x76, 0x0c};
 
     // composed TU (identical pipeline to the BSF3 test)
