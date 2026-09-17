@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include <entropy.h>
 #include "bitstream.h"
@@ -164,4 +165,75 @@ TEST_CASE("structural keyframe TU assembly matches gate") {
                                              0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x08, 0x18, 0x80, 0x08,
                                              0xc5, 0x2d, 0xb8, 0x76, 0x0c};
     for (int i = 0; i < 23; ++i) CHECK((unsigned)tuBuf[i] == wantTu[i]);
+}
+
+TEST_CASE("structural keyframe .obu file equals the composed TU and the gate bytes") {
+    // BSF4 milestone artifact: goldens/structural_keyframe.obu is the
+    // gate-pinned tu_bytes stream (tools/golden_gen expected line:
+    // tu_bytes 23 12 00 0a 09 10 00 00 02 27 fe 60 c2 a0 32 08 18 80 08 c5
+    // 2d b8 76 0c), produced from the generator output (not hand-typed).
+    // The test proves the three-way identity: composed TU (l7 tile data +
+    // l8 assembly) == committed file == gate bytes. The USER runs the
+    // external decode check (aomdec/dav1d - neither found on this machine's
+    // PATH at BSF4 time; see the slice report).
+    static const unsigned char wantTu[23] = {0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27,
+                                             0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x08, 0x18, 0x80, 0x08,
+                                             0xc5, 0x2d, 0xb8, 0x76, 0x0c};
+
+    // composed TU (identical pipeline to the BSF3 test)
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc);
+    entropy::AomWriter w{};
+    unsigned char tileBuf[64] = {0};
+    w.ec.buf = tileBuf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    std::uint8_t aboveCtx[8];
+    std::uint8_t leftCtx[16];
+    memset(aboveCtx, INVALID_NEIGHBOR_DATA, sizeof(aboveCtx));
+    memset(leftCtx, INVALID_NEIGHBOR_DATA, sizeof(leftCtx));
+    static const int modes[4] = {1, 7, 2, 2};
+    static const int lr[4] = {0, 0, 4, 4};
+    static const int lc[4] = {0, 4, 0, 4};
+    static const int aboveMode[4] = {-1, -1, 1, 7};
+    static const int leftMode[4] = {-1, 1, -1, 2};
+    static const int skipCtx[4] = {0, 1, 1, 2};
+    entropy::writePartition(&w, &fc, entropy::BLOCK_32X32, 1, 1, aboveCtx[0], leftCtx[0],
+                            entropy::PARTITION_SPLIT);
+    for (int b = 0; b < 4; ++b) {
+        entropy::writePartition(&w, &fc, entropy::BLOCK_16X16, 1, 1, aboveCtx[lc[b]],
+                                leftCtx[lr[b] & 15], entropy::PARTITION_NONE);
+        entropy::updatePartitionContext(aboveCtx, leftCtx, lr[b], lc[b], entropy::BLOCK_16X16);
+        entropy::writeSkip(&w, &fc, skipCtx[b], 1);
+        int topCtx, leftCtxKf;
+        entropy::getKfYModeCtx(leftMode[b] >= 0 ? 1 : 0, leftMode[b] < 0 ? 0 : leftMode[b],
+                               aboveMode[b] >= 0 ? 1 : 0, aboveMode[b] < 0 ? 0 : aboveMode[b],
+                               &topCtx, &leftCtxKf);
+        entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
+                                 static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, 0);
+    }
+    entropy::odEcStopEncode(&w);
+    unsigned char tuBuf[128];
+    memset(tuBuf, 0, sizeof(tuBuf));
+    const std::uint32_t tuSize = bitstream::assembleStructuralKeyframeTU(tuBuf, tileBuf, w.pos);
+    REQUIRE(tuSize == 23);
+    for (int i = 0; i < 23; ++i) CHECK((unsigned)tuBuf[i] == wantTu[i]);
+
+    // committed artifact identity. The goldens path derives from __FILE__
+    // (robust against compile-definition quoting across CMake generators -
+    // named; a BSF4_OBU_PATH definition was tried and broke on the VS
+    // generator with the space in the repo path).
+    const std::string tuFilePath = []() {
+        const std::string f = __FILE__;
+        return f.substr(0, f.find_last_of("/\\") + 1) + "goldens/structural_keyframe.obu";
+    }();
+    FILE* f = nullptr;
+    fopen_s(&f, tuFilePath.c_str(), "rb");
+    REQUIRE(f != nullptr);
+    unsigned char fileBytes[32] = {0};
+    const size_t n = fread(fileBytes, 1, sizeof(fileBytes), f);
+    fclose(f);
+    REQUIRE(n == 23);
+    for (int i = 0; i < 23; ++i) CHECK(fileBytes[i] == wantTu[i]);
 }
