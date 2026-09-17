@@ -2583,6 +2583,7 @@ typedef struct Ts1FrameContext {
     AomCdfProb eob_flag_cdf256[PLANE_TYPES][2][CDF_SIZE(9)];
     AomCdfProb eob_flag_cdf512[PLANE_TYPES][2][CDF_SIZE(10)];
     AomCdfProb eob_flag_cdf1024[PLANE_TYPES][2][CDF_SIZE(11)];
+    AomCdfProb intra_ext_tx_cdf[EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][CDF_SIZE(16)];
 } Ts1FrameContext;
 
 static void ts1_init(Ts1FrameContext* fc) {
@@ -2599,6 +2600,7 @@ static void ts1_init(Ts1FrameContext* fc) {
     memcpy(fc->eob_flag_cdf256, av1_default_eob_multi256_cdfs, sizeof(fc->eob_flag_cdf256));
     memcpy(fc->eob_flag_cdf512, av1_default_eob_multi512_cdfs, sizeof(fc->eob_flag_cdf512));
     memcpy(fc->eob_flag_cdf1024, av1_default_eob_multi1024_cdfs, sizeof(fc->eob_flag_cdf1024));
+    memcpy(fc->intra_ext_tx_cdf, default_intra_ext_tx_cdf, sizeof(fc->intra_ext_tx_cdf));
 }
 
 static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranLow* coeff,
@@ -2610,6 +2612,19 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
 
     aom_write_symbol(w, eob == 0, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     if (eob == 0) return;
+
+    // TS3: tx-type emission (entropy_coding.c:374-376). The l6 pipeline's
+    // DCT_DCT-only port emits the DCT_DCT index through the DTT4_IDTX set
+    // (eset 2, 5 symbols) for reduced_tx_set=1 intra. The intra_dir is
+    // always DC_PRED for the DCT_DCT-only port (av1_write_tx_type :339-342
+    // folds filter-intra via fimode_to_intradir; DCT_DCT-only port has
+    // filter_intra_mode == FILTER_INTRA_MODES, so intra_dir = the caller's
+    // intraDir = the luma mode).
+    {
+        const TxSize sq = txsize_sqr_map[tx_size];
+        aom_write_symbol(w, av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
+                         fc->intra_ext_tx_cdf[2][sq][DC_PRED], 5);
+    }
 
     int eob_extra;
     const int eob_pt = get_eob_pos_token(eob, &eob_extra);
@@ -2710,6 +2725,13 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
 
     const int all_zero = aom_read_symbol_(r, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     if (all_zero) return 0;
+
+    // TS3: tx-type read (between txb_skip and eob_pt, entropy_coding.c:374-376)
+    {
+        const TxSize sq = txsize_sqr_map[tx_size];
+        const int ttx = aom_read_symbol_(r, fc->intra_ext_tx_cdf[2][sq][DC_PRED], 5);
+        (void)ttx;  // DCT_DCT-only port: the read symbol is discarded
+    }
 
     int eob_pt;
     int nsyms;

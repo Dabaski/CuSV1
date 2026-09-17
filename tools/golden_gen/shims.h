@@ -16,6 +16,19 @@
 #define INLINE inline
 #define AOM_FORCE_INLINE inline // definitions.h:535/538 MSVC __forceinline branch flattened to plain inline (generator builds /Od-equivalent semantics; inlining is a hint only)
 #define AOMMIN(x, y) (((x) < (y)) ? (x) : (y)) // definitions.h:1001, verbatim (TS1: get_nz_map_ctx_from_stats / get_br_ctx)
+// TxSetType (definitions.h:1071-1082 enum): the 7 TxSetType values, needed
+// by the TS3 ext-tx tables (av1_num_ext_tx_set etc. index by EXT_TX_SET_TYPES).
+typedef enum TxSetTypeShim {
+    EXT_TX_SET_DCTONLY = 0,
+    EXT_TX_SET_DCT_IDTX = 1,
+    EXT_TX_SET_DTT4_IDTX = 2,
+    EXT_TX_SET_DTT4_IDTX_1DDCT = 3,
+    EXT_TX_SET_DTT9_IDTX_1DDCT = 4,
+    EXT_TX_SET_ALL16 = 5,
+    EXT_TX_SET_TYPES = 6,
+    EXT_TX_SETS_INTRA = 3,   // definitions.h:1104
+    EXT_TX_SIZES = 4,        // definitions.h:1102
+} TxSetType;
 #define ABS(a) (((a) < 0) ? (-(a)) : (a)) // utility.h ABS macro (TS1: coeff levels)
 #define NOINLINE
 #define ATTRIBUTE_PACKED

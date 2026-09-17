@@ -577,6 +577,12 @@ Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb
     av1_default_coeff_base_multi_cdfs" "av1_default_coeff_base_multi_cdfs"
 Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb
     av1_default_coeff_base_eob_multi_cdfs" "av1_default_coeff_base_eob_multi_cdfs"
+# TS3: ext tx set tables (common_utils.c:195-210)
+Emit-Verbatim "common_utils.c" "const int32_t av1_num_ext_tx_set" "av1_num_ext_tx_set"
+Emit-Verbatim "common_utils.c" "const int32_t av1_ext_tx_used" "av1_ext_tx_used"
+Emit-Verbatim "common_utils.c" "const int32_t ext_tx_set_index" "ext_tx_set_index"
+Emit-Verbatim "cabac_context_model.c" "const int32_t av1_ext_tx_ind" "av1_ext_tx_ind"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_intra_ext_tx_cdf" "default_intra_ext_tx_cdf"
 Emit-Macro "entropy_coding.c" "static const size_t   k_maximum_leb_128_size" "k_maximum_leb_128_size"
 Emit-Macro "entropy_coding.c" "static const uint64_t k_maximum_leb_128_value" "k_maximum_leb_128_value"
 Emit-Verbatim "entropy_coding.c" "size_t svt_aom_uleb_size_in_bytes" "svt_aom_uleb_size_in_bytes"

@@ -222,6 +222,15 @@ that file — currently **249/249 lines identical**, covering:
   svt_aom_get_txb_ctx :248-315. txb_skip_ctx = 0 always (whole-block TUs,
   :298-299); the skip_contexts table branch and the chroma branch are
   ported but dead for our luma whole-block case.
+- TS3 tx-type gate lines (merged into ectok/ecblk): the token chain now
+  emits the DCT_DCT symbol through intra_ext_tx_cdf[2][sq][intra_dir]
+  (eset 2 = DTT4_IDTX, 5 symbols, reduced_tx_set=1 intra) for q>0 TUs.
+  The reader twin reads the tx-type symbol between txb_skip and eob_pt
+  (entropy_coding.c:374-376 mirror: aom decodetxb.c av1_read_tx_type).
+  ecblk bytes 18 -> 19 (one extra tx-type symbol per q>0 TU); ectok
+  bytes 16 -> 16 (the 4x4 TU with eob=0 skips the tx-type via the
+  eob==0 early return). The intra_ext_tx_cdf table is ported whole
+  ([EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][CDF_SIZE(TX_TYPES)]).
 - BSF3 structural-keyframe assembly gate lines: sps_obu 11 0a 09 10 00 00
   02 27 fe 60 c2 a0 (the ratified sequence header - 9-byte payload = 66
   field bits + the trailing 1 bit, phase-2 uleb rewrite :3925-3948),

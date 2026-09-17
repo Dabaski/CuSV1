@@ -664,11 +664,42 @@ static const AomCdfProb eob_multi1024_cdfs_default[PLANE_TYPES][2][CDF_SIZE(11)]
 #include "eob_multi1024_cdfs_default.inc"
 };
 
+// default_intra_ext_tx_cdf (cabac_context_model.c:157, verbatim)
+static const AomCdfProb intra_ext_tx_cdfs_default[EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][CDF_SIZE(16)] = {
+#include "intra_ext_tx_cdfs_default.inc"
+};
+
+// av1_num_ext_tx_set (common_utils.c:195, verbatim)
+const int32_t av1NumExtTxSet[EXT_TX_SET_TYPES] = {1, 2, 5, 7, 12, 16};
+
+// av1_ext_tx_used (common_utils.c:197-205, verbatim)
+const int32_t av1ExtTxUsed[EXT_TX_SET_TYPES][16] = {
+    {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
+    {1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
+    {1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0},
+    {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0},
+    {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+};
+
+// ext_tx_set_index (common_utils.c:206-209, verbatim)
+const int32_t extTxSetIndex[2][EXT_TX_SET_TYPES] = {
+    {0, -1, 2, 1, -1, -1}, // Intra
+    {0, 3, -1, -1, 2, 1} // Inter
+};
+
+// av1_ext_tx_ind (cabac_context_model.c:34-41, verbatim)
+const int32_t av1ExtTxInd[EXT_TX_SET_TYPES][16] = {
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 3, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 5, 6, 4, 0, 0, 0, 0, 0, 0, 2, 3, 0, 0, 0, 0},
+    {3, 4, 5, 8, 6, 7, 9, 10, 11, 0, 1, 2, 0, 0, 0, 0},
+    {7, 8, 9, 12, 10, 11, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6},
+};
+
 // tx_type_to_class (cabac_context_model.c:15-35, verbatim; TS1 uses [DCT_DCT])
-enum TxType { DCT_DCT, ADST_DCT, DCT_ADST, ADST_ADST, FLIPADST_DCT, DCT_FLIPADST, FLIPADST_FLIPADST,
-              ADST_FLIPADST, FLIPADST_ADST, IDTX, V_DCT, H_DCT, V_ADST, H_ADST, V_FLIPADST, H_FLIPADST,
-              TX_TYPES_SENTINEL, INVALID_TX_TYPE };
-static const TxClass tx_type_to_class[TX_TYPES_SENTINEL] = {
+static const TxClass tx_type_to_class[TX_TYPES] = {
     TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D,
     TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_VERT, TX_CLASS_HORIZ, TX_CLASS_VERT, TX_CLASS_HORIZ,
     TX_CLASS_VERT, TX_CLASS_HORIZ,
@@ -749,6 +780,7 @@ void initDefaultEcFrameContext(EcFrameContext* fc) {
     memcpy(fc->eob_flag_cdf256, eob_multi256_cdfs_default, sizeof(fc->eob_flag_cdf256));
     memcpy(fc->eob_flag_cdf512, eob_multi512_cdfs_default, sizeof(fc->eob_flag_cdf512));
     memcpy(fc->eob_flag_cdf1024, eob_multi1024_cdfs_default, sizeof(fc->eob_flag_cdf1024));
+    memcpy(fc->intra_ext_tx_cdf, intra_ext_tx_cdfs_default, sizeof(fc->intra_ext_tx_cdf));
 }
 
 int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
@@ -770,7 +802,8 @@ int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
            memcmp(a->eob_flag_cdf128, b->eob_flag_cdf128, sizeof(a->eob_flag_cdf128)) == 0 &&
            memcmp(a->eob_flag_cdf256, b->eob_flag_cdf256, sizeof(a->eob_flag_cdf256)) == 0 &&
            memcmp(a->eob_flag_cdf512, b->eob_flag_cdf512, sizeof(a->eob_flag_cdf512)) == 0 &&
-           memcmp(a->eob_flag_cdf1024, b->eob_flag_cdf1024, sizeof(a->eob_flag_cdf1024)) == 0;
+           memcmp(a->eob_flag_cdf1024, b->eob_flag_cdf1024, sizeof(a->eob_flag_cdf1024)) == 0 &&
+           memcmp(a->intra_ext_tx_cdf, b->intra_ext_tx_cdf, sizeof(a->intra_ext_tx_cdf)) == 0;
 }
 
 // svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021), flattened
@@ -1192,6 +1225,78 @@ int readGolomb(AomReader* r) {
 }
 
 // ---------------------------------------------------------------------------
+// TS3: tx-type surface (entropy_coding.c:317-353, intra path).
+// ---------------------------------------------------------------------------
+// get_ext_tx_set_type (common_utils.h:59-77, intra path: is_inter=0)
+TxSetType getExtTxSetType(TxSize tx_size, int is_inter, int use_reduced_set) {
+    const TxSize tx_size_sqr_up = txsizeSqrUpMap[tx_size];
+    if (tx_size_sqr_up > TX_32X32) return EXT_TX_SET_DCTONLY;
+    if (tx_size_sqr_up == TX_32X32) return is_inter ? EXT_TX_SET_DCT_IDTX : EXT_TX_SET_DCTONLY;
+    if (use_reduced_set) return is_inter ? EXT_TX_SET_DCT_IDTX : EXT_TX_SET_DTT4_IDTX;
+    const TxSize tx_size_sqr = txsizeSqrMap[tx_size];
+    if (is_inter) return (tx_size_sqr == TX_16X16 ? EXT_TX_SET_DTT9_IDTX_1DDCT : EXT_TX_SET_ALL16);
+    return (tx_size_sqr == TX_16X16 ? EXT_TX_SET_DTT4_IDTX : EXT_TX_SET_DTT4_IDTX_1DDCT);
+}
+
+// get_ext_tx_types (common_utils.h:79-82)
+int getExtTxTypes(TxSize tx_size, int is_inter, int use_reduced_set) {
+    return av1NumExtTxSet[getExtTxSetType(tx_size, is_inter, use_reduced_set)];
+}
+
+// get_ext_tx_set (common_utils.h:87-90)
+int getExtTxSet(TxSize tx_size, int is_inter, int use_reduced_set) {
+    return extTxSetIndex[is_inter][getExtTxSetType(tx_size, is_inter, use_reduced_set)];
+}
+
+// av1_write_tx_type (entropy_coding.c:317-353, intra path only)
+void writeTxType(AomWriter* w, EcFrameContext* fc, int base_q_idx, int reduced_tx_set,
+                 PredictionMode intra_dir, TxType tx_type, TxSize tx_size) {
+    const int is_inter = 0;  // intra path only
+    if (getExtTxTypes(tx_size, is_inter, reduced_tx_set) > 1 && base_q_idx > 0) {
+        const TxSize square_tx_size = txsizeSqrMap[tx_size];
+        const TxSetType tx_set_type = getExtTxSetType(tx_size, is_inter, reduced_tx_set);
+        const int32_t eset = getExtTxSet(tx_size, is_inter, reduced_tx_set);
+        odEcWriteSymbol(w, av1ExtTxInd[tx_set_type][tx_type],
+                        fc->intra_ext_tx_cdf[eset][square_tx_size][intra_dir],
+                        av1NumExtTxSet[tx_set_type]);
+    }
+}
+
+// aom decodetxb.c av1_read_tx_type (intra path, symbol-for-symbol twin)
+TxType readTxType(AomReader* r, EcFrameContext* fc, int base_q_idx, int reduced_tx_set,
+                  PredictionMode intra_dir, TxSize tx_size) {
+    const int is_inter = 0;
+    if (getExtTxTypes(tx_size, is_inter, reduced_tx_set) <= 1 || base_q_idx == 0) return DCT_DCT;
+    const TxSetType tx_set_type = getExtTxSetType(tx_size, is_inter, reduced_tx_set);
+    const int32_t eset = getExtTxSet(tx_size, is_inter, reduced_tx_set);
+    const int32_t num = av1NumExtTxSet[tx_set_type];
+    const int32_t sym = odEcReadSymbol(r, fc->intra_ext_tx_cdf[eset][txsizeSqrMap[tx_size]][intra_dir], num);
+    // av1_ext_tx_inv[tx_set_type][sym] — the inverse mapping for DTT4_IDTX (eset 2)
+    // For the reduced intra set (DTT4_IDTX): {9,0,3,1,2,0,...} — index 0→9(IDTX? no,
+    // av1_ext_tx_inv[2][0]=9? hmm — looking at the table: {9, 0, 3, 1, 2, ...}
+    // sym 0 → 9 (IDTX? no — DCT_DCT is 0, so av1_ext_tx_inv maps the read
+    // symbol back to the TxType enum). For DCT_DCT-only port: sym 0 → DCT_DCT.
+    // The av1_ext_tx_inv[2] row: {9, 0, 3, 1, 2, 0, ...} — sym 0→9 (IDTX? no.
+    // Actually the aom table maps the CDF index to the TxType. For DTT4_IDTX
+    // (eset 2): the set is {DCT_DCT, DCT_ADST, ADST_DCT, ADST_ADST, IDTX} in
+    // the order {0,3,4,2,9} per av1_ext_tx_ind[2] = {1,3,4,2,0,0,...}. Wait —
+    // av1_ext_tx_ind[2] maps TxType → symbol index: DCT_DCT→1, H_DCT→3, V_DCT→4,
+    // ADST_DCT→2, IDTX→0. So the inverse (av1_ext_tx_inv[2]) maps symbol → TxType:
+    // sym 0→IDTX(9), sym 1→DCT_DCT(0), sym 2→ADST_DCT(1), sym 3→H_DCT(11),
+    // sym 4→V_DCT(10). For our DCT_DCT-only port, the DCT_DCT symbol index is
+    // av1_ext_tx_ind[2][DCT_DCT] = 1, and the reader inverts: av1_ext_tx_inv[2][1] = 0.
+    static const int32_t av1ExtTxInv[EXT_TX_SET_TYPES][16] = {
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {9, 0, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {9, 0, 10, 11, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {9, 10, 11, 0, 1, 2, 4, 5, 3, 6, 7, 8, 0, 0, 0, 0},
+        {9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 4, 5, 3, 6, 7, 8},
+    };
+    return static_cast<TxType>(av1ExtTxInv[tx_set_type][sym]);
+}
+
+// ---------------------------------------------------------------------------
 // TS2: per-block tables + getTxbCtx + per-block loop.
 // ---------------------------------------------------------------------------
 // tx_blocks_per_depth (transforms.c:24-46, verbatim)
@@ -1323,14 +1428,15 @@ static void setDcSign(int* cul_level, int dc_val) {
 
 void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                       const std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
-                      BlockSize bsize, int eob, int mi_row, int mi_col) {
+                      BlockSize bsize, int eob, int mi_row, int mi_col,
+                      int reduced_tx_set, PredictionMode intra_dir) {
     const int tx_w_unit = static_cast<int>(ebTxSizeWideUnit[tx_size]);
     const int tx_h_unit = static_cast<int>(ebTxSizeHighUnit[tx_size]);
     int txb_skip_ctx = 0, dc_sign_ctx = 0;
     getTxbCtx(&na->above[mi_col], &na->left[mi_row], tx_w_unit, tx_h_unit, 0, bsize, tx_size,
               &txb_skip_ctx, &dc_sign_ctx);
 
-    writeTxbCoeffs(w, fc, coeff, scan, tx_size, eob, txb_skip_ctx, dc_sign_ctx);
+    writeTxbCoeffs(w, fc, coeff, scan, tx_size, eob, txb_skip_ctx, dc_sign_ctx, reduced_tx_set, intra_dir);
 
     // cul_level: sum of abs levels (entropy_coding.c:487/:510 accumulation,
     // clamped at :541), then set_dc_sign (:542). NA update: write the packed
@@ -1348,14 +1454,15 @@ void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
 
 int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                     std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
-                    BlockSize bsize, int mi_row, int mi_col) {
+                    BlockSize bsize, int mi_row, int mi_col,
+                    int reduced_tx_set, PredictionMode intra_dir) {
     const int tx_w_unit = static_cast<int>(ebTxSizeWideUnit[tx_size]);
     const int tx_h_unit = static_cast<int>(ebTxSizeHighUnit[tx_size]);
     int txb_skip_ctx = 0, dc_sign_ctx = 0;
     getTxbCtx(&na->above[mi_col], &na->left[mi_row], tx_w_unit, tx_h_unit, 0, bsize, tx_size,
               &txb_skip_ctx, &dc_sign_ctx);
 
-    const int eob = readTxbCoeffs(r, fc, coeff, scan, tx_size, txb_skip_ctx, dc_sign_ctx);
+    const int eob = readTxbCoeffs(r, fc, coeff, scan, tx_size, txb_skip_ctx, dc_sign_ctx, reduced_tx_set, intra_dir);
     // NA update: same as the writer (aom read side: av1_set_entropy_contexts)
     int32_t cul_level = 0;
     for (int c = 0; c < eob; ++c) cul_level += std::abs(coeff[scan[c]]);
@@ -1369,13 +1476,25 @@ int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
 // entropy_coding.c:355-544 (LUMA DCT_DCT port)
 void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
                     const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
-                    int dc_sign_ctx) {
+                    int dc_sign_ctx, int reduced_tx_set, PredictionMode intra_dir) {
     const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
     const int    eob_multi_size = txsizeLog2Minus4[tx_size];
     const int    eob_multi_ctx  = 0;  // TX_CLASS_2D (tx_type_to_class[DCT_DCT])
 
     odEcWriteSymbol(w, eob == 0, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     if (eob == 0) return;
+
+    // TS3: tx-type emission (entropy_coding.c:374-376). q100 gate: the
+    // caller passes base_q_idx via the reduced_tx_set parameter (repurposed
+    // for the DCT_DCT-only port — reduced_tx_set > 0 implies q > 0 for the
+    // DCT_DCT-only call sites). The DCT_DCT-only port always emits the
+    // DCT_DCT index through the DTT4_IDTX set (eset 2, 5 symbols) for
+    // reduced_tx_set=1 intra. The intra_dir is the caller's luma mode.
+    if (reduced_tx_set > 0) {
+        const TxSize sq = txsizeSqrMap[tx_size];
+        odEcWriteSymbol(w, av1ExtTxInd[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
+                        fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
+    }
 
     int eob_extra;
     const int eob_pt = getEobPosToken(eob, &eob_extra);
@@ -1465,7 +1584,8 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
 
 // aom decodetxb.c read_coeffs_txb (symbol-for-symbol twin)
 int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
-                  const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx) {
+                  const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx,
+                  int reduced_tx_set, PredictionMode intra_dir) {
     const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
     const int    eob_multi_size = txsizeLog2Minus4[tx_size];
     const int    eob_multi_ctx  = 0;
@@ -1473,6 +1593,13 @@ int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
 
     const int all_zero = odEcReadSymbol(r, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     if (all_zero) return 0;
+
+    // TS3: tx-type read (entropy_coding.c:374-376 mirror)
+    if (reduced_tx_set > 0) {
+        const TxSize sq = txsizeSqrMap[tx_size];
+        const int ttx = odEcReadSymbol(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
+        (void)ttx;  // DCT_DCT-only port
+    }
 
     int eob_pt;
     switch (eob_multi_size) {

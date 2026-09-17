@@ -542,9 +542,9 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     w.allow_update_cdf = 1;
     w.pos = 0;
 
-    entropy::writeTxbCoeffs(&w, &fc, qc16, scan16, entropy::TX_16X16, eob16, 0, 0);
-    entropy::writeTxbCoeffs(&w, &fc, qc8, scan8, entropy::TX_8X8, eob8, 0, 0);
-    entropy::writeTxbCoeffs(&w, &fc, qc4, scan4, entropy::TX_4X4, eob4, 0, 0);
+    entropy::writeTxbCoeffs(&w, &fc, qc16, scan16, entropy::TX_16X16, eob16, 0, 0, 1, entropy::DC_PRED);
+    entropy::writeTxbCoeffs(&w, &fc, qc8, scan8, entropy::TX_8X8, eob8, 0, 0, 1, entropy::V_PRED);
+    entropy::writeTxbCoeffs(&w, &fc, qc4, scan4, entropy::TX_4X4, eob4, 0, 0, 1, entropy::H_PRED);
     entropy::odEcStopEncode(&w);
     REQUIRE(w.pos == 16);
     static const unsigned char wantBytes[16] = {0x32, 0x06, 0x83, 0x20, 0x6a, 0x0a, 0xcc, 0x5f,
@@ -557,9 +557,9 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     std::int32_t rc16[256] = {0};
     std::int32_t rc8[64] = {0};
     std::int32_t rc4[16] = {0};
-    const int reob16 = entropy::readTxbCoeffs(&r, &fcR, rc16, scan16, entropy::TX_16X16, 0, 0);
-    const int reob8 = entropy::readTxbCoeffs(&r, &fcR, rc8, scan8, entropy::TX_8X8, 0, 0);
-    const int reob4 = entropy::readTxbCoeffs(&r, &fcR, rc4, scan4, entropy::TX_4X4, 0, 0);
+    const int reob16 = entropy::readTxbCoeffs(&r, &fcR, rc16, scan16, entropy::TX_16X16, 0, 0, 1, entropy::DC_PRED);
+    const int reob8 = entropy::readTxbCoeffs(&r, &fcR, rc8, scan8, entropy::TX_8X8, 0, 0, 1, entropy::V_PRED);
+    const int reob4 = entropy::readTxbCoeffs(&r, &fcR, rc4, scan4, entropy::TX_4X4, 0, 0, 1, entropy::H_PRED);
     CHECK(reob16 == 21);
     CHECK(reob8 == 10);
     CHECK(reob4 == 0);
@@ -619,7 +619,7 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
 
     for (int b = 0; b < 4; ++b) {
         entropy::writeBlockCoeffs(&w, &fc, &na, qc[b], scan16, entropy::TX_16X16,
-                                  entropy::BLOCK_16X16, eob[b], mi[b][0], mi[b][1]);
+                                  entropy::BLOCK_16X16, eob[b], mi[b][0], mi[b][1], 1, entropy::DC_PRED);
     }
     entropy::odEcStopEncode(&w);
     REQUIRE(w.pos == 18);
@@ -637,7 +637,7 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
     for (int b = 0; b < 4; ++b) {
         std::int32_t rc[256] = {0};
         const int reob = entropy::readBlockCoeffs(&r, &fcR, &naR, rc, scan16, entropy::TX_16X16,
-                                                  entropy::BLOCK_16X16, mi[b][0], mi[b][1]);
+                                                  entropy::BLOCK_16X16, mi[b][0], mi[b][1], 1, entropy::DC_PRED);
         CHECK(reob == (int)eob[b]);
         for (int i = 0; i < 256; ++i) CHECK(rc[i] == qc[b][i]);
     }

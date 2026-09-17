@@ -276,6 +276,27 @@ enum FilterIntraMode {
 #define TX_PAD_VER (TX_PAD_TOP + TX_PAD_BOTTOM)
 #define TX_PAD_END 16
 #define TX_PAD_2D ((64 + TX_PAD_HOR) * (64 + TX_PAD_VER) + TX_PAD_END)
+#define EXT_TX_SETS_INTRA 3   // definitions.h:1104
+#define EXT_TX_SIZES 4        // definitions.h:1102
+
+// TxType (definitions.h:1017-1037, verbatim order)
+enum TxType {
+    DCT_DCT, ADST_DCT, DCT_ADST, ADST_ADST, FLIPADST_DCT, DCT_FLIPADST,
+    FLIPADST_FLIPADST, ADST_FLIPADST, FLIPADST_ADST, IDTX, V_DCT, H_DCT,
+    V_ADST, H_ADST, V_FLIPADST, H_FLIPADST,
+    TX_TYPES, INVALID_TX_TYPE,
+};
+
+// TxSetType (definitions.h:1071-1082 enum, verbatim order)
+enum TxSetType {
+    EXT_TX_SET_DCTONLY = 0,
+    EXT_TX_SET_DCT_IDTX = 1,
+    EXT_TX_SET_DTT4_IDTX = 2,
+    EXT_TX_SET_DTT4_IDTX_1DDCT = 3,
+    EXT_TX_SET_DTT9_IDTX_1DDCT = 4,
+    EXT_TX_SET_ALL16 = 5,
+    EXT_TX_SET_TYPES = 6,
+};
 
 // PlaneType (definitions.h:685)
 enum PlaneType { PLANE_TYPE_Y, PLANE_TYPE_UV, PLANE_TYPES };
@@ -343,6 +364,7 @@ struct EcFrameContext {
     AomCdfProb eob_flag_cdf256[PLANE_TYPES][2][CDF_SIZE(9)];
     AomCdfProb eob_flag_cdf512[PLANE_TYPES][2][CDF_SIZE(10)];
     AomCdfProb eob_flag_cdf1024[PLANE_TYPES][2][CDF_SIZE(11)];
+    AomCdfProb intra_ext_tx_cdf[EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][CDF_SIZE(TX_TYPES)];
 };
 
 // Initialize from the SVT default tables (cabac_context_model.c:59-97,
@@ -475,11 +497,43 @@ int readGolomb(AomReader* r);
 // scan: forward scan (svt_aom_init_iscan family).
 void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
                     const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
-                    int dc_sign_ctx);
+                    int dc_sign_ctx, int reduced_tx_set, PredictionMode intra_dir);
 // read twin (aom decodetxb.c read_coeffs_txb, symbol-for-symbol). Fills
 // coeff (raster, signed); returns eob.
 int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
-                  const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx);
+                  const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx,
+                  int reduced_tx_set, PredictionMode intra_dir);
+
+// ---------------------------------------------------------------------------
+// TS3: tx-type surface (entropy_coding.c:317-353, intra path only).
+// ---------------------------------------------------------------------------
+// get_ext_tx_set_type (common_utils.h:59-77; the txsize_sqr tables + TxSetType enum)
+TxSetType getExtTxSetType(TxSize tx_size, int is_inter, int use_reduced_set);
+// get_ext_tx_types (common_utils.h:79-82) -> av1_num_ext_tx_set[set_type]
+int getExtTxTypes(TxSize tx_size, int is_inter, int use_reduced_set);
+// get_ext_tx_set (common_utils.h:87-90) -> ext_tx_set_index[is_inter][set_type]
+int getExtTxSet(TxSize tx_size, int is_inter, int use_reduced_set);
+
+// av1_num_ext_tx_set (common_utils.c:195, verbatim)
+extern const int32_t av1NumExtTxSet[EXT_TX_SET_TYPES];
+// av1_ext_tx_used (common_utils.c:197-205, verbatim)
+extern const int32_t av1ExtTxUsed[EXT_TX_SET_TYPES][16];
+// ext_tx_set_index (common_utils.c:206-209, verbatim)
+extern const int32_t extTxSetIndex[2][EXT_TX_SET_TYPES];
+// av1_ext_tx_ind (cabac_context_model.c:34-41, verbatim)
+extern const int32_t av1ExtTxInd[EXT_TX_SET_TYPES][16];
+
+// av1_write_tx_type (entropy_coding.c:317-353, intra path only: is_inter=0).
+// Gate: get_ext_tx_types(tx_size, 0, reduced_tx_set) > 1 AND base_q_idx > 0.
+// Symbol value = av1_ext_tx_ind[tx_set_type][tx_type]; cdf =
+// intra_ext_tx_cdf[eset][square_tx_size][intra_dir]; nsymbs =
+// av1_num_ext_tx_set[tx_set_type].
+void writeTxType(AomWriter* w, EcFrameContext* fc, int base_q_idx, int reduced_tx_set,
+                 PredictionMode intra_dir, TxType tx_type, TxSize tx_size);
+// Read twin (aom decodetxb.c: av1_read_tx_type — reads from intra_ext_tx_cdf
+// at [eset][square][intra_dir] and inverts via av1_ext_tx_inv)
+TxType readTxType(AomReader* r, EcFrameContext* fc, int base_q_idx, int reduced_tx_set,
+                  PredictionMode intra_dir, TxSize tx_size);
 
 // ---------------------------------------------------------------------------
 // TS2: per-block coefficient loop. The dc-sign-level NA model: two flat
@@ -517,10 +571,12 @@ extern const std::int32_t ebTxSizeHighUnit[TX_SIZES_ALL];
 //   and writes it to the above/left arrays over the TU's mi extent.
 void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                       const std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
-                      BlockSize bsize, int eob, int mi_row, int mi_col);
+                      BlockSize bsize, int eob, int mi_row, int mi_col,
+                      int reduced_tx_set, PredictionMode intra_dir);
 int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                     std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
-                    BlockSize bsize, int mi_row, int mi_col);
+                    BlockSize bsize, int mi_row, int mi_col,
+                    int reduced_tx_set, PredictionMode intra_dir);
 
 // encode_intra_luma_mode_kf_av1 (entropy_coding.c:1026-1040): mode symbol
 // from kf_y_cdf[above_ctx][left_ctx], then the angle-delta symbol when
