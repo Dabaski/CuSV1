@@ -1,7 +1,11 @@
 #pragma once
 
 #include <climits>
+#include <cstdlib>
+#include <cmath>
 #include <cstdint>
+
+#define AOMMIN(x, y) (((x) < (y)) ? (x) : (y))  // definitions.h:1001
 
 namespace entropy {
 
@@ -142,6 +146,11 @@ void odEcWriteSymbol(AomWriter* w, int symb, AomCdfProb* cdf, int nsymbs);
 // count in w->pos.
 void odEcStopEncode(AomWriter* w);
 
+// aom_write_bit (bitstream_unit.h:255-257): od_ec_encode_bool_eq_q15
+void odEcWriteLiteralBit(AomWriter* w, int bit, int unused_bits);
+// aom_write_literal (bitstream_unit.h:259-263)
+void odEcWriteLiteralBits(AomWriter* w, unsigned data, int bits);
+
 // aom_reader - bitreader.h:40-47. Deviation: buffer/buffer_end pointers
 // dropped (only used by find_begin/find_end/has_overflowed, not ported).
 struct AomReader {
@@ -157,6 +166,9 @@ int odEcReadCdf(AomReader* r, const AomCdfProb* cdf, int nsymbs);
 
 // aom_read_symbol_ (bitreader.h:92-98)
 int odEcReadSymbol(AomReader* r, AomCdfProb* cdf, int nsymbs);
+
+// aom_read_bit (bitreader.h:71-75): od_ec_decode_bool_q15 at f=128 (half)
+int odEcReadBit(AomReader* r);
 
 // ---------------------------------------------------------------------------
 // Intra-frame (key-frame) symbol surface (EC3).
@@ -238,6 +250,49 @@ enum FilterIntraMode {
 // definitions.h:1313 (verbatim value)
 #define SKIP_CONTEXTS 3
 
+// ---------------------------------------------------------------------------
+// Token/coefficiency surface (TS1). Constants verbatim:
+// cabac_context_model.h:109-129, definitions.h:410-426, :1313.
+// ---------------------------------------------------------------------------
+#define TOKEN_CDF_Q_CTXS 4
+#define TXB_SKIP_CONTEXTS 13
+#define EOB_COEF_CONTEXTS 9
+#define SIG_COEF_CONTEXTS_2D 26
+#define SIG_COEF_CONTEXTS_1D 16
+#define SIG_COEF_CONTEXTS_EOB 4
+#define SIG_COEF_CONTEXTS (SIG_COEF_CONTEXTS_2D + SIG_COEF_CONTEXTS_1D)
+#define LEVEL_CONTEXTS 21
+#define NUM_BASE_LEVELS 2
+#define BR_CDF_SIZE (4)
+#define COEFF_BASE_RANGE (4 * (BR_CDF_SIZE - 1))
+#define COEFF_CONTEXT_BITS 6
+#define COEFF_CONTEXT_MASK ((1 << COEFF_CONTEXT_BITS) - 1)
+#define MAX_BASE_BR_RANGE (COEFF_BASE_RANGE + NUM_BASE_LEVELS + 1)
+#define DC_SIGN_CONTEXTS 3
+#define TX_PAD_HOR_LOG2 2
+#define TX_PAD_HOR 4
+#define TX_PAD_TOP 0
+#define TX_PAD_BOTTOM 4
+#define TX_PAD_VER (TX_PAD_TOP + TX_PAD_BOTTOM)
+#define TX_PAD_END 16
+#define TX_PAD_2D ((64 + TX_PAD_HOR) * (64 + TX_PAD_VER) + TX_PAD_END)
+
+// PlaneType (definitions.h:685)
+enum PlaneType { PLANE_TYPE_Y, PLANE_TYPE_UV, PLANE_TYPES };
+// TxClass (definitions.h:989-994)
+enum TxClass { TX_CLASS_2D = 0, TX_CLASS_HORIZ = 1, TX_CLASS_VERT = 2, TX_CLASSES = 3 };
+// TxSize (definitions.h:951-983, full verbatim order - the txb helpers index
+// rectangular sizes)
+enum TxSize {
+    TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_64X64, TX_4X8, TX_8X4, TX_8X16, TX_16X8,
+    TX_16X32, TX_32X16, TX_32X64, TX_64X32, TX_4X16, TX_16X4, TX_8X32, TX_32X8,
+    TX_16X64, TX_64X16,
+    TX_SIZES_ALL,
+    TX_SIZES = TX_4X8,
+    TX_SIZES_LARGEST = TX_64X64,
+    TX_INVALID = 255,
+};
+
 // PartitionType (definitions.h:911-925, verbatim order).
 enum PartitionType {
     PARTITION_NONE,
@@ -275,6 +330,19 @@ struct EcFrameContext {
     AomCdfProb filter_intra_mode_cdf[CDF_SIZE(FILTER_INTRA_MODES)];
     AomCdfProb partition_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
     AomCdfProb skip_cdfs[SKIP_CONTEXTS][CDF_SIZE(2)];
+    AomCdfProb txb_skip_cdf[TX_SIZES][TXB_SKIP_CONTEXTS][CDF_SIZE(2)];
+    AomCdfProb dc_sign_cdf[PLANE_TYPES][DC_SIGN_CONTEXTS][CDF_SIZE(2)];
+    AomCdfProb coeff_base_eob_cdf[TX_SIZES][PLANE_TYPES][SIG_COEF_CONTEXTS_EOB][CDF_SIZE(3)];
+    AomCdfProb coeff_base_cdf[TX_SIZES][PLANE_TYPES][SIG_COEF_CONTEXTS][CDF_SIZE(4)];
+    AomCdfProb coeff_br_cdf[TX_32X32 + 1][PLANE_TYPES][LEVEL_CONTEXTS][CDF_SIZE(BR_CDF_SIZE)];
+    AomCdfProb eob_extra_cdf[TX_SIZES][PLANE_TYPES][EOB_COEF_CONTEXTS][CDF_SIZE(2)];
+    AomCdfProb eob_flag_cdf16[PLANE_TYPES][2][CDF_SIZE(5)];
+    AomCdfProb eob_flag_cdf32[PLANE_TYPES][2][CDF_SIZE(6)];
+    AomCdfProb eob_flag_cdf64[PLANE_TYPES][2][CDF_SIZE(7)];
+    AomCdfProb eob_flag_cdf128[PLANE_TYPES][2][CDF_SIZE(8)];
+    AomCdfProb eob_flag_cdf256[PLANE_TYPES][2][CDF_SIZE(9)];
+    AomCdfProb eob_flag_cdf512[PLANE_TYPES][2][CDF_SIZE(10)];
+    AomCdfProb eob_flag_cdf1024[PLANE_TYPES][2][CDF_SIZE(11)];
 };
 
 // Initialize from the SVT default tables (cabac_context_model.c:59-97,
@@ -353,6 +421,65 @@ void writeSkip(AomWriter* w, EcFrameContext* fc, int ctx, int skip);
 // BSF4 arbiter; no aom code extracted) minus the SEG_LVL_SKIP implicit-1
 // branch - the segmentation surface is deferred with segmentation itself.
 int readSkip(AomReader* r, EcFrameContext* fc, int ctx);
+
+// ---------------------------------------------------------------------------
+// TS1: per-TU coefficient chain (entropy_coding.c:355-544, LUMA DCT_DCT
+// path). The token tables were added to EcFrameContext above. The luma-only
+// port carries no tx-type symbol (the :321-322 gate's emission lands in TS3
+// with the tx-type surface; the q0 structural keyframe never emits it).
+// ---------------------------------------------------------------------------
+
+// txsize_log2_minus4 (inv_transforms.h:341-359, verbatim: log2(num_coeffs)-4)
+extern const std::int8_t txsizeLog2Minus4[TX_SIZES_ALL];
+// tx_size_wide/high/log2 (common_utils.c:116-128, verbatim)
+extern const std::int32_t txSizeWide[TX_SIZES_ALL];
+extern const std::int32_t txSizeHigh[TX_SIZES_ALL];
+extern const std::int32_t txSizeWideLog2[TX_SIZES_ALL];
+// txsize_sqr_map / txsize_sqr_up_map (common_utils.c:150/:172)
+extern const TxSize txsizeSqrMap[TX_SIZES_ALL];
+extern const TxSize txsizeSqrUpMap[TX_SIZES_ALL];
+
+// get_txsize_entropy_ctx (entropy_coding.h:110-112)
+TxSize getTxsizeEntropyCtx(TxSize txsize);
+// get_txb_bwl/wide/high (common_utils.h:115-128; via av1_get_adjusted_tx_size)
+int getTxbBwl(TxSize tx_size);
+int getTxbWide(TxSize tx_size);
+int getTxbHigh(TxSize tx_size);
+// get_padded_idx (coefficients.h:129-131)
+int getPaddedIdx(int idx, int bwl);
+// get_nz_mag (coefficients.h:133-155)
+int getNzMag(const std::uint8_t* levels, int bwl, TxClass tx_class);
+// get_nz_map_ctx_from_stats (coefficients.h:157-194; 2D via the offset LUT)
+int getNzMapCtxFromStats(int stats, int coeff_idx, int bwl, TxSize tx_size, TxClass tx_class);
+// get_lower_levels_ctx_eob (coefficients.h:56-67) / get_lower_levels_ctx (:196)
+int getLowerLevelsCtxEob(int bwl, int height, int scan_idx);
+int getLowerLevelsCtx(const std::uint8_t* levels, int coeff_idx, int bwl, TxSize tx_size, TxClass tx_class);
+// get_br_ctx_eob (coefficients.h:69-81) / get_br_ctx (:83-127)
+int getBrCtxEob(int c, int bwl, TxClass tx_class);
+int getBrCtx(const std::uint8_t* levels, int c, int bwl, TxClass tx_class);
+// svt_av1_txb_init_levels_c (rd_cost.c:93-105)
+void txbInitLevels(const std::int32_t* coeff, int width, int height, std::uint8_t* levels);
+// svt_av1_get_nz_map_contexts_c (C_DEFAULT/encode_txb_ref_c.c:35-44)
+void getNzMapContexts(const std::uint8_t* levels, const std::int16_t* scan, std::uint16_t eob,
+                      TxSize tx_size, TxClass tx_class, std::int8_t* coeff_contexts);
+// get_eob_pos_token (entropy_coding.h:94-102)
+int getEobPosToken(int eob, int* extra);
+// write_golomb (entropy_coding.c:236-243)
+void writeGolomb(AomWriter* w, int level);
+// read_golomb (aom decodetxb.c read_golomb - the decoder-order twin)
+int readGolomb(AomReader* r);
+
+// entropy_coding.c:355-544 port (LUMA DCT_DCT): txb_skip :366 -> eob_pt/extra
+// :378-411 -> last-coeff base_eob+br :479-500 -> reverse base/br :502-524 ->
+// forward signs+golomb :527-539. coeff: raster-order quantized coefficients;
+// scan: forward scan (svt_aom_init_iscan family).
+void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
+                    const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
+                    int dc_sign_ctx);
+// read twin (aom decodetxb.c read_coeffs_txb, symbol-for-symbol). Fills
+// coeff (raster, signed); returns eob.
+int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
+                  const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx);
 
 // encode_intra_luma_mode_kf_av1 (entropy_coding.c:1026-1040): mode symbol
 // from kf_y_cdf[above_ctx][left_ctx], then the angle-delta symbol when

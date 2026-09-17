@@ -39,6 +39,11 @@ $files = @{
     "entropy_coding.h" = (Get-Content (Join-Path $src "Codec\entropy_coding.h") -Raw)
     "av1_structs.h" = (Get-Content (Join-Path $src "Codec\av1_structs.h") -Raw)
     "EbSvtAv1.h" = (Get-Content (Join-Path $repo "third_party\SVT-AV1\Source\API\EbSvtAv1.h") -Raw)
+    "coefficients.h" = (Get-Content (Join-Path $src "Codec\coefficients.h") -Raw)
+    "coefficients.c" = (Get-Content (Join-Path $src "Codec\coefficients.c") -Raw)
+    "rd_cost.c" = (Get-Content (Join-Path $src "Codec\rd_cost.c") -Raw)
+    "encode_txb_ref_c.c" = (Get-Content (Join-Path $src "C_DEFAULT\encode_txb_ref_c.c") -Raw)
+    "common_utils.h" = (Get-Content (Join-Path $src "Codec\common_utils.h") -Raw)
     "entdec.c"           = (Get-Content (Join-Path $src3p "src\entdec.c") -Raw)
     "entdec.h"           = (Get-Content (Join-Path $src3p "inc\entdec.h") -Raw)
     "bitreader.h"        = (Get-Content (Join-Path $src3p "inc\bitreader.h") -Raw)
@@ -251,6 +256,9 @@ Emit-Verbatim "intra_prediction.c" "static INLINE int abs_diff" "abs_diff"
 Emit-Verbatim "intra_prediction.c" "static INLINE uint16_t paeth_predictor_single" "paeth_predictor_single"
 Emit-Verbatim "intra_prediction.c" "static INLINE void paeth_predictor" "paeth_predictor"
 Emit-Verbatim "intra_prediction.c" "void filter_intra_edge_corner" "filter_intra_edge_corner"
+Emit-Verbatim "common_utils.c" "const int32_t tx_size_wide[TX_SIZES_ALL]" "tx_size_wide table"
+Emit-Verbatim "common_utils.c" "const int32_t tx_size_high[TX_SIZES_ALL]" "tx_size_high table"
+Emit-Verbatim "common_utils.c" "const int32_t tx_size_wide_log2[TX_SIZES_ALL]" "tx_size_wide_log2 table"
 Emit-Verbatim "intra_prediction.c" "void svt_aom_dr_predictor" "svt_aom_dr_predictor"
 Emit-Verbatim "intra_prediction.h" "enum {
     NEED_LEFT       = 1 << 1," "need-flags enum"
@@ -358,6 +366,8 @@ Emit-Verbatim "cabac_context_model.h" "static INLINE void update_cdf" "update_cd
 # and the nsymbs==2 -> bool-encoder specialization (bitstream_unit.h:265-279);
 # the reader side mirrors it (bitreader.h:84-98, bitreader.c:14-22).
 Emit-Verbatim "bitstream_unit.h" "typedef struct AomWriter" "AomWriter"
+Emit-Verbatim "bitstream_unit.h" "static INLINE void aom_write_bit" "aom_write_bit"
+Emit-Verbatim "bitstream_unit.h" "static INLINE void aom_write_literal" "aom_write_literal"
 Emit-Verbatim "bitstream_unit.h" "static INLINE void aom_stop_encode" "aom_stop_encode"
 Emit-Verbatim "bitstream_unit.h" "static INLINE void aom_write_symbol" "aom_write_symbol"
 Emit-Macro "bitreader.h" "#define ACCT_STR_PARAM" "ACCT_STR_PARAM"
@@ -408,6 +418,12 @@ Emit-Macro "bitreader.h" "typedef struct aom_reader aom_reader;" "aom_reader typ
 Emit-Verbatim "bitreader.c" "int aom_reader_init" "aom_reader_init"
 Emit-Verbatim "bitreader.h" "static INLINE int aom_read_cdf_" "aom_read_cdf_"
 Emit-Verbatim "bitreader.h" "static INLINE int aom_read_symbol_" "aom_read_symbol_"
+# aom_read_(bit/literal): raw-bit reads (bitreader.h:65-82; the reader-side
+# counterpart of aom_write_bit/literal, needed by the TS1 sign/golomb reads).
+Emit-Macro "bitreader.h" "#define aom_read(r, prob, ACCT_STR_NAME)" "aom_read macro"
+Emit-Macro "bitreader.h" "#define aom_read_bit(r, ACCT_STR_NAME)" "aom_read_bit macro"
+Emit-Lines "bitreader.h" "static INLINE int aom_read_(aom_reader" "  return literal;" "aom_read_/_aom_read_literal_"
+Emit "}"  # closes aom_read_literal_ (the line-range ends inside the function)
 
 # ---- partition symbol surface (ECP1) ----
 # Context derivation inputs (entropy_coding.c:945-960): partition_context_lookup
@@ -466,6 +482,94 @@ Emit-Verbatim "av1_structs.h" "typedef enum ATTRIBUTE_PACKED {
     OBU_SEQUENCE_HEADER" "ObuType"
 Emit-Verbatim "definitions.h" "typedef enum AomCodecErr" "AomCodecErr"
 Emit-Verbatim "EbSvtAv1.h" "typedef enum EbErrorType" "EbErrorType"
+
+# ---- token/coefficiency surface (TS1) ----
+# The per-TU coefficient chain (entropy_coding.c:355-544) and its context
+# helpers. Constants (cabac_context_model.h:109-129, definitions.h:410-426);
+# default CDF tables (cabac_context_model.c:801-1295+); the tx-class map
+# (cabac_context_model.c:15); the level-context helpers (coefficients.h:28-200
+# + the 2D offset LUT coefficients.c:24-303); txb pad/window
+# (definitions.h:410-426); tx-size tables (common_utils.c:116-128) + window
+# helpers (common_utils.h:100-128); txb_init_levels (rd_cost.c:93);
+# nz-map contexts (C_DEFAULT/encode_txb_ref_c.c:17-44); eob position token
+# (entropy_coding.h:94-102); golomb (entropy_coding.c:236-243);
+# txsize_log2_minus4 (inv_transforms.h:341-359).
+Emit-Macro "cabac_context_model.h" "#define TOKEN_CDF_Q_CTXS" "TOKEN_CDF_Q_CTXS"
+Emit-Macro "cabac_context_model.h" "#define TXB_SKIP_CONTEXTS" "TXB_SKIP_CONTEXTS"
+Emit-Macro "cabac_context_model.h" "#define EOB_COEF_CONTEXTS" "EOB_COEF_CONTEXTS"
+Emit-Macro "cabac_context_model.h" "#define SIG_COEF_CONTEXTS_2D" "SIG_COEF_CONTEXTS_2D"
+Emit-Macro "cabac_context_model.h" "#define SIG_COEF_CONTEXTS_1D" "SIG_COEF_CONTEXTS_1D"
+Emit-Macro "cabac_context_model.h" "#define SIG_COEF_CONTEXTS_EOB" "SIG_COEF_CONTEXTS_EOB"
+Emit-Macro "cabac_context_model.h" "#define SIG_COEF_CONTEXTS " "SIG_COEF_CONTEXTS"
+Emit-Macro "cabac_context_model.h" "#define LEVEL_CONTEXTS" "LEVEL_CONTEXTS"
+Emit-Macro "cabac_context_model.h" "#define NUM_BASE_LEVELS" "NUM_BASE_LEVELS"
+Emit-Macro "cabac_context_model.h" "#define BR_CDF_SIZE" "BR_CDF_SIZE"
+Emit-Macro "cabac_context_model.h" "#define COEFF_BASE_RANGE" "COEFF_BASE_RANGE"
+Emit-Macro "cabac_context_model.h" "#define COEFF_CONTEXT_BITS" "COEFF_CONTEXT_BITS"
+Emit-Macro "cabac_context_model.h" "#define COEFF_CONTEXT_MASK" "COEFF_CONTEXT_MASK"
+Emit-Macro "cabac_context_model.h" "#define MAX_BASE_BR_RANGE" "MAX_BASE_BR_RANGE"
+Emit-Macro "definitions.h" "#define MAX_TX_SIZE_LOG2" "MAX_TX_SIZE_LOG2"
+Emit-Macro "definitions.h" "#define MAX_TX_SIZE " "MAX_TX_SIZE"
+Emit-Macro "definitions.h" "#define TX_PAD_HOR_LOG2" "TX_PAD_HOR_LOG2"
+Emit-Macro "definitions.h" "#define TX_PAD_HOR " "TX_PAD_HOR"
+Emit-Macro "definitions.h" "#define TX_PAD_TOP" "TX_PAD_TOP"
+Emit-Macro "definitions.h" "#define TX_PAD_BOTTOM" "TX_PAD_BOTTOM"
+Emit-Macro "definitions.h" "#define TX_PAD_VER" "TX_PAD_VER"
+Emit-Macro "definitions.h" "#define TX_PAD_END" "TX_PAD_END"
+Emit-Macro "definitions.h" "#define TX_PAD_2D" "TX_PAD_2D"
+Emit-Macro "cabac_context_model.h" "#define DC_SIGN_CONTEXTS" "DC_SIGN_CONTEXTS"
+Emit-Verbatim "definitions.h" "typedef enum ATTRIBUTE_PACKED { PLANE_TYPE_Y, PLANE_TYPE_UV, PLANE_TYPES } PlaneType;" "PlaneType"
+Emit-Verbatim "definitions.h" "typedef enum ATTRIBUTE_PACKED {
+    COMPONENT_LUMA      = 0, // luma" "COMPONENT_TYPE"
+Emit-Verbatim "definitions.h" "typedef enum TxClass" "TxClass"
+Emit-Lines "definitions.h" "#ifdef _MSC_VER
+typedef uint8_t TxType" "} TxType;" "TxType"
+Emit "#endif"  # closes the extracted TxType #ifdef (the line-range ends before it)
+# tables that the helpers reference, emitted BEFORE the helpers
+Emit-Lines "coefficients.c" "static const int8_t eb_av1_nz_map_ctx_offset_4x4" "    17,17,    18,18,    19,19,    20,20" "eb_av1_nz_map_ctx_offset LUT (all sub-tables + the [19] pointer array)"
+Emit "};"  # closes the extracted LUT line-range
+Emit-Verbatim "common_utils.h" "static INLINE TxSize av1_get_adjusted_tx_size" "av1_get_adjusted_tx_size"
+Emit-Verbatim "common_utils.h" "static INLINE int get_txb_bwl" "get_txb_bwl"
+Emit-Verbatim "common_utils.h" "static INLINE int get_txb_wide" "get_txb_wide"
+Emit-Verbatim "common_utils.h" "static INLINE int get_txb_high" "get_txb_high"
+Emit-Macro "coefficients.h" "#define NZ_MAP_CTX_0" "NZ_MAP_CTX_0"
+Emit-Macro "coefficients.h" "#define NZ_MAP_CTX_5" "NZ_MAP_CTX_5"
+Emit-Macro "coefficients.h" "#define NZ_MAP_CTX_10" "NZ_MAP_CTX_10"
+Emit-Verbatim "coefficients.h" "static const int nz_map_ctx_offset_1d" "nz_map_ctx_offset_1d"
+Emit-Verbatim "coefficients.h" "static INLINE int get_lower_levels_ctx_eob" "get_lower_levels_ctx_eob"
+Emit-Verbatim "coefficients.h" "static AOM_FORCE_INLINE int get_br_ctx_eob" "get_br_ctx_eob"
+Emit-Verbatim "coefficients.h" "static AOM_FORCE_INLINE int get_br_ctx(const uint8_t" "get_br_ctx"
+Emit-Verbatim "coefficients.h" "static INLINE int get_padded_idx" "get_padded_idx"
+Emit-Verbatim "coefficients.h" "static AOM_FORCE_INLINE int get_nz_mag" "get_nz_mag"
+Emit-Verbatim "coefficients.h" "static AOM_FORCE_INLINE int get_nz_map_ctx_from_stats" "get_nz_map_ctx_from_stats"
+Emit-Verbatim "coefficients.h" "static AOM_FORCE_INLINE int get_lower_levels_ctx" "get_lower_levels_ctx"
+Emit-Verbatim "rd_cost.c" "void svt_av1_txb_init_levels_c" "svt_av1_txb_init_levels_c"
+Emit-Lines "encode_txb_ref_c.c" "static INLINE int get_nz_map_ctx" "coeff_contexts[pos] = get_nz_map_ctx(levels, pos, bwl, height, i, i == eob - 1, tx_size, tx_class);" "nz map contexts"
+Emit "    }"
+Emit "}"  # closes the extracted function (the line-range ends mid-body)
+Emit-Verbatim "entropy_coding.h" "static INLINE int get_eob_pos_token" "get_eob_pos_token"
+Emit-Verbatim "common_utils.c" "const TxSize txsize_sqr_map" "txsize_sqr_map"
+Emit-Verbatim "common_utils.c" "const TxSize txsize_sqr_up_map" "txsize_sqr_up_map"
+Emit-Verbatim "entropy_coding.h" "static INLINE TxSize get_txsize_entropy_ctx" "get_txsize_entropy_ctx"
+Emit-Verbatim "entropy_coding.c" "static INLINE void write_golomb" "write_golomb"
+Emit-Lines "inv_transforms.h" "static const int8_t txsize_log2_minus4" "5, // TX_64X16" "txsize_log2_minus4"
+Emit "};"  # closes the extracted txsize_log2_minus4 line-range
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_dc_sign_cdfs" "av1_default_dc_sign_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_txb_skip_cdfs" "av1_default_txb_skip_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_eob_extra_cdfs" "av1_default_eob_extra_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_eob_multi16_cdfs" "av1_default_eob_multi16_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_eob_multi32_cdfs" "av1_default_eob_multi32_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_eob_multi64_cdfs" "av1_default_eob_multi64_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_eob_multi128_cdfs" "av1_default_eob_multi128_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_eob_multi256_cdfs" "av1_default_eob_multi256_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_eob_multi512_cdfs" "av1_default_eob_multi512_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb av1_default_eob_multi1024_cdfs" "av1_default_eob_multi1024_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb
+    av1_default_coeff_lps_multi_cdfs" "av1_default_coeff_lps_multi_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb
+    av1_default_coeff_base_multi_cdfs" "av1_default_coeff_base_multi_cdfs"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb
+    av1_default_coeff_base_eob_multi_cdfs" "av1_default_coeff_base_eob_multi_cdfs"
 Emit-Macro "entropy_coding.c" "static const size_t   k_maximum_leb_128_size" "k_maximum_leb_128_size"
 Emit-Macro "entropy_coding.c" "static const uint64_t k_maximum_leb_128_value" "k_maximum_leb_128_value"
 Emit-Verbatim "entropy_coding.c" "size_t svt_aom_uleb_size_in_bytes" "svt_aom_uleb_size_in_bytes"

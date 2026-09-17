@@ -111,6 +111,15 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | svt_aom_wb_is_byte_aligned, svt_aom_wb_bytes_written, wb_write_bit/literal(+_inlined)/inv_signed_literal | Codec/entropy_coding.c:1343-1382 | BSF2: raw bit/literal writers + alignment/size probes |
 | write_obu_header, write_uleb_obu_size, svt_aom_encode_td_av1 | Codec/entropy_coding.c:3639-3666, :3953-3960 | BSF2: OBU header (forbidden 0/type 4b/ext/has_size hardcoded 1 :3646/reserved), uleb obu size, temporal delimiter (2 bytes 12 00) |
 | ObuType, AomCodecErr | Codec/av1_structs.h:22-32, Codec/definitions.h:1493-1535 | BSF2: OBU type enum (TD=2/SPS=1/FRAME=6) + codec return codes (OK/ERROR consumed by write_uleb_obu_size) |
+| eb_av1_nz_map_ctx_offset (all 19 sub-tables + the pointer array) | Codec/coefficients.c:24-303 | TS1: per-position 2D nz-map context offsets (consumed by get_nz_map_ctx_from_stats :157-194) |
+| TOKEN_CDF_Q_CTXS..MAX_BASE_BR_RANGE constants | Codec/cabac_context_model.h:109-129, definitions.h:410-426 | TS1: token chain constants |
+| av1_default_txb_skip_cdfs, av1_default_dc_sign_cdfs, eob_extra/eob_multi16..1024/coeff_lps/coeff_base_multi/coeff_base_eob_multi | Codec/cabac_context_model.c:801-1860 | TS1: token CDF defaults (q_ctx=0 slice extracted for the l7 3D field) |
+| coefficients.h nz-map helpers (nz_map_ctx_offset_1d, get_lower_levels_ctx_eob, get_br_ctx_eob, get_br_ctx, get_padded_idx, get_nz_mag, get_nz_map_ctx_from_stats, get_lower_levels_ctx) | Codec/coefficients.h:28-200 | TS1: level-context derivation (the l7 ports all; the DCT_DCT path uses only TX_CLASS_2D) |
+| svt_av1_txb_init_levels_c | Codec/rd_cost.c:93-105 | TS1: abs/clamp level init |
+| get_nz_map_ctx_c + svt_av1_get_nz_map_contexts_c | C_DEFAULT/encode_txb_ref_c.c:17-44 | TS1: the nz-map context filler |
+| get_eob_pos_token, get_txsize_entropy_ctx | Codec/entropy_coding.h:94-102, :110-112 | TS1: eob position token + entropy tx size |
+| write_golomb | Codec/entropy_coding.c:236-243 | TS1: golomb writer (the l7 ports the read twin from aom decodetxb.c) |
+| ObuType, AomCodecErr, EbErrorType extracts (BSF2) unchanged | | |
 | EbErrorType (EB_ErrorNone) | API/EbSvtAv1.h:122-124 | BSF2: TD return type (only EB_ErrorNone consumed by svt_aom_encode_td_av1) |
 
 Second documented deviation (EC0): the WORDS_BIGENDIAN `#if` guard around the
@@ -134,7 +143,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **241/241 lines identical**, covering:
+that file — currently **245/245 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -193,6 +202,16 @@ that file — currently **241/241 lines identical**, covering:
   (bit+literal+inv_signed_literal packing across byte boundaries = 20 bits
   -> 3 bytes aa bf 60 with byte 3 untouched), wbalign (zero-pad to byte
   alignment -> 3 whole bytes, aligned).
+- TS1 token-chain gate lines: ectok_eob 21 10 0 (16x16 eob 21, 8x8 eob 10,
+  4x4 eob 0 = txb_skip-only), ectok_bytes 16 (32 06 83 20 6a 0a cc 5f 00 5a
+  a8 31 e2 de 8c c0 - the 3-TU token stream through od_ec with adaptation),
+  ectok_rt 21 10 0, ectok_cdf_eq 1 (all 13 token tables identical after
+  adaptation). Fixture: f16 source, block 0 (16x16, eob 21), block (bx=1,
+  by=0) (8x8, eob 10), block (bx=0, by=1) (4x4, eob 0). Whole-block TUs:
+  txb_skip_ctx = 0 (get_txb_ctx :298-299), dc_sign_ctx = 0. DCT_DCT only,
+  no tx-type symbol. The eb_av1_nz_map_ctx_offset[19] per-position offset
+  LUT (coefficients.c:24-303) is the critical context input - extracted
+  whole, consumed by get_nz_map_ctx_from_stats.
 - BSF3 structural-keyframe assembly gate lines: sps_obu 11 0a 09 10 00 00
   02 27 fe 60 c2 a0 (the ratified sequence header - 9-byte payload = 66
   field bits + the trailing 1 bit, phase-2 uleb rewrite :3925-3948),

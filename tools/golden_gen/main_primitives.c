@@ -2013,5 +2013,14 @@ int main(void) {
         for (uint32_t i = 0; i < tu_size; ++i) printf(" %02x", tu_buf[i]);
         printf("\n");
     }
+
+    // ---- TS1 gate lines ----
+    {
+        static uint8_t tok_buf[512];
+        memset(tok_buf, 0, sizeof(tok_buf));
+        const int rc = svtd_ts1_drive(tok_buf, 1);
+        if (rc) { fprintf(stderr, "TS1 drive FAILED rc=%d\n", rc); return 1; }
+        printf("ectok_cdf_eq 1\n");
+    }
     return 0;
 }

@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include <pixels.h>
+#include <transform.h>
 #include "entropy.h"
 
 // EC1 tolerance note: integer-only port, bit-exact vs the SVT C - every
@@ -474,5 +476,95 @@ TEST_CASE("skip symbol surface matches gate (context combos)") {
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
     r.allow_update_cdf = 1;
     for (int b = 0; b < 4; ++b) CHECK(entropy::readSkip(&r, &fcR, ctx[b]) == skip[b]);
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+}
+
+TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
+    // Gate: ectok_eob 21 10 0, ectok_bytes 16 32 06 83 20 6a 0a cc 5f 00 5a
+    // a8 31 e2 de 8c c0, ectok_rt 21 10 0, ectok_cdf_eq 1 (composition.c
+    // TS1 block). Fixture: f16 source, block 0 (16x16, eob 21), block 1
+    // (8x8, eob 10), block 4 (4x4, eob 0 = txb_skip-only path). Whole-block
+    // TUs: txb_skip_ctx = 0 (get_txb_ctx :298-299 plane_bsize == tx_bsize),
+    // dc_sign_ctx = 0 (no coded neighbors). DCT_DCT only, no tx-type symbol.
+    // Quantized through the f16q path (quantize_fp at q100).
+    pixels::Plane src(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            src.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
+
+    // 16x16 block (0,0): DC_PRED predictor = 0 (no neighbors)
+    std::int16_t res16[256];
+    for (int i = 0; i < 256; ++i) res16[i] = static_cast<std::int16_t>(src.at(i % 16, i / 16));
+    std::int32_t cb16[256] = {0};
+    transforms::fwdTxfm2d16x16(res16, cb16, 16, transforms::TxType::DCT_DCT);
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(100, qt);
+    std::int16_t scan16[256];
+    transforms::defaultScan16x16(scan16);
+    std::int32_t qc16[256] = {0}, dq16[256] = {0};
+    std::uint16_t eob16 = 0;
+    transforms::quantizeFp16x16(cb16, qt, scan16, qc16, dq16, &eob16);
+    CHECK((int)eob16 == 21);
+
+    // 8x8 block (bx=1, by=0): source pixels 16..23 x 0..7, predictor = 0
+    std::int16_t res8[64];
+    for (int i = 0; i < 64; ++i) res8[i] = static_cast<std::int16_t>(src.at(16 + i % 8, i / 8));
+    std::int32_t cb8[64] = {0};
+    transforms::fwdTxfm2d8x8(res8, cb8, 8, transforms::TxType::DCT_DCT);
+    std::int16_t scan8[64];
+    transforms::defaultScan8x8(scan8);
+    std::int32_t qc8[64] = {0}, dq8[64] = {0};
+    std::uint16_t eob8 = 0;
+    transforms::quantizeFp8x8(cb8, qt, scan8, qc8, dq8, &eob8);
+    CHECK((int)eob8 == 10);
+
+    // 4x4 block (bx=0, by=1): source pixels 0..3 x 16..19, predictor = 0
+    std::int16_t res4[16];
+    for (int i = 0; i < 16; ++i) res4[i] = static_cast<std::int16_t>(src.at(i % 4, 16 + i / 4));
+    std::int32_t cb4[16] = {0};
+    transforms::fwdTxfm2d4x4(res4, cb4, 4, transforms::TxType::DCT_DCT);
+    std::int16_t scan4[16];
+    transforms::defaultScan4x4(scan4);
+    std::int32_t qc4[16] = {0}, dq4[16] = {0};
+    std::uint16_t eob4 = 0;
+    transforms::quantizeFp4x4(cb4, qt, scan4, qc4, dq4, &eob4);
+    CHECK((int)eob4 == 0);
+
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc);
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR);
+
+    entropy::AomWriter w{};
+    unsigned char buf[128] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    entropy::writeTxbCoeffs(&w, &fc, qc16, scan16, entropy::TX_16X16, eob16, 0, 0);
+    entropy::writeTxbCoeffs(&w, &fc, qc8, scan8, entropy::TX_8X8, eob8, 0, 0);
+    entropy::writeTxbCoeffs(&w, &fc, qc4, scan4, entropy::TX_4X4, eob4, 0, 0);
+    entropy::odEcStopEncode(&w);
+    REQUIRE(w.pos == 16);
+    static const unsigned char wantBytes[16] = {0x32, 0x06, 0x83, 0x20, 0x6a, 0x0a, 0xcc, 0x5f,
+                                                0x00, 0x5a, 0xa8, 0x31, 0xe2, 0xde, 0x8c, 0xc0};
+    for (int i = 0; i < 16; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    std::int32_t rc16[256] = {0};
+    std::int32_t rc8[64] = {0};
+    std::int32_t rc4[16] = {0};
+    const int reob16 = entropy::readTxbCoeffs(&r, &fcR, rc16, scan16, entropy::TX_16X16, 0, 0);
+    const int reob8 = entropy::readTxbCoeffs(&r, &fcR, rc8, scan8, entropy::TX_8X8, 0, 0);
+    const int reob4 = entropy::readTxbCoeffs(&r, &fcR, rc4, scan4, entropy::TX_4X4, 0, 0);
+    CHECK(reob16 == 21);
+    CHECK(reob8 == 10);
+    CHECK(reob4 == 0);
+    for (int i = 0; i < 256; ++i) CHECK(rc16[i] == qc16[i]);
+    for (int i = 0; i < 64; ++i) CHECK(rc8[i] == qc8[i]);
+    for (int i = 0; i < 16; ++i) CHECK(rc4[i] == qc4[i]);
     CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
 }

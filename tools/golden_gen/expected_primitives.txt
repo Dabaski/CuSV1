@@ -239,3 +239,7 @@ wbalign 3 1
 sps_obu 11 0a 09 10 00 00 02 27 fe 60 c2 a0
 frame_obu 10 32 08 10 c0 04 c5 2d b8 76 0c
 tu_bytes 23 12 00 0a 09 10 00 00 02 27 fe 60 c2 a0 32 08 10 c0 04 c5 2d b8 76 0c
+ectok_eob 21 10 0
+ectok_bytes 16 32 06 83 20 6a 0a cc 5f 00 5a a8 31 e2 de 8c c0
+ectok_rt 21 10 0
+ectok_cdf_eq 1

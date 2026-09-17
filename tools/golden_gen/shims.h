@@ -14,6 +14,9 @@
 // SVT uses INLINE/NOINLINE/ATTRIBUTE_PACKED macros (EbConfigMacros etc.).
 // SVT writes `static INLINE` itself, so INLINE expands to plain `inline`.
 #define INLINE inline
+#define AOM_FORCE_INLINE inline // definitions.h:535/538 MSVC __forceinline branch flattened to plain inline (generator builds /Od-equivalent semantics; inlining is a hint only)
+#define AOMMIN(x, y) (((x) < (y)) ? (x) : (y)) // definitions.h:1001, verbatim (TS1: get_nz_map_ctx_from_stats / get_br_ctx)
+#define ABS(a) (((a) < 0) ? (-(a)) : (a)) // utility.h ABS macro (TS1: coeff levels)
 #define NOINLINE
 #define ATTRIBUTE_PACKED
 
@@ -75,11 +78,13 @@ typedef enum {
 
 // TxSize: the generator exercises TX_4X4 (=0), TX_8X8 (=1), TX_16X16 (=2),
 // TX_32X32 (=3) and TX_64X64 (=4) from SVT's TxSize enum.
-typedef enum { TX_4X4 = 0, TX_8X8 = 1, TX_16X16 = 2, TX_32X32 = 3, TX_64X64 = 4 } TxSize;
+typedef enum {
+    TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_64X64, TX_4X8, TX_8X4, TX_8X16, TX_16X8, TX_16X32,
+    TX_32X16, TX_32X64, TX_64X32, TX_4X16, TX_16X4, TX_8X32, TX_32X8, TX_16X64, TX_64X16,
+    TX_SIZES_ALL, TX_SIZES = TX_4X8, TX_SIZES_LARGEST = TX_64X64, TX_INVALID = 255
+} TxSize;  // definitions.h:951-983 full enum (TS1: the txb helpers index rectangular sizes)
 // tx_size_wide/high for the sizes the generator uses (SVT tables in
 // av1_common data; 4/8/16/32/64).
-static const int32_t tx_size_wide[5] = {4, 8, 16, 32, 64};
-static const int32_t tx_size_high[5] = {4, 8, 16, 32, 64};
 
 // MAX_TXFM_STAGE_NUM - transforms.h; MAX_BLOCK_DIM / MAX_UPSAMPLE_SZ -
 // intra_prediction.h / definitions.h; MAX_TX_SIZE - definitions.h:410

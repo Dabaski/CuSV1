@@ -11,6 +11,9 @@
 
 #include <cstring>
 #include <intrin.h>
+#include <cassert>
+#include <climits>
+#include <cstdio>
 
 namespace entropy {
 
@@ -442,6 +445,26 @@ void odEcStopEncode(AomWriter* w) {
     w->pos = bytes;
 }
 
+// aom_write_bit (bitstream_unit.h:255-257)
+void odEcWriteLiteralBit(AomWriter* w, int bit, int unused_bits) {
+    (void)unused_bits;
+    odEcEncodeBoolEqQ15(&w->ec, bit);
+}
+
+// aom_write_literal (bitstream_unit.h:259-263)
+void odEcWriteLiteralBits(AomWriter* w, unsigned data, int bits) {
+    for (int bit = bits - 1; bit >= 0; bit--) {
+        odEcWriteLiteralBit(w, 1 & (data >> bit), 0);
+    }
+}
+
+// aom_read_bit (bitreader.h:71-75): aom_read(r, 128) -> od_ec_decode_bool_q15 at the half probability
+int odEcReadBit(AomReader* r) {
+    // aom_read_(r, 128): p = (0x7FFFFF - (128 << 15) + 128) >> 8 = (0x7FFFFF - 0x400000 + 0x80) >> 8
+    const int p = (0x7FFFFF - (128 << 15) + 128) >> 8;
+    return odEcDecodeBoolQ15(&r->ec, static_cast<unsigned>(p));
+}
+
 // aom_reader_init (bitreader.c:14-22)
 int odEcReaderInit(AomReader* r, const unsigned char* buffer, std::uint32_t size) {
     if (size && !buffer) {
@@ -600,6 +623,109 @@ static const AomCdfProb skip_cdfs_default[SKIP_CONTEXTS][CDF_SIZE(2)] = {
     {AOM_CDF2(31671)}, {AOM_CDF2(16515)}, {AOM_CDF2(4576)}
 };
 
+// default token CDF tables (cabac_context_model.c, verbatim)
+static const AomCdfProb txb_skip_cdfs_default[TX_SIZES][TXB_SKIP_CONTEXTS][CDF_SIZE(2)] = {
+#include "txb_skip_cdfs_default.inc"
+};
+static const AomCdfProb dc_sign_cdfs_default[PLANE_TYPES][DC_SIGN_CONTEXTS][CDF_SIZE(2)] = {
+#include "dc_sign_cdfs_default.inc"
+};
+static const AomCdfProb coeff_base_eob_multi_cdfs_default[TX_SIZES][PLANE_TYPES][SIG_COEF_CONTEXTS_EOB][CDF_SIZE(3)] = {
+#include "coeff_base_eob_multi_cdfs_default.inc"
+};
+static const AomCdfProb coeff_base_multi_cdfs_default[TX_SIZES][PLANE_TYPES][SIG_COEF_CONTEXTS][CDF_SIZE(4)] = {
+#include "coeff_base_multi_cdfs_default.inc"
+};
+static const AomCdfProb coeff_lps_multi_cdfs_default[TX_32X32 + 1][PLANE_TYPES][LEVEL_CONTEXTS][CDF_SIZE(BR_CDF_SIZE)] = {
+#include "coeff_lps_multi_cdfs_default.inc"
+};
+static const AomCdfProb eob_extra_cdfs_default[TX_SIZES][PLANE_TYPES][EOB_COEF_CONTEXTS][CDF_SIZE(2)] = {
+#include "eob_extra_cdfs_default.inc"
+};
+static const AomCdfProb eob_multi16_cdfs_default[PLANE_TYPES][2][CDF_SIZE(5)] = {
+#include "eob_multi16_cdfs_default.inc"
+};
+static const AomCdfProb eob_multi32_cdfs_default[PLANE_TYPES][2][CDF_SIZE(6)] = {
+#include "eob_multi32_cdfs_default.inc"
+};
+static const AomCdfProb eob_multi64_cdfs_default[PLANE_TYPES][2][CDF_SIZE(7)] = {
+#include "eob_multi64_cdfs_default.inc"
+};
+static const AomCdfProb eob_multi128_cdfs_default[PLANE_TYPES][2][CDF_SIZE(8)] = {
+#include "eob_multi128_cdfs_default.inc"
+};
+static const AomCdfProb eob_multi256_cdfs_default[PLANE_TYPES][2][CDF_SIZE(9)] = {
+#include "eob_multi256_cdfs_default.inc"
+};
+static const AomCdfProb eob_multi512_cdfs_default[PLANE_TYPES][2][CDF_SIZE(10)] = {
+#include "eob_multi512_cdfs_default.inc"
+};
+static const AomCdfProb eob_multi1024_cdfs_default[PLANE_TYPES][2][CDF_SIZE(11)] = {
+#include "eob_multi1024_cdfs_default.inc"
+};
+
+// tx_type_to_class (cabac_context_model.c:15-35, verbatim; TS1 uses [DCT_DCT])
+enum TxType { DCT_DCT, ADST_DCT, DCT_ADST, ADST_ADST, FLIPADST_DCT, DCT_FLIPADST, FLIPADST_FLIPADST,
+              ADST_FLIPADST, FLIPADST_ADST, IDTX, V_DCT, H_DCT, V_ADST, H_ADST, V_FLIPADST, H_FLIPADST,
+              TX_TYPES_SENTINEL, INVALID_TX_TYPE };
+static const TxClass tx_type_to_class[TX_TYPES_SENTINEL] = {
+    TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D,
+    TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_2D, TX_CLASS_VERT, TX_CLASS_HORIZ, TX_CLASS_VERT, TX_CLASS_HORIZ,
+    TX_CLASS_VERT, TX_CLASS_HORIZ,
+};
+
+// txsize_log2_minus4 (inv_transforms.h:341-359, verbatim)
+extern const std::int8_t txsizeLog2Minus4[TX_SIZES_ALL] = {
+    0, 2, 4, 6, 6, 1, 1, 3, 3, 5, 5, 6, 6, 2, 2, 4, 4, 5, 5,
+};
+// tx_size_wide/high/log2 (common_utils.c:116-128, verbatim)
+const std::int32_t txSizeWide[TX_SIZES_ALL] = {4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64};
+const std::int32_t txSizeHigh[TX_SIZES_ALL] = {4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16};
+const std::int32_t txSizeWideLog2[TX_SIZES_ALL] = {2, 3, 4, 5, 6, 2, 3, 3, 4, 4, 5, 5, 6, 2, 4, 3, 5, 4, 6};
+// txsize_sqr_map / txsize_sqr_up_map (common_utils.c:150/:172, verbatim)
+const TxSize txsizeSqrMap[TX_SIZES_ALL] = {
+    TX_4X4, // TX_4X4
+    TX_8X8, // TX_8X8
+    TX_16X16, // TX_16X16
+    TX_32X32, // TX_32X32
+    TX_64X64, // TX_64X64
+    TX_4X4, // TX_4X8
+    TX_4X4, // TX_8X4
+    TX_8X8, // TX_8X16
+    TX_8X8, // TX_16X8
+    TX_16X16, // TX_16X32
+    TX_16X16, // TX_32X16
+    TX_32X32, // TX_32X64
+    TX_32X32, // TX_64X32
+    TX_4X4, // TX_4X16
+    TX_4X4, // TX_16X4
+    TX_8X8, // TX_8X32
+    TX_8X8, // TX_32X8
+    TX_16X16, // TX_16X64
+    TX_16X16, // TX_64X16
+};
+const TxSize txsizeSqrUpMap[TX_SIZES_ALL] = {
+    TX_4X4, // TX_4X4
+    TX_8X8, // TX_8X8
+    TX_16X16, // TX_16X16
+    TX_32X32, // TX_32X32
+    TX_64X64, // TX_64X64
+    TX_8X8, // TX_4X8
+    TX_8X8, // TX_8X4
+    TX_16X16, // TX_8X16
+    TX_16X16, // TX_16X8
+    TX_32X32, // TX_16X32
+    TX_32X32, // TX_32X16
+    TX_64X64, // TX_32X64
+    TX_64X64, // TX_64X32
+    TX_16X16, // TX_4X16
+    TX_16X16, // TX_16X4
+    TX_32X32, // TX_8X32
+    TX_32X32, // TX_32X8
+    TX_64X64, // TX_16X64
+    TX_64X64, // TX_64X16
+};
+
 // COPY_CDF equivalent for the four tables (cabac_context_model.c:740-741,
 // :767 - the kf_y_cdf/angle_delta_cdf/filter_intra rows of
 // svt_aom_av1_setup_frame_context).
@@ -610,6 +736,19 @@ void initDefaultEcFrameContext(EcFrameContext* fc) {
     memcpy(fc->filter_intra_mode_cdf, filter_intra_mode_cdf_default, sizeof(fc->filter_intra_mode_cdf));
     memcpy(fc->partition_cdf, partition_cdf_default, sizeof(fc->partition_cdf));
     memcpy(fc->skip_cdfs, skip_cdfs_default, sizeof(fc->skip_cdfs));
+    memcpy(fc->txb_skip_cdf, txb_skip_cdfs_default, sizeof(fc->txb_skip_cdf));
+    memcpy(fc->dc_sign_cdf, dc_sign_cdfs_default, sizeof(fc->dc_sign_cdf));
+    memcpy(fc->coeff_base_eob_cdf, coeff_base_eob_multi_cdfs_default, sizeof(fc->coeff_base_eob_cdf));
+    memcpy(fc->coeff_base_cdf, coeff_base_multi_cdfs_default, sizeof(fc->coeff_base_cdf));
+    memcpy(fc->coeff_br_cdf, coeff_lps_multi_cdfs_default, sizeof(fc->coeff_br_cdf));
+    memcpy(fc->eob_extra_cdf, eob_extra_cdfs_default, sizeof(fc->eob_extra_cdf));
+    memcpy(fc->eob_flag_cdf16, eob_multi16_cdfs_default, sizeof(fc->eob_flag_cdf16));
+    memcpy(fc->eob_flag_cdf32, eob_multi32_cdfs_default, sizeof(fc->eob_flag_cdf32));
+    memcpy(fc->eob_flag_cdf64, eob_multi64_cdfs_default, sizeof(fc->eob_flag_cdf64));
+    memcpy(fc->eob_flag_cdf128, eob_multi128_cdfs_default, sizeof(fc->eob_flag_cdf128));
+    memcpy(fc->eob_flag_cdf256, eob_multi256_cdfs_default, sizeof(fc->eob_flag_cdf256));
+    memcpy(fc->eob_flag_cdf512, eob_multi512_cdfs_default, sizeof(fc->eob_flag_cdf512));
+    memcpy(fc->eob_flag_cdf1024, eob_multi1024_cdfs_default, sizeof(fc->eob_flag_cdf1024));
 }
 
 int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
@@ -618,7 +757,20 @@ int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
            memcmp(a->filter_intra_cdfs, b->filter_intra_cdfs, sizeof(a->filter_intra_cdfs)) == 0 &&
            memcmp(a->filter_intra_mode_cdf, b->filter_intra_mode_cdf, sizeof(a->filter_intra_mode_cdf)) == 0 &&
            memcmp(a->partition_cdf, b->partition_cdf, sizeof(a->partition_cdf)) == 0 &&
-           memcmp(a->skip_cdfs, b->skip_cdfs, sizeof(a->skip_cdfs)) == 0;
+           memcmp(a->skip_cdfs, b->skip_cdfs, sizeof(a->skip_cdfs)) == 0 &&
+           memcmp(a->txb_skip_cdf, b->txb_skip_cdf, sizeof(a->txb_skip_cdf)) == 0 &&
+           memcmp(a->dc_sign_cdf, b->dc_sign_cdf, sizeof(a->dc_sign_cdf)) == 0 &&
+           memcmp(a->coeff_base_eob_cdf, b->coeff_base_eob_cdf, sizeof(a->coeff_base_eob_cdf)) == 0 &&
+           memcmp(a->coeff_base_cdf, b->coeff_base_cdf, sizeof(a->coeff_base_cdf)) == 0 &&
+           memcmp(a->coeff_br_cdf, b->coeff_br_cdf, sizeof(a->coeff_br_cdf)) == 0 &&
+           memcmp(a->eob_extra_cdf, b->eob_extra_cdf, sizeof(a->eob_extra_cdf)) == 0 &&
+           memcmp(a->eob_flag_cdf16, b->eob_flag_cdf16, sizeof(a->eob_flag_cdf16)) == 0 &&
+           memcmp(a->eob_flag_cdf32, b->eob_flag_cdf32, sizeof(a->eob_flag_cdf32)) == 0 &&
+           memcmp(a->eob_flag_cdf64, b->eob_flag_cdf64, sizeof(a->eob_flag_cdf64)) == 0 &&
+           memcmp(a->eob_flag_cdf128, b->eob_flag_cdf128, sizeof(a->eob_flag_cdf128)) == 0 &&
+           memcmp(a->eob_flag_cdf256, b->eob_flag_cdf256, sizeof(a->eob_flag_cdf256)) == 0 &&
+           memcmp(a->eob_flag_cdf512, b->eob_flag_cdf512, sizeof(a->eob_flag_cdf512)) == 0 &&
+           memcmp(a->eob_flag_cdf1024, b->eob_flag_cdf1024, sizeof(a->eob_flag_cdf1024)) == 0;
 }
 
 // svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021), flattened
@@ -833,6 +985,403 @@ void writeSkip(AomWriter* w, EcFrameContext* fc, int ctx, int skip) {
 // the SEG_LVL_SKIP implicit-1 branch (segmentation deferred)
 int readSkip(AomReader* r, EcFrameContext* fc, int ctx) {
     return odEcReadSymbol(r, fc->skip_cdfs[ctx], 2);
+}
+
+// ---------------------------------------------------------------------------
+// TS1: per-TU coefficient chain (entropy_coding.c:355-544, LUMA DCT_DCT).
+// ---------------------------------------------------------------------------
+// eb_av1_nz_map_ctx_offset LUT (coefficients.c:24-303, verbatim): the full
+// [19] pointer array + all sub-tables. The 2D DCT_DCT path indexes by the
+// square TxSize values (0-4).
+namespace {
+#include "nz_map_ctx_offset.inc"
+}  // anonymous namespace
+
+// coefficients.h:56-67
+int getLowerLevelsCtxEob(int bwl, int height, int scan_idx) {
+    if (scan_idx == 0) return 0;
+    if (scan_idx <= (height << bwl) / 8) return 1;
+    if (scan_idx <= (height << bwl) / 4) return 2;
+    return 3;
+}
+
+// coefficients.h:69-81
+int getBrCtxEob(int c, int bwl, TxClass tx_class) {
+    const int row = c >> bwl;
+    const int col = c - (row << bwl);
+    if (c == 0) return 0;
+    if ((tx_class == TX_CLASS_2D && row < 2 && col < 2) || (tx_class == TX_CLASS_HORIZ && col == 0) ||
+        (tx_class == TX_CLASS_VERT && row == 0)) return 7;
+    return 14;
+}
+
+// coefficients.h:83-127 (verbatim semantics)
+int getBrCtx(const std::uint8_t* levels, int c, int bwl, TxClass tx_class) {
+    const int row    = c >> bwl;
+    const int col    = c - (row << bwl);
+    const int stride = (1 << bwl) + TX_PAD_HOR;
+    const int pos    = row * stride + col;
+    int mag = levels[pos + 1];
+    mag += levels[pos + stride];
+    switch (tx_class) {
+    case TX_CLASS_2D:
+        mag += levels[pos + stride + 1];
+        mag = AOMMIN((mag + 1) >> 1, 6);
+        if (c == 0) return mag;
+        if ((row < 2) && (col < 2)) return mag + 7;
+        break;
+    case TX_CLASS_HORIZ:
+        mag += levels[pos + 2];
+        mag = AOMMIN((mag + 1) >> 1, 6);
+        if (c == 0) return mag;
+        if (col == 0) return mag + 7;
+        break;
+    case TX_CLASS_VERT:
+        mag += levels[pos + (stride << 1)];
+        mag = AOMMIN((mag + 1) >> 1, 6);
+        if (c == 0) return mag;
+        if (row == 0) return mag + 7;
+        break;
+    default: break;
+    }
+    return mag + 14;
+}
+
+// coefficients.h:129-131
+int getPaddedIdx(int idx, int bwl) {
+    return idx + ((idx >> bwl) << TX_PAD_HOR_LOG2);
+}
+
+// coefficients.h:133-155 (verbatim, all three classes)
+int getNzMag(const std::uint8_t* levels, int bwl, TxClass tx_class) {
+    int mag;
+#define CLIP_MAX3(x) ((x > 3) ? 3 : x)
+    mag = CLIP_MAX3(levels[1]);
+    mag += CLIP_MAX3(levels[(1 << bwl) + TX_PAD_HOR]);
+    if (tx_class == TX_CLASS_2D) {
+        mag += CLIP_MAX3(levels[(1 << bwl) + TX_PAD_HOR + 1]);
+        mag += CLIP_MAX3(levels[2]);
+        mag += CLIP_MAX3(levels[(2 << bwl) + (2 << TX_PAD_HOR_LOG2)]);
+    } else if (tx_class == TX_CLASS_VERT) {
+        mag += CLIP_MAX3(levels[(2 << bwl) + (2 << TX_PAD_HOR_LOG2)]);
+        mag += CLIP_MAX3(levels[(3 << bwl) + (3 << TX_PAD_HOR_LOG2)]);
+        mag += CLIP_MAX3(levels[(4 << bwl) + (4 << TX_PAD_HOR_LOG2)]);
+    } else {
+        mag += CLIP_MAX3(levels[2]);
+        mag += CLIP_MAX3(levels[3]);
+        mag += CLIP_MAX3(levels[4]);
+    }
+#undef CLIP_MAX3
+    return mag;
+}
+
+// coefficients.h:157-194 (2D class = the DCT_DCT port's only path)
+int getNzMapCtxFromStats(int stats, int coeff_idx, int bwl, TxSize tx_size, TxClass tx_class) {
+    (void)bwl;
+    if ((tx_class | coeff_idx) == 0) return 0;
+    int ctx = (stats + 1) >> 1;
+    ctx = AOMMIN(ctx, 4);
+    switch (tx_class) {
+    case TX_CLASS_2D:
+        return ctx + eb_av1_nz_map_ctx_offset[tx_size][coeff_idx];
+    default:
+        return 0;  // HORIZ/VERT classes are the 1D path - not in the DCT_DCT port
+    }
+}
+
+// coefficients.h:196-200
+int getLowerLevelsCtx(const std::uint8_t* levels, int coeff_idx, int bwl, TxSize tx_size, TxClass tx_class) {
+    const int stats = getNzMag(levels + getPaddedIdx(coeff_idx, bwl), bwl, tx_class);
+    return getNzMapCtxFromStats(stats, coeff_idx, bwl, tx_size, tx_class);
+}
+
+// rd_cost.c:93-105 (verbatim)
+void txbInitLevels(const std::int32_t* coeff, int width, int height, std::uint8_t* levels) {
+    std::uint8_t* ls = levels;
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            *ls++ = static_cast<std::uint8_t>(AOMMIN(std::abs(coeff[i * width + j]), INT8_MAX));
+        }
+        for (int j = 0; j < TX_PAD_HOR; j++) *ls++ = 0;
+    }
+}
+
+// C_DEFAULT/encode_txb_ref_c.c:17-44 (verbatim)
+static int nzMapCtx(const std::uint8_t* levels, int coeff_idx, int bwl, int height, int scan_idx, int is_eob,
+                    TxSize tx_size, TxClass tx_class) {
+    if (is_eob) {
+        if (scan_idx == 0) return 0;
+        if (scan_idx <= (height << bwl) / 8) return 1;
+        if (scan_idx <= (height << bwl) / 4) return 2;
+        return 3;
+    }
+    const int stats = getNzMag(levels + getPaddedIdx(coeff_idx, bwl), bwl, tx_class);
+    return getNzMapCtxFromStats(stats, coeff_idx, bwl, tx_size, tx_class);
+}
+
+// C_DEFAULT/encode_txb_ref_c.c:35-44 (verbatim)
+void getNzMapContexts(const std::uint8_t* levels, const std::int16_t* scan, std::uint16_t eob,
+                      TxSize tx_size, TxClass tx_class, std::int8_t* coeff_contexts) {
+    const int bwl    = getTxbBwl(tx_size);
+    const int height = getTxbHigh(tx_size);
+    for (int i = 0; i < eob; ++i) {
+        const int pos = scan[i];
+        coeff_contexts[pos] =
+            static_cast<std::int8_t>(nzMapCtx(levels, pos, bwl, height, i, i == eob - 1, tx_size, tx_class));
+    }
+}
+
+// entropy_coding.h:110-112
+TxSize getTxsizeEntropyCtx(TxSize txsize) {
+    return static_cast<TxSize>((txsizeSqrMap[txsize] + txsizeSqrUpMap[txsize] + 1) >> 1);
+}
+
+// common_utils.h:100-128 (verbatim; av1_get_adjusted_tx_size folded per function)
+static TxSize av1GetAdjustedTxSize(TxSize tx_size) {
+    switch (tx_size) {
+    case TX_64X64: case TX_64X32: case TX_32X64: return TX_32X32;
+    case TX_64X16: return TX_32X16;
+    case TX_16X64: return TX_16X32;
+    default: return tx_size;
+    }
+}
+int getTxbBwl(TxSize tx_size) {
+    tx_size = av1GetAdjustedTxSize(tx_size);
+    return txSizeWideLog2[tx_size];
+}
+int getTxbWide(TxSize tx_size) {
+    tx_size = av1GetAdjustedTxSize(tx_size);
+    return txSizeWide[tx_size];
+}
+int getTxbHigh(TxSize tx_size) {
+    tx_size = av1GetAdjustedTxSize(tx_size);
+    return txSizeHigh[tx_size];
+}
+
+// entropy_coding.h:94-102
+int getEobPosToken(int eob, int* extra) {
+    if (eob < 3) {
+        *extra = 0;
+        return eob;
+    }
+    const int t = getMsb(static_cast<std::uint32_t>(eob - 1));
+    *extra = eob - 1 - (1 << t);
+    return t + 2;
+}
+
+// entropy_coding.c:236-243
+void writeGolomb(AomWriter* w, int level) {
+    const std::int32_t x      = level + 1;
+    const std::uint32_t length = static_cast<std::uint32_t>(getMsb(x) + 1);
+    odEcWriteLiteralBits(w, 0, static_cast<int>(length - 1));  // aom_write_literal(w, 0, length-1)
+    odEcWriteLiteralBits(w, x, static_cast<int>(length));
+}
+
+// aom decodetxb.c read_golomb (verbatim semantics)
+int readGolomb(AomReader* r) {
+    int x = 1, length = 0, i = 0;
+    while (!i) {
+        i = odEcReadBit(r);
+        ++length;
+    }
+    for (i = 0; i < length - 1; ++i) {
+        x <<= 1;
+        x += odEcReadBit(r);
+    }
+    return x - 1;
+}
+
+// entropy_coding.c:355-544 (LUMA DCT_DCT port)
+void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
+                    const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
+                    int dc_sign_ctx) {
+    const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
+    const int    eob_multi_size = txsizeLog2Minus4[tx_size];
+    const int    eob_multi_ctx  = 0;  // TX_CLASS_2D (tx_type_to_class[DCT_DCT])
+
+    odEcWriteSymbol(w, eob == 0, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
+    if (eob == 0) return;
+
+    int eob_extra;
+    const int eob_pt = getEobPosToken(eob, &eob_extra);
+    AomCdfProb* eob_cdf;
+    int nsyms;
+    switch (eob_multi_size) {
+    case 0: eob_cdf = fc->eob_flag_cdf16[0][eob_multi_ctx]; nsyms = 5; break;
+    case 1: eob_cdf = fc->eob_flag_cdf32[0][eob_multi_ctx]; nsyms = 6; break;
+    case 2: eob_cdf = fc->eob_flag_cdf64[0][eob_multi_ctx]; nsyms = 7; break;
+    case 3: eob_cdf = fc->eob_flag_cdf128[0][eob_multi_ctx]; nsyms = 8; break;
+    case 4: eob_cdf = fc->eob_flag_cdf256[0][eob_multi_ctx]; nsyms = 9; break;
+    case 5: eob_cdf = fc->eob_flag_cdf512[0][eob_multi_ctx]; nsyms = 10; break;
+    default: eob_cdf = fc->eob_flag_cdf1024[0][eob_multi_ctx]; nsyms = 11; break;
+    }
+    odEcWriteSymbol(w, eob_pt - 1, eob_cdf, nsyms);
+    if (eob_pt > 2) {
+        const int cnt = eob_pt - 3;
+        const int bit = (eob_extra >> cnt) & 1;
+        odEcWriteSymbol(w, bit, fc->eob_extra_cdf[txs_ctx][0][cnt], 2);
+        odEcWriteLiteralBits(w, eob_extra, cnt);
+    }
+
+    const int bwl    = getTxbBwl(tx_size);
+    const int width  = getTxbWide(tx_size);
+    const int height = getTxbHigh(tx_size);
+
+    std::uint8_t levels[TX_PAD_2D];
+    memset(levels, 0, sizeof(levels));
+    txbInitLevels(coeff, width, height, levels);
+    std::int8_t coeff_contexts[TX_PAD_2D];
+    getNzMapContexts(levels, scan, static_cast<std::uint16_t>(eob), tx_size, TX_CLASS_2D, coeff_contexts);
+
+    const int br_txs_ctx = AOMMIN(txs_ctx, TX_32X32);
+
+    // last coefficient (scan[eob-1]): base_eob (AOMMIN(level,3)-1) + br
+    {
+        const int c   = eob - 1;
+        const int pos = scan[c];
+        const int lctx = (eob == 1) ? 0 : coeff_contexts[pos];
+        const std::int32_t level = std::abs(coeff[pos]);
+        odEcWriteSymbol(w, AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3);
+        if (level > NUM_BASE_LEVELS) {
+            const int32_t base_range = level - 1 - NUM_BASE_LEVELS;
+            const int br_ctx = (eob == 1) ? 0 : getBrCtxEob(pos, bwl, TX_CLASS_2D);
+            if (eob == 1) {
+                // base_eob br_ctx: aom get_br_ctx_eob(pos, bhl, tx_class); for eob==1, pos=0 -> 0
+            }
+            for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
+                const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
+                odEcWriteSymbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                if (k < BR_CDF_SIZE - 1) break;
+            }
+        }
+    }
+    // reverse pass c = eob-2 .. 0: base (AOMMIN(level,3)) + br
+    for (int c = eob - 2; c >= 0; --c) {
+        const int pos = scan[c];
+        const int coeff_ctx = coeff_contexts[pos];
+        const std::int32_t level = std::abs(coeff[pos]);
+        odEcWriteSymbol(w, AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
+        if (level > NUM_BASE_LEVELS) {
+            const int32_t base_range = level - 1 - NUM_BASE_LEVELS;
+            const int br_ctx = getBrCtx(levels, pos, bwl, TX_CLASS_2D);
+            for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
+                const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
+                odEcWriteSymbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                if (k < BR_CDF_SIZE - 1) break;
+            }
+        }
+    }
+    // forward pass: signs + golomb
+    for (int c = 0; c < eob; ++c) {
+        const int pos = scan[c];
+        const std::int32_t v = coeff[pos];
+        const std::int32_t level = std::abs(v);
+        if (!level) continue;
+        if (c == 0) {
+            odEcWriteSymbol(w, (v < 0) ? 1 : 0, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
+        } else {
+            odEcWriteLiteralBit(w, (v < 0) ? 1 : 0, 1);
+        }
+        if (level > COEFF_BASE_RANGE + NUM_BASE_LEVELS) {
+            writeGolomb(w, level - COEFF_BASE_RANGE - 1 - NUM_BASE_LEVELS);
+        }
+    }
+}
+
+// aom decodetxb.c read_coeffs_txb (symbol-for-symbol twin)
+int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
+                  const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx) {
+    const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
+    const int    eob_multi_size = txsizeLog2Minus4[tx_size];
+    const int    eob_multi_ctx  = 0;
+    memset(coeff, 0, sizeof(std::int32_t) * (getTxbWide(tx_size) * getTxbHigh(tx_size)));
+
+    const int all_zero = odEcReadSymbol(r, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
+    if (all_zero) return 0;
+
+    int eob_pt;
+    switch (eob_multi_size) {
+    case 0: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf16[0][eob_multi_ctx], 5) + 1; break;
+    case 1: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf32[0][eob_multi_ctx], 6) + 1; break;
+    case 2: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf64[0][eob_multi_ctx], 7) + 1; break;
+    case 3: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf128[0][eob_multi_ctx], 8) + 1; break;
+    case 4: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf256[0][eob_multi_ctx], 9) + 1; break;
+    case 5: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf512[0][eob_multi_ctx], 10) + 1; break;
+    default: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf1024[0][eob_multi_ctx], 11) + 1; break;
+    }
+    int eob_extra = 0;
+    {
+        const int eob_offset_bits = (eob_pt > 2) ? (eob_pt - 2) : 0;
+        if (eob_offset_bits > 0) {
+            const int eob_ctx = eob_pt - 3;
+            if (odEcReadSymbol(r, fc->eob_extra_cdf[txs_ctx][0][eob_ctx], 2)) {
+                eob_extra += (1 << (eob_offset_bits - 1));
+            }
+            for (int i = 1; i < eob_offset_bits; i++) {
+                if (odEcReadBit(r)) eob_extra += (1 << (eob_offset_bits - 1 - i));
+            }
+        }
+    }
+    // rec_eob_pos: group_start[1]=1, [2]=2, [t>2]=(1<<(t-2))+1
+    const int eob = (eob_pt <= 2) ? eob_pt : ((1 << (eob_pt - 2)) + 1 + eob_extra);
+
+    const int bwl    = getTxbBwl(tx_size);
+    const int width  = getTxbWide(tx_size);
+    (void)width;
+    const int height = getTxbHigh(tx_size);
+    std::uint8_t levels[TX_PAD_2D];
+    memset(levels, 0, sizeof(levels));
+    const int br_txs_ctx = AOMMIN(txs_ctx, TX_32X32);
+
+    // last coefficient
+    {
+        const int c   = eob - 1;
+        const int pos = scan[c];
+        const int lctx = getLowerLevelsCtxEob(bwl, height, c);
+        int level = odEcReadSymbol(r, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3) + 1;
+        if (level > NUM_BASE_LEVELS) {
+            const int br_ctx = getBrCtxEob(pos, bwl, TX_CLASS_2D);
+            for (int idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
+                const int k = odEcReadSymbol(r, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                level += k;
+                if (k < BR_CDF_SIZE - 1) break;
+            }
+        }
+        levels[getPaddedIdx(pos, bwl)] = static_cast<std::uint8_t>(level);
+    }
+    // reverse pass
+    for (int c = eob - 2; c >= 0; --c) {
+        const int pos = scan[c];
+        const int coeff_ctx = getLowerLevelsCtx(levels, pos, bwl, tx_size, TX_CLASS_2D);
+        int level = odEcReadSymbol(r, fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
+        if (level > NUM_BASE_LEVELS) {
+            const int br_ctx = getBrCtx(levels, pos, bwl, TX_CLASS_2D);
+            for (int idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
+                const int k = odEcReadSymbol(r, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                level += k;
+                if (k < BR_CDF_SIZE - 1) break;
+            }
+        }
+        levels[getPaddedIdx(pos, bwl)] = static_cast<std::uint8_t>(level);
+    }
+    // forward pass: signs + golomb
+    for (int c = 0; c < eob; ++c) {
+        const int pos = scan[c];
+        const int level = levels[getPaddedIdx(pos, bwl)];
+        if (!level) continue;
+        int sign;
+        if (c == 0) {
+            sign = odEcReadSymbol(r, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
+        } else {
+            sign = odEcReadBit(r);
+        }
+        int lv = level;
+        if (lv >= MAX_BASE_BR_RANGE) {
+            lv += readGolomb(r);
+        }
+        coeff[pos] = sign ? -lv : lv;
+    }
+    return eob;
 }
 
 }  // namespace entropy
