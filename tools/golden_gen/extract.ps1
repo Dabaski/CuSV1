@@ -478,6 +478,7 @@ Emit-Verbatim "entropy_coding.c" "void NOINLINE svt_aom_wb_write_bit" "svt_aom_w
 Emit-Verbatim "entropy_coding.c" "void NOINLINE svt_aom_wb_write_literal" "svt_aom_wb_write_literal"
 Emit-Verbatim "entropy_coding.c" "void NOINLINE svt_aom_wb_write_inv_signed_literal" "svt_aom_wb_write_inv_signed_literal"
 Emit-Verbatim "entropy_coding.c" "static uint32_t write_obu_header" "write_obu_header"
+Emit-Verbatim "entropy_coding.c" "static void add_trailing_bits" "add_trailing_bits"
 Emit-Verbatim "entropy_coding.c" "static int32_t write_uleb_obu_size" "write_uleb_obu_size"
 Emit-Verbatim "entropy_coding.c" "EbErrorType svt_aom_encode_td_av1" "svt_aom_encode_td_av1"
 

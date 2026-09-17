@@ -6893,6 +6893,16 @@ static uint32_t write_obu_header(ObuType obu_type, int32_t obuExtension, uint8_t
     return size;
 }
 
+// ==== SVT-AV1 entropy_coding.c :3668 - add_trailing_bits (verbatim extract; do not edit) ====
+static void add_trailing_bits(AomWriteBitBuffer* wb) {
+    if (svt_aom_wb_is_byte_aligned(wb)) {
+        svt_aom_wb_write_literal(wb, 0x80, 8);
+    } else {
+        // assumes that the other bits are already 0s
+        svt_aom_wb_write_bit(wb, 1);
+    }
+}
+
 // ==== SVT-AV1 entropy_coding.c :3656 - write_uleb_obu_size (verbatim extract; do not edit) ====
 static int32_t write_uleb_obu_size(uint32_t obu_header_size, uint32_t obu_payload_size, uint8_t* dest) {
     const uint32_t obu_size       = obu_payload_size;

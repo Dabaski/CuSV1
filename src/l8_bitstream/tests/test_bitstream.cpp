@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include <entropy.h>
 #include "bitstream.h"
 
 // BSF2 tolerance note: integer-only port, bit-exact vs the SVT C - every
@@ -80,4 +81,87 @@ TEST_CASE("literal/bit packing matches gate") {
     while (!bitstream::wbIsByteAligned(&wb)) bitstream::wbWriteBit(&wb, 0);
     CHECK(bitstream::wbBytesWritten(&wb) == 3);
     CHECK(bitstream::wbIsByteAligned(&wb) == 1);
+}
+
+TEST_CASE("structural keyframe TU assembly matches gate") {
+    // Gates: sps_obu 11 0a 09 10 00 00 02 27 fe 60 c2 a0,
+    // frame_obu 10 32 08 18 80 08 c5 2d b8 76 0c,
+    // tu_bytes 23 12 00 0a 09 10 00 00 02 27 fe 60 c2 a0 32 08 18 80 08 c5
+    // 2d b8 76 0c (tools/golden_gen composition.c BSF3 block: SVT packer +
+    // court-ratified D1 mono patch). The tile data is composed HERE through
+    // the l7 surfaces in decode order - partition plane
+    // (encode_partition_av1 :932-981) interleaved with per-leaf
+    // skip (encode_skip_coeff_av1 :995-1000) + kf y mode + angle delta
+    // (encode_intra_luma_mode_kf_av1 :1026-1040) - exactly the generator's
+    // svtd_bsf3_tile_data walk: 64x64 forced SPLIT (no symbol), coded
+    // SPLIT at 32x32 ctx 8, four 16x16 NONE leaves (ctx 4), modes
+    // {1,7,2,2}, all skip = 1, no FI symbols (no decided mode is DC_PRED).
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc);
+    entropy::AomWriter w{};
+    unsigned char tileBuf[64] = {0};
+    w.ec.buf = tileBuf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    std::uint8_t aboveCtx[8];
+    std::uint8_t leftCtx[16];
+    memset(aboveCtx, INVALID_NEIGHBOR_DATA, sizeof(aboveCtx));
+    memset(leftCtx, INVALID_NEIGHBOR_DATA, sizeof(leftCtx));
+    static const int modes[4] = {1, 7, 2, 2};
+    static const int lr[4] = {0, 0, 4, 4};
+    static const int lc[4] = {0, 4, 0, 4};
+    static const int aboveMode[4] = {-1, -1, 1, 7};
+    static const int leftMode[4] = {-1, 1, -1, 2};
+    static const int skipCtx[4] = {0, 1, 1, 2};
+
+    // 32x32 coded SPLIT (the 64x64 above it is a forced split: no symbol)
+    entropy::writePartition(&w, &fc, entropy::BLOCK_32X32, 1, 1, aboveCtx[0], leftCtx[0],
+                            entropy::PARTITION_SPLIT);
+    for (int b = 0; b < 4; ++b) {
+        entropy::writePartition(&w, &fc, entropy::BLOCK_16X16, 1, 1, aboveCtx[lc[b]],
+                                leftCtx[lr[b] & 15], entropy::PARTITION_NONE);
+        entropy::updatePartitionContext(aboveCtx, leftCtx, lr[b], lc[b], entropy::BLOCK_16X16);
+        entropy::writeSkip(&w, &fc, skipCtx[b], 1);
+        int topCtx, leftCtxKf;
+        entropy::getKfYModeCtx(leftMode[b] >= 0 ? 1 : 0, leftMode[b] < 0 ? 0 : leftMode[b],
+                               aboveMode[b] >= 0 ? 1 : 0, aboveMode[b] < 0 ? 0 : aboveMode[b],
+                               &topCtx, &leftCtxKf);
+        entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
+                                 static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, 0);
+    }
+    entropy::odEcStopEncode(&w);
+    REQUIRE(w.pos == 5);
+    static const unsigned char wantTile[5] = {0xc5, 0x2d, 0xb8, 0x76, 0x0c};
+    for (int i = 0; i < 5; ++i) CHECK((unsigned)tileBuf[i] == wantTile[i]);
+
+    // sequence header payload (write_sequence_header_obu :3699-3763 with
+    // the D1 patch): 9 bytes, no OBU header/uleb
+    unsigned char spsBuf[64] = {0};
+    const std::uint32_t spsPayload = bitstream::writeSequenceHeaderObu(spsBuf);
+    REQUIRE(spsPayload == 9);
+    static const unsigned char wantSpsPayload[9] = {0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0};
+    for (int i = 0; i < 9; ++i) CHECK((unsigned)spsBuf[i] == wantSpsPayload[i]);
+
+    // frame header (21-bit ratified walk, NO trailing-bits marker): 3 bytes
+    unsigned char fhBuf[64] = {0};
+    const std::uint32_t fhSize = bitstream::writeFrameHeader(fhBuf);
+    REQUIRE(fhSize == 3);
+    CHECK((unsigned)fhBuf[0] == 0x18);
+    CHECK((unsigned)fhBuf[1] == 0x80);
+    CHECK((unsigned)fhBuf[2] == 0x08);
+
+    // full TU: TD + SPS + OBU_FRAME (svt_aom_encode_td_av1 :3953-3960 +
+    // svt_aom_encode_sps_av1 :3925-3948 + svt_aom_write_frame_header_av1
+    // :3843-3920 structures)
+    unsigned char tuBuf[128];
+    memset(tuBuf, 0, sizeof(tuBuf));
+    const std::uint32_t tuSize =
+        bitstream::assembleStructuralKeyframeTU(tuBuf, tileBuf, w.pos);
+    REQUIRE(tuSize == 23);
+    static const unsigned char wantTu[23] = {0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27,
+                                             0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x08, 0x18, 0x80, 0x08,
+                                             0xc5, 0x2d, 0xb8, 0x76, 0x0c};
+    for (int i = 0; i < 23; ++i) CHECK((unsigned)tuBuf[i] == wantTu[i]);
 }

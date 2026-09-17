@@ -2162,3 +2162,394 @@ static void svtd_frame_auto_8x8(const uint8_t* src, uint8_t* recon, int32_t* coe
 
 
 
+
+// ---- ECP1 partition walk helpers (composition over the extracts) ---------
+// Context derivation (entropy_coding.c:945-960 flattened): bsl from
+// block_size_wide (mi_size_wide_log2 == log2(px>>2) for squares); fresh
+// INVALID_NEIGHBOR_DATA (0xFF, definitions.h:334) cells map to 0.
+typedef struct EcPartState {
+    AomWriter* w;
+    AomCdfProb (*cdf)[CDF_SIZE(EXT_PARTITION_TYPES)];
+    uint8_t* above;  // per mi column
+    uint8_t* left;   // per mi row, (miRow & 15)
+    int frame_mi;    // frame extent in mi units
+    int aligned_px;  // aligned frame extent in px
+    int nctx;        // coded partition symbol count
+} EcPartState;
+
+static int ecpart_bsl(BlockSize bsize) {
+    return svt_log2f(block_size_wide[bsize] >> 2) - 1;
+}
+
+static int ecpart_derive_ctx(const uint8_t* above, const uint8_t* left, int miRow, int miCol, BlockSize bsize) {
+    const uint8_t ab = above[miCol];
+    const uint8_t lf = left[miRow & 15];
+    const int a = ((ab == (uint8_t)INVALID_NEIGHBOR_DATA ? 0 : ab) >> ecpart_bsl(bsize)) & 1;
+    const int l = ((lf == (uint8_t)INVALID_NEIGHBOR_DATA ? 0 : lf) >> ecpart_bsl(bsize)) & 1;
+    return (l * 2 + a) + ecpart_bsl(bsize) * PARTITION_PLOFFSET;
+}
+
+// coding_loop.c:1700-1713: each CODED block writes
+// partition_context_lookup[bsize] over its mi extent (above bytes at
+// mi_col.., left bytes at (mi_row & 15)..).
+static void ecpart_update_ctx(uint8_t* above, uint8_t* left, int miRow, int miCol, BlockSize bsize) {
+    const int mi_w = block_size_wide[bsize] >> 2;
+    const int mi_h = block_size_high[bsize] >> 2;
+    for (int j = 0; j < mi_w; ++j) above[miCol + j] = (uint8_t)partition_context_lookup[bsize].above;
+    for (int i = 0; i < mi_h; ++i) left[(miRow + i) & 15] = (uint8_t)partition_context_lookup[bsize].left;
+}
+
+// Ratified structural tree: 32x32 frame inside sb_size 64 - SPLIT at 64x64
+// (forced, no symbol) and 32x32 (coded), NONE at the four 16x16 leaves.
+static int ecpart_decide(int miRow, int miCol, BlockSize bsize) {
+    (void)miRow;
+    (void)miCol;
+    return (bsize == BLOCK_64X64 || bsize == BLOCK_32X32) ? PARTITION_SPLIT : PARTITION_NONE;
+}
+
+static BlockSize ecpart_child(BlockSize bsize) {
+    switch (bsize) {
+        case BLOCK_128X128: return BLOCK_64X64;
+        case BLOCK_64X64: return BLOCK_32X32;
+        case BLOCK_32X32: return BLOCK_16X16;
+        case BLOCK_16X16: return BLOCK_8X8;
+        default: return BLOCK_4X4;
+    }
+}
+
+// Writer walk (encode_partition_av1, entropy_coding.c:932-981): has_rows/
+// has_cols from the px rule (:941-943), forced split with NO symbol
+// (:962-965), full symbol when both edges (:967-969, alphabet per
+// svt_aom_partition_cdf_length :922-930), gathered 2-symbol on XOR edges
+// (:970-977, unreachable in the structural tree, exercised by ecpart_gather).
+static void ecpart_write(EcPartState* s, int miRow, int miCol, BlockSize bsize) {
+    if (miRow >= s->frame_mi || miCol >= s->frame_mi) return;
+    const int hbs = block_size_wide[bsize] >> 1;
+    const int has_rows = (miRow * 4 + hbs) < s->aligned_px;
+    const int has_cols = (miCol * 4 + hbs) < s->aligned_px;
+    const int decided = ecpart_decide(miRow, miCol, bsize);
+    if (!has_rows && !has_cols) {
+        if (decided != PARTITION_SPLIT) { fprintf(stderr, "ECP1 forced-split mismatch\n"); exit(1); }
+    } else {
+        const int ctx = ecpart_derive_ctx(s->above, s->left, miRow, miCol, bsize);
+        printf(" %d", ctx);
+        if (has_rows && has_cols) {
+            aom_write_symbol(s->w, decided, s->cdf[ctx], svt_aom_partition_cdf_length(bsize));
+        } else if (!has_rows && has_cols) {
+            AomCdfProb g[CDF_SIZE(2)];
+            partition_gather_vert_alike(g, s->cdf[ctx], bsize);
+            aom_write_symbol(s->w, decided == PARTITION_SPLIT, g, 2);
+        } else {
+            AomCdfProb g[CDF_SIZE(2)];
+            partition_gather_horz_alike(g, s->cdf[ctx], bsize);
+            aom_write_symbol(s->w, decided == PARTITION_SPLIT, g, 2);
+        }
+        s->nctx++;
+        if (decided != PARTITION_SPLIT) {
+            ecpart_update_ctx(s->above, s->left, miRow, miCol, bsize);
+            return;
+        }
+    }
+    const BlockSize sub = ecpart_child(bsize);
+    const int stepMi = block_size_wide[bsize] >> 3;
+    ecpart_write(s, miRow, miCol, sub);
+    ecpart_write(s, miRow, miCol + stepMi, sub);
+    ecpart_write(s, miRow + stepMi, miCol, sub);
+    ecpart_write(s, miRow + stepMi, miCol + stepMi, sub);
+}
+
+// Reader twin (aom read_partition decodeframe.c:1266-1293 semantics, the
+// out-of-tree BSF4 arbiter; persistent-cdf branch adapts via
+// aom_read_symbol_, gathered branch reads the temporary via aom_read_cdf_
+// exactly like the aom decoder - the writer's gathered adaptation is
+// discarded with the temporary, entropy_coding.c:971-977).
+typedef struct EcPartRState {
+    aom_reader* r;
+    AomCdfProb (*cdf)[CDF_SIZE(EXT_PARTITION_TYPES)];
+    uint8_t* above;
+    uint8_t* left;
+    int frame_mi;
+    int aligned_px;
+    int* rt;   // decoded partition values in coded order
+    int nrt;
+    int bad;
+} EcPartRState;
+
+static void ecpart_read(EcPartRState* s, int miRow, int miCol, BlockSize bsize) {
+    if (miRow >= s->frame_mi || miCol >= s->frame_mi) return;
+    const int hbs = block_size_wide[bsize] >> 1;
+    const int has_rows = (miRow * 4 + hbs) < s->aligned_px;
+    const int has_cols = (miCol * 4 + hbs) < s->aligned_px;
+    if (!has_rows && !has_cols) {
+        // forced SPLIT, no symbol
+    } else {
+        const int ctx = ecpart_derive_ctx(s->above, s->left, miRow, miCol, bsize);
+        int p;
+        if (has_rows && has_cols) {
+            p = aom_read_symbol_(s->r, s->cdf[ctx], svt_aom_partition_cdf_length(bsize));
+        } else if (!has_rows && has_cols) {
+            AomCdfProb g[CDF_SIZE(2)];
+            partition_gather_vert_alike(g, s->cdf[ctx], bsize);
+            p = aom_read_cdf_(s->r, g, 2) ? PARTITION_SPLIT : PARTITION_HORZ;
+        } else {
+            AomCdfProb g[CDF_SIZE(2)];
+            partition_gather_horz_alike(g, s->cdf[ctx], bsize);
+            p = aom_read_cdf_(s->r, g, 2) ? PARTITION_SPLIT : PARTITION_VERT;
+        }
+        printf(" %d", p);
+        if (p != ecpart_decide(miRow, miCol, bsize)) s->bad = 1;
+        s->rt[s->nrt++] = p;
+        if (p != PARTITION_SPLIT) {
+            ecpart_update_ctx(s->above, s->left, miRow, miCol, bsize);
+            return;
+        }
+    }
+    const BlockSize sub = ecpart_child(bsize);
+    const int stepMi = block_size_wide[bsize] >> 3;
+    ecpart_read(s, miRow, miCol, sub);
+    ecpart_read(s, miRow, miCol + stepMi, sub);
+    ecpart_read(s, miRow + stepMi, miCol, sub);
+    ecpart_read(s, miRow + stepMi, miCol + stepMi, sub);
+}
+
+// ---- BSF3: structural keyframe assembly -----------------------------------
+// SVT packer structure + court-ratified D1 mono patch. Every field value is
+// the ratified BSF0(g) config: profile 0, still_picture=1,
+// reduced_still_picture_header=0, monochrome=1 (D1), use_128x128=0 (sb 64),
+// enable_filter_intra=1, enable_intra_edge_filter=1, enable_order_hint=0
+// (D3), seq_force_screen_content_tools=2 / seq_force_integer_mv=2 (choose
+// bits written), seq_level_idx=0 (level 2.0), 32x32 frame == max dims,
+// single tile, base_q_idx 0 -> all_lossless = coded_lossless = 1.
+//
+// THE D1 MONO PATCH (court-ratified; exact spans in the pinned
+// write_color_config / encode_quantization):
+//   span 1 - entropy_coding.c:2689  const int is_monochrome = 0 -> 1;
+//   span 2 - entropy_coding.c:2706-2710  the commented-out spec mono branch
+//            becomes live (color_range bit, then return - skipping the
+//            4:2:0 subsampling writes :2720-2745 and separate_uv_delta_q
+//            :2747-2751, which the spec derives to 0 for mono);
+//   span 3 - entropy_coding.c:2385-2386  encode_quantization writes the U
+//            delta_q pair UNCONDITIONALLY; the spec's num_planes guard
+//            (aom setup_quantization is num_planes-aware,
+//            decodeframe.c:5121-5122) skips them for mono - the pinned
+//            writer lacks the guard because mono is unreachable there.
+//            Required by the ratified 21-bit frame-header walk. NOT a
+//            commented branch - named explicitly for the court audit.
+// No other writer behavior changes.
+
+// write_sequence_header (entropy_coding.c:2754-2839), ratified values.
+static void svtd_bsf3_sequence_header(AomWriteBitBuffer* wb) {
+    // max dims 32x32: frame_width_bits = svt_log2f(32) = 5, no bump
+    // (:2757-2764); the >= 1 guard (:2766-2771) no-op.
+    svt_aom_wb_write_literal(wb, 5 - 1, 4);   // frame_width_bits - 1 (:2775)
+    svt_aom_wb_write_literal(wb, 5 - 1, 4);   // frame_height_bits - 1 (:2776)
+    svt_aom_wb_write_literal(wb, 32 - 1, 5);  // max_frame_width - 1 (:2777)
+    svt_aom_wb_write_literal(wb, 32 - 1, 5);  // max_frame_height - 1 (:2778)
+    if (1) {  // !reduced_still_picture_header (:2780)
+        svt_aom_wb_write_bit(wb, 0);  // frame_id_numbers_present_flag (:2784; sequence_control_set.c:85)
+    }
+    svt_aom_wb_write_bit(wb, 0);  // sb_size == BLOCK_128X128 ? 1 : 0 (:2795; enc_handle.c:4072-4090)
+    svt_aom_wb_write_bit(wb, 1);  // filter_intra_level (:2797; ratified BSF0(g))
+    svt_aom_wb_write_bit(wb, 1);  // enable_intra_edge_filter (:2798; enc_mode_config.c:2877)
+    if (1) {  // !reduced (:2800)
+        svt_aom_wb_write_bit(wb, 0);  // enable_interintra_compound (:2801)
+        svt_aom_wb_write_bit(wb, 0);  // enable_masked_compound (:2802)
+        svt_aom_wb_write_bit(wb, 0);  // enable_warped_motion (:2804)
+        svt_aom_wb_write_bit(wb, 0);  // enable_dual_filter (:2805; sequence_control_set.c:91)
+        svt_aom_wb_write_bit(wb, 0);  // enable_order_hint = 0 (D3; SVT default 1, sequence_control_set.c:104; :2807)
+        // :2809-2812 skipped (order hint off); :2831-2833 skipped (order_hint_bits)
+        svt_aom_wb_write_bit(wb, 1);  // seq_force_screen_content_tools == 2 -> choose bit 1 (:2814-2815)
+        svt_aom_wb_write_bit(wb, 1);  // seq_force_integer_mv == 2 -> choose bit 1 (:2821-2823)
+    }
+    svt_aom_wb_write_bit(wb, 0);  // enable_superres (:2836; enc_mode_config.c:2824)
+    svt_aom_wb_write_bit(wb, 0);  // cdef_level (:2837)
+    svt_aom_wb_write_bit(wb, 0);  // enable_restoration (:2838)
+}
+
+// write_color_config (entropy_coding.c:2687-2752) + D1 spans 1 and 2.
+static void svtd_bsf3_color_config(AomWriteBitBuffer* wb) {
+    svt_aom_wb_write_bit(wb, 0);  // high_bitdepth: 8-bit (:2676-2679)
+    // monochrome bit: profile != HIGH_PROFILE -> bit written (:2691-2692).
+    // D1 span 1: :2689 const is_monochrome = 0 -> ratified 1.
+    svt_aom_wb_write_bit(wb, 1);  // is_monochrome = 1 (D1)
+    svt_aom_wb_write_bit(wb, 0);  // color_description_present (:2696-2699; CP/TC/MC unspecified)
+    // D1 span 2: the commented-out mono branch (:2706-2710) live:
+    svt_aom_wb_write_bit(wb, 1);  // color_range = 1 (court-ratified full range; :2708)
+    return;                       // mono return (:2709): skips subsampling
+                                  // (:2720-2745) and separate_uv_delta_q
+                                  // (:2747-2751; spec derives 0 for mono)
+}
+
+// write_sequence_header_obu (:3699-3763), ratified reduced=0 path.
+static uint32_t svtd_bsf3_sps_payload(AomWriteBitBuffer* wb) {
+    svt_aom_wb_write_literal(wb, 0, 3);  // profile = MAIN_PROFILE (:3705; enc_settings.c:989)
+    svt_aom_wb_write_bit(wb, 1);         // still_picture (:3708)
+    svt_aom_wb_write_bit(wb, 0);         // reduced_still_picture_header (:3712; ratified D2)
+    if (1) {  // !reduced (:3716)
+        svt_aom_wb_write_bit(wb, 0);          // timing_info_present (:3717; never set in the pinned tree)
+        svt_aom_wb_write_bit(wb, 0);          // initial_display_delay_present_flag (:3726; ratified BSF0(g))
+        svt_aom_wb_write_literal(wb, 0, 5);   // operating_points_cnt_minus_1 (:3728-3729)
+        // op loop i = 0 (:3731-3751):
+        svt_aom_wb_write_literal(wb, 0, 12);  // operating_point[0].op_idc (:3732)
+        svt_aom_wb_write_literal(wb, 0, 5);   // seq_level_idx = 0 (level 2.0: 32x32@30 matches the 512x288@30 slot :121-129; major_minor_to_seq_level_idx entropy_coding.h:81-84; :3733)
+        // tier skipped: level major 2 <= 3 (:3734-3736); decoder model skipped
+        // (:3737-3743); initial_display_delay skipped (:3744-3750)
+    }
+    svtd_bsf3_sequence_header(wb);
+    svtd_bsf3_color_config(wb);
+    svt_aom_wb_write_bit(wb, 0);  // film_grain_params_present (:3757; enc_handle.c:4449)
+    add_trailing_bits(wb);        // (:3759)
+    return svt_aom_wb_bytes_written(wb);
+}
+
+// write_uncompressed_header_obu (:3294-3637), ratified structural KF walk
+// (BSF0(b): 21 bits).
+static void svtd_bsf3_frame_header(AomWriteBitBuffer* wb) {
+    svt_aom_wb_write_bit(wb, 0);         // show_existing_frame (:3333)
+    svt_aom_wb_write_literal(wb, 0, 2);  // frame_type = KEY_FRAME (:3336)
+    svt_aom_wb_write_bit(wb, 1);         // show_frame (:3338)
+    // showable_frame skipped (show_frame = 1, :3340-3342); error_resilient
+    // skipped (KEY_FRAME && show_frame, :3343-3347)
+    svt_aom_wb_write_bit(wb, 1);  // disable_cdf_update (:3350; ratified)
+    svt_aom_wb_write_bit(wb, 0);  // allow_screen_content_tools - bit IS written (force == 2, :3352-3353)
+    // force_integer_mv skipped (asc = 0, :3358-3366)
+    svt_aom_wb_write_bit(wb, 0);  // frame_size_override_flag (:3386; frame == max dims, :3368-3371)
+    // order hint skipped (enable_order_hint = 0, :3389-3391); primary_ref
+    // skipped (intra-only, :3393-3395); refresh mask skipped (KF && show, :3399-3402)
+    // write_frame_size (:3470 -> :2652-2669): w/h literals skipped (override
+    // = 0); superres skipped ENTIRELY (enable_superres = 0 -> no bit,
+    // :2636-2639); render size:
+    svt_aom_wb_write_bit(wb, 0);  // render_and_frame_size_different (:2616-2624; frame_resize_enabled = 0)
+    // allow_intrabc skipped (asc = 0, :3472-3474); refresh_frame_context
+    // skipped (might_bwd_adapt = !reduced && !disable_cdf_update = 0, :3548-3554)
+    // write_tile_info (:3556 -> :2581-2614): single tile, sb 64 vs 32x32
+    // frame -> sbCols = sbRows = 1 -> log2_tile_cols = log2_tile_rows = 0 =
+    // min = max -> increment/terminator bits = 0 (:2410-2425);
+    // context_update_tile_id + tile_size_bytes skipped (tiles == 1, :2588-2613)
+    svt_aom_wb_write_bit(wb, 1);           // uniform_tile_spacing_flag (:2405; set :2556)
+    svt_aom_wb_write_literal(wb, 0, 8);    // base_q_idx (encode_quantization :2376)
+    svt_aom_wb_write_bit(wb, 0);           // delta_q Y dc (write_delta_q :2365-2372)
+    // D1 span 3: U/V delta_q writes (:2385-2386) SKIPPED for mono (see the
+    // patch note above).
+    svt_aom_wb_write_bit(wb, 0);  // using_qmatrix (:2391)
+    // diff_uv_delta skipped (deltas all 0)
+    svt_aom_wb_write_bit(wb, 0);  // segmentation_enabled (encode_segmentation :2255)
+    // delta_q block skipped (base_q_idx == 0, :3565-3587)
+    // loopfilter/cdef/restoration skipped (all_lossless, :3589-3602)
+    // tx_mode skipped (coded_lossless -> ONLY_4X4, :3603-3604)
+    // comp_inter_inter / skip_mode / warped skipped (intra-only, :3610-3624)
+    svt_aom_wb_write_bit(wb, 1);  // reduced_tx_set (:3626; ratified)
+    // global motion skipped (intra-only, :3628-3631); film grain skipped
+    // (params_present = 0, :3632-3636)
+}
+
+// write_frame_header_obu (:3784-3802) with appendTrailingBits = show_existing
+// = 0 (:3858): NO trailing-bits marker inside OBU_FRAME.
+static uint32_t svtd_bsf3_frame_header_obu(uint8_t* dst) {
+    AomWriteBitBuffer wb = {dst, 0};
+    svtd_bsf3_frame_header(&wb);
+    return svt_aom_wb_bytes_written(&wb);
+}
+
+// Tile data: decode-order symbols through the od_ec encoder - partition
+// plane (encode_partition_av1 :932-981) interleaved with per-leaf block
+// symbols in write_modes_b I_SLICE order (:4977-5113): skip
+// (encode_skip_coeff_av1 :995-1000, context :983-989), kf y mode
+// (encode_intra_luma_mode_kf_av1 :1026-1040), angle delta when directional,
+// filter-intra where allowed (none here: modes {1,7,2,2} are not DC_PRED).
+static uint32_t svtd_bsf3_tile_data(uint8_t* dst) {
+    static AomCdfProb part_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+    memcpy(part_cdf, default_partition_cdf, sizeof(part_cdf));
+    static AomCdfProb skip_cdf[SKIP_CONTEXTS][CDF_SIZE(2)];
+    memcpy(skip_cdf, default_skip_cdfs, sizeof(skip_cdf));
+    static AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+    memcpy(kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(kf_y_cdf));
+    static AomCdfProb angle_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+    memcpy(angle_cdf, default_angle_delta_cdf, sizeof(angle_cdf));
+
+    AomWriter w;
+    w.ec.buf = dst;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos              = 0;
+
+    uint8_t above_pctx[8];
+    uint8_t left_pctx[16];
+    memset(above_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(above_pctx));
+    memset(left_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(left_pctx));
+
+    // structural keyframe: modes {1,7,2,2} (f16 fixture), all skip = 1
+    static const int modes[4] = {1, 7, 2, 2};
+    // leaf positions in mi units: (0,0),(0,4),(4,0),(4,4); decided
+    // neighbor modes for the kf contexts (unavailable -> DC_PRED).
+    static const int above_mode[4] = {-1, -1, 1, 7};
+    static const int left_mode[4]  = {-1, 1, -1, 2};
+    // skip contexts: above/left neighbor skip flags (all coded blocks skip)
+    static const int skip_ctx[4] = {0, 1, 1, 2};
+
+    EcPartState st = {&w, part_cdf, above_pctx, left_pctx, 8, 32, 0};
+    // 64x64 @(0,0): forced SPLIT, no symbol; 32x32 @(0,0): coded SPLIT.
+    // (walk structure identical to the ECP1 gate; the leaves here also emit
+    // their block symbols, so the recursion is unrolled.)
+    const int ctx32 = ecpart_derive_ctx(st.above, st.left, 0, 0, BLOCK_32X32);
+    aom_write_symbol(&w, PARTITION_SPLIT, part_cdf[ctx32], svt_aom_partition_cdf_length(BLOCK_32X32));
+    for (int b = 0; b < 4; ++b) {
+        static const int lr[4] = {0, 0, 4, 4};
+        static const int lc[4] = {0, 4, 0, 4};
+        // partition NONE at the 16x16 leaf (ECP1-measured ctx 4)
+        const int pctx = ecpart_derive_ctx(st.above, st.left, lr[b], lc[b], BLOCK_16X16);
+        aom_write_symbol(&w, PARTITION_NONE, part_cdf[pctx], svt_aom_partition_cdf_length(BLOCK_16X16));
+        ecpart_update_ctx(st.above, st.left, lr[b], lc[b], BLOCK_16X16);
+        // skip symbol (first arithmetic-coded symbol of the block)
+        aom_write_symbol(&w, 1, skip_cdf[skip_ctx[b]], 2);
+        // kf y mode + angle delta
+        const int top_ctx = intra_mode_context[above_mode[b] < 0 ? DC_PRED : (PredictionMode)above_mode[b]];
+        const int left_ctx = intra_mode_context[left_mode[b] < 0 ? DC_PRED : (PredictionMode)left_mode[b]];
+        aom_write_symbol(&w, modes[b], kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+        if (BLOCK_16X16 >= BLOCK_8X8 && av1_is_directional_mode((PredictionMode)modes[b])) {
+            aom_write_symbol(&w, MAX_ANGLE_DELTA, angle_cdf[modes[b] - V_PRED],
+                             2 * MAX_ANGLE_DELTA + 1);
+        }
+        // filter-intra: svt_aom_filter_intra_allowed(1, 16x16, 0, mode) is 0
+        // for every decided mode here (none is DC_PRED) -> no symbols.
+    }
+    aom_stop_encode(&w);
+    return w.pos;
+}
+
+// svt_aom_encode_sps_av1 (:3925-3948) structure: phase 1 measure, phase 2
+// rewrite (the payload size depends on its own content; the content is
+// stable across the two writes).
+static uint32_t svtd_bsf3_encode_sps(uint8_t* dst) {
+    const uint32_t obu_header_size  = write_obu_header(OBU_SEQUENCE_HEADER, 0, dst);
+    AomWriteBitBuffer wb            = {dst + obu_header_size, 0};
+    const uint32_t obu_payload_size = svtd_bsf3_sps_payload(&wb);
+    const size_t length_field_size  = svt_aom_uleb_size_in_bytes(obu_payload_size);
+    size_t coded_size;
+    svt_aom_uleb_encode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
+    AomWriteBitBuffer wb2 = {dst + obu_header_size + length_field_size, 0};
+    svtd_bsf3_sps_payload(&wb2);  // phase 2 rewrite at the correct offset
+    return obu_header_size + (uint32_t)length_field_size + obu_payload_size;
+}
+
+// svt_aom_write_frame_header_av1 (:3843-3920) structure for the single-tile
+// OBU_FRAME: obu_type = OBU_FRAME (:3852), uncompressed header with NO
+// trailing bits (:3858), tile-group header = 0 bytes (:3770-3772), uleb
+// payload size (:3876/:3892), tile data copy with no per-tile prefix at
+// tile_cnt == 1 (:3902-3915).
+static uint32_t svtd_bsf3_frame_obu(uint8_t* dst, const uint8_t* tile_data, uint32_t tile_size) {
+    const uint32_t obu_header_size = write_obu_header(OBU_FRAME, 0, dst);
+    const uint32_t frame_hdr_size  = svtd_bsf3_frame_header_obu(dst + obu_header_size);
+    const uint32_t tg_hdr_size     = 0;  // single tile: write_tile_group_header writes 0 bytes
+    const uint32_t obu_payload_size = frame_hdr_size + tg_hdr_size + tile_size;
+    const size_t length_field_size  = svt_aom_uleb_size_in_bytes(obu_payload_size);
+    size_t coded_size;
+    svt_aom_uleb_encode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
+    const uint32_t write_offset = obu_header_size + (uint32_t)length_field_size;
+    svtd_bsf3_frame_header_obu(dst + write_offset);  // phase 2 rewrite
+    // tile data copy (:3902-3915); the caller zeroes dst so the 3 pad bits
+    // after the 21-bit uncompressed header are the spec's byte_alignment
+    // zero bits.
+    memcpy(dst + write_offset + frame_hdr_size + tg_hdr_size, tile_data, tile_size);
+    return write_offset + obu_payload_size;
+}

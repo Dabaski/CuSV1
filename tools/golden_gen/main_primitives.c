@@ -23,155 +23,6 @@ static void ec_print_bytes(const char* name, uint32_t n) {
 // precondition, bitstream_unit.c:282). Skewed toward low indices.
 static const uint16_t ec_icdf13[13] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0};
 
-// ---- ECP1 partition walk helpers (composition over the extracts) ---------
-// Context derivation (entropy_coding.c:945-960 flattened): bsl from
-// block_size_wide (mi_size_wide_log2 == log2(px>>2) for squares); fresh
-// INVALID_NEIGHBOR_DATA (0xFF, definitions.h:334) cells map to 0.
-typedef struct EcPartState {
-    AomWriter* w;
-    AomCdfProb (*cdf)[CDF_SIZE(EXT_PARTITION_TYPES)];
-    uint8_t* above;  // per mi column
-    uint8_t* left;   // per mi row, (miRow & 15)
-    int frame_mi;    // frame extent in mi units
-    int aligned_px;  // aligned frame extent in px
-    int nctx;        // coded partition symbol count
-} EcPartState;
-
-static int ecpart_bsl(BlockSize bsize) {
-    return svt_log2f(block_size_wide[bsize] >> 2) - 1;
-}
-
-static int ecpart_derive_ctx(const uint8_t* above, const uint8_t* left, int miRow, int miCol, BlockSize bsize) {
-    const uint8_t ab = above[miCol];
-    const uint8_t lf = left[miRow & 15];
-    const int a = ((ab == (uint8_t)INVALID_NEIGHBOR_DATA ? 0 : ab) >> ecpart_bsl(bsize)) & 1;
-    const int l = ((lf == (uint8_t)INVALID_NEIGHBOR_DATA ? 0 : lf) >> ecpart_bsl(bsize)) & 1;
-    return (l * 2 + a) + ecpart_bsl(bsize) * PARTITION_PLOFFSET;
-}
-
-// coding_loop.c:1700-1713: each CODED block writes
-// partition_context_lookup[bsize] over its mi extent (above bytes at
-// mi_col.., left bytes at (mi_row & 15)..).
-static void ecpart_update_ctx(uint8_t* above, uint8_t* left, int miRow, int miCol, BlockSize bsize) {
-    const int mi_w = block_size_wide[bsize] >> 2;
-    const int mi_h = block_size_high[bsize] >> 2;
-    for (int j = 0; j < mi_w; ++j) above[miCol + j] = (uint8_t)partition_context_lookup[bsize].above;
-    for (int i = 0; i < mi_h; ++i) left[(miRow + i) & 15] = (uint8_t)partition_context_lookup[bsize].left;
-}
-
-// Ratified structural tree: 32x32 frame inside sb_size 64 - SPLIT at 64x64
-// (forced, no symbol) and 32x32 (coded), NONE at the four 16x16 leaves.
-static int ecpart_decide(int miRow, int miCol, BlockSize bsize) {
-    (void)miRow;
-    (void)miCol;
-    return (bsize == BLOCK_64X64 || bsize == BLOCK_32X32) ? PARTITION_SPLIT : PARTITION_NONE;
-}
-
-static BlockSize ecpart_child(BlockSize bsize) {
-    switch (bsize) {
-        case BLOCK_128X128: return BLOCK_64X64;
-        case BLOCK_64X64: return BLOCK_32X32;
-        case BLOCK_32X32: return BLOCK_16X16;
-        case BLOCK_16X16: return BLOCK_8X8;
-        default: return BLOCK_4X4;
-    }
-}
-
-// Writer walk (encode_partition_av1, entropy_coding.c:932-981): has_rows/
-// has_cols from the px rule (:941-943), forced split with NO symbol
-// (:962-965), full symbol when both edges (:967-969, alphabet per
-// svt_aom_partition_cdf_length :922-930), gathered 2-symbol on XOR edges
-// (:970-977, unreachable in the structural tree, exercised by ecpart_gather).
-static void ecpart_write(EcPartState* s, int miRow, int miCol, BlockSize bsize) {
-    if (miRow >= s->frame_mi || miCol >= s->frame_mi) return;
-    const int hbs = block_size_wide[bsize] >> 1;
-    const int has_rows = (miRow * 4 + hbs) < s->aligned_px;
-    const int has_cols = (miCol * 4 + hbs) < s->aligned_px;
-    const int decided = ecpart_decide(miRow, miCol, bsize);
-    if (!has_rows && !has_cols) {
-        if (decided != PARTITION_SPLIT) { fprintf(stderr, "ECP1 forced-split mismatch\n"); exit(1); }
-    } else {
-        const int ctx = ecpart_derive_ctx(s->above, s->left, miRow, miCol, bsize);
-        printf(" %d", ctx);
-        if (has_rows && has_cols) {
-            aom_write_symbol(s->w, decided, s->cdf[ctx], svt_aom_partition_cdf_length(bsize));
-        } else if (!has_rows && has_cols) {
-            AomCdfProb g[CDF_SIZE(2)];
-            partition_gather_vert_alike(g, s->cdf[ctx], bsize);
-            aom_write_symbol(s->w, decided == PARTITION_SPLIT, g, 2);
-        } else {
-            AomCdfProb g[CDF_SIZE(2)];
-            partition_gather_horz_alike(g, s->cdf[ctx], bsize);
-            aom_write_symbol(s->w, decided == PARTITION_SPLIT, g, 2);
-        }
-        s->nctx++;
-        if (decided != PARTITION_SPLIT) {
-            ecpart_update_ctx(s->above, s->left, miRow, miCol, bsize);
-            return;
-        }
-    }
-    const BlockSize sub = ecpart_child(bsize);
-    const int stepMi = block_size_wide[bsize] >> 3;
-    ecpart_write(s, miRow, miCol, sub);
-    ecpart_write(s, miRow, miCol + stepMi, sub);
-    ecpart_write(s, miRow + stepMi, miCol, sub);
-    ecpart_write(s, miRow + stepMi, miCol + stepMi, sub);
-}
-
-// Reader twin (aom read_partition decodeframe.c:1266-1293 semantics, the
-// out-of-tree BSF4 arbiter; persistent-cdf branch adapts via
-// aom_read_symbol_, gathered branch reads the temporary via aom_read_cdf_
-// exactly like the aom decoder - the writer's gathered adaptation is
-// discarded with the temporary, entropy_coding.c:971-977).
-typedef struct EcPartRState {
-    aom_reader* r;
-    AomCdfProb (*cdf)[CDF_SIZE(EXT_PARTITION_TYPES)];
-    uint8_t* above;
-    uint8_t* left;
-    int frame_mi;
-    int aligned_px;
-    int* rt;   // decoded partition values in coded order
-    int nrt;
-    int bad;
-} EcPartRState;
-
-static void ecpart_read(EcPartRState* s, int miRow, int miCol, BlockSize bsize) {
-    if (miRow >= s->frame_mi || miCol >= s->frame_mi) return;
-    const int hbs = block_size_wide[bsize] >> 1;
-    const int has_rows = (miRow * 4 + hbs) < s->aligned_px;
-    const int has_cols = (miCol * 4 + hbs) < s->aligned_px;
-    if (!has_rows && !has_cols) {
-        // forced SPLIT, no symbol
-    } else {
-        const int ctx = ecpart_derive_ctx(s->above, s->left, miRow, miCol, bsize);
-        int p;
-        if (has_rows && has_cols) {
-            p = aom_read_symbol_(s->r, s->cdf[ctx], svt_aom_partition_cdf_length(bsize));
-        } else if (!has_rows && has_cols) {
-            AomCdfProb g[CDF_SIZE(2)];
-            partition_gather_vert_alike(g, s->cdf[ctx], bsize);
-            p = aom_read_cdf_(s->r, g, 2) ? PARTITION_SPLIT : PARTITION_HORZ;
-        } else {
-            AomCdfProb g[CDF_SIZE(2)];
-            partition_gather_horz_alike(g, s->cdf[ctx], bsize);
-            p = aom_read_cdf_(s->r, g, 2) ? PARTITION_SPLIT : PARTITION_VERT;
-        }
-        printf(" %d", p);
-        if (p != ecpart_decide(miRow, miCol, bsize)) s->bad = 1;
-        s->rt[s->nrt++] = p;
-        if (p != PARTITION_SPLIT) {
-            ecpart_update_ctx(s->above, s->left, miRow, miCol, bsize);
-            return;
-        }
-    }
-    const BlockSize sub = ecpart_child(bsize);
-    const int stepMi = block_size_wide[bsize] >> 3;
-    ecpart_read(s, miRow, miCol, sub);
-    ecpart_read(s, miRow, miCol + stepMi, sub);
-    ecpart_read(s, miRow + stepMi, miCol, sub);
-    ecpart_read(s, miRow + stepMi, miCol + stepMi, sub);
-}
-
 int main(void) {
     svtd_populate_dispatch();
     fprintf(stderr, "CK: dispatch\n"); fflush(stderr);
@@ -2123,6 +1974,44 @@ int main(void) {
         // pattern): 24 bits -> 3 whole bytes, aligned
         while (!svt_aom_wb_is_byte_aligned(&wb)) svt_aom_wb_write_bit(&wb, 0);
         printf("wbalign %u %d\n", svt_aom_wb_bytes_written(&wb), svt_aom_wb_is_byte_aligned(&wb));
+    }
+
+    // ---- BSF3: structural keyframe assembly gate lines ----------------------
+    // SVT packer + court-ratified D1 mono patch (composition.c BSF3 block
+    // names the three patch spans). sps_obu = the ratified sequence header
+    // (write_sequence_header_obu :3699-3763 structure, phase-2 uleb rewrite
+    // :3925-3948); frame_obu = the OBU_FRAME (21-bit uncompressed header per
+    // the ratified BSF0(b) walk, NO trailing-bits marker :3858, tile-group
+    // header 0 bytes :3770-3772, tile data = decode-order symbols:
+    // partition plane + per-leaf skip/kf-mode/angle-delta through od_ec);
+    // tu_bytes = TD + SPS + OBU_FRAME.
+    {
+        static uint8_t tile_buf[256];
+        static uint8_t obu_buf[256];
+        static uint8_t tu_buf[512];
+        memset(tile_buf, 0, sizeof(tile_buf));
+        const uint32_t tile_size = svtd_bsf3_tile_data(tile_buf);
+
+        memset(ec_buf, 0, 64);
+        const uint32_t sps_size = svtd_bsf3_encode_sps(ec_buf);
+        printf("sps_obu %u", sps_size);
+        for (uint32_t i = 0; i < sps_size; ++i) printf(" %02x", ec_buf[i]);
+        printf("\n");
+
+        memset(obu_buf, 0, sizeof(obu_buf));
+        const uint32_t frame_size = svtd_bsf3_frame_obu(obu_buf, tile_buf, tile_size);
+        printf("frame_obu %u", frame_size);
+        for (uint32_t i = 0; i < frame_size; ++i) printf(" %02x", obu_buf[i]);
+        printf("\n");
+
+        memset(tu_buf, 0, sizeof(tu_buf));
+        svt_aom_encode_td_av1(tu_buf);
+        memcpy(tu_buf + 2, ec_buf, sps_size);
+        memcpy(tu_buf + 2 + sps_size, obu_buf, frame_size);
+        const uint32_t tu_size = 2 + sps_size + frame_size;
+        printf("tu_bytes %u", tu_size);
+        for (uint32_t i = 0; i < tu_size; ++i) printf(" %02x", tu_buf[i]);
+        printf("\n");
     }
     return 0;
 }

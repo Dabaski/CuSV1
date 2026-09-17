@@ -134,7 +134,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **238/238 lines identical**, covering:
+that file — currently **241/241 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -193,6 +193,17 @@ that file — currently **238/238 lines identical**, covering:
   (bit+literal+inv_signed_literal packing across byte boundaries = 20 bits
   -> 3 bytes aa bf 60 with byte 3 untouched), wbalign (zero-pad to byte
   alignment -> 3 whole bytes, aligned).
+- BSF3 structural-keyframe assembly gate lines: sps_obu 11 0a 09 10 00 00
+  02 27 fe 60 c2 a0 (the ratified sequence header - 9-byte payload = 66
+  field bits + the trailing 1 bit, phase-2 uleb rewrite :3925-3948),
+  frame_obu 10 32 08 18 80 08 c5 2d b8 76 0c (21-bit uncompressed header
+  per the ratified BSF0(b) walk - reconciled bit-by-bit - NO trailing-bits
+  marker :3858, tile-group header 0 bytes, 5 tile bytes), tu_bytes 23 (TD +
+  SPS + OBU_FRAME). Composition = SVT packer + court-ratified D1 mono
+  patch (three named spans: :2689 const, :2706-2710 commented branch live,
+  :2385-2386 quantization U/V deltas skipped for mono). Tile data =
+  decode-order symbols through od_ec: partition plane + per-leaf
+  skip/kf-mode/angle-delta for modes {1,7,2,2}, all skip=1.
 
 ## EC3 scope statement
 
