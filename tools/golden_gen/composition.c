@@ -2584,6 +2584,8 @@ typedef struct Ts1FrameContext {
     AomCdfProb eob_flag_cdf512[PLANE_TYPES][2][CDF_SIZE(10)];
     AomCdfProb eob_flag_cdf1024[PLANE_TYPES][2][CDF_SIZE(11)];
     AomCdfProb intra_ext_tx_cdf[EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][CDF_SIZE(16)];
+    AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+    AomCdfProb angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
 } Ts1FrameContext;
 
 static void ts1_init(Ts1FrameContext* fc) {
@@ -2601,11 +2603,13 @@ static void ts1_init(Ts1FrameContext* fc) {
     memcpy(fc->eob_flag_cdf512, av1_default_eob_multi512_cdfs, sizeof(fc->eob_flag_cdf512));
     memcpy(fc->eob_flag_cdf1024, av1_default_eob_multi1024_cdfs, sizeof(fc->eob_flag_cdf1024));
     memcpy(fc->intra_ext_tx_cdf, default_intra_ext_tx_cdf, sizeof(fc->intra_ext_tx_cdf));
+memcpy(fc->kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(fc->kf_y_cdf));
+memcpy(fc->angle_delta_cdf, default_angle_delta_cdf, sizeof(fc->angle_delta_cdf));
 }
 
 static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranLow* coeff,
                                   const int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
-                                  int dc_sign_ctx) {
+                                  int dc_sign_ctx, PredictionMode intra_dir) {
     const TxSize txs_ctx        = get_txsize_entropy_ctx(tx_size);
     const int    eob_multi_size = txsize_log2_minus4[tx_size];
     const int    eob_multi_ctx  = 0;  // TX_CLASS_2D
@@ -2623,7 +2627,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     {
         const TxSize sq = txsize_sqr_map[tx_size];
         aom_write_symbol(w, av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
-                         fc->intra_ext_tx_cdf[2][sq][DC_PRED], 5);
+                         fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
     }
 
     int eob_extra;
@@ -2717,7 +2721,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
 // order (signed).
 static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coeff,
                                 const int16_t* scan, TxSize tx_size, int txb_skip_ctx,
-                                int dc_sign_ctx) {
+                                int dc_sign_ctx, PredictionMode intra_dir) {
     const TxSize txs_ctx        = get_txsize_entropy_ctx(tx_size);
     const int    eob_multi_size = txsize_log2_minus4[tx_size];
     const int    eob_multi_ctx  = 0;
@@ -2729,7 +2733,7 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
     // TS3: tx-type read (between txb_skip and eob_pt, entropy_coding.c:374-376)
     {
         const TxSize sq = txsize_sqr_map[tx_size];
-        const int ttx = aom_read_symbol_(r, fc->intra_ext_tx_cdf[2][sq][DC_PRED], 5);
+        const int ttx = aom_read_symbol_(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
         (void)ttx;  // DCT_DCT-only port: the read symbol is discarded
     }
 
@@ -2894,14 +2898,14 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
     // contexts: our whole-block TUs always have plane_bsize == tx_bsize
     // (svt_aom_get_txb_ctx :298-299) -> txb_skip_ctx = 0; dc_sign_ctx = 0
     // (no coded neighbors yet). TS2 ports the general ctx derivation.
-    svtd_write_coeffs_txb(&w, &fc, qc16, scan16, TX_16X16, eob16, 0, 0);
-    svtd_write_coeffs_txb(&w, &fc, qc8, scan8, TX_8X8, eob8, 0, 0);
-    svtd_write_coeffs_txb(&w, &fc, qc4, scan4, TX_4X4, eob4, 0, 0);
+    svtd_write_coeffs_txb(&w, &fc, qc16, scan16, TX_16X16, eob16, 0, 0, DC_PRED);
+    svtd_write_coeffs_txb(&w, &fc, qc8, scan8, TX_8X8, eob8, 0, 0, DC_PRED);
+    svtd_write_coeffs_txb(&w, &fc, qc4, scan4, TX_4X4, eob4, 0, 0, DC_PRED);
     aom_stop_encode(&w);
 
     if (verbose) {
         printf("ectok_eob %u %u %u\n", eob16, eob8, eob4);
-    
+
         printf("ectok_bytes %u", w.pos);
         for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
         printf("\n");
@@ -2911,9 +2915,9 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
     if (aom_reader_init(&r, buf, w.pos)) return 2;
     r.allow_update_cdf = 1;
     TranLow rc16[256], rc8[64], rc4[16];
-    int reob16 = svtd_read_coeffs_txb(&r, &fc_r, rc16, scan16, TX_16X16, 0, 0);
-    int reob8 = svtd_read_coeffs_txb(&r, &fc_r, rc8, scan8, TX_8X8, 0, 0);
-    int reob4 = svtd_read_coeffs_txb(&r, &fc_r, rc4, scan4, TX_4X4, 0, 0);
+    int reob16 = svtd_read_coeffs_txb(&r, &fc_r, rc16, scan16, TX_16X16, 0, 0, DC_PRED);
+    int reob8 = svtd_read_coeffs_txb(&r, &fc_r, rc8, scan8, TX_8X8, 0, 0, DC_PRED);
+    int reob4 = svtd_read_coeffs_txb(&r, &fc_r, rc4, scan4, TX_4X4, 0, 0, DC_PRED);
     if (verbose) printf("ectok_rt %d %d %d\n", reob16, reob8, reob4);
 
     if (reob16 != (int)eob16 || reob8 != (int)eob8 || reob4 != (int)eob4) {
@@ -2941,7 +2945,281 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
     if (memcmp(fc.eob_flag_cdf1024, fc_r.eob_flag_cdf1024, sizeof(fc.eob_flag_cdf1024))) return 7;
     return 0;
 }
-// ---- TS2: per-block txb-ctx + NA gate lines --------------------------------
+// ---- TS3: full-frame 4x 16x16 token stream (skip=0, q100) ------------------
+// 4 f16 blocks, decided modes {1,7,2,2} via the D2 policy loop (same as
+// svtd_frame_auto_16x16_blocks), skip=0 for all four (no skip decision
+// logic). Per block: kf_y_mode + angle_delta + filter_intra skip + tx_type
+// + txb_skip + eob_pt + eob_extra + base_eob/br + base/br + signs/golomb.
+// The predictor is the DECIDED mode's build_intra_predictors output (M1
+// availability), NOT DC=0 Ã¢â‚¬â€ matching the l6 pipeline's residual computation.
+static int svtd_ts3_drive(uint8_t* buf) {
+    uint8_t src[1024];
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) src[y * 32 + x] = (y < 16) ? (uint8_t)(4 * (x + y + 1)) : 0;
+
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(100, &t);
+    int16_t scan16[256];
+    svtd_default_scan_16x16(scan16);
+
+    Ts1FrameContext fc;
+    ts1_init(&fc);
+    Ts1FrameContext fc_r;
+    ts1_init(&fc_r);
+
+    uint8_t recon[1024];
+    memset(recon, 0, sizeof(recon));
+    int modes[4] = {0};
+
+    AomWriter w;
+    w.ec.buf = buf;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    uint8_t above_na[16], left_na[8];
+    memset(above_na, (int)INVALID_NEIGHBOR_DATA, sizeof(above_na));
+    memset(left_na, (int)INVALID_NEIGHBOR_DATA, sizeof(left_na));
+
+    static const int px[4][2] = {{0, 0}, {16, 0}, {0, 16}, {16, 16}};
+    static const int mi[4][2] = {{0, 0}, {0, 4}, {4, 0}, {4, 4}};
+    uint16_t eobs[4] = {0};
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const int r = px[b][1], c = px[b][0];
+        const int hasTop = by > 0, hasLeft = bx > 0;
+        const int hasAL = hasTop && hasLeft;
+        const int nTop = hasTop ? 16 : 0, nLeft = hasLeft ? 16 : 0;
+        const int nTr = (hasTop && bx + 1 < 2) ? 16 : 0;
+        uint8_t above[33] = {0}, left_edge[33] = {0};
+        uint8_t al = 0;
+        if (hasTop) svtd_gather_above(above, recon, 32, r, c, 16, nTr);
+        if (hasLeft) for (int i = 0; i < 16; ++i) left_edge[i] = recon[(r + i) * 32 + c - 1];
+        if (hasTop && hasLeft) al = recon[(r - 1) * 32 + c - 1];
+        const int aboveMode = hasTop ? modes[(by - 1) * 2 + bx] : DC_PRED;
+        const int leftMode = hasLeft ? modes[by * 2 + bx - 1] : DC_PRED;
+        svtd_filt_type = ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED || aboveMode == SMOOTH_H_PRED) ||
+                          (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED || leftMode == SMOOTH_H_PRED)) ? 1 : 0;
+        uint8_t srcblk[256];
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(r + i) * 32 + c + j];
+        // D2 policy
+        uint32_t best_sad = 0; int mode = -1;
+        for (int m = 0; m <= PAETH_PRED; ++m) {
+            uint8_t pred[256];
+            svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+            const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, 16, pred, 16, 16, 16);
+            if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+        }
+        modes[b] = mode;
+        // decided-mode predictor (NOT DC=0)
+        uint8_t pred[256];
+        svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+        int16_t res[256];
+        for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+        int32_t cb[256];
+        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        TranLow qc[256], dq[256];
+        uint16_t eob = 0;
+        svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
+        eobs[b] = eob;
+        // recon (LOSSY at q100: quantize -> dequantize -> inverse)
+        svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < 16; ++j) recon[(r + i) * 32 + c + j] = pred[i * 16 + j];
+    }
+    printf("ecfrm_modes");
+    for (int b = 0; b < 4; ++b) printf(" %d", modes[b]);
+    printf("\n");
+    printf("ecfrm_eobs");
+    for (int b = 0; b < 4; ++b) printf(" %d", (int)eobs[b]);
+    printf("\n");
+
+    // token emission loop (raster order, using the recon from the decision pass)
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const int r = px[b][1], c = px[b][0];
+        const int hasTop = by > 0, hasLeft = bx > 0;
+        const int hasAL = hasTop && hasLeft;
+        const int nTop = hasTop ? 16 : 0, nLeft = hasLeft ? 16 : 0;
+        const int nTr = (hasTop && bx + 1 < 2) ? 16 : 0;
+        uint8_t above[33] = {0}, left_edge[33] = {0};
+        uint8_t al = 0;
+        if (hasTop) svtd_gather_above(above, recon, 32, r, c, 16, nTr);
+        if (hasLeft) for (int i = 0; i < 16; ++i) left_edge[i] = recon[(r + i) * 32 + c - 1];
+        if (hasTop && hasLeft) al = recon[(r - 1) * 32 + c - 1];
+        const int aboveMode = hasTop ? modes[(by - 1) * 2 + bx] : DC_PRED;
+        const int leftMode = hasLeft ? modes[by * 2 + bx - 1] : DC_PRED;
+        svtd_filt_type = ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED || aboveMode == SMOOTH_H_PRED) ||
+                          (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED || leftMode == SMOOTH_H_PRED)) ? 1 : 0;
+
+        // recompute the residual using the same recon edges
+        uint8_t srcblk[256];
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(r + i) * 32 + c + j];
+        uint8_t pred[256];
+        svtd_call_builder_tx(pred, modes[b], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+        int16_t res[256];
+        for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+        int32_t cb[256];
+        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        TranLow qc[256], dq[256];
+        uint16_t eob = 0;
+        svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
+
+        // 1. kf_y_mode (BSF1)
+        const int top_ctx = intra_mode_context[aboveMode < 0 ? DC_PRED : (PredictionMode)aboveMode];
+        const int left_ctx = intra_mode_context[leftMode < 0 ? DC_PRED : (PredictionMode)leftMode];
+        aom_write_symbol(&w, modes[b], fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+
+        // 2. angle delta for directional modes
+        if (av1_is_directional_mode((PredictionMode)modes[b])) {
+            aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[modes[b] - V_PRED], 2 * MAX_ANGLE_DELTA + 1);
+        }
+
+        // 3. filter-intra: never for {1,7,3,2} (svt_aom_filter_intra_allowed is
+        // DC_PRED-only, mode_decision.c:108-119; no decided mode is DC_PRED)
+        // 4. tx-type: emitted INSIDE svtd_write_coeffs_txb (one symbol, after
+        // txb_skip, before eob_pt) — mirroring the l7 writeTxbCoeffs structure
+
+        // 5. token chain (TS1+TS2)
+        const int eob_tok = svtd_eob_from_coeffs(qc, scan16, TX_16X16);
+        const int tx_w = eb_tx_size_wide_unit[TX_16X16];
+        const int tx_h = eb_tx_size_high_unit[TX_16X16];
+        uint8_t* above_ptr = &above_na[px[b][0] / 4];
+        uint8_t* left_ptr = &left_na[px[b][1] / 4];
+        int16_t dc_sign = 0;
+        if (above_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_w; ++k) dc_sign += ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        if (left_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_h; ++k) dc_sign += ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+        svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx,
+                              (PredictionMode)modes[b]);
+
+        // NA update
+        int32_t cul = 0;
+        for (int q = 0; q < eob_tok; ++q) cul += abs((int)qc[scan16[q]]);
+        cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+        if (eob_tok > 0) {
+            if (qc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+            else if (qc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+        }
+        for (int k = 0; k < tx_w; ++k) above_ptr[k] = (uint8_t)cul;
+        for (int k = 0; k < tx_h; ++k) left_ptr[k] = (uint8_t)cul;
+    }
+    aom_stop_encode(&w);
+    printf("ecfrm_bytes %u", w.pos);
+    for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
+    printf("\n");
+
+    // read twin
+    uint8_t above_r[16], left_r[8];
+    memset(above_r, (int)INVALID_NEIGHBOR_DATA, sizeof(above_r));
+    memset(left_r, (int)INVALID_NEIGHBOR_DATA, sizeof(left_r));
+    aom_reader r;
+    if (aom_reader_init(&r, buf, w.pos)) return 2;
+    r.allow_update_cdf = 1;
+    int rt_bad = 0;
+    printf("ecfrm_rt");
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        // NOTE: `row`/`col`, NOT `r` — `r` here would shadow the aom_reader
+        // above, and every &r read would decode from the row int as garbage.
+        const int row = px[b][1], col = px[b][0];
+        const int hasTop = by > 0, hasLeft = bx > 0;
+        const int hasAL = hasTop && hasLeft;
+        const int nTop = hasTop ? 16 : 0, nLeft = hasLeft ? 16 : 0;
+        const int nTr = (hasTop && bx + 1 < 2) ? 16 : 0;
+        uint8_t above[33] = {0}, left_edge[33] = {0};
+        uint8_t al = 0;
+        if (hasTop) svtd_gather_above(above, recon, 32, row, col, 16, nTr);
+        if (hasLeft) for (int i = 0; i < 16; ++i) left_edge[i] = recon[(row + i) * 32 + col - 1];
+        if (hasTop && hasLeft) al = recon[(row - 1) * 32 + col - 1];
+        const int aboveMode = hasTop ? modes[(by - 1) * 2 + bx] : DC_PRED;
+        const int leftMode = hasLeft ? modes[by * 2 + bx - 1] : DC_PRED;
+        svtd_filt_type = ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED || aboveMode == SMOOTH_H_PRED) ||
+                          (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED || leftMode == SMOOTH_H_PRED)) ? 1 : 0;
+
+        // 1. kf_y_mode read
+        const int top_ctx = intra_mode_context[aboveMode < 0 ? DC_PRED : (PredictionMode)aboveMode];
+        const int left_ctx = intra_mode_context[leftMode < 0 ? DC_PRED : (PredictionMode)leftMode];
+        const int m = aom_read_symbol_(&r, fc_r.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+        printf(" %d", m);
+        if (m != modes[b]) rt_bad = 1;
+
+        // 2. angle delta read
+        if (av1_is_directional_mode((PredictionMode)modes[b])) {
+            aom_read_symbol_(&r, fc_r.angle_delta_cdf[modes[b] - V_PRED], 2 * MAX_ANGLE_DELTA + 1);
+        }
+
+        // 4. tx-type: read INSIDE svtd_read_coeffs_txb (mirrors the write side)
+
+        // 5. token chain read
+        const int tx_w = eb_tx_size_wide_unit[TX_16X16];
+        const int tx_h = eb_tx_size_high_unit[TX_16X16];
+        uint8_t* above_ptr = &above_r[px[b][0] / 4];
+        uint8_t* left_ptr = &left_r[px[b][1] / 4];
+        int16_t dc_sign = 0;
+        if (above_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_w; ++k) dc_sign += ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        if (left_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_h; ++k) dc_sign += ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+        // recompute the quantized coefficients from the same predictor
+        uint8_t srcblk[256];
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(row + i) * 32 + col + j];
+        uint8_t pred[256];
+        svtd_call_builder_tx(pred, modes[b], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+        int16_t res[256];
+        for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+        int32_t cb[256];
+        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        TranLow qc[256], dq[256];
+        uint16_t eob_q = 0;
+        svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob_q);
+
+        TranLow rc[256];
+        memset(rc, 0, sizeof(rc));
+        const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx,
+                                              (PredictionMode)m);
+        printf(" %d", reob);
+        if (reob != (int)eob_q) rt_bad = 1;
+        for (int i = 0; i < 256; ++i) if (rc[i] != qc[i]) rt_bad = 1;
+
+        // NA update
+        int32_t cul = 0;
+        for (int q = 0; q < reob; ++q) cul += abs((int)rc[scan16[q]]);
+        cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+        if (reob > 0) {
+            if (rc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+            else if (rc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+        }
+        for (int k = 0; k < tx_w; ++k) above_ptr[k] = (uint8_t)cul;
+        for (int k = 0; k < tx_h; ++k) left_ptr[k] = (uint8_t)cul;
+    }
+    printf("\n");
+    if (rt_bad) { fprintf(stderr, "TS3 roundtrip FAILED\n"); return 3; }
+
+    int cdf_eq = 1;
+    if (memcmp(fc.txb_skip_cdf, fc_r.txb_skip_cdf, sizeof(fc.txb_skip_cdf))) cdf_eq = 0;
+    if (memcmp(fc.dc_sign_cdf, fc_r.dc_sign_cdf, sizeof(fc.dc_sign_cdf))) cdf_eq = 0;
+    if (memcmp(fc.coeff_base_eob_cdf, fc_r.coeff_base_eob_cdf, sizeof(fc.coeff_base_eob_cdf))) cdf_eq = 0;
+    if (memcmp(fc.coeff_base_cdf, fc_r.coeff_base_cdf, sizeof(fc.coeff_base_cdf))) cdf_eq = 0;
+    if (memcmp(fc.coeff_br_cdf, fc_r.coeff_br_cdf, sizeof(fc.coeff_br_cdf))) cdf_eq = 0;
+    if (memcmp(fc.eob_extra_cdf, fc_r.eob_extra_cdf, sizeof(fc.eob_extra_cdf))) cdf_eq = 0;
+    if (memcmp(fc.eob_flag_cdf64, fc_r.eob_flag_cdf64, sizeof(fc.eob_flag_cdf64))) cdf_eq = 0;
+    if (memcmp(fc.intra_ext_tx_cdf, fc_r.intra_ext_tx_cdf, sizeof(fc.intra_ext_tx_cdf))) cdf_eq = 0;
+    if (memcmp(fc.kf_y_cdf, fc_r.kf_y_cdf, sizeof(fc.kf_y_cdf))) cdf_eq = 0;
+    if (memcmp(fc.angle_delta_cdf, fc_r.angle_delta_cdf, sizeof(fc.angle_delta_cdf))) cdf_eq = 0;
+    printf("ecfrm_cdf_eq %d\n", cdf_eq);
+    return 0;
+}// ---- TS2: per-block txb-ctx + NA gate lines --------------------------------
 // The 4-block 64x32 fixture with q100 quantized residuals, NA accumulation
 // across blocks. Reuses the TS1 writer/reader + frame context.
 
@@ -3022,7 +3300,7 @@ static int svtd_ts2_drive(uint8_t* buf) {
         printf(" %d", dc_sign_ctx);
 
         const int eob_tok = svtd_eob_from_coeffs(qc, scan16, TX_16X16);
-        svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx);
+        svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx, DC_PRED);
 
         // NA update
         int32_t cul = 0;
@@ -3078,7 +3356,7 @@ static int svtd_ts2_drive(uint8_t* buf) {
 
         TranLow rc[256];
         memset(rc, 0, sizeof(rc));
-        const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx);
+        const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx, DC_PRED);
         printf(" %d", reob);
         if (reob != (int)eob_q) rt_bad = 1;
         for (int i = 0; i < 256; ++i) if (rc[i] != qc[i]) rt_bad = 1;

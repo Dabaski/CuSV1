@@ -898,7 +898,8 @@ void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std:
 // encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
 void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                            std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
-                           entropy::AomWriter* w, entropy::EcFrameContext* fc) {
+                           entropy::AomWriter* w, entropy::EcFrameContext* fc,
+                           entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 16;
     const int gridH = src.height() / 16;
     // BSF1 symbol emission (D5): identical surface to the lossless variant.
@@ -979,6 +980,15 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
             std::uint16_t eob = 0;
             transforms::quantizeFp16x16(cb, qt, scan, qc, dq, &eob);
             for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
+
+            // TS3: token emission (skip = 0 for all blocks — no skip decision
+            // logic; the residual is coded for every block). reduced_tx_set=1,
+            // decided intra_dir = d.mode.
+            if (w && fc && na) {
+                entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_16X16,
+                                          entropy::BLOCK_16X16, eob, by * 4, bx * 4,
+                                          1, static_cast<entropy::PredictionMode>(d.mode));
+            }
 
             std::uint8_t blk[256] = {0};
             for (int i = 0; i < 256; ++i) blk[i] = pred[i];

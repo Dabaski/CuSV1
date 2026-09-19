@@ -1,4 +1,4 @@
-﻿cospi13_16 7568
+cospi13_16 7568
 cospi13_32 5793
 cospi13_48 3135
 sinpi13_4 7606
@@ -247,3 +247,8 @@ ecblk_ctx 0 2 2 2
 ecblk_bytes 19 1a 76 83 60 70 4d 64 92 25 57 03 f2 98 71 1c 85 43 f9 80
 ecblk_rt 21 21 0 0
 ecblk_cdf_eq 1
+ecfrm_modes 1 7 3 2
+ecfrm_eobs 21 16 232 56
+ecfrm_bytes 63 7c 90 12 64 e5 b2 f0 27 b5 c4 81 c8 6b ae 48 5b 07 31 4b d3 83 55 b3 c7 47 a1 9a 10 ca 96 14 ce 4a 82 cb 76 ef 37 74 41 14 f1 3e 91 06 a5 cd 6a 2d 94 dc ac 08 80 8e 22 9d 07 fd e5 9a 1f c0
+ecfrm_rt 1 21 7 16 3 232 2 56
+ecfrm_cdf_eq 1

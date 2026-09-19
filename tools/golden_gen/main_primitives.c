@@ -2030,5 +2030,13 @@ int main(void) {
         const int rc2 = svtd_ts2_drive(blk_buf);
         if (rc2) { fprintf(stderr, "TS2 drive FAILED rc=%d\n", rc2); return 1; }
     }
+
+    // ---- TS3 gate lines ----
+    {
+        static uint8_t frm_buf[1024];
+        memset(frm_buf, 0, sizeof(frm_buf));
+        const int rc3 = svtd_ts3_drive(frm_buf);
+        if (rc3) { fprintf(stderr, "TS3 drive FAILED rc=%d\n", rc3); return 1; }
+    }
     return 0;
 }

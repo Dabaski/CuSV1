@@ -104,7 +104,8 @@ void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std:
 
 void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                            std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
-                           entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr);
+                           entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
+                           entropy::DcSignLevelCoeffNa* na = nullptr);
 
 // L6: 32x32 frame compositions. M1 availability + FR-series REAL recon
 // top-right gather (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]); the

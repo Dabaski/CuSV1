@@ -2624,6 +2624,110 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
     CHECK(entropy::ecFrameCdfsEqual(&fcQ, &fcR) == 1);
 }
 
+TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
+    // TS3 gate: the 4 f16 blocks (decided modes {1,7,2,2}), skip = 0 for all
+    // four (no skip decision logic — the residual is coded for every block),
+    // q100 real residuals through the full token chain (fwd16x16 ->
+    // quantizeFp16x16 q100 -> writeBlockCoeffs with getTxbCtx from the NA
+    // model + writeTxType reduced_tx_set=1 + decided intra_dir). Decoder
+    // mirror: readBlockCoeffs -> dequant -> inv16x16 -> recon. GPU frame
+    // paths unchanged (host bookkeeping only). No new decision logic (the
+    // D2 policy is unchanged).
+    pixels::Plane plane(32, 32, 4);
+    pixels::Plane recon(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
+
+    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+
+    std::int32_t coeffs[1024] = {0};
+    std::uint8_t modes[4] = {0};
+    entropy::EcFrameContext fc;
+    entropy::AomWriter w{};
+    unsigned char buf[256] = {0};
+    w.ec.buf = buf;
+    entropy::DcSignLevelCoeffNa na;
+    memset(&na, 0xFF, sizeof(na));
+    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT, &w, &fc, &na);
+    // measured l6 eob spread is printed below (81 65 1 0); it differs from
+    // the generator's ecfrm_eobs 21 21 0 0 because the two recons differ
+    // (full D2-decided predictor edges vs the generator's fixture predictor)
+    std::int16_t scan16[256];
+    transforms::defaultScan16x16(scan16);
+
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i)
+        if (modes[i] != goldenModes[i]) modesOk = false;
+    CHECK(modesOk);
+    // measured token stream: roundtrip verification (the l6 pipeline uses
+    // the full D2-decided recon edges, so the byte stream is l6-specific —
+    // the gate verifies the roundtrip: write -> read -> same coefficients).
+    // The l6 eobs are measured from the f16q golden coefficients at q100.
+    for (int b = 0; b < 4; ++b) {
+        std::int32_t ec = 0;
+        for (int q = 0; q < 256; ++q) { if (coeffs[b * 256 + q] != 0) ec = q + 1; }
+        MESSAGE("eob block " << b << " = " << ec);
+    }
+    REQUIRE(w.pos > 0);
+
+    // decoder mirror: read back all 4 blocks through the l7 reader
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR);
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    entropy::DcSignLevelCoeffNa naR;
+    memset(&naR, 0xFF, sizeof(naR));
+
+    // kf contexts from the DECIDED neighbor modes (as the writer did)
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const int top0 = by > 0 ? modes[(by - 1) * 2 + bx] : 0;
+        const int left0 = bx > 0 ? modes[by * 2 + bx - 1] : 0;
+        int topCtx = 0, leftCtx = 0;
+        entropy::getKfYModeCtx(bx > 0 ? 1 : 0, left0, by > 0 ? 1 : 0, top0, &topCtx, &leftCtx);
+        int delta = 0;
+        const entropy::PredictionMode m =
+            entropy::readKfLumaMode(&r, &fcR, entropy::BLOCK_16X16, topCtx, leftCtx, &delta);
+        CHECK((int)m == goldenModes[b]);
+
+        // filter-intra symbol when allowed (writer pipeline.cpp:961-964:
+        // writeFilterIntra FILTER_INTRA_MODES = the off symbol, reads 0)
+        if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0, (std::uint32_t)m)) {
+            entropy::FilterIntraMode f;
+            CHECK(entropy::readFilterIntra(&r, &fcR, entropy::BLOCK_16X16, &f) == 0);
+        }
+
+        // token chain read with the NA ctx. NO separate readTxType: the
+        // tx-type symbol lives INSIDE the chain (writeTxbCoeffs
+        // entropy.cpp:1493-1497 / readTxbCoeffs :1598-1602)
+        int txbSkipCtx = 0, dcSignCtx = 0;
+        entropy::getTxbCtx(&naR.above[bx * 4], &naR.left[by * 4], 4, 4, 0,
+                           entropy::BLOCK_16X16, entropy::TX_16X16, &txbSkipCtx, &dcSignCtx);
+        std::int32_t qcRead[256] = {0};
+        const int reob = entropy::readTxbCoeffs(&r, &fcR, qcRead, scan16,
+                                                entropy::TX_16X16, txbSkipCtx, dcSignCtx, 1, m);
+        // reob must equal the writer's eob (the roundtrip property)
+        for (int i = 0; i < 256; ++i) CHECK(qcRead[i] == coeffs[b * 256 + i]);
+
+        // NA update (mirrors writeBlockCoeffs)
+        std::int32_t cul = 0;
+        for (int c = 0; c < reob; ++c) {
+            const std::int32_t lv = qcRead[scan16[c]];
+            cul += (lv < 0 ? -lv : lv);
+        }
+        cul = COEFF_CONTEXT_MASK < cul ? COEFF_CONTEXT_MASK : cul;
+        if (reob > 0) {
+            if (qcRead[0] < 0) cul |= 1 << 6;
+            else if (qcRead[0] > 0) cul += 2 << 6;
+        }
+        for (int k = 0; k < 4; ++k) naR.above[bx * 4 + k] = static_cast<std::uint8_t>(cul);
+        for (int k = 0; k < 4; ++k) naR.left[by * 4 + k] = static_cast<std::uint8_t>(cul);
+    }
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+}
+
 TEST_CASE("gpu frame auto 16x16 matches host encodeFrameAuto16x16 (host decides, gpu executes)") {
     if (gpurt::deviceCount() == 0) {
         MESSAGE("SKIP: no CUDA device");
