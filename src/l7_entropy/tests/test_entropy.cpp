@@ -480,13 +480,17 @@ TEST_CASE("skip symbol surface matches gate (context combos)") {
 }
 
 TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
-    // Gate: ectok_eob 21 10 0, ectok_bytes 16 32 06 83 20 6a 0a cc 5f 00 5a
-    // a8 31 e2 de 8c c0, ectok_rt 21 10 0, ectok_cdf_eq 1 (composition.c
+    // Gate: ectok_eob 21 10 0, ectok_bytes 16 1a 76 83 60 70 4d 64 92 25 9b
+    // 7e 88 e5 d4 60 ec, ectok_rt 21 10 0, ectok_cdf_eq 1 (composition.c
     // TS1 block). Fixture: f16 source, block 0 (16x16, eob 21), block 1
     // (8x8, eob 10), block 4 (4x4, eob 0 = txb_skip-only path). Whole-block
     // TUs: txb_skip_ctx = 0 (get_txb_ctx :298-299 plane_bsize == tx_bsize),
-    // dc_sign_ctx = 0 (no coded neighbors). DCT_DCT only, no tx-type symbol.
-    // Quantized through the f16q path (quantize_fp at q100).
+    // dc_sign_ctx = 0 (no coded neighbors). TS3: the token chain emits the
+    // tx-type symbol between txb_skip and eob_pt (entropy_coding.c:374-376)
+    // for every q>0 TU — the DCT_DCT index through intra_ext_tx_cdf with
+    // intra_dir = DC_PRED, exactly the generator's TS1 drive call sites
+    // (composition.c:2901-2903); the eob=0 4x4 TU skips it via the early
+    // return. Quantized through the f16q path (quantize_fp at q100).
     pixels::Plane src(32, 32, 4);
     for (int y = 0; y < 32; ++y)
         for (int x = 0; x < 32; ++x)
@@ -543,12 +547,12 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     w.pos = 0;
 
     entropy::writeTxbCoeffs(&w, &fc, qc16, scan16, entropy::TX_16X16, eob16, 0, 0, 1, entropy::DC_PRED);
-    entropy::writeTxbCoeffs(&w, &fc, qc8, scan8, entropy::TX_8X8, eob8, 0, 0, 1, entropy::V_PRED);
-    entropy::writeTxbCoeffs(&w, &fc, qc4, scan4, entropy::TX_4X4, eob4, 0, 0, 1, entropy::H_PRED);
+    entropy::writeTxbCoeffs(&w, &fc, qc8, scan8, entropy::TX_8X8, eob8, 0, 0, 1, entropy::DC_PRED);
+    entropy::writeTxbCoeffs(&w, &fc, qc4, scan4, entropy::TX_4X4, eob4, 0, 0, 1, entropy::DC_PRED);
     entropy::odEcStopEncode(&w);
     REQUIRE(w.pos == 16);
-    static const unsigned char wantBytes[16] = {0x32, 0x06, 0x83, 0x20, 0x6a, 0x0a, 0xcc, 0x5f,
-                                                0x00, 0x5a, 0xa8, 0x31, 0xe2, 0xde, 0x8c, 0xc0};
+    static const unsigned char wantBytes[16] = {0x1a, 0x76, 0x83, 0x60, 0x70, 0x4d, 0x64, 0x92,
+                                                0x25, 0x9b, 0x7e, 0x88, 0xe5, 0xd4, 0x60, 0xec};
     for (int i = 0; i < 16; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
 
     entropy::AomReader r;
@@ -558,8 +562,8 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     std::int32_t rc8[64] = {0};
     std::int32_t rc4[16] = {0};
     const int reob16 = entropy::readTxbCoeffs(&r, &fcR, rc16, scan16, entropy::TX_16X16, 0, 0, 1, entropy::DC_PRED);
-    const int reob8 = entropy::readTxbCoeffs(&r, &fcR, rc8, scan8, entropy::TX_8X8, 0, 0, 1, entropy::V_PRED);
-    const int reob4 = entropy::readTxbCoeffs(&r, &fcR, rc4, scan4, entropy::TX_4X4, 0, 0, 1, entropy::H_PRED);
+    const int reob8 = entropy::readTxbCoeffs(&r, &fcR, rc8, scan8, entropy::TX_8X8, 0, 0, 1, entropy::DC_PRED);
+    const int reob4 = entropy::readTxbCoeffs(&r, &fcR, rc4, scan4, entropy::TX_4X4, 0, 0, 1, entropy::DC_PRED);
     CHECK(reob16 == 21);
     CHECK(reob8 == 10);
     CHECK(reob4 == 0);
@@ -570,10 +574,13 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
 }
 
 TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accumulation)") {
-    // Gate: ecblk_ctx 0 2 2 2, ecblk_bytes 18, ecblk_rt 21 21 0 0, ecblk_cdf_eq 1
+    // Gate: ecblk_ctx 0 2 2 2, ecblk_bytes 19 1a 76 83 60 70 4d 64 92 25 57
+    // 03 f2 98 71 1c 85 43 f9 80, ecblk_rt 21 21 0 0, ecblk_cdf_eq 1
     // (composition.c TS2 block). 64x32 frame, 2x2 of 16x16 blocks, raster
     // order, NA accumulates after each block. txb_skip_ctx = 0 always
     // (plane_bsize == tx_bsize, :298-299); dc_sign_ctx covers 0/1/2.
+    // TS3: one tx-type symbol per q>0 TU (bytes 18 -> 19); the intra_dir is
+    // DC_PRED at every call site, matching the generator drive.
     // The skip_contexts table branch (:301-308) and the chroma branch
     // (:310-314) are dead for whole-block luma TUs (plane_bsize == tx_bsize
     // always) — ported in l7 for the range rule but never exercised here.
@@ -622,11 +629,11 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
                                   entropy::BLOCK_16X16, eob[b], mi[b][0], mi[b][1], 1, entropy::DC_PRED);
     }
     entropy::odEcStopEncode(&w);
-    REQUIRE(w.pos == 18);
-    static const unsigned char wantBytes[18] = {0x32, 0x06, 0x83, 0x20, 0x6a, 0x0a, 0xcc, 0x5f,
-                                                0x01, 0x6c, 0x34, 0xb6, 0x4e, 0x34, 0x45, 0xac,
-                                                0x67, 0xcc};
-    for (int i = 0; i < 18; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+    REQUIRE(w.pos == 19);
+    static const unsigned char wantBytes[19] = {0x1a, 0x76, 0x83, 0x60, 0x70, 0x4d, 0x64, 0x92,
+                                                0x25, 0x57, 0x03, 0xf2, 0x98, 0x71, 0x1c, 0x85,
+                                                0x43, 0xf9, 0x80};
+    for (int i = 0; i < 19; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
 
     entropy::AomReader r;
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
