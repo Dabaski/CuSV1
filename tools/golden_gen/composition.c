@@ -2984,6 +2984,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
     static const int px[4][2] = {{0, 0}, {16, 0}, {0, 16}, {16, 16}};
     static const int mi[4][2] = {{0, 0}, {0, 4}, {4, 0}, {4, 4}};
     uint16_t eobs[4] = {0};
+    static TranLow all_qc[4][256];
     for (int b = 0; b < 4; ++b) {
         const int bx = b % 2, by = b / 2;
         const int r = px[b][1], c = px[b][0];
@@ -2993,7 +2994,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
         const int nTr = (hasTop && bx + 1 < 2) ? 16 : 0;
         uint8_t above[33] = {0}, left_edge[33] = {0};
         uint8_t al = 0;
-        if (hasTop) svtd_gather_above(above, recon, 32, r, c, 16, nTr);
+        if (hasTop) svtd_gather_above(above, recon, 32, c, r, 16, nTr);
         if (hasLeft) for (int i = 0; i < 16; ++i) left_edge[i] = recon[(r + i) * 32 + c - 1];
         if (hasTop && hasLeft) al = recon[(r - 1) * 32 + c - 1];
         const int aboveMode = hasTop ? modes[(by - 1) * 2 + bx] : DC_PRED;
@@ -3023,6 +3024,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
         uint16_t eob = 0;
         svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
         eobs[b] = eob;
+        memcpy(all_qc[b], qc, sizeof(all_qc[b]));
         // recon (LOSSY at q100: quantize -> dequantize -> inverse)
         svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
         for (int i = 0; i < 16; ++i)
@@ -3045,7 +3047,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
         const int nTr = (hasTop && bx + 1 < 2) ? 16 : 0;
         uint8_t above[33] = {0}, left_edge[33] = {0};
         uint8_t al = 0;
-        if (hasTop) svtd_gather_above(above, recon, 32, r, c, 16, nTr);
+        if (hasTop) svtd_gather_above(above, recon, 32, c, r, 16, nTr);
         if (hasLeft) for (int i = 0; i < 16; ++i) left_edge[i] = recon[(r + i) * 32 + c - 1];
         if (hasTop && hasLeft) al = recon[(r - 1) * 32 + c - 1];
         const int aboveMode = hasTop ? modes[(by - 1) * 2 + bx] : DC_PRED;
@@ -3135,7 +3137,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
         const int nTr = (hasTop && bx + 1 < 2) ? 16 : 0;
         uint8_t above[33] = {0}, left_edge[33] = {0};
         uint8_t al = 0;
-        if (hasTop) svtd_gather_above(above, recon, 32, row, col, 16, nTr);
+        if (hasTop) svtd_gather_above(above, recon, 32, col, row, 16, nTr);
         if (hasLeft) for (int i = 0; i < 16; ++i) left_edge[i] = recon[(row + i) * 32 + col - 1];
         if (hasTop && hasLeft) al = recon[(row - 1) * 32 + col - 1];
         const int aboveMode = hasTop ? modes[(by - 1) * 2 + bx] : DC_PRED;
@@ -3218,6 +3220,16 @@ static int svtd_ts3_drive(uint8_t* buf) {
     if (memcmp(fc.kf_y_cdf, fc_r.kf_y_cdf, sizeof(fc.kf_y_cdf))) cdf_eq = 0;
     if (memcmp(fc.angle_delta_cdf, fc_r.angle_delta_cdf, sizeof(fc.angle_delta_cdf))) cdf_eq = 0;
     printf("ecfrm_cdf_eq %d\n", cdf_eq);
+    // TS3c: the l6 acceptance compares its modes, eobs, coeffs and recon
+    // against the generator's, bit-exact — publish coeffs and recon too
+    // (raster order, 4x256 + 32x32).
+    printf("ecfrm_coeffs");
+    for (int b2 = 0; b2 < 4; ++b2)
+        for (int i = 0; i < 256; ++i) printf(" %d", (int)all_qc[b2][i]);
+    printf("\n");
+    printf("ecfrm_recon");
+    for (int i = 0; i < 1024; ++i) printf(" %d", (int)recon[i]);
+    printf("\n");
     return 0;
 }// ---- TS2: per-block txb-ctx + NA gate lines --------------------------------
 // The 4-block 64x32 fixture with q100 quantized residuals, NA accumulation
