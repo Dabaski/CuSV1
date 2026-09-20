@@ -2338,13 +2338,15 @@ static void ecpart_read(EcPartRState* s, int miRow, int miCol, BlockSize bsize) 
 // No other writer behavior changes.
 
 // write_sequence_header (entropy_coding.c:2754-2839), ratified values.
-static void svtd_bsf3_sequence_header(AomWriteBitBuffer* wb) {
-    // max dims 32x32: frame_width_bits = svt_log2f(32) = 5, no bump
-    // (:2757-2764); the >= 1 guard (:2766-2771) no-op.
-    svt_aom_wb_write_literal(wb, 5 - 1, 4);   // frame_width_bits - 1 (:2775)
-    svt_aom_wb_write_literal(wb, 5 - 1, 4);   // frame_height_bits - 1 (:2776)
-    svt_aom_wb_write_literal(wb, 32 - 1, 5);  // max_frame_width - 1 (:2777)
-    svt_aom_wb_write_literal(wb, 32 - 1, 5);  // max_frame_height - 1 (:2778)
+static void svtd_bsf3_sequence_header(AomWriteBitBuffer* wb, int max_dim) {
+    // max_dim is a power of two: frame_width_bits = svt_log2f(max_dim), no
+    // bump (:2757-2764); the >= 1 guard (:2766-2771) no-op. 32 -> bits 5
+    // (verbatim 32x32 walk); 16 -> bits 4 (TD0 16x16-frame rungs).
+    const int bits = svt_log2f(max_dim);
+    svt_aom_wb_write_literal(wb, bits - 1, 4);        // frame_width_bits - 1 (:2775)
+    svt_aom_wb_write_literal(wb, bits - 1, 4);        // frame_height_bits - 1 (:2776)
+    svt_aom_wb_write_literal(wb, max_dim - 1, bits);  // max_frame_width - 1 (:2777)
+    svt_aom_wb_write_literal(wb, max_dim - 1, bits);  // max_frame_height - 1 (:2778)
     if (1) {  // !reduced_still_picture_header (:2780)
         svt_aom_wb_write_bit(wb, 0);  // frame_id_numbers_present_flag (:2784; sequence_control_set.c:85)
     }
@@ -2380,8 +2382,9 @@ static void svtd_bsf3_color_config(AomWriteBitBuffer* wb) {
                                   // (:2747-2751; spec derives 0 for mono)
 }
 
-// write_sequence_header_obu (:3699-3763), ratified reduced=0 path.
-static uint32_t svtd_bsf3_sps_payload(AomWriteBitBuffer* wb) {
+// write_sequence_header_obu (:3699-3763), ratified reduced=0 path; max_dim
+// parameterizes the frame-size literals (32 verbatim; 16 for TD0 rungs).
+static uint32_t svtd_bsf3_sps_payload(AomWriteBitBuffer* wb, int max_dim) {
     svt_aom_wb_write_literal(wb, 0, 3);  // profile = MAIN_PROFILE (:3705; enc_settings.c:989)
     svt_aom_wb_write_bit(wb, 1);         // still_picture (:3708)
     svt_aom_wb_write_bit(wb, 0);         // reduced_still_picture_header (:3712; ratified D2)
@@ -2395,7 +2398,7 @@ static uint32_t svtd_bsf3_sps_payload(AomWriteBitBuffer* wb) {
         // tier skipped: level major 2 <= 3 (:3734-3736); decoder model skipped
         // (:3737-3743); initial_display_delay skipped (:3744-3750)
     }
-    svtd_bsf3_sequence_header(wb);
+    svtd_bsf3_sequence_header(wb, max_dim);
     svtd_bsf3_color_config(wb);
     svt_aom_wb_write_bit(wb, 0);  // film_grain_params_present (:3757; enc_handle.c:4449)
     add_trailing_bits(wb);        // (:3759)
@@ -2525,16 +2528,20 @@ static uint32_t svtd_bsf3_tile_data(uint8_t* dst) {
 // svt_aom_encode_sps_av1 (:3925-3948) structure: phase 1 measure, phase 2
 // rewrite (the payload size depends on its own content; the content is
 // stable across the two writes).
-static uint32_t svtd_bsf3_encode_sps(uint8_t* dst) {
+static uint32_t svtd_bsf3_encode_sps_dims(uint8_t* dst, int max_dim) {
     const uint32_t obu_header_size  = write_obu_header(OBU_SEQUENCE_HEADER, 0, dst);
     AomWriteBitBuffer wb            = {dst + obu_header_size, 0};
-    const uint32_t obu_payload_size = svtd_bsf3_sps_payload(&wb);
+    const uint32_t obu_payload_size = svtd_bsf3_sps_payload(&wb, max_dim);
     const size_t length_field_size  = svt_aom_uleb_size_in_bytes(obu_payload_size);
     size_t coded_size;
     svt_aom_uleb_encode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
     AomWriteBitBuffer wb2 = {dst + obu_header_size + length_field_size, 0};
-    svtd_bsf3_sps_payload(&wb2);  // phase 2 rewrite at the correct offset
+    svtd_bsf3_sps_payload(&wb2, max_dim);  // phase 2 rewrite at the correct offset
     return obu_header_size + (uint32_t)length_field_size + obu_payload_size;
+}
+
+static uint32_t svtd_bsf3_encode_sps(uint8_t* dst) {
+    return svtd_bsf3_encode_sps_dims(dst, 32);
 }
 
 // svt_aom_write_frame_header_av1 (:3843-3920) structure for the single-tile
@@ -3462,6 +3469,211 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
     }
     aom_stop_encode(&w);
     return w.pos;
+}
+
+// ---- TD0: decoder-conformance bisect ladder --------------------------------
+// One 16x16 frame, ONE 16x16 block at (0,0) (fresh contexts everywhere):
+// 64x64 SB forced SPLIT (no symbol), 32x32(0,0) forced SPLIT (no symbol:
+// has_rows/has_cols false at mi 4x4), 16x16(0,0) coded partition NONE
+// (fresh ctx = the ECP1-measured 4), then per rung the block symbols.
+// Each rung isolates one wire surface; the decode oracle (ffmpeg's
+// libdav1d/libaom - the only conformant decoders available locally) is the
+// arbiter. Rungs: (a) q0 header, skip=1, DC_PRED, NO chain - partition/
+// skip/kf-mode/mode-ctx plus the FI flag (aom's av1_filter_intra_allowed =
+// DC_PRED && bsize <= 32x32, reconintra.h:68-80 - the flag IS read for
+// DC_PRED blocks; our writer writes it, value 0); (b) q100 header, skip=0,
+// eob=0 TU (the txb_skip symbol only, no tx-type via the eob==0 early
+// return); (c) + real tokens eob=5, levels <= 8 (the base/br/sign/
+// eob_extra/tx-type surface, no golomb); (d) + a golomb-class level (DC 20
+// >= MAX_BASE_BR_RANGE 15; 20*dc_q(100) = 18840 stays under the +/-32767
+// dqcoeff clamp) + the angle-delta symbol (mode D203, delta 0).
+#define TD0_RUNG_A 0
+#define TD0_RUNG_B 1
+#define TD0_RUNG_C 2
+#define TD0_RUNG_D 3
+#define TD0_RUNG_E 4
+#define TD0_RUNG_F 5
+#define TD0_RUNG_G 6
+
+// rung block parameters: mode, skip flag, chain coefficients (raster)
+static void svtd_td0_block_params(int rung, int* mode, int* skip, TranLow qc[256]) {
+    memset(qc, 0, sizeof(TranLow) * 256);
+    switch (rung) {
+    case TD0_RUNG_E: *mode = V_PRED; break;
+    case TD0_RUNG_D: *mode = D203_PRED; break;
+    default: *mode = DC_PRED; break;
+    }
+    *skip = (rung == TD0_RUNG_A || rung == TD0_RUNG_E) ? 1 : 0;
+    if (rung == TD0_RUNG_F || rung == TD0_RUNG_G) {
+        int16_t scan[256];
+        svtd_default_scan_16x16(scan);
+        // DC level 3: dqcoeff 3*dc_q(100)=279 -> +1 pixel shift (VISIBLE);
+        // the tile keeps every dqcoeff under the +/-32767 clamp.
+        qc[scan[0]] = 3;
+        if (rung == TD0_RUNG_G) qc[scan[1]] = 3;  // +1 br symbol + the raw sign bit
+    }
+    if (rung == TD0_RUNG_C || rung == TD0_RUNG_D) {
+        int16_t scan[256];
+        svtd_default_scan_16x16(scan);
+        const int lev[5] = { 3, 8, 5, 3, 2 };
+        const int sgn[5] = { 1, 0, 0, 1, 0 };
+        for (int c = 0; c < 5; ++c) qc[scan[c]] = sgn[c] ? -lev[c] : lev[c];
+        if (rung == TD0_RUNG_D) qc[0] = -20;  // golomb-class level (20 >= 15)
+    }
+}
+
+static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
+    static AomCdfProb part_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+    memcpy(part_cdf, default_partition_cdf, sizeof(part_cdf));
+    static AomCdfProb skip_cdf[SKIP_CONTEXTS][CDF_SIZE(2)];
+    memcpy(skip_cdf, default_skip_cdfs, sizeof(skip_cdf));
+    static AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+    memcpy(kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(kf_y_cdf));
+    static AomCdfProb angle_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+    memcpy(angle_cdf, default_angle_delta_cdf, sizeof(angle_cdf));
+    static AomCdfProb fi_cdf[CDF_SIZE(2)];
+    memcpy(fi_cdf, default_filter_intra_cdfs[BLOCK_16X16], sizeof(fi_cdf));
+    Ts1FrameContext fc;
+    ts1_init(&fc);
+
+    AomWriter w;
+    w.ec.buf = dst;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos              = 0;
+
+    uint8_t above_pctx[8];
+    uint8_t left_pctx[16];
+    memset(above_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(above_pctx));
+    memset(left_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(left_pctx));
+
+    // partition walk (fresh contexts): 64x64 forced SPLIT, 32x32(0,0) forced
+    // SPLIT, 16x16(0,0) coded NONE
+    EcPartState st = {&w, part_cdf, above_pctx, left_pctx, 4, 16, 0};
+    const int pctx = ecpart_derive_ctx(st.above, st.left, 0, 0, BLOCK_16X16);
+    aom_write_symbol(&w, PARTITION_NONE, part_cdf[pctx], svt_aom_partition_cdf_length(BLOCK_16X16));
+
+    int mode, skip;
+    TranLow qc[256];
+    svtd_td0_block_params(rung, &mode, &skip, qc);
+    // skip flag, ctx 0 (fresh: unavailable neighbors -> 0)
+    aom_write_symbol(&w, skip, skip_cdf[0], 2);
+
+    // kf mode (both contexts = intra_mode_context[DC_PRED], fresh)
+    const int top_ctx = intra_mode_context[DC_PRED];
+    const int left_ctx = intra_mode_context[DC_PRED];
+    aom_write_symbol(&w, mode, kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+    if (av1_is_directional_mode((PredictionMode)mode)) {
+        aom_write_symbol(&w, MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
+                         2 * MAX_ANGLE_DELTA + 1);
+    }
+    // filter-intra flag: read for DC_PRED blocks (aom reconintra.h:68-80);
+    // the symbol is written exactly when the decoder reads it (mode DC).
+    if (mode == DC_PRED) {
+        aom_write_symbol(&w, 0, fi_cdf, 2);
+    }
+    // token chain: the svtd twin - [txb_skip][tx-type for q>0 eob>0][eob_pt]
+    // [eob_extra][base_eob+br][reverse][signs+golomb]
+    if (skip == 0) {
+        int16_t scan[256];
+        svtd_default_scan_16x16(scan);
+        const int eob_tok = svtd_eob_from_coeffs(qc, scan, TX_16X16);
+        const int wantEob[7] = { 0, 0, 5, 5, 0, 1, 2 };
+        if (eob_tok != wantEob[rung]) { fprintf(stderr, "TD0 rung %d eob %d\n", rung, eob_tok); return 0; }
+        svtd_write_coeffs_txb(&w, &fc, qc, scan, TX_16X16, eob_tok, 0, 0, (PredictionMode)mode);
+    }
+    aom_stop_encode(&w);
+
+    // TD0 probe: read the tile back with the aom-entdec reader (the decoder
+    // oracle's own primitives) and print the decoded symbol sequence —
+    // whatever THIS reads is what a conformant decoder reads.
+    {
+        aom_reader r;
+        if (aom_reader_init(&r, dst, w.pos)) { fprintf(stderr, "TD0 reader init\n"); return 0; }
+        r.allow_update_cdf = 1;  // the writer adapted; the decoder must too
+        static AomCdfProb rp[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+        memcpy(rp, default_partition_cdf, sizeof(rp));
+        static AomCdfProb rs[SKIP_CONTEXTS][CDF_SIZE(2)];
+        memcpy(rs, default_skip_cdfs, sizeof(rs));
+        static AomCdfProb rk[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+        memcpy(rk, svt_aom_default_kf_y_mode_cdf, sizeof(rk));
+        static AomCdfProb ra[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+        memcpy(ra, default_angle_delta_cdf, sizeof(ra));
+        static AomCdfProb rfi[CDF_SIZE(2)];
+        memcpy(rfi, default_filter_intra_cdfs[BLOCK_16X16], sizeof(rfi));
+        Ts1FrameContext fc2;
+        ts1_init(&fc2);
+        fprintf(stderr, "TD0 rung %d rt:", rung);
+        const int pctx2 = ecpart_derive_ctx(above_pctx, left_pctx, 0, 0, BLOCK_16X16);
+        fprintf(stderr, " part=%d", aom_read_symbol_(&r, rp[pctx2], svt_aom_partition_cdf_length(BLOCK_16X16)));
+        fprintf(stderr, " skip=%d", aom_read_symbol_(&r, rs[0], 2));
+        const int rmode = aom_read_symbol_(&r, rk[top_ctx][left_ctx], INTRA_MODES);
+        fprintf(stderr, " mode=%d", rmode);
+        if (av1_is_directional_mode((PredictionMode)rmode)) {
+            fprintf(stderr, " delta=%d", aom_read_symbol_(&r, ra[rmode - V_PRED], 2 * MAX_ANGLE_DELTA + 1));
+        }
+        if (rmode == DC_PRED) fprintf(stderr, " fi=%d", aom_read_symbol_(&r, rfi, 2));
+        if (skip == 0) {
+            int16_t scan2[256];
+            svtd_default_scan_16x16(scan2);
+            uint8_t above_na2[16], left_na2[8];
+            memset(above_na2, (int)INVALID_NEIGHBOR_DATA, sizeof(above_na2));
+            memset(left_na2, (int)INVALID_NEIGHBOR_DATA, sizeof(left_na2));
+            TranLow rc[256];
+            memset(rc, 0, sizeof(rc));
+            const int reob = svtd_read_coeffs_txb(&r, &fc2, rc, scan2, TX_16X16, 0, 0,
+                                                  (PredictionMode)rmode);
+            fprintf(stderr, " reob=%d", reob);
+            for (int c2 = 0; c2 < 5; ++c2) fprintf(stderr, " c%d=%d", c2, (int)rc[scan2[c2]]);
+        }
+        fprintf(stderr, " (pos %u/%u)\n", (uint32_t)od_ec_dec_tell(&r.ec), w.pos);
+    }
+    return w.pos;
+}
+
+// expected decoded picture: the decoder reconstructs pred + inv(dqcoeff)
+// with its normative integer inverse transform and clamps to [0,255]; all
+// rung dqcoeffs stay under the +/-32767 clamp so the IDCT inputs match.
+static void svtd_td0_expected(int rung, uint8_t* pic) {
+    int mode, skip;
+    TranLow qc[256];
+    svtd_td0_block_params(rung, &mode, &skip, qc);
+    uint8_t pred[256];
+    memset(pred, 0, sizeof(pred));
+    svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, NULL, 0, 0, NULL, 0, 0, 0, TX_16X16);
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(100, &t);
+    TranLow dq[256];
+    for (int i = 0; i < 256; ++i) dq[i] = qc[i] * t.dequant[i != 0];
+    svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
+    memcpy(pic, pred, 256);
+}
+
+static uint32_t svtd_td0_tu(int rung, uint8_t* tu, uint8_t* pic) {
+    static uint8_t tile_buf[512];
+    static uint8_t sps_buf[64];
+    static uint8_t obu_buf[256];
+    memset(tile_buf, 0, sizeof(tile_buf));
+    memset(sps_buf, 0, sizeof(sps_buf));
+    memset(obu_buf, 0, sizeof(obu_buf));
+    const uint32_t tile_size = svtd_td0_tile(rung, tile_buf);
+    if (tile_size == 0) return 0;
+    const uint32_t sps_size = svtd_bsf3_encode_sps_dims(sps_buf, 16);
+    svtd_td0_expected(rung, pic);
+    memset(tu, 0, 128);
+    svt_aom_encode_td_av1(tu);
+    memcpy(tu + 2, sps_buf, sps_size);
+    uint32_t offset = 2 + sps_size;
+    // rung a/e keep the lossless q0 header (skip=1, no TUs read); rungs
+    // b/c/d/f/g carry the lossy q100 header (40 bits, LARGEST, tx-type gate
+    // live, q100 dequant).
+    uint32_t obu_size;
+    if (rung == TD0_RUNG_A || rung == TD0_RUNG_E) {
+        obu_size = svtd_bsf3_frame_obu(tu + offset, tile_buf, tile_size);
+    } else {
+        obu_size = svtd_bsf3_frame_obu_v2(tu + offset, tile_buf, tile_size);
+    }
+    return offset + obu_size;
 }
 
 static int svtd_ts2_drive(uint8_t* buf) {

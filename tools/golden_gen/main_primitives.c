@@ -2091,5 +2091,28 @@ int main(void) {
         for (uint32_t i = 0; i < tu_size2; ++i) printf(" %02x", tu_buf2[i]);
         printf("\n");
     }
+
+    // ---- TD0: bisect-ladder gate lines -------------------------------------
+    // Four 16x16 single-block rungs; the ladder script (tools/td0_ladder.ps1)
+    // materializes each TU + expected picture from these lines, decodes with
+    // the local conformant decoder (ffmpeg), and reports the first rung
+    // whose decoded picture diverges from the generator's expected recon.
+    {
+        static const char* rungNames[7] = { "a", "b", "c", "d", "e", "f", "g" };
+        for (int r = 0; r < 7; ++r) {
+            static uint8_t tu_buf[128];
+            static uint8_t pic_buf[256];
+            memset(tu_buf, 0, sizeof(tu_buf));
+            memset(pic_buf, 0, sizeof(pic_buf));
+            const uint32_t tu_size = svtd_td0_tu(r, tu_buf, pic_buf);
+            if (tu_size == 0) { fprintf(stderr, "TD0 rung %d FAILED\n", r); return 1; }
+            printf("td0_rung%s_tu %u", rungNames[r], tu_size);
+            for (uint32_t i = 0; i < tu_size; ++i) printf(" %02x", tu_buf[i]);
+            printf("\n");
+            printf("td0_rung%s_pic", rungNames[r]);
+            for (int i = 0; i < 256; ++i) printf(" %d", (int)pic_buf[i]);
+            printf("\n");
+        }
+    }
     return 0;
 }
