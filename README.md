@@ -6,30 +6,35 @@ encoder building blocks to CUDA 12.2, targeting NVIDIA Pascal
 from SVT-AV1's C implementation and re-expressed as CUDA C++ kernels
 JIT-compiled at runtime via NVRTC.
 
-Milestone (BS-series closed): the pipeline now emits a structural
-keyframe temporal unit that a reference decoder accepts and decodes —
-libdav1d exits silently and ffprobe reports `codec_name=av1`, 32x32,
-`pix_fmt=gray` (monochrome, confirmed by an independent decoder) and
-`color_range=pc` (the ratified `color_range=1`).
+> **Disclaimer:** This project is actively being worked on. APIs will
+> change and not every SVT-AV1 feature is ported yet. Kernels are held
+> to bit-exact agreement with the vendored SVT host C (enforced by the
+> committed golden gate); the composite encoder loop is per-block
+> synchronous launches — see `AGENTS.md` for the dated benchmark
+> baseline and the known-overhead caveat. Not ready for production use.
 
-The TS-series closes coefficient/token coding: the lossy v2 TU
-(45 bytes, real token streams, base_q_idx = 100) also parses under the
-same decoders — an ffmpeg probe reports `av1 (libdav1d) (Main)`,
-gray(pc), 32x32 (probe-level evidence; the attested full decode is the
-v1 lossless TU above).
+## Status
 
-> **Disclaimer:** This project is actively being worked on. Code is
-> incomplete, tests may be red, and APIs will change. Kernels are
-> functionally correct (bit-exact vs SVT's host C where noted); a
-> benchmark harness exists (`tools/bench/`) but the composite encoder
-> loop is per-block synchronous launches — see `AGENTS.md` for the
-> dated baseline and the known-overhead caveat. Expect rough edges.
-> Not ready for production use.
+- **First decoder-accepted AV1 bitstream** (BS-series closed): the
+  pipeline emits a structural keyframe temporal unit that a reference
+  decoder accepts and decodes — libdav1d exits silently and ffprobe
+  reports `codec_name=av1`, 32x32, `pix_fmt=gray` (monochrome, D1
+  confirmed by an independent decoder) and `color_range=pc` (the
+  ratified `color_range=1`).
+- **Coefficient/token coding closed** (TS-series): the lossy v2
+  temporal unit (45 bytes, real token streams, `base_q_idx` = 100)
+  parses under the same decoders — an ffmpeg probe reports
+  `av1 (libdav1d) (Main)`, gray(pc), 32x32. This is probe-level
+  evidence; the attested full decode is the lossless TU above.
+- All layers green: 9 doctest targets pass, and the golden gate
+  reproduces the committed `expected_primitives.txt` 259/259 lines.
 
 ## What's implemented
 
 Each layer is developed under incremental TDD (see `AGENTS.md`); GPU
 twins are held to bit-exact agreement with the SVT host reference.
+Symbol-by-symbol provenance and the gate-line inventory live in
+`AGENTS.md` and `tools/golden_gen/README.md`.
 
 - **l0_core** — minimal shared types: `Sample` (uint8), `BlockSize`.
 - **l1_pixels** — `pixels::Plane`: strided pixel buffer with left/right
@@ -37,199 +42,86 @@ twins are held to bit-exact agreement with the SVT host reference.
 - **l2_gpurt** — NVRTC JIT + CUDA driver-API runtime: `GpuContext`,
   `DeviceBuffer`, `Kernel`, `compileToPtx`, `ptxEntryNames`; kernel
   sources are CUDA C++ strings compiled for `compute_61`.
-- **l3_transforms** — SVT-AV1 fixed-point transforms, 4x4 / 8x8 /
-  16x16 / 32x32 / 64x64: forward `fdct4`/`fadst4`, `fdct8`/`fadst8`,
-  `fdct16`/`fadst16`, `fdct32`/`fadst32`, `fdct64` and inverse
-  `idct4`/`iadst4`, `idct8`/`iadst8`, `idct16`/`iadst16`,
-  `idct32`/`iadst32`, `idct64` with `cospi`/`sinpi` tables, `halfBtf`,
-  `roundShift` (fdct16/fadst16 are cos_bit-parameterized — 16x16 is
-  the one geometry where col 13 / row 12 differ; fdct64B is
-  cos_bit-parameterized — 64x64 col 13 / row 10 is the only pass
-  below 12; 64x64 is DCT-ONLY, no ADST exists in this tree:
-  `av1_txfm_type_ls[4]` = DCT64/INVALID/INVALID/IDENTITY64); 2D
-  forward `fwdTxfm2d4x4`/`fwdTxfm2d8x8`/`fwdTxfm2d16x16`/
-  `fwdTxfm2d32x32`/`fwdTxfm2d64x64` and inverse
-  `invTxfm2dAdd4x4`/`invTxfm2dAdd8x8`/`invTxfm2dAdd16x16`/
-  `invTxfm2dAdd32x32`/`invTxfm2dAdd64x64` (fwd shifts
-  {2,0,0}/{2,-1,0}/{2,-2,0}/{2,-4,0}/{0,-2,-2}, inv
-  {0,-4}/{-1,-4}/{-2,-4}/{-2,-4}/{-2,-4}, 8-bit clip add; the inverse
-  clamps only where SVT consumes stage_range — idct16 stages 3-7,
-  iadst16 stages 3/5/7, idct32 stages 3-9, iadst32 every stage,
-  idct64 clamped at 16-bit range, no all-zero early-out at 16 or 32);
-  every size has bit-exact GPU twins (`fwd_txfm_2d_*` /
-  `inv_txfm_2d_add_*`). Integer only. Quantizer stage:
-  `buildQuantTables` (luma rows of `svt_av1_build_quantizer`,
-  sharpness=0), `defaultScan4x4`/`defaultScan8x8`/`defaultScan16x16`/
-  `defaultScan32x32`/`defaultScan64x64` (iscan formula),
-  `quantizeFp4x4`/`quantizeB4x4` + `quantizeFp8x8`/`quantizeB8x8` +
-  `quantizeFp16x16`/`quantizeB16x16` + `quantizeFp32x32`/`quantizeB32x32`
-  + `quantizeFp64x64`/`quantizeB64x64` (verbatim
-  `quantize_fp_helper_c` / `svt_aom_quantize_b_c` semantics, log_scale
-  0 at 4x4/8x8/16x16, 1 at 32x32, 2 at 64x64; dc/ac unified via
-  dequant table index — this SVT tree has no `av1_quantize_dc`); GPU
-  twins `quant_dequant_4x4` / `quant_dequant_8x8` /
-  `quant_dequant_16x16` / `quant_dequant_32x32` /
-  `quant_dequant_64x64` (quantize + dequant in one launch, bit-exact
-  vs the host fp path, TxType-agnostic).
-- **l4_intra** — `buildIntraPredictors` (1:1 with SVT, luma,
-  size-generic over 4/8/16/32/64, DC availability variants,
-  missing-neighbor fills), `dr_z1`/`z2`/`z3` + `drPredictor`, edge
-  filter / upsample (with `disable_edge_filter` config and `filt_type`
-  neighbor plumbing), filter-intra, smoothPredict family; GPU twins
-  `predict_block_4x4`, `predict_block_8x8`, `predict_block_16x16`,
-  `predict_block_32x32` (1024 threads — the CUDA block maximum —
-  one thread per pixel under `__launch_bounds__(1024)`) and
-  `predict_block_64x64` (1024 threads, four pixels per thread
-  p = t + 1024k; filter-intra is not signalable at 64x64 so the 64
-  kernel has no FI path; the corner blend is live at 16x16/32x32/64x64
-  but dead at 4x4/8x8, and edge upsample never fires above 8x8); GPU
-  == host verified for all 8 dr modes x angle deltas at every size.
-  Chroma (CH-series): `UvPredictionMode` (verbatim enum order;
-  `UV_CFL_PRED` enumerated but folds to `DC_PRED` at the prediction
-  surface — the cfl_alpha AC-from-luma combine is out of scope),
-  `uv2y` (the `get_uv_mode`/`g_uv2y` mirror) and
-  `buildIntraPredictorsUv` = fold + size-generic builder call with
-  FILTER_INTRA_MODES (chroma never uses filter-intra); the predictors
-  are plane-agnostic so the wrapper IS the chroma dispatch. GPU chroma
-  coverage folds `uv2y` host-side (the SVT call site) and drives the
-  unchanged kernels: all 14 UV modes at delta 0 plus the 8 dr modes at
-  deltas -1/+1 = 30 combos per size at 4x4/8x8.
-- **l5_motion** — `motion::sad4x4` / `sad8x8` / `sad16x16` /
-  `sad32x32` / `sad64x64` (strided uint8; sad8x8 mirrors SVT's
-  dedicated `compute8x8_sad_kernel_c`, the rest mirror
-  `svt_nxm_sad_kernel_helper_c` at their dims) + GPU kernels for
-  4x4/8x8; the 16x16/32x32/64x64 D2 policies score host-side.
+- **l3_transforms** — SVT-AV1 fixed-point transforms at every size
+  4x4..64x64, host plus bit-exact GPU twins: the verbatim 1D kernels
+  (forward fdct/fadst, inverse idct/iadst; 64x64 is DCT-only — no ADST
+  is signalable at TX_64X64 in this tree), the 2D wrappers
+  (`fwdTxfm2d*`/`invTxfm2dAdd*`) carrying SVT's per-size cos_bit/shift
+  configuration (16x16 is the one geometry with differing fwd col/row
+  cos_bit 13/12; 64x64 col/row 13/10 is the only pass below 12), and
+  the quantizer stage: `buildQuantTables`, default scans,
+  `quantizeFp*`/`quantizeB*` at log_scale 0/0/0/1/2 (dc/ac unified via
+  the dequant table index — this SVT tree has no `av1_quantize_dc`),
+  with GPU quantize+dequant twins (`quant_dequant_*`).
+- **l4_intra** — intra prediction 1:1 with SVT's
+  `build_intra_predictors`, size-generic over 4/8/16/32/64 (DC
+  availability variants, missing-neighbor fills): directional
+  prediction (z1/z2/z3 + drPredictor), edge filter/upsample, smooth
+  family, filter-intra, paeth. GPU twins `predict_block_*` at every
+  size — 32x32/64x64 run 1024 threads (the CUDA block maximum; 64x64
+  does four pixels per thread and has no filter-intra path, which is
+  not signalable at that size), the corner blend is live at 16x16 and
+  above, edge upsample never fires above 8x8, and GPU == host is
+  verified for all 8 dr modes x angle deltas at every size. Chroma:
+  `UvPredictionMode` (UV_CFL_PRED folds to DC_PRED — the cfl_alpha
+  AC-from-luma combine is out of scope), the `uv2y` fold and
+  `buildIntraPredictorsUv`; the predictors are plane-agnostic and
+  chroma never uses filter-intra.
+- **l5_motion** — SAD at 4x4/8x8/16x16/32x32/64x64 over strided uint8
+  (8x8 mirrors SVT's dedicated 8x8 kernel, the rest mirror
+  `svt_nxm_sad_kernel_helper_c`); GPU kernels for 4x4/8x8, the larger
+  dims score host-side.
 - **l6_pipeline** — block and frame composition and mode decision at
-  4x4 / 8x8 / 16x16 / 32x32 / 64x64.
-  Block level: `encodeBlock4x4` = plane window (l1) +
-  `buildIntraPredictors` (l4) -> int16 residual (no clamp) ->
-  `fwdTxfm2d4x4` (l3); `encodeRecon4x4` adds the inverse round trip.
-  Frame level: `encodeFrameRecon4x4`/`encodeFrameRecon8x8`/
-  `encodeFrameRecon16x16`/`encodeFrameRecon32x32`/
-  `encodeFrameRecon64x64` run a raster grid with recon-only
-  neighbors; `frameMse8` is the integer frame SSE; the D2 policy
-  (`decideBlockMode4x4`/`8x8`/`16x16`/`32x32`/`64x64`) scores all 13
-  PredictionModes by SAD (project-defined policy, SVT primitives); the
-  Auto variants (`encodeFrameAuto4x4`/
-  `encodeFrameAuto8x8`/`encodeFrameAuto16x16`/`encodeFrameAuto32x32`/
-  `encodeFrameAuto64x64`) drive full frames — each block's mode chosen
-  against RECONSTRUCTED edges, with the
-  FR-series REAL top-right gather (above[B..2B-1] come from the
-  reconstructed row above, not zeros), the chosen modes feeding
-  `NeighborContext` (filt_type live). Quantized variants
-  (`encodeFrameAuto4x4Q`, `encodeFrameRecon8x8Q`/`encodeFrameAuto8x8Q`,
-  `encodeFrameRecon16x16Q`/`encodeFrameAuto16x16Q`,
-  `encodeFrameRecon32x32Q`/`encodeFrameAuto32x32Q`,
-  `encodeFrameRecon64x64Q`/`encodeFrameAuto64x64Q`) wire the FP
-  quantizer at a fixed qindex after the forward transform (qcoeff =
-  coded coefficients, dequantized coefficients feed the inverse —
-  quantization loss feeds back through decisions; log_scale 1 at
-  32x32, log_scale 2 at 64x64 per `av1_get_tx_scale_tab`). The 16x16
-  fwd/inv roundtrip is exact (recon == source); 8x8/32x32/64x64 are
-  lossy by design (64x64 DCT-only within our TxType scope — no ADST
-  is signalable at TX_64X64 in this tree).
-  GPU path `predict_block_*` + `subtract_*_plane` +
-  `fwd_txfm_2d_*` (+ `quant_dequant_*` in the quantized loops) +
-  `inv_txfm_2d_add_*` at every size, bit-exact vs host; the GPU
-  frame-auto loops reproduce the host `encodeFrameAuto*` paths
-  exactly, lossless and quantized (host decides, GPU executes).
-  CH3 chroma frame compositions
-  `encodeFrameReconChroma16x16`/`encodeFrameAutoChroma16x16`/
-  `encodeFrameReconChroma16x16Q`/`encodeFrameAutoChroma16x16Q` run the
-  same grid over a UV-sized plane (blocks are UV-sized, availability
-  per-plane, the `uv2y` fold at the call site, filt_type from the UV
-  mode map). BSF1: the 16x16 Auto/Q variants take an optional writer +
-  `EcFrameContext` and emit, per block in raster order, the kf y-mode
-  symbol (context pair from the decided neighbor modes), the
-  angle-delta symbol when the decided mode is directional, and the
-  filter-intra flag — symbols only (partition/skip symbols are
-   ECP1/ECP2, tile assembly is BSF3/BSF4); GPU frame paths unchanged.
-   TS3: the 16x16 Q path emits the real per-block token stream
-   (`entropy::writeBlockCoeffs`, skip = 0, NA-driven contexts — the
-   TS3c-proven coefficient path that feeds the tile chains; gate
-   ecfrm_*). Goldens are generated by `tools/golden_gen/` (committed)
-   from the vendored SVT tree.
+  4x4..64x64. `encodeBlock4x4` composes plane window (l1) + intra
+  prediction (l4) + residual + forward transform (l3); `encodeRecon4x4`
+  adds the inverse round trip. Frame level: the Recon variants run a
+  raster grid with recon-only neighbors; the Auto variants drive full
+  frames with each block's mode chosen by the D2 policy
+  (`decideBlockMode*` — all 13 intra modes scored by SAD against
+  reconstructed edges; project-defined policy on SVT primitives).
+  Quantized variants (`*Q`) wire the FP quantizer at a fixed qindex so
+  quantization loss feeds back through decisions. The 16x16 fwd/inv
+  roundtrip is exact; 8x8/32x32/64x64 are lossy by design (64x64
+  DCT-only within our TxType scope). Chroma frame compositions run the
+  same grid over the 4:2:0 UV plane (UV-sized blocks, per-plane
+  availability, the `uv2y` fold at the call site). The 16x16 Auto/Q
+  paths also emit entropy symbols: the kf y-mode + angle delta +
+  filter-intra flag (BSF1) and the real per-block token stream (TS3,
+  skip = 0). GPU frame paths run the per-block kernel chain (predict,
+  subtract, forward, quantize where configured, inverse-add),
+  bit-exact vs host in lossless and q100 at all five geometries (host
+  decides, GPU executes).
 - **l7_entropy** — the entropy coder, host port, integer only,
-  bit-exact vs the committed gate. od_ec range coder: `OdEcEnc` +
-  `odEcEncReset`/`odEcEncodeBoolEqQ15`/`odEcEncodeBoolQ15`/
-  `odEcEncodeCdfQ15`/`odEcEncDone`/`odEcEncTell`/`odEcEncTellFrac`
-  (bitstream_unit.c verbatim) and decoder `OdEcDec` + init/refill/
-  normalize/`odEcDecodeBoolQ15`/`odEcDecodeCdfQ15`/`odEcDecTell`
-  (entdec.c, vendored aom_dsp subtree; named deviation:
-  `od_ec_dec_bits_` is declared-but-undefined in the pinned tree and
-  stays unported). CDF adaptation `updateCdf` and the symbol wrappers
-  `odEcWriteSymbol`/`odEcStopEncode` + reader init/`odEcReadCdf`/
-  `odEcReadSymbol` (aom_write_symbol semantics incl. the nsymbs==2
-  bool routing and allow_update_cdf adaptation). Symbol level: kf
-  luma-mode surface (the full SVT `BlockSize` enum is mirrored here
-  because filter_intra_cdfs indexes by it; `PredictionMode` intra
-  subset, `FilterIntraMode`, `getKfYModeCtx`,
-  `writeKfLumaMode`/`readKfLumaMode`, angle delta, the
-  `filterIntraAllowed` predicate and write/read filter-intra),
-  partition surface (`partitionCdfLength`, gathered horz/vert-alike
-  two-symbol branches, `writePartition`/`readPartition`,
-  `updatePartitionContext`) and skip surface
-  (`getSkipContext`/`writeSkip`/`readSkip`); `EcFrameContext` carries
-  the default CDF tables verbatim and writer and reader adapt them
-   identically (encoder/decoder mutual-consistency integration test).
-   Reader halves of partition/skip follow the aom decoder semantics
-   (out-of-tree arbiter; no aom code extracted). TS-series token
-   surface: `writeTxbCoeffs`/`readTxbCoeffs` per-TU chain (txb_skip ->
-   eob position -> base/br -> signs -> golomb), `getTxbCtx` + the
-   `DcSignLevelCoeffNa` NA model (packed dc_sign<<6|cul_level above/
-   left arrays, OR-accumulate; dc_sign_ctx {0,1,2}), the per-block
-   `writeBlockCoeffs`/`readBlockCoeffs` wrapper (whole-block TU,
-   txb_count = 1) and the tx-type surface `writeTxType`/`readTxType`
-   through `intra_ext_tx_cdf` (DCT_DCT, eset 2, reduced_tx_set intra,
-   5 symbols, gated by getExtTxTypes > 1 AND base_q_idx > 0), plus
-   `writeGolomb`/`readGolomb`, `odEcWriteLiteralBit(s)`/`odEcReadBit`
-   and the level-context surface (`eb_av1_nz_map_ctx_offset[19]` LUT,
-   nz-map/lower-level/br context helpers, `txb_init_levels`). Named
-   scope: LUMA DCT_DCT only, token CDF slices at q_ctx = 0 (.inc
-   files), whole-block TUs. Deferred: chroma uv_mode/CFL symbols,
-   nonkey y-mode path, palette, intrabc.
-- **l8_bitstream** — raw-bit writer + OBU container ground floor, host
-  port of entropy_coding.{h,c} (verbatim, camelCase; deviation:
-  `write_obu_header` is static in SVT, public here):
-  `AomWriteBitBuffer`, `wbWriteBit`/`wbWriteLiteral`/
-  `wbWriteInvSignedLiteral`, uleb128 (`ulebSizeInBytes`/`ulebEncode`),
-  `writeObuHeader`/`writeUlebObuSize`, temporal delimiter
-  (`encodeTdAv1` = exactly 2 bytes). Structural keyframe assembly
-  (BSF3, SVT packer structure + court-ratified D1 monochrome patch —
-  is_monochrome const 0 -> 1, the commented-out spec mono branch live,
-  U/V quantizer delta writes skipped for mono; D1 decoder-confirmed:
-  libdav1d/ffprobe read the stream back as gray):
-  `writeSequenceHeaderObu` (payload incl. trailing bits),
-  `writeFrameHeader` (the ratified uncompressed-header walk, no
-  trailing-bits marker; BSF4-fix sets disable_cdf_update = 0 — the SVT
-  keyframe default — making the might_bwd_adapt region live so the
-  refresh_frame_context = DISABLED bit is now emitted: 22 bits + 2 pad)
-  and `assembleStructuralKeyframeTU` (TD + SPS with phase-1 measure /
-  phase-2 uleb rewrite + OBU_FRAME, tile-group header 0 bytes at
-  tile_cnt == 1, dst zeroed first so the pad bits after the header are
-  the spec's byte_alignment zeros). TS4 lossy header v2:
-  `writeFrameHeaderV2` (the 22 structural bits with base_q_idx = 100 +
-  delta_q_present = 0 — delta_lf nested inside it, entropy_coding.c:
-  3564-3587 — + encode_loopfilter zeros 6+6+3+1, the level[2]/[3] U/V
-  pair skipped at zero and for mono :2296-2299 + tx_mode_select = 0 =
-  TX_MODE_LARGEST :3603-3607 = 40 bits, exactly 5 bytes 10 d9 00 00 01,
-  NO padding; CDEF/restoration still skipped: seq cdef_level = 0 /
-  enable_restoration = 0) and `assembleStructuralKeyframeTUv2` (the same
-  packer with header v2; the SPS carries no lossy state and is
-  byte-identical, gate-HALTed). BSF4-fix ec coupling, stated as an
-  invariant at both l6 emission sites: allow_update_cdf = 1 only
-  because the ratified config carries disable_cdf_update = 0 (SVT
-  couples ec_writer.allow_update_cdf = !disable_cdf_update,
-  ec_process.c:101); any future disable_cdf_update = 1 config must
-  flip the emission with it. Milestone artifact
-  `src/l8_bitstream/tests/goldens/structural_keyframe.obu`
-  (45 bytes, produced from the generator output, regenerated by TS4
-  to the lossy v2 TU): the test proves the three-way identity composed
-  TU == committed file == gate bytes (tu_bytes_v2), and the TU is
-  decoder-accepted — libdav1d decodes it silently (exit 0), ffprobe
-  reports codec_name=av1, 32x32, pix_fmt=gray, color_range=pc; the v2
-  tile carries the TS3-proven real token streams (skip = 0), so the
-  decoded picture is the lossy reconstruction rather than DC-only.
+  bit-exact vs the committed gate. The od_ec range encoder and decoder
+  (equal-prob, binary and cdf-coded symbol primitives, byte flush,
+  tell/tell_frac; the decoder side ports the vendored aom_dsp
+  `entdec.c` — `od_ec_dec_bits_` is declared-but-undefined in the
+  pinned tree and stays unported), CDF adaptation (`updateCdf`) and
+  the write/read symbol wrappers. Symbol level: kf luma mode + angle
+  delta + filter-intra flag/mode, partition, skip, and the token
+  chain — per-TU coefficients (txb_skip -> eob position -> base/br ->
+  signs -> golomb) driven by the NA context model and the
+  per-position nz-map context LUT, plus the tx-type symbol through
+  `intra_ext_tx_cdf`. Named scope: LUMA DCT_DCT only, token CDF
+  slices at q_ctx = 0, whole-block TUs; writer and reader adapt CDFs
+  identically (encoder/decoder mutual-consistency test). Deferred:
+  chroma uv_mode/CFL symbols, the nonkey y-mode path, palette,
+  intrabc.
+- **l8_bitstream** — raw-bit writer + OBU container ground floor
+  (bit/literal/inv-signed-literal writers, uleb128, OBU header +
+  uleb payload size, temporal delimiter) and structural keyframe
+  assembly: sequence-header OBU payload, the uncompressed frame-header
+  walk and the full temporal unit packer (TD + SPS + OBU_FRAME in
+  SVT's packer structure, with the court-ratified D1 monochrome
+  patch — decoder-confirmed gray). The lossless TU carries 22 header
+  bits + 2 pad; the lossy v2 (TS4) carries `base_q_idx` = 100 and a
+  40-bit header with real token streams. The committed artifact
+  `src/l8_bitstream/tests/goldens/structural_keyframe.obu` (45 bytes,
+  regenerated by TS4) proves the three-way identity composed TU ==
+  committed file == gate bytes and is decoder-accepted. The BSF4-fix
+  ec coupling is stated as an invariant at both l6 emission sites:
+  allow_update_cdf = 1 only because the ratified config carries
+  disable_cdf_update = 0.
 
 ## Repository layout
 
@@ -238,9 +130,10 @@ src/
   l0_core/        core types, test harness
   l1_pixels/      strided pixel buffers
   l2_gpurt/       NVRTC JIT + driver-API runtime
-  l3_transforms/  fixed-point forward/inverse transforms, 4x4+8x8+16x16
-                  +32x32+64x64 (DCT-only at 64x64), quantizer (host + GPU)
-  l4_intra/       intra prediction, 4x4+8x8+16x16+32x32+64x64 (host + GPU)
+  l3_transforms/  fixed-point forward/inverse transforms, 4x4..64x64
+                  (DCT-only at 64x64), quantizer (host + GPU)
+  l4_intra/       intra prediction, 4x4..64x64 (host + GPU, chroma
+                  via the uv2y fold)
   l5_motion/      SAD / motion (host; GPU kernels for 4x4/8x8)
   l6_pipeline/    block + frame composition, 4x4..64x64 (host + GPU)
   l7_entropy/     entropy coding: od_ec range coder, CDF adaptation,
@@ -254,6 +147,8 @@ tools/
   bench/          av1_bench: console benchmark tool (own target, not a
                   ctest; env + host/GPU frame + per-stage timings;
                   run the exe with the CUDA toolkit bin on PATH)
+  decode_handoff.ps1             decoder acceptance runner
+                                 (dav1d/aomdec/ffmpeg) + self-test
 third_party/
   SVT-AV1/        vendored source of truth (do not modify; pinned
                   snapshot — see Third-party notices)
@@ -266,7 +161,7 @@ docs/             design/research notes (e.g. native FFmpeg CUDA
 CMakeLists.txt    top-level build
 AGENTS.md         TDD methodology + CUDA-specific GREEN rules + standing
                   rules (bench-before/after, citation verification,
-                  REFERENCE PINNING)
+                  REFERENCE PINNING); the detailed layer map
 ```
 
 ## Target hardware
@@ -308,10 +203,8 @@ ctest --test-dir build -R l4_intra
   SVT-AV1 tree (see `tools/golden_gen/README.md`); its validation gate
   diffs generator output against committed tests.
 - Decode handoff: `tools/decode_handoff.ps1` runs dav1d / aomdec /
-  ffmpeg against the committed `.obu` artifact (default input = the
-  goldens artifact; dated report written to `decode_handoff_results.txt`
-  at the repo root, kept untracked) — the ffmpeg probe of the v2
-  artifact reports `av1 (libdav1d) (Main)`, gray(pc), 32x32.
+  ffmpeg against the committed `.obu` artifact (dated report written
+  to `decode_handoff_results.txt` at the repo root, kept untracked).
   `tools/test_decode_handoff.ps1` is the self-test (fake decoder,
   report-content check).
 
