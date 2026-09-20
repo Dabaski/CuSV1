@@ -31,7 +31,12 @@ above each). No golden is hand-typed.
   and the frame-policy drivers (`svtd_frame_auto_32x32_blocks/_q`,
   `svtd_frame_v_dct_32x32/_q`, `svtd_frame_auto_64x64_blocks/_q`,
   `svtd_frame_v_dct_64x64/_q` — 2x2 grids on 64x64 / 128x128 frames with the
-  FR-series REAL recon top-right gather).
+  FR-series REAL recon top-right gather), plus the entropy/bitstream
+  composition blocks: the BSF3 packer family (svtd_bsf3_sps_payload/
+  frame_header(+_v2)/frame_obu(+_v2)/encode_sps/tile_data(+_v2)), the
+  TS-series token drives (svtd_ts1/ts2/ts3_drive,
+  svtd_write/read_coeffs_txb, svtd_eob_from_coeffs), the chroma frame
+  drivers (svtd_frame_chroma_*) and the ECP1 partition helpers.
 - `main_primitives.c` — per-primitive golden dump (diffed against
   `expected_primitives.txt` by the validation gate).
 - `main_frame.c` — frame-policy composition: raster 4x4 loop where each
@@ -119,7 +124,6 @@ build\golden_gen\Release\golden_frame.exe        # D-policy frame golden
 | get_nz_map_ctx_c + svt_av1_get_nz_map_contexts_c | C_DEFAULT/encode_txb_ref_c.c:17-44 | TS1: the nz-map context filler |
 | get_eob_pos_token, get_txsize_entropy_ctx | Codec/entropy_coding.h:94-102, :110-112 | TS1: eob position token + entropy tx size |
 | write_golomb | Codec/entropy_coding.c:236-243 | TS1: golomb writer (the l7 ports the read twin from aom decodetxb.c) |
-| ObuType, AomCodecErr, EbErrorType extracts (BSF2) unchanged | | |
 | tx_blocks_per_depth, txsize_to_bsize, eb_tx_size_wide_unit/high_unit | Codec/transforms.c:24-46, Codec/inv_transforms.h:319-339, Codec/common_utils.c:65-72 | TS2: per-block TU loop bookkeeping |
 | EbErrorType (EB_ErrorNone) | API/EbSvtAv1.h:122-124 | BSF2: TD return type (only EB_ErrorNone consumed by svt_aom_encode_td_av1) |
 
@@ -155,6 +159,12 @@ that file — currently **259/259 lines identical**, covering:
 - builder gate lines: b4/b8/b16/b32/b64 families (V/DC/DC128/D45/D135/D203/
   smooth/paeth/fiv) with the upsample/corner-blend regime differences per
   size;
+- CH-series chroma gate lines: uv2y (the 16-entry g_uv2y fold table,
+  sentinels -> INTRA_INVALID), the bc4_uv* builder lines (V/DC/D45/
+  D45(-1)/CFL/SMOOTH/PAETH at TX_4X4 on the distinct UV fixture), and
+  the bcf16 frame lines (modes/recon/coeffs, +q and forced-V variants -
+  9 lines: the 4:2:0 box-average UV plane, 2x2 grid of 16x16 UV blocks
+  through the same D2 driver + g_uv2y fold);
 - frame-policy gate lines: f16/f32/f64 mode maps + recon + coeffs (lossless
   + q100) and forced-mode f16v/f32v/f64v (+q) recon/coeffs captured from the
   SVT-composed drivers (`svtd_frame_auto_*` / `svtd_frame_v_dct_*`);
@@ -287,13 +297,20 @@ l4 FI machinery actually produce and can decode:
   :1032-1037); filter-intra flag (2 symbols) + filter-intra-mode symbol (5
   symbols) gated by svt_aom_filter_intra_allowed (:5047-5060,
   mode_decision.c:108-119 - DC_PRED only, palette 0, bsize <= 32x32).
+- IN scope (TS-series additions): tx-type symbol (writeTxType/readTxType,
+  entropy_coding.c:317-353 intra path + the aom decodetxb.c reader mirror;
+  DCT_DCT through eset 2, reduced_tx_set intra, 5 symbols, gated by
+  getExtTxTypes > 1 AND base_q_idx > 0); the LUMA DCT_DCT token chain
+  (TS1/TS2: writeTxbCoeffs/readTxbCoeffs txb_skip -> eob_pt -> base/br ->
+  signs -> golomb, getTxbCtx + the DcSignLevelCoeffNa NA model, per-block
+  writeBlockCoeffs/readBlockCoeffs, whole-block TUs txb_count = 1, token
+  CDF slices at q_ctx = 0).
 - DEFERRED (named): chroma uv_mode/CFL alphas/chroma angle-delta
   (encode_intra_chroma_mode_av1 :1077-1095 - the CH-agent boundary; deferred
   to CH coordination per the approved plan); the nonkey y_mode_cdf path
-  (:1046-1058 - the pipeline is intra-only); tx_type (:317 - ext_tx sets,
-  out of the current TxType scope); palette (:4362), intrabc (:4401),
-  coefficient/token coding (separate series); od_ec_dec_bits raw bits
-  (declared-undefined in the pinned tree, EC0 deviation).
+  (:1046-1058 - the pipeline is intra-only); palette (:4362), intrabc
+  (:4401); od_ec_dec_bits raw bits (declared-undefined in the pinned
+  tree, EC0 deviation).
 
 The frame-policy golden (`golden_frame.exe`) is captured for D3.
 

@@ -2,3 +2,6 @@ build/
 t.obj
 *.obj
 .zcode/
+decode_handoff_results.txt
+ts4.y4m
+ts4_aom.y4m
