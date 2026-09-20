@@ -121,4 +121,27 @@ std::uint32_t writeFrameHeader(std::uint8_t* dst);
 std::uint32_t assembleStructuralKeyframeTU(std::uint8_t* dst, const std::uint8_t* tile_data,
                                            std::uint32_t tile_size);
 
+// TS4: the lossy header v2 (write_uncompressed_header_obu :3294-3637 lossy
+// walk). The 22 structural bits with base_q_idx = 100, then the delta_q
+// block LIVE (base_q_idx > 0, :3565-3587): delta_q_present 1 bit = 0
+// (delta_lf is nested INSIDE delta_q_present - not written at 0,
+// court-verified nesting), then all_lossless = 0 -> encode_loopfilter
+// (:2290-2299): loop_filter_level[0]/[1] 6+6 bits = 0 (the level[2]/[3]
+// U/V pair skipped at zero AND for mono, :2296-2299), sharpness 3 bits = 0,
+// mode_ref_delta_enabled 1 bit = 0, CDEF/restoration still skipped (seq
+// cdef_level = 0 / enable_restoration = 0), tx_mode_select 1 bit = 0 =
+// TX_MODE_LARGEST (:3603-3607), reduced_tx_set 1 bit = 1. Total 22 + 18 =
+// 40 bits = exactly 5 bytes, NO byte_alignment padding. Returns the header
+// length in bytes.
+std::uint32_t writeFrameHeaderV2(std::uint8_t* dst);
+
+// TS4 v2 full temporal unit: identical packer structure with the lossy
+// header v2. The SPS is shared (byte-identical at lossy - qidx is
+// frame-header state; the generator HALTs if sps_obu_v2 moves). tile_data
+// is the l7 writer output (decode-order symbols with skip = 0 + the
+// TS3-proven token chains). dst is zeroed first. Returns the total TU
+// length in bytes.
+std::uint32_t assembleStructuralKeyframeTUv2(std::uint8_t* dst, const std::uint8_t* tile_data,
+                                             std::uint32_t tile_size);
+
 }  // namespace bitstream

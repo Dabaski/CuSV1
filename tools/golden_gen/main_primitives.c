@@ -7,6 +7,8 @@
 // Drivers mirror aom_start_encode (bitstream_unit.h:230-236): point
 // ec.buf at a fixed buffer, then svt_od_ec_enc_reset.
 static uint8_t ec_buf[1024];
+static uint8_t g_sps_v1[64];
+static uint32_t g_sps_v1_size;
 static OdEcEnc ec_enc;
 static od_ec_dec ec_dec;
 static void ec_reset(void) {
@@ -1994,6 +1996,8 @@ int main(void) {
 
         memset(ec_buf, 0, 64);
         const uint32_t sps_size = svtd_bsf3_encode_sps(ec_buf);
+        memcpy(g_sps_v1, ec_buf, sps_size);
+        g_sps_v1_size = sps_size;
         printf("sps_obu %u", sps_size);
         for (uint32_t i = 0; i < sps_size; ++i) printf(" %02x", ec_buf[i]);
         printf("\n");
@@ -2037,6 +2041,55 @@ int main(void) {
         memset(frm_buf, 0, sizeof(frm_buf));
         const int rc3 = svtd_ts3_drive(frm_buf);
         if (rc3) { fprintf(stderr, "TS3 drive FAILED rc=%d\n", rc3); return 1; }
+    }
+
+    // ---- TS4: lossy header v2 + TU v2 gate lines --------------------------
+    // The ratified lossy additions: base_q_idx = 100 (VALUE change, 8 bits),
+    // delta_q_present 1 bit = 0 (delta_lf nested inside, :3565-3587),
+    // encode_loopfilter zeros 6+6+3+1 (U/V level pair skipped at zero + mono,
+    // :2290-2299), tx_mode_select 1 bit = 0 = LARGEST (:3603-3607). 22 + 18
+    // = 40 bits = 5 bytes, no padding. CDEF/restoration still skipped (seq
+    // cdef_level = 0 / enable_restoration = 0). The SPS carries NO lossy
+    // state (qidx is frame-header state): sps_obu_v2 must be byte-identical
+    // to sps_obu - HALT (exit 1) if it moves. Tile v2 = the v1 walk with
+    // skip = 0 (ctx 0 everywhere) + the TS3-proven token chains
+    // (svtd_bsf3_tile_data_v2: the same deterministic encode as the TS3
+    // drive, NA-driven dc_sign_ctx, intra_dir = the decided mode).
+    {
+        static uint8_t tile_buf2[512];
+        static uint8_t obu_buf2[256];
+        static uint8_t tu_buf2[1024];
+        static uint8_t sps_buf2[64];
+        memset(tile_buf2, 0, sizeof(tile_buf2));
+        memset(obu_buf2, 0, sizeof(obu_buf2));
+        memset(tu_buf2, 0, sizeof(tu_buf2));
+        memset(sps_buf2, 0, sizeof(sps_buf2));
+
+        const uint32_t sps_size2 = svtd_bsf3_encode_sps(sps_buf2);
+        if (sps_size2 != g_sps_v1_size || memcmp(sps_buf2, g_sps_v1, sps_size2) != 0) {
+            fprintf(stderr, "TS4 HALT: sps_obu_v2 differs from sps_obu (SPS must not move at lossy)\n");
+            return 1;
+        }
+        printf("sps_obu_v2 %u", sps_size2);
+        for (uint32_t i = 0; i < sps_size2; ++i) printf(" %02x", sps_buf2[i]);
+        printf("\n");
+
+        const uint32_t tile_size2 = svtd_bsf3_tile_data_v2(tile_buf2);
+        if (tile_size2 == 0) { fprintf(stderr, "TS4 tile v2 FAILED\n"); return 1; }
+
+        memset(obu_buf2, 0, sizeof(obu_buf2));
+        const uint32_t frame_size2 = svtd_bsf3_frame_obu_v2(obu_buf2, tile_buf2, tile_size2);
+        printf("frame_obu_v2 %u", frame_size2);
+        for (uint32_t i = 0; i < frame_size2; ++i) printf(" %02x", obu_buf2[i]);
+        printf("\n");
+
+        svt_aom_encode_td_av1(tu_buf2);
+        memcpy(tu_buf2 + 2, sps_buf2, sps_size2);
+        memcpy(tu_buf2 + 2 + sps_size2, obu_buf2, frame_size2);
+        const uint32_t tu_size2 = 2 + sps_size2 + frame_size2;
+        printf("tu_bytes_v2 %u", tu_size2);
+        for (uint32_t i = 0; i < tu_size2; ++i) printf(" %02x", tu_buf2[i]);
+        printf("\n");
     }
     return 0;
 }

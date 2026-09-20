@@ -229,6 +229,46 @@ std::uint32_t writeFrameHeader(std::uint8_t* dst) {
     return wbBytesWritten(&wb);
 }
 
+// TS4: the lossy header v2 (write_uncompressed_header_obu :3294-3637
+// lossy walk). The 22 structural bits with base_q_idx = 100 (VALUE change,
+// still 8 bits), then the delta_q block LIVE (base_q_idx > 0,
+// :3565-3587): delta_q_present 1 bit = 0 (delta_lf is nested INSIDE
+// delta_q_present - not written at 0, court-verified nesting), then
+// all_lossless = 0 -> encode_loopfilter (:2290-2299): loop_filter_level[0]
+// 6 bits = 0, loop_filter_level[1] 6 bits = 0 (the level[2]/[3] U/V pair
+// skipped at zero AND for mono, :2296-2299), sharpness 3 bits = 0,
+// mode_ref_delta_enabled 1 bit = 0 (deltas skipped), CDEF/restoration
+// still skipped (seq cdef_level = 0 / enable_restoration = 0),
+// tx_mode_select 1 bit = 0 = TX_MODE_LARGEST (:3603-3607), reduced_tx_set
+// 1 bit = 1. Total 22 + 18 = 40 bits = exactly 5 bytes, NO byte_alignment
+// padding.
+std::uint32_t writeFrameHeaderV2(std::uint8_t* dst) {
+    AomWriteBitBuffer wb = {dst, 0};
+    wbWriteBit(&wb, 0);           // show_existing_frame (:3333)
+    wbWriteLiteral(&wb, 0, 2);    // frame_type = KEY_FRAME (:3336)
+    wbWriteBit(&wb, 1);           // show_frame (:3338)
+    wbWriteBit(&wb, 0);           // disable_cdf_update (:3350; BSF4-fix)
+    wbWriteBit(&wb, 0);           // allow_screen_content_tools (:3352-3353)
+    wbWriteBit(&wb, 0);           // frame_size_override_flag (:3386)
+    wbWriteBit(&wb, 0);           // render_and_frame_size_different (:2616-2624)
+    wbWriteBit(&wb, 1);           // refresh_frame_context == DISABLED (:3553)
+    wbWriteBit(&wb, 1);           // uniform_tile_spacing_flag (:2405)
+    wbWriteLiteral(&wb, 100, 8);  // base_q_idx = 100 (encode_quantization :2376)
+    wbWriteBit(&wb, 0);           // delta_q Y dc (:2365-2372)
+    // D1 span 3: U/V delta_q writes (:2385-2386) SKIPPED for mono
+    wbWriteBit(&wb, 0);           // using_qmatrix (:2391)
+    wbWriteBit(&wb, 0);           // segmentation_enabled (:2255)
+    wbWriteBit(&wb, 0);           // delta_q_present (:3565-3587; delta_lf nested)
+    wbWriteLiteral(&wb, 0, 6);    // loop_filter_level[0] (:2290-2299)
+    wbWriteLiteral(&wb, 0, 6);    // loop_filter_level[1] (U/V pair [2]/[3] skipped)
+    wbWriteLiteral(&wb, 0, 3);    // loop_filter_sharpness
+    wbWriteBit(&wb, 0);           // loop_filter_delta_enabled (deltas skipped)
+    wbWriteBit(&wb, 0);           // tx_mode_select = 0 -> TX_MODE_LARGEST (:3603-3607)
+    wbWriteBit(&wb, 1);           // reduced_tx_set (:3626)
+    // NO trailing bits: appendTrailingBits = show_existing = 0 (:3858)
+    return wbBytesWritten(&wb);
+}
+
 // svt_aom_encode_sps_av1 (:3925-3948) structure: phase 1 measure, phase 2
 // rewrite (the payload size depends on its own content; the content is
 // stable across the two writes)
@@ -261,6 +301,42 @@ static std::uint32_t bsf3FrameObu(std::uint8_t* dst, const std::uint8_t* tile_da
         dst[write_offset + frame_hdr_size + tg_hdr_size + i] = tile_data[i];
     }
     return write_offset + obu_payload_size;
+}
+
+// TS4 v2 packer: identical structure with the lossy header v2. The SPS is
+// shared (byte-identical at lossy - qidx is frame-header state; the
+// generator HALTs if sps_obu_v2 moves).
+static std::uint32_t bsf3FrameObuV2(std::uint8_t* dst, const std::uint8_t* tile_data,
+                                    std::uint32_t tile_size) {
+    const std::uint32_t obu_header_size = writeObuHeader(OBU_FRAME, 0, dst);
+    const std::uint32_t frame_hdr_size = writeFrameHeaderV2(dst + obu_header_size);
+    const std::uint32_t tg_hdr_size = 0;  // single tile: 0 bytes (:3770-3772)
+    const std::uint32_t obu_payload_size = frame_hdr_size + tg_hdr_size + tile_size;
+    const std::size_t length_field_size = ulebSizeInBytes(obu_payload_size);
+    std::size_t coded_size = 0;
+    ulebEncode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
+    const std::uint32_t write_offset = obu_header_size + static_cast<std::uint32_t>(length_field_size);
+    writeFrameHeaderV2(dst + write_offset);  // phase 2 rewrite (:3896)
+    for (std::uint32_t i = 0; i < tile_size; ++i) {
+        dst[write_offset + frame_hdr_size + tg_hdr_size + i] = tile_data[i];
+    }
+    return write_offset + obu_payload_size;
+}
+
+std::uint32_t assembleStructuralKeyframeTUv2(std::uint8_t* dst, const std::uint8_t* tile_data,
+                                             std::uint32_t tile_size) {
+    // Zero the region first: the byte-aligned 40-bit header needs no pad
+    // bits, but the tile offset must be exact; zeroing guarantees the spec's
+    // zero state for any future pad (named, as in the v1 assembler).
+    // Upper bound: 2 (TD) + SPS (<= 16) + FRAME (<= 96); zero 128 to cover
+    // every ratified-config TU.
+    for (std::uint32_t i = 0; i < 128; ++i) dst[i] = 0;
+    std::uint32_t offset = 0;
+    encodeTdAv1(dst + offset);
+    offset += 2;  // TD_SIZE (packetization_process.c:300)
+    offset += bsf3EncodeSps(dst + offset);
+    offset += bsf3FrameObuV2(dst + offset, tile_data, tile_size);
+    return offset;
 }
 
 std::uint32_t assembleStructuralKeyframeTU(std::uint8_t* dst, const std::uint8_t* tile_data,

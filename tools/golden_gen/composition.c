@@ -2559,6 +2559,65 @@ static uint32_t svtd_bsf3_frame_obu(uint8_t* dst, const uint8_t* tile_data, uint
     return write_offset + obu_payload_size;
 }
 
+// ---- TS4: lossy header v2 (the ratified additions) -------------------------
+// write_uncompressed_header_obu (:3294-3637) lossy walk: the 22 structural
+// bits with base_q_idx = 100 (VALUE change, still 8 bits), then the
+// delta_q block LIVE (base_q_idx > 0, :3565-3587): delta_q_present 1 bit = 0
+// (delta_lf is nested INSIDE delta_q_present - not written at 0, court-
+// verified nesting), then all_lossless = 0 -> encode_loopfilter (:2290-2299):
+// loop_filter_level[0] 6 bits = 0, loop_filter_level[1] 6 bits = 0 (the
+// level[2]/[3] U/V pair skipped at zero AND for mono, :2296-2299),
+// sharpness 3 bits = 0, mode_ref_delta_enabled 1 bit = 0 (deltas skipped),
+// CDEF/restoration still skipped (seq cdef_level = 0 / enable_restoration
+// = 0), tx_mode_select 1 bit = 0 = TX_MODE_LARGEST (:3603-3607),
+// reduced_tx_set 1 bit = 1. Total 22 + 18 = 40 bits = exactly 5 bytes, NO
+// byte_alignment padding.
+static void svtd_bsf3_frame_header_v2(AomWriteBitBuffer* wb) {
+    svt_aom_wb_write_bit(wb, 0);           // show_existing_frame (:3333)
+    svt_aom_wb_write_literal(wb, 0, 2);    // frame_type = KEY_FRAME (:3336)
+    svt_aom_wb_write_bit(wb, 1);           // show_frame (:3338)
+    svt_aom_wb_write_bit(wb, 0);           // disable_cdf_update (:3350; BSF4-fix)
+    svt_aom_wb_write_bit(wb, 0);           // allow_screen_content_tools (:3352-3353)
+    svt_aom_wb_write_bit(wb, 0);           // frame_size_override_flag (:3386)
+    svt_aom_wb_write_bit(wb, 0);           // render_and_frame_size_different (:2616-2624)
+    svt_aom_wb_write_bit(wb, 1);           // refresh_frame_context == DISABLED (:3553)
+    svt_aom_wb_write_bit(wb, 1);           // uniform_tile_spacing_flag (:2405)
+    svt_aom_wb_write_literal(wb, 100, 8);  // base_q_idx = 100 (encode_quantization :2376)
+    svt_aom_wb_write_bit(wb, 0);           // delta_q Y dc (write_delta_q :2365-2372)
+    // D1 span 3: U/V delta_q writes (:2385-2386) SKIPPED for mono.
+    svt_aom_wb_write_bit(wb, 0);           // using_qmatrix (:2391)
+    svt_aom_wb_write_bit(wb, 0);           // segmentation_enabled (:2255)
+    svt_aom_wb_write_bit(wb, 0);           // delta_q_present (:3565-3587; delta_lf nested)
+    svt_aom_wb_write_literal(wb, 0, 6);    // loop_filter_level[0] (:2290-2299)
+    svt_aom_wb_write_literal(wb, 0, 6);    // loop_filter_level[1] (U/V pair [2]/[3] skipped)
+    svt_aom_wb_write_literal(wb, 0, 3);    // loop_filter_sharpness
+    svt_aom_wb_write_bit(wb, 0);           // loop_filter_delta_enabled (deltas skipped)
+    // CDEF/restoration skipped (seq cdef_level = 0 / enable_restoration = 0)
+    svt_aom_wb_write_bit(wb, 0);           // tx_mode_select = 0 -> TX_MODE_LARGEST (:3603-3607)
+    svt_aom_wb_write_bit(wb, 1);           // reduced_tx_set (:3626; ratified)
+}
+
+static uint32_t svtd_bsf3_frame_header_obu_v2(uint8_t* dst) {
+    AomWriteBitBuffer wb = {dst, 0};
+    svtd_bsf3_frame_header_v2(&wb);
+    return svt_aom_wb_bytes_written(&wb);
+}
+
+static uint32_t svtd_bsf3_frame_obu_v2(uint8_t* dst, const uint8_t* tile_data, uint32_t tile_size) {
+    const uint32_t obu_header_size = write_obu_header(OBU_FRAME, 0, dst);
+    const uint32_t frame_hdr_size  = svtd_bsf3_frame_header_obu_v2(dst + obu_header_size);
+    const uint32_t tg_hdr_size     = 0;
+    const uint32_t obu_payload_size = frame_hdr_size + tg_hdr_size + tile_size;
+    const size_t length_field_size  = svt_aom_uleb_size_in_bytes(obu_payload_size);
+    size_t coded_size;
+    svt_aom_uleb_encode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
+    const uint32_t write_offset = obu_header_size + (uint32_t)length_field_size;
+    svtd_bsf3_frame_header_obu_v2(dst + write_offset);  // phase 2 rewrite
+    memcpy(dst + write_offset + frame_hdr_size + tg_hdr_size, tile_data, tile_size);
+    return write_offset + obu_payload_size;
+}
+
+
 
 // ---- TS1: per-TU coefficient chain (entropy_coding.c:355-544 LUMA DCT_DCT
 // path) + the decoder-order read twin (aom decodetxb.c read_coeffs_txb) ----
@@ -3249,6 +3308,160 @@ static int svtd_eob_from_coeffs(const TranLow* coeff, const int16_t* scan, TxSiz
         if (coeff[scan[c]] != 0) eob = c + 1;
     }
     return eob;
+}
+
+// Lossy tile v2: the v1 partition/kf-mode walk with skip = 0 (context 0 for
+// every block: all neighbors coded skip = 0, unavailable -> 0 per
+// av1_get_skip_context) and the TS3-proven token chain appended per leaf
+// (txb_skip = 0 inside the chain + tx-type + eob + coefficients). The
+// coefficients are the REAL encode: the same deterministic loop as
+// svtd_ts3_drive (f16 fixture, D2 decision against the recon feedback,
+// quantize_fp at q100, NA-driven dc_sign_ctx) - TS3c proved this path
+// bit-exact vs the l6 pipeline.
+static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
+    uint8_t src[1024];
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) src[y * 32 + x] = (y < 16) ? (uint8_t)(4 * (x + y + 1)) : 0;
+
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(100, &t);
+    int16_t scan16[256];
+    svtd_default_scan_16x16(scan16);
+
+    Ts1FrameContext fc;
+    ts1_init(&fc);
+
+    uint8_t recon[1024];
+    memset(recon, 0, sizeof(recon));
+    int modes[4] = {0};
+    uint16_t eobs[4] = {0};
+    static TranLow all_qc[4][256];
+
+    AomWriter w;
+    w.ec.buf = dst;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos              = 0;
+
+    // partition + skip cdfs (fresh defaults, same as the v1 walk)
+    static AomCdfProb part_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+    memcpy(part_cdf, default_partition_cdf, sizeof(part_cdf));
+    static AomCdfProb skip_cdf[SKIP_CONTEXTS][CDF_SIZE(2)];
+    memcpy(skip_cdf, default_skip_cdfs, sizeof(skip_cdf));
+
+    uint8_t above_pctx[8];
+    uint8_t left_pctx[16];
+    memset(above_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(above_pctx));
+    memset(left_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(left_pctx));
+
+    uint8_t above_na[16], left_na[8];
+    memset(above_na, (int)INVALID_NEIGHBOR_DATA, sizeof(above_na));
+    memset(left_na, (int)INVALID_NEIGHBOR_DATA, sizeof(left_na));
+
+    static const int px[4][2] = {{0, 0}, {16, 0}, {0, 16}, {16, 16}};
+    static const int lr[4] = {0, 0, 4, 4};
+    static const int lc[4] = {0, 4, 0, 4};
+
+    // encode loop (identical to svtd_ts3_drive): decision pass fills recon,
+    // modes, eobs, coefficients
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const int r = px[b][1], c = px[b][0];
+        const int hasTop = by > 0, hasLeft = bx > 0;
+        const int nTop = hasTop ? 16 : 0, nLeft = hasLeft ? 16 : 0;
+        const int nTr = (hasTop && bx + 1 < 2) ? 16 : 0;
+        uint8_t above[33] = {0}, left_edge[33] = {0};
+        uint8_t al = 0;
+        if (hasTop) svtd_gather_above(above, recon, 32, c, r, 16, nTr);
+        if (hasLeft) for (int i = 0; i < 16; ++i) left_edge[i] = recon[(r + i) * 32 + c - 1];
+        if (hasTop && hasLeft) al = recon[(r - 1) * 32 + c - 1];
+        const int aboveMode = hasTop ? modes[(by - 1) * 2 + bx] : DC_PRED;
+        const int leftMode = hasLeft ? modes[by * 2 + bx - 1] : DC_PRED;
+        svtd_filt_type = ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED || aboveMode == SMOOTH_H_PRED) ||
+                          (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED || leftMode == SMOOTH_H_PRED)) ? 1 : 0;
+        uint8_t srcblk[256];
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(r + i) * 32 + c + j];
+        uint32_t best_sad = 0; int mode = -1;
+        for (int m = 0; m <= PAETH_PRED; ++m) {
+            uint8_t pred[256];
+            svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+            const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, 16, pred, 16, 16, 16);
+            if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+        }
+        modes[b] = mode;
+        uint8_t pred[256];
+        svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+        int16_t res[256];
+        for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+        int32_t cb[256];
+        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        TranLow qc[256], dq[256];
+        uint16_t eob = 0;
+        svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
+        eobs[b] = eob;
+        memcpy(all_qc[b], qc, sizeof(all_qc[b]));
+        svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < 16; ++j) recon[(r + i) * 32 + c + j] = pred[i * 16 + j];
+    }
+
+    // tile symbol emission: partition plane + per-leaf skip(0) + kf mode +
+    // angle delta + token chain (the TS3-proven per-block symbol sequence)
+    EcPartState st = {&w, part_cdf, above_pctx, left_pctx, 8, 32, 0};
+    const int ctx32 = ecpart_derive_ctx(st.above, st.left, 0, 0, BLOCK_32X32);
+    aom_write_symbol(&w, PARTITION_SPLIT, part_cdf[ctx32], svt_aom_partition_cdf_length(BLOCK_32X32));
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const int r = px[b][1], c = px[b][0];
+        const int pctx = ecpart_derive_ctx(st.above, st.left, lr[b], lc[b], BLOCK_16X16);
+        aom_write_symbol(&w, PARTITION_NONE, part_cdf[pctx], svt_aom_partition_cdf_length(BLOCK_16X16));
+        ecpart_update_ctx(st.above, st.left, lr[b], lc[b], BLOCK_16X16);
+        // skip = 0: every block codes its residual; the context is
+        // above_skip + left_skip = 0 for all four (all neighbors coded
+        // skip = 0, unavailable -> 0)
+        aom_write_symbol(&w, 0, skip_cdf[0], 2);
+        const int aboveMode = by > 0 ? modes[(by - 1) * 2 + bx] : DC_PRED;
+        const int leftMode = bx > 0 ? modes[by * 2 + bx - 1] : DC_PRED;
+        const int top_ctx = intra_mode_context[aboveMode < 0 ? DC_PRED : (PredictionMode)aboveMode];
+        const int left_ctx = intra_mode_context[leftMode < 0 ? DC_PRED : (PredictionMode)leftMode];
+        aom_write_symbol(&w, modes[b], fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+        if (av1_is_directional_mode((PredictionMode)modes[b])) {
+            aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[modes[b] - V_PRED],
+                             2 * MAX_ANGLE_DELTA + 1);
+        }
+        // token chain (TS1+TS2+TS3): txb_skip_ctx = 0 (whole-block TU),
+        // dc_sign_ctx from the NA sweep, intra_dir = the decided mode
+        const int tx_w = eb_tx_size_wide_unit[TX_16X16];
+        const int tx_h = eb_tx_size_high_unit[TX_16X16];
+        uint8_t* above_ptr = &above_na[px[b][0] / 4];
+        uint8_t* left_ptr = &left_na[px[b][1] / 4];
+        int16_t dc_sign = 0;
+        if (above_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_w; ++k) dc_sign += ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((above_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        if (left_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            for (int k = 0; k < tx_h; ++k) dc_sign += ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 1) ? -1 : ((left_ptr[k] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+        const int eob_tok = svtd_eob_from_coeffs(all_qc[b], scan16, TX_16X16);
+        svtd_write_coeffs_txb(&w, &fc, all_qc[b], scan16, TX_16X16, eob_tok, 0, dc_sign_ctx,
+                              (PredictionMode)modes[b]);
+        if (eob_tok != (int)eobs[b]) { fprintf(stderr, "TS4 tile v2 eob mismatch\n"); return 0; }
+        // NA update (packed cul_level + dc sign, over the TU MI extent)
+        int32_t cul = 0;
+        for (int q = 0; q < eob_tok; ++q) cul += abs((int)all_qc[b][scan16[q]]);
+        cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+        if (eob_tok > 0) {
+            if (all_qc[b][0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+            else if (all_qc[b][0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+        }
+        for (int k = 0; k < tx_w; ++k) above_ptr[k] = (uint8_t)cul;
+        for (int k = 0; k < tx_h; ++k) left_ptr[k] = (uint8_t)cul;
+        (void)r; (void)c;
+    }
+    aom_stop_encode(&w);
+    return w.pos;
 }
 
 static int svtd_ts2_drive(uint8_t* buf) {
