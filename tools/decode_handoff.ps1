@@ -65,7 +65,10 @@ $results.Add("")
 
 Invoke-DecodeCommand "dav1d" $Dav1dCommand @("-i", $InputPath, "-o", $dav1dOutput)
 Invoke-DecodeCommand "aomdec" $AomdecCommand @("-o", $aomdecOutput, $InputPath)
-Invoke-DecodeCommand "ffmpeg" $FfmpegCommand @("-hide_banner", "-i", $InputPath)
+# ffmpeg requires an output target: the bare "-i input" form exits 1 with
+# "At least one output file must be specified". Decode fully to the null
+# muxer so the runner still measures a real full decode.
+Invoke-DecodeCommand "ffmpeg" $FfmpegCommand @("-hide_banner", "-i", $InputPath, "-f", "null", "-")
 
 $results.Add("summary: $failures decoder command(s) failed")
 $results.Add("finished: $(Get-Date -Format o)")
