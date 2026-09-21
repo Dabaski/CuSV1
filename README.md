@@ -27,14 +27,24 @@ JIT-compiled at runtime via NVRTC.
   `av1 (libdav1d) (Main)`, gray(pc), 32x32. This is probe-level
   evidence; the attested full decode is the lossless TU above.
 - All layers green: 9 doctest targets pass, and the golden gate
-  reproduces the committed `expected_primitives.txt` 259/259 lines.
+  reproduces the committed `expected_primitives.txt` 277/277 lines.
+- **Open (TD-series): decoder conformance beyond the attested
+  artifacts.** Our writer-reader roundtrip is exact, every skip=1
+  probe stream conforms bit-exact in libdav1d and libaom, but probe
+  streams with skip=0 token chains desync the real decoders. The
+  context surface is gate-exonerated (958,272 exhaustive assertions);
+  the named suspects and instruments live in
+  `docs/decode_conformance.md`.
 
 ## What's implemented
 
 Each layer is developed under incremental TDD (see `AGENTS.md`); GPU
 twins are held to bit-exact agreement with the SVT host reference.
-Symbol-by-symbol provenance and the gate-line inventory live in
-`AGENTS.md` and `tools/golden_gen/README.md`.
+Symbol-by-symbol provenance lives in `docs/provenance.md` and
+`tools/golden_gen/README.md`; the gate-line inventory in the latter.
+How the stack works end to end: `docs/layers.md`; the bitstream path:
+`docs/bitstream.md`; decoder-acceptance status:
+`docs/decode_conformance.md`.
 
 - **l0_core** — minimal shared types: `Sample` (uint8), `BlockSize`.
 - **l1_pixels** — `pixels::Plane`: strided pixel buffer with left/right
@@ -149,6 +159,9 @@ tools/
                   run the exe with the CUDA toolkit bin on PATH)
   decode_handoff.ps1             decoder acceptance runner
                                  (dav1d/aomdec/ffmpeg) + self-test
+  td0_ladder.ps1                 decoder-conformance bisect ladder
+                                 (TD-series; see
+                                 docs/decode_conformance.md)
 third_party/
   SVT-AV1/        vendored source of truth (do not modify; pinned
                   snapshot — see Third-party notices)

@@ -1,12 +1,12 @@
 # PV — function-by-function provenance table
 
-Every port artifact in `src/l3_transforms`, `src/l4_intra`, `src/l5_motion`
-and `src/l6_pipeline` (plus the l2 runtime and fixture classification below)
-traced to the pinned vendored reference (`third_party/SVT-AV1/`, REFERENCE
-PINNING rule in `AGENTS.md`). l0_core/l1_pixels are infrastructure with no
-SVT symbol to trace (single policy row in the classification section).
-Status
-vocabulary:
+Every port artifact in `src/l3_transforms`, `src/l4_intra`,
+`src/l5_motion`, `src/l6_pipeline`, `src/l7_entropy` and
+`src/l8_bitstream` (plus the l2 runtime and fixture classification
+below) traced to the pinned vendored reference (`third_party/SVT-AV1/`,
+REFERENCE PINNING rule in `AGENTS.md`). l0_core/l1_pixels are
+infrastructure with no SVT symbol to trace (single policy row in the
+classification section). Status vocabulary:
 
 - **exact (mech)** — the SVT body was ported mechanically from the committed
   verbatim extract (`svt_gen.c`) with identifier/table renames only; the
@@ -15,7 +15,7 @@ vocabulary:
 - **exact (hand)** — hand-transcribed from the SVT source with the
   arithmetic text unchanged (mechanical renames, C++ `std::` spellings);
   bit-exactness is gate-proven by `tools/golden_gen`
-  (expected_primitives.txt, 178 lines). All pre-extract-era ports (the
+  (expected_primitives.txt, 277 lines). All pre-extract-era ports (the
   C-series 4x4/8x8/16x16 kernels, the L-series 32x32 kernels, the helpers,
   and all of l4/l5) are this class.
 - **adapted** — SVT structure is preserved but the port changes shape:
@@ -108,6 +108,50 @@ port (tests in test_transform.cpp).
 | — | `decideBlockMode4x4/8x8/16x16/32x32/64x64` (decideBlockMode64x64 at :679) | policy | D2 policy is OURS: all 13 PredictionModes scored by SAD (SVT primitives), lowest wins, tie = lowest mode index; SVT selects modes via RD/trellis machinery we do not port |
 | — | fixed `defaultScan*` for every block in the Q frame loops | policy | SVT selects scan order per mode/tx-type via get_scan_order; ours is fixed default scan (named in each loop's comment) |
 | — | `NeighborContext` (filt_type plumbing) | policy | carries the two neighbor modes the generator shim needs; value semantics match enc_intra_prediction.c:186 |
+| kf luma symbol emission via l7 (BSF1) | in `encodeFrameAuto16x16`/`encodeFrameAuto16x16Q` | adapted | per block in raster order: getKfYModeCtx (entropy_coding.c:1004-1021) from the DECIDED neighbor modes + writeKfLumaMode (:1026-1040) + angle delta (directional, delta 0) + writeFilterIntra flag=0 where filterIntraAllowed (mode_decision.c:108-119); allow_update_cdf = 1 forced, ends with odEcStopEncode — see the BSF4-fix coupling invariant (deviations, item 6) |
+| token emission via l7 (TS3) | in the 16x16 Q path (`entropy::writeBlockCoeffs`, pipeline.cpp:984-988) | adapted | skip = 0 for all blocks (no skip decision), NA-driven contexts, intra_dir = the decided mode; the ecfrm_* gate lines pin modes AND eobs AND coeffs AND recon AND the byte stream equal to the generator drive |
+
+## l7_entropy (src/l7_entropy/entropy.cpp)
+
+| SVT symbol (file:line) | Port artifact(s) | Status | Notes |
+| --- | --- | --- | --- |
+| svt_od_ec_enc_* encoder family (bitstream_unit.c:77-408) | `odEcEncReset`/`odEcEncodeBoolEqQ15`/`odEcEncodeBoolQ15`/`odEcEncodeCdfQ15`/`odEcEncDone`/`odEcEncTell`/`odEcEncTellFrac` | exact (hand) | verbatim semantics; named deviations: OD_MEASURE_EC_OVERHEAD #if blocks omitted (upstream 0), EB_UNLIKELY -> plain if, NOINLINE dropped, asserts dropped; two explicit static_cast<int16_t> where SVT's C narrows implicitly |
+| OdEcEnc struct (bitstream_unit.h:101-120) | `OdEcEnc` + `OdEcWindow` | exact (hand) | verbatim member layout |
+| od_ec_dec family (third_party/aom_dsp entdec.c:78-283) | `OdEcDec`, `odEcDecInit`, refill/normalize, `odEcDecodeBoolQ15`/`odEcDecodeCdfQ15`, `odEcDecTell` | exact (hand) | vendored aom_dsp subtree; explicit casts where SVT's C narrows; see deviation: od_ec_dec_bits_ |
+| update_cdf (cabac_context_model.h:76-105) | `updateCdf` | exact (hand) | the one CDF adaptation primitive; rate = 4 + (count>>4) + (nsymbs>3), counter capped at 32 |
+| aom_write_symbol (bitstream_unit.h:265-279), aom_stop_encode (:245-253) | `odEcWriteSymbol`/`odEcStopEncode` + `AomWriter` | adapted | nsymbs==2 -> bool(cdf[0]) routing + allow_update_cdf adaptation verbatim; buffer_parent/ownership glue dropped (caller assigns ec.buf) |
+| aom_reader family (bitreader.c:14-22, bitreader.h:84-98) | `AomReader`/`odEcReaderInit`/`odEcReadCdf`/`odEcReadSymbol` + `odEcReadBit` (p=16384) | adapted | reader struct shape deviates from the vendored one (see deviations, item 7); ACCT_STR dropped |
+| BlockSize enum (definitions.h:883-905), PredictionMode intra subset (:1169-1204), FilterIntraMode (:1295-1302), TxSize/TxType/TxSetType/TxClass/PartitionType/PlaneType | layer enums | exact (hand) | full SVT BlockSize mirrored because filter_intra_cdfs indexes by it; l0_core::BlockSize stays the project-minimal variant |
+| svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021) | `getKfYModeCtx` | exact (hand) | flattened: neighbor modes as explicit args (SVT reads from xd) |
+| encode_intra_luma_mode_kf_av1 (:1026-1040) + angle-delta (:1032-1037) | `writeKfLumaMode`/`readKfLumaMode` | exact (hand) | ctx pair passed in; reader returns the decoded mode + raw delta symbol |
+| filter-intra pair (:5047-5060) + predicate (mode_decision.c:108-119) | `writeFilterIntra`/`readFilterIntra`/`filterIntraAllowed`(+Bsize) | exact (hand) | CONFIG_ENABLE_FILTER_INTRA=1 resolved from the non-RTC defaults (EbConfigMacros.h:203) |
+| default CDF tables (cabac_context_model.c:59, :87, :134-155, :157, :594-596, :614, :618, :801-1860) | `EcFrameContext` tables + `initDefaultEcFrameContext` (COPY_CDF of :740-767 slice) | exact (hand) | kf_y/angle_delta/filter_intra(_mode)/partition/skip/txb token tables (q_ctx=0 slices via .inc files) + intra_ext_tx_cdf whole [3][4][13][17] |
+| svt_aom_partition_cdf_length (entropy_coding.c:922-930), partition_plane_context (:945-960), encode_partition_av1 (:962-978), update_partition_context (coding_loop.c:1700-1713), gather cdfs (cabac_context_model.h:373-405) | `partitionCdfLength`/`partitionPlaneContext`/`writePartition`/`updatePartitionContext`/`partitionGather*` | exact (hand) | forced split writes NOTHING; gathered 2-symbol XOR branches with the temporary's adaptation discarded; INVALID 0xFF -> 0 |
+| aom read_partition (decodeframe.c:1266-1293) | `readPartition` | adapted | aom decoder semantics, out-of-tree arbiter (no aom code extracted); gathered reads non-adapting |
+| av1_get_skip_context (:983-989) + encode_skip_coeff_av1 (:995-1000) | `getSkipContext`/`writeSkip`/`readSkip` | exact (hand) | read twin = aom read_skip_txfm (decodemv semantics, arbiter); SEG_LVL_SKIP implicit-1 branch deferred with segmentation |
+| LUMA DCT_DCT token chain (entropy_coding.c:355-544) | `writeTxbCoeffs`/`readTxbCoeffs` | exact (hand) | writer = svt write path, reader = aom decodetxb.c read_coeffs_txb symbol-for-symbol (incremental lower-level/br contexts, group-start derivation) |
+| get_txb_ctx (entropy_coding.c:248-315) | `getTxbCtx` + `DcSignLevelCoeffNa` NA model | adapted | above[64]/left[64] flat uint8, packed (dc_sign << 6 | cul_level), sweep + OR-accumulate; txb_skip_ctx = 0 (whole-block TUs, :298-299); skip_contexts/chroma branches ported but dead for our luma case |
+| eb_av1_nz_map_ctx_offset[19] (coefficients.c:24-303) + level helpers (coefficients.h:28-200) | `getNzMag`/`getNzMapCtxFromStats`/`getLowerLevelsCtx`(+Eob)/`getBrCtx`(+Eob)/`getPaddedIdx` + nz_map_ctx_offset.inc | exact (hand) | the full per-position pointer array (an initial hardcoded [TX_SIZES][26] guess was caught by the gate); nz-map is_eob position-only branch verbatim |
+| svt_av1_txb_init_levels_c (rd_cost.c:93-105) | `txbInitLevels` | exact (hand) | abs/clamp level init, TX_PAD_2D state |
+| svt_aom_get_nz_map_contexts_c (C_DEFAULT/encode_txb_ref_c.c:17-44) | `getNzMapContexts` | exact (hand) | |
+| write_golomb (entropy_coding.c:236-243) + aom read_golomb twin | `writeGolomb`/`readGolomb` | exact (hand) | read twin from aom decodetxb.c; gate-enumerated byte-identical over [0,65535] (TD2) |
+| tx-type surface (entropy_coding.c:317-353, common_utils.c:195-209, cabac_context_model.c:34-50) | `writeTxType`/`readTxType`/`getExtTxSetType`/`getExtTxSet`/`getExtTxTypes` + ExtTx tables | exact (hand) | reader mirror = aom decodetxb.c av1_read_tx_type; gated by getExtTxTypes > 1 AND base_q_idx > 0; DCT_DCT through eset 2 (DTT4_IDTX, 5 symbols, reduced_tx_set=1 intra) |
+| odEcWriteLiteralBit(s) (bitstream_unit.h:255-263) | `odEcWriteLiteralBit`/`odEcWriteLiteralBits` | exact (hand) | |
+
+## l8_bitstream (src/l8_bitstream/bitstream.cpp)
+
+| SVT symbol (file:line) | Port artifact(s) | Status | Notes |
+| --- | --- | --- | --- |
+| AomWriteBitBuffer (entropy_coding.h:116-119) + wb family (entropy_coding.c:1343-1382) | `AomWriteBitBuffer`, `wbIsByteAligned`/`wbBytesWritten`/`wbWriteBit`/`wbWriteLiteral`/`wbWriteInvSignedLiteral` | exact (hand) | NOINLINE hint dropped (l7 precedent); bodies via the inlined statics :1351-1370 |
+| svt_aom_uleb_size_in_bytes + svt_aom_uleb_encode (entropy_coding.c:1313-1341) | `ulebSizeInBytes`/`ulebEncode` | exact (hand) | k_maximum_leb_128 constants folded, verbatim values (16383 = ff 7f measured) |
+| write_obu_header (entropy_coding.c:3639-3654) | `writeObuHeader` | adapted | deviation: static in SVT, public here (consumed by tests + BSF3) |
+| write_uleb_obu_size (:3656-3666), svt_aom_encode_td_av1 (:3953-3960) | `writeUlebObuSize`/`encodeTdAv1` | exact (hand) | TD return flattened EbErrorType -> 0 (API/EbSvtAv1.h:123); TD = exactly 2 bytes (12 00) |
+| ObuType (av1_structs.h:22-32), AomCodecErr (definitions.h:1493-1497) | layer enums | exact (hand) | OK/ERROR slice only (consumed by write_uleb_obu_size) |
+| write_sequence_header_obu (:3699-3763) + add_trailing_bits (:3668-3675) | `writeSequenceHeaderObu` | adapted | ratified BSF0(g) field values (profile 0, still_picture=1, monochrome per D1, 32x32 = max dims, filter-intra 1, order_hint 0 per D3, ...); payload only (header + uleb in the packer) |
+| write_uncompressed_header_obu (:3294-3637) | `writeFrameHeader`/`writeFrameHeaderV2` | adapted | v1 = the BSF4-fix 22-bit walk (disable_cdf_update = 0 -> might_bwd_adapt region LIVE, refresh_frame_context = DISABLED emitted; 22 bits + 2 pad); v2 = lossy walk (base_q_idx = 100, delta_q block live, encode_loopfilter zeros, tx_mode_select = TX_MODE_LARGEST = 40 bits, 5 bytes, NO padding) |
+| write_frame_header_av1 (:3843-3920), encode_sps_av1 (:3925-3948) | `assembleStructuralKeyframeTU`/`assembleStructuralKeyframeTUv2` | adapted | phase-1 measure / phase-2 uleb rewrite (SPS); TG header 0 bytes + tile copy with no per-tile prefix at tile_cnt == 1; v1 dst zeroed first (spec byte_alignment zeros — named); SPS byte-identical between v1/v2 (gate-HALTed if it moves) |
+| D1 mono patch spans (entropy_coding.c:2689, :2706-2710, :2385-2386) | generator-side only (composition.c) | policy | court-ratified monochrome still-picture writer: is_monochrome const 0 -> 1, commented spec mono branch live, U/V quantization delta writes skipped (the num_planes guard the pinned writer lacks) — see deviations, item 5 |
+| — | committed artifact `src/l8_bitstream/tests/goldens/structural_keyframe.obu` (45 bytes, v2) | policy | produced from the generator output (never hand-typed); three-way identity composed TU == file == gate bytes; v1 bytes remain gated (tu_bytes) |
 
 ## GPU runtime (l2_gpurt), infrastructure, and fixtures
 
@@ -138,3 +182,28 @@ port (tests in test_transform.cpp).
 4. The composite bench/GPU frame loops run host decisions + per-block
    launches (structure ours); this is a measurement-harness shape, not a
    port of SVT's schedule.
+5. D1 monochrome patch (BSF3): the pinned SVT OBU writer is
+   hardcoded non-mono; the generator applies three court-ratified spans
+   (entropy_coding.c:2689 const 0 -> 1; :2706-2710 the commented spec
+   mono branch live; :2385-2386 the U/V quantization delta writes
+   skipped — the spec's num_planes guard the pinned writer lacks,
+   decodeframe.c:5121-5122). Decoder-confirmed: libdav1d/ffprobe read
+   the stream back as gray.
+6. THE COUPLING (BSF4-fix): SVT sets ec_writer.allow_update_cdf =
+   !disable_cdf_update (ec_process.c:101). Both l6 emission sites hardcode
+   allow_update_cdf = 1, correct ONLY because the ratified config
+   carries disable_cdf_update = 0 (SVT keyframe default,
+   resource_coordination_process.c:360); any future disable_cdf_update
+   = 1 config must flip the emission with it, or the stream is
+   unspecifiable (the writer adapts CDFs a conformant decoder will not
+   replay). Found by the decoder (libdav1d AVERROR_INVALIDDATA), fixed
+   as an invariant.
+7. l7 `AomReader` struct shape: {ec, allow_update_cdf} (aom-upstream
+   shape) vs the vendored bitreader.h aom_reader = {buffer, buffer_end,
+   ec, allow_update_cdf} — the buffer-ownership glue is unported
+   (harmless in l7's self-consistent use). Found by the TD2 gate harness
+   (casting one onto the other crashed 0xC0000005); the harness now
+   exchanges bytes/values only (l7_ctx_shim.cpp extern-C shims).
+8. `od_ec_dec_bits_` (entdec.h:64) is DECLARED in the pinned tree with
+   NO definition anywhere in it (grep-verified) — raw-bits decode is
+   unported, not needed by the intra symbol subset.
