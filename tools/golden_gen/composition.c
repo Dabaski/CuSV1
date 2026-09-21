@@ -2673,6 +2673,18 @@ memcpy(fc->kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(fc->kf_y_cdf));
 memcpy(fc->angle_delta_cdf, default_angle_delta_cdf, sizeof(fc->angle_delta_cdf));
 }
 
+static int svtd_trace = 0;
+static const char* svtd_trace_tag = "";
+static void svtd_tr(const char* tag, int val, const OdEcEnc* enc) {
+    if (!svtd_trace) return;
+    if (enc) {
+        fprintf(stderr, "W %s%s val=%d rng=%u low=%llu cnt=%d\n", svtd_trace_tag, tag, val,
+                enc->rng, (unsigned long long)enc->low, (int)enc->cnt);
+    } else {
+        fprintf(stderr, "W %s%s val=%d\n", svtd_trace_tag, tag, val);
+    }
+}
+
 static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranLow* coeff,
                                   const int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
                                   int dc_sign_ctx, PredictionMode intra_dir) {
@@ -2681,6 +2693,11 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     const int    eob_multi_ctx  = 0;  // TX_CLASS_2D
 
     aom_write_symbol(w, eob == 0, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
+    svtd_tr("skip", eob == 0, &w->ec);
+    if (svtd_trace) {
+        fprintf(stderr, "W skipcdf f=%u (txs=%d ctx=%d)\n",
+                fc->txb_skip_cdf[txs_ctx][txb_skip_ctx][0], (int)txs_ctx, txb_skip_ctx);
+    }
     if (eob == 0) return;
 
     // TS3: tx-type emission (entropy_coding.c:374-376). The l6 pipeline's
@@ -2694,6 +2711,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const TxSize sq = txsize_sqr_map[tx_size];
         aom_write_symbol(w, av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
                          fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
+        svtd_tr("tx", av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT], &w->ec);
     }
 
     int eob_extra;
@@ -2710,11 +2728,19 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     default: eob_cdf = fc->eob_flag_cdf1024[0][eob_multi_ctx]; nsyms = 11; break;
     }
     aom_write_symbol(w, eob_pt - 1, eob_cdf, nsyms);
+    svtd_tr("eobpt", eob_pt - 1, &w->ec);
+    if (svtd_trace) {
+        fprintf(stderr, "W eobcdf:");
+        for (int i2 = 0; i2 < nsyms + 1; ++i2) fprintf(stderr, " %u", eob_cdf[i2]);
+        fprintf(stderr, " (s=%d)\n", eob_pt - 1);
+    }
     if (eob_pt > 2) {
         const int cnt = eob_pt - 3;
         const int bit = (eob_extra >> cnt) & 1;
         aom_write_symbol(w, bit, fc->eob_extra_cdf[txs_ctx][0][cnt], 2);
+        svtd_tr("eobx", bit, &w->ec);
         aom_write_literal(w, eob_extra, cnt);
+        svtd_tr("eobxlit", eob_extra, &w->ec);
     }
 
     const int bwl    = get_txb_bwl(tx_size);
@@ -2739,12 +2765,14 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const int32_t level = ABS(v);
         const int32_t lctx  = (eob == 1) ? get_lower_levels_ctx_eob(bwl, height, c) : coeff_ctx;
         aom_write_symbol(w, AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3);
+        svtd_tr("beob", AOMMIN(level, 3) - 1, &w->ec);
         if (level > NUM_BASE_LEVELS) {
             const int32_t base_range = level - 1 - NUM_BASE_LEVELS;
             const int16_t br_ctx     = get_br_ctx_eob(pos, bwl, TX_CLASS_2D);
             for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
                 aom_write_symbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                svtd_tr("br", k, &w->ec);
                 if (k < BR_CDF_SIZE - 1) break;
             }
         }
@@ -2755,12 +2783,14 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const TranLow v     = coeff[pos];
         const int32_t level = ABS(v);
         aom_write_symbol(w, AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
+        svtd_tr("base", AOMMIN(level, 3), &w->ec);
         if (level > NUM_BASE_LEVELS) {
             const int32_t base_range = level - 1 - NUM_BASE_LEVELS;
             const int16_t br_ctx     = get_br_ctx(levels, pos, bwl, TX_CLASS_2D);
             for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
                 aom_write_symbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                svtd_tr("brs", k, &w->ec);
                 if (k < BR_CDF_SIZE - 1) break;
             }
         }
@@ -2774,11 +2804,14 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         if (!level) continue;
         if (c == 0) {
             aom_write_symbol(w, (v < 0) ? 1 : 0, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
+            svtd_tr("sign0", (v < 0) ? 1 : 0, &w->ec);
         } else {
             aom_write_bit(w, (v < 0) ? 1 : 0);
+            svtd_tr("sign", (v < 0) ? 1 : 0, &w->ec);
         }
         if (level > COEFF_BASE_RANGE + NUM_BASE_LEVELS) {
             write_golomb(w, level - COEFF_BASE_RANGE - 1 - NUM_BASE_LEVELS);
+            svtd_tr("golomb", level - COEFF_BASE_RANGE - 1 - NUM_BASE_LEVELS, &w->ec);
         }
     }
 }
@@ -3495,6 +3528,10 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
 #define TD0_RUNG_F 5
 #define TD0_RUNG_G 6
 
+// TD1: writer-arm state trace. Set before a rung tile write; prints one line
+// per symbol with the od_ec encoder state AFTER the encode. The decoder-arm
+// harness (out-of-tree, aom entdec verbatim) prints the same tags so the two
+// arms align state-for-state.
 // rung block parameters: mode, skip flag, chain coefficients (raster)
 static void svtd_td0_block_params(int rung, int* mode, int* skip, TranLow qc[256]) {
     memset(qc, 0, sizeof(TranLow) * 256);
@@ -3523,6 +3560,12 @@ static void svtd_td0_block_params(int rung, int* mode, int* skip, TranLow qc[256
 }
 
 static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
+    static char tagbuf[8];
+    tagbuf[0] = "abcdefg"[rung];
+    tagbuf[1] = ':';
+    tagbuf[2] = '\0';
+    svtd_trace_tag = tagbuf;
+    svtd_trace = 1;
     static AomCdfProb part_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
     memcpy(part_cdf, default_partition_cdf, sizeof(part_cdf));
     static AomCdfProb skip_cdf[SKIP_CONTEXTS][CDF_SIZE(2)];
@@ -3552,25 +3595,30 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
     EcPartState st = {&w, part_cdf, above_pctx, left_pctx, 4, 16, 0};
     const int pctx = ecpart_derive_ctx(st.above, st.left, 0, 0, BLOCK_16X16);
     aom_write_symbol(&w, PARTITION_NONE, part_cdf[pctx], svt_aom_partition_cdf_length(BLOCK_16X16));
+    svtd_tr("part", PARTITION_NONE, &w.ec);
 
     int mode, skip;
     TranLow qc[256];
     svtd_td0_block_params(rung, &mode, &skip, qc);
     // skip flag, ctx 0 (fresh: unavailable neighbors -> 0)
     aom_write_symbol(&w, skip, skip_cdf[0], 2);
+    svtd_tr("skip", skip, &w.ec);
 
     // kf mode (both contexts = intra_mode_context[DC_PRED], fresh)
     const int top_ctx = intra_mode_context[DC_PRED];
     const int left_ctx = intra_mode_context[DC_PRED];
     aom_write_symbol(&w, mode, kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+    svtd_tr("mode", mode, &w.ec);
     if (av1_is_directional_mode((PredictionMode)mode)) {
         aom_write_symbol(&w, MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
                          2 * MAX_ANGLE_DELTA + 1);
+        svtd_tr("delta", MAX_ANGLE_DELTA, &w.ec);
     }
     // filter-intra flag: read for DC_PRED blocks (aom reconintra.h:68-80);
     // the symbol is written exactly when the decoder reads it (mode DC).
     if (mode == DC_PRED) {
         aom_write_symbol(&w, 0, fi_cdf, 2);
+        svtd_tr("fi", 0, &w.ec);
     }
     // token chain: the svtd twin - [txb_skip][tx-type for q>0 eob>0][eob_pt]
     // [eob_extra][base_eob+br][reverse][signs+golomb]
@@ -3582,6 +3630,7 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
         if (eob_tok != wantEob[rung]) { fprintf(stderr, "TD0 rung %d eob %d\n", rung, eob_tok); return 0; }
         svtd_write_coeffs_txb(&w, &fc, qc, scan, TX_16X16, eob_tok, 0, 0, (PredictionMode)mode);
     }
+    svtd_trace = 0;
     aom_stop_encode(&w);
 
     // TD0 probe: read the tile back with the aom-entdec reader (the decoder

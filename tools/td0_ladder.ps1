@@ -44,8 +44,11 @@ try {
         $expectedPath = Join-Path $temp ("rung" + $name + "_expected.raw")
         [System.IO.File]::WriteAllBytes($expectedPath, $expected.ToArray())
         $decPath = Join-Path $temp ("rung" + $name + "_dec.raw")
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         & $FfmpegCommand -hide_banner -loglevel error -i $obuPath -f rawvideo -pix_fmt gray $decPath 2>$null
         $ffExit = $LASTEXITCODE
+        $ErrorActionPreference = $previousEap
         if ($ffExit -ne 0) {
             $summary.Add("rung $name : ffmpeg FAILED exit $ffExit")
             continue
