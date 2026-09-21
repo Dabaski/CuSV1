@@ -2675,6 +2675,25 @@ memcpy(fc->angle_delta_cdf, default_angle_delta_cdf, sizeof(fc->angle_delta_cdf)
 
 static int svtd_trace = 0;
 static const char* svtd_trace_tag = "";
+// TD3a adaptation-invariance probe: 1 = the production writer state
+// (allow_update_cdf, adaptation live); overridable to 0 to write the rung
+// tiles with static default rows and diff the bytes.
+static int svtd_td0_adapt_probe = 1;
+// TD3 cross-decoder script: 1 = emit S lines (tag nsymbs row-as-written
+// intended-val) + T lines (tile bytes) for the out-of-tree replay harness
+// (aom entdec vs dav1d msac, state-for-state).
+static int svtd_script = 0;
+static void svtd_script_row(const char* tag, int val, const AomCdfProb* cdf, int ns) {
+    if (!svtd_script) return;
+    fprintf(stderr, "S %s%s %d %d", svtd_trace_tag, tag, ns, val);
+    for (int i = 0; i <= ns; ++i) fprintf(stderr, " %u", cdf[i]);
+    fprintf(stderr, "\n");
+}
+static void svtd_script_bool(const char* tag, int val) {
+    if (!svtd_script) return;
+    static const AomCdfProb eqrow[3] = { AOM_CDF2(16384) };
+    fprintf(stderr, "S %s%s 2 %d 16384 0 0\n", svtd_trace_tag, tag, val);
+}
 static void svtd_tr(const char* tag, int val, const OdEcEnc* enc) {
     if (!svtd_trace) return;
     if (enc) {
@@ -2692,6 +2711,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     const int    eob_multi_size = txsize_log2_minus4[tx_size];
     const int    eob_multi_ctx  = 0;  // TX_CLASS_2D
 
+    svtd_script_row("skip", eob == 0, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     aom_write_symbol(w, eob == 0, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     svtd_tr("skip", eob == 0, &w->ec);
     if (svtd_trace) {
@@ -2709,6 +2729,8 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     // intraDir = the luma mode).
     {
         const TxSize sq = txsize_sqr_map[tx_size];
+        svtd_script_row("tx", av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
+                        fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
         aom_write_symbol(w, av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
                          fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
         svtd_tr("tx", av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT], &w->ec);
@@ -2727,6 +2749,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     case 5: eob_cdf = fc->eob_flag_cdf512[0][eob_multi_ctx]; nsyms = 10; break;
     default: eob_cdf = fc->eob_flag_cdf1024[0][eob_multi_ctx]; nsyms = 11; break;
     }
+    svtd_script_row("eobpt", eob_pt - 1, eob_cdf, nsyms);
     aom_write_symbol(w, eob_pt - 1, eob_cdf, nsyms);
     svtd_tr("eobpt", eob_pt - 1, &w->ec);
     if (svtd_trace) {
@@ -2737,10 +2760,15 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     if (eob_pt > 2) {
         const int cnt = eob_pt - 3;
         const int bit = (eob_extra >> cnt) & 1;
+        svtd_script_row("eobx", bit, fc->eob_extra_cdf[txs_ctx][0][cnt], 2);
         aom_write_symbol(w, bit, fc->eob_extra_cdf[txs_ctx][0][cnt], 2);
         svtd_tr("eobx", bit, &w->ec);
         aom_write_literal(w, eob_extra, cnt);
-        svtd_tr("eobxlit", eob_extra, &w->ec);
+        for (int li = 0; li < cnt; ++li) {
+            const int lbit = (eob_extra >> (cnt - 1 - li)) & 1;
+            svtd_script_bool("eobxlit", lbit);
+            svtd_tr("eobxlit", lbit, &w->ec);
+        }
     }
 
     const int bwl    = get_txb_bwl(tx_size);
@@ -2764,6 +2792,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const TranLow v     = coeff[pos];
         const int32_t level = ABS(v);
         const int32_t lctx  = (eob == 1) ? get_lower_levels_ctx_eob(bwl, height, c) : coeff_ctx;
+        svtd_script_row("beob", AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3);
         aom_write_symbol(w, AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3);
         svtd_tr("beob", AOMMIN(level, 3) - 1, &w->ec);
         if (level > NUM_BASE_LEVELS) {
@@ -2771,6 +2800,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
             const int16_t br_ctx     = get_br_ctx_eob(pos, bwl, TX_CLASS_2D);
             for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
+                svtd_script_row("br", k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
                 aom_write_symbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
                 svtd_tr("br", k, &w->ec);
                 if (k < BR_CDF_SIZE - 1) break;
@@ -2782,6 +2812,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const int coeff_ctx = coeff_contexts[pos];
         const TranLow v     = coeff[pos];
         const int32_t level = ABS(v);
+        svtd_script_row("base", AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
         aom_write_symbol(w, AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
         svtd_tr("base", AOMMIN(level, 3), &w->ec);
         if (level > NUM_BASE_LEVELS) {
@@ -2789,6 +2820,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
             const int16_t br_ctx     = get_br_ctx(levels, pos, bwl, TX_CLASS_2D);
             for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
+                svtd_script_row("brs", k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
                 aom_write_symbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
                 svtd_tr("brs", k, &w->ec);
                 if (k < BR_CDF_SIZE - 1) break;
@@ -2803,15 +2835,31 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const int32_t level = ABS(v);
         if (!level) continue;
         if (c == 0) {
+            svtd_script_row("sign0", (v < 0) ? 1 : 0, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
             aom_write_symbol(w, (v < 0) ? 1 : 0, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
             svtd_tr("sign0", (v < 0) ? 1 : 0, &w->ec);
         } else {
             aom_write_bit(w, (v < 0) ? 1 : 0);
+            svtd_script_bool("sign", (v < 0) ? 1 : 0);
             svtd_tr("sign", (v < 0) ? 1 : 0, &w->ec);
         }
         if (level > COEFF_BASE_RANGE + NUM_BASE_LEVELS) {
-            write_golomb(w, level - COEFF_BASE_RANGE - 1 - NUM_BASE_LEVELS);
-            svtd_tr("golomb", level - COEFF_BASE_RANGE - 1 - NUM_BASE_LEVELS, &w->ec);
+            const int gval = level - COEFF_BASE_RANGE - 1 - NUM_BASE_LEVELS;
+            write_golomb(w, gval);
+            {
+                const int32_t gx = gval + 1;
+                const uint32_t glen = svt_log2f(gx) + 1;
+                for (uint32_t zi = 0; zi < glen - 1; ++zi) {
+                    svtd_script_bool("golz", 0);
+                    svtd_tr("golz", 0, &w->ec);
+                }
+                for (int bi = glen - 1; bi >= 0; --bi) {
+                    const int gbit = (gx >> bi) & 1;
+                    svtd_script_bool("gol", gbit);
+                    svtd_tr("gol", gbit, &w->ec);
+                }
+            }
+            svtd_tr("golomb", gval, &w->ec);
         }
     }
 }
@@ -3582,7 +3630,7 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
     AomWriter w;
     w.ec.buf = dst;
     svt_od_ec_enc_reset(&w.ec);
-    w.allow_update_cdf = 1;
+    w.allow_update_cdf = svtd_td0_adapt_probe;  // TD3a probe: 1 normally
     w.pos              = 0;
 
     uint8_t above_pctx[8];
@@ -3594,6 +3642,8 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
     // SPLIT, 16x16(0,0) coded NONE
     EcPartState st = {&w, part_cdf, above_pctx, left_pctx, 4, 16, 0};
     const int pctx = ecpart_derive_ctx(st.above, st.left, 0, 0, BLOCK_16X16);
+    svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
+                    svt_aom_partition_cdf_length(BLOCK_16X16));
     aom_write_symbol(&w, PARTITION_NONE, part_cdf[pctx], svt_aom_partition_cdf_length(BLOCK_16X16));
     svtd_tr("part", PARTITION_NONE, &w.ec);
 
@@ -3601,15 +3651,19 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
     TranLow qc[256];
     svtd_td0_block_params(rung, &mode, &skip, qc);
     // skip flag, ctx 0 (fresh: unavailable neighbors -> 0)
+    svtd_script_row("skip", skip, skip_cdf[0], 2);
     aom_write_symbol(&w, skip, skip_cdf[0], 2);
     svtd_tr("skip", skip, &w.ec);
 
     // kf mode (both contexts = intra_mode_context[DC_PRED], fresh)
     const int top_ctx = intra_mode_context[DC_PRED];
     const int left_ctx = intra_mode_context[DC_PRED];
+    svtd_script_row("mode", mode, kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
     aom_write_symbol(&w, mode, kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
     svtd_tr("mode", mode, &w.ec);
     if (av1_is_directional_mode((PredictionMode)mode)) {
+        svtd_script_row("delta", MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
+                        2 * MAX_ANGLE_DELTA + 1);
         aom_write_symbol(&w, MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
                          2 * MAX_ANGLE_DELTA + 1);
         svtd_tr("delta", MAX_ANGLE_DELTA, &w.ec);
@@ -3617,6 +3671,7 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
     // filter-intra flag: read for DC_PRED blocks (aom reconintra.h:68-80);
     // the symbol is written exactly when the decoder reads it (mode DC).
     if (mode == DC_PRED) {
+        svtd_script_row("fi", 0, fi_cdf, 2);
         aom_write_symbol(&w, 0, fi_cdf, 2);
         svtd_tr("fi", 0, &w.ec);
     }
@@ -3721,6 +3776,11 @@ static uint32_t svtd_td0_tu(int rung, uint8_t* tu, uint8_t* pic) {
         obu_size = svtd_bsf3_frame_obu(tu + offset, tile_buf, tile_size);
     } else {
         obu_size = svtd_bsf3_frame_obu_v2(tu + offset, tile_buf, tile_size);
+    }
+    if (svtd_script) {
+        fprintf(stderr, "T %c %u", "abcdefg"[rung], tile_size);
+        for (uint32_t i = 0; i < tile_size; ++i) fprintf(stderr, " %02x", tile_buf[i]);
+        fprintf(stderr, "\n");
     }
     return offset + obu_size;
 }

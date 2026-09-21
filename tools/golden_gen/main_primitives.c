@@ -26,6 +26,11 @@ static void ec_print_bytes(const char* name, uint32_t n) {
 static const uint16_t ec_icdf13[13] = {26700, 22000, 18000, 14000, 10500, 8000, 6000, 4500, 3200, 2200, 1400, 700, 0};
 
 int main(void) {
+    // TD3a probe hook: TD3_ADAPT=0 writes the rung tiles with static rows.
+    if (getenv("TD3_ADAPT")) svtd_td0_adapt_probe = atoi(getenv("TD3_ADAPT"));
+    // TD3 script hook: TD3_SCRIPT=1 emits the S/T replay script for the
+    // out-of-tree cross-decoder trace.
+    if (getenv("TD3_SCRIPT")) svtd_script = atoi(getenv("TD3_SCRIPT"));
     svtd_populate_dispatch();
     fprintf(stderr, "CK: dispatch\n"); fflush(stderr);
 
@@ -2116,8 +2121,7 @@ int main(void) {
     }
 
     fflush(stdout);
-    // ---- TD2: context-equality gate lines -----------------------------------
-    // Exhaustive SVT-vs-l7 context equality (TX_CLASS_2D, the DCT_DCT scope):
+    // ---- TD2: context-equality gate lines -----------------------------------    // Exhaustive SVT-vs-l7 context equality (TX_CLASS_2D, the DCT_DCT scope):
     // eob_ll/eob_br/fromstats/mag/ll/br enumeration + txb_init_levels
     // full-buffer state. One gate line per size: <assert count> <fnv hex>
     // <ok flag>; any mismatch also fails the drive (exit 1) and names the
