@@ -7934,6 +7934,23 @@ static const AomCdfProb av1_default_eob_multi1024_cdfs[TOKEN_CDF_Q_CTXS][PLANE_T
       {AOM_CDF11( 2979,  5958,  8937, 11916, 14895, 17873, 20852, 23831, 26810, 29789)}}}
 };
 
+// ==== SVT-AV1 cabac_context_model.c :1907-1918 - get_q_ctx (verbatim extract; do not edit) ====
+// The TOKEN_CDF_Q_CTXS bucket selection for the coefficient CDF tables: the
+// spec's init_coeff_cdfs (07.bitstream.semantics.md:1800-1820) mandates this
+// exact qindex bucketing (TD5a).
+static int32_t get_q_ctx(int32_t q) {
+    if (q <= 20) {
+        return 0;
+    }
+    if (q <= 60) {
+        return 1;
+    }
+    if (q <= 120) {
+        return 2;
+    }
+    return 3;
+}
+
 // ==== SVT-AV1 cabac_context_model.c :1066 - av1_default_coeff_lps_multi_cdfs (verbatim extract; do not edit) ====
 static const AomCdfProb
     av1_default_coeff_lps_multi_cdfs[TOKEN_CDF_Q_CTXS][TX_32X32 + 1][PLANE_TYPES][LEVEL_CONTEXTS][CDF_SIZE(BR_CDF_SIZE)] = {

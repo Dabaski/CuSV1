@@ -2675,20 +2675,27 @@ typedef struct Ts1FrameContext {
     AomCdfProb angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
 } Ts1FrameContext;
 
-static void ts1_init(Ts1FrameContext* fc) {
-    memcpy(fc->txb_skip_cdf, av1_default_txb_skip_cdfs, sizeof(fc->txb_skip_cdf));
-    memcpy(fc->dc_sign_cdf, av1_default_dc_sign_cdfs, sizeof(fc->dc_sign_cdf));
-    memcpy(fc->coeff_base_eob_cdf, av1_default_coeff_base_eob_multi_cdfs, sizeof(fc->coeff_base_eob_cdf));
-    memcpy(fc->coeff_base_cdf, av1_default_coeff_base_multi_cdfs, sizeof(fc->coeff_base_cdf));
-    memcpy(fc->coeff_br_cdf, av1_default_coeff_lps_multi_cdfs, sizeof(fc->coeff_br_cdf));
-    memcpy(fc->eob_extra_cdf, av1_default_eob_extra_cdfs, sizeof(fc->eob_extra_cdf));
-    memcpy(fc->eob_flag_cdf16, av1_default_eob_multi16_cdfs, sizeof(fc->eob_flag_cdf16));
-    memcpy(fc->eob_flag_cdf32, av1_default_eob_multi32_cdfs, sizeof(fc->eob_flag_cdf32));
-    memcpy(fc->eob_flag_cdf64, av1_default_eob_multi64_cdfs, sizeof(fc->eob_flag_cdf64));
-    memcpy(fc->eob_flag_cdf128, av1_default_eob_multi128_cdfs, sizeof(fc->eob_flag_cdf128));
-    memcpy(fc->eob_flag_cdf256, av1_default_eob_multi256_cdfs, sizeof(fc->eob_flag_cdf256));
-    memcpy(fc->eob_flag_cdf512, av1_default_eob_multi512_cdfs, sizeof(fc->eob_flag_cdf512));
-    memcpy(fc->eob_flag_cdf1024, av1_default_eob_multi1024_cdfs, sizeof(fc->eob_flag_cdf1024));
+// TD5a: the token-chain CDF tables are QINDEX-BUCKET-SELECTED per the spec's
+// init_coeff_cdfs (07.bitstream.semantics.md:1800-1820) and the vendored
+// svt_av1_default_coef_probs (cabac_context_model.c:1919-1938, via the
+// verbatim get_q_ctx :1907-1918 extract in svt_gen.c). Previously this init
+// copied the idx-0 bucket for every frame - the TS1 deviation named in the
+// register; resolution: it WAS the q100 tile-divergence bug.
+static void ts1_init(Ts1FrameContext* fc, int base_qindex) {
+    const int idx = get_q_ctx(base_qindex);
+    memcpy(fc->txb_skip_cdf, av1_default_txb_skip_cdfs[idx], sizeof(fc->txb_skip_cdf));
+    memcpy(fc->dc_sign_cdf, av1_default_dc_sign_cdfs[idx], sizeof(fc->dc_sign_cdf));
+    memcpy(fc->coeff_base_eob_cdf, av1_default_coeff_base_eob_multi_cdfs[idx], sizeof(fc->coeff_base_eob_cdf));
+    memcpy(fc->coeff_base_cdf, av1_default_coeff_base_multi_cdfs[idx], sizeof(fc->coeff_base_cdf));
+    memcpy(fc->coeff_br_cdf, av1_default_coeff_lps_multi_cdfs[idx], sizeof(fc->coeff_br_cdf));
+    memcpy(fc->eob_extra_cdf, av1_default_eob_extra_cdfs[idx], sizeof(fc->eob_extra_cdf));
+    memcpy(fc->eob_flag_cdf16, av1_default_eob_multi16_cdfs[idx], sizeof(fc->eob_flag_cdf16));
+    memcpy(fc->eob_flag_cdf32, av1_default_eob_multi32_cdfs[idx], sizeof(fc->eob_flag_cdf32));
+    memcpy(fc->eob_flag_cdf64, av1_default_eob_multi64_cdfs[idx], sizeof(fc->eob_flag_cdf64));
+    memcpy(fc->eob_flag_cdf128, av1_default_eob_multi128_cdfs[idx], sizeof(fc->eob_flag_cdf128));
+    memcpy(fc->eob_flag_cdf256, av1_default_eob_multi256_cdfs[idx], sizeof(fc->eob_flag_cdf256));
+    memcpy(fc->eob_flag_cdf512, av1_default_eob_multi512_cdfs[idx], sizeof(fc->eob_flag_cdf512));
+    memcpy(fc->eob_flag_cdf1024, av1_default_eob_multi1024_cdfs[idx], sizeof(fc->eob_flag_cdf1024));
     memcpy(fc->intra_ext_tx_cdf, default_intra_ext_tx_cdf, sizeof(fc->intra_ext_tx_cdf));
 memcpy(fc->kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(fc->kf_y_cdf));
 memcpy(fc->angle_delta_cdf, default_angle_delta_cdf, sizeof(fc->angle_delta_cdf));
@@ -3053,9 +3060,9 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
     svtd_quantize_fp_4x4(cb4, &t, scan4, qc4, dq4, &eob4);
 
     Ts1FrameContext fc;
-    ts1_init(&fc);
+    ts1_init(&fc, 100);
     Ts1FrameContext fc_r;
-    ts1_init(&fc_r);
+    ts1_init(&fc_r, 100);
 
     AomWriter w;
     w.ec.buf = buf;
@@ -3131,9 +3138,9 @@ static int svtd_ts3_drive(uint8_t* buf) {
     svtd_default_scan_16x16(scan16);
 
     Ts1FrameContext fc;
-    ts1_init(&fc);
+    ts1_init(&fc, 100);
     Ts1FrameContext fc_r;
-    ts1_init(&fc_r);
+    ts1_init(&fc_r, 100);
 
     uint8_t recon[1024];
     memset(recon, 0, sizeof(recon));
@@ -3438,7 +3445,7 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
     svtd_default_scan_16x16(scan16);
 
     Ts1FrameContext fc;
-    ts1_init(&fc);
+    ts1_init(&fc, 100);
 
     uint8_t recon[1024];
     memset(recon, 0, sizeof(recon));
@@ -3646,7 +3653,11 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
     static AomCdfProb fi_cdf[CDF_SIZE(2)];
     memcpy(fi_cdf, default_filter_intra_cdfs[BLOCK_16X16], sizeof(fi_cdf));
     Ts1FrameContext fc;
-    ts1_init(&fc);
+    // TD5a: the rung's own qindex - a/e carry the lossless q0 header, b..g
+    // the lossy q100 header; the coefficient CDF bucket follows (spec
+    // init_coeff_cdfs).
+    const int td0_qidx = (rung == TD0_RUNG_A || rung == TD0_RUNG_E) ? 0 : 100;
+    ts1_init(&fc, td0_qidx);
 
     AomWriter w;
     w.ec.buf = dst;
@@ -3727,7 +3738,7 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
         static AomCdfProb rfi[CDF_SIZE(2)];
         memcpy(rfi, default_filter_intra_cdfs[BLOCK_16X16], sizeof(rfi));
         Ts1FrameContext fc2;
-        ts1_init(&fc2);
+        ts1_init(&fc2, td0_qidx);
         fprintf(stderr, "TD0 rung %d rt:", rung);
         const int pctx2 = ecpart_derive_ctx(above_pctx, left_pctx, 0, 0, BLOCK_16X16);
         fprintf(stderr, " part=%d", aom_read_symbol_(&r, rp[pctx2], svt_aom_partition_cdf_length(BLOCK_16X16)));
@@ -4093,9 +4104,9 @@ static int svtd_ts2_drive(uint8_t* buf) {
     svtd_default_scan_16x16(scan16);
 
     Ts1FrameContext fc;
-    ts1_init(&fc);
+    ts1_init(&fc, 100);
     Ts1FrameContext fc_r;
-    ts1_init(&fc_r);
+    ts1_init(&fc_r, 100);
 
     // dc-sign-level NA: above[16] (64px / 4), left[8] (32px / 4)
     uint8_t above_na[16];
