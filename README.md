@@ -22,19 +22,24 @@ JIT-compiled at runtime via NVRTC.
   confirmed by an independent decoder) and `color_range=pc` (the
   ratified `color_range=1`).
 - **Coefficient/token coding closed** (TS-series): the lossy v2
-  temporal unit (45 bytes, real token streams, `base_q_idx` = 100)
+  temporal unit (47 bytes, real token streams, `base_q_idx` = 100)
   parses under the same decoders — an ffmpeg probe reports
   `av1 (libdav1d) (Main)`, gray(pc), 32x32. This is probe-level
   evidence; the attested full decode is the lossless TU above.
+- **Decoder conformance closed, content 1:1** (TD-series): the
+  q100 token streams now decode **and reconstruct bit-identically**.
+  The root cause was the coefficient-CDF qindex bucket: the spec's
+  `init_coeff_cdfs` mandates selecting the token tables by
+  `base_q_idx` (07.bitstream.semantics.md:1800-1820; the verbatim
+  `get_q_ctx`, cabac_context_model.c:1907-1918); the writer used the
+  idx-0 bucket for every frame. With the bucketed init the 7-rung
+  bisect ladder is 7/7 byte-exact in the real libdav1d, the committed
+  47-byte artifact decodes with exit 0, and all 1024 decoded pixels
+  equal the generator's recon (byte-diffs 0/1024; the content
+  fingerprint: the first pixels `05 08 0c 11`). The full resolution
+  record: `docs/decode_conformance.md`.
 - All layers green: 9 doctest targets pass, and the golden gate
   reproduces the committed `expected_primitives.txt` 277/277 lines.
-- **Open (TD-series): decoder conformance beyond the attested
-  artifacts.** Our writer-reader roundtrip is exact, every skip=1
-  probe stream conforms bit-exact in libdav1d and libaom, but probe
-  streams with skip=0 token chains desync the real decoders. The
-  context surface is gate-exonerated (958,272 exhaustive assertions);
-  the named suspects and instruments live in
-  `docs/decode_conformance.md`.
 
 ## What's implemented
 
@@ -159,9 +164,12 @@ tools/
                   run the exe with the CUDA toolkit bin on PATH)
   decode_handoff.ps1             decoder acceptance runner
                                  (dav1d/aomdec/ffmpeg) + self-test
-  td0_ladder.ps1                 decoder-conformance bisect ladder
-                                 (TD-series; see
-                                 docs/decode_conformance.md)
+td0_ladder.ps1                 decoder-conformance bisect ladder
+                               (TD-series closed; see
+docs/decode_conformance.md)
+verify_decode4.ps1             the decode attempt #4 instrument:
+                               artifact decode + content-1:1 vs the
+                               gate's ecfrm_recon (exit 0 = pass)
 third_party/
   SVT-AV1/        vendored source of truth (do not modify; pinned
                   snapshot — see Third-party notices)

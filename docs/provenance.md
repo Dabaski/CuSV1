@@ -125,7 +125,7 @@ port (tests in test_transform.cpp).
 | svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021) | `getKfYModeCtx` | exact (hand) | flattened: neighbor modes as explicit args (SVT reads from xd) |
 | encode_intra_luma_mode_kf_av1 (:1026-1040) + angle-delta (:1032-1037) | `writeKfLumaMode`/`readKfLumaMode` | exact (hand) | ctx pair passed in; reader returns the decoded mode + raw delta symbol |
 | filter-intra pair (:5047-5060) + predicate (mode_decision.c:108-119) | `writeFilterIntra`/`readFilterIntra`/`filterIntraAllowed`(+Bsize) | exact (hand) | CONFIG_ENABLE_FILTER_INTRA=1 resolved from the non-RTC defaults (EbConfigMacros.h:203) |
-| default CDF tables (cabac_context_model.c:59, :87, :134-155, :157, :594-596, :614, :618, :801-1860) | `EcFrameContext` tables + `initDefaultEcFrameContext` (COPY_CDF of :740-767 slice) | exact (hand) | kf_y/angle_delta/filter_intra(_mode)/partition/skip/txb token tables (q_ctx=0 slices via .inc files) + intra_ext_tx_cdf whole [3][4][13][17] |
+| default CDF tables (cabac_context_model.c:59, :87, :134-155, :157, :594-596, :614, :618, :801-1860) | `EcFrameContext` tables + `initDefaultEcFrameContext` (COPY_CDF of :740-767 slice; TD5b: the coefficient tables bucket-selected via the getQCtx mirror of :1907-1918) | exact (hand) | kf_y/angle_delta/filter_intra(_mode)/partition/skip tables + intra_ext_tx_cdf whole [3][4][13][17]; the 13 token families carried as the 4-bucket *_buckets.inc files mechanically split from the committed svt_gen.c extracts (no hand-transcribed values), bucket[idx] = get_q_ctx(base_q_idx) per the spec's init_coeff_cdfs |
 | svt_aom_partition_cdf_length (entropy_coding.c:922-930), partition_plane_context (:945-960), encode_partition_av1 (:962-978), update_partition_context (coding_loop.c:1700-1713), gather cdfs (cabac_context_model.h:373-405) | `partitionCdfLength`/`partitionPlaneContext`/`writePartition`/`updatePartitionContext`/`partitionGather*` | exact (hand) | forced split writes NOTHING; gathered 2-symbol XOR branches with the temporary's adaptation discarded; INVALID 0xFF -> 0 |
 | aom read_partition (decodeframe.c:1266-1293) | `readPartition` | adapted | aom decoder semantics, out-of-tree arbiter (no aom code extracted); gathered reads non-adapting |
 | av1_get_skip_context (:983-989) + encode_skip_coeff_av1 (:995-1000) | `getSkipContext`/`writeSkip`/`readSkip` | exact (hand) | read twin = aom read_skip_txfm (decodemv semantics, arbiter); SEG_LVL_SKIP implicit-1 branch deferred with segmentation |
@@ -207,3 +207,13 @@ port (tests in test_transform.cpp).
 8. `od_ec_dec_bits_` (entdec.h:64) is DECLARED in the pinned tree with
    NO definition anywhere in it (grep-verified) — raw-bits decode is
    unported, not needed by the intra symbol subset.
+9. TS1 token-tables deviation — RESOLVED 2026-09-21 (TD5b): the writer
+   emitted the default (idx-0) coefficient CDF bucket for every frame
+   regardless of base_q_idx. The spec's init_coeff_cdfs
+   (07.bitstream.semantics.md:1800-1820; the verbatim get_q_ctx,
+   cabac_context_model.c:1907-1918) mandates the bucket by base_q_idx
+   (q100 -> idx 2). Named the q100 tile-divergence root cause by the
+   TD4 spec arm + the real-dav1d row exhibit (aom token_cdfs.h:861),
+   ratified by the court, fixed in TD5a (generator) and TD5b (the l7
+   mirror); the TD0 ladder flipped to 7/7 byte-exact and the 47-byte
+   artifact decodes content-1:1 (byte-diffs 0/1024).

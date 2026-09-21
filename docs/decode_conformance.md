@@ -9,17 +9,19 @@ in `docs/provenance.md`; the bitstream construction in
 ## Status summary
 
 - The v1 lossless keyframe TU (23 bytes) is decoder-ACCEPTED: attested
-  full decode (libdav1d silent, exit 0; ffprobe av1/32x32/gray/pc).
-- The v2 lossy TU (45 bytes, real token streams) parses: ffmpeg probe
-  reports av1 (libdav1d) (Main), gray(pc), 32x32.
+full decode (libdav1d silent, exit 0; ffprobe av1/32x32/gray/pc).
+- The v2 lossy TU (47 bytes, real token streams) DECODES with the
+content 1:1: all 1024 decoded pixels equal the generator's recon
+(byte-diffs 0/1024; the fingerprint: the first pixels `05 08 0c 11`
+- the ecfrm_recon row-0 values 5 8 12 17). Measured by
+`tools/verify_decode4.ps1` (ffmpeg 8.1.2 / libdav1d 1.5.3-62, exit 0).
 - Our writer <-> aom-entdec roundtrip is EXACT on every TD probe rung
-  (adaptation on): the arithmetic, the CDF evolution and the defaults
-  are internally consistent with aom's own decoder primitives.
-- OPEN: probe streams whose tiles contain skip=0 token chains desync
-  the real decoders (libdav1d and libaom, in agreement). Skip=1 rungs
-  conform bit-exact. The context surface is exonerated by an
-  exhaustive instrument (958,272 assertions, zero mismatches). The
-  remaining suspects are named below; the court arbitrates.
+(adaptation on): the arithmetic, the CDF evolution and the defaults
+are internally consistent with aom's own decoder primitives.
+- CLOSED (TD-series resolved): every q100 rung of the bisect ladder
+conforms bit-exact in the real libdav1d — 7/7 rungs PASS (the conformance
+gate). Root cause named and fixed: the coefficient-CDF qindex bucket
+(TD5a/TD5b, the resolution below).
 
 ## Tooling
 
@@ -142,7 +144,7 @@ different offsets. Harmless in l7's self-consistent use; the gate now
 exchanges bytes/values only. The crash was the harness's, not the
 codec's.
 
-## Remaining hypothesis space
+## Remaining hypothesis space (CLOSED by TD4/TD5)
 
 After the exoneration, the named suspects:
 
@@ -162,7 +164,42 @@ skip=0 tile whose eob_pt symbol uses a state-traced
 (2811/30016)-pair through aom's OD_EC in isolation, tracing at the rng
 level.
 
-Discipline: TD0-TD2 made NO production-code change; the instruments
-(writer trace, ladder, context gate) are committed as standing
-artifacts. The remaining hypothesis space is arbitrated by the court
-procedure (see AGENTS.md parallel-work protocol).
+**Resolution (2026-09-21, TD4/TD5).** None of the three suspects was
+the bug. The TD4 spec arm fetched the normative text and the real
+dav1d instrument (1.5.4, throwaway build, trace-patched at
+`dav1d_msac_decode_symbol_adapt_c` and `ctx_norm`) exposed the actual
+divergence: at the first coefficient symbol (txb_skip) the real
+decoder uses a DIFFERENT cdf row than our writer. The spec's
+`init_coeff_cdfs` (07.bitstream.semantics.md:1800-1820) mandates
+selecting the token tables by the frame's base_q_idx (the verbatim
+get_q_ctx, cabac_context_model.c:1907-1918: q<=20 -> bucket 0,
+<=60 -> 1, <=120 -> 2, else 3). The writer used the idx-0 bucket for
+every frame; q100 streams require idx 2. The measured row the real
+dav1d used ({3089, 3920, 6038, 9460, 14266, 19881, 25766, 29176} =
+aom token_cdfs.h:861, the idx-2 EobPt256 row) confirmed it. The TD5
+fix (generator `ts1_init(fc, base_qindex)` mirroring
+svt_av1_default_coef_probs :1919-1938; the l7 mirror
+`initDefaultEcFrameContext(fc, base_q_idx)` with mechanically
+extracted 4-bucket tables) restored conformance. Both named formulas
+(spec / aom entdec / dav1d msac) are identical once the
+n_symbols-vs-boundary-count indexing convention is resolved (dav1d's
+n_symbols = the boundary count; aom's nsymbs = the symbol count) -
+the TD1 "dav1d deviates by MIN" reading was an artifact of that
+convention, not a bug in either decoder.
+
+Measured close-out (this machine): the 7-rung ladder is 7/7 PASS
+(byte-exact against the expected pics AND ffmpeg exit 0, tools/
+td0_ladder.ps1); the 47-byte artifact decodes exit 0 with the content
+1:1 (all 1024 pixels equal the generator's recon, byte-diffs 0/1024,
+the fingerprint 05 08 0c 11; tools/verify_decode4.ps1). The rung-b
+exit-69 observed with ffmpeg's libdav1d (1.5.3-62) does NOT reproduce
+in the real dav1d 1.5.4 (it decodes rung b cleanly) - a decoder-
+version artifact, not a defect in our stream; the v2 header field
+walk was verified against dav1d's own parse (reduced_txtp_set=1,
+base_q_idx=100, txfm_mode=LARGEST) during TD4.
+
+Discipline: TD0-TD4 made NO production-code change (the instruments
+are committed as standing artifacts); TD5a/TD5b made the ratified
+bucket-selection change (the generator + the l7 mirror) with the
+ladder as the conformance gate. The TS-series closes with
+decoder-acceptance AND content-1:1.

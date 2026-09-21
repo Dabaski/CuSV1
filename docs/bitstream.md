@@ -124,9 +124,10 @@ gray(pc).
 
 ## 6. The committed artifact
 
-`src/l8_bitstream/tests/goldens/structural_keyframe.obu` (45 bytes,
-v2) is produced from the generator output — never hand-typed. The l8
-test proves the three-way identity: composed TU (l6 decisions through
+`src/l8_bitstream/tests/goldens/structural_keyframe.obu` (47 bytes,
+v2; TD5b: the v2 header + the idx-2-coded tile) is produced from the
+generator output — never hand-typed. The l8 test proves the three-way
+identity: composed TU (l6 decisions through
 l7 symbols + l8 assembly) == committed file == gate bytes
 (tu_bytes_v2). The v1 byte stream remains gated (tu_bytes).
 
@@ -135,8 +136,8 @@ Decoder status (measured):
 | Stream | Result |
 | --- | --- |
 | v1 lossless TU (23 bytes, BSF4-fix bytes) | full decode attested: libdav1d silent exit 0; ffprobe reports av1, 32x32, gray(pc) |
-| v2 lossy TU (45 bytes, real token streams) | ffmpeg probe OK: av1 (libdav1d) (Main), gray(pc), 32x32 |
-| TD0 probe ladder | skip=1 rungs conform bit-exact in libdav1d AND libaom; skip=0 token-chain rungs desync — open, see docs/decode_conformance.md |
+| v2 lossy TU (47 bytes, real token streams, idx-2 bucket) | full decode attested AND content 1:1: ffmpeg exit 0, all 1024 pixels == the generator's recon (byte-diffs 0/1024, the fingerprint 05 08 0c 11; tools/verify_decode4.ps1) |
+| TD0 probe ladder | CLOSED: 7/7 rungs byte-exact in the real libdav1d (TD5a; see docs/decode_conformance.md) |
 
 ## 7. The coupling invariant (BSF4-fix)
 
