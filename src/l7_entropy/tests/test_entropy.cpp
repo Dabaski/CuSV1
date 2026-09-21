@@ -258,9 +258,9 @@ TEST_CASE("KF luma-mode symbol sequence matches gate bytes and round-trips") {
     static const unsigned char expectedBytes[3] = {0x47, 0xbd, 0x40};
 
     entropy::EcFrameContext fc;
-    entropy::initDefaultEcFrameContext(&fc);
+    entropy::initDefaultEcFrameContext(&fc, 100);
     entropy::EcFrameContext fcR;
-    entropy::initDefaultEcFrameContext(&fcR);
+    entropy::initDefaultEcFrameContext(&fcR, 100);
 
     entropy::AomWriter w{};
     unsigned char buf[64] = {0};
@@ -332,9 +332,9 @@ TEST_CASE("partition symbol surface matches gate (ratified 32x32 frame walk)") {
     CHECK(entropy::partitionCdfLength(entropy::BLOCK_128X128) == 8);
 
     entropy::EcFrameContext fc;
-    entropy::initDefaultEcFrameContext(&fc);
+    entropy::initDefaultEcFrameContext(&fc, 100);
     entropy::EcFrameContext fcR;
-    entropy::initDefaultEcFrameContext(&fcR);
+    entropy::initDefaultEcFrameContext(&fcR, 100);
 
     entropy::AomWriter w{};
     unsigned char buf[64] = {0};
@@ -453,9 +453,9 @@ TEST_CASE("skip symbol surface matches gate (context combos)") {
     CHECK(entropy::getSkipContext(1, 0, 1, 0) == 0);
 
     entropy::EcFrameContext fc;
-    entropy::initDefaultEcFrameContext(&fc);
+    entropy::initDefaultEcFrameContext(&fc, 100);
     entropy::EcFrameContext fcR;
-    entropy::initDefaultEcFrameContext(&fcR);
+    entropy::initDefaultEcFrameContext(&fcR, 100);
 
     entropy::AomWriter w{};
     unsigned char buf[64] = {0};
@@ -535,9 +535,9 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     CHECK((int)eob4 == 0);
 
     entropy::EcFrameContext fc;
-    entropy::initDefaultEcFrameContext(&fc);
+    entropy::initDefaultEcFrameContext(&fc, 100);
     entropy::EcFrameContext fcR;
-    entropy::initDefaultEcFrameContext(&fcR);
+    entropy::initDefaultEcFrameContext(&fcR, 100);
 
     entropy::AomWriter w{};
     unsigned char buf[128] = {0};
@@ -550,10 +550,13 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     entropy::writeTxbCoeffs(&w, &fc, qc8, scan8, entropy::TX_8X8, eob8, 0, 0, 1, entropy::DC_PRED);
     entropy::writeTxbCoeffs(&w, &fc, qc4, scan4, entropy::TX_4X4, eob4, 0, 0, 1, entropy::DC_PRED);
     entropy::odEcStopEncode(&w);
-    REQUIRE(w.pos == 16);
-    static const unsigned char wantBytes[16] = {0x1a, 0x76, 0x83, 0x60, 0x70, 0x4d, 0x64, 0x92,
-                                                0x25, 0x9b, 0x7e, 0x88, 0xe5, 0xd4, 0x60, 0xec};
-    for (int i = 0; i < 16; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+    // TD5b: the token tables are the q100 bucket (idx 2) - the bytes follow
+    // the regenerated ectok_bytes gate line.
+    REQUIRE(w.pos == 17);
+    static const unsigned char wantBytes[17] = {0x36, 0xa4, 0x3a, 0x79, 0xdf, 0xfe, 0x77, 0x33,
+                                                0x1d, 0x73, 0x04, 0xff, 0xaf, 0xbd, 0xd9, 0x19,
+                                                0xa0};
+    for (int i = 0; i < 17; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
 
     entropy::AomReader r;
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
@@ -610,9 +613,9 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
     }
 
     entropy::EcFrameContext fc;
-    entropy::initDefaultEcFrameContext(&fc);
+    entropy::initDefaultEcFrameContext(&fc, 100);
     entropy::EcFrameContext fcR;
-    entropy::initDefaultEcFrameContext(&fcR);
+    entropy::initDefaultEcFrameContext(&fcR, 100);
 
     entropy::AomWriter w{};
     unsigned char buf[128] = {0};
@@ -629,11 +632,13 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
                                   entropy::BLOCK_16X16, eob[b], mi[b][0], mi[b][1], 1, entropy::DC_PRED);
     }
     entropy::odEcStopEncode(&w);
-    REQUIRE(w.pos == 19);
-    static const unsigned char wantBytes[19] = {0x1a, 0x76, 0x83, 0x60, 0x70, 0x4d, 0x64, 0x92,
-                                                0x25, 0x57, 0x03, 0xf2, 0x98, 0x71, 0x1c, 0x85,
-                                                0x43, 0xf9, 0x80};
-    for (int i = 0; i < 19; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+    // TD5b: the token tables are the q100 bucket (idx 2) - the bytes follow
+    // the regenerated ecblk_bytes gate line.
+    REQUIRE(w.pos == 20);
+    static const unsigned char wantBytes[20] = {0x36, 0xa4, 0x3a, 0x79, 0xdf, 0xfe, 0x77, 0x33,
+                                                0x1d, 0x72, 0xd8, 0x1a, 0x17, 0xd5, 0x70, 0xf6,
+                                                0xf7, 0x1f, 0xfe, 0x7d};
+    for (int i = 0; i < 20; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
 
     entropy::AomReader r;
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);

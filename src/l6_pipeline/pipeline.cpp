@@ -754,7 +754,8 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
     const int gridH = src.height() / 16;
     // BSF1 symbol emission (D5): kf y mode + angle delta + FI flag=0 only.
     if (w && fc) {
-        entropy::initDefaultEcFrameContext(fc);
+        // TD5b: the lossless variant carries q0 (CodedLossless) - bucket 0.
+        entropy::initDefaultEcFrameContext(fc, 0);
         entropy::odEcEncReset(&w->ec);
         w->allow_update_cdf = 1;  // THE COUPLING (BSF4-fix): SVT sets ec_writer.allow_update_cdf = !disable_cdf_update (ec_process.c:101). This 1 is only correct because the ratified structural config carries disable_cdf_update = 0 (resource_coordination_process.c:360). ANY future config with disable_cdf_update = 1 (should_disable_cdf_update, enc_mode_config.c:9559 - future work) must flip this emission with it, or the stream is unspecifiable: the writer adapts CDFs a conformant decoder (allow_update_cdf = 0) will not replay.
         w->pos = 0;
@@ -904,7 +905,8 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
     const int gridH = src.height() / 16;
     // BSF1 symbol emission (D5): identical surface to the lossless variant.
     if (w && fc) {
-        entropy::initDefaultEcFrameContext(fc);
+        // TD5b: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
+        entropy::initDefaultEcFrameContext(fc, qindex);
         entropy::odEcEncReset(&w->ec);
         w->allow_update_cdf = 1;  // THE COUPLING (BSF4-fix): SVT sets ec_writer.allow_update_cdf = !disable_cdf_update (ec_process.c:101). This 1 is only correct because the ratified structural config carries disable_cdf_update = 0 (resource_coordination_process.c:360). ANY future config with disable_cdf_update = 1 (should_disable_cdf_update, enc_mode_config.c:9559 - future work) must flip this emission with it, or the stream is unspecifiable: the writer adapts CDFs a conformant decoder (allow_update_cdf = 0) will not replay.
         w->pos = 0;

@@ -99,7 +99,7 @@ TEST_CASE("structural keyframe TU assembly matches gate") {
     // SPLIT at 32x32 ctx 8, four 16x16 NONE leaves (ctx 4), modes
     // {1,7,2,2}, all skip = 1, no FI symbols (no decided mode is DC_PRED).
     entropy::EcFrameContext fc;
-    entropy::initDefaultEcFrameContext(&fc);
+    entropy::initDefaultEcFrameContext(&fc, 100);
     entropy::AomWriter w{};
     unsigned char tileBuf[64] = {0};
     w.ec.buf = tileBuf;
@@ -209,7 +209,7 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
     std::int16_t scan16[256];
     transforms::defaultScan16x16(scan16);
     entropy::EcFrameContext fc;
-    entropy::initDefaultEcFrameContext(&fc);
+    entropy::initDefaultEcFrameContext(&fc, 100);
     entropy::AomWriter w{};
     unsigned char tileBuf[128] = {0};
     w.ec.buf = tileBuf;
@@ -251,31 +251,34 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
     }
     entropy::odEcStopEncode(&w);
 
-    // TU v2 == gate tu_bytes_v2 45
+    // TU v2 == gate tu_bytes_v2 47 (TD5b: the q100 bucket, idx 2)
     unsigned char tuBuf[128];
     memset(tuBuf, 0, sizeof(tuBuf));
     const std::uint32_t tuSize =
         bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, w.pos);
-    REQUIRE(tuSize == 45);
-    static const unsigned char wantTu2[45] = {
-        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x1e,
-        0x10, 0xd9, 0x00, 0x00, 0x01, 0xbc, 0xb0, 0x41, 0x26, 0x4e, 0x5b, 0x2f, 0x02, 0x7b, 0x5c,
-        0x16, 0x8d, 0x09, 0x2b, 0xde, 0xc5, 0x8c, 0x39, 0xf2, 0xd3, 0x1e, 0xca, 0x88, 0x7a, 0x81};
-    for (int i = 0; i < 45; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
+    REQUIRE(tuSize == 47);
+    static const unsigned char wantTu2[47] = {
+        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x20,
+        0x10, 0xd9, 0x00, 0x00, 0x01, 0xbc, 0xb5, 0x86, 0x91, 0x2e, 0xb4, 0xff, 0xd9, 0xb5, 0xbd,
+        0xc5, 0x16, 0x13, 0xec, 0x17, 0x00, 0xe5, 0x21, 0x87, 0x39, 0x1a, 0x0c, 0xa8, 0x0e, 0xdc,
+        0xb0, 0x38};
+    for (int i = 0; i < 47; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
 }
 
 TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate bytes") {
     // TS4 milestone artifact: goldens/structural_keyframe.obu is the
     // gate-pinned tu_bytes_v2 stream (tools/golden_gen expected line:
-    // tu_bytes_v2 45 12 00 0a ... 7a 81), produced from the generator
+    // tu_bytes_v2 47 12 00 0a ... b0 38 - TD5b: the q100 bucket, idx 2),
+    // produced from the generator
     // output (not hand-typed). The test proves the three-way identity:
     // composed TU (l6 coefficients + l7 tile symbols + l8 assembly) ==
     // committed file == gate bytes. The USER runs the external decode
     // check (aomdec/dav1d/ffmpeg - decode handoff attempt #3).
-    static const unsigned char wantTu2[45] = {
-        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x1e,
-        0x10, 0xd9, 0x00, 0x00, 0x01, 0xbc, 0xb0, 0x41, 0x26, 0x4e, 0x5b, 0x2f, 0x02, 0x7b, 0x5c,
-        0x16, 0x8d, 0x09, 0x2b, 0xde, 0xc5, 0x8c, 0x39, 0xf2, 0xd3, 0x1e, 0xca, 0x88, 0x7a, 0x81};
+    static const unsigned char wantTu2[47] = {
+        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x20,
+        0x10, 0xd9, 0x00, 0x00, 0x01, 0xbc, 0xb5, 0x86, 0x91, 0x2e, 0xb4, 0xff, 0xd9, 0xb5, 0xbd,
+        0xc5, 0x16, 0x13, 0xec, 0x17, 0x00, 0xe5, 0x21, 0x87, 0x39, 0x1a, 0x0c, 0xa8, 0x0e, 0xdc,
+        0xb0, 0x38};
 
     // composed v2 TU (identical pipeline to the TS4 test)
     pixels::Plane plane(32, 32, 4);
@@ -289,7 +292,7 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
     std::int16_t scan16[256];
     transforms::defaultScan16x16(scan16);
     entropy::EcFrameContext fc;
-    entropy::initDefaultEcFrameContext(&fc);
+    entropy::initDefaultEcFrameContext(&fc, 100);
     entropy::AomWriter w{};
     unsigned char tileBuf[128] = {0};
     w.ec.buf = tileBuf;
@@ -330,8 +333,8 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
     unsigned char tuBuf[128];
     memset(tuBuf, 0, sizeof(tuBuf));
     const std::uint32_t tuSize = bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, w.pos);
-    REQUIRE(tuSize == 45);
-    for (int i = 0; i < 45; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
+    REQUIRE(tuSize == 47);
+    for (int i = 0; i < 47; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
 
     // committed artifact identity. The goldens path derives from __FILE__
     // (robust against compile-definition quoting across CMake generators -
@@ -347,6 +350,6 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
     unsigned char fileBytes[64] = {0};
     const size_t n = fread(fileBytes, 1, sizeof(fileBytes), f);
     fclose(f);
-    REQUIRE(n == 45);
-    for (int i = 0; i < 45; ++i) CHECK(fileBytes[i] == wantTu2[i]);
+    REQUIRE(n == 47);
+    for (int i = 0; i < 47; ++i) CHECK(fileBytes[i] == wantTu2[i]);
 }

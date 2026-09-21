@@ -2578,8 +2578,9 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
 
     // reader round-trip with adaptation: contexts recomputed from the
     // DECIDED neighbor modes (DC_PRED when unavailable), fresh default CDFs
+    // (the lossless variant's bucket = 0, matching the writer's init)
     entropy::EcFrameContext fcR;
-    entropy::initDefaultEcFrameContext(&fcR);
+    entropy::initDefaultEcFrameContext(&fcR, 0);
     entropy::AomReader r;
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
     r.allow_update_cdf = 1;
@@ -2621,7 +2622,36 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
     CHECK(modesQOk);
     REQUIRE(wQ.pos == 3);
     for (int i = 0; i < 3; ++i) CHECK((unsigned)bufQ[i] == goldenBytes[i]);
-    CHECK(entropy::ecFrameCdfsEqual(&fcQ, &fcR) == 1);
+    // TD5b: the Q variant's bucket = 2 (q100); the reader side must walk the
+    // SAME symbol sequence through the same bucket for the adapted-CDF
+    // equality to hold.
+    entropy::EcFrameContext fcRQ;
+    entropy::initDefaultEcFrameContext(&fcRQ, 100);
+    entropy::AomReader rQ;
+    REQUIRE(entropy::odEcReaderInit(&rQ, bufQ, wQ.pos) == 0);
+    rQ.allow_update_cdf = 1;
+    int riQ = 0;
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const bool hasTop = by > 0, hasLeft = bx > 0;
+        const int topMode = hasTop ? modesQ[(by - 1) * 2 + bx] : 0;
+        const int leftMode = hasLeft ? modesQ[by * 2 + bx - 1] : 0;
+        int topCtxQ, leftCtxQ;
+        entropy::getKfYModeCtx(hasLeft ? 1 : 0, leftMode, hasTop ? 1 : 0, topMode, &topCtxQ,
+                               &leftCtxQ);
+        int deltaQ = 0;
+        const int mQ =
+            (int)entropy::readKfLumaMode(&rQ, &fcRQ, entropy::BLOCK_16X16, topCtxQ, leftCtxQ, &deltaQ);
+        CHECK(mQ == wantRt[riQ++]);
+        if (entropy::isDirectionalMode((entropy::PredictionMode)modesQ[b])) {
+            CHECK(deltaQ == wantRt[riQ++]);
+        }
+        if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0, (std::uint32_t)modesQ[b])) {
+            entropy::FilterIntraMode fQ;
+            CHECK(entropy::readFilterIntra(&rQ, &fcRQ, entropy::BLOCK_16X16, &fQ) == wantRt[riQ++]);
+        }
+    }
+    CHECK(entropy::ecFrameCdfsEqual(&fcQ, &fcRQ) == 1);
 }
 
 TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
@@ -2676,13 +2706,15 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
             CHECK(ec == wantEob[b]);
         }
     }
-    // token byte stream == gate ecfrm_bytes 25 7c 90 12 64 e5 b2 f0 27 b5
-    // c4 81 c8 6b ae 48 5b 07 31 4b b5 26 c4 64 27 80
-    REQUIRE(w.pos == 25);
-    static const unsigned char wantBytes[25] = {0x7c, 0x90, 0x12, 0x64, 0xe5, 0xb2, 0xf0, 0x27, 0xb5,
-                                                0xc4, 0x81, 0xc8, 0x6b, 0xae, 0x48, 0x5b, 0x07,
-                                                0x31, 0x4b, 0xb5, 0x26, 0xc4, 0x64, 0x27, 0x80};
-    for (int i = 0; i < 25; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+    // token byte stream == gate ecfrm_bytes 26 7c e4 69 12 eb 4f fd 9b 5b
+    // dc 58 58 ca c9 83 88 0a 13 81 d7 a2 c0 99 54 ce 3c (TD5b: the q100
+    // bucket, idx 2)
+    REQUIRE(w.pos == 26);
+    static const unsigned char wantBytes[26] = {0x7c, 0xe4, 0x69, 0x12, 0xeb, 0x4f, 0xfd, 0x9b,
+                                                0x5b, 0xdc, 0x58, 0x58, 0xca, 0xc9, 0x83, 0x88,
+                                                0x0a, 0x13, 0x81, 0xd7, 0xa2, 0xc0, 0x99, 0x54,
+                                                0xce, 0x3c};
+    for (int i = 0; i < 26; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
     // quantized coefficients == gate ecfrm_coeffs (generator raster order)
     static const std::int32_t genCoeffs[1024] = {        -87, -21, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -2730,7 +2762,7 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
 
     // decoder mirror: read back all 4 blocks through the l7 reader
     entropy::EcFrameContext fcR;
-    entropy::initDefaultEcFrameContext(&fcR);
+    entropy::initDefaultEcFrameContext(&fcR, 100);
     entropy::AomReader r;
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
     r.allow_update_cdf = 1;

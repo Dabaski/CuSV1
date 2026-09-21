@@ -624,44 +624,44 @@ static const AomCdfProb skip_cdfs_default[SKIP_CONTEXTS][CDF_SIZE(2)] = {
 };
 
 // default token CDF tables (cabac_context_model.c, verbatim)
-static const AomCdfProb txb_skip_cdfs_default[TX_SIZES][TXB_SKIP_CONTEXTS][CDF_SIZE(2)] = {
-#include "txb_skip_cdfs_default.inc"
+static const AomCdfProb txb_skip_cdfs_default[TOKEN_CDF_Q_CTXS][TX_SIZES][TXB_SKIP_CONTEXTS][CDF_SIZE(2)] = {
+#include "txb_skip_cdfs_buckets.inc"
 };
-static const AomCdfProb dc_sign_cdfs_default[PLANE_TYPES][DC_SIGN_CONTEXTS][CDF_SIZE(2)] = {
-#include "dc_sign_cdfs_default.inc"
+static const AomCdfProb dc_sign_cdfs_default[TOKEN_CDF_Q_CTXS][PLANE_TYPES][DC_SIGN_CONTEXTS][CDF_SIZE(2)] = {
+#include "dc_sign_cdfs_buckets.inc"
 };
-static const AomCdfProb coeff_base_eob_multi_cdfs_default[TX_SIZES][PLANE_TYPES][SIG_COEF_CONTEXTS_EOB][CDF_SIZE(3)] = {
-#include "coeff_base_eob_multi_cdfs_default.inc"
+static const AomCdfProb coeff_base_eob_multi_cdfs_default[TOKEN_CDF_Q_CTXS][TX_SIZES][PLANE_TYPES][SIG_COEF_CONTEXTS_EOB][CDF_SIZE(3)] = {
+#include "coeff_base_eob_multi_cdfs_buckets.inc"
 };
-static const AomCdfProb coeff_base_multi_cdfs_default[TX_SIZES][PLANE_TYPES][SIG_COEF_CONTEXTS][CDF_SIZE(4)] = {
-#include "coeff_base_multi_cdfs_default.inc"
+static const AomCdfProb coeff_base_multi_cdfs_default[TOKEN_CDF_Q_CTXS][TX_SIZES][PLANE_TYPES][SIG_COEF_CONTEXTS][CDF_SIZE(4)] = {
+#include "coeff_base_multi_cdfs_buckets.inc"
 };
-static const AomCdfProb coeff_lps_multi_cdfs_default[TX_32X32 + 1][PLANE_TYPES][LEVEL_CONTEXTS][CDF_SIZE(BR_CDF_SIZE)] = {
-#include "coeff_lps_multi_cdfs_default.inc"
+static const AomCdfProb coeff_lps_multi_cdfs_default[TOKEN_CDF_Q_CTXS][TX_32X32 + 1][PLANE_TYPES][LEVEL_CONTEXTS][CDF_SIZE(BR_CDF_SIZE)] = {
+#include "coeff_lps_multi_cdfs_buckets.inc"
 };
-static const AomCdfProb eob_extra_cdfs_default[TX_SIZES][PLANE_TYPES][EOB_COEF_CONTEXTS][CDF_SIZE(2)] = {
-#include "eob_extra_cdfs_default.inc"
+static const AomCdfProb eob_extra_cdfs_default[TOKEN_CDF_Q_CTXS][TX_SIZES][PLANE_TYPES][EOB_COEF_CONTEXTS][CDF_SIZE(2)] = {
+#include "eob_extra_cdfs_buckets.inc"
 };
-static const AomCdfProb eob_multi16_cdfs_default[PLANE_TYPES][2][CDF_SIZE(5)] = {
-#include "eob_multi16_cdfs_default.inc"
+static const AomCdfProb eob_multi16_cdfs_default[TOKEN_CDF_Q_CTXS][PLANE_TYPES][2][CDF_SIZE(5)] = {
+#include "eob_multi16_cdfs_buckets.inc"
 };
-static const AomCdfProb eob_multi32_cdfs_default[PLANE_TYPES][2][CDF_SIZE(6)] = {
-#include "eob_multi32_cdfs_default.inc"
+static const AomCdfProb eob_multi32_cdfs_default[TOKEN_CDF_Q_CTXS][PLANE_TYPES][2][CDF_SIZE(6)] = {
+#include "eob_multi32_cdfs_buckets.inc"
 };
-static const AomCdfProb eob_multi64_cdfs_default[PLANE_TYPES][2][CDF_SIZE(7)] = {
-#include "eob_multi64_cdfs_default.inc"
+static const AomCdfProb eob_multi64_cdfs_default[TOKEN_CDF_Q_CTXS][PLANE_TYPES][2][CDF_SIZE(7)] = {
+#include "eob_multi64_cdfs_buckets.inc"
 };
-static const AomCdfProb eob_multi128_cdfs_default[PLANE_TYPES][2][CDF_SIZE(8)] = {
-#include "eob_multi128_cdfs_default.inc"
+static const AomCdfProb eob_multi128_cdfs_default[TOKEN_CDF_Q_CTXS][PLANE_TYPES][2][CDF_SIZE(8)] = {
+#include "eob_multi128_cdfs_buckets.inc"
 };
-static const AomCdfProb eob_multi256_cdfs_default[PLANE_TYPES][2][CDF_SIZE(9)] = {
-#include "eob_multi256_cdfs_default.inc"
+static const AomCdfProb eob_multi256_cdfs_default[TOKEN_CDF_Q_CTXS][PLANE_TYPES][2][CDF_SIZE(9)] = {
+#include "eob_multi256_cdfs_buckets.inc"
 };
-static const AomCdfProb eob_multi512_cdfs_default[PLANE_TYPES][2][CDF_SIZE(10)] = {
-#include "eob_multi512_cdfs_default.inc"
+static const AomCdfProb eob_multi512_cdfs_default[TOKEN_CDF_Q_CTXS][PLANE_TYPES][2][CDF_SIZE(10)] = {
+#include "eob_multi512_cdfs_buckets.inc"
 };
-static const AomCdfProb eob_multi1024_cdfs_default[PLANE_TYPES][2][CDF_SIZE(11)] = {
-#include "eob_multi1024_cdfs_default.inc"
+static const AomCdfProb eob_multi1024_cdfs_default[TOKEN_CDF_Q_CTXS][PLANE_TYPES][2][CDF_SIZE(11)] = {
+#include "eob_multi1024_cdfs_buckets.inc"
 };
 
 // default_intra_ext_tx_cdf (cabac_context_model.c:157, verbatim)
@@ -757,29 +757,49 @@ const TxSize txsizeSqrUpMap[TX_SIZES_ALL] = {
     TX_64X64, // TX_64X16
 };
 
+// get_q_ctx (cabac_context_model.c:1907-1918, verbatim; the spec's
+// init_coeff_cdfs, 07.bitstream.semantics.md:1800-1820): the
+// TOKEN_CDF_Q_CTXS bucket for the coefficient CDF tables.
+static int getQCtx(std::int32_t q) {
+    if (q <= 20) {
+        return 0;
+    }
+    if (q <= 60) {
+        return 1;
+    }
+    if (q <= 120) {
+        return 2;
+    }
+    return 3;
+}
+
 // COPY_CDF equivalent for the four tables (cabac_context_model.c:740-741,
 // :767 - the kf_y_cdf/angle_delta_cdf/filter_intra rows of
-// svt_aom_av1_setup_frame_context).
-void initDefaultEcFrameContext(EcFrameContext* fc) {
+// svt_aom_av1_setup_frame_context) plus the coefficient tables, which are
+// QINDEX-BUCKET-SELECTED per the spec's init_coeff_cdfs (TD5b; previously
+// this init copied the idx-0 bucket for every frame - the TS1 deviation
+// named in the register; resolution: it WAS the q100 tile-divergence bug).
+void initDefaultEcFrameContext(EcFrameContext* fc, std::int32_t base_q_idx) {
+    const int idx = getQCtx(base_q_idx);
     memcpy(fc->kf_y_cdf, kf_y_mode_cdf_default, sizeof(fc->kf_y_cdf));
     memcpy(fc->angle_delta_cdf, angle_delta_cdf_default, sizeof(fc->angle_delta_cdf));
     memcpy(fc->filter_intra_cdfs, filter_intra_cdfs_default, sizeof(fc->filter_intra_cdfs));
     memcpy(fc->filter_intra_mode_cdf, filter_intra_mode_cdf_default, sizeof(fc->filter_intra_mode_cdf));
     memcpy(fc->partition_cdf, partition_cdf_default, sizeof(fc->partition_cdf));
     memcpy(fc->skip_cdfs, skip_cdfs_default, sizeof(fc->skip_cdfs));
-    memcpy(fc->txb_skip_cdf, txb_skip_cdfs_default, sizeof(fc->txb_skip_cdf));
-    memcpy(fc->dc_sign_cdf, dc_sign_cdfs_default, sizeof(fc->dc_sign_cdf));
-    memcpy(fc->coeff_base_eob_cdf, coeff_base_eob_multi_cdfs_default, sizeof(fc->coeff_base_eob_cdf));
-    memcpy(fc->coeff_base_cdf, coeff_base_multi_cdfs_default, sizeof(fc->coeff_base_cdf));
-    memcpy(fc->coeff_br_cdf, coeff_lps_multi_cdfs_default, sizeof(fc->coeff_br_cdf));
-    memcpy(fc->eob_extra_cdf, eob_extra_cdfs_default, sizeof(fc->eob_extra_cdf));
-    memcpy(fc->eob_flag_cdf16, eob_multi16_cdfs_default, sizeof(fc->eob_flag_cdf16));
-    memcpy(fc->eob_flag_cdf32, eob_multi32_cdfs_default, sizeof(fc->eob_flag_cdf32));
-    memcpy(fc->eob_flag_cdf64, eob_multi64_cdfs_default, sizeof(fc->eob_flag_cdf64));
-    memcpy(fc->eob_flag_cdf128, eob_multi128_cdfs_default, sizeof(fc->eob_flag_cdf128));
-    memcpy(fc->eob_flag_cdf256, eob_multi256_cdfs_default, sizeof(fc->eob_flag_cdf256));
-    memcpy(fc->eob_flag_cdf512, eob_multi512_cdfs_default, sizeof(fc->eob_flag_cdf512));
-    memcpy(fc->eob_flag_cdf1024, eob_multi1024_cdfs_default, sizeof(fc->eob_flag_cdf1024));
+    memcpy(fc->txb_skip_cdf, txb_skip_cdfs_default[idx], sizeof(fc->txb_skip_cdf));
+    memcpy(fc->dc_sign_cdf, dc_sign_cdfs_default[idx], sizeof(fc->dc_sign_cdf));
+    memcpy(fc->coeff_base_eob_cdf, coeff_base_eob_multi_cdfs_default[idx], sizeof(fc->coeff_base_eob_cdf));
+    memcpy(fc->coeff_base_cdf, coeff_base_multi_cdfs_default[idx], sizeof(fc->coeff_base_cdf));
+    memcpy(fc->coeff_br_cdf, coeff_lps_multi_cdfs_default[idx], sizeof(fc->coeff_br_cdf));
+    memcpy(fc->eob_extra_cdf, eob_extra_cdfs_default[idx], sizeof(fc->eob_extra_cdf));
+    memcpy(fc->eob_flag_cdf16, eob_multi16_cdfs_default[idx], sizeof(fc->eob_flag_cdf16));
+    memcpy(fc->eob_flag_cdf32, eob_multi32_cdfs_default[idx], sizeof(fc->eob_flag_cdf32));
+    memcpy(fc->eob_flag_cdf64, eob_multi64_cdfs_default[idx], sizeof(fc->eob_flag_cdf64));
+    memcpy(fc->eob_flag_cdf128, eob_multi128_cdfs_default[idx], sizeof(fc->eob_flag_cdf128));
+    memcpy(fc->eob_flag_cdf256, eob_multi256_cdfs_default[idx], sizeof(fc->eob_flag_cdf256));
+    memcpy(fc->eob_flag_cdf512, eob_multi512_cdfs_default[idx], sizeof(fc->eob_flag_cdf512));
+    memcpy(fc->eob_flag_cdf1024, eob_multi1024_cdfs_default[idx], sizeof(fc->eob_flag_cdf1024));
     memcpy(fc->intra_ext_tx_cdf, intra_ext_tx_cdfs_default, sizeof(fc->intra_ext_tx_cdf));
 }
 

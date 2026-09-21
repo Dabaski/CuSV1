@@ -370,7 +370,9 @@ struct EcFrameContext {
 // Initialize from the SVT default tables (cabac_context_model.c:59-97,
 // :614-623; RESET-INIT equivalent of svt_aom_av1_setup_frame_context
 // COPY_CDF, cabac_context_model.c:740-767 for these four tables).
-void initDefaultEcFrameContext(EcFrameContext* fc);
+// TD5b: the coefficient tables are QINDEX-BUCKET-SELECTED (the spec's
+// init_coeff_cdfs; get_q_ctx cabac_context_model.c:1907-1918).
+void initDefaultEcFrameContext(EcFrameContext* fc, std::int32_t base_q_idx);
 
 // Bitwise equality of the four tables (test-side adapted-cdf comparison).
 int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b);
