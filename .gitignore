@@ -5,3 +5,5 @@ t.obj
 decode_handoff_results.txt
 ts4.y4m
 ts4_aom.y4m
+third_party/aom/
+third_party/dav1d/
