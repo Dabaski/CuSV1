@@ -4,6 +4,27 @@
 // SVT general cores (provenance inline). Everything else forwards to the
 // verbatim extracts in svt_gen.c.
 #include "svt_gen.c"
+// TD4d: forward declarations for the drivers defined below the first use
+// (C4013 prototype discipline - MSVC assumes int returns otherwise).
+static int svtd_decide(const uint8_t* src, const uint8_t* above, int n_top, int n_topright,
+                       const uint8_t* left, int n_left, int txb_skip_ctx,
+                       const uint8_t* al, uint32_t* best_sad);
+static int svtd_eob_from_coeffs(const TranLow* coeff, const int16_t* scan, TxSize tx_size);
+// TD2 gate: the l7 twin wrappers (l7_ctx_shim.cpp, extern "C").
+int l7_getPaddedIdx(int idx, int bwl);
+int l7_getNzMag(const uint8_t* levels, int bwl, int tx_class);
+int l7_getNzMapCtxFromStats(int stats, int coeff_idx, int bwl, int tx_size, int tx_class);
+int l7_getLowerLevelsCtxEob(int bwl, int height, int scan_idx);
+int l7_getLowerLevelsCtx(const uint8_t* levels, int coeff_idx, int bwl, int tx_size,
+                         int tx_class);
+int l7_getBrCtxEob(int c, int bwl, int tx_class);
+int l7_getBrCtx(const uint8_t* levels, int c, int bwl, int tx_class);
+void l7_txbInitLevels(const int32_t* coeff, int width, int height, uint8_t* levels);
+// TD2c golomb + raw-sign surface (bytes/values exchange only - the l7 reader
+// struct layouts differ from the vendored bitreader.h shape; named in TD2).
+int l7_writeGolombToBuf(int level, unsigned char* out, unsigned cap, unsigned* outSize);
+int l7_readGolombFromBytes(const unsigned char* buffer, unsigned size, int* out);
+int l7_signtrace(const unsigned char* buffer, unsigned size, int dcsign0, int* out);
 
 // ---- dispatch adapters -----------------------------------------------------
 // SVT builds svt_aom_eb_pred / svt_aom_dc_pred with the intra_pred_sized
