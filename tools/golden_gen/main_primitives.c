@@ -2114,5 +2114,36 @@ int main(void) {
             printf("\n");
         }
     }
+
+    fflush(stdout);
+    // ---- TD2: context-equality gate lines -----------------------------------
+    // Exhaustive SVT-vs-l7 context equality (TX_CLASS_2D, the DCT_DCT scope):
+    // eob_ll/eob_br/fromstats/mag/ll/br enumeration + txb_init_levels
+    // full-buffer state. One gate line per size: <assert count> <fnv hex>
+    // <ok flag>; any mismatch also fails the drive (exit 1) and names the
+    // (pos, stats) pair on stderr.
+    {
+        svtd_ctxgate_init();
+        const int txs[3] = { TX_4X4, TX_8X8, TX_16X16 };
+        const char* names[3] = { "4", "8", "16" };
+        for (int i = 0; i < 3; ++i) {
+            if (svtd_ctxgate_size(txs[i])) {
+                fprintf(stderr, "CTXGATE size %s FAILED\n", names[i]);
+                return 1;
+            }
+            printf("ectx%s %d %016llx %d\n", names[i], svtd_ctx_count, svtd_ctx_fnv,
+                   svtd_ctx_bad == 0 ? 1 : 0);
+        }
+        fflush(stdout);
+        // TD2c: golomb (write-bytes + read-roundtrip over [0, 65535]) and the
+        // raw-sign positions; one combined gate line.
+        svtd_ctxgate_init();
+        const int gr = svtd_golombgate();
+        int sr = 0;
+        if (gr == 0 && !svtd_ctx_bad) sr = svtd_signgate();
+        printf("ectxg %d %016llx %d\n", svtd_ctx_count, svtd_ctx_fnv,
+               (svtd_ctx_bad == 0 && gr == 0 && sr == 0) ? 1 : 0);
+        if (gr != 0 || sr != 0 || svtd_ctx_bad) return 1;
+    }
     return 0;
 }

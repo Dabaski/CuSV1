@@ -3725,6 +3725,281 @@ static uint32_t svtd_td0_tu(int rung, uint8_t* tu, uint8_t* pic) {
     return offset + obu_size;
 }
 
+// ---- TD2: context-equality gate (exhaustive) -------------------------------
+// For TX_CLASS_2D at TX_4X4 / TX_8X8 / TX_16X16 (range rule: every size in
+// our TxType scope), enumerate the REACHABLE (pos, stats) state space and
+// assert bit-exact equality between the extracted SVT C context functions
+// and the l7 ported twins (linked in-process via l7_ctx_shim.cpp).
+// Reachability arguments: get_nz_mag CLIP_MAX3-clips every read cell to 3,
+// so the 2D mag domain is exactly [0, 15] (5 cells x {0..3}); every value in
+// [0, 15] is reachable. get_br_ctx reads 3 cells RAW (no pre-clip) with the
+// post-sum (mag+1)>>1 AOMMIN 6 - the sum saturates at 12, so the {0..4}^3
+// sweep covers sums 0..12 fully and the belt patterns pin the saturation.
+// The level buffers are poisoned before each call so unwritten regions
+// (stride/padding/END) participate in the comparison.
+
+// l7 twin wrappers (l7_ctx_shim.cpp, extern "C"): the ported twins the gate
+// asserts against.
+int l7_getBrCtxEob(int c, int bwl, int tx_class);
+int l7_getBrCtx(const uint8_t* levels, int c, int bwl, int tx_class);
+void l7_txbInitLevels(const int32_t* coeff, int width, int height, uint8_t* levels);
+// TD2c: the golomb + raw-sign surface (void* = the l7 struct pointers; the
+// l7 layouts mirror the vendored bitstream_unit.h structs)
+void l7_writeGolomb(void* w, int level);
+int l7_readGolombFromBytes(const unsigned char* buffer, unsigned size, int* out);
+
+
+
+int l7_signtrace(const unsigned char* buffer, unsigned size, int dcsign0, int* out);
+
+static uint64_t svtd_ctx_fnv;
+static int svtd_ctx_count;
+static int svtd_ctx_bad;
+
+static void svtd_ctx_ck(const char* tag, int svt, int l7v, int tx, int pos, int stats) {
+    svtd_ctx_count++;
+    svtd_ctx_fnv ^= (uint64_t)(uint32_t)svt;
+    svtd_ctx_fnv *= 1099511628211ULL;
+    if (svt != l7v) {
+        svtd_ctx_bad = 1;
+        fprintf(stderr, "CTXGATE MISMATCH tx=%d tag=%s pos=%d stats=%d svt=%d l7=%d\n", tx, tag,
+                pos, stats, svt, l7v);
+    }
+}
+
+static void svtd_ctxgate_init(void) {
+    svtd_ctx_fnv = 1469598103934665603ULL;
+    svtd_ctx_count = 0;
+    svtd_ctx_bad = 0;
+}
+
+static int svtd_ctxgate_size(int tx) {
+    const int bwl    = get_txb_bwl(tx);
+    const int w      = get_txb_wide(tx);
+    const int h      = get_txb_high(tx);
+    const int n      = w * h;
+    const int stride = (1 << bwl) + TX_PAD_HOR;
+    static uint8_t buf[TX_PAD_2D];
+
+    // A. get_lower_levels_ctx_eob over scan_idx [0, n)
+    for (int s = 0; s < n; ++s) {
+        const int a = get_lower_levels_ctx_eob(bwl, h, s);
+        const int b = l7_getLowerLevelsCtxEob(bwl, h, s);
+        svtd_ctx_ck("eob_ll", a, b, tx, s, 0);
+    }
+    // B. get_br_ctx_eob over pos [0, n)
+    for (int p = 0; p < n; ++p) {
+        const int a = get_br_ctx_eob(p, bwl, TX_CLASS_2D);
+        const int b = l7_getBrCtxEob(p, bwl, TX_CLASS_2D);
+        svtd_ctx_ck("eob_br", a, b, tx, p, 0);
+    }
+    // C. get_nz_map_ctx_from_stats over (pos, stats), stats [0, 31]
+    // (reachable clipped domain [0, 15]; [16, 31] = defined-but-unreachable belt)
+    for (int p = 0; p < n; ++p) {
+        for (int st = 0; st <= 31; ++st) {
+            const int a = get_nz_map_ctx_from_stats(st, p, bwl, tx, TX_CLASS_2D);
+            const int b = l7_getNzMapCtxFromStats(st, p, bwl, tx, TX_CLASS_2D);
+            svtd_ctx_ck("fromstats", a, b, tx, p, st);
+        }
+    }
+    // D. get_nz_mag + get_lower_levels_ctx over the clipped-reachable cell
+    // space. The 2D reader reads 5 cells relative to the padded index:
+    //   o0 = 1; o1 = stride; o2 = stride + 1; o3 = 2;
+    //   o4 = (2 << bwl) + (2 << TX_PAD_HOR_LOG2)
+    // Each cell clips to 3, so {0,1,2,3}^5 sweeps every reachable (pos,
+    // stats) state; the belt combos pin the clip3 at 4/127/255.
+    for (int p = 0; p < n; ++p) {
+        const int base = get_padded_idx(p, bwl);
+        for (int combo = 0; combo < 1024 + 3; ++combo) {
+            memset(buf, 0, sizeof(buf));
+            if (combo < 1024) {
+                int d[5];
+                int cc = combo;
+                for (int di = 0; di < 5; ++di) { d[di] = cc & 3; cc >>= 2; }
+                buf[base + 1] = (uint8_t)d[0];
+                buf[base + stride] = (uint8_t)d[1];
+                buf[base + stride + 1] = (uint8_t)d[2];
+                buf[base + 2] = (uint8_t)d[3];
+                buf[base + (2 << bwl) + (2 << TX_PAD_HOR_LOG2)] = (uint8_t)d[4];
+            } else {
+                const int v = (combo == 1024) ? 4 : (combo == 1025) ? 127 : 255;
+                buf[base + 1] = (uint8_t)v;
+                buf[base + stride] = (uint8_t)v;
+                buf[base + stride + 1] = (uint8_t)v;
+                buf[base + 2] = (uint8_t)v;
+                buf[base + (2 << bwl) + (2 << TX_PAD_HOR_LOG2)] = (uint8_t)v;
+            }
+            const int mag_s = get_nz_mag(buf + base, bwl, TX_CLASS_2D);
+            const int mag_l = l7_getNzMag(buf + base, bwl, TX_CLASS_2D);
+            svtd_ctx_ck("mag", mag_s, mag_l, tx, p, combo);
+            const int ctx_s = get_lower_levels_ctx(buf, p, bwl, tx, TX_CLASS_2D);
+            const int ctx_l = l7_getLowerLevelsCtx(buf, p, bwl, tx, TX_CLASS_2D);
+            svtd_ctx_ck("ll", ctx_s, ctx_l, tx, p, combo);
+        }
+    }
+    // F. get_br_ctx over the raw-sum sweep: 3 cells read RAW at
+    //   base + 1, base + stride, base + stride + 1
+    // {0..4}^3 covers sums 0..12 (the (mag+1)>>1 min-6 saturation point);
+    // belt patterns pin the saturation and the 127/255 raw-byte behavior.
+    for (int p = 0; p < n; ++p) {
+        const int base = get_padded_idx(p, bwl);
+        for (int combo = 0; combo < 125 + 5; ++combo) {
+            memset(buf, 0, sizeof(buf));
+            if (combo < 125) {
+                int d[3];
+                int cc = combo;
+                for (int di = 0; di < 3; ++di) { d[di] = cc % 5; cc /= 5; }
+                buf[base + 1] = (uint8_t)d[0];
+                buf[base + stride] = (uint8_t)d[1];
+                buf[base + stride + 1] = (uint8_t)d[2];
+            } else {
+                static const int belts[5][3] = { {0, 0, 5}, {0, 0, 15}, {0, 0, 127},
+                                                 {0, 0, 255}, {127, 127, 127} };
+                const int bi = combo - 125;
+                buf[base + 1] = (uint8_t)belts[bi][0];
+                buf[base + stride] = (uint8_t)belts[bi][1];
+                buf[base + stride + 1] = (uint8_t)belts[bi][2];
+            }
+            const int a = get_br_ctx(buf, p, bwl, TX_CLASS_2D);
+            const int b = l7_getBrCtx(buf, p, bwl, TX_CLASS_2D);
+            svtd_ctx_ck("br", a, b, tx, p, combo);
+        }
+    }
+    // G. txb_init_levels: full-buffer state equality over the value sweep
+    // (per-cell clamp map: identical buffers prove stride/padding/offsets for
+    // the geometry; the sweep covers the reachable coefficient domain edges).
+    {
+        static TranLow coeff[1024];
+        static uint8_t lvs[2][TX_PAD_2D];
+        static const int sweep[] = { 0, 1, 2, 3, 4, 15, 16, 127, 128, 255, 1000,
+                                     -1, -3, -127, -128, -1000 };
+        const int nvals = (int)(sizeof(sweep) / sizeof(sweep[0]));
+        for (int vi = 0; vi < nvals; ++vi) {
+            for (int i = 0; i < n; ++i) coeff[i] = sweep[vi];
+            memset(lvs[0], 0xA5, TX_PAD_2D);
+            memset(lvs[1], 0xA5, TX_PAD_2D);
+            svt_av1_txb_init_levels_c(coeff, w, h, lvs[0]);
+            l7_txbInitLevels(coeff, w, h, lvs[1]);
+            svtd_ctx_count++;
+            svtd_ctx_fnv ^= 0x1F2E3D4C5B6A7988ULL;
+            svtd_ctx_fnv *= 1099511628211ULL;
+            if (memcmp(lvs[0], lvs[1], TX_PAD_2D) != 0) {
+                svtd_ctx_bad = 1;
+                int first = -1;
+                for (int k = 0; k < TX_PAD_2D; ++k) {
+                    if (lvs[0][k] != lvs[1][k]) { first = k; break; }
+                }
+                fprintf(stderr, "CTXGATE MISMATCH tx=%d tag=init val=%d first-byte=%d svt=%d l7=%d\n",
+                        tx, sweep[vi], first,
+                        first >= 0 ? (int)lvs[0][first] : -1,
+                        first >= 0 ? (int)lvs[1][first] : -1);
+            }
+        }
+    }
+    return svtd_ctx_bad;
+}
+
+// TD2c: the golomb + raw-sign exhaustive gate. Golomb: enumerate the reachable
+// level range g in [0, 65535] (the wire value = abs(level) - 14, reachable up
+// to the u16 wire clamp and beyond the 8-bit transform domain; read_golomb's
+// 20-bit length cap admits x up to ~2M so 65535 is well inside). Asserts:
+// (a) our writeGolomb emits BYTES identical to the SVT write_golomb extract,
+// (b) our readGolomb decodes the SVT-written stream back to g. The l7 side
+// runs in its own structs (the layouts differ structurally from the vendored
+// reader - named in the report); the exchange is bytes/values only.
+static int svtd_golombgate(void) {
+    static uint8_t b1[64], b2[64];
+    int rc = 0;
+    for (int g = 0; g <= 65535; ++g) {
+        AomWriter w1;
+        w1.ec.buf = b1;
+        svt_od_ec_enc_reset(&w1.ec);
+        w1.allow_update_cdf = 1;
+        w1.pos = 0;
+        write_golomb(&w1, g);
+        aom_stop_encode(&w1);
+
+        unsigned w2pos = 0;
+        const int wrc = l7_writeGolombToBuf(g, b2, sizeof(b2), &w2pos);
+        if (wrc) {
+            svtd_ctx_bad = 1;
+            fprintf(stderr, "GOLGATE L7-WRITE rc=%d g=%d\n", wrc, g);
+            rc = 2;
+            break;
+        }
+
+        svtd_ctx_count++;
+        if (w1.pos != w2pos || memcmp(b1, b2, w1.pos) != 0) {
+            svtd_ctx_bad = 1;
+            if (!rc) {
+                fprintf(stderr, "GOLGATE WRITE MISMATCH g=%d svt=%u l7=%u b0=%02x/%02x\n", g,
+                        (unsigned)w1.pos, (unsigned)w2pos,
+                        w1.pos ? (unsigned)b1[0] : 0, w2pos ? (unsigned)b2[0] : 0);
+                rc = 1;
+            }
+        }
+        svtd_ctx_fnv ^= (uint64_t)(uint32_t)w1.pos;
+        svtd_ctx_fnv *= 1099511628211ULL;
+        svtd_ctx_fnv ^= (uint64_t)(uint32_t)g;
+        svtd_ctx_fnv *= 1099511628211ULL;
+
+        // read side: our readGolomb over the SVT-written bytes
+        int v = -1;
+        if (l7_readGolombFromBytes(b1, w1.pos, &v)) {
+            svtd_ctx_bad = 1;
+            fprintf(stderr, "GOLGATE READ-INIT FAIL g=%d\n", g);
+            rc = 4;
+            break;
+        }
+        svtd_ctx_count++;
+        svtd_ctx_fnv ^= (uint64_t)(uint32_t)v;
+        svtd_ctx_fnv *= 1099511628211ULL;
+        if (v != g) {
+            svtd_ctx_bad = 1;
+            if (rc == 0 || rc == 1) {
+                fprintf(stderr, "GOLGATE READ MISMATCH g=%d read=%d\n", g, v);
+                rc = 3;
+            }
+        }
+    }
+    return rc;
+}
+
+// raw-sign positions: (dc-sign cdf symbol, raw bool-eq bit) pairs written by
+// the SVT extracts, read back through OUR l7 reader (bytes-exchanged only -
+// the shim runs the l7 codec locally). The two sign surfaces in the token
+// chain: the c==0 dc-sign symbol and the c>0 raw aom_read_bit.
+static int svtd_signgate(void) {
+    static uint8_t b1[64];
+    int rc = 0;
+    static const AomCdfProb dcsign_row[CDF_SIZE(2)] = { AOM_CDF2(16384) };
+    for (int pat = 0; pat < 4; ++pat) {
+        AomWriter w;
+        w.ec.buf = b1;
+        svt_od_ec_enc_reset(&w.ec);
+        w.allow_update_cdf = 0;
+        w.pos = 0;
+        aom_write_bit(&w, pat & 1);
+        aom_write_symbol(&w, (pat >> 1) & 1, (AomCdfProb*)dcsign_row, 2);
+        aom_write_bit(&w, (pat >> 1) & 1);
+        aom_stop_encode(&w);
+
+        int out[4] = { -1, -1, -1, -1 };
+        if (l7_signtrace(b1, w.pos, dcsign_row[0], out)) return 2;
+        svtd_ctx_count++;
+        svtd_ctx_fnv ^= (uint64_t)(uint32_t)((out[0] << 8) | (out[1] << 4) | (out[2] << 2) | out[3]);
+        svtd_ctx_fnv *= 1099511628211ULL;
+        if (out[0] != (pat & 1) || out[1] != ((pat >> 1) & 1) || out[2] != ((pat >> 1) & 1) ||
+            out[3] != (pat & 1)) {
+            svtd_ctx_bad = 1;
+            fprintf(stderr, "SIGN GATE MISMATCH pat=%d got b0=%d sym=%d b1=%d b2=%d\n", pat, out[0],
+                    out[1], out[2], out[3]);
+            rc = 1;
+        }
+    }
+    return rc;
+}
+
 static int svtd_ts2_drive(uint8_t* buf) {
     // 64x32 frame from the f16 fixture pattern
     uint8_t src[2048];
