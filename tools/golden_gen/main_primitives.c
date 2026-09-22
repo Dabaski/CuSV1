@@ -2121,6 +2121,30 @@ int main(void) {
     }
 
     fflush(stdout);
+    // ---- FS2: per-size Q emission drives + per-size SPS ------------------
+    // The per-size analogs of the TS3 ecfrm set (modes/eobs/bytes/coeffs/
+    // recon + the read twin) at 4x4/8x8/32x32/64x64, plus the per-size SPS
+    // compositions via the parameterized svtd_bsf3_encode_sps_dims. The
+    // 64x64 drive runs the scan-contract settle (the compacted 32-wide
+    // token domain per svt_aom_init_iscan:331-337 + transforms.c:2700-2707
+    // + inv_transforms.c:2615-2628, documented at
+    // svtd_default_scan_64x64_token).
+    {
+        static uint8_t sps_buf[128];
+        const int dims[4] = { 4, 8, 32, 64 };
+        const char* dnames[4] = { "4", "8", "32", "64" };
+        for (int i = 0; i < 4; ++i) {
+            memset(sps_buf, 0, sizeof(sps_buf));
+            const uint32_t sps_size = svtd_bsf3_encode_sps_dims(sps_buf, dims[i]);
+            printf("sps_obu_d%s %u", dnames[i], sps_size);
+            for (uint32_t b = 0; b < sps_size; ++b) printf(" %02x", sps_buf[b]);
+            printf("\n");
+        }
+        fflush(stdout);
+        for (int i = 0; i < 4; ++i) svtd_fs2_drive(dims[i]);
+        fflush(stdout);
+    }
+
     // ---- TD2: context-equality gate lines -----------------------------------    // Exhaustive SVT-vs-l7 context equality (TX_CLASS_2D, the DCT_DCT scope):
     // eob_ll/eob_br/fromstats/mag/ll/br enumeration + txb_init_levels
     // full-buffer state. One gate line per size: <assert count> <fnv hex>

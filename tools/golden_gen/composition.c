@@ -1561,11 +1561,78 @@ static void svtd_default_scan_64x64(int16_t* scan) {
     }
 }
 
+// ---- FS2: THE TX_64X64 SCAN-CONTRACT SETTLE (pinned against SVT's own C) ---
+// The TX_64X64 coefficient-coding domain is the ADJUSTED 32x32 (the top-left
+// quadrant of the 64x64 matrix), end to end in the pinned tree:
+//   1. av1_get_max_eob(TX_64X64) = 1024 (inv_transforms.h:129-137); the
+//      quantize runs n_coeffs = 1024 (full_loop.c:1262).
+//   2. The scan pool at TX_64X64 is generated with W = H = 32, n = 1024
+//      (svt_aom_init_iscan, coefficients.c:331-337) -> the default scan is
+//      the 32x32-grid up-right diagonal (values r*32 + c, 0..1023),
+//      indexing a 32-WIDE buffer (coefficients.c:364).
+//   3. The fwd wrapper COMPACTS in place: rows 1..31 memcpy'd from row*64
+//      to row*32 (svt_handle_transform64x64_N2_N4_c, transforms.c:2700-2707,
+//      called at transforms.c:2916) - the quantize/token coeff buffer at
+//      TX_64X64 IS the 32-wide compacted top-left quadrant.
+//   4. The inverse takes the 32-WIDE 1024-entry input and remaps it into the
+//      zero-padded 64x64 internally (svt_av1_inv_txfm2d_add_64x64_c,
+//      inv_transforms.c:2615-2628, the verbatim comment).
+//   5. The token chain folds 64 -> 32 via get_txb_bwl/wide/high
+//      (common_utils.h:115-128); the nz-map LUT row aliases the 32x32 table
+//      (coefficients.c:274).
+// THE QC-BUFFER CONTRACT (documented here; the seam the court named):
+//   the token chain at TX_64X64 consumes a 32-WIDE 1024-entry COMPACTED
+//   buffer (qc32[r*32 + c] = qc64[r*64 + c], r,c < 32) with the normative
+//   1024-position scan below; the quantize is n_coeffs = 1024 over the same
+//   compacted buffer (NOT the 4096-wide buffer the l3 f64/b64 gate lines
+//   pin - those stay as the l3 64-wide facade artifacts). Coefficients
+//   outside the top-left 32x32 are never quantized nor coded (the decoder
+//   zero-fills them: the recon contract below); the recon path expands the
+//   compacted dqcoeff into a 64-wide zeroed array before the l3 inv64 -
+//   reproducing svt_av1_inv_txfm2d_add_64x64_c's internal remap exactly.
+// This drive IS the settle: it runs the vendored quantize_fp_helper_c +
+// svt_av1_idct64_new on the compacted domain and the fs264_recon gate line
+// pins the result; FS5's real-decoder decode gives the final content-1:1
+// proof.
+static void svtd_default_scan_64x64_token(int16_t* scan) {
+    // svt_aom_init_iscan at TX_64X64 (coefficients.c:331-337, 349-363):
+    // n = 1024, W = H = tx_size_wide/high capped at 32 -> the same
+    // up-right diagonal formula as the 32x32 grid.
+    const int W = 32, H = 32;
+    int idx = 0;
+    for (int d = 0; d < W + H - 1; ++d) {
+        const int rlo  = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
+        const int rhi  = d < (H - 1) ? d : (H - 1);
+        int       incr = (H > W) ? 1 : (W > H) ? 0 : (d & 1);
+        if (incr) {
+            for (int r = rlo; r <= rhi; ++r) {
+                scan[idx++] = (int16_t)(r * W + (d - r));
+            }
+        } else {
+            for (int r = rhi; r >= rlo; --r) {
+                scan[idx++] = (int16_t)(r * W + (d - r));
+            }
+        }
+    }
+}
+
 // TX_64X64 FP quantize entry (L7): quantize_fp_helper_c at n_coeffs=4096,
 // log_scale 2 (av1_get_tx_scale_tab[TX_64X64] = 2, full_loop.c:22).
 static void svtd_quantize_fp_64x64(const TranLow* coeff, const SvtdQuantTables* t, const int16_t* scan,
                                    TranLow* qcoeff, TranLow* dqcoeff, uint16_t* eob) {
     quantize_fp_helper_c(coeff, 4096, t->zbin, t->round_fp, t->quant_fp, t->quant_shift, qcoeff,
+                         dqcoeff, t->dequant, eob, scan, NULL, NULL, NULL, 2);
+}
+
+// FS2: the EMISSION quantize at TX_64X64 - the vendored call shape:
+// n_coeffs = av1_get_max_eob(TX_64X64) = 1024 (full_loop.c:1262 +
+// inv_transforms.h:129-137) over the COMPACTED 32-wide buffer with the
+// normative 32x32-grid scan (coefficients.c:331-337, 364). The l3
+// svtd_quantize_fp_64x64 above stays the 4096-wide facade artifact.
+static void svtd_quantize_fp_64x64_token(const TranLow* coeff, const SvtdQuantTables* t,
+                                         const int16_t* scan, TranLow* qcoeff, TranLow* dqcoeff,
+                                         uint16_t* eob) {
+    quantize_fp_helper_c(coeff, 1024, t->zbin, t->round_fp, t->quant_fp, t->quant_shift, qcoeff,
                          dqcoeff, t->dequant, eob, scan, NULL, NULL, NULL, 2);
 }
 
@@ -2722,6 +2789,20 @@ static void svtd_script_bool(const char* tag, int val) {
     static const AomCdfProb eqrow[3] = { AOM_CDF2(16384) };
     fprintf(stderr, "S %s%s 2 %d 16384 0 0\n", svtd_trace_tag, tag, val);
 }
+
+// FS2 (the FS3-prep gate, generator side): the verbatim av1_write_tx_type
+// gate (entropy_coding.c:321-322) folded for the DCT_DCT-only port's call
+// sites - intra (is_inter=0), use_reduced_set=1 (the ratified config:
+// reduced_tx_set = 1 in the v2 header), q > 0 implied by the callers (the
+// lossless paths never enter the chain). get_ext_tx_set_type folds from
+// common_utils.h:59-77: at TX_32X32/64X64 intra the eset is DCTONLY
+// (1 type) -> NO tx-type symbol; at 4x4/8x8/16x16 reduced intra -> DTT4_IDTX
+// (5 types) -> the symbol (byte-identical to the previous ungated emission).
+static int svtd_get_ext_tx_types(TxSize tx_size) {
+    const TxSize sqr_up = txsize_sqr_up_map[tx_size];
+    if (sqr_up >= TX_32X32) return av1_num_ext_tx_set[EXT_TX_SET_DCTONLY];
+    return av1_num_ext_tx_set[EXT_TX_SET_DTT4_IDTX];
+}
 static void svtd_tr(const char* tag, int val, const OdEcEnc* enc) {
     if (!svtd_trace) return;
     if (enc) {
@@ -2748,14 +2829,14 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     }
     if (eob == 0) return;
 
-    // TS3: tx-type emission (entropy_coding.c:374-376). The l6 pipeline's
-    // DCT_DCT-only port emits the DCT_DCT index through the DTT4_IDTX set
-    // (eset 2, 5 symbols) for reduced_tx_set=1 intra. The intra_dir is
-    // always DC_PRED for the DCT_DCT-only port (av1_write_tx_type :339-342
+    // TS3: tx-type emission (entropy_coding.c:374-376), gated by the
+    // verbatim av1_write_tx_type gate (entropy_coding.c:321-322) via
+    // svtd_get_ext_tx_types (common_utils.h:59-77 fold): at TX_32X32/64X64
+    // intra the eset is DCTONLY (1 type) -> the symbol is NOT written.
+    // The intra_dir is the caller's luma mode (av1_write_tx_type :339-342
     // folds filter-intra via fimode_to_intradir; DCT_DCT-only port has
-    // filter_intra_mode == FILTER_INTRA_MODES, so intra_dir = the caller's
-    // intraDir = the luma mode).
-    {
+    // filter_intra_mode == FILTER_INTRA_MODES).
+    if (svtd_get_ext_tx_types(tx_size) > 1) {
         const TxSize sq = txsize_sqr_map[tx_size];
         svtd_script_row("tx", av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
                         fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
@@ -2840,12 +2921,17 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const int coeff_ctx = coeff_contexts[pos];
         const TranLow v     = coeff[pos];
         const int32_t level = ABS(v);
+        if (svtd_script) fprintf(stderr, "C %sbase c=%d pos=%d ctx=%d\n", svtd_trace_tag, c, pos,
+                                 coeff_ctx);
         svtd_script_row("base", AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
         aom_write_symbol(w, AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
         svtd_tr("base", AOMMIN(level, 3), &w->ec);
         if (level > NUM_BASE_LEVELS) {
             const int32_t base_range = level - 1 - NUM_BASE_LEVELS;
             const int16_t br_ctx     = get_br_ctx(levels, pos, bwl, TX_CLASS_2D);
+            if (svtd_script)
+                fprintf(stderr, "C %sbrs c=%d pos=%d brctx=%d lv=%d\n", svtd_trace_tag, c, pos,
+                        br_ctx, (int)levels[get_padded_idx(pos, bwl)]);
             for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
                 svtd_script_row("brs", k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
@@ -2903,12 +2989,16 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
     memset(coeff, 0, sizeof(TranLow) * (get_txb_wide(tx_size) * get_txb_high(tx_size)));
 
     const int all_zero = aom_read_symbol_(r, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
+    if (svtd_script) fprintf(stderr, "R %sskip %d\n", svtd_trace_tag, all_zero);
     if (all_zero) return 0;
 
-    // TS3: tx-type read (between txb_skip and eob_pt, entropy_coding.c:374-376)
-    {
+    // TS3: tx-type read (between txb_skip and eob_pt, entropy_coding.c:374-376),
+    // the same verbatim gate as the writer side (av1_read_tx_type folds it:
+    // <= 1 types -> DCT_DCT implicit, no symbol).
+    if (svtd_get_ext_tx_types(tx_size) > 1) {
         const TxSize sq = txsize_sqr_map[tx_size];
         const int ttx = aom_read_symbol_(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
+        if (svtd_script) fprintf(stderr, "R %stx %d\n", svtd_trace_tag, ttx);
         (void)ttx;  // DCT_DCT-only port: the read symbol is discarded
     }
 
@@ -2923,6 +3013,7 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
     case 5: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf512[0][eob_multi_ctx], 10) + 1; break;
     default: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf1024[0][eob_multi_ctx], 11) + 1; break;
     }
+    if (svtd_script) fprintf(stderr, "R %seobpt %d\n", svtd_trace_tag, eob_pt - 1);
     int eob_extra = 0;
     {
         const int eob_offset_bits = (eob_pt > 2) ? (eob_pt - 2) : 0;
@@ -2934,6 +3025,7 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
                 if (aom_read_bit(r, NULL)) eob_extra += (1 << (eob_offset_bits - 1 - i));
             }
         }
+        if (svtd_script) fprintf(stderr, "R %seobx %d\n", svtd_trace_tag, eob_extra);
     }
     // rec_eob_pos (aom decodetxb.c): group_start[token] + extra, where
     // group_start[1]=1, group_start[2]=2, group_start[t>2]=(1<<(t-2))+1
@@ -2957,11 +3049,15 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
         const int pos = scan[c];
         const int lctx = get_lower_levels_ctx_eob(bwl, height, c);
         int level = aom_read_symbol_(r, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3) + 1;
+        if (svtd_script) fprintf(stderr, "R %sbeob c=%d pos=%d lctx=%d %d\n", svtd_trace_tag, c, pos,
+                                 lctx, level - 1);
         if (level > NUM_BASE_LEVELS) {
             const int br_ctx = get_br_ctx_eob(pos, bwl, TX_CLASS_2D);
             for (int idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int k = aom_read_symbol_(r, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
                 level += k;
+                if (svtd_script) fprintf(stderr, "R %sbr c=%d pos=%d brctx=%d k=%d\n", svtd_trace_tag, c,
+                                         pos, br_ctx, k);
                 if (k < BR_CDF_SIZE - 1) break;
             }
         }
@@ -2973,11 +3069,20 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
         const int coeff_ctx =
             (eob == 1) ? 0 : get_lower_levels_ctx(levels, pos, bwl, tx_size, TX_CLASS_2D);
         int level = aom_read_symbol_(r, fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
+        if (svtd_script) {
+        AomCdfProb* dbgRow = fc->coeff_base_cdf[txs_ctx][0][coeff_ctx];
+        fprintf(stderr,
+                "R %sbase c=%d pos=%d ctx=%d %d row=%u,%u,%u cnt=%u rng=%u dif=%llu cnt2=%d\n",
+                svtd_trace_tag, c, pos, coeff_ctx, level, dbgRow[0], dbgRow[1], dbgRow[2],
+                dbgRow[4], r->ec.rng, (unsigned long long)r->ec.dif, (int)r->ec.cnt);
+    }
         if (level > NUM_BASE_LEVELS) {
             const int br_ctx = get_br_ctx(levels, pos, bwl, TX_CLASS_2D);
             for (int idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int k = aom_read_symbol_(r, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
                 level += k;
+                if (svtd_script) fprintf(stderr, "R %sbrs c=%d pos=%d brctx=%d k=%d\n", svtd_trace_tag, c,
+                                         pos, br_ctx, k);
                 if (k < BR_CDF_SIZE - 1) break;
             }
         }
@@ -3011,6 +3116,232 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
         coeff[pos] = sign ? -lv : lv;
     }
     return eob;
+}
+// ---- FS2: per-size Q emission drives ---------------------------------------
+// One single-TU SxS frame per geometry (4/8/32/64; 16x16 is the committed
+// ecfrm/td0 set). Per drive: the D2 SAD policy decides the mode over the
+// fresh-edge fixture (the 13-mode sweep; policy ours, primitives 1:1), then
+// the full per-block symbol walk in the wire order:
+//   [partition iff the walk reads one] [skip=0] [kf mode] [FI iff
+//   mode==DC_PRED && block_size <= 32x32 (mode_decision.c:108-120)]
+//   [tx-type iff svtd_get_ext_tx_types > 1] [token chain].
+// Partition reads per frame size: a 4x4 frame reads NONE (at the 8x8 level
+// both splits are unavailable in a 1x1-mi frame -> forced split, the 4x4
+// quadrant coded directly); 8x8 reads a 4-symbol row at BLOCK_8X8
+// (svt_aom_partition_cdf_length, entropy_coding.c:922-930); 16/32/64 read
+// 10-symbol rows at their level. The fresh partition context comes from
+// ecpart_derive_ctx on INVALID-filled arrays (the TD0 walk shape); the
+// fresh kf ctx pair = intra_mode_context[DC_PRED] (the TD0 walk shape).
+// All four drives run the read twin with the SAME bucket + scan and assert
+// the roundtrip; the fs2S_* gate lines pin every surface for the l6 mirror
+// (FS3/FS4). The TX_64X64 drive runs the scan-contract settle documented at
+// svtd_default_scan_64x64_token above.
+static void svtd_fs2_drive(int S) {
+    static char tagbuf[8];
+    tagbuf[0] = (S == 4) ? 'p' : (S == 8) ? 'q' : (S == 32) ? 'r' : 's';
+    tagbuf[1] = ':';
+    tagbuf[2] = 0;
+    svtd_trace_tag = tagbuf;
+    const TxSize ts    = (S == 4) ? TX_4X4 : (S == 8) ? TX_8X8 : (S == 32) ? TX_32X32 : TX_64X64;
+    const BlockSize bs = (S == 4)    ? BLOCK_4X4
+                         : (S == 8)  ? BLOCK_8X8
+                         : (S == 32) ? BLOCK_32X32
+                                     : BLOCK_64X64;
+    static uint8_t src[4096];
+    for (int y = 0; y < S; ++y)
+        for (int x = 0; x < S; ++x)
+            src[y * S + x] = (uint8_t)((y < S / 2) ? (4 * (x + y + 1)) : 0);
+
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(100, &t);
+    static int16_t scan[4096];
+    if (S == 4) {
+        svtd_default_scan_4x4(scan);
+    } else if (S == 8) {
+        svtd_default_scan_8x8(scan);
+    } else if (S == 32) {
+        svtd_default_scan_32x32(scan);
+    } else {
+        svtd_default_scan_64x64_token(scan);  // the normative 1024-position scan
+    }
+    const int n = S * S;
+
+    // D2 policy: 13 candidates, SAD scored, lowest wins, tie = lowest idx
+    static uint8_t srcblk[4096];
+    memcpy(srcblk, src, (size_t)n);
+    static uint8_t pred[4096];
+    uint32_t best_sad = 0;
+    int mode = -1;
+    for (int m = 0; m <= PAETH_PRED; ++m) {
+        svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, NULL, 0, 0, NULL, 0, 0, 0, ts);
+        const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, S, pred, S, S, S);
+        if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+    }
+    svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, NULL, 0, 0, NULL, 0, 0, 0, ts);
+    static int16_t res[4096];
+    for (int i = 0; i < n; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+
+    // forward + quantize (the emission domain)
+    static int32_t cb[4096];
+    static TranLow qc[4096], dq[4096];
+    memset(qc, 0, sizeof(qc));
+    memset(dq, 0, sizeof(dq));
+    uint16_t eob = 0;
+    if (S == 64) {
+        // THE TX_64X64 SCAN-CONTRACT (the settle documented at
+        // svtd_default_scan_64x64_token): fwd64 (the l3 64-wide facade) ->
+        // compact the top-left 32x32 of the INT32 coeff output into a
+        // 32-WIDE buffer (the vendored fwd wrapper does exactly this,
+        // svt_handle_transform64x64_N2_N4_c, transforms.c:2700-2707) ->
+        // quantize n_coeffs = 1024 over the compacted buffer with the
+        // normative 32x32-grid scan (full_loop.c:1262 + the scan).
+        svtd_fwd2d64x64(res, S, cb, svt_av1_fdct64_new);
+        for (int r = 1; r < 32; ++r)
+            memcpy(cb + r * 32, cb + r * 64, 32 * sizeof(*cb));
+        svtd_quantize_fp_64x64_token(cb, &t, scan, qc, dq, &eob);
+    } else if (S == 32) {
+        svtd_fwd2d32x32(res, S, cb, svt_av1_fdct32_new);
+        svtd_quantize_fp_32x32(cb, &t, scan, qc, dq, &eob);
+    } else if (S == 8) {
+        svtd_fwd2d8x8(res, S, cb, svt_av1_fdct8_new);
+        svtd_quantize_fp_8x8(cb, &t, scan, qc, dq, &eob);
+    } else {
+        svtd_fwd2d4x4(res, S, cb, svt_av1_fdct4_new);
+        svtd_quantize_fp_4x4(cb, &t, scan, qc, dq, &eob);
+    }
+
+    // emission context (q100 -> the idx-2 bucket, TD5a)
+    static AomCdfProb part_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+    memcpy(part_cdf, default_partition_cdf, sizeof(part_cdf));
+    static AomCdfProb skip_cdf[SKIP_CONTEXTS][CDF_SIZE(2)];
+    memcpy(skip_cdf, default_skip_cdfs, sizeof(skip_cdf));
+    static AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+    memcpy(kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(kf_y_cdf));
+    static AomCdfProb fi_cdf[CDF_SIZE(2)];
+    memcpy(fi_cdf, default_filter_intra_cdfs[bs], sizeof(fi_cdf));
+    Ts1FrameContext fc;
+    ts1_init(&fc, 100);
+    Ts1FrameContext fc2;
+    ts1_init(&fc2, 100);
+
+    static uint8_t tile_buf[256];
+    memset(tile_buf, 0, sizeof(tile_buf));
+    AomWriter w;
+    w.ec.buf = tile_buf;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = svtd_td0_adapt_probe;
+    w.pos = 0;
+
+    // [partition iff the walk reads one]
+    if (S >= 8) {
+        static uint8_t above_pctx[8];
+        static uint8_t left_pctx[16];
+        memset(above_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(above_pctx));
+        memset(left_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(left_pctx));
+        const int pctx = ecpart_derive_ctx(above_pctx, left_pctx, 0, 0, bs);
+svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
+                        svt_aom_partition_cdf_length(bs));
+        aom_write_symbol(&w, PARTITION_NONE, part_cdf[pctx], svt_aom_partition_cdf_length(bs));
+        printf("fs2%d_part %d\n", S, pctx);
+    } else {
+        // 4x4 frame: no partition symbol (the forced-split quadrant is
+        // coded directly).
+        printf("fs24_part -1\n");
+    }
+// skip = 0, ctx 0 (fresh)
+    svtd_script_row("skip", 0, skip_cdf[0], 2);
+    aom_write_symbol(&w, 0, skip_cdf[0], 2);
+    // kf mode, fresh ctx pair
+    const int kctx = intra_mode_context[DC_PRED];
+    svtd_script_row("mode", mode, kf_y_cdf[kctx][kctx], INTRA_MODES);
+    aom_write_symbol(&w, mode, kf_y_cdf[kctx][kctx], INTRA_MODES);
+    // FI iff allowed (mode_decision.c:108-120; 64x64 dead by bsize)
+    if (mode == DC_PRED && block_size_wide[bs] <= 32 && block_size_high[bs] <= 32) {
+        svtd_script_row("fi", 0, fi_cdf, 2);
+        aom_write_symbol(&w, 0, fi_cdf, 2);
+    }
+    // the token chain (the tx-type gate inside is the verbatim FS3-prep fix)
+    svtd_write_coeffs_txb(&w, &fc, qc, scan, ts, eob, 0, 0, (PredictionMode)mode);
+    aom_stop_encode(&w);
+
+    printf("fs2%d_modes %d\n", S, mode);
+    printf("fs2%d_eobs %d\n", S, (int)eob);
+    printf("fs2%d_bytes %u", S, w.pos);
+    for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", tile_buf[i]);
+    printf("\n");
+    printf("fs2%d_coeffs", S);
+    for (int i = 0; i < n; ++i) printf(" %d", (int)qc[i]);
+    printf("\n");
+
+    // recon (the decoder contract): the emission-domain dqcoeff placed back
+    static uint8_t rec[4096];
+    if (S == 64) {
+        // expand the compacted dqcoeff into the 64-wide zeroed array (the
+        // svt_av1_inv_txfm2d_add_64x64_c internal remap,
+        // inv_transforms.c:2615-2628) then the l3 inv64 facade
+        static TranLow dq64[4096];
+        memset(dq64, 0, sizeof(dq64));
+        for (int r = 0; r < 32; ++r)
+            for (int c = 0; c < 32; ++c) dq64[r * 64 + c] = dq[r * 32 + c];
+        svtd_inv2dadd64x64(dq64, pred, S, svt_av1_idct64_new);
+    } else if (S == 32) {
+        svtd_inv2dadd32x32(dq, pred, S, svt_av1_idct32_new);
+    } else if (S == 8) {
+        svtd_inv2dadd8x8(dq, pred, S, svt_av1_idct8_new);
+    } else {
+        svtd_inv2dadd4x4(dq, pred, S, svt_av1_idct4_new);
+    }
+    memcpy(rec, pred, (size_t)n);
+    printf("fs2%d_recon", S);
+    for (int i = 0; i < n; ++i) printf(" %d", (int)rec[i]);
+    printf("\n");
+
+    // read twin with the SAME bucket + scan
+    static uint8_t above_na[16];
+    static uint8_t left_na[8];
+    memset(above_na, (int)INVALID_NEIGHBOR_DATA, sizeof(above_na));
+    memset(left_na, (int)INVALID_NEIGHBOR_DATA, sizeof(left_na));
+    aom_reader r;
+    if (aom_reader_init(&r, tile_buf, w.pos)) { fprintf(stderr, "FS2 reader init\n"); return; }
+    r.allow_update_cdf = 1;
+    static AomCdfProb rs[CDF_SIZE(2)];
+    memcpy(rs, default_skip_cdfs[0], sizeof(rs));
+    if (S >= 8) {
+        static AomCdfProb rp[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+        memcpy(rp, default_partition_cdf, sizeof(rp));
+        const int pctx2 = ecpart_derive_ctx(above_na, left_na, 0, 0, bs);
+        const int pv = aom_read_symbol_(&r, rp[pctx2], svt_aom_partition_cdf_length(bs));
+        if (pv != PARTITION_NONE) { fprintf(stderr, "FS2 rt part %d\n", pv); return; }
+    }
+    aom_read_symbol_(&r, rs, 2);
+    {
+        static AomCdfProb rk[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+        memcpy(rk, svt_aom_default_kf_y_mode_cdf, sizeof(rk));
+        const int kctx2 = intra_mode_context[DC_PRED];
+        const int m2 = aom_read_symbol_(&r, rk[kctx2][kctx2], INTRA_MODES);
+        if (m2 != mode) { fprintf(stderr, "FS2 rt mode %d\n", m2); return; }
+        if (mode == DC_PRED && block_size_wide[bs] <= 32 && block_size_high[bs] <= 32) {
+            static AomCdfProb rfi[CDF_SIZE(2)];
+            memcpy(rfi, default_filter_intra_cdfs[bs], sizeof(rfi));
+            aom_read_symbol_(&r, rfi, 2);
+        }
+    }
+static TranLow rc[4096];
+    memset(rc, 0, sizeof(rc));
+    const int reob = svtd_read_coeffs_txb(&r, &fc2, rc, scan, ts, 0, 0, (PredictionMode)mode);
+    int coeff_eq = (reob == (int)eob) ? 1 : 0;
+    int first_mm = -1;
+    for (int i = 0; i < n; ++i) {
+        if (rc[i] != qc[i]) {
+            coeff_eq = 0;
+            if (first_mm < 0) first_mm = i;
+        }
+    }
+    if (first_mm >= 0) {
+        fprintf(stderr, "FS2 rt mismatch S=%d first=%d qc=%d rc=%d\n", S, first_mm, (int)qc[first_mm],
+                (int)rc[first_mm]);
+    }
+    printf("fs2%d_rt %d %d\n", S, reob, coeff_eq);
 }
 // TS1 driver: one 16x16 TU (f16 block 0, q100) + 4x4/8x8 TUs (multi-size
 // eob selection coverage). Writes, reads back, compares.
