@@ -2128,9 +2128,9 @@ int main(void) {
     // (pos, stats) pair on stderr.
     {
         svtd_ctxgate_init();
-        const int txs[3] = { TX_4X4, TX_8X8, TX_16X16 };
-        const char* names[3] = { "4", "8", "16" };
-        for (int i = 0; i < 3; ++i) {
+        const int txs[5] = { TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_64X64 };
+        const char* names[5] = { "4", "8", "16", "32", "64" };
+        for (int i = 0; i < 5; ++i) {
             if (svtd_ctxgate_size(txs[i])) {
                 fprintf(stderr, "CTXGATE size %s FAILED\n", names[i]);
                 return 1;
