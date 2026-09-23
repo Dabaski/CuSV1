@@ -122,22 +122,27 @@ writes skipped — the spec's num_planes guard the pinned writer
 lacks). Decoder-confirmed: libdav1d/ffprobe read the stream back as
 gray(pc).
 
-## 6. The committed artifact
+## 6. The committed artifact set
 
-`src/l8_bitstream/tests/goldens/structural_keyframe.obu` (47 bytes,
-v2; TD5b: the v2 header + the idx-2-coded tile) is produced from the
-generator output — never hand-typed. The l8 test proves the three-way
-identity: composed TU (l6 decisions through
-l7 symbols + l8 assembly) == committed file == gate bytes
-(tu_bytes_v2). The v1 byte stream remains gated (tu_bytes).
+`src/l8_bitstream/tests/goldens/structural_keyframe*.obu` — five
+artifacts, one per geometry, each produced from the generator output —
+never hand-typed. The l8 tests prove the three-way identity per
+artifact: composed TU (l6 decisions through l7 symbols + l8
+assembly) == committed file == gate bytes (tu_bytes_v2_dS; the d32 =
+tu_bytes_v2). The v1 byte stream remains gated (tu_bytes).
 
-Decoder status (measured):
+Decoder status (measured, `tools/verify_decode4.ps1 -Geometry`):
 
-| Stream | Result |
-| --- | --- |
-| v1 lossless TU (23 bytes, BSF4-fix bytes) | full decode attested: libdav1d silent exit 0; ffprobe reports av1, 32x32, gray(pc) |
-| v2 lossy TU (47 bytes, real token streams, idx-2 bucket) | full decode attested AND content 1:1: ffmpeg exit 0, all 1024 pixels == the generator's recon (byte-diffs 0/1024, the fingerprint 05 08 0c 11; tools/verify_decode4.ps1) |
-| TD0 probe ladder | CLOSED: 7/7 rungs byte-exact in the real libdav1d (TD5a; see docs/decode_conformance.md) |
+| Artifact | Size | Decoded | Result |
+| --- | --- | --- | --- |
+| structural_keyframe_d4.obu | 30 B | 64 B (8x8) | content 1:1 == fs5g4_recon; the 4x4 geometry codes an 8x8 frame: the decoders align frame dims to 8 px, so the 8x8 node reads one 4-symbol partition symbol (forced SPLIT) and codes four 4x4 partition leaves — a 4x4 TU exists only as a leaf (dav1d 1.5.4 trace-verified) |
+| structural_keyframe_d8.obu | 30 B | 64 B | content 1:1 == fs28_recon |
+| structural_keyframe_d16.obu | 44 B | 256 B | content 1:1 == fs216_recon |
+| structural_keyframe.obu | 47 B | 1024 B (32x32) | content 1:1 == ecfrm_recon (byte-diffs 0/1024, the fingerprint 05 08 0c 11) |
+| structural_keyframe_d64.obu | 441 B | 4096 B | content 1:1 == fs264_recon |
+
+All measured with tools/verify_decode4.ps1
+(ffmpeg 8.1.2 / libdav1d 1.5.3-62, exit 0 per geometry).
 
 ## 7. The coupling invariant (BSF4-fix)
 

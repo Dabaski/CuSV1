@@ -24,8 +24,9 @@ JIT-compiled at runtime via NVRTC.
 - **Coefficient/token coding closed** (TS-series): the lossy v2
   temporal unit (47 bytes, real token streams, `base_q_idx` = 100)
   parses under the same decoders — an ffmpeg probe reports
-  `av1 (libdav1d) (Main)`, gray(pc), 32x32. This is probe-level
-  evidence; the attested full decode is the lossless TU above.
+  `av1 (libdav1d) (Main)`, gray(pc), 32x32 — and was the
+  conformance gate until the FS-series extended it to all five
+  geometries.
 - **Decoder conformance closed, content 1:1** (TD-series): the
   q100 token streams now decode **and reconstruct bit-identically**.
   The root cause was the coefficient-CDF qindex bucket: the spec's
@@ -33,13 +34,30 @@ JIT-compiled at runtime via NVRTC.
   `base_q_idx` (07.bitstream.semantics.md:1800-1820; the verbatim
   `get_q_ctx`, cabac_context_model.c:1907-1918); the writer used the
   idx-0 bucket for every frame. With the bucketed init the 7-rung
-  bisect ladder is 7/7 byte-exact in the real libdav1d, the committed
-  47-byte artifact decodes with exit 0, and all 1024 decoded pixels
-  equal the generator's recon (byte-diffs 0/1024; the content
-  fingerprint: the first pixels `05 08 0c 11`). The full resolution
-  record: `docs/decode_conformance.md`.
+  bisect ladder is 7/7 byte-exact in the real libdav1d, and all 1024
+  decoded pixels of the committed 47-byte artifact equal the
+  generator's recon (the content fingerprint: the first pixels
+  `05 08 0c 11`). The full resolution record:
+  `docs/decode_conformance.md`.
+- **Per-geometry emission closed, content 1:1 at all five sizes**
+  (FS-series): every geometry (4x4, 8x8, 16x16, 32x32, 64x64) now
+  emits real symbol streams (partition/skip/kf-mode/filter-intra/
+  token chains) and carries a committed v3 artifact that a reference
+  decoder decodes **bit-identically** — measured: d4 30B→64B,
+  d8 30B→64B, d16 44B→256B, d32 47B→1024B, d64 441B→4096B decoded
+  bytes all equal the generator's recon lines
+  (`tools/verify_decode4.ps1 -Geometry <4|8|16|32|64>`). The 4x4
+  artifact codes an 8x8 frame as one 4-symbol partition symbol
+  (forced SPLIT) plus four 4x4 partition leaves: the decoders align
+  frame dims to 8 px, so a 4x4 frame is an 8x8 node and a 4x4 TU
+  exists only as a leaf (dav1d-trace-verified). Multi-block grids
+  emit running partition contexts (`updatePartitionContext`); the
+  grid conformance gate is the fs5g32 fixture. Scope: single-TU and
+  the grid fixtures are gate-pinned; the filter-intra DC-deciding
+  fixture and the 64x64 dual-domain GPU unification remain named
+  follow-ups.
 - All layers green: 9 doctest targets pass, and the golden gate
-  reproduces the committed `expected_primitives.txt` 277/277 lines.
+  reproduces the committed `expected_primitives.txt` 335/335 lines.
 
 ## What's implemented
 
@@ -99,13 +117,22 @@ How the stack works end to end: `docs/layers.md`; the bitstream path:
   roundtrip is exact; 8x8/32x32/64x64 are lossy by design (64x64
   DCT-only within our TxType scope). Chroma frame compositions run the
   same grid over the 4:2:0 UV plane (UV-sized blocks, per-plane
-  availability, the `uv2y` fold at the call site). The 16x16 Auto/Q
-  paths also emit entropy symbols: the kf y-mode + angle delta +
-  filter-intra flag (BSF1) and the real per-block token stream (TS3,
-  skip = 0). GPU frame paths run the per-block kernel chain (predict,
-  subtract, forward, quantize where configured, inverse-add),
-  bit-exact vs host in lossless and q100 at all five geometries (host
-  decides, GPU executes).
+  availability, the `uv2y` fold at the call site). Entropy emission
+  runs per geometry: the 16x16 Auto/Q paths emit the kf y-mode +
+  angle delta + filter-intra flag (BSF1) and the real per-block
+  token stream (TS3, skip = 0); the 4x4Q/8x8Q/32x32Q/64x64Q loops
+  emit the full per-block walk [partition iff the frame reads one]
+  [skip][kf mode + angle delta][filter-intra iff the predicate]
+  [token chain] with the qindex-bucketed frame context (FS3/FS4) —
+  bit-exact vs the generator's per-size gate lines; multi-block
+  grids emit running partition contexts (`updatePartitionContext`,
+  the fs5g32 grid gate). Scope: the single-TU and grid fixtures are
+  gate-pinned; the filter-intra DC-deciding fixture and the 64x64
+  dual-domain GPU unification (a 1024-position GPU kernel + bench
+  work) are named follow-ups. GPU frame paths run the per-block
+  kernel chain (predict, subtract, forward, quantize where
+  configured, inverse-add), bit-exact vs host in lossless and q100
+  at all five geometries (host decides, GPU executes).
 - **l7_entropy** — the entropy coder, host port, integer only,
   bit-exact vs the committed gate. The od_ec range encoder and decoder
   (equal-prob, binary and cdf-coded symbol primitives, byte flush,
@@ -125,18 +152,23 @@ How the stack works end to end: `docs/layers.md`; the bitstream path:
 - **l8_bitstream** — raw-bit writer + OBU container ground floor
   (bit/literal/inv-signed-literal writers, uleb128, OBU header +
   uleb payload size, temporal delimiter) and structural keyframe
-  assembly: sequence-header OBU payload, the uncompressed frame-header
-  walk and the full temporal unit packer (TD + SPS + OBU_FRAME in
-  SVT's packer structure, with the court-ratified D1 monochrome
-  patch — decoder-confirmed gray). The lossless TU carries 22 header
-  bits + 2 pad; the lossy v2 (TS4) carries `base_q_idx` = 100 and a
-  40-bit header with real token streams. The committed artifact
-  `src/l8_bitstream/tests/goldens/structural_keyframe.obu` (45 bytes,
-  regenerated by TS4) proves the three-way identity composed TU ==
-  committed file == gate bytes and is decoder-accepted. The BSF4-fix
-  ec coupling is stated as an invariant at both l6 emission sites:
-  allow_update_cdf = 1 only because the ratified config carries
-  disable_cdf_update = 0.
+  assembly: sequence-header OBU payload (the max frame dims
+  parameterized; `frame_width_bits` = msb(dims)), the uncompressed
+  frame-header walk and the full temporal unit packer (TD + SPS +
+  OBU_FRAME in SVT's packer structure, with the court-ratified D1
+  monochrome patch — decoder-confirmed gray). The lossless TU
+  carries 22 header bits + 2 pad; the lossy v2 (TS4) carries
+  `base_q_idx` = 100 and a 40-bit header with real token streams.
+  The committed artifact set
+  `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` — the
+  47-byte d32 (the four-16x16-leaves walk, TD5b) plus the
+  per-geometry FS5 set (d4 30B, d8 30B, d16 44B, d64 441B) — each
+  proves the three-way identity composed TU == committed file ==
+  gate bytes and is decoder-accepted with content 1:1 (the d32 =
+  all 1024 pixels == ecfrm_recon; the d4 = the 8x8-frame structure
+  stated above). The BSF4-fix ec coupling is stated as an invariant
+  at both l6 emission sites: allow_update_cdf = 1 only because the
+  ratified config carries disable_cdf_update = 0.
 
 ## Repository layout
 
@@ -154,8 +186,9 @@ src/
   l7_entropy/     entropy coding: od_ec range coder, CDF adaptation,
                   partition/skip/kf-mode/filter-intra + token/txb +
                   tx-type symbols (host)
-  l8_bitstream/   raw-bit writer + OBU ground floor, structural keyframe
-                  TU assembly (+ committed 45-byte .obu golden artifact)
+l8_bitstream/   raw-bit writer + OBU ground floor, structural keyframe
+                TU assembly (+ the committed artifact set:
+                structural_keyframe*.obu — d4/d8/d16/d32/d64)
 tools/
   golden_gen/     SVT golden-vector generator (mechanical verbatim
                   extraction from third_party/SVT-AV1, committed)
@@ -167,9 +200,10 @@ tools/
 td0_ladder.ps1                 decoder-conformance bisect ladder
                                (TD-series closed; see
 docs/decode_conformance.md)
-verify_decode4.ps1             the decode attempt #4 instrument:
+verify_decode4.ps1             the per-geometry decode instrument:
                                artifact decode + content-1:1 vs the
-                               gate's ecfrm_recon (exit 0 = pass)
+                               gate's recon line (exit 0 = pass;
+                               -Geometry 4|8|16|32|64, default 32)
 third_party/
   SVT-AV1/        vendored source of truth (do not modify; pinned
                   snapshot — see Third-party notices)

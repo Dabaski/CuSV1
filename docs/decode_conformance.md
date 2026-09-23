@@ -15,6 +15,21 @@ content 1:1: all 1024 decoded pixels equal the generator's recon
 (byte-diffs 0/1024; the fingerprint: the first pixels `05 08 0c 11`
 - the ecfrm_recon row-0 values 5 8 12 17). Measured by
 `tools/verify_decode4.ps1` (ffmpeg 8.1.2 / libdav1d 1.5.3-62, exit 0).
+- Per-geometry content 1:1 CLOSED (FS-series): all five committed
+artifacts decode with ffmpeg exit 0 AND the decoded picture equals the
+generator's recon line per geometry:
+
+| Geometry | Artifact | Decoded | Match vs |
+| --- | --- | --- | --- |
+| d4 (8x8 frame, four 4x4 TUs) | structural_keyframe_d4.obu (30 B) | 64/64 | fs5g4_recon |
+| d8 | structural_keyframe_d8.obu (30 B) | 64/64 | fs28_recon |
+| d16 | structural_keyframe_d16.obu (44 B) | 256/256 | fs216_recon |
+| d32 | structural_keyframe.obu (47 B) | 1024/1024 | ecfrm_recon |
+| d64 | structural_keyframe_d64.obu (441 B) | 4096/4096 | fs264_recon |
+
+These establish content equality for the five committed fixtures, not
+every possible encoder input or full SVT encoder behavior.
+Mode-decision/composition remain project-defined policy.
 - Our writer <-> aom-entdec roundtrip is EXACT on every TD probe rung
 (adaptation on): the arithmetic, the CDF evolution and the defaults
 are internally consistent with aom's own decoder primitives.

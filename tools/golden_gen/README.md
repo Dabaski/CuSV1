@@ -148,7 +148,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **259/259 lines identical**, covering:
+that file — currently **335/335 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -283,6 +283,28 @@ that file — currently **259/259 lines identical**, covering:
   is 25 bytes). The v2 TU is the regenerated
   src/l8_bitstream/tests/goldens/structural_keyframe.obu artifact
   (three-way identity: composed == file == gate).
+- FS2 per-size Q-emission gate lines: the fs2S_* families (7 lines
+  each: part/modes/eobs/bytes/coeffs/recon/rt) at S = 4/8/16/32/64 -
+  one single-TU SxS frame per geometry (the fs2 fixture, q100), the
+  full per-block symbol walk [partition iff the frame reads one]
+  [skip=0 ctx 0][kf mode + the angle-delta symbol after a
+  directional kf mode at bsize >= 8x8][FI iff DC && bsize <= 32x32]
+  [token chain, the tx-type gate inside]; the TX_64X64 drive runs
+  the scan-contract settle (the compacted 1024-entry 32-wide
+  quadrant; all rt = 1). Also the per-size SPS lines sps_obu_d4/d8/
+  d16/d32/d64 (the max-dims-parameterized SPS: frame_width_bits =
+  msb(dims)).
+- FS5 grid + artifact gate lines: fs5g32_* (the 2x2 grid of 32x32 at
+  64x64 with the RUNNING partition contexts via ecpart_derive_ctx/
+  ecpart_update_ctx + the running coefficient NA - modes 10 5 3 7,
+  rt 1 1 1 1); fs5g4_* (the 4x4-geometry grid: the 8x8 frame coded
+  as [part@8 SPLIT ctx 0][4x 4x4-TU leaf walks] - the decoders align
+  frame dims to 8 px, so a 4x4 frame reads the partition symbol at
+  the 8x8 node; modes 1 7 2 2, rt 1 1 1 1); the per-geometry
+  artifact lines tu_bytes_v2_d4 30 / d8 30 / d16 44 / d64 441 (TD +
+  sps_obu_dS + OBU_FRAME(v2 + the tile); the d4 artifact's SPS =
+  d8). All five committed artifacts decode content-1:1 per
+  geometry (tools/verify_decode4.ps1 -Geometry, the FS5c gate).
 
 ## EC3 scope statement
 

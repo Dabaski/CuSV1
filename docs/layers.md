@@ -232,7 +232,7 @@ hand-traces:
 3. `composition.c` wires the extracts into the dispatch tables and the
    frame/policy/chroma/bitstream/token drivers.
 4. `golden_primitives.exe` dumps the primitive vectors; its output is
-   diffed against `committed expected_primitives.txt` (currently 277
+   diffed against `committed expected_primitives.txt` (currently 335
    lines — 0 diff is a commit precondition). Round-trips and
    inequalities exit nonzero inside the generator itself.
 5. `golden_frame.exe` captures the D-policy frame golden.

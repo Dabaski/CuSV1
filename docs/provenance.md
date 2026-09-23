@@ -15,7 +15,7 @@ classification section). Status vocabulary:
 - **exact (hand)** — hand-transcribed from the SVT source with the
   arithmetic text unchanged (mechanical renames, C++ `std::` spellings);
   bit-exactness is gate-proven by `tools/golden_gen`
-  (expected_primitives.txt, 277 lines). All pre-extract-era ports (the
+  (expected_primitives.txt, 335 lines). All pre-extract-era ports (the
   C-series 4x4/8x8/16x16 kernels, the L-series 32x32 kernels, the helpers,
   and all of l4/l5) are this class.
 - **adapted** — SVT structure is preserved but the port changes shape:
@@ -110,6 +110,8 @@ port (tests in test_transform.cpp).
 | — | `NeighborContext` (filt_type plumbing) | policy | carries the two neighbor modes the generator shim needs; value semantics match enc_intra_prediction.c:186 |
 | kf luma symbol emission via l7 (BSF1) | in `encodeFrameAuto16x16`/`encodeFrameAuto16x16Q` | adapted | per block in raster order: getKfYModeCtx (entropy_coding.c:1004-1021) from the DECIDED neighbor modes + writeKfLumaMode (:1026-1040) + angle delta (directional, delta 0) + writeFilterIntra flag=0 where filterIntraAllowed (mode_decision.c:108-119); allow_update_cdf = 1 forced, ends with odEcStopEncode — see the BSF4-fix coupling invariant (deviations, item 6) |
 | token emission via l7 (TS3) | in the 16x16 Q path (`entropy::writeBlockCoeffs`, pipeline.cpp:984-988) | adapted | skip = 0 for all blocks (no skip decision), NA-driven contexts, intra_dir = the decided mode; the ecfrm_* gate lines pin modes AND eobs AND coeffs AND recon AND the byte stream equal to the generator drive |
+| per-geometry Q emission (FS3/FS4) | in `encodeFrameAuto4x4Q`/`encodeFrameAuto8x8Q`/`encodeFrameAuto32x32Q`/`encodeFrameAuto64x64Q` (the optional w/fc/na emission params; the per-block walk [partition iff the frame reads one][skip][kf mode + the angle-delta symbol][FI iff the predicate][writeBlockCoeffs]) | adapted | the walk shape mirrors encode_partition_av1 + encode_skip_coeff_av1 + encode_intra_luma_mode_kf_av1 + av1_write_tx_type + the token chain, order per the aom decodeframe.c read order; bit-exact vs the fs2S_* gate lines per size (the 64x64 emission-domain = the TX_64X64 scan contract via quantizeFp64x64Token, n_coeffs=1024 over the compacted 32-wide quadrant, full_loop.c:1262); named deviation: the Auto64x64Q keeps the 4096-wide facade for the legacy/GPU callers, the emission case runs the compacted token domain (the FS5d dual-domain follow-up) |
+| running partition contexts (FS5a) | in the 8x8Q/32x32Q/64x64Q emission blocks (updatePartitionContext after each coded block; the 4x4Q/16x16Q emit no partition symbol — named) | adapted | coding_loop.c:1700-1713 semantics via l7; for uniform PARTITION_NONE grids the running ctxs coincide with fresh INVALID cells (the lookup bit at the leaf's own bsl is 0 for every square size — the mutation check proved the fixture discriminates wrong ctxs) |
 
 ## l7_entropy (src/l7_entropy/entropy.cpp)
 
@@ -217,3 +219,31 @@ port (tests in test_transform.cpp).
    ratified by the court, fixed in TD5a (generator) and TD5b (the l7
    mirror); the TD0 ladder flipped to 7/7 byte-exact and the 47-byte
    artifact decodes content-1:1 (byte-diffs 0/1024).
+10. FS-series generator-drive self-consistency traps — both caught by
+    the l6 bit-exactness tests, both fixed:
+    (a) FS3 (11a0e7e): svtd_fs2_drive omitted the angle-delta symbol
+    after a directional kf mode at bsize >= 8x8; its read twin omitted
+    it too, so the drive's rt=1 was self-consistent with its own
+    omission — the l6 emission (writeKfLumaMode emits the delta,
+    entropy_coding.c:1030-1037) diverged on the fs28/fs232/fs264 bytes
+    and the regenerated gate exposed it.
+    (b) FS5b (a853ac9): the new S==16 drive branch fell through the
+    fwd/quant/recon switches into the 4x4 machinery (svtd_fwd2d4x4 etc.
+    on a 256-entry block); the fs216 lines were self-consistent (rt 15 1)
+    but wrong — the l6 hand-rolled walk diverged at the token chain
+    (24 bytes vs 6) and the bit-exactness test caught it.
+11. FS5c 4x4-frame structure (687625f): the decoders align frame dims
+    to 8 pixels (aligned_width = ALIGN_POWER_OF_TWO(w, 3)), so a 4x4
+    frame has a 2x2 mi grid and the 8x8 node READS a 4-symbol partition
+    symbol (partition_plane_context bsl=0, the fresh ctx-0 row
+    {19132, 25510, 30392}; dav1d 1.5.4 trace-verified). A 4x4 TU exists
+    only as a partition leaf; the d4 artifact codes the 8x8 frame as
+    [part@8 SPLIT][4x 4x4-TU leaf walks]. A single-4x4-TU tile desyncs
+    the real decoder at its first symbol.
+12. FS5d (OPEN, named follow-up): the Auto64x64Q carries two domains -
+    the legacy (non-emission) callers keep the 4096-wide facade (the
+    GPU twin quant_dequant_64x64 is a 4096-position kernel), the
+    emission case runs the vendored compacted 1024-position token
+    domain. Unification = a 1024-position GPU kernel + bench work;
+    for the fs264 fixture the two domains' recons coincide (the
+    outer-ring coefficients quantize to 0 at q100).
