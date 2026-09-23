@@ -136,3 +136,53 @@ TEST_CASE("FS3: per-size emission walk bit-exact vs the FS2 gate lines (4x4/8x8/
                 CHECK((int)recon.at(x, y) == (int)wantR.v[y * S + x]);
     }
 }
+
+TEST_CASE("FS5: 2x2 grid of 32x32 at 64x64 matches the fs5g32 gate (running partition ctxs)") {
+    // The grid fixture: the fs2 64x64 fixture on a 64x64 frame, 2x2 raster of
+    // 32x32 blocks, q100. The gate (svtd_fs5_grid_drive) emits the RUNNING
+    // partition contexts (ecpart_update_ctx after each coded block) and the
+    // running coefficient NA (mi-unit bookkeeping). RED slice: the production
+    // loop still emits a fresh INVALID partition ctx per block and passes
+    // pixel-based mi args to writeBlockCoeffs - the walk must diverge at
+    // block 2+.
+    const int S = 64;
+    const int n = S * S;
+
+    pixels::Plane plane(S, S, 4);
+    pixels::Plane recon(S, S, 4);
+    for (int y = 0; y < S; ++y)
+        for (int x = 0; x < S; ++x)
+            plane.at(x, y) = static_cast<std::uint8_t>((y < S / 2) ? (4 * (x + y + 1)) : 0);
+
+    std::int32_t coeffs[4096] = {0};
+    std::uint8_t modes[4] = {0};
+    entropy::EcFrameContext fc;
+    entropy::AomWriter w{};
+    unsigned char tileBuf[1024];
+    memset(tileBuf, 0, sizeof(tileBuf));
+    w.ec.buf = tileBuf;
+    entropy::DcSignLevelCoeffNa na;
+    memset(&na, 0xFF, sizeof(na));
+
+    pipeline::encodeFrameAuto32x32Q(plane, recon, coeffs, modes, 100,
+                                    transforms::TxType::DCT_DCT, &w, &fc, &na);
+
+    const Fs2Line wantM = loadGate("fs5g32_modes");
+    REQUIRE(wantM.n == 4);
+    for (int b = 0; b < 4; ++b) CHECK((int)modes[b] == (int)wantM.v[b]);
+
+    const Fs2Line wantB = loadGate("fs5g32_bytes ", 16);
+    REQUIRE(wantB.n == 1 + (int)w.pos);
+    for (int i = 0; i < (int)w.pos; ++i)
+        CHECK((int)tileBuf[i] == (int)wantB.v[1 + i]);
+
+    const Fs2Line wantC = loadGate("fs5g32_coeffs");
+    REQUIRE(wantC.n == 4096);
+    for (int i = 0; i < 4096; ++i) CHECK(coeffs[i] == (std::int32_t)wantC.v[i]);
+
+    const Fs2Line wantR = loadGate("fs5g32_recon");
+    REQUIRE(wantR.n == n);
+    for (int y = 0; y < S; ++y)
+        for (int x = 0; x < S; ++x)
+            CHECK((int)recon.at(x, y) == (int)wantR.v[y * S + x]);
+}

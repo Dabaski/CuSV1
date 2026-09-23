@@ -2143,6 +2143,9 @@ int main(void) {
         fflush(stdout);
         for (int i = 0; i < 4; ++i) svtd_fs2_drive(dims[i]);
         fflush(stdout);
+        // FS5: the grid drive (the running partition-context proof, 2x2 of 32x32)
+        svtd_fs5_grid_drive();
+        fflush(stdout);
     }
 
     // ---- TD2: context-equality gate lines -----------------------------------    // Exhaustive SVT-vs-l7 context equality (TX_CLASS_2D, the DCT_DCT scope):

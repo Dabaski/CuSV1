@@ -510,7 +510,7 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                                               entropy::FILTER_INTRA_MODES);
                 }
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_4X4,
-                                          entropy::BLOCK_4X4, eob, by * 4, bx * 4, 1,
+                                          entropy::BLOCK_4X4, eob, by, bx, 1,
                                           static_cast<entropy::PredictionMode>(d.mode));
             }
 
@@ -602,6 +602,17 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
         w->allow_update_cdf = 1;  // THE COUPLING (BSF4-fix): see encodeFrameAuto16x16Q.
         w->pos = 0;
     }
+    // FS5: the running partition contexts (coding_loop.c:1700-1713) across
+    // the grid - above indexed by mi column, left by (mi_row & 15). For the
+    // uniform PARTITION_NONE grids these coincide with fresh INVALID cells
+    // (the lookup bit at the leaf's own bsl is 0 for every square size:
+    // lookupLeft[32X32]=24 bit2=0, [16X16]=28 bit1=0, [8X8]=30 bit0=0), but
+    // the wiring is the aom-faithful contract and pins the mixed-tree
+    // surface.
+    std::uint8_t pAboveRun[64];
+    std::uint8_t pLeftRun[16];
+    memset(pAboveRun, INVALID_NEIGHBOR_DATA, sizeof(pAboveRun));
+    memset(pLeftRun, INVALID_NEIGHBOR_DATA, sizeof(pLeftRun));
     transforms::QuantTables qt;
     transforms::buildQuantTables(qindex, qt);
     std::int16_t scan[64];
@@ -667,12 +678,9 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
             // (svt_aom_partition_cdf_length, entropy_coding.c:922-930);
             // every block of the grid codes one.
             if (w && fc && na) {
-                std::uint8_t pAboveCtx[8];
-                std::uint8_t pLeftCtx[16];
-                memset(pAboveCtx, INVALID_NEIGHBOR_DATA, sizeof(pAboveCtx));
-                memset(pLeftCtx, INVALID_NEIGHBOR_DATA, sizeof(pLeftCtx));
-                entropy::writePartition(w, fc, entropy::BLOCK_8X8, 1, 1, pAboveCtx[0],
-                                        pLeftCtx[0], entropy::PARTITION_NONE);
+                entropy::writePartition(w, fc, entropy::BLOCK_8X8, 1, 1, pAboveRun[bx],
+                                        pLeftRun[by & 15], entropy::PARTITION_NONE);
+                entropy::updatePartitionContext(pAboveRun, pLeftRun, by, bx, entropy::BLOCK_8X8);
                 entropy::writeSkip(w, fc, 0, 0);
                 int topCtx = 0, leftCtx = 0;
                 entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
@@ -687,7 +695,7 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                                               entropy::FILTER_INTRA_MODES);
                 }
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_8X8,
-                                          entropy::BLOCK_8X8, eob, by * 8, bx * 8, 1,
+                                          entropy::BLOCK_8X8, eob, by * 2, bx * 2, 1,
                                           static_cast<entropy::PredictionMode>(d.mode));
             }
 
@@ -1271,6 +1279,12 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
     transforms::buildQuantTables(qindex, qt);
     std::int16_t scan[1024];
     transforms::defaultScan32x32(scan);
+    // FS5: the running partition contexts (coding_loop.c:1700-1713) across
+    // the grid - above indexed by mi column, left by (mi_row & 15).
+    std::uint8_t pAboveRun[64];
+    std::uint8_t pLeftRun[16];
+    memset(pAboveRun, INVALID_NEIGHBOR_DATA, sizeof(pAboveRun));
+    memset(pLeftRun, INVALID_NEIGHBOR_DATA, sizeof(pLeftRun));
     for (int by = 0; by < gridH; ++by) {
         for (int bx = 0; bx < gridW; ++bx) {
             const int px = bx * 32;
@@ -1333,12 +1347,9 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
             // written (DCTONLY at 32x32 intra: 1 type, entropy_coding.c:321-322
             // via the FS3-prep gate inside writeBlockCoeffs).
             if (w && fc && na) {
-                std::uint8_t pAboveCtx[8];
-                std::uint8_t pLeftCtx[16];
-                memset(pAboveCtx, INVALID_NEIGHBOR_DATA, sizeof(pAboveCtx));
-                memset(pLeftCtx, INVALID_NEIGHBOR_DATA, sizeof(pLeftCtx));
-                entropy::writePartition(w, fc, entropy::BLOCK_32X32, 1, 1, pAboveCtx[0],
-                                        pLeftCtx[0], entropy::PARTITION_NONE);
+                entropy::writePartition(w, fc, entropy::BLOCK_32X32, 1, 1, pAboveRun[bx],
+                                        pLeftRun[by & 15], entropy::PARTITION_NONE);
+                entropy::updatePartitionContext(pAboveRun, pLeftRun, by, bx, entropy::BLOCK_32X32);
                 entropy::writeSkip(w, fc, 0, 0);
                 int topCtx = 0, leftCtx = 0;
                 entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
@@ -1353,7 +1364,7 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
                                               entropy::FILTER_INTRA_MODES);
                 }
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_32X32,
-                                          entropy::BLOCK_32X32, eob, by * 32, bx * 32, 1,
+                                          entropy::BLOCK_32X32, eob, by * 8, bx * 8, 1,
                                           static_cast<entropy::PredictionMode>(d.mode));
             }
 
@@ -1562,6 +1573,12 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
         w->allow_update_cdf = 1;  // THE COUPLING (BSF4-fix): see encodeFrameAuto16x16Q.
         w->pos = 0;
     }
+    // FS5: the running partition contexts (coding_loop.c:1700-1713) across
+    // the grid - above indexed by mi column, left by (mi_row & 15).
+    std::uint8_t pAboveRun[64];
+    std::uint8_t pLeftRun[16];
+    memset(pAboveRun, INVALID_NEIGHBOR_DATA, sizeof(pAboveRun));
+    memset(pLeftRun, INVALID_NEIGHBOR_DATA, sizeof(pLeftRun));
     transforms::QuantTables qt;
     transforms::buildQuantTables(qindex, qt);
     std::int16_t scan[4096];
@@ -1667,12 +1684,9 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
             // the FS3-prep gate); FI is dead at 64x64 (bsize > 32x32,
             // mode_decision.c:108-120).
             if (w && fc && na) {
-                std::uint8_t pAboveCtx[8];
-                std::uint8_t pLeftCtx[16];
-                memset(pAboveCtx, INVALID_NEIGHBOR_DATA, sizeof(pAboveCtx));
-                memset(pLeftCtx, INVALID_NEIGHBOR_DATA, sizeof(pLeftCtx));
-                entropy::writePartition(w, fc, entropy::BLOCK_64X64, 1, 1, pAboveCtx[0],
-                                        pLeftCtx[0], entropy::PARTITION_NONE);
+                entropy::writePartition(w, fc, entropy::BLOCK_64X64, 1, 1, pAboveRun[bx],
+                                        pLeftRun[by & 15], entropy::PARTITION_NONE);
+                entropy::updatePartitionContext(pAboveRun, pLeftRun, by, bx, entropy::BLOCK_64X64);
                 entropy::writeSkip(w, fc, 0, 0);
                 int topCtx = 0, leftCtx = 0;
                 entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
@@ -1684,7 +1698,7 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 std::int16_t scanTok[1024];
                 transforms::defaultScan32x32(scanTok);
                 entropy::writeBlockCoeffs(w, fc, na, qcTok, scanTok, entropy::TX_64X64,
-                                          entropy::BLOCK_64X64, eobTok, by * 64, bx * 64, 1,
+                                          entropy::BLOCK_64X64, eobTok, by * 16, bx * 16, 1,
                                           static_cast<entropy::PredictionMode>(d.mode));
             }
         }
