@@ -100,8 +100,11 @@ std::int32_t encodeTdAv1(std::uint8_t* output_bitstream_ptr);
 
 // write_sequence_header_obu (:3699-3763) payload only - no OBU header, no
 // uleb size. Returns the payload size in bytes (trailing bits included,
-// add_trailing_bits :3668-3675).
-std::uint32_t writeSequenceHeaderObu(std::uint8_t* dst);
+// add_trailing_bits :3668-3675). FS5b: maxDim parameterizes the max frame
+// dims (a power of two; frame_width_bits = msb(maxDim), the generator's
+// svtd_bsf3_sequence_header formula); the default 32 is the ratified
+// committed-artifact walk.
+std::uint32_t writeSequenceHeaderObu(std::uint8_t* dst, int maxDim = 32);
 
 // write_frame_header_obu (:3784-3802 -> write_uncompressed_header_obu
 // :3294-3637) with appendTrailingBits = show_existing = 0 (:3858): the
@@ -139,9 +142,10 @@ std::uint32_t writeFrameHeaderV2(std::uint8_t* dst);
 // header v2. The SPS is shared (byte-identical at lossy - qidx is
 // frame-header state; the generator HALTs if sps_obu_v2 moves). tile_data
 // is the l7 writer output (decode-order symbols with skip = 0 + the
-// TS3-proven token chains). dst is zeroed first. Returns the total TU
-// length in bytes.
+// TS3-proven token chains). dst is zeroed first. FS5b: maxDim parameterizes
+// the SPS's max frame dims (the default 32 = the committed-artifact walk).
+// Returns the total TU length in bytes.
 std::uint32_t assembleStructuralKeyframeTUv2(std::uint8_t* dst, const std::uint8_t* tile_data,
-                                             std::uint32_t tile_size);
+                                             std::uint32_t tile_size, int maxDim = 32);
 
 }  // namespace bitstream

@@ -3150,15 +3150,27 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
 // the roundtrip; the fs2S_* gate lines pin every surface for the l6 mirror
 // (FS3/FS4). The TX_64X64 drive runs the scan-contract settle documented at
 // svtd_default_scan_64x64_token above.
-static void svtd_fs2_drive(int S) {
+static uint8_t svtd_fs2_tile[1024];  // FS5b: the last drive's tile capture
+static uint32_t svtd_fs2_pos;
+static void svtd_fs2_drive(int S, int emit_lines) {
     static char tagbuf[8];
-    tagbuf[0] = (S == 4) ? 'p' : (S == 8) ? 'q' : (S == 32) ? 'r' : 's';
+    tagbuf[0] = (S == 4) ? 'p' : (S == 8) ? 'q' : (S == 16) ? 'u' : (S == 32) ? 'r' : 's';
     tagbuf[1] = ':';
     tagbuf[2] = 0;
     svtd_trace_tag = tagbuf;
-    const TxSize ts    = (S == 4) ? TX_4X4 : (S == 8) ? TX_8X8 : (S == 32) ? TX_32X32 : TX_64X64;
+    // FS5b: the emit_lines=0 pass is the silent re-run for the per-geometry
+    // TU assembly (the fs2S_* lines and the TD3 script rows suppressed; the
+    // tile captured to the svtd_fs2_* globals).
+    const int saved_script = svtd_script;
+    if (!emit_lines) svtd_script = 0;
+    const TxSize ts = (S == 4)    ? TX_4X4
+                      : (S == 8)  ? TX_8X8
+                      : (S == 16) ? TX_16X16
+                      : (S == 32) ? TX_32X32
+                                  : TX_64X64;
     const BlockSize bs = (S == 4)    ? BLOCK_4X4
                          : (S == 8)  ? BLOCK_8X8
+                         : (S == 16) ? BLOCK_16X16
                          : (S == 32) ? BLOCK_32X32
                                      : BLOCK_64X64;
     static uint8_t src[4096];
@@ -3173,6 +3185,8 @@ static void svtd_fs2_drive(int S) {
         svtd_default_scan_4x4(scan);
     } else if (S == 8) {
         svtd_default_scan_8x8(scan);
+    } else if (S == 16) {
+        svtd_default_scan_16x16(scan);
     } else if (S == 32) {
         svtd_default_scan_32x32(scan);
     } else {
@@ -3216,6 +3230,9 @@ static void svtd_fs2_drive(int S) {
     } else if (S == 32) {
         svtd_fwd2d32x32(res, S, cb, svt_av1_fdct32_new);
         svtd_quantize_fp_32x32(cb, &t, scan, qc, dq, &eob);
+    } else if (S == 16) {
+        svtd_fwd2d16x16(res, S, cb, svt_av1_fdct16_new);
+        svtd_quantize_fp_16x16(cb, &t, scan, qc, dq, &eob);
     } else if (S == 8) {
         svtd_fwd2d8x8(res, S, cb, svt_av1_fdct8_new);
         svtd_quantize_fp_8x8(cb, &t, scan, qc, dq, &eob);
@@ -3256,11 +3273,11 @@ static void svtd_fs2_drive(int S) {
 svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
                         svt_aom_partition_cdf_length(bs));
         aom_write_symbol(&w, PARTITION_NONE, part_cdf[pctx], svt_aom_partition_cdf_length(bs));
-        printf("fs2%d_part %d\n", S, pctx);
+        if (emit_lines) printf("fs2%d_part %d\n", S, pctx);
     } else {
         // 4x4 frame: no partition symbol (the forced-split quadrant is
         // coded directly).
-        printf("fs24_part -1\n");
+        if (emit_lines) printf("fs24_part -1\n");
     }
 // skip = 0, ctx 0 (fresh)
     svtd_script_row("skip", 0, skip_cdf[0], 2);
@@ -3290,7 +3307,11 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
     // the token chain (the tx-type gate inside is the verbatim FS3-prep fix)
     svtd_write_coeffs_txb(&w, &fc, qc, scan, ts, eob, 0, 0, (PredictionMode)mode);
     aom_stop_encode(&w);
+    // FS5b: the tile capture for the per-geometry TU assembly
+    memcpy(svtd_fs2_tile, tile_buf, w.pos);
+    svtd_fs2_pos = w.pos;
 
+    if (emit_lines) {
     printf("fs2%d_modes %d\n", S, mode);
     printf("fs2%d_eobs %d\n", S, (int)eob);
     printf("fs2%d_bytes %u", S, w.pos);
@@ -3299,6 +3320,7 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
     printf("fs2%d_coeffs", S);
     for (int i = 0; i < n; ++i) printf(" %d", (int)qc[i]);
     printf("\n");
+    }
 
     // recon (the decoder contract): the emission-domain dqcoeff placed back
     static uint8_t rec[4096];
@@ -3313,15 +3335,19 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
         svtd_inv2dadd64x64(dq64, pred, S, svt_av1_idct64_new);
     } else if (S == 32) {
         svtd_inv2dadd32x32(dq, pred, S, svt_av1_idct32_new);
+    } else if (S == 16) {
+        svtd_inv2dadd16x16(dq, pred, S, svt_av1_idct16_new);
     } else if (S == 8) {
         svtd_inv2dadd8x8(dq, pred, S, svt_av1_idct8_new);
     } else {
         svtd_inv2dadd4x4(dq, pred, S, svt_av1_idct4_new);
     }
     memcpy(rec, pred, (size_t)n);
+    if (emit_lines) {
     printf("fs2%d_recon", S);
     for (int i = 0; i < n; ++i) printf(" %d", (int)rec[i]);
     printf("\n");
+    }
 
     // read twin with the SAME bucket + scan
     static uint8_t above_na[16];
@@ -3379,7 +3405,8 @@ static TranLow rc[4096];
         fprintf(stderr, "FS2 rt mismatch S=%d first=%d qc=%d rc=%d total=%d\n", S, first_mm,
                 (int)qc[first_mm], (int)rc[first_mm], mm_count);
     }
-    printf("fs2%d_rt %d %d\n", S, reob, coeff_eq);
+    if (emit_lines) printf("fs2%d_rt %d %d\n", S, reob, coeff_eq);
+    svtd_script = saved_script;
 }
 // ---- FS5: the grid drive (the running partition-context proof) -------------
 // A 64x64 frame of the fs2 fixture coded as the 2x2 grid of 32x32 blocks at

@@ -353,3 +353,180 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
     REQUIRE(n == 47);
     for (int i = 0; i < 47; ++i) CHECK(fileBytes[i] == wantTu2[i]);
 }
+
+// ---- FS5b: the per-geometry single-TU v3 artifacts (4/8/16/64) -------------
+// Each artifact = TD + SPS(maxDim) + OBU_FRAME(v2 header + the single-TU
+// tile), the decoder-consistent structure per frame size:
+//   4x4:  the forced-split quadrant coded directly - [skip][kf][FI?][tokens]
+//         (no partition symbol, no delta: bsize < 8X8)      = the fs24 tile
+//   8x8:  [part@8, 4-symbol row][skip][kf][delta][FI?][tokens] = the fs28 tile
+//   16x16:[part@16, 10-symbol row][skip][kf][delta][FI?][tokens] = fs216
+//         (hand-rolled: the l6 16x16Q walk keeps the ratified TD5b-era shape
+//          without the partition/skip symbols)
+//   64x64:[part@64, 10-symbol row][skip][kf][delta][tokens] = the fs264 tile
+// Three-way identity: the composed TU (l6 coeffs + l7 symbols + l8 assembly)
+// == the committed .obu file == the generator's tu_bytes_v2_dS gate line.
+namespace fs5b {
+
+// the gate-line loader: one line's ints after the tag (the FS3 test's
+// __FILE__-derived repo root)
+struct Line {
+    int n = 0;
+    long long v[4200];
+};
+
+Line loadGate(const char* tag, int base = 10) {
+    Line out;
+    const std::string f = __FILE__;
+    std::string dir = f.substr(0, f.find_last_of("/\\") + 1);
+    for (int k = 0; k < 4; ++k) dir = dir.substr(0, dir.find_last_of("/\\"));
+    const std::string gatePath = dir + "/tools/golden_gen/expected_primitives.txt";
+    FILE* fp = nullptr;
+    fopen_s(&fp, gatePath.c_str(), "r");
+    if (!fp) {
+        fprintf(stderr, "FS5b loader: gate NOT FOUND: %s\n", gatePath.c_str());
+        return out;
+    }
+    char line[65536];
+    const size_t tlen = strlen(tag);
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, tag, tlen) == 0) {
+            char* p = line + tlen;
+            char* ctx = nullptr;
+            char* tok = strtok_s(p, " \t\r\n", &ctx);
+            while (tok) {
+                if (out.n < 4200) out.v[out.n++] = strtoll(tok, nullptr, base);
+                tok = strtok_s(nullptr, " \t\r\n", &ctx);
+            }
+            break;
+        }
+    }
+    fclose(fp);
+    if (out.n == 0) fprintf(stderr, "FS5b loader: tag [%s] not matched\n", tag);
+    return out;
+}
+
+}  // namespace fs5b
+
+TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
+    struct Geo {
+        int S;
+    };
+    const Geo geos[4] = {{4}, {8}, {16}, {64}};
+
+    for (int g = 0; g < 4; ++g) {
+        const int S = geos[g].S;
+        const int n = S * S;
+
+        pixels::Plane plane(S, S, 4);
+        pixels::Plane recon(S, S, 4);
+        for (int y = 0; y < S; ++y)
+            for (int x = 0; x < S; ++x)
+                plane.at(x, y) = static_cast<std::uint8_t>((y < S / 2) ? (4 * (x + y + 1)) : 0);
+
+        std::int32_t coeffs[4096] = {0};
+        std::uint8_t modes[1] = {0};
+        unsigned char tileBuf[1024];
+        memset(tileBuf, 0, sizeof(tileBuf));
+        std::uint32_t tilePos = 0;
+
+        if (S == 16) {
+            // the l6 loop (coeffs only; its emission shape stays the ratified
+            // TD5b-era walk) + the hand-rolled artifact walk
+            pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100,
+                                            transforms::TxType::DCT_DCT);
+            entropy::EcFrameContext fc;
+            entropy::initDefaultEcFrameContext(&fc, 100);
+            entropy::AomWriter w{};
+            w.ec.buf = tileBuf;
+            entropy::odEcEncReset(&w.ec);
+            w.allow_update_cdf = 1;
+            entropy::DcSignLevelCoeffNa na;
+            memset(&na, 0xFF, sizeof(na));
+            std::uint8_t pAbove[8];
+            std::uint8_t pLeft[16];
+            memset(pAbove, INVALID_NEIGHBOR_DATA, sizeof(pAbove));
+            memset(pLeft, INVALID_NEIGHBOR_DATA, sizeof(pLeft));
+            entropy::writePartition(&w, &fc, entropy::BLOCK_16X16, 1, 1, pAbove[0], pLeft[0],
+                                    entropy::PARTITION_NONE);
+            entropy::writeSkip(&w, &fc, 0, 0);
+            int topCtx = 0, leftCtx = 0;
+            entropy::getKfYModeCtx(0, entropy::DC_PRED, 0, entropy::DC_PRED, &topCtx, &leftCtx);
+            entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
+                                     static_cast<entropy::PredictionMode>(modes[0]), topCtx,
+                                     leftCtx, 0);
+            if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0,
+                                            static_cast<std::uint32_t>(modes[0]))) {
+                entropy::writeFilterIntra(&w, &fc, entropy::BLOCK_16X16,
+                                          entropy::FILTER_INTRA_MODES);
+            }
+            std::int16_t scan16[256];
+            transforms::defaultScan16x16(scan16);
+            std::int32_t eob = 0;
+            for (int c = 255; c >= 0; --c) {
+                if (coeffs[scan16[c]] != 0) { eob = c + 1; break; }
+            }
+            entropy::writeBlockCoeffs(&w, &fc, &na, coeffs, scan16, entropy::TX_16X16,
+                                      entropy::BLOCK_16X16, eob, 0, 0, 1,
+                                      static_cast<entropy::PredictionMode>(modes[0]));
+            entropy::odEcStopEncode(&w);
+            tilePos = w.pos;
+        } else if (S == 4) {
+            entropy::EcFrameContext fc;
+            entropy::AomWriter w{};
+            w.ec.buf = tileBuf;
+            entropy::DcSignLevelCoeffNa na;
+            memset(&na, 0xFF, sizeof(na));
+            pipeline::encodeFrameAuto4x4Q(plane, recon, coeffs, modes, 100,
+                                          transforms::TxType::DCT_DCT, &w, &fc, &na);
+            tilePos = w.pos;
+        } else if (S == 8) {
+            entropy::EcFrameContext fc;
+            entropy::AomWriter w{};
+            w.ec.buf = tileBuf;
+            entropy::DcSignLevelCoeffNa na;
+            memset(&na, 0xFF, sizeof(na));
+            pipeline::encodeFrameAuto8x8Q(plane, recon, coeffs, modes, 100,
+                                          transforms::TxType::DCT_DCT, &w, &fc, &na);
+            tilePos = w.pos;
+        } else {
+            entropy::EcFrameContext fc;
+            entropy::AomWriter w{};
+            w.ec.buf = tileBuf;
+            entropy::DcSignLevelCoeffNa na;
+            memset(&na, 0xFF, sizeof(na));
+            pipeline::encodeFrameAuto64x64Q(plane, recon, coeffs, modes, 100,
+                                            transforms::TxType::DCT_DCT, &w, &fc, &na);
+            tilePos = w.pos;
+        }
+
+        unsigned char tuBuf[1200];
+        memset(tuBuf, 0, sizeof(tuBuf));
+        const std::uint32_t tuSize =
+            bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, tilePos, S);
+
+        // the gate line (the first value = the byte count)
+        char tag[48];
+        snprintf(tag, sizeof(tag), "tu_bytes_v2_d%d ", S);
+        const fs5b::Line want = fs5b::loadGate(tag, 16);
+        REQUIRE(want.n == 1 + (int)tuSize);
+        for (std::uint32_t i = 0; i < tuSize; ++i)
+            CHECK((int)tuBuf[i] == (int)want.v[1 + i]);
+
+        // the committed artifact file
+        const std::string f = __FILE__;
+        std::string dir = f.substr(0, f.find_last_of("/\\") + 1);
+        char tuFilePath[256];
+        snprintf(tuFilePath, sizeof(tuFilePath), "%sgoldens/structural_keyframe_d%d.obu",
+                 dir.c_str(), S);
+        FILE* fp = nullptr;
+        fopen_s(&fp, tuFilePath, "rb");
+        REQUIRE(fp != nullptr);
+        unsigned char fileBytes[1200] = {0};
+        const size_t rd = fread(fileBytes, 1, sizeof(fileBytes), fp);
+        fclose(fp);
+        REQUIRE(rd == tuSize);
+        for (std::uint32_t i = 0; i < tuSize; ++i) CHECK(fileBytes[i] == tuBuf[i]);
+        (void)n;
+    }
+}

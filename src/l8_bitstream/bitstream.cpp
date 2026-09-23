@@ -151,12 +151,16 @@ static void wbAddTrailingBits(AomWriteBitBuffer* wb) {
 }
 
 // write_sequence_header (entropy_coding.c:2754-2839), ratified values
-static void bsf3SequenceHeader(AomWriteBitBuffer* wb) {
-    // max dims 32x32: frame_width_bits = 5, no bump (:2757-2764)
-    wbWriteLiteral(wb, 5 - 1, 4);   // frame_width_bits - 1 (:2775)
-    wbWriteLiteral(wb, 5 - 1, 4);   // frame_height_bits - 1 (:2776)
-    wbWriteLiteral(wb, 32 - 1, 5);  // max_frame_width - 1 (:2777)
-    wbWriteLiteral(wb, 32 - 1, 5);  // max_frame_height - 1 (:2778)
+static void bsf3SequenceHeader(AomWriteBitBuffer* wb, int maxDim) {
+    // FS5b: maxDim parameterizes the max dims (a power of two):
+    // frame_width_bits = msb(maxDim) (the generator's svtd_bsf3_sequence_header
+    // formula, :2757-2764). 32 -> 5 (the committed walk); 4/8/16/64 -> 2/3/4/6.
+    int bits = 0;
+    for (int v = maxDim; v > 1; v >>= 1) ++bits;
+    wbWriteLiteral(wb, bits - 1, 4);       // frame_width_bits - 1 (:2775)
+    wbWriteLiteral(wb, bits - 1, 4);       // frame_height_bits - 1 (:2776)
+    wbWriteLiteral(wb, maxDim - 1, bits);  // max_frame_width - 1 (:2777)
+    wbWriteLiteral(wb, maxDim - 1, bits);  // max_frame_height - 1 (:2778)
     wbWriteBit(wb, 0);              // frame_id_numbers_present_flag (:2784; sequence_control_set.c:85)
     wbWriteBit(wb, 0);              // use_128x128 (:2795; sb 64, enc_handle.c:4072-4090)
     wbWriteBit(wb, 1);              // filter_intra_level (:2797; ratified BSF0(g))
@@ -187,7 +191,7 @@ static void bsf3ColorConfig(AomWriteBitBuffer* wb) {
 }
 
 // write_sequence_header_obu (:3699-3763), ratified reduced=0 path
-std::uint32_t writeSequenceHeaderObu(std::uint8_t* dst) {
+std::uint32_t writeSequenceHeaderObu(std::uint8_t* dst, int maxDim) {
     AomWriteBitBuffer wb = {dst, 0};
     wbWriteLiteral(&wb, 0, 3);  // profile = MAIN_PROFILE (:3705; enc_settings.c:989)
     wbWriteBit(&wb, 1);         // still_picture (:3708)
@@ -199,7 +203,7 @@ std::uint32_t writeSequenceHeaderObu(std::uint8_t* dst) {
     wbWriteLiteral(&wb, 0, 5);  // seq_level_idx = 0 (level 2.0, :121-129 + entropy_coding.h:81-84; :3733)
     // tier skipped (level major 2 <= 3, :3734-3736); decoder model / initial
     // display delay skipped (:3737-3750)
-    bsf3SequenceHeader(&wb);
+    bsf3SequenceHeader(&wb, maxDim);
     bsf3ColorConfig(&wb);
     wbWriteBit(&wb, 0);  // film_grain_params_present (:3757; enc_handle.c:4449)
     wbAddTrailingBits(&wb);  // (:3759)
@@ -272,13 +276,14 @@ std::uint32_t writeFrameHeaderV2(std::uint8_t* dst) {
 // svt_aom_encode_sps_av1 (:3925-3948) structure: phase 1 measure, phase 2
 // rewrite (the payload size depends on its own content; the content is
 // stable across the two writes)
-static std::uint32_t bsf3EncodeSps(std::uint8_t* dst) {
+static std::uint32_t bsf3EncodeSps(std::uint8_t* dst, int maxDim) {
     const std::uint32_t obu_header_size = writeObuHeader(OBU_SEQUENCE_HEADER, 0, dst);
-    const std::uint32_t obu_payload_size = writeSequenceHeaderObu(dst + obu_header_size);
+    const std::uint32_t obu_payload_size = writeSequenceHeaderObu(dst + obu_header_size, maxDim);
     const std::size_t length_field_size = ulebSizeInBytes(obu_payload_size);
     std::size_t coded_size = 0;
     ulebEncode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
-    writeSequenceHeaderObu(dst + obu_header_size + length_field_size);  // phase 2 rewrite
+    writeSequenceHeaderObu(dst + obu_header_size + length_field_size,
+                           maxDim);  // phase 2 rewrite
     return obu_header_size + static_cast<std::uint32_t>(length_field_size) + obu_payload_size;
 }
 
@@ -324,7 +329,7 @@ static std::uint32_t bsf3FrameObuV2(std::uint8_t* dst, const std::uint8_t* tile_
 }
 
 std::uint32_t assembleStructuralKeyframeTUv2(std::uint8_t* dst, const std::uint8_t* tile_data,
-                                             std::uint32_t tile_size) {
+                                             std::uint32_t tile_size, int maxDim) {
     // Zero the region first: the byte-aligned 40-bit header needs no pad
     // bits, but the tile offset must be exact; zeroing guarantees the spec's
     // zero state for any future pad (named, as in the v1 assembler).
@@ -334,7 +339,7 @@ std::uint32_t assembleStructuralKeyframeTUv2(std::uint8_t* dst, const std::uint8
     std::uint32_t offset = 0;
     encodeTdAv1(dst + offset);
     offset += 2;  // TD_SIZE (packetization_process.c:300)
-    offset += bsf3EncodeSps(dst + offset);
+    offset += bsf3EncodeSps(dst + offset, maxDim);
     offset += bsf3FrameObuV2(dst + offset, tile_data, tile_size);
     return offset;
 }
@@ -350,7 +355,7 @@ std::uint32_t assembleStructuralKeyframeTU(std::uint8_t* dst, const std::uint8_t
     std::uint32_t offset = 0;
     encodeTdAv1(dst + offset);
     offset += 2;  // TD_SIZE (packetization_process.c:300)
-    offset += bsf3EncodeSps(dst + offset);
+    offset += bsf3EncodeSps(dst + offset, 32);
     offset += bsf3FrameObu(dst + offset, tile_data, tile_size);
     return offset;
 }
