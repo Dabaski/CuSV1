@@ -2143,24 +2143,41 @@ int main(void) {
         fflush(stdout);
         for (int i = 0; i < 5; ++i) svtd_fs2_drive(dims[i], 1);
         fflush(stdout);
+        // FS5c: the 4x4-geometry grid drive (the 8x8 frame, four 4x4 TUs) -
+        // its tile feeds the tu_bytes_v2_d4 assembly below
+        svtd_fs5_grid4_drive();
+        fflush(stdout);
         // FS5b: the per-geometry single-TU v3 artifact gate lines (the decode
         // hands): TD + SPS(dims) + OBU_FRAME(v2 header + the fs2S tile) for
         // S in {4, 8, 16, 64}. The 32x32 committed 47-byte artifact stays
         // pinned (its structure is the four-16x16-leaves walk, tu_bytes_v2).
+        // FS5c: the d4 artifact's tile = the 4x4-GRID tile (the 8x8 frame,
+        // four 4x4 TUs) - the 4x4 TU exists only as a partition leaf (the
+        // decoder aligns frame dims to 8 px; a 4x4 frame reads a 4-symbol
+        // partition symbol at the 8x8 node). Its SPS = d8 (the 8x8 frame).
         {
             static uint8_t tu[1200];
             static uint8_t sps_buf[64];
             const int tu_dims[4] = { 4, 8, 16, 64 };
             for (int i = 0; i < 4; ++i) {
                 const int S = tu_dims[i];
-                svtd_fs2_drive(S, 0);  // the silent capture pass
+                const uint8_t* tile_src;
+                uint32_t tile_pos;
+                if (S == 4) {
+                    tile_src = svtd_fs5g4_tile;
+                    tile_pos = svtd_fs5g4_pos;
+                } else {
+                    svtd_fs2_drive(S, 0);  // the silent capture pass
+                    tile_src = svtd_fs2_tile;
+                    tile_pos = svtd_fs2_pos;
+                }
                 memset(sps_buf, 0, sizeof(sps_buf));
-                const uint32_t sps_size = svtd_bsf3_encode_sps_dims(sps_buf, S);
+                const uint32_t sps_size = svtd_bsf3_encode_sps_dims(sps_buf, S == 4 ? 8 : S);
                 memset(tu, 0, sizeof(tu));
                 svt_aom_encode_td_av1(tu);
                 memcpy(tu + 2, sps_buf, sps_size);
                 const uint32_t obu_size =
-                    svtd_bsf3_frame_obu_v2(tu + 2 + sps_size, svtd_fs2_tile, svtd_fs2_pos);
+                    svtd_bsf3_frame_obu_v2(tu + 2 + sps_size, tile_src, tile_pos);
                 const uint32_t tu_size = 2 + sps_size + obu_size;
                 printf("tu_bytes_v2_d%d %u", S, tu_size);
                 for (uint32_t b = 0; b < tu_size; ++b) printf(" %02x", tu[b]);

@@ -3673,6 +3673,253 @@ static void svtd_fs5_grid_drive(void) {
     }
     printf("\n");
 }
+// ---- FS5c: the 4x4-geometry artifact drive ---------------------------------
+// The 4x4 TU exists only as a partition leaf: the decoder aligns frame dims
+// to 8 pixels (aligned_width = ALIGN_POWER_OF_TWO(w, 3)), so a 4x4 frame has
+// a 2x2 mi grid and the 8x8 node READS a 4-symbol partition symbol
+// (partition_plane_context bsl=0, the fresh ctx-0 row
+// {19132, 25510, 30392}) and PARTITION_SPLITs to four 4x4 leaves, each
+// coded WITHOUT a partition symbol (bsize < 8 -> forced NONE). The d4
+// artifact's tile is therefore an 8x8 frame coded as
+//   [part@8 SPLIT][4x [skip][kf, no delta: bsize < 8X8][FI iff DC][tx][tokens]]
+// with the running coefficient NA. Measured against the real decoder
+// (dav1d 1.5.4 TD4 trace): the previous single-4x4-TU tile desynced at the
+// first symbol (the decoder read the 4-symbol partition row where the tile
+// began with the 2-symbol skip).
+static uint8_t svtd_fs5g4_tile[256];
+static uint32_t svtd_fs5g4_pos;
+static void svtd_fs5_grid4_drive(void) {
+    svtd_trace_tag = "v:";
+    static uint8_t src[64];
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x) src[y * 8 + x] = (y < 4) ? (uint8_t)(4 * (x + y + 1)) : 0;
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(100, &t);
+    int16_t scan4[16];
+    svtd_default_scan_4x4(scan4);
+    Ts1FrameContext fc, fc_r;
+    ts1_init(&fc, 100);
+    ts1_init(&fc_r, 100);
+    static AomCdfProb part_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+    memcpy(part_cdf, default_partition_cdf, sizeof(part_cdf));
+    static AomCdfProb skip_cdf[SKIP_CONTEXTS][CDF_SIZE(2)];
+    memcpy(skip_cdf, default_skip_cdfs, sizeof(skip_cdf));
+
+    static uint8_t recon[64];
+    memset(recon, 0, sizeof(recon));
+    int modes[4] = {0};
+    static uint8_t tile[256];
+    memset(tile, 0, sizeof(tile));
+    AomWriter w;
+    w.ec.buf = tile;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    uint8_t above_pctx[16], left_pctx[16];
+    memset(above_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(above_pctx));
+    memset(left_pctx, (int)INVALID_NEIGHBOR_DATA, sizeof(left_pctx));
+    uint8_t above_na[16], left_na[16];
+    memset(above_na, (int)INVALID_NEIGHBOR_DATA, sizeof(above_na));
+    memset(left_na, (int)INVALID_NEIGHBOR_DATA, sizeof(left_na));
+
+    static const int px[4][2] = {{0, 0}, {4, 0}, {0, 4}, {4, 4}};
+    uint16_t eobs[4] = {0};
+    static TranLow all_qc[4][16];
+    // the 8x8-level SPLIT symbol (ctx 0, fresh; the frame root)
+    const int pctx0 = ecpart_derive_ctx(above_pctx, left_pctx, 0, 0, BLOCK_8X8);
+    svtd_script_row("part", PARTITION_SPLIT, part_cdf[pctx0],
+                    svt_aom_partition_cdf_length(BLOCK_8X8));
+    aom_write_symbol(&w, PARTITION_SPLIT, part_cdf[pctx0],
+                     svt_aom_partition_cdf_length(BLOCK_8X8));
+    ecpart_update_ctx(above_pctx, left_pctx, 0, 0, BLOCK_8X8);
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const int r = px[b][1], c = px[b][0];
+        const int miRow = by, miCol = bx;
+        const int hasTop = by > 0, hasLeft = bx > 0;
+        const int nTop = hasTop ? 4 : 0, nLeft = hasLeft ? 4 : 0;
+        const int nTr = (hasTop && bx + 1 < 2) ? 4 : 0;
+        uint8_t above[9] = {0}, left_edge[9] = {0};
+        uint8_t al = 0;
+        if (hasTop) {
+            for (int i = 0; i < 4 + nTr; ++i) above[i] = recon[(r - 1) * 8 + c + i];
+        }
+        if (hasLeft) {
+            for (int i = 0; i < 4; ++i) left_edge[i] = recon[(r + i) * 8 + c - 1];
+        }
+        if (hasTop && hasLeft) al = recon[(r - 1) * 8 + c - 1];
+        const int aboveMode = hasTop ? modes[(by - 1) * 2 + bx] : DC_PRED;
+        const int leftMode = hasLeft ? modes[by * 2 + bx - 1] : DC_PRED;
+        svtd_filt_type =
+            ((aboveMode == SMOOTH_PRED || aboveMode == SMOOTH_V_PRED || aboveMode == SMOOTH_H_PRED) ||
+             (leftMode == SMOOTH_PRED || leftMode == SMOOTH_V_PRED || leftMode == SMOOTH_H_PRED))
+                ? 1
+                : 0;
+        uint8_t srcblk[16];
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j) srcblk[i * 4 + j] = src[(r + i) * 8 + c + j];
+        uint32_t best_sad = 0;
+        int mode = -1;
+        for (int m = 0; m <= PAETH_PRED; ++m) {
+            uint8_t pred[16];
+            svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, hasTop ? 4 : 0,
+                                 nTr, left_edge, hasLeft ? 4 : 0, 0, al, TX_4X4);
+            const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, 4, pred, 4, 4, 4);
+            if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+        }
+        modes[b] = mode;
+        uint8_t pred[16];
+        svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, hasTop ? 4 : 0,
+                             nTr, left_edge, hasLeft ? 4 : 0, 0, al, TX_4X4);
+        int16_t res[16];
+        for (int i = 0; i < 16; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
+        int32_t cb[16];
+        svtd_fwd2d4x4(res, 4, cb, svt_av1_fdct4_new);
+        TranLow qc[16], dq[16];
+        uint16_t eob = 0;
+        svtd_quantize_fp_4x4(cb, &t, scan4, qc, dq, &eob);
+        eobs[b] = eob;
+        memcpy(all_qc[b], qc, sizeof(qc));
+        // the leaf walk: [skip ctx 0][kf, NO delta (bsize < 8X8)][FI iff DC]
+        // [tx + tokens with the dc_sign ctx from the running NA]
+        svtd_script_row("skip", 0, skip_cdf[0], 2);
+        aom_write_symbol(&w, 0, skip_cdf[0], 2);
+        const int top_ctx = intra_mode_context[aboveMode < 0 ? DC_PRED : (PredictionMode)aboveMode];
+        const int left_ctx = intra_mode_context[leftMode < 0 ? DC_PRED : (PredictionMode)leftMode];
+        svtd_script_row("mode", mode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+        aom_write_symbol(&w, mode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+        if (mode == DC_PRED) {
+            static AomCdfProb fi_cdf[CDF_SIZE(2)];
+            memcpy(fi_cdf, default_filter_intra_cdfs[BLOCK_4X4], sizeof(fi_cdf));
+            svtd_script_row("fi", 0, fi_cdf, 2);
+            aom_write_symbol(&w, 0, fi_cdf, 2);
+        }
+        uint8_t* above_ptr = &above_na[miCol];
+        uint8_t* left_ptr = &left_na[miRow];
+        int16_t dc_sign = 0;
+        if (above_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            dc_sign += ((above_ptr[0] >> COEFF_CONTEXT_BITS) == 1)
+                           ? -1
+                           : ((above_ptr[0] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        if (left_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            dc_sign += ((left_ptr[0] >> COEFF_CONTEXT_BITS) == 1)
+                           ? -1
+                           : ((left_ptr[0] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+        svtd_write_coeffs_txb(&w, &fc, qc, scan4, TX_4X4, eob, 0, dc_sign_ctx,
+                              (PredictionMode)mode);
+        int32_t cul = 0;
+        for (int q = 0; q < eob; ++q) cul += abs((int)qc[scan4[q]]);
+        cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+        if (eob > 0) {
+            if (qc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+            else if (qc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+        }
+        above_ptr[0] = (uint8_t)cul;
+        left_ptr[0] = (uint8_t)cul;
+        ecpart_update_ctx(above_pctx, left_pctx, miRow, miCol, BLOCK_4X4);
+        svtd_inv2dadd4x4(dq, pred, 4, svt_av1_idct4_new);
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j) recon[(r + i) * 8 + c + j] = pred[i * 4 + j];
+    }
+    aom_stop_encode(&w);
+    memcpy(svtd_fs5g4_tile, tile, w.pos);
+    svtd_fs5g4_pos = w.pos;
+
+    printf("fs5g4_modes");
+    for (int b = 0; b < 4; ++b) printf(" %d", modes[b]);
+    printf("\n");
+    printf("fs5g4_eobs");
+    for (int b = 0; b < 4; ++b) printf(" %d", (int)eobs[b]);
+    printf("\n");
+    printf("fs5g4_bytes %u", w.pos);
+    for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", tile[i]);
+    printf("\n");
+    printf("fs5g4_coeffs");
+    for (int b = 0; b < 4; ++b)
+        for (int i = 0; i < 16; ++i) printf(" %d", (int)all_qc[b][i]);
+    printf("\n");
+    printf("fs5g4_recon");
+    for (int i = 0; i < 64; ++i) printf(" %d", (int)recon[i]);
+    printf("\n");
+
+    // read twin with the same running states
+    uint8_t above_pctx_r[16], left_pctx_r[16];
+    memset(above_pctx_r, (int)INVALID_NEIGHBOR_DATA, sizeof(above_pctx_r));
+    memset(left_pctx_r, (int)INVALID_NEIGHBOR_DATA, sizeof(left_pctx_r));
+    uint8_t above_na_r[16], left_na_r[16];
+    memset(above_na_r, (int)INVALID_NEIGHBOR_DATA, sizeof(above_na_r));
+    memset(left_na_r, (int)INVALID_NEIGHBOR_DATA, sizeof(left_na_r));
+    aom_reader rr;
+    if (aom_reader_init(&rr, tile, w.pos)) { fprintf(stderr, "FS5c reader init\n"); return; }
+    rr.allow_update_cdf = 1;
+    static AomCdfProb rpart[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+    memcpy(rpart, default_partition_cdf, sizeof(rpart));
+    static AomCdfProb rskip[SKIP_CONTEXTS][CDF_SIZE(2)];
+    memcpy(rskip, default_skip_cdfs, sizeof(rskip));
+    printf("fs5g4_rt");
+    {
+        const int pctx2 = ecpart_derive_ctx(above_pctx_r, left_pctx_r, 0, 0, BLOCK_8X8);
+        const int pv =
+            aom_read_symbol_(&rr, rpart[pctx2], svt_aom_partition_cdf_length(BLOCK_8X8));
+        if (pv != PARTITION_SPLIT) { fprintf(stderr, "FS5c rt part %d\n", pv); }
+    }
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const int miRow = by, miCol = bx;
+        aom_read_symbol_(&rr, rskip[0], 2);
+        const int aboveMode2 = by > 0 ? modes[(by - 1) * 2 + bx] : DC_PRED;
+        const int leftMode2 = bx > 0 ? modes[by * 2 + bx - 1] : DC_PRED;
+        const int top_ctx2 =
+            intra_mode_context[aboveMode2 < 0 ? DC_PRED : (PredictionMode)aboveMode2];
+        const int left_ctx2 =
+            intra_mode_context[leftMode2 < 0 ? DC_PRED : (PredictionMode)leftMode2];
+        const int rmode = aom_read_symbol_(&rr, fc_r.kf_y_cdf[top_ctx2][left_ctx2], INTRA_MODES);
+        if (rmode != modes[b]) { fprintf(stderr, "FS5c rt mode %d\n", rmode); break; }
+        if (rmode == DC_PRED) {
+            static AomCdfProb rfi[CDF_SIZE(2)];
+            memcpy(rfi, default_filter_intra_cdfs[BLOCK_4X4], sizeof(rfi));
+            aom_read_symbol_(&rr, rfi, 2);
+        }
+        uint8_t* above_ptr = &above_na_r[miCol];
+        uint8_t* left_ptr = &left_na_r[miRow];
+        int16_t dc_sign = 0;
+        if (above_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            dc_sign += ((above_ptr[0] >> COEFF_CONTEXT_BITS) == 1)
+                           ? -1
+                           : ((above_ptr[0] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        if (left_ptr[0] != (uint8_t)INVALID_NEIGHBOR_DATA) {
+            dc_sign += ((left_ptr[0] >> COEFF_CONTEXT_BITS) == 1)
+                           ? -1
+                           : ((left_ptr[0] >> COEFF_CONTEXT_BITS) == 2) ? 1 : 0;
+        }
+        const int dc_sign_ctx2 = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+        static TranLow rc[16];
+        memset(rc, 0, sizeof(rc));
+        const int reob = svtd_read_coeffs_txb(&rr, &fc_r, rc, scan4, TX_4X4, 0, dc_sign_ctx2,
+                                              (PredictionMode)modes[b]);
+        int ok = (reob == (int)eobs[b]);
+        for (int q = 0; q < (int)eobs[b]; ++q) {
+            if (rc[scan4[q]] != all_qc[b][scan4[q]]) { ok = 0; break; }
+        }
+        printf(" %d", ok);
+        int32_t cul2 = 0;
+        for (int q = 0; q < reob; ++q) cul2 += abs((int)rc[scan4[q]]);
+        cul2 = AOMMIN(cul2, COEFF_CONTEXT_MASK);
+        if (reob > 0) {
+            if (rc[0] < 0) cul2 |= 1 << COEFF_CONTEXT_BITS;
+            else if (rc[0] > 0) cul2 += 2 << COEFF_CONTEXT_BITS;
+        }
+        above_na_r[miCol] = (uint8_t)cul2;
+        left_na_r[miRow] = (uint8_t)cul2;
+        ecpart_update_ctx(above_pctx_r, left_pctx_r, miRow, miCol, BLOCK_4X4);
+    }
+    printf("\n");
+}
 // TS1 driver: one 16x16 TU (f16 block 0, q100) + 4x4/8x8 TUs (multi-size
 // eob selection coverage). Writes, reads back, compares.
 static int svtd_ts1_drive(uint8_t* buf, int verbose) {

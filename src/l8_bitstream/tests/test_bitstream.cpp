@@ -357,8 +357,11 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
 // ---- FS5b: the per-geometry single-TU v3 artifacts (4/8/16/64) -------------
 // Each artifact = TD + SPS(maxDim) + OBU_FRAME(v2 header + the single-TU
 // tile), the decoder-consistent structure per frame size:
-//   4x4:  the forced-split quadrant coded directly - [skip][kf][FI?][tokens]
-//         (no partition symbol, no delta: bsize < 8X8)      = the fs24 tile
+//   4x4:  the 8x8 frame coded as [part@8 SPLIT (4-symbol row, ctx 0)]
+//         [4x [skip][kf, no delta][FI?][tokens]] - the 4x4 TU exists only
+//         as a partition leaf (the decoder aligns frame dims to 8 px, so a
+//         4x4 frame reads the partition symbol at the 8x8 node; measured
+//         against the dav1d 1.5.4 TD4 trace)                = the fs5g4 tile
 //   8x8:  [part@8, 4-symbol row][skip][kf][delta][FI?][tokens] = the fs28 tile
 //   16x16:[part@16, 10-symbol row][skip][kf][delta][FI?][tokens] = fs216
 //         (hand-rolled: the l6 16x16Q walk keeps the ratified TD5b-era shape
@@ -430,9 +433,65 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
         memset(tileBuf, 0, sizeof(tileBuf));
         std::uint32_t tilePos = 0;
 
-        if (S == 16) {
-            // the l6 loop (coeffs only; its emission shape stays the ratified
-            // TD5b-era walk) + the hand-rolled artifact walk
+        if (S == 4) {
+            // the 8x8 frame with the four 4x4 TUs: the l6 loop (coeffs only;
+            // its per-block emission shape = [skip][kf][FI?][tokens]) + the
+            // hand-rolled [part@8 SPLIT] prefix
+            pixels::Plane plane8(8, 8, 4);
+            pixels::Plane recon8(8, 8, 4);
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x)
+                    plane8.at(x, y) =
+                        static_cast<std::uint8_t>((y < 4) ? (4 * (x + y + 1)) : 0);
+            std::int32_t coeffs8[256] = {0};
+            std::uint8_t modes8[4] = {0};
+            pipeline::encodeFrameAuto4x4Q(plane8, recon8, coeffs8, modes8, 100,
+                                          transforms::TxType::DCT_DCT);
+            entropy::EcFrameContext fc;
+            entropy::initDefaultEcFrameContext(&fc, 100);
+            entropy::AomWriter w{};
+            w.ec.buf = tileBuf;
+            entropy::odEcEncReset(&w.ec);
+            w.allow_update_cdf = 1;
+            entropy::DcSignLevelCoeffNa na;
+            memset(&na, 0xFF, sizeof(na));
+            std::uint8_t pAbove[8];
+            std::uint8_t pLeft[16];
+            memset(pAbove, INVALID_NEIGHBOR_DATA, sizeof(pAbove));
+            memset(pLeft, INVALID_NEIGHBOR_DATA, sizeof(pLeft));
+            entropy::writePartition(&w, &fc, entropy::BLOCK_8X8, 1, 1, pAbove[0], pLeft[0],
+                                    entropy::PARTITION_SPLIT);
+            entropy::updatePartitionContext(pAbove, pLeft, 0, 0, entropy::BLOCK_8X8);
+            std::int16_t scan4[16];
+            transforms::defaultScan4x4(scan4);
+            static const int lr4[4] = {0, 0, 1, 1};
+            static const int lc4[4] = {0, 1, 0, 1};
+            for (int b = 0; b < 4; ++b) {
+                entropy::writeSkip(&w, &fc, 0, 0);
+                const int aboveMode = b / 2 > 0 ? modes8[(b / 2 - 1) * 2 + b % 2] : 0;
+                const int leftMode = b % 2 > 0 ? modes8[(b / 2) * 2 + b % 2 - 1] : 0;
+                int topCtx = 0, leftCtx = 0;
+                entropy::getKfYModeCtx(b % 2 > 0 ? 1 : 0, leftMode, b / 2 > 0 ? 1 : 0,
+                                       aboveMode, &topCtx, &leftCtx);
+                entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_4X4,
+                                         static_cast<entropy::PredictionMode>(modes8[b]), topCtx,
+                                         leftCtx, 0);
+                if (entropy::filterIntraAllowed(1, entropy::BLOCK_4X4, 0,
+                                                static_cast<std::uint32_t>(modes8[b]))) {
+                    entropy::writeFilterIntra(&w, &fc, entropy::BLOCK_4X4,
+                                              entropy::FILTER_INTRA_MODES);
+                }
+                std::int32_t eob = 0;
+                for (int c = 15; c >= 0; --c) {
+                    if (coeffs8[b * 16 + scan4[c]] != 0) { eob = c + 1; break; }
+                }
+                entropy::writeBlockCoeffs(&w, &fc, &na, coeffs8 + b * 16, scan4, entropy::TX_4X4,
+                                          entropy::BLOCK_4X4, eob, lr4[b], lc4[b], 1,
+                                          static_cast<entropy::PredictionMode>(modes8[b]));
+            }
+            entropy::odEcStopEncode(&w);
+            tilePos = w.pos;
+        } else if (S == 16) {
             pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100,
                                             transforms::TxType::DCT_DCT);
             entropy::EcFrameContext fc;
@@ -471,15 +530,6 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
                                       static_cast<entropy::PredictionMode>(modes[0]));
             entropy::odEcStopEncode(&w);
             tilePos = w.pos;
-        } else if (S == 4) {
-            entropy::EcFrameContext fc;
-            entropy::AomWriter w{};
-            w.ec.buf = tileBuf;
-            entropy::DcSignLevelCoeffNa na;
-            memset(&na, 0xFF, sizeof(na));
-            pipeline::encodeFrameAuto4x4Q(plane, recon, coeffs, modes, 100,
-                                          transforms::TxType::DCT_DCT, &w, &fc, &na);
-            tilePos = w.pos;
         } else if (S == 8) {
             entropy::EcFrameContext fc;
             entropy::AomWriter w{};
@@ -503,7 +553,7 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
         unsigned char tuBuf[1200];
         memset(tuBuf, 0, sizeof(tuBuf));
         const std::uint32_t tuSize =
-            bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, tilePos, S);
+            bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, tilePos, S == 4 ? 8 : S);
 
         // the gate line (the first value = the byte count)
         char tag[48];
