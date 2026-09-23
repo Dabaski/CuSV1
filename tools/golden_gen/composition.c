@@ -3096,8 +3096,13 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
         int sign;
         if (c == 0) {
             sign = aom_read_symbol_(r, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
+            if (svtd_script) fprintf(stderr, "R %ssign0 %d\n", svtd_trace_tag, sign);
         } else {
             sign = aom_read_bit(r, NULL);
+            if (svtd_script)
+                fprintf(stderr, "R %ssign %d rng=%u dif=%llu cnt=%d bptr=%d\n", svtd_trace_tag, sign,
+                         r->ec.rng, (unsigned long long)r->ec.dif, (int)r->ec.cnt,
+                         (int)(r->ec.bptr - r->ec.buf));
         }
         int lv = level;
         if (lv >= MAX_BASE_BR_RANGE) {
@@ -3106,13 +3111,22 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
             while (!i) {
                 i = aom_read_bit(r, NULL);
                 ++length;
+                if (svtd_script) fprintf(stderr, "R %sgolz %d\n", svtd_trace_tag, i ? 0 : 1);
             }
             for (i = 0; i < length - 1; ++i) {
                 x <<= 1;
                 x += aom_read_bit(r, NULL);
             }
+            {
+                const int gx = x;
+                for (int bi = length - 1; bi >= 0; --bi) {
+                    if (svtd_script) fprintf(stderr, "R %sgol %d\n", svtd_trace_tag, (gx >> bi) & 1);
+                }
+            }
             lv += x - 1;
         }
+        if (svtd_script) fprintf(stderr, "R %ssigned c=%d pos=%d lv=%d sign=%d\n", svtd_trace_tag, c,
+                                 pos, lv, sign);
         coeff[pos] = sign ? -lv : lv;
     }
     return eob;
@@ -3224,7 +3238,7 @@ static void svtd_fs2_drive(int S) {
     Ts1FrameContext fc2;
     ts1_init(&fc2, 100);
 
-    static uint8_t tile_buf[256];
+    static uint8_t tile_buf[1024];  // the fs264 tile is 420 bytes: [256] overflowed (the rt root cause)
     memset(tile_buf, 0, sizeof(tile_buf));
     AomWriter w;
     w.ec.buf = tile_buf;
@@ -3315,6 +3329,7 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
     memset(above_na, (int)INVALID_NEIGHBOR_DATA, sizeof(above_na));
     memset(left_na, (int)INVALID_NEIGHBOR_DATA, sizeof(left_na));
     aom_reader r;
+    if (svtd_script) { fprintf(stderr, "FS2 tail S=%d:", S); for (int ti = 410; ti < 424; ++ti) fprintf(stderr, " %02x", tile_buf[ti]); fprintf(stderr, " (pos=%u)\n", w.pos); }
     if (aom_reader_init(&r, tile_buf, w.pos)) { fprintf(stderr, "FS2 reader init\n"); return; }
     r.allow_update_cdf = 1;
     static AomCdfProb rs[CDF_SIZE(2)];
@@ -3350,15 +3365,19 @@ static TranLow rc[4096];
     const int reob = svtd_read_coeffs_txb(&r, &fc2, rc, scan, ts, 0, 0, (PredictionMode)mode);
     int coeff_eq = (reob == (int)eob) ? 1 : 0;
     int first_mm = -1;
+    int mm_count = 0;
     for (int i = 0; i < n; ++i) {
         if (rc[i] != qc[i]) {
             coeff_eq = 0;
+            ++mm_count;
             if (first_mm < 0) first_mm = i;
+            if (svtd_script) fprintf(stderr, "FS2 rt mm S=%d i=%d qc=%d rc=%d\n", S, i, (int)qc[i],
+                                     (int)rc[i]);
         }
     }
     if (first_mm >= 0) {
-        fprintf(stderr, "FS2 rt mismatch S=%d first=%d qc=%d rc=%d\n", S, first_mm, (int)qc[first_mm],
-                (int)rc[first_mm]);
+        fprintf(stderr, "FS2 rt mismatch S=%d first=%d qc=%d rc=%d total=%d\n", S, first_mm,
+                (int)qc[first_mm], (int)rc[first_mm], mm_count);
     }
     printf("fs2%d_rt %d %d\n", S, reob, coeff_eq);
 }
