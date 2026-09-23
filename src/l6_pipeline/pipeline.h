@@ -144,7 +144,9 @@ void encodeFrameRecon64x64Q(const pixels::Plane& src, pixels::Plane& recon, std:
                             transforms::TxType txType);
 
 void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
+                           entropy::DcSignLevelCoeffNa* na = nullptr);
 
 // D2 mode decision — THE POLICY IS THIS PROJECT'S, NOT SVT's: SVT's real
 // mode decision is full RD with rate costs. The 1:1 guarantee covers every

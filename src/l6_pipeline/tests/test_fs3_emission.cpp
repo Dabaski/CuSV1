@@ -14,10 +14,10 @@
 namespace {
 
 // the gate-line loader: loadGate("fs24_bytes ") -> the line's ints
-// cap: fs264_coeffs = 1024 values + the count
+// cap: fs264_coeffs = 4096 values + the count
 struct Fs2Line {
     int n = 0;
-    long long v[2048];
+    long long v[4200];
 };
 
 Fs2Line loadGate(const char* tag, int base = 10) {
@@ -45,7 +45,7 @@ Fs2Line loadGate(const char* tag, int base = 10) {
             char* ctx = nullptr;
             char* tok = strtok_s(p, " \t\r\n", &ctx);
             while (tok) {
-                if (out.n < 2048) out.v[out.n++] = strtoll(tok, nullptr, base);
+                if (out.n < 4200) out.v[out.n++] = strtoll(tok, nullptr, base);
                 tok = strtok_s(nullptr, " \t\r\n", &ctx);
             }
             break;
@@ -58,7 +58,7 @@ Fs2Line loadGate(const char* tag, int base = 10) {
 
 }  // namespace
 
-TEST_CASE("FS3: per-size emission walk bit-exact vs the FS2 gate lines (4x4/8x8/32x32)") {
+TEST_CASE("FS3: per-size emission walk bit-exact vs the FS2 gate lines (4x4/8x8/32x32/64x64)") {
     struct Geo {
         int S;
         entropy::TxSize ts;
@@ -66,13 +66,14 @@ TEST_CASE("FS3: per-size emission walk bit-exact vs the FS2 gate lines (4x4/8x8/
         const char* tag;      // "fs24" etc
         bool partition;       // the walk reads a partition symbol
     };
-    const Geo geos[3] = {
+    const Geo geos[4] = {
         {4, entropy::TX_4X4, entropy::BLOCK_4X4, "fs24", false},
         {8, entropy::TX_8X8, entropy::BLOCK_8X8, "fs28", true},
         {32, entropy::TX_32X32, entropy::BLOCK_32X32, "fs232", true},
+        {64, entropy::TX_64X64, entropy::BLOCK_64X64, "fs264", true},
     };
 
-    for (int g = 0; g < 3; ++g) {
+    for (int g = 0; g < 4; ++g) {
         const int S = geos[g].S;
         const int n = S * S;
 
@@ -82,7 +83,7 @@ TEST_CASE("FS3: per-size emission walk bit-exact vs the FS2 gate lines (4x4/8x8/
             for (int x = 0; x < S; ++x)
                 plane.at(x, y) = static_cast<std::uint8_t>((y < S / 2) ? (4 * (x + y + 1)) : 0);
 
-        std::int32_t coeffs[1024] = {0};
+        std::int32_t coeffs[4096] = {0};
         std::uint8_t modes[1] = {0};
         entropy::EcFrameContext fc;
         entropy::AomWriter w{};
@@ -98,8 +99,11 @@ TEST_CASE("FS3: per-size emission walk bit-exact vs the FS2 gate lines (4x4/8x8/
         } else if (S == 8) {
             pipeline::encodeFrameAuto8x8Q(plane, recon, coeffs, modes, 100,
                                           transforms::TxType::DCT_DCT, &w, &fc, &na);
-        } else {
+        } else if (S == 32) {
             pipeline::encodeFrameAuto32x32Q(plane, recon, coeffs, modes, 100,
+                                            transforms::TxType::DCT_DCT, &w, &fc, &na);
+        } else {
+            pipeline::encodeFrameAuto64x64Q(plane, recon, coeffs, modes, 100,
                                             transforms::TxType::DCT_DCT, &w, &fc, &na);
         }
 

@@ -7886,6 +7886,14 @@ void quantizeB64x64(const std::int32_t* coeff, const QuantTables& tables, const 
     quantizeBN(coeff, tables, scan, 4096, 2, qcoeff, dqcoeff, eob);
 }
 
+// FS4: the TX_64X64 EMISSION-domain quantize - n_coeffs=1024 (the compacted
+// 32-wide quadrant; full_loop.c:1262 / inv_transforms.h:129-137), log_scale 2.
+void quantizeFp64x64Token(const std::int32_t* coeff, const QuantTables& tables,
+                          const std::int16_t* scan, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                          std::uint16_t* eob) {
+    quantizeFpN(coeff, tables, scan, 1024, 2, qcoeff, dqcoeff, eob);
+}
+
 // default (up-right diagonal) scan for 64x64, svt_aom_init_iscan formula
 // (coefficients.c:345-363) at W=H=64
 void defaultScan64x64(std::int16_t scan[4096]) {

@@ -1550,9 +1550,18 @@ void encodeFrameRecon64x64Q(const pixels::Plane& src, pixels::Plane& recon, std:
 // (log_scale 2). SCAN POLICY IS OURS: fixed defaultScan64x64 for every block
 // (see encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
 void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType) {
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           entropy::AomWriter* w, entropy::EcFrameContext* fc,
+                           entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 64;
     const int gridH = src.height() / 64;
+    // FS4: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
+    if (w && fc) {
+        entropy::initDefaultEcFrameContext(fc, qindex);
+        entropy::odEcEncReset(&w->ec);
+        w->allow_update_cdf = 1;  // THE COUPLING (BSF4-fix): see encodeFrameAuto16x16Q.
+        w->pos = 0;
+    }
     transforms::QuantTables qt;
     transforms::buildQuantTables(qindex, qt);
     std::int16_t scan[4096];
@@ -1610,19 +1619,78 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
             std::int32_t qc[4096] = {0};
             std::int32_t dq[4096] = {0};
             std::uint16_t eob = 0;
-            transforms::quantizeFp64x64(cb, qt, scan, qc, dq, &eob);
-            for (int i = 0; i < 4096; ++i) coeffs[(by * gridW + bx) * 4096 + i] = qc[i];
+
+            // FS4: the emission case runs the TX_64X64 SCAN CONTRACT (the FS2
+            // settle): the fwd64 output's top-left 32x32 is COMPACTED into a
+            // 32-wide buffer (the vendored fwd wrapper,
+            // transforms.c:2700-2707), quantized at n_coeffs=1024 with the
+            // normative 1024-position token scan, and the inverse consumes
+            // the COMPACTED dqcoeff expanded back into the 64-wide zeroed
+            // array (inv_transforms.c:2615-2628). The legacy (non-emission)
+            // callers keep the 4096-wide facade path (the GPU twin pins it).
+            std::int32_t qcTok[1024] = {0};
+            std::int32_t dqTok[1024] = {0};
+            std::uint16_t eobTok = 0;
+            if (w && fc && na) {
+                std::int32_t cbTok[1024] = {0};
+                for (int r = 0; r < 32; ++r)
+                    for (int c = 0; c < 32; ++c) cbTok[r * 32 + c] = cb[r * 64 + c];
+                std::int16_t scanTok[1024];
+                transforms::defaultScan32x32(scanTok);
+                transforms::quantizeFp64x64Token(cbTok, qt, scanTok, qcTok, dqTok, &eobTok);
+            } else {
+                transforms::quantizeFp64x64(cb, qt, scan, qc, dq, &eob);
+            }
+            if (w && fc && na) {
+                for (int i = 0; i < 1024; ++i) coeffs[(by * gridW + bx) * 4096 + i] = qcTok[i];
+                for (int i = 1024; i < 4096; ++i) coeffs[(by * gridW + bx) * 4096 + i] = 0;
+            } else {
+                for (int i = 0; i < 4096; ++i) coeffs[(by * gridW + bx) * 4096 + i] = qc[i];
+            }
 
             std::uint8_t blk[4096] = {0};
             for (int i = 0; i < 4096; ++i) blk[i] = pred[i];
-            transforms::invTxfm2dAdd64x64(dq, blk, 64, txType);
+            if (w && fc && na) {
+                std::int32_t dq64[4096] = {0};
+                for (int r = 0; r < 32; ++r)
+                    for (int c = 0; c < 32; ++c) dq64[r * 64 + c] = dqTok[r * 32 + c];
+                transforms::invTxfm2dAdd64x64(dq64, blk, 64, txType);
+            } else {
+                transforms::invTxfm2dAdd64x64(dq, blk, 64, txType);
+            }
             for (int y = 0; y < 64; ++y)
                 for (int x = 0; x < 64; ++x) recon.at(px + x, py + y) = blk[y * 64 + x];
+
+            // FS4: the per-block symbol walk. A 64x64 frame reads its
+            // partition symbol from the 10-symbol BLOCK_64X64 row. DCTONLY at
+            // 64x64 intra -> NO tx-type symbol (entropy_coding.c:321-322 via
+            // the FS3-prep gate); FI is dead at 64x64 (bsize > 32x32,
+            // mode_decision.c:108-120).
+            if (w && fc && na) {
+                std::uint8_t pAboveCtx[8];
+                std::uint8_t pLeftCtx[16];
+                memset(pAboveCtx, INVALID_NEIGHBOR_DATA, sizeof(pAboveCtx));
+                memset(pLeftCtx, INVALID_NEIGHBOR_DATA, sizeof(pLeftCtx));
+                entropy::writePartition(w, fc, entropy::BLOCK_64X64, 1, 1, pAboveCtx[0],
+                                        pLeftCtx[0], entropy::PARTITION_NONE);
+                entropy::writeSkip(w, fc, 0, 0);
+                int topCtx = 0, leftCtx = 0;
+                entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
+                                       hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode),
+                                       &topCtx, &leftCtx);
+                entropy::writeKfLumaMode(w, fc, entropy::BLOCK_64X64,
+                                         static_cast<entropy::PredictionMode>(d.mode), topCtx,
+                                         leftCtx, 0);
+                std::int16_t scanTok[1024];
+                transforms::defaultScan32x32(scanTok);
+                entropy::writeBlockCoeffs(w, fc, na, qcTok, scanTok, entropy::TX_64X64,
+                                          entropy::BLOCK_64X64, eobTok, by * 64, bx * 64, 1,
+                                          static_cast<entropy::PredictionMode>(d.mode));
+            }
         }
     }
+    if (w) entropy::odEcStopEncode(w);
 }
-
-// ---- CH3: chroma (4:2:0) frame compositions --------------------------------
 // The UV plane is its own plane; per-plane availability (the chroma
 // above/left mbmi of enc_intra_prediction.c:28-33 maps to the same
 // hasTop/hasLeft raster logic on the UV grid). Dispatch: uv_mode folds via
