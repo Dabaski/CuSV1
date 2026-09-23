@@ -57,7 +57,9 @@ void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int
 // (quantize_fp_helper_c at log_scale 0): qcoeff = coded coeffs, dqcoeff
 // feeds the inverse, so recon carries real quantization loss.
 void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                         entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
+                         entropy::DcSignLevelCoeffNa* na = nullptr);
 
 // QW2: 8x8 round trip with the FP quantizer wired at a fixed qindex
 // (quantize_fp_helper_c at n_coeffs=64, log_scale 0 per
@@ -71,7 +73,9 @@ void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::i
 // SCAN POLICY IS OURS: fixed defaultScan8x8 for every block (see
 // encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
 void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                         entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
+                         entropy::DcSignLevelCoeffNa* na = nullptr);
 
 // C7: 16x16 frame compositions. M1 availability: above iff by > 0, left iff
 // bx > 0, above-left iff both, top-right iff by > 0 && bx + 1 < gridW, and
@@ -121,7 +125,9 @@ void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std:
                             transforms::TxType txType);
 
 void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
+                           entropy::DcSignLevelCoeffNa* na = nullptr);
 
 // L9: 64x64 frame compositions. M1 availability + FR-series REAL recon
 // top-right gather (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]). DCT-only

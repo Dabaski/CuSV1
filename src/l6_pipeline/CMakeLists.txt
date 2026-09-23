@@ -2,7 +2,9 @@ add_library(av1_pipeline STATIC pipeline.cpp)
 target_include_directories(av1_pipeline PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(av1_pipeline PUBLIC av1_pixels av1_transforms av1_intra av1_motion av1_entropy)
 
-add_executable(av1_l6_pipeline_tests tests/test_harness.cpp tests/test_pipeline.cpp)
+add_executable(av1_l6_pipeline_tests tests/test_harness.cpp tests/test_pipeline.cpp
+                                 tests/test_fs3_emission.cpp)
 target_include_directories(av1_l6_pipeline_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/doctest)
+target_compile_definitions(av1_l6_pipeline_tests PRIVATE REPO_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(av1_l6_pipeline_tests PRIVATE av1_pipeline)
 av1_cuda_test(pipeline av1_l6_pipeline_tests)

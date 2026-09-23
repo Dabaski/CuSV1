@@ -3255,6 +3255,19 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
     const int kctx = intra_mode_context[DC_PRED];
     svtd_script_row("mode", mode, kf_y_cdf[kctx][kctx], INTRA_MODES);
     aom_write_symbol(&w, mode, kf_y_cdf[kctx][kctx], INTRA_MODES);
+    // FS3 fix (the drive deviation, named): the angle-delta symbol after a
+    // directional kf mode at bsize >= 8x8 (encode_intra_luma_mode_kf_av1,
+    // entropy_coding.c:1030-1037; the svtd_td0_tile walk precedent). The
+    // previous drive omitted it - the fs2 8/32/64 bytes changed and the
+    // gate lines regenerated; 4x4 unchanged (bsize < 8X8, no delta).
+    static AomCdfProb angle_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+    memcpy(angle_cdf, default_angle_delta_cdf, sizeof(angle_cdf));
+    if (S >= 8 && av1_is_directional_mode((PredictionMode)mode)) {
+        svtd_script_row("delta", MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
+                        2 * MAX_ANGLE_DELTA + 1);
+        aom_write_symbol(&w, MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
+                         2 * MAX_ANGLE_DELTA + 1);
+    }
     // FI iff allowed (mode_decision.c:108-120; 64x64 dead by bsize)
     if (mode == DC_PRED && block_size_wide[bs] <= 32 && block_size_high[bs] <= 32) {
         svtd_script_row("fi", 0, fi_cdf, 2);
@@ -3320,6 +3333,12 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
         const int kctx2 = intra_mode_context[DC_PRED];
         const int m2 = aom_read_symbol_(&r, rk[kctx2][kctx2], INTRA_MODES);
         if (m2 != mode) { fprintf(stderr, "FS2 rt mode %d\n", m2); return; }
+        // FS3 fix: the angle-delta read after a directional mode at 8x8+
+        if (S >= 8 && av1_is_directional_mode((PredictionMode)m2)) {
+            static AomCdfProb ra[CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+            memcpy(ra, default_angle_delta_cdf[mode - V_PRED], sizeof(ra));
+            aom_read_symbol_(&r, ra, 2 * MAX_ANGLE_DELTA + 1);
+        }
         if (mode == DC_PRED && block_size_wide[bs] <= 32 && block_size_high[bs] <= 32) {
             static AomCdfProb rfi[CDF_SIZE(2)];
             memcpy(rfi, default_filter_intra_cdfs[bs], sizeof(rfi));

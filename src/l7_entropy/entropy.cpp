@@ -1497,6 +1497,7 @@ int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
 void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
                     const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
                     int dc_sign_ctx, int reduced_tx_set, PredictionMode intra_dir) {
+    (void)reduced_tx_set;  // FS3-prep: the gate folds use_reduced_set = 1
     const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
     const int    eob_multi_size = txsizeLog2Minus4[tx_size];
     const int    eob_multi_ctx  = 0;  // TX_CLASS_2D (tx_type_to_class[DCT_DCT])
@@ -1504,16 +1505,22 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
     odEcWriteSymbol(w, eob == 0, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     if (eob == 0) return;
 
-    // TS3: tx-type emission (entropy_coding.c:374-376). q100 gate: the
-    // caller passes base_q_idx via the reduced_tx_set parameter (repurposed
-    // for the DCT_DCT-only port — reduced_tx_set > 0 implies q > 0 for the
-    // DCT_DCT-only call sites). The DCT_DCT-only port always emits the
-    // DCT_DCT index through the DTT4_IDTX set (eset 2, 5 symbols) for
-    // reduced_tx_set=1 intra. The intra_dir is the caller's luma mode.
-    if (reduced_tx_set > 0) {
-        const TxSize sq = txsizeSqrMap[tx_size];
-        odEcWriteSymbol(w, av1ExtTxInd[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
-                        fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
+// TS3: tx-type emission (entropy_coding.c:374-376), gated by the verbatim
+    // av1_write_tx_type gate (entropy_coding.c:321-322) - FS3-prep
+    // (court-ratified FS0): at TX_32X32/64X64 intra the eset is DCTONLY
+    // (common_utils.h:62-66; 1 type) -> the symbol is NOT written; at
+    // 4x4/8x8/16x16 reduced intra the eset is DTT4_IDTX (5 types) -> the
+    // DCT_DCT index through the 5-symbol set (byte-identical to the
+    // previous ungated emission - the 16x16 gate lines diff-0 prove it).
+    // reduced_tx_set = 1 (the ratified header config); base_q_idx > 0 is
+    // implied by the callers (the lossless paths never enter the chain).
+    {
+        const TxSize tx_size_sqr_up = txsizeSqrUpMap[tx_size];
+        if (tx_size_sqr_up < TX_32X32) {
+            const TxSize sq = txsizeSqrMap[tx_size];
+            odEcWriteSymbol(w, av1ExtTxInd[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
+                            fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
+        }
     }
 
     int eob_extra;
@@ -1606,6 +1613,7 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
 int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
                   const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx,
                   int reduced_tx_set, PredictionMode intra_dir) {
+    (void)reduced_tx_set;  // FS3-prep: the gate folds use_reduced_set = 1
     const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
     const int    eob_multi_size = txsizeLog2Minus4[tx_size];
     const int    eob_multi_ctx  = 0;
@@ -1614,11 +1622,16 @@ int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
     const int all_zero = odEcReadSymbol(r, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     if (all_zero) return 0;
 
-    // TS3: tx-type read (entropy_coding.c:374-376 mirror)
-    if (reduced_tx_set > 0) {
-        const TxSize sq = txsizeSqrMap[tx_size];
-        const int ttx = odEcReadSymbol(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
-        (void)ttx;  // DCT_DCT-only port
+    // TS3: tx-type read (entropy_coding.c:374-376 mirror), the same verbatim
+    // gate as the writer side (av1_read_tx_type folds it: <= 1 types ->
+    // DCT_DCT implicit, no symbol) - FS3-prep.
+    {
+        const TxSize tx_size_sqr_up = txsizeSqrUpMap[tx_size];
+        if (tx_size_sqr_up < TX_32X32) {
+            const TxSize sq = txsizeSqrMap[tx_size];
+            const int ttx = odEcReadSymbol(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
+            (void)ttx;  // DCT_DCT-only port
+        }
     }
 
     int eob_pt;

@@ -409,9 +409,18 @@ void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int
 // scan per mode/tx type via get_scan_order (coefficients.h:40). Fixing the
 // scan is a scope decision, attributed to no one else.
 void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType) {
+                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                         entropy::AomWriter* w, entropy::EcFrameContext* fc,
+                         entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 4;
     const int gridH = src.height() / 4;
+    // FS3: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
+    if (w && fc) {
+        entropy::initDefaultEcFrameContext(fc, qindex);
+        entropy::odEcEncReset(&w->ec);
+        w->allow_update_cdf = 1;  // THE COUPLING (BSF4-fix): see encodeFrameAuto16x16Q.
+        w->pos = 0;
+    }
     transforms::QuantTables qt;
     transforms::buildQuantTables(qindex, qt);
     std::int16_t scan[16];
@@ -482,6 +491,29 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
             for (int i = 0; i < 16; ++i) {
                 coeffs[(by * gridW + bx) * 16 + i] = qc[i];
             }
+
+            // FS3: the token chain. A 4x4 frame emits NO partition symbol
+            // (the 8x8-level walk in a 1x1-mi frame is forced-split; the 4x4
+            // quadrant is coded directly) - the skip/kf/FI symbols only.
+            if (w && fc && na) {
+                entropy::writeSkip(w, fc, 0, 0);
+                int topCtx = 0, leftCtx = 0;
+                entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
+                                       hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode),
+                                       &topCtx, &leftCtx);
+                entropy::writeKfLumaMode(w, fc, entropy::BLOCK_4X4,
+                                         static_cast<entropy::PredictionMode>(d.mode), topCtx,
+                                         leftCtx, 0);
+                if (entropy::filterIntraAllowed(1, entropy::BLOCK_4X4, 0,
+                                                static_cast<std::uint32_t>(d.mode))) {
+                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_4X4,
+                                              entropy::FILTER_INTRA_MODES);
+                }
+                entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_4X4,
+                                          entropy::BLOCK_4X4, eob, by * 4, bx * 4, 1,
+                                          static_cast<entropy::PredictionMode>(d.mode));
+            }
+
             std::uint8_t blk[16] = {0};
             for (int i = 0; i < 16; ++i) blk[i] = pred[i];
             transforms::invTxfm2dAdd4x4(dq, blk, 4, txType);
@@ -490,6 +522,7 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
             }
         }
     }
+    if (w) entropy::odEcStopEncode(w);
 }
 
 // QW2: 8x8 quantized compositions. Both wire quantizeFp8x8 (n_coeffs=64,
@@ -557,9 +590,18 @@ void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::i
 }
 
 void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType) {
+                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                         entropy::AomWriter* w, entropy::EcFrameContext* fc,
+                         entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 8;
     const int gridH = src.height() / 8;
+    // FS3: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
+    if (w && fc) {
+        entropy::initDefaultEcFrameContext(fc, qindex);
+        entropy::odEcEncReset(&w->ec);
+        w->allow_update_cdf = 1;  // THE COUPLING (BSF4-fix): see encodeFrameAuto16x16Q.
+        w->pos = 0;
+    }
     transforms::QuantTables qt;
     transforms::buildQuantTables(qindex, qt);
     std::int16_t scan[64];
@@ -620,6 +662,35 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
             transforms::quantizeFp8x8(cb, qt, scan, qc, dq, &eob);
             for (int i = 0; i < 64; ++i) coeffs[(by * gridW + bx) * 64 + i] = qc[i];
 
+            // FS3: the per-block symbol walk. An 8x8 frame reads its
+            // partition symbol from the 4-symbol BLOCK_8X8 row
+            // (svt_aom_partition_cdf_length, entropy_coding.c:922-930);
+            // every block of the grid codes one.
+            if (w && fc && na) {
+                std::uint8_t pAboveCtx[8];
+                std::uint8_t pLeftCtx[16];
+                memset(pAboveCtx, INVALID_NEIGHBOR_DATA, sizeof(pAboveCtx));
+                memset(pLeftCtx, INVALID_NEIGHBOR_DATA, sizeof(pLeftCtx));
+                entropy::writePartition(w, fc, entropy::BLOCK_8X8, 1, 1, pAboveCtx[0],
+                                        pLeftCtx[0], entropy::PARTITION_NONE);
+                entropy::writeSkip(w, fc, 0, 0);
+                int topCtx = 0, leftCtx = 0;
+                entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
+                                       hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode),
+                                       &topCtx, &leftCtx);
+                entropy::writeKfLumaMode(w, fc, entropy::BLOCK_8X8,
+                                         static_cast<entropy::PredictionMode>(d.mode), topCtx,
+                                         leftCtx, 0);
+                if (entropy::filterIntraAllowed(1, entropy::BLOCK_8X8, 0,
+                                                static_cast<std::uint32_t>(d.mode))) {
+                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_8X8,
+                                              entropy::FILTER_INTRA_MODES);
+                }
+                entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_8X8,
+                                          entropy::BLOCK_8X8, eob, by * 8, bx * 8, 1,
+                                          static_cast<entropy::PredictionMode>(d.mode));
+            }
+
             std::uint8_t blk[64] = {0};
             for (int i = 0; i < 64; ++i) blk[i] = pred[i];
             transforms::invTxfm2dAdd8x8(dq, blk, 8, txType);
@@ -627,6 +698,7 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                 for (int x = 0; x < 8; ++x) recon.at(px + x, py + y) = blk[y * 8 + x];
         }
     }
+    if (w) entropy::odEcStopEncode(w);
 }
 
 // C7 policy (16x16): all 13 PredictionModes, sad16x16-scored
@@ -1183,9 +1255,18 @@ void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std:
 // (log_scale 1). SCAN POLICY IS OURS: fixed defaultScan32x32 for every block
 // (see encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
 void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType) {
+                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           entropy::AomWriter* w, entropy::EcFrameContext* fc,
+                           entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 32;
     const int gridH = src.height() / 32;
+    // FS3: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
+    if (w && fc) {
+        entropy::initDefaultEcFrameContext(fc, qindex);
+        entropy::odEcEncReset(&w->ec);
+        w->allow_update_cdf = 1;  // THE COUPLING (BSF4-fix): see encodeFrameAuto16x16Q.
+        w->pos = 0;
+    }
     transforms::QuantTables qt;
     transforms::buildQuantTables(qindex, qt);
     std::int16_t scan[1024];
@@ -1246,6 +1327,36 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
             transforms::quantizeFp32x32(cb, qt, scan, qc, dq, &eob);
             for (int i = 0; i < 1024; ++i) coeffs[(by * gridW + bx) * 1024 + i] = qc[i];
 
+            // FS3: the per-block symbol walk. A 32x32 frame reads its
+            // partition symbol from the 10-symbol BLOCK_32X32 row; every
+            // block of the grid codes one. The tx-type symbol is NOT
+            // written (DCTONLY at 32x32 intra: 1 type, entropy_coding.c:321-322
+            // via the FS3-prep gate inside writeBlockCoeffs).
+            if (w && fc && na) {
+                std::uint8_t pAboveCtx[8];
+                std::uint8_t pLeftCtx[16];
+                memset(pAboveCtx, INVALID_NEIGHBOR_DATA, sizeof(pAboveCtx));
+                memset(pLeftCtx, INVALID_NEIGHBOR_DATA, sizeof(pLeftCtx));
+                entropy::writePartition(w, fc, entropy::BLOCK_32X32, 1, 1, pAboveCtx[0],
+                                        pLeftCtx[0], entropy::PARTITION_NONE);
+                entropy::writeSkip(w, fc, 0, 0);
+                int topCtx = 0, leftCtx = 0;
+                entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
+                                       hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode),
+                                       &topCtx, &leftCtx);
+                entropy::writeKfLumaMode(w, fc, entropy::BLOCK_32X32,
+                                         static_cast<entropy::PredictionMode>(d.mode), topCtx,
+                                         leftCtx, 0);
+                if (entropy::filterIntraAllowed(1, entropy::BLOCK_32X32, 0,
+                                                static_cast<std::uint32_t>(d.mode))) {
+                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_32X32,
+                                              entropy::FILTER_INTRA_MODES);
+                }
+                entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_32X32,
+                                          entropy::BLOCK_32X32, eob, by * 32, bx * 32, 1,
+                                          static_cast<entropy::PredictionMode>(d.mode));
+            }
+
             std::uint8_t blk[1024] = {0};
             for (int i = 0; i < 1024; ++i) blk[i] = pred[i];
             transforms::invTxfm2dAdd32x32(dq, blk, 32, txType);
@@ -1253,6 +1364,7 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 for (int x = 0; x < 32; ++x) recon.at(px + x, py + y) = blk[y * 32 + x];
         }
     }
+    if (w) entropy::odEcStopEncode(w);
 }
 
 // ---- L9: 64x64 frame compositions. M1 availability + REAL recon top-right
