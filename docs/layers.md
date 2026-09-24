@@ -140,10 +140,14 @@ above, not zeros).
 - Chroma frame compositions run the same grid over the 4:2:0 UV plane:
   UV-sized blocks, per-plane availability, the `uv2y` fold at the call
   site, filt_type from the UV mode map.
-- Entropy emission: the 16x16 Auto/Q paths emit, per block, the kf
-  y-mode + angle-delta + filter-intra symbols (BSF1) and — in the Q
-  path — the real per-block token stream (TS3, skip = 0, NA-driven
-  contexts). The chosen modes feed `NeighborContext` (filt_type live).
+ - Entropy emission: the Auto/Q paths at ALL five geometries (4x4..64x64,
+   FS3/FS4b) emit, per block, the partition symbol where the tree codes
+   one, skip, the kf y-mode + angle-delta + filter-intra symbols (BSF1;
+   FI predicate-gated: DC_PRED, bsize <= 32x32) and — in the Q path —
+   the real per-block token stream (TS3, skip = 0, NA-driven contexts).
+   Multi-block grids emit running partition contexts (FS5a,
+   `updatePartitionContext`, the fs5g32 grid gate). The chosen modes
+   feed `NeighborContext` (filt_type live).
 - GPU frame paths run the per-block kernel chain (`predict_block_*` +
   `subtract_*_plane` + `fwd_txfm_2d_*` (+ `quant_dequant_*`) +
   `inv_txfm_2d_add_*`), bit-exact vs host in lossless and q100 at all
@@ -189,10 +193,12 @@ then `writeSequenceHeaderObu`, the frame-header walk (v1 lossless 22
 bits + pad; v2 lossy 40 bits at base_q_idx = 100) and
 `assembleStructuralKeyframeTU`/`...v2` packing TD + SPS + OBU_FRAME in
 SVT's packer structure with the court-ratified D1 monochrome patch.
-The committed artifact
-`src/l8_bitstream/tests/goldens/structural_keyframe.obu` (45 bytes)
-proves composed TU == committed file == gate bytes and is
-decoder-accepted.
+The committed artifacts
+`src/l8_bitstream/tests/goldens/structural_keyframe*.obu` — five files
+(d4 30B, d8 30B, d16 44B, d32 47B, d64 441B; the d32 v2 lossy TU is the
+structural-keyframe milestone artifact) — prove composed TU == committed
+file == gate bytes and are decoder-accepted AND content-1:1 per geometry
+(tools/verify_decode4.ps1 -Geometry N).
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 
@@ -212,10 +218,19 @@ decoder-accepted.
 8. Emission: the kf y-mode symbol (context pair from the decided
    neighbor modes), the angle-delta symbol when directional, the
    filter-intra flag where allowed (BSF1); Q paths append the token
-   chain for the block's coefficients (TS3).
+   chain for the block's coefficients (TS3); partition + skip symbols
+   where the tree codes them (ECP1/ECP2), with running partition
+   contexts across blocks (FS5a).
 
-Other geometries differ only in the size-specific transform/quant
-wrappers and the policy entry points; 64x64 is DCT-only.
+The same flow runs at all five geometries (the Auto/Q loops at
+4x4..64x64 emit; FS3/FS4b) — sizes differ in the transform/quant
+wrappers, the token-table row (txs_ctx), the eob alphabet, and the
+policy entry points; 64x64 is DCT-only (no tx-type symbol, no FI —
+the token domain is the adjusted 32x32, 1024 positions). A 4x4 frame
+is an 8x8 node in every decoder (8px alignment): the 4x4 TUs exist
+only as partition leaves (FS5c). Each geometry has a committed
+content-1:1 artifact (d4 30B / d8 30B / d16 44B / d32 47B / d64 441B;
+tools/verify_decode4.ps1 -Geometry N).
 
 ## The golden gate (tools/golden_gen)
 

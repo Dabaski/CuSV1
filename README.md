@@ -186,7 +186,7 @@ src/
   l7_entropy/     entropy coding: od_ec range coder, CDF adaptation,
                   partition/skip/kf-mode/filter-intra + token/txb +
                   tx-type symbols (host)
-l8_bitstream/   raw-bit writer + OBU ground floor, structural keyframe
+  l8_bitstream/   raw-bit writer + OBU ground floor, structural keyframe
                 TU assembly (+ the committed artifact set:
                 structural_keyframe*.obu — d4/d8/d16/d32/d64)
 tools/
