@@ -100,16 +100,58 @@ A0. SLICE-LEVEL STATE (the live register)
 ------------------------------------------------------------
 
 1.1 Chroma residual + uv_mode symbols (ends the monochrome limitation)
-- [ ] uv_mode symbol surface in l7 (writer/reader, EC3 deferral):
-      UV mode CDFs + the g_uv2y fold at the token surface (prediction fold
-      exists; the SYNTAX fold at the entropy layer does not)
-- [ ] Chroma coefficient chains: per-plane token coding (component_type,
-      uv txb ctx branch, the chroma skip_contexts table — ported but dead)
-- [ ] 4:2:0 plane plumbing through l6 emission + recon (UV plane loops,
-      per-plane NA/cul_level)
-- [ ] separate_uv_delta_q + UV dequant fields (the D1 mono patch inverts)
-- [ ] Chroma frame artifacts + real-decoder content-1:1 per plane
-- [ ] uv_mode in the decision (chroma mode policy — OURS)
+  CS-series PLANNED (CS0 scoping of record 2026-09-24, all claims
+  court-verified in the pinned tree; statuses flip to [~] per slice on
+  landing):
+- [ ] CS1 l7 chroma entropy: uv_mode write/read (entropy_coding.c:1077-1095
+      write, decodemv.c:144-147/:823-837 read; ctx = [cflAllowed][luma_mode],
+      the DECIDED luma mode; alphabet UV_INTRA_MODES - !cflAllowed = 14 at
+      bsize <= 32x32 / 13 at 64x64; default_uv_mode_cdf cabac_context_model.c:105
+      NOT yet in l7 NOR the svt_gen.c extract — extract extension first) +
+      the component index threading through writeTxbCoeffs/readBlockCoeffs
+      (six component-dim table families; the l7 CDF data ALREADY carries
+      [PLANE_TYPES] — entropy.cpp:630/:790-802 — the use sites hardcode [0],
+      :1497-1538) + writeUvAngleDelta/readUvAngleDelta (entropy_coding.c:1087-1092,
+      decodemv.c:830-833; LUMA bsize >= 8X8 gate) + the chroma txb_skip_ctx
+      (offset 7 for every reachable pair — the 10-branch dead, named).
+      DEFERRED (named): write_cfl_alphas (:1060-1071) — UV_CFL_PRED is not a
+      D2 candidate (pipeline.cpp:1721), the alphas are dead in our emission.
+- [ ] CS2 uv dequant + chroma Q drives: the quant tables are SINGLE lookups
+      (inv_transforms.c:3467/:3484); svt_av1_build_quantizer (md_config_process.c:101-152)
+      builds U/V from the same lookups with deltas, the runtime call passes all
+      deltas 0 (initial_rc_process.c:807) -> U == V == Y; l3 tables reused
+      verbatim. UV frame Q loops at UV sizes 4/8/16/32 (the CH3 16x16 template
+      generalized; buildIntraPredictorsUv size-generic).
+- [ ] CS3 the D1 un-patch: bitstream.cpp:185 (mono bit), :187-190 (the mono
+      early-return), :228/:262 (the U/V delta_q writes); the vendored
+      write_color_config (entropy_coding.c:2687-2752) already writes the full
+      non-mono path (is_monochrome=0 :2689); the frame header quant section
+      (:2375-2400) writes U dc/ac unconditionally (:2385-2386), write_delta_q
+      (:2365-2372) = 1 bit each at delta 0 -> +2 bits expected. Mono artifact
+      set stays pinned. Other mono-gated spans (grep-verified): :3149 (LR flag,
+      already-positioned), :3581 (deblock count, not bitstream).
+- [ ] CS4 l6 integration: the per-block walk order (write_modes_b :5015-5112
+      -> av1_encode_coeff_1d :757-904): [modes: luma kf -> uv_mode] then LUMA
+      chain -> CB chain -> CR chain (U BEFORE V), three separate NAs
+      (:4159-4161), one UV TU per block (txb_count_uv = 1),
+      chroma_tx_size = av1_get_max_uv_txsize (common_utils.h:142-149):
+      8x8->TX_4X4, 16x16->TX_8X8, 32x32->TX_16X16, 64x64->TX_32X32.
+      THE 4x4 GEOMETRY: is_chroma_reference (common_utils.h:315-320) is TRUE
+      only at odd mi_row AND odd mi_col — the (1,1) 4x4 block owns ONE TX_4X4
+      UV TU at uv (0,0) (ROUND_UV(x) = ((x)>>3)<<3, definitions.h:327 —
+      ROUND_UV(4)>>1 = 0), covering the whole 8x8-aligned quad's chroma; a
+      single-4x4-TU frame codes NO chroma; the d4 artifact carries chroma via
+      the (1,1) owner.
+- [ ] CS5 color artifacts + per-plane instrument (yuv420p: Y/U/V compared
+      separately vs the generator's per-plane recon) + USER decode checks.
+- [ ] CS6 docs currency (currency item noted: docs/ffmpeg_integration.md's
+      "repo reality" section is stale — pre-quantizer/entropy/bitstream;
+      the C-ABI sketch stands as the target contract, the section 8 gate
+      governs).
+  Range enumeration: uv alphabet 14/13 by bsize; both components at every
+  reachable txs_ctx {4,8,16,32}; chroma txb_skip_ctx {7,8,9}; the has_uv
+  parity range (4x4: only (1,1); 8x8+: all); the uv angle-delta gate
+  (FALSE at 4x4 luma, per-mode otherwise); dc_sign_ctx {0,1,2} per plane.
 1.2 CFL (chroma-from-luma)
 - [ ] cfl_alpha symbol surface + the AC-from-luma combine (P: after 1.1)
 1.3 TX surface completion
