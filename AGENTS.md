@@ -3,15 +3,15 @@
 ## Prime directive: incremental TDD only (Uncle Bob's Three Laws)
 
 You do not write a feature, function, or file in one pass. You follow Robert C.
-Martin's Three Laws of TDD as a **nano-cycle** â€” run on almost a second-by-second
+Martin's Three Laws of TDD as a **nano-cycle** -" run on almost a second-by-second
 basis, not test-file-by-test-file:
 
 1. You may not write production code until you have written a failing test.
-2. You may not write more of a test than is sufficient to fail â€” and a
+2. You may not write more of a test than is sufficient to fail -" and a
    compilation/syntax error counts as a failure.
 3. You may not write more production code than is sufficient to pass the one
    currently failing test.
-These are training wheels, not superstition â€” the point isn't the literal
+These are training wheels, not superstition -" the point isn't the literal
 order of test-vs-code, it's staying in small, always-verified steps instead of
 writing a pile of code and hoping it's right. Treat "one behavior" as far
 smaller than a feature: often one assertion, sometimes just enough to fail to
@@ -21,37 +21,37 @@ compile. If you can split a step into two smaller ones, split it.
 **Never write more test than is needed to fail (including "fails to compile").**
 **Never write more implementation than the minimum needed to pass the current test.**
 
-## The loop (repeat constantly â€” this is a nano-cycle, not a per-feature cycle)
+## The loop (repeat constantly -" this is a nano-cycle, not a per-feature cycle)
 
 1. **Pick the smallest next slice.** Smaller than you think. One assertion,
-   or one line that won't even compile yet. Not "handle the whole function" â€”
+   or one line that won't even compile yet. Not "handle the whole function" -"
    just the next tiny fact about its behavior.
-2. **RED â€” write just enough test to fail.**
+2. **RED -" write just enough test to fail.**
    - Write only the test. Do not touch implementation files in this step.
-   - Stop as soon as it fails or fails to compile â€” do not pre-write further
+   - Stop as soon as it fails or fails to compile -" do not pre-write further
      assertions "while you're in there."
 3. **Run the test suite and confirm it fails.**
-   - Actually run it. Do not assume it fails â€” show the failure or compiler output.
-   - A compile error is a valid, expected RED state â€” treat it as step 2's
+   - Actually run it. Do not assume it fails -" show the failure or compiler output.
+   - A compile error is a valid, expected RED state -" treat it as step 2's
      natural first failure, then move straight to step 4 to make it compile
      and fail correctly, or pass, whichever comes first.
    - If it passes immediately with zero new code, the test is wrong or
-     redundant â€” fix the test, don't touch implementation.
-4. **GREEN â€” write the minimum code to pass.**
+     redundant -" fix the test, don't touch implementation.
+4. **GREEN -" write the minimum code to pass.**
    - Minimum literally means minimum: hardcode a return value if that's all
      the current test demands. Generalization comes later, driven by a test
-     that forces it â€” not written speculatively now.
+     that forces it -" not written speculatively now.
    - No extra abstraction, no handling of cases you haven't written a test for yet.
 5. **Run the full test suite and confirm everything passes.**
-   - Not just the new test â€” the whole suite. Regressions count as failure.
+   - Not just the new test -" the whole suite. Regressions count as failure.
    - Do not stack new increments on top of a red suite.
 6. **REFACTOR (only on green, and only here do you step back from the Three Laws).**
    - Clean up naming, remove duplication, generalize hardcoded values into
-     real logic if the accumulated tests now justify it â€” behavior must not change.
+     real logic if the accumulated tests now justify it -" behavior must not change.
    - Rerun the full suite after refactoring. Must stay green before continuing.
 7. **Report status, then go back to step 1.**
    - One line: what tiny slice was added, test name, pass/fail state.
-   - Do not batch multiple loop iterations into a single summary â€” report each one.
+   - Do not batch multiple loop iterations into a single summary -" report each one.
 ## Hard rules
 
 - **RED evidence is mandatory in every slice report**: the failing doctest
@@ -86,7 +86,7 @@ compile. If you can split a step into two smaller ones, split it.
   any mode/size/index range in a port (e.g. `isDr = m >= 1 && m <= 8`) must be
   checked against the reference for EVERY value it admits, not just the ones
   the current tests exercise. Precedent: B6's predict_block_8x8 shipped with
-  H_PRED (m==2) inside the dr range — acute bug caught in QW3, latent V/H
+  H_PRED (m==2) inside the dr range - acute bug caught in QW3, latent V/H
   angleDelta divergence caught in the QW audit; both were invisible to the
   spot-checked subset of modes.
 - **ASCII-only authoring: never write em-dashes or ANY non-ASCII characters
@@ -99,12 +99,12 @@ compile. If you can split a step into two smaller ones, split it.
 
 
 - Do not write test and implementation in the same edit/commit.
-- Do not write a test you already know will pass â€” if it passes on first run
+- Do not write a test you already know will pass -" if it passes on first run
   without new code, you skipped ahead or the test is too weak.
 - Do not write more than one new assertion at a time. If two things need
   testing, that's two trips through the loop, not one.
 - Do not generalize ahead of the tests. Hardcoded/special-cased GREEN code is
-  correct and expected early on â€” let a future failing test force the
+  correct and expected early on -" let a future failing test force the
   generalization, don't anticipate it.
 - If a task looks big, your first job is to decompose it into an ordered list
   of small slices before writing any test. Show that list before starting the loop.
@@ -131,15 +131,15 @@ compile. If you can split a step into two smaller ones, split it.
 
 Determine the project's test command before starting work. Check, in order:
 
-1. `package.json` â†’ `npm test`, `npm run test`, or `yarn test` / `pnpm test`
-2. `Cargo.toml` â†’ `cargo test` (optionally `cargo test -p <crate>` for workspace members)
-3. `pyproject.toml` / `setup.py` / `pytest.ini` â†’ `pytest`
-4. `go.mod` â†’ `go test ./...`
-5. `CMakeLists.txt` / `Makefile` â†’ `ctest` or `make test`
-6. `*.csproj` / `*.sln` â†’ `dotnet test`
+1. `package.json` -' `npm test`, `npm run test`, or `yarn test` / `pnpm test`
+2. `Cargo.toml` -' `cargo test` (optionally `cargo test -p <crate>` for workspace members)
+3. `pyproject.toml` / `setup.py` / `pytest.ini` -' `pytest`
+4. `go.mod` -' `go test ./...`
+5. `CMakeLists.txt` / `Makefile` -' `ctest` or `make test`
+6. `*.csproj` / `*.sln` -' `dotnet test`
 7. A custom script documented in the repo's README or CI config
 If no test runner exists yet, the first task is to add the minimal test
-harness for the language/framework in use â€” itself done via the nano-cycle
+harness for the language/framework in use -" itself done via the nano-cycle
 (the first test: "the test runner can run a trivial passing test").
 
 Run the full suite with whatever command applies. Run a single test by name
@@ -149,7 +149,7 @@ suite before moving on.
 ## General dev environment guidance
 
 - **Before writing any code**, read the project's existing structure,
-  conventions, and neighboring files. Mimic the style already present â€”
+  conventions, and neighboring files. Mimic the style already present -"
   naming, formatting, imports, error handling, logging.
 - **Never assume a library is available** even if it's well-known. Check
   `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, etc. for
@@ -182,14 +182,14 @@ being close to useless. Do not conflate them.
   only claims "produces correct output," never "is fast enough to ship."
   Do not mark a slice as done, or move on to the next slice, on the strength
   of a passing correctness test alone if the task was a performance-motivated
-  port (e.g. replacing an existing SIMD path). Track perf status separately â€”
+  port (e.g. replacing an existing SIMD path). Track perf status separately -"
   see below.
 - **Floating point comparisons need an explicit tolerance, decided up front.**
   GPU FP results will not bit-match the existing AVX2/AVX-512 CPU reference
   paths in SVT-AV1. Before writing the first RED test that compares GPU
   output to a CPU reference, decide and document the tolerance (ULP-based or
   epsilon, whichever fits the operation) in the test file itself as a
-  comment. Do not pick a tolerance ad hoc per test â€” inconsistent tolerances
+  comment. Do not pick a tolerance ad hoc per test -" inconsistent tolerances
   make it impossible to tell a real regression from noise. If a comparison
   fails and you're not sure whether it's a bug or expected rounding
   divergence, that's a stop-and-explain situation, not a guess-and-loosen-
@@ -198,18 +198,18 @@ being close to useless. Do not conflate them.
   an actual CUDA device, a specific compute capability, or VRAM beyond what's
   available must use the `SKIP:`-prefixed early-return pattern already
   defined above. Do not "fix" a missing-GPU skip by weakening or removing the
-  assertion â€” the skip exists so the test suite stays honest on machines
+  assertion -" the skip exists so the test suite stays honest on machines
   without the hardware, not so the test becomes meaningless everywhere.
 - **A kernel can pass and still be badly formed.** Occupancy problems,
   register spills to local memory, uncoalesced memory access, and warp
   divergence are all invisible to a functional correctness test. When a
   kernel reaches GREEN, note in the step-report whether a compile/PTX-level
   sanity check (e.g. `nvcc --ptxas-options=-v` register/spill output) was
-  reviewed. This isn't a new law-breaking step â€” it's a checklist item during
+  reviewed. This isn't a new law-breaking step -" it's a checklist item during
   REFACTOR, not a reason to add unrequested generalization.
 - **Perf regressions get their own check, run less often than the unit
   suite.** Do not fold throughput/benchmark assertions into the nano-cycle's
-  RED/GREEN loop â€” they're too slow and too noisy to gate every tiny slice.
+  RED/GREEN loop -" they're too slow and too noisy to gate every tiny slice.
   Instead, maintain a separate benchmark pass (documented once a harness
   exists) that's run at slice-group boundaries, not per-assertion. If no
   such harness exists yet when the first performance-sensitive kernel lands,
@@ -229,14 +229,14 @@ being close to useless. Do not conflate them.
   mismatch. MEASURED VALUES ONLY: every number quoted anywhere comes from
   an actual run on this machine.
 - Known caveat baked into the tool's output header: the composite loop is
-  HOST decision + per-block synchronous kernel launches — the numbers
+  HOST decision + per-block synchronous kernel launches - the numbers
   include per-launch/per-copy sync overhead per block. They measure the
   current structure, not the kernels' potential.
 - **Rule: perf-relevant slices must quote before/after bench lines** (the
   same config from this tool, same machine, clocks as recorded at run
   time). A perf slice without bench lines is not done.
 - Baseline (2026-09-10, RTX 3090, driver 591.86; clocks unlocked, SM clock
-  varied 210-1695 MHz across runs — record what nvidia-smi prints):
+  varied 210-1695 MHz across runs - record what nvidia-smi prints):
   host 4x4L 0.374 / 4x4Q 0.403 / 8x8L 0.244 / 8x8Q 0.268 ms (median);
   gpu 4x4L 227.0 / 4x4Q 390.7 / 8x8L 93.4 / 8x8Q 99.5 ms (median);
   per-stage single launches ~0.056-0.061 ms (4x4 all stages; 8x8 predict
@@ -251,15 +251,15 @@ being close to useless. Do not conflate them.
 
 North star: a working, bit-exact 1:1 port of SVT-AV1 on CUDA 12.2 - every algorithm traceable to the pinned vendored reference in third_party/SVT-AV1 (REFERENCE PINNING rule above); the target is bit-exact 1:1 with the pinned vendored SVT-AV1 reference, not with upstream.
 
-- l0_core â€” minimal types (Sample, BlockSize) shared across layers.
-- l1_pixels â€” pixels::Plane (strided pixel buffer with padding).
-- l2_gpurt â€” NVRTC JIT + driver-API runtime (GpuContext, DeviceBuffer, Kernel, ptxEntryNames); kernels are CUDA C++ source strings compiled for compute_61.
-- l3_transforms — SVT-AV1 fixed-point transforms at 4x4 / 8x8 / 16x16 (C-series) then 32x32 / 64x64 (L-series). Host 1D kernels: fdct4/fadst4, fdct8/fadst8, fdct16/fadst16 (verbatim svt_av1_fdct/fadst_N_new) and idct4/iadst4, idct8/iadst8, idct16/iadst16 (verbatim, clamps only where SVT consumes stage_range: idct16 stages 3-7, iadst16 stages 3/5/7; iadst16 has no all-zero early-out at 16); fdct32/fadst32 + idct32/iadst32 (idct32 clamps ONLY stages 3-9, iadst32 clamps EVERY stage, no all-zero early-out at 32); fdct64/idct64 DCT-only within our TxType scope (av1_txfm_type_ls[4] = {DCT64, INVALID, INVALID, IDENTITY64}, inv_transforms.h:196 - no ADST is signalable at TX_64X64; the IDENTITY64 column is parked, not ported) - ported mechanically from the committed extract svt_gen.c with the SVT pointer-swap structure preserved, fdct64B takes cos_bit. Host 2D: fwdTxfm2d4x4/8x8/16x16/32x32/64x64 + invTxfm2dAdd4x4/8x8/16x16/32x32/64x64 (64x64 DCT-only; the 64x64 fwd has net shift 0 so the roundtrip is lossy like 8x8/32x32). cos_bit findings from the SVT tables (transforms.c:19-22, inv_transforms.h:32-41): fwd 4x4 13/13, 8x8 13/13, 16x16 col 13 / row 12, 32x32 12/12, 64x64 col 13 / row 10 (the only pass below 12 - fdct16/fadst16 and fdct64B are cos_bit-parameterized via cospiRow = cospi_arr mirror); inv is 12/12 (INV_COS_BIT) at every size. Shifts: fwd {2,0,0} / {2,-1,0} / {2,-2,0} / {2,-4,0} / {0,-2,-2}; inv {0,-4} / {-1,-4} / {-2,-4} / {-2,-4} / {-2,-4}. Quantizer stage: buildQuantTables (luma rows of svt_av1_build_quantizer, sharpness=0), size-parameterized quantizeFpN/quantizeBN (verbatim semantics of quantize_fp_helper_c / svt_aom_quantize_b_c) with 4x4/8x8/16x16 (log_scale 0) / 32x32 (log_scale 1) / 64x64 (log_scale 2) wrappers per av1_get_tx_scale_tab (full_loop.c:22) - the escalated arithmetic (rounding ROUND_POWER_OF_TWO(round, log_scale), threshold << (1+log_scale), quant >> (16-log_scale), dq >> log_scale) cited in the L5/L9a commits; defaultScan4x4/8x8/16x16/32x32/64x64 (svt_aom_init_iscan formula); dc/ac unified via table index [rc != 0] - this SVT tree has no av1_quantize_dc. GPU twins at every size: fwd_txfm_2d_4x4..64x64, inv_txfm_2d_add_4x4..64x64, quant_dequant_4x4..64x64 (32x32 fwd/inv cos_bit 12 via kC12f/kC12; 64x64 d_fdct64 selects bit 13 col / 10 row; quant_dequant_64x64 = 4 scan positions per thread). MSVC toolchain limit named: raw string literals > ~16.8KB fire C2026 - all CuSource functions are += chunked (<= ~13.5KB per chunk). Integer only.
-- l4_intra — buildIntraPredictors (1:1 with SVT build_intra_predictors, luma, size-generic over 4/8/16/32/64, DC availability variants, missing-neighbor fills), drZ1/2/3 + drPredictor, edge filter/upsample, smoothPredict family, filterIntraPredictor. Corner blend (enc_intra_prediction.c:600-604, txwpx+txhpx >= 24): dead at 4x4/8x8 (sums 8/16), LIVE at 16x16 (32), 32x32 (64) and 64x64 (128) - the 16x16/32x32/64x64 GPU kernels carry it. Upsample never fires at 16x16/32x32/64x64 (blk_wh 32/64/128 > 16, svt_aom_use_intra_edge_upsample). GPU twins: predict_block_4x4, predict_block_8x8, predict_block_16x16 (256 threads, shared sizing: above/left max 32 used, zone-1 maxBaseX = 31, above[31] reach within 96-byte arrays), predict_block_32x32 (1024 threads = the CUDA block maximum, __launch_bounds__(1024) after CUresult 701 at naive 1024-thread/64-reg; zone-1 maxBaseX = 63, edge-filter nPx = 65, corner blend live) and predict_block_64x64 (1024 threads, FOUR pixels per thread p = t + 1024k - the stated thread-map design; zone-1 maxBaseX = 127, edge-filter nPx = 129 within 256-byte shared arrays; filter-intra NOT signalable at 64x64 so the 64x64 kernel has no FI path).
-- l5_motion — motion::sad4x4 / sad8x8 / sad16x16 / sad32x32 / sad64x64 (strided uint8) + GPU kernels for 4x4 and 8x8 only; the 16x16 / 32x32 / 64x64 D2 policies score host-side (frame GPU tests are host-decides-gpu-executes, like 8x8). Provenance: sad8x8 mirrors the dedicated 8x8 kernel compute8x8_sad_kernel_c (motion_estimation.c:71); sad4x4 / sad16x16 / sad32x32 / sad64x64 mirror svt_nxm_sad_kernel_helper_c at those dims (compute_sad_c.c:21). (HK1 correction: both citations restored - the HK1 edit had dropped compute8x8_sad_kernel_c, which does exist at motion_estimation.c:71.)
+- l0_core -" minimal types (Sample, BlockSize) shared across layers.
+- l1_pixels -" pixels::Plane (strided pixel buffer with padding).
+- l2_gpurt -" NVRTC JIT + driver-API runtime (GpuContext, DeviceBuffer, Kernel, ptxEntryNames); kernels are CUDA C++ source strings compiled for compute_61.
+- l3_transforms - SVT-AV1 fixed-point transforms at 4x4 / 8x8 / 16x16 (C-series) then 32x32 / 64x64 (L-series). Host 1D kernels: fdct4/fadst4, fdct8/fadst8, fdct16/fadst16 (verbatim svt_av1_fdct/fadst_N_new) and idct4/iadst4, idct8/iadst8, idct16/iadst16 (verbatim, clamps only where SVT consumes stage_range: idct16 stages 3-7, iadst16 stages 3/5/7; iadst16 has no all-zero early-out at 16); fdct32/fadst32 + idct32/iadst32 (idct32 clamps ONLY stages 3-9, iadst32 clamps EVERY stage, no all-zero early-out at 32); fdct64/idct64 DCT-only within our TxType scope (av1_txfm_type_ls[4] = {DCT64, INVALID, INVALID, IDENTITY64}, inv_transforms.h:196 - no ADST is signalable at TX_64X64; the IDENTITY64 column is parked, not ported) - ported mechanically from the committed extract svt_gen.c with the SVT pointer-swap structure preserved, fdct64B takes cos_bit. Host 2D: fwdTxfm2d4x4/8x8/16x16/32x32/64x64 + invTxfm2dAdd4x4/8x8/16x16/32x32/64x64 (64x64 DCT-only; the 64x64 fwd has net shift 0 so the roundtrip is lossy like 8x8/32x32). cos_bit findings from the SVT tables (transforms.c:19-22, inv_transforms.h:32-41): fwd 4x4 13/13, 8x8 13/13, 16x16 col 13 / row 12, 32x32 12/12, 64x64 col 13 / row 10 (the only pass below 12 - fdct16/fadst16 and fdct64B are cos_bit-parameterized via cospiRow = cospi_arr mirror); inv is 12/12 (INV_COS_BIT) at every size. Shifts: fwd {2,0,0} / {2,-1,0} / {2,-2,0} / {2,-4,0} / {0,-2,-2}; inv {0,-4} / {-1,-4} / {-2,-4} / {-2,-4} / {-2,-4}. Quantizer stage: buildQuantTables (luma rows of svt_av1_build_quantizer, sharpness=0), size-parameterized quantizeFpN/quantizeBN (verbatim semantics of quantize_fp_helper_c / svt_aom_quantize_b_c) with 4x4/8x8/16x16 (log_scale 0) / 32x32 (log_scale 1) / 64x64 (log_scale 2) wrappers per av1_get_tx_scale_tab (full_loop.c:22) - the escalated arithmetic (rounding ROUND_POWER_OF_TWO(round, log_scale), threshold << (1+log_scale), quant >> (16-log_scale), dq >> log_scale) cited in the L5/L9a commits; defaultScan4x4/8x8/16x16/32x32/64x64 (svt_aom_init_iscan formula); dc/ac unified via table index [rc != 0] - this SVT tree has no av1_quantize_dc. GPU twins at every size: fwd_txfm_2d_4x4..64x64, inv_txfm_2d_add_4x4..64x64, quant_dequant_4x4..64x64 (32x32 fwd/inv cos_bit 12 via kC12f/kC12; 64x64 d_fdct64 selects bit 13 col / 10 row; quant_dequant_64x64 = 4 scan positions per thread). MSVC toolchain limit named: raw string literals > ~16.8KB fire C2026 - all CuSource functions are += chunked (<= ~13.5KB per chunk). Integer only.
+- l4_intra - buildIntraPredictors (1:1 with SVT build_intra_predictors, luma, size-generic over 4/8/16/32/64, DC availability variants, missing-neighbor fills), drZ1/2/3 + drPredictor, edge filter/upsample, smoothPredict family, filterIntraPredictor. Corner blend (enc_intra_prediction.c:600-604, txwpx+txhpx >= 24): dead at 4x4/8x8 (sums 8/16), LIVE at 16x16 (32), 32x32 (64) and 64x64 (128) - the 16x16/32x32/64x64 GPU kernels carry it. Upsample never fires at 16x16/32x32/64x64 (blk_wh 32/64/128 > 16, svt_aom_use_intra_edge_upsample). GPU twins: predict_block_4x4, predict_block_8x8, predict_block_16x16 (256 threads, shared sizing: above/left max 32 used, zone-1 maxBaseX = 31, above[31] reach within 96-byte arrays), predict_block_32x32 (1024 threads = the CUDA block maximum, __launch_bounds__(1024) after CUresult 701 at naive 1024-thread/64-reg; zone-1 maxBaseX = 63, edge-filter nPx = 65, corner blend live) and predict_block_64x64 (1024 threads, FOUR pixels per thread p = t + 1024k - the stated thread-map design; zone-1 maxBaseX = 127, edge-filter nPx = 129 within 256-byte shared arrays; filter-intra NOT signalable at 64x64 so the 64x64 kernel has no FI path).
+- l5_motion - motion::sad4x4 / sad8x8 / sad16x16 / sad32x32 / sad64x64 (strided uint8) + GPU kernels for 4x4 and 8x8 only; the 16x16 / 32x32 / 64x64 D2 policies score host-side (frame GPU tests are host-decides-gpu-executes, like 8x8). Provenance: sad8x8 mirrors the dedicated 8x8 kernel compute8x8_sad_kernel_c (motion_estimation.c:71); sad4x4 / sad16x16 / sad32x32 / sad64x64 mirror svt_nxm_sad_kernel_helper_c at those dims (compute_sad_c.c:21). (HK1 correction: both citations restored - the HK1 edit had dropped compute8x8_sad_kernel_c, which does exist at motion_estimation.c:71.)
 - l6_pipeline - block + frame composition and DECISION at all five geometries: 4x4 (encode
 Block4x4 / encodeRecon4x4 / encodeFrameRecon4x4 / encodeFrameAuto4x4 / encodeFrameAuto4x4Q), 8x8 (encodeFrameRecon8x8 / Auto8x8 / Recon8x8Q / Auto8x8Q), 16x16 (encodeFrameRecon16x16 / Auto16x16 / Recon16x16Q / Auto16x16Q), 32x32 (encodeFrameRecon32x32 / Auto32x32 / Recon32x32Q / Auto32x32Q + decideBlockMode32x32) and 64x64 (encodeFrameRecon64x64 / Auto64x64 / Recon64x64Q / Auto64x64Q + decideBlockMode64x64, DCT-only within our TxType scope) - raster grids, intra-only, each block predicting from RECONSTRUCTED neighbors (M1 availability rules) with the FR-series REAL recon top-right gather in every variant (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]; row above fully reconstructed by raster order). Each Auto variant's mode is CHOSEN by the D2 SAD policy per geometry (decideBlockMode4x4/8x8/16x16/32x32/64x64 - policy is ours; primitives 1:1) evaluated against reconstructed edges; chosen modes feed NeighborContext (filt_type live) = plane window (l1) + buildIntraPredictors (l4) -> int16 residual (no clamp) -> fwdTxfm2d (l3) -> invTxfm2dAdd (l3 inverse) onto the same predictor. GPU frame paths: per-block kernel chains (predict_block / subtract_4x4..64x64_plane / fwd_txfm_2d / quant_dequant / inv_txfm_2d_add), edges gathered host-side from the device recon buffer; ALL FIVE geometries are bit-exact vs host in both lossless and q100 GPU frame tests. The 16x16 fwd/inv roundtrip is exact (recon == source at 16x16); 8x8 / 32x32 / 64x64 are lossy by design (fwd shift sums -2, 0 for 64). Goldens captured from SVT's own C in the committed generator (tools/golden_gen). Emission sites (TD5b): encodeFrameAuto16x16 inits the frame context with q0 (CodedLossless, bucket 0, pipeline.cpp:758) and encodeFrameAuto16x16Q passes the frame qindex (pipeline.cpp:909) - the l7 init is qindex-bucketed (see l7). FS-series (CLOSED, content-1:1 at all five geometries): the 4x4Q/8x8Q/32x32Q/64x64Q loops take optional w/fc/na (defaults nullptr) and emit the full per-block walk [partition iff the frame reads one: 8x8 = the 4-symbol row, 16/32/64 = the 10-symbol rows, 4x4 = none][skip=0 ctx 0][kf mode + the angle-delta symbol for directional at bsize >= 8X8][FI iff DC_PRED && bsize <= 32x32][writeBlockCoeffs] with initDefaultEcFrameContext(fc, qindex) (the bucketed init, see l7) - bit-exact vs the fs2S_* gate lines per size (the 64x64 emission-domain = the TX_64X64 scan contract: compact the fwd64 top-left 32x32, quantize n_coeffs=1024 with the 1024-position token scan via quantizeFp64x64Token, expand the compacted dqcoeff for inv64; the legacy/GPU callers keep the 4096 facade - the FS5d named follow-up); the 8x8Q/32x32Q/64x64Q emit RUNNING partition contexts (updatePartitionContext after each coded block; for uniform grids these coincide with fresh INVALID - the lookup bit at the leaf's own bsl is 0 for every square size, mutation-check-proven) and writeBlockCoeffs takes mi-unit args; the grid conformance gate = the fs5g32 fixture (the 2x2 of 32x32). Scope: single-TU + the grid fixtures gate-pinned; the FI DC-deciding fixture still open; FS5d the named dual-domain follow-up (a 1024-position GPU kernel + bench work). Per-geometry decode conformance: the five committed artifacts (d4 30B the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px so the 8x8 node reads the partition symbol; d8 30B; d16 44B; d32 47B committed; d64 441B) decode content-1:1 per geometry via tools/verify_decode4.ps1 -Geometry.
 - l7_entropy - the od_ec writer/reader families + the full symbol surface: initDefaultEcFrameContext(fc, base_q_idx) (TD5b: the coefficient tables QINDEX-BUCKET-SELECTED per the spec's init_coeff_cdfs, 07.bitstream.semantics.md:1800-1820, via the verbatim getQCtx mirror of cabac_context_model.c:1907-1918; the 13 token-table families carried as the 4-bucket *_buckets.inc files mechanically split from the committed svt_gen.c extracts - no hand-transcribed values; previously the idx-0 bucket was used for every frame = the TS1 deviation, RESOLVED 2026-09-21: it was the q100 tile-divergence root cause), writeTxbCoeffs/writeBlockCoeffs/readBlockCoeffs (the token chain: txb_skip, tx-type, eob_pt/eob_extra, base_eob+br, reverse base+brs, dc_sign + raw signs + golomb; FS3-prep: the in-chain tx-type symbol requires tx_size_sqr_up < TX_32X32 - DCTONLY at 32x32/64x64 intra writes/reads NO symbol, entropy_coding.c:321-322), writeKfLumaMode/readKfLumaMode, writeSkip, writePartition/readPartition, writeTxType, updatePartitionContext (FS5a: wired into the 8x8Q/32x32Q/64x64Q emission loops), getKfYModeCtx, updateCdf (the spec adaptation rate), writeGolomb/readGolomb. Provenance: every primitive cites the vendored extract; the per-bucket rows cite cabac_context_model.c (the court-cited [2]-bucket EobPt256 row {3089, 3920, ...} = token_cdfs.h:861 on the aom side).
 - l8_bitstream - the bit assembly: wb family (bit writer), uleb128, OBU header + temporal delimiter, SPS encode (writeSequenceHeaderObu, sps_obu; FS5b: maxDim-parameterized max frame dims - frame_width_bits = msb(maxDim), the default 32 = the committed walk), the frame-header v1 (writeFrameHeader, lossless q0, 22-bit walk) and v2 (writeFrameHeaderV2, lossy q100, 40-bit walk - verified field-by-field against both aom decodeframe.c and dav1d obu.c), assembleStructuralKeyframeTUv2 (TD + SPS + OBU_FRAME; FS5b: the dims threaded through bsf3EncodeSps), the committed artifact SET goldens/structural_keyframe*.obu - the 47-byte d32 (TD5b: the v2 header + the idx-2-coded tile, the four-16x16-leaves walk; decodes exit 0 with the content 1:1 - the ecfrm_recon fingerprint 05 08 0c 11, byte-diffs 0/1024) plus the FS5 per-geometry set (d4 30B = the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px; d8 30B; d16 44B; d64 441B - each three-way-identity-tested and content-1:1 measured per geometry; tools/verify_decode4.ps1 -Geometry = the standing instrument). Gate: tu_bytes_v2 47 + tu_bytes_v2_d4/d8/d16/d64 (tools/golden_gen).
-- third_party/ â€” vendored SVT-AV1 (1:1 source of truth), doctest, hardware docs (perf-axis only: PTX ISA, GP104 whitepaper, Pascal Tuning Guide, Nsight-focused guides; CUDA 12.2 profiling is ncu, not nvprof).
+- third_party/ -" vendored SVT-AV1 (1:1 source of truth), doctest, hardware docs (perf-axis only: PTX ISA, GP104 whitepaper, Pascal Tuning Guide, Nsight-focused guides; CUDA 12.2 profiling is ncu, not nvprof).
 

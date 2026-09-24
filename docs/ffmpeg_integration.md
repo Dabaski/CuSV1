@@ -4,7 +4,7 @@
 
 - **End goal:** a new AV1 encoder in FFmpeg (`-c:v av1_gpu`) that runs the CUDA
   pipeline and emits a **decodable AV1 bitstream**.
-- **Mechanism:** native FFmpeg CUDA encoder — implement the `AVCodec` inside
+- **Mechanism:** native FFmpeg CUDA encoder - implement the `AVCodec` inside
   `libavcodec`, using `libavutil/hwcontext_cuda` for device management (the
   `av1_nvenc` model), not an external-library wrapper.
 - **Scope:** FFmpeg-integration focused. It **assumes the encoder core is
@@ -14,7 +14,7 @@
 - **Perf:** correctness-first. Throughput is tracked in a separate benchmark
   pass (AGENTS.md rule), never gating the RED/GREEN loop.
 - **Repo reality:** the current port (`l6_pipeline::encodeFrameAuto4x4`) emits
-  `coeffs[]`/`modes[]` to host arrays — no bitstream. There is no quantizer, no
+  `coeffs[]`/`modes[]` to host arrays - no bitstream. There is no quantizer, no
   chroma, no inter, no entropy coder. The wiring below starts from the
   *assumed-complete* encoder library, not today's code.
 
@@ -50,23 +50,23 @@ Requirements on this core:
 - **Low-delay, no B-frames initially** to keep `AV_CODEC_CAP_DELAY`/frame-
   reordering out of the first integration.
 - **GPU frames are optional.** Either accept a host YUV plane (upload
-  internally) or accept an already-uploaded CUDA buffer (see Phase 1) — FFmpeg
+  internally) or accept an already-uploaded CUDA buffer (see Phase 1) - FFmpeg
   decides which via pixel-format negotiation.
 
 ## Architecture
 
 ```
 AVFrame (YUV420P or CUDA)                    AVPacket (AV1 OBU)
-      │                                             ▲
-      ▼                                             │
+      |                                             ^
+      v                                             |
 libavcodec/av1_gpuenc.c  (AVCodec)
-      │ send_frame / receive_packet
-      ▼
-av1_gpu_enc library (C ABI)  ── owns CUcontext + stream ──>
-   NVRTC-compiled kernels (predict/subtract/fwd/inv/quant/entropy/…)
+      | send_frame / receive_packet
+      v
+av1_gpu_enc library (C ABI)  -- owns CUcontext + stream -->
+   NVRTC-compiled kernels (predict/subtract/fwd/inv/quant/entropy/...)
 ```
 
-## Phase 0 — Environment & FFmpeg checkout
+## Phase 0 - Environment & FFmpeg checkout
 
 - Clone FFmpeg (`n6.1` or current master) into a sibling dir; **do not vendor**
   it into this repo. Pin the tag and record it.
@@ -79,12 +79,12 @@ av1_gpu_enc library (C ABI)  ── owns CUcontext + stream ──>
 
 **Acceptance:** `configure --enable-cuda` builds on this machine.
 
-## Phase 1 — CUDA device/hwcontext reconciliation (biggest integration risk)
+## Phase 1 - CUDA device/hwcontext reconciliation (biggest integration risk)
 
 Today `gpurt` creates its **own** `CUcontext` (`cuCtxCreate` in a static lambda,
 `src/l2_gpurt/gpurt.cpp:21`) and calls `cuCtxSynchronize` per launch
 (`src/l2_gpurt/gpurt.cpp:111`). A native FFmpeg encoder gets its context from
-`av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_CUDA)` → `AVCUDAContext->cuda_ctx`.
+`av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_CUDA)` -> `AVCUDAContext->cuda_ctx`.
 Two live contexts on the same device will clash.
 
 - Add a mode to `Av1GpuEnc` to **adopt** an existing `CUcontext` (FFmpeg's)
@@ -99,7 +99,7 @@ Two live contexts on the same device will clash.
 **Acceptance:** an encode session uses FFmpeg's `CUcontext`/stream, no "multiple
 contexts" error, no memory leak across frame submissions.
 
-## Phase 2 — `libavcodec/av1_gpuenc.c`
+## Phase 2 - `libavcodec/av1_gpuenc.c`
 
 Implement the `AVCodec`:
 
@@ -125,7 +125,7 @@ AVCodec ff_av1_gpu_encoder = {
 
 - `Av1GpuEncCtx` holds `AVHWDeviceContext*` + the `Av1GpuEnc*` handle + the
   `AVCodecContext` mapping (timebase, framerate, dimensions).
-- `av1_gpu_init`: read `AVOption`s → `Av1GpuCfg`, create the CUDA hwdevice
+- `av1_gpu_init`: read `AVOption`s -> `Av1GpuCfg`, create the CUDA hwdevice
   context if none supplied, call `av1_gpu_enc_create`.
 - `av1_gpu_send_frame`: convert frame to the expected pixel format, hand the
   data (host or `CUdeviceptr`) to `av1_gpu_enc_send_frame`.
@@ -136,7 +136,7 @@ AVCodec ff_av1_gpu_encoder = {
 **Acceptance:** `ffmpeg -encoders | grep av1_gpu` shows it; a trivial encode of a
 tiny YUV4MPEG file runs without crash.
 
-## Phase 3 — Build integration in FFmpeg
+## Phase 3 - Build integration in FFmpeg
 
 - `libavcodec/Makefile`: add `av1_gpuenc.o` to `OBJS` (guarded by the new config
   flag).
@@ -151,7 +151,7 @@ tiny YUV4MPEG file runs without crash.
 **Acceptance:** `./configure --enable-av1-gpu && make` produces a binary with the
 encoder, on Windows.
 
-## Phase 4 — Pixel format & frame-handling path
+## Phase 4 - Pixel format & frame-handling path
 
 - Advertise `AV_PIX_FMT_CUDA` and `AV_PIX_FMT_YUV420P` in `pix_fmts`; set
   `hw_configs` with `AV_CODEC_HW_CONFIG_METHOD_AD_HOC`/
@@ -159,7 +159,7 @@ encoder, on Windows.
 - If FFmpeg picks `AV_PIX_FMT_CUDA`, frames arrive as `AV_HWFRAME` and you pass
   `CUdeviceptr`s directly to the library (zero-copy). If it picks
   `AV_PIX_FMT_YUV420P`, upload in `send_frame`.
-- Handle dimension alignment (SVT/AV1 require multiples of 8/64) — pad/reflect
+- Handle dimension alignment (SVT/AV1 require multiples of 8/64) - pad/reflect
   in the encoder library, and set `AVCodecContext->width/height` to the padded
   dims so output framing is correct.
 - Threading: start single-threaded (`FF_THREAD_SLICE` disabled); the GPU is the
@@ -169,22 +169,22 @@ encoder, on Windows.
 **Acceptance:** both `AV_PIX_FMT_CUDA` (via `-hwaccel cuda` / `-vf hwupload`) and
 plain `AV_PIX_FMT_YUV420P` paths produce identical packets.
 
-## Phase 5 — Validation harness (correctness-first)
+## Phase 5 - Validation harness (correctness-first)
 
-Follow the repo's `SKIP:` convention — no GPU ⇒ skip, not fail.
+Follow the repo's `SKIP:` convention - no GPU => skip, not fail.
 
 - **Decode validation (the gate):** encode a known YUV, pipe to
   `ffmpeg -c:v libdav1d -f null -`, assert decode exit 0 and frame count/size
   match. Also decode with `libaom-av1` for cross-decoder confidence.
 - **Signal check:** decode the same input with `libsvtav1`/`libaom-av1` and
-  compare PSNR/SSIM — loose bounds only (the mode-decision policy is this
+  compare PSNR/SSIM - loose bounds only (the mode-decision policy is this
   project's, not SVT's, so **no bit-exactness vs. any reference**; that 1:1
   guarantee is at the *primitive* level).
 - **Hardware-frame test:** run the CUDA-frame path (`-hwaccel cuda`) and the
   software-frame path; assert identical packets.
 - **Golden where possible:** reuse the committed `tools/golden_gen` primitives
   for the GPU-block sub-stages (predict/subtract/fwd/inv), but only at the block
-  level — the frame-level policy is ours.
+  level - the frame-level policy is ours.
 - Add these as doctest-style integration tests in the FFmpeg wrapper or as a
   CMake/ctest target that shells out to ffmpeg, so they run in CI where a GPU
   exists.
@@ -192,15 +192,15 @@ Follow the repo's `SKIP:` convention — no GPU ⇒ skip, not fail.
 **Acceptance:** a reproducible command that encodes a clip and decodes it
 error-free; a `SKIP:` note on GPU-less machines.
 
-## Phase 6 — Performance (correctness-first, separate pass)
+## Phase 6 - Performance (correctness-first, separate pass)
 
-- AGENTS.md rule: correctness-green ≠ performance-acceptable, but throughput is
+- AGENTS.md rule: correctness-green != performance-acceptable, but throughput is
   **not** gated per slice.
 - At slice-group boundaries, run a benchmark pass (e.g. `ffmpeg -benchmark` on a
   1080p clip): record fps, and capture `ptxas -v` register/spill for any new
   kernel.
 - Known hot spots to optimize later (not in the initial wiring): per-block
-  host↔device round trips in `encodeFrameAuto4x4` (the test does a download per
+  host<->device round trips in `encodeFrameAuto4x4` (the test does a download per
   block, `src/l6_pipeline/tests/test_pipeline.cpp:507`), per-launch
   `cuCtxSynchronize`, and JIT compile at startup.
 
@@ -208,7 +208,7 @@ error-free; a `SKIP:` note on GPU-less machines.
 
 1. **Encoder-core completion is the critical path.** There is no quantizer,
    chroma, inter, entropy coder, or OBU writer today. "A month around the clock"
-   realistically buys the core, not the FFmpeg layer — the wiring here is the
+   realistically buys the core, not the FFmpeg layer - the wiring here is the
    *last* ~2 weeks.
 2. **Context ownership.** `gpurt` creates its own `CUcontext`; it must adopt
    FFmpeg's. This touches every kernel path and is the most likely source of
@@ -219,5 +219,5 @@ error-free; a `SKIP:` note on GPU-less machines.
    build; document the AOMedia patent license.
 5. **Threading/refcount.** Frame lifecycle and `AVFrame` reuse must be reconciled
    with async GPU work; start single-threaded.
-6. **The `AVOption` surface** (crf/qp/preset/bitrate/gop) needs defining —
+6. **The `AVOption` surface** (crf/qp/preset/bitrate/gop) needs defining -
    decide early what maps to the D2/D3 policy and what is ignored.

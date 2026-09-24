@@ -1,4 +1,4 @@
-# PV — function-by-function provenance table
+# PV - function-by-function provenance table
 
 Every port artifact in `src/l3_transforms`, `src/l4_intra`,
 `src/l5_motion`, `src/l6_pipeline`, `src/l7_entropy` and
@@ -8,21 +8,21 @@ REFERENCE PINNING rule in `AGENTS.md`). l0_core/l1_pixels are
 infrastructure with no SVT symbol to trace (single policy row in the
 classification section). Status vocabulary:
 
-- **exact (mech)** — the SVT body was ported mechanically from the committed
+- **exact (mech)** - the SVT body was ported mechanically from the committed
   verbatim extract (`svt_gen.c`) with identifier/table renames only; the
   arithmetic text is byte-derived from the extract. Currently exactly two
   ports: `fdct64`/`fdct64B` and `idct64`.
-- **exact (hand)** — hand-transcribed from the SVT source with the
+- **exact (hand)** - hand-transcribed from the SVT source with the
   arithmetic text unchanged (mechanical renames, C++ `std::` spellings);
   bit-exactness is gate-proven by `tools/golden_gen`
   (expected_primitives.txt, 335 lines). All pre-extract-era ports (the
   C-series 4x4/8x8/16x16 kernels, the L-series 32x32 kernels, the helpers,
   and all of l4/l5) are this class.
-- **adapted** — SVT structure is preserved but the port changes shape:
+- **adapted** - SVT structure is preserved but the port changes shape:
   thread mapping, buffer ownership, parameterization, or a documented
   specialization of a generic SVT function. The per-sample arithmetic is
   still 1:1 SVT; what changed is the wrapper around it.
-- **policy** — project-defined decision logic that SVT does not prescribe
+- **policy** - project-defined decision logic that SVT does not prescribe
   at this scope. SVT primitives inside it are exact/adapted as listed.
 
 Golden provenance: every expected value comes from `tools/golden_gen`
@@ -60,14 +60,14 @@ is in `tools/golden_gen/README.md`.
 | fwd_cos_bit_col/row, inv_cos_bit_col/row (transforms.c:19-22, inv_transforms.h:32-41) | cos_bit constants (13/13, 13/13, 13/12, 12/12, 13/10; inv 12/12) | exact (hand) | read from the extracted tables, cited |
 | av1_tranform_two_d_core_c (transforms.c:2398) | `fwdTxfm2d4x4..64x64` | adapted | generic core specialized per size: bd=8 fixed, no flips, fixed TxType column; col/row 1D calls + round_shift_array(-shift) structure preserved |
 | inv_txfm2d_add_c / svt_av1_inv_txfm2d_add_64x64_c | `invTxfm2dAdd4x4..64x64` | adapted | same specialization; clamps only where SVT consumes stage_range; clip_pixel_highbd add |
-| av1_txfm_type_ls (inv_transforms.h:196) | 64x64 DCT-only scope | exact (finding) | {DCT64, INVALID, INVALID, IDENTITY64} — no ADST signalable at TX_64X64; IDENTITY64 column parked, not ported |
+| av1_txfm_type_ls (inv_transforms.h:196) | 64x64 DCT-only scope | exact (finding) | {DCT64, INVALID, INVALID, IDENTITY64} - no ADST signalable at TX_64X64; IDENTITY64 column parked, not ported |
 | quantize_fp_helper_c (full_loop.c:222) | `quantizeFpN` (log_scale param), `quantizeFp4x4/8x8/16x16/32x32/64x64` | adapted | verbatim semantics with the helper's own log_scale parameter; escalated arithmetic cited (full_loop.c:228/:244/:246/:249) |
 | svt_aom_quantize_b_c (full_loop.c:31) | `quantizeBN`, `quantizeB4x4/8x8/16x16/32x32/64x64` | adapted | escalated arithmetic cited (:36/:67/:69-70/:74) |
 | svt_aom_init_iscan (coefficients.c:345-363) | `defaultScan4x4..64x64` | adapted | formula-based port at W=H=4..64 (the iscan loop instantiated per size) |
 | dc_qlookup/ac_qlookup_QTX, svt_aom_dc/ac_quant_qtx, get_qzbin_factor, invert_quant (inv_transforms.c:3357-3516) | `buildQuantTables` | adapted | luma rows of svt_av1_build_quantizer, sharpness=0; the composition is ours, each table/step is verbatim SVT |
 | svt_aom_eb_av1 dc/ac QTX lookup | GPU `quant_dequant_4x4..64x64` | adapted | fp helper arithmetic per-thread at log_scale 0/1/2; eob = max nonzero scan position + 1 (policy comment in kernel) |
 
-GPU twins (fwd_txfm_2d_*, inv_txfm_2d_add_*, quant_dequant_*): **adapted** —
+GPU twins (fwd_txfm_2d_*, inv_txfm_2d_add_*, quant_dequant_*): **adapted** -
 the device 1D bodies (`d_fdct4..d_fdct64`, `d_idct4i..d_idct64i`,
 `d_fadst4..d_fadst32`, `d_iadst4i..d_iadst32i`) carry the verbatim stage
 arithmetic; what differs is the launch geometry (one thread per column/row,
@@ -82,15 +82,15 @@ port (tests in test_transform.cpp).
 | build_intra_predictors (enc_intra_prediction.c:159) | `buildIntraPredictors` (:455) | exact (hand) | the ONE extract substitution: get_filt_type(xd, plane) -> svtd_filt_type generator shim, flagged inline in svt_gen.c; the host port mirrors that shim with intra::NeighborContext carrying the same two mode values |
 | svt_av1_dr_prediction_z1/z2/z3_c (intra_prediction.c) | `drZ1`/`drZ2`/`drZ3` (:202/:236/:262) | exact (hand) | gate-verified per zone |
 | svt_aom_dr_predictor + eb_dr_intra_derivative + get_dx/get_dy | `drPredictor` (:734) + `getDx`/`getDy` (:345/:355) + `drIntraDerivative` (:312, verbatim table) | exact (hand) | |
-| dc/dc_left/dc_top/dc_128/v/h/paeth predictors (intra_prediction.c) | inline dispatch arms inside `buildIntraPredictors` (DC_PRED :631, V_PRED :660, H_PRED :666, PAETH_PRED :672 — paeth_predictor_single mirrored inline via std::abs) | exact (hand) | |
+| dc/dc_left/dc_top/dc_128/v/h/paeth predictors (intra_prediction.c) | inline dispatch arms inside `buildIntraPredictors` (DC_PRED :631, V_PRED :660, H_PRED :666, PAETH_PRED :672 - paeth_predictor_single mirrored inline via std::abs) | exact (hand) | |
 | smooth/smooth_v/smooth_h predictors (intra_prediction.c) + sm_weight_arrays (:25) | `smoothPredict`/`smoothVPredict`/`smoothHPredict` (:365/:389/:408) + `smWeightArrays` (:291, verbatim table) | exact (hand) | |
 | svt_aom_intra_edge_filter_strength + svt_av1_filter_intra_edge_c + filter_intra_edge_corner | `edgeFilterStrength`/`filterIntraEdge` (:95) + corner-blend path | exact (hand) | |
 | svt_aom_use_intra_edge_upsample + svt_av1_upsample_intra_edge_c | `useUpsample` + `upsampleIntraEdge` (:760) | exact (hand) | dead above 8x8 (blk_wh > 16), audited per size |
-| eb_av1_filter_intra_taps + svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c) | `filterIntraPredictor` (:694) | exact (hand) | verbatim asserts bw<=32 retained — FI is NOT signalable at 64x64 |
+| eb_av1_filter_intra_taps + svt_av1_filter_intra_predictor_c (C_DEFAULT/filterintra_c.c) | `filterIntraPredictor` (:694) | exact (hand) | verbatim asserts bw<=32 retained - FI is NOT signalable at 64x64 |
 | sm_weight_arrays (intra_prediction.c:25) | `sm_w` rows + `sm_w32`/`sm_w64` GPU constants | exact (hand) | bs=16/32/64 rows verbatim |
 | mode_to_angle_map / extend_modes / av1_is_directional_mode | `kModeToAngle` (:451) / `kExtendModes` (:435) / `isDrMode` inline test | exact (hand) | |
 | Corner-blend regime (enc_intra_prediction.c:600-604) | in builder + 16/32/64 GPU kernels | exact (hand) | txwpx+txhpx >= 24; live at 16/32/64, dead at 4/8 |
-| — | GPU `predict_block_4x4/8x8/16x16/32x32/64x64` | adapted | per-sample arithmetic 1:1 with the host builder (which is exact); launch mapping ours (256 threads at 4/8/16; 1024 threads at 32/64 — 64x64 = FOUR pixels per thread p = t + 1024k, the stated thread-map design); edge-buffer ownership reworked for shared memory; filter-intra path absent at 64x64 (not signalable) |
+| - | GPU `predict_block_4x4/8x8/16x16/32x32/64x64` | adapted | per-sample arithmetic 1:1 with the host builder (which is exact); launch mapping ours (256 threads at 4/8/16; 1024 threads at 32/64 - 64x64 = FOUR pixels per thread p = t + 1024k, the stated thread-map design); edge-buffer ownership reworked for shared memory; filter-intra path absent at 64x64 (not signalable) |
 
 ## l5_motion (src/l5_motion/motion.cpp)
 
@@ -98,20 +98,20 @@ port (tests in test_transform.cpp).
 | --- | --- | --- | --- |
 | compute8x8_sad_kernel_c (motion_estimation.c:71) | `sad8x8` (:5) | exact (hand) | dedicated 8x8 kernel mirrored; GPU 8x8 kernel adapted from it (accumulators per-thread, warp-reduce) |
 | svt_nxm_sad_kernel_helper_c (compute_sad_c.c:21) | `sad4x4` (:95), `sad16x16` (:44), `sad32x32` (:61), `sad64x64` (:78) | exact (hand) | dim loops unrolled to the template dims |
-| — | GPU sad 4x4/8x8 kernels | adapted | same sums; 16x16/32x32/64x64 score host-side by design |
+| - | GPU sad 4x4/8x8 kernels | adapted | same sums; 16x16/32x32/64x64 score host-side by design |
 
 ## l6_pipeline (src/l6_pipeline/pipeline.cpp)
 
 | SVT symbol | Port artifact(s) | Status | Notes |
 | --- | --- | --- | --- |
 | av1_tranform_two_d_core_c / quantize / iscan via l3 | `encodeFrameRecon4x4..64x64`, `encodeFrameAuto4x4..64x64`, `encodeFrameAuto4x4Q` + `encodeFrameRecon8x8Q..64x64Q` + `encodeFrameAuto8x8Q..64x64Q` (pipeline.cpp:1195+ for the 32x32 block, :1386 for Auto64x64Q) | adapted | composition: plane window (l1) + buildIntraPredictors (l4) -> int16 residual -> fwdTxfm2d -> invTxfm2dAdd; M1 availability + FR-series REAL recon top-right gather follow SVT's raster decode order; note: there is no encodeFrameRecon4x4Q in the tree (the 4x4 quantized API is encodeFrameAuto4x4Q alone, pipeline.h:58) |
-| — | `decideBlockMode4x4/8x8/16x16/32x32/64x64` (decideBlockMode64x64 at :679) | policy | D2 policy is OURS: all 13 PredictionModes scored by SAD (SVT primitives), lowest wins, tie = lowest mode index; SVT selects modes via RD/trellis machinery we do not port |
-| — | fixed `defaultScan*` for every block in the Q frame loops | policy | SVT selects scan order per mode/tx-type via get_scan_order; ours is fixed default scan (named in each loop's comment) |
-| — | `NeighborContext` (filt_type plumbing) | policy | carries the two neighbor modes the generator shim needs; value semantics match enc_intra_prediction.c:186 |
-| kf luma symbol emission via l7 (BSF1) | in `encodeFrameAuto16x16`/`encodeFrameAuto16x16Q` | adapted | per block in raster order: getKfYModeCtx (entropy_coding.c:1004-1021) from the DECIDED neighbor modes + writeKfLumaMode (:1026-1040) + angle delta (directional, delta 0) + writeFilterIntra flag=0 where filterIntraAllowed (mode_decision.c:108-119); allow_update_cdf = 1 forced, ends with odEcStopEncode — see the BSF4-fix coupling invariant (deviations, item 6) |
+| - | `decideBlockMode4x4/8x8/16x16/32x32/64x64` (decideBlockMode64x64 at :679) | policy | D2 policy is OURS: all 13 PredictionModes scored by SAD (SVT primitives), lowest wins, tie = lowest mode index; SVT selects modes via RD/trellis machinery we do not port |
+| - | fixed `defaultScan*` for every block in the Q frame loops | policy | SVT selects scan order per mode/tx-type via get_scan_order; ours is fixed default scan (named in each loop's comment) |
+| - | `NeighborContext` (filt_type plumbing) | policy | carries the two neighbor modes the generator shim needs; value semantics match enc_intra_prediction.c:186 |
+| kf luma symbol emission via l7 (BSF1) | in `encodeFrameAuto16x16`/`encodeFrameAuto16x16Q` | adapted | per block in raster order: getKfYModeCtx (entropy_coding.c:1004-1021) from the DECIDED neighbor modes + writeKfLumaMode (:1026-1040) + angle delta (directional, delta 0) + writeFilterIntra flag=0 where filterIntraAllowed (mode_decision.c:108-119); allow_update_cdf = 1 forced, ends with odEcStopEncode - see the BSF4-fix coupling invariant (deviations, item 6) |
 | token emission via l7 (TS3) | in the 16x16 Q path (`entropy::writeBlockCoeffs`, pipeline.cpp:984-988) | adapted | skip = 0 for all blocks (no skip decision), NA-driven contexts, intra_dir = the decided mode; the ecfrm_* gate lines pin modes AND eobs AND coeffs AND recon AND the byte stream equal to the generator drive |
 | per-geometry Q emission (FS3/FS4) | in `encodeFrameAuto4x4Q`/`encodeFrameAuto8x8Q`/`encodeFrameAuto32x32Q`/`encodeFrameAuto64x64Q` (the optional w/fc/na emission params; the per-block walk [partition iff the frame reads one][skip][kf mode + the angle-delta symbol][FI iff the predicate][writeBlockCoeffs]) | adapted | the walk shape mirrors encode_partition_av1 + encode_skip_coeff_av1 + encode_intra_luma_mode_kf_av1 + av1_write_tx_type + the token chain, order per the aom decodeframe.c read order; bit-exact vs the fs2S_* gate lines per size (the 64x64 emission-domain = the TX_64X64 scan contract via quantizeFp64x64Token, n_coeffs=1024 over the compacted 32-wide quadrant, full_loop.c:1262); named deviation: the Auto64x64Q keeps the 4096-wide facade for the legacy/GPU callers, the emission case runs the compacted token domain (the FS5d dual-domain follow-up) |
-| running partition contexts (FS5a) | in the 8x8Q/32x32Q/64x64Q emission blocks (updatePartitionContext after each coded block; the 4x4Q/16x16Q emit no partition symbol — named) | adapted | coding_loop.c:1700-1713 semantics via l7; for uniform PARTITION_NONE grids the running ctxs coincide with fresh INVALID cells (the lookup bit at the leaf's own bsl is 0 for every square size — the mutation check proved the fixture discriminates wrong ctxs) |
+| running partition contexts (FS5a) | in the 8x8Q/32x32Q/64x64Q emission blocks (updatePartitionContext after each coded block; the 4x4Q/16x16Q emit no partition symbol - named) | adapted | coding_loop.c:1700-1713 semantics via l7; for uniform PARTITION_NONE grids the running ctxs coincide with fresh INVALID cells (the lookup bit at the leaf's own bsl is 0 for every square size - the mutation check proved the fixture discriminates wrong ctxs) |
 
 ## l7_entropy (src/l7_entropy/entropy.cpp)
 
@@ -151,34 +151,34 @@ port (tests in test_transform.cpp).
 | ObuType (av1_structs.h:22-32), AomCodecErr (definitions.h:1493-1497) | layer enums | exact (hand) | OK/ERROR slice only (consumed by write_uleb_obu_size) |
 | write_sequence_header_obu (:3699-3763) + add_trailing_bits (:3668-3675) | `writeSequenceHeaderObu` | adapted | ratified BSF0(g) field values (profile 0, still_picture=1, monochrome per D1, 32x32 = max dims, filter-intra 1, order_hint 0 per D3, ...); payload only (header + uleb in the packer) |
 | write_uncompressed_header_obu (:3294-3637) | `writeFrameHeader`/`writeFrameHeaderV2` | adapted | v1 = the BSF4-fix 22-bit walk (disable_cdf_update = 0 -> might_bwd_adapt region LIVE, refresh_frame_context = DISABLED emitted; 22 bits + 2 pad); v2 = lossy walk (base_q_idx = 100, delta_q block live, encode_loopfilter zeros, tx_mode_select = TX_MODE_LARGEST = 40 bits, 5 bytes, NO padding) |
-| write_frame_header_av1 (:3843-3920), encode_sps_av1 (:3925-3948) | `assembleStructuralKeyframeTU`/`assembleStructuralKeyframeTUv2` | adapted | phase-1 measure / phase-2 uleb rewrite (SPS); TG header 0 bytes + tile copy with no per-tile prefix at tile_cnt == 1; v1 dst zeroed first (spec byte_alignment zeros — named); SPS byte-identical between v1/v2 (gate-HALTed if it moves) |
-| D1 mono patch spans (entropy_coding.c:2689, :2706-2710, :2385-2386) | generator-side only (composition.c) | policy | court-ratified monochrome still-picture writer: is_monochrome const 0 -> 1, commented spec mono branch live, U/V quantization delta writes skipped (the num_planes guard the pinned writer lacks) — see deviations, item 5 |
-| — | committed artifacts `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` (d4 30B, d8 30B, d16 44B, d32 47B v2, d64 441B) | policy | produced from the generator output (never hand-typed); three-way identity composed TU == file == gate bytes per geometry; decoder-accepted AND content-1:1 per geometry (FS5c, verify_decode4.ps1 -Geometry N); v1 bytes remain gated (tu_bytes) |
+| write_frame_header_av1 (:3843-3920), encode_sps_av1 (:3925-3948) | `assembleStructuralKeyframeTU`/`assembleStructuralKeyframeTUv2` | adapted | phase-1 measure / phase-2 uleb rewrite (SPS); TG header 0 bytes + tile copy with no per-tile prefix at tile_cnt == 1; v1 dst zeroed first (spec byte_alignment zeros - named); SPS byte-identical between v1/v2 (gate-HALTed if it moves) |
+| D1 mono patch spans (entropy_coding.c:2689, :2706-2710, :2385-2386) | generator-side only (composition.c) | policy | court-ratified monochrome still-picture writer: is_monochrome const 0 -> 1, commented spec mono branch live, U/V quantization delta writes skipped (the num_planes guard the pinned writer lacks) - see deviations, item 5 |
+| - | committed artifacts `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` (d4 30B, d8 30B, d16 44B, d32 47B v2, d64 441B) | policy | produced from the generator output (never hand-typed); three-way identity composed TU == file == gate bytes per geometry; decoder-accepted AND content-1:1 per geometry (FS5c, verify_decode4.ps1 -Geometry N); v1 bytes remain gated (tu_bytes) |
 
 ## GPU runtime (l2_gpurt), infrastructure, and fixtures
 
 - l2_gpurt (NVRTC JIT + driver API): **policy** (our infrastructure; no SVT
   counterpart).
 - l0_core (Sample, BlockSize) and l1_pixels (pixels::Plane strided buffer):
-  **policy** — infrastructure with no SVT symbol to trace (they exist so the
+  **policy** - infrastructure with no SVT symbol to trace (they exist so the
   layers above can hold SVT-shaped data; the data layout they carry is
   defined by the SVT calls listed above).
 - Test/golden fixtures (ramp frames, (11+7i)%251-style edge arrays, corner
   fill 7/127/128 regimes): **policy** - fixtures are ours; the code under
   test is SVT's.
 - `svtd_gather_above` / frame drivers in tools/golden_gen/composition.c:
-  **adapted** — documented specializations of the SVT composition with the
+  **adapted** - documented specializations of the SVT composition with the
   get_filt_type shim; the D2 decision inside them mirrors the host policy.
 
 ## Known deviations (named, per the standing rule)
 
-1. ADST at TX_64X64: not ported and not signalable — av1_txfm_type_ls[4] =
+1. ADST at TX_64X64: not ported and not signalable - av1_txfm_type_ls[4] =
    {DCT64, INVALID, INVALID, IDENTITY64} (inv_transforms.h:196). The
    IDENTITY64 column is parked. No fadst64/iadst64 exist in this tree.
-2. get_filt_type: shimmed (generator-controlled global) — flagged inline in
+2. get_filt_type: shimmed (generator-controlled global) - flagged inline in
    svt_gen.c and mirrored by NeighborContext in the port.
 3. GPU kernels are thread-mapped re-expressions of the exact host
-   arithmetic (adapted), not verbatim C — their bit-exactness is enforced
+   arithmetic (adapted), not verbatim C - their bit-exactness is enforced
    by tests against the host paths, and the host paths are gate-enforced
    against the verbatim generator.
 4. The composite bench/GPU frame loops run host decisions + per-block
@@ -188,7 +188,7 @@ port (tests in test_transform.cpp).
    hardcoded non-mono; the generator applies three court-ratified spans
    (entropy_coding.c:2689 const 0 -> 1; :2706-2710 the commented spec
    mono branch live; :2385-2386 the U/V quantization delta writes
-   skipped — the spec's num_planes guard the pinned writer lacks,
+   skipped - the spec's num_planes guard the pinned writer lacks,
    decodeframe.c:5121-5122). Decoder-confirmed: libdav1d/ffprobe read
    the stream back as gray.
 6. THE COUPLING (BSF4-fix): SVT sets ec_writer.allow_update_cdf =
@@ -202,14 +202,14 @@ port (tests in test_transform.cpp).
    as an invariant.
 7. l7 `AomReader` struct shape: {ec, allow_update_cdf} (aom-upstream
    shape) vs the vendored bitreader.h aom_reader = {buffer, buffer_end,
-   ec, allow_update_cdf} — the buffer-ownership glue is unported
+   ec, allow_update_cdf} - the buffer-ownership glue is unported
    (harmless in l7's self-consistent use). Found by the TD2 gate harness
    (casting one onto the other crashed 0xC0000005); the harness now
    exchanges bytes/values only (l7_ctx_shim.cpp extern-C shims).
 8. `od_ec_dec_bits_` (entdec.h:64) is DECLARED in the pinned tree with
-   NO definition anywhere in it (grep-verified) — raw-bits decode is
+   NO definition anywhere in it (grep-verified) - raw-bits decode is
    unported, not needed by the intra symbol subset.
-9. TS1 token-tables deviation — RESOLVED 2026-09-21 (TD5b): the writer
+9. TS1 token-tables deviation - RESOLVED 2026-09-21 (TD5b): the writer
    emitted the default (idx-0) coefficient CDF bucket for every frame
    regardless of base_q_idx. The spec's init_coeff_cdfs
    (07.bitstream.semantics.md:1800-1820; the verbatim get_q_ctx,
@@ -219,18 +219,18 @@ port (tests in test_transform.cpp).
    ratified by the court, fixed in TD5a (generator) and TD5b (the l7
    mirror); the TD0 ladder flipped to 7/7 byte-exact and the 47-byte
    artifact decodes content-1:1 (byte-diffs 0/1024).
-10. FS-series generator-drive self-consistency traps — both caught by
+10. FS-series generator-drive self-consistency traps - both caught by
     the l6 bit-exactness tests, both fixed:
     (a) FS3 (11a0e7e): svtd_fs2_drive omitted the angle-delta symbol
     after a directional kf mode at bsize >= 8x8; its read twin omitted
     it too, so the drive's rt=1 was self-consistent with its own
-    omission — the l6 emission (writeKfLumaMode emits the delta,
+    omission - the l6 emission (writeKfLumaMode emits the delta,
     entropy_coding.c:1030-1037) diverged on the fs28/fs232/fs264 bytes
     and the regenerated gate exposed it.
     (b) FS5b (a853ac9): the new S==16 drive branch fell through the
     fwd/quant/recon switches into the 4x4 machinery (svtd_fwd2d4x4 etc.
     on a 256-entry block); the fs216 lines were self-consistent (rt 15 1)
-    but wrong — the l6 hand-rolled walk diverged at the token chain
+    but wrong - the l6 hand-rolled walk diverged at the token chain
     (24 bytes vs 6) and the bit-exactness test caught it.
 11. FS5c 4x4-frame structure (687625f): the decoders align frame dims
     to 8 pixels (aligned_width = ALIGN_POWER_OF_TWO(w, 3)), so a 4x4

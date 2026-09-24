@@ -1,4 +1,4 @@
-# The layer stack — how everything works
+# The layer stack - how everything works
 
 Orientation doc for the port. Symbol-by-symbol provenance lives in
 `docs/provenance.md`; the golden generator's own inventory in
@@ -30,17 +30,17 @@ snapshot and re-expressed as CUDA C++ kernels JIT-compiled at runtime
 via NVRTC. Every layer is developed under incremental TDD; GPU twins
 are held to bit-exact agreement with the SVT host C.
 
-## l0_core / l1_pixels — infrastructure
+## l0_core / l1_pixels - infrastructure
 
 `Sample` (uint8) and `BlockSize` (the project-minimal square variant)
 are shared types; `pixels::Plane` is a strided buffer with left/right
 padding sized for the intra edge gather. They carry SVT-shaped data so
 the layers above can hold it; they have no SVT counterpart.
 
-## l2_gpurt — GPU runtime
+## l2_gpurt - GPU runtime
 
 - NVRTC JIT: `compileToPtx` compiles CUDA C++ source strings for
-  `compute_61` at runtime — no offline nvcc kernel build. Kernel
+  `compute_61` at runtime - no offline nvcc kernel build. Kernel
   sources are chunked raw strings (MSVC C2026 fires on raw string
   literals above ~16.8 KB; all `CuSource` functions are built from
   <= ~13.5 KB chunks).
@@ -50,13 +50,13 @@ the layers above can hold it; they have no SVT counterpart.
 - `ptxas -v` register/spill review is done manually during REFACTOR on
   kernels that land (AGENTS.md checklist).
 
-## l3_transforms — transforms + quantizer
+## l3_transforms - transforms + quantizer
 
 Fixed-point transforms at every size 4x4..64x64, verbatim SVT
 arithmetic:
 
 - 1D kernels: forward fdct/fadst and inverse idct/iadst at 4/8/16/32;
-  64x64 is DCT-ONLY (no ADST is signalable at TX_64X64 in this tree —
+  64x64 is DCT-ONLY (no ADST is signalable at TX_64X64 in this tree -
   `av1_txfm_type_ls[4]` = DCT64/INVALID/INVALID/IDENTITY64). Inverse
   clamps only where SVT consumes stage_range (idct16 stages 3-7,
   iadst16 stages 3/5/7, idct32 stages 3-9, iadst32 every stage,
@@ -69,7 +69,7 @@ arithmetic:
 - Quantizer: `buildQuantTables` (luma rows of `svt_av1_build_quantizer`,
   sharpness = 0), default scans 4x4..64x64, `quantizeFp*`/`quantizeB*`
   at log_scale 0/0/0/1/2 per `av1_get_tx_scale_tab`. dc/ac is unified
-  via the dequant table index (`quant_ptr[rc != 0]`) — this SVT tree
+  via the dequant table index (`quant_ptr[rc != 0]`) - this SVT tree
   has no `av1_quantize_dc`.
 - GPU twins at every size: `fwd_txfm_2d_*`, `inv_txfm_2d_add_*`,
   `quant_dequant_*` (quantize + dequant in one launch). Device 1D
@@ -77,7 +77,7 @@ arithmetic:
   (one thread per column/row, shared-memory staging) is ours. Every
   twin is bit-exact vs its host port.
 
-## l4_intra — intra prediction
+## l4_intra - intra prediction
 
 `buildIntraPredictors` is 1:1 with SVT's `build_intra_predictors`,
 size-generic over 4/8/16/32/64: DC availability variants and
@@ -99,21 +99,21 @@ GPU twins `predict_block_4x4/8x8/16x16/32x32/64x64`: 256 threads at
 verified for all 8 dr modes x angle deltas at every size.
 
 Chroma (CH-series): `UvPredictionMode` verbatim enum, the `uv2y` fold
-(= `get_uv_mode`/`g_uv2y`; UV_CFL_PRED folds to DC_PRED — the
+(= `get_uv_mode`/`g_uv2y`; UV_CFL_PRED folds to DC_PRED - the
 cfl_alpha AC-from-luma combine is out of scope) and
 `buildIntraPredictorsUv` = fold + the size-generic builder with
 FILTER_INTRA_MODES (chroma never uses filter-intra). The predictors
-are plane-agnostic, so the wrapper IS the chroma dispatch — exactly
+are plane-agnostic, so the wrapper IS the chroma dispatch - exactly
 SVT's call-site fold.
 
-## l5_motion — SAD
+## l5_motion - SAD
 
 `sad4x4`..`sad64x64` over strided uint8: 8x8 mirrors SVT's dedicated
 8x8 kernel, the rest mirror `svt_nxm_sad_kernel_helper_c` at their
 dims. GPU kernels exist for 4x4/8x8; the 16x16/32x32/64x64 D2 policies
 score host-side by design.
 
-## l6_pipeline — composition + decision
+## l6_pipeline - composition + decision
 
 Block and frame composition at 4x4..64x64, intra-only. The pipeline
 raster order follows SVT's decode order: every block predicts from
@@ -134,7 +134,7 @@ above, not zeros).
   after the forward transform; the dequantized coefficients feed the
   inverse, so quantization loss feeds back through decisions. Scan
   order is the fixed default scan (SVT's get_scan_order per
-  mode/tx-type selection is out of scope — named policy).
+  mode/tx-type selection is out of scope - named policy).
 - Lossy regime: the 16x16 fwd/inv roundtrip is exact (recon == source);
   8x8/32x32/64x64 are lossy by design (fwd shifts sum to -2, 0 for 64).
 - Chroma frame compositions run the same grid over the 4:2:0 UV plane:
@@ -143,7 +143,7 @@ above, not zeros).
  - Entropy emission: the Auto/Q paths at ALL five geometries (4x4..64x64,
    FS3/FS4b) emit, per block, the partition symbol where the tree codes
    one, skip, the kf y-mode + angle-delta + filter-intra symbols (BSF1;
-   FI predicate-gated: DC_PRED, bsize <= 32x32) and — in the Q path —
+   FI predicate-gated: DC_PRED, bsize <= 32x32) and - in the Q path -
    the real per-block token stream (TS3, skip = 0, NA-driven contexts).
    Multi-block grids emit running partition contexts (FS5a,
    `updatePartitionContext`, the fs5g32 grid gate). The chosen modes
@@ -155,14 +155,14 @@ above, not zeros).
   gathers stay on the host (edges are read from the device recon
   buffer), kernels execute the per-block work.
 
-## l7_entropy — entropy coder + symbols
+## l7_entropy - entropy coder + symbols
 
 The SVT/AOM entropy coder as a host port, integer only, bit-exact vs
 the committed gate (see `docs/bitstream.md` for the narrative):
 
 - od_ec range coder: encoder (equal-prob, binary, cdf-coded symbol
   primitives, flush/done, tell/tell_frac) and decoder (refill/
-  normalize/decode, tell) — the decoder ports the vendored aom_dsp
+  normalize/decode, tell) - the decoder ports the vendored aom_dsp
   `entdec.c`. `od_ec_dec_bits_` is declared-but-undefined in the
   pinned tree and stays unported.
 - `updateCdf` CDF adaptation + the write/read symbol wrappers
@@ -171,7 +171,7 @@ the committed gate (see `docs/bitstream.md` for the narrative):
   flag/mode; partition (incl. the gathered 2-symbol XOR branches);
   skip (the first arithmetic-coded symbol of each I_SLICE block);
   tx-type (DCT_DCT through eset 2, reduced_tx_set intra); and the
-  token chain — per-TU coefficients (txb_skip -> eob position ->
+  token chain - per-TU coefficients (txb_skip -> eob position ->
   base/br -> signs -> golomb) driven by the NA context model
   (`DcSignLevelCoeffNa`, packed dc_sign<<6|cul_level, OR-accumulate)
   and the per-position nz-map context LUT.
@@ -184,7 +184,7 @@ the committed gate (see `docs/bitstream.md` for the narrative):
   tx_depth = 0). Deferred: chroma uv_mode/CFL symbols, the nonkey
   y-mode path, palette, intrabc.
 
-## l8_bitstream — raw-bit writer + OBU
+## l8_bitstream - raw-bit writer + OBU
 
 The container ground floor and the structural keyframe assembly (see
 `docs/bitstream.md`): `AomWriteBitBuffer` bit/literal writers, uleb128,
@@ -194,9 +194,9 @@ bits + pad; v2 lossy 40 bits at base_q_idx = 100) and
 `assembleStructuralKeyframeTU`/`...v2` packing TD + SPS + OBU_FRAME in
 SVT's packer structure with the court-ratified D1 monochrome patch.
 The committed artifacts
-`src/l8_bitstream/tests/goldens/structural_keyframe*.obu` — five files
+`src/l8_bitstream/tests/goldens/structural_keyframe*.obu` - five files
 (d4 30B, d8 30B, d16 44B, d32 47B, d64 441B; the d32 v2 lossy TU is the
-structural-keyframe milestone artifact) — prove composed TU == committed
+structural-keyframe milestone artifact) - prove composed TU == committed
 file == gate bytes and are decoder-accepted AND content-1:1 per geometry
 (tools/verify_decode4.ps1 -Geometry N).
 
@@ -223,9 +223,9 @@ file == gate bytes and are decoder-accepted AND content-1:1 per geometry
    contexts across blocks (FS5a).
 
 The same flow runs at all five geometries (the Auto/Q loops at
-4x4..64x64 emit; FS3/FS4b) — sizes differ in the transform/quant
+4x4..64x64 emit; FS3/FS4b) - sizes differ in the transform/quant
 wrappers, the token-table row (txs_ctx), the eob alphabet, and the
-policy entry points; 64x64 is DCT-only (no tx-type symbol, no FI —
+policy entry points; 64x64 is DCT-only (no tx-type symbol, no FI -
 the token domain is the adjusted 32x32, 1024 positions). A 4x4 frame
 is an 8x8 node in every decoder (8px alignment): the 4x4 TUs exist
 only as partition leaves (FS5c). Each geometry has a committed
@@ -248,7 +248,7 @@ hand-traces:
    frame/policy/chroma/bitstream/token drivers.
 4. `golden_primitives.exe` dumps the primitive vectors; its output is
    diffed against `committed expected_primitives.txt` (currently 335
-   lines — 0 diff is a commit precondition). Round-trips and
+   lines - 0 diff is a commit precondition). Round-trips and
    inequalities exit nonzero inside the generator itself.
 5. `golden_frame.exe` captures the D-policy frame golden.
 
@@ -262,10 +262,10 @@ skip with a `SKIP:`-prefixed message when no CUDA device is present.
 
 ## Where the deep detail lives
 
-- `AGENTS.md` — the layer map with the standing rules and citations.
-- `docs/provenance.md` — the function-by-function provenance table.
-- `tools/golden_gen/README.md` — the extraction inventory, gate-line
+- `AGENTS.md` - the layer map with the standing rules and citations.
+- `docs/provenance.md` - the function-by-function provenance table.
+- `tools/golden_gen/README.md` - the extraction inventory, gate-line
   documentation, EC3 scope statement, REFERENCE PINNING note.
 - `docs/bitstream.md`, `docs/emission.md`,
-  `docs/decode_conformance.md` — the bitstream path, the per-geometry
+  `docs/decode_conformance.md` - the bitstream path, the per-geometry
   emission walks, and decoder-acceptance status.

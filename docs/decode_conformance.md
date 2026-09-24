@@ -1,4 +1,4 @@
-# Decoder conformance — status and investigation record
+# Decoder conformance - status and investigation record
 
 The project's bar is: a reference decoder accepts what we emit. This
 doc records what is proven, what is measured, and what is still open
@@ -34,25 +34,25 @@ Mode-decision/composition remain project-defined policy.
 (adaptation on): the arithmetic, the CDF evolution and the defaults
 are internally consistent with aom's own decoder primitives.
 - CLOSED (TD-series resolved): every q100 rung of the bisect ladder
-conforms bit-exact in the real libdav1d — 7/7 rungs PASS (the conformance
+conforms bit-exact in the real libdav1d - 7/7 rungs PASS (the conformance
 gate). Root cause named and fixed: the coefficient-CDF qindex bucket
 (TD5a/TD5b, the resolution below).
 
 ## Tooling
 
-- `tools/decode_handoff.ps1` — runs dav1d / aomdec / ffmpeg against
+- `tools/decode_handoff.ps1` - runs dav1d / aomdec / ffmpeg against
   the committed artifact and writes a dated report
   (`decode_handoff_results.txt`, untracked).
-- `tools/td0_ladder.ps1` — the bisect ladder driver (TD0).
+- `tools/td0_ladder.ps1` - the bisect ladder driver (TD0).
 - Local decoder-side oracles: `third_party/aom/` and
-  `third_party/dav1d/` are cloned in place and GITIGNORED — never
+  `third_party/dav1d/` are cloned in place and GITIGNORED - never
   built or committed by this repo (REFERENCE PINNING for
   `third_party/SVT-AV1/` is unchanged). They serve as the
   decode-side oracle and audit source. The available conformant
   oracle on this machine is ffmpeg's libdav1d/libaom; both agree on
   every rung measured.
 
-## TD0 — the bisect ladder
+## TD0 - the bisect ladder
 
 Minimal 16x16 one-block streams, each isolating one tile-wire surface
 (the SPS walk is parameterized by max_dim = 16 for the rungs; 32
@@ -67,14 +67,14 @@ entdec verbatim, adaptation ON) and proves the symbols round-trip.
 | e | V_PRED + angle-delta symbol (127-flat V pred discriminates the mode VALUE) | PASS 256/256 |
 | b | q100 header, skip=0, eob=0 TU (txb_skip only; no tx-type via the early return) | ffmpeg exit 69 (libdav1d AND libaom: "Failed to decode tile data") |
 | f | b + eob=1 chain (tx-type + eob_pt + base_eob + dc sign) | ffmpeg exit 69 |
-| g | f + eob=2 (a br symbol + sweep + raw sign bit) | decodes, DIVERGES 240/256 first@0 (134 vs 129) — AC coefficients lost |
+| g | f + eob=2 (a br symbol + sweep + raw sign bit) | decodes, DIVERGES 240/256 first@0 (134 vs 129) - AC coefficients lost |
 | c | eob=5 base/br/sign/eob_extra surface | decodes, DIVERGES 250/256 first@0 (142 vs 129) |
 | d | c + golomb (DC 20 >= MAX_BASE_BR_RANGE 15) + D203 mode | decodes, DIVERGES 250/256 first@0 (130 vs 128) |
 
-Control: rung b with 2 zero bytes appended (uleb fixed) still fails —
+Control: rung b with 2 zero bytes appended (uleb fixed) still fails -
 not a tail/overread artifact.
 
-Verdict: EVERY skip=1 rung is bit-exact; EVERY skip=0 TU desyncs —
+Verdict: EVERY skip=1 rung is bit-exact; EVERY skip=0 TU desyncs -
 the divergence class is the TU symbol stream, entered at or before
 the txb_skip symbol.
 
@@ -92,12 +92,12 @@ tx-type rows byte-equal to dav1d's raw values), the ICDF inversion
 conventions (SVT's macro omits the terminal ICDF(CDF_PROB_TOP) but
 the array zero-fill makes them identical), the update_cdf formulas
 (SVT's count-warmup rate == aom's 3 + (count>15) + (count>31) +
-nsymbs2speed derivation — targets identical), the bool-vs-cdf
+nsymbs2speed derivation - targets identical), the bool-vs-cdf
 2-symbol route (f = icdf[0] = P(sym1), verified both directions), and
-the dequant tables (dc_q(100) = 93 measured — matches the decoder's
+the dequant tables (dc_q(100) = 93 measured - matches the decoder's
 observed +1-per-level behavior). ALL CLEAN.
 
-## TD1 — writer-state trace + the aom-encoder isolation
+## TD1 - writer-state trace + the aom-encoder isolation
 
 Instrument: every tile symbol in the generator's rung path emits a
 state line (W rung:symbol val/rng/low/cnt, the od_ec encoder state
@@ -109,11 +109,11 @@ Findings (measured):
 (a) The fresh-aom-entenc-vs-our-writer comparison CANNOT separate:
 the aom encode of the same symbol sequence produces DIFFERENT bytes
 (e.g. rung f: writer 3 bytes vs aom 5 bytes for the same alphabet)
-but BOTH decode identically under the aom entdec — od_ec's tail
+but BOTH decode identically under the aom entdec - od_ec's tail
 freedom.
 
 (b) The decisive isolation: aom's OWN entenc output for the f-sequence
-fed to the DECODER still fails (exit 69) — the tile bytes are
+fed to the DECODER still fails (exit 69) - the tile bytes are
 exonerated.
 
 (c) The cheap OBU/header variants are clean: the 9-byte tile already
@@ -122,10 +122,10 @@ aom-entdec primitive-for-primitive at every symbol (verified against
 the writer trace, state-for-state).
 
 One measured boundary datum: dav1d msac MIN-term vs aom/SVT
-MIN*(nsyms - ret) differs by exactly EC_MIN_PROB per boundary —
+MIN*(nsyms - ret) differs by exactly EC_MIN_PROB per boundary -
 TD1-measured 62304 vs 62320 rng drift.
 
-## TD2 — the context-equality gate (exhaustive instrument)
+## TD2 - the context-equality gate (exhaustive instrument)
 
 `golden_primitives` links the l7 twins (extern-C value/byte shims) and
 enumerates the ENTIRE reachable context domain per size (TX_4X4/8x8/
@@ -140,7 +140,7 @@ state over a 16-value sweep with 0xA5 poison (stride/padding/END
 participate).
 
 Measured (this machine): ectx4 35504 / ectx8 177472 / ectx16 745296
-assertions, fnv-pinned, ok — 958,272 assertions, ZERO mismatches. The
+assertions, fnv-pinned, ok - 958,272 assertions, ZERO mismatches. The
 golomb gate (ectxg 131076): writeGolomb bytes == SVT write_golomb
 bytes for EVERY g in [0, 65535], and our readGolomb roundtrips the
 SVT-written stream for EVERY g. Raw-sign gate: 4 patterns, 0
@@ -152,7 +152,7 @@ buffer state) and the reverse-pass surface (golomb + signs) are
 EXONERATED for the TD tile divergence.
 
 Harness finding (named): the first shim design cast generator structs
-onto l7 types and crashed (0xC0000005) — the l7 `AomReader` = {ec,
+onto l7 types and crashed (0xC0000005) - the l7 `AomReader` = {ec,
 allow_update_cdf} vs the vendored bitreader.h aom_reader = {buffer,
 buffer_end, ec, allow_update_cdf}: structurally different, ec at
 different offsets. Harmless in l7's self-consistent use; the gate now
@@ -167,14 +167,14 @@ After the exoneration, the named suspects:
    (the writer's final-byte flush freedom interacting with the
    decoder's end-of-buffer refill).
 2. The decode-side boundary semantics: dav1d's msac MIN-term vs
-   aom/SVT's MIN*(nsyms - ret) — differs by exactly EC_MIN_PROB per
+   aom/SVT's MIN*(nsyms - ret) - differs by exactly EC_MIN_PROB per
    boundary (TD1-measured 62304 vs 62320 rng drift). Our reads follow
-   aom/SVT; dav1d is the oracle that desyncs — this is the leading
+   aom/SVT; dav1d is the oracle that desyncs - this is the leading
    suspect.
 3. A symbol-surface element only present in the real decoders' walk
    that our roundtrip does not model.
 
-Next decisive instrument (per the TD0 plan): rung 8 — construct a
+Next decisive instrument (per the TD0 plan): rung 8 - construct a
 skip=0 tile whose eob_pt symbol uses a state-traced
 (2811/30016)-pair through aom's OD_EC in isolation, tracing at the rng
 level.
