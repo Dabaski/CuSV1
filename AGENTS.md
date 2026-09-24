@@ -89,6 +89,13 @@ compile. If you can split a step into two smaller ones, split it.
   H_PRED (m==2) inside the dr range — acute bug caught in QW3, latent V/H
   angleDelta divergence caught in the QW audit; both were invisible to the
   spot-checked subset of modes.
+- **ASCII-only authoring: never write em-dashes or ANY non-ASCII characters
+  in source, docs, commit messages, or reports.** Use "-" or "->" instead.
+  Non-ASCII bytes are the mojibake class: PowerShell's default-encoding
+  writes (Set-Content without -Encoding utf8) have corrupted this repo's
+  files three times (Q1 comment lines, the todo.md incident, the CS0
+  insert). The Edit tool is safe; byte-level writes must be explicit UTF-8.
+  Legacy non-ASCII already in tracked files is repair-on-touch, not urgent.
 
 
 - Do not write test and implementation in the same edit/commit.
