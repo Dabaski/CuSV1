@@ -2740,6 +2740,10 @@ typedef struct Ts1FrameContext {
     AomCdfProb intra_ext_tx_cdf[EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][CDF_SIZE(16)];
     AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
     AomCdfProb angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+    // CS1: the uv_mode CDF (cabac_context_model.c:105 verbatim extract).
+    // Disallowed rows: 13-symbol (counter at cdf[13]); allowed rows:
+    // 14-symbol (counter at cdf[14]).
+    AomCdfProb uv_mode_cdf[CFL_ALLOWED_TYPES][INTRA_MODES][CDF_SIZE(UV_INTRA_MODES)];
 } Ts1FrameContext;
 
 // TD5a: the token-chain CDF tables are QINDEX-BUCKET-SELECTED per the spec's
@@ -2766,6 +2770,7 @@ static void ts1_init(Ts1FrameContext* fc, int base_qindex) {
     memcpy(fc->intra_ext_tx_cdf, default_intra_ext_tx_cdf, sizeof(fc->intra_ext_tx_cdf));
 memcpy(fc->kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(fc->kf_y_cdf));
 memcpy(fc->angle_delta_cdf, default_angle_delta_cdf, sizeof(fc->angle_delta_cdf));
+memcpy(fc->uv_mode_cdf, default_uv_mode_cdf, sizeof(fc->uv_mode_cdf));
 }
 
 static int svtd_trace = 0;
@@ -2815,7 +2820,7 @@ static void svtd_tr(const char* tag, int val, const OdEcEnc* enc) {
 
 static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranLow* coeff,
                                   const int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
-                                  int dc_sign_ctx, PredictionMode intra_dir) {
+                                  int dc_sign_ctx, PredictionMode intra_dir, int component_type) {
     const TxSize txs_ctx        = get_txsize_entropy_ctx(tx_size);
     const int    eob_multi_size = txsize_log2_minus4[tx_size];
     const int    eob_multi_ctx  = 0;  // TX_CLASS_2D
@@ -2833,10 +2838,13 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     // verbatim av1_write_tx_type gate (entropy_coding.c:321-322) via
     // svtd_get_ext_tx_types (common_utils.h:59-77 fold): at TX_32X32/64X64
     // intra the eset is DCTONLY (1 type) -> the symbol is NOT written.
+    // CS1: the tx-type symbol is LUMA-ONLY (entropy_coding.c:374-376:
+    // `if (component_type == COMPONENT_LUMA) av1_write_tx_type(...)`) -
+    // chroma TUs emit NO tx-type symbol.
     // The intra_dir is the caller's luma mode (av1_write_tx_type :339-342
     // folds filter-intra via fimode_to_intradir; DCT_DCT-only port has
     // filter_intra_mode == FILTER_INTRA_MODES).
-    if (svtd_get_ext_tx_types(tx_size) > 1) {
+    if (component_type == COMPONENT_LUMA && svtd_get_ext_tx_types(tx_size) > 1) {
         const TxSize sq = txsize_sqr_map[tx_size];
         svtd_script_row("tx", av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
                         fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
@@ -2850,13 +2858,13 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     AomCdfProb* eob_cdf;
     int nsyms;
     switch (eob_multi_size) {
-    case 0: eob_cdf = fc->eob_flag_cdf16[0][eob_multi_ctx]; nsyms = 5; break;
-    case 1: eob_cdf = fc->eob_flag_cdf32[0][eob_multi_ctx]; nsyms = 6; break;
-    case 2: eob_cdf = fc->eob_flag_cdf64[0][eob_multi_ctx]; nsyms = 7; break;
-    case 3: eob_cdf = fc->eob_flag_cdf128[0][eob_multi_ctx]; nsyms = 8; break;
-    case 4: eob_cdf = fc->eob_flag_cdf256[0][eob_multi_ctx]; nsyms = 9; break;
-    case 5: eob_cdf = fc->eob_flag_cdf512[0][eob_multi_ctx]; nsyms = 10; break;
-    default: eob_cdf = fc->eob_flag_cdf1024[0][eob_multi_ctx]; nsyms = 11; break;
+    case 0: eob_cdf = fc->eob_flag_cdf16[component_type][eob_multi_ctx]; nsyms = 5; break;
+    case 1: eob_cdf = fc->eob_flag_cdf32[component_type][eob_multi_ctx]; nsyms = 6; break;
+    case 2: eob_cdf = fc->eob_flag_cdf64[component_type][eob_multi_ctx]; nsyms = 7; break;
+    case 3: eob_cdf = fc->eob_flag_cdf128[component_type][eob_multi_ctx]; nsyms = 8; break;
+    case 4: eob_cdf = fc->eob_flag_cdf256[component_type][eob_multi_ctx]; nsyms = 9; break;
+    case 5: eob_cdf = fc->eob_flag_cdf512[component_type][eob_multi_ctx]; nsyms = 10; break;
+    default: eob_cdf = fc->eob_flag_cdf1024[component_type][eob_multi_ctx]; nsyms = 11; break;
     }
     svtd_script_row("eobpt", eob_pt - 1, eob_cdf, nsyms);
     aom_write_symbol(w, eob_pt - 1, eob_cdf, nsyms);
@@ -2869,8 +2877,8 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
     if (eob_pt > 2) {
         const int cnt = eob_pt - 3;
         const int bit = (eob_extra >> cnt) & 1;
-        svtd_script_row("eobx", bit, fc->eob_extra_cdf[txs_ctx][0][cnt], 2);
-        aom_write_symbol(w, bit, fc->eob_extra_cdf[txs_ctx][0][cnt], 2);
+        svtd_script_row("eobx", bit, fc->eob_extra_cdf[txs_ctx][component_type][cnt], 2);
+        aom_write_symbol(w, bit, fc->eob_extra_cdf[txs_ctx][component_type][cnt], 2);
         svtd_tr("eobx", bit, &w->ec);
         aom_write_literal(w, eob_extra, cnt);
         for (int li = 0; li < cnt; ++li) {
@@ -2901,16 +2909,16 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const TranLow v     = coeff[pos];
         const int32_t level = ABS(v);
         const int32_t lctx  = (eob == 1) ? get_lower_levels_ctx_eob(bwl, height, c) : coeff_ctx;
-        svtd_script_row("beob", AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3);
-        aom_write_symbol(w, AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3);
+        svtd_script_row("beob", AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][component_type][lctx], 3);
+        aom_write_symbol(w, AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][component_type][lctx], 3);
         svtd_tr("beob", AOMMIN(level, 3) - 1, &w->ec);
         if (level > NUM_BASE_LEVELS) {
             const int32_t base_range = level - 1 - NUM_BASE_LEVELS;
             const int16_t br_ctx     = get_br_ctx_eob(pos, bwl, TX_CLASS_2D);
             for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
-                svtd_script_row("br", k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
-                aom_write_symbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                svtd_script_row("br", k, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
+                aom_write_symbol(w, k, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
                 svtd_tr("br", k, &w->ec);
                 if (k < BR_CDF_SIZE - 1) break;
             }
@@ -2923,8 +2931,8 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const int32_t level = ABS(v);
         if (svtd_script) fprintf(stderr, "C %sbase c=%d pos=%d ctx=%d\n", svtd_trace_tag, c, pos,
                                  coeff_ctx);
-        svtd_script_row("base", AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
-        aom_write_symbol(w, AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
+        svtd_script_row("base", AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][component_type][coeff_ctx], 4);
+        aom_write_symbol(w, AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][component_type][coeff_ctx], 4);
         svtd_tr("base", AOMMIN(level, 3), &w->ec);
         if (level > NUM_BASE_LEVELS) {
             const int32_t base_range = level - 1 - NUM_BASE_LEVELS;
@@ -2934,8 +2942,8 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
                         br_ctx, (int)levels[get_padded_idx(pos, bwl)]);
             for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
-                svtd_script_row("brs", k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
-                aom_write_symbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                svtd_script_row("brs", k, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
+                aom_write_symbol(w, k, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
                 svtd_tr("brs", k, &w->ec);
                 if (k < BR_CDF_SIZE - 1) break;
             }
@@ -2949,8 +2957,8 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
         const int32_t level = ABS(v);
         if (!level) continue;
         if (c == 0) {
-            svtd_script_row("sign0", (v < 0) ? 1 : 0, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
-            aom_write_symbol(w, (v < 0) ? 1 : 0, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
+            svtd_script_row("sign0", (v < 0) ? 1 : 0, fc->dc_sign_cdf[component_type][dc_sign_ctx], 2);
+            aom_write_symbol(w, (v < 0) ? 1 : 0, fc->dc_sign_cdf[component_type][dc_sign_ctx], 2);
             svtd_tr("sign0", (v < 0) ? 1 : 0, &w->ec);
         } else {
             aom_write_bit(w, (v < 0) ? 1 : 0);
@@ -2982,7 +2990,7 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
 // order (signed).
 static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coeff,
                                 const int16_t* scan, TxSize tx_size, int txb_skip_ctx,
-                                int dc_sign_ctx, PredictionMode intra_dir) {
+                                int dc_sign_ctx, PredictionMode intra_dir, int component_type) {
     const TxSize txs_ctx        = get_txsize_entropy_ctx(tx_size);
     const int    eob_multi_size = txsize_log2_minus4[tx_size];
     const int    eob_multi_ctx  = 0;
@@ -2994,8 +3002,9 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
 
     // TS3: tx-type read (between txb_skip and eob_pt, entropy_coding.c:374-376),
     // the same verbatim gate as the writer side (av1_read_tx_type folds it:
-    // <= 1 types -> DCT_DCT implicit, no symbol).
-    if (svtd_get_ext_tx_types(tx_size) > 1) {
+    // <= 1 types -> DCT_DCT implicit, no symbol). CS1: LUMA-ONLY - chroma
+    // reads no tx-type symbol (the writer's :374-376 gate mirror).
+    if (component_type == COMPONENT_LUMA && svtd_get_ext_tx_types(tx_size) > 1) {
         const TxSize sq = txsize_sqr_map[tx_size];
         const int ttx = aom_read_symbol_(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
         if (svtd_script) fprintf(stderr, "R %stx %d\n", svtd_trace_tag, ttx);
@@ -3005,13 +3014,13 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
     int eob_pt;
     int nsyms;
     switch (eob_multi_size) {
-    case 0: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf16[0][eob_multi_ctx], 5) + 1; break;
-    case 1: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf32[0][eob_multi_ctx], 6) + 1; break;
-    case 2: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf64[0][eob_multi_ctx], 7) + 1; break;
-    case 3: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf128[0][eob_multi_ctx], 8) + 1; break;
-    case 4: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf256[0][eob_multi_ctx], 9) + 1; break;
-    case 5: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf512[0][eob_multi_ctx], 10) + 1; break;
-    default: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf1024[0][eob_multi_ctx], 11) + 1; break;
+    case 0: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf16[component_type][eob_multi_ctx], 5) + 1; break;
+    case 1: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf32[component_type][eob_multi_ctx], 6) + 1; break;
+    case 2: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf64[component_type][eob_multi_ctx], 7) + 1; break;
+    case 3: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf128[component_type][eob_multi_ctx], 8) + 1; break;
+    case 4: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf256[component_type][eob_multi_ctx], 9) + 1; break;
+    case 5: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf512[component_type][eob_multi_ctx], 10) + 1; break;
+    default: eob_pt = aom_read_symbol_(r, fc->eob_flag_cdf1024[component_type][eob_multi_ctx], 11) + 1; break;
     }
     if (svtd_script) fprintf(stderr, "R %seobpt %d\n", svtd_trace_tag, eob_pt - 1);
     int eob_extra = 0;
@@ -3019,7 +3028,7 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
         const int eob_offset_bits = (eob_pt > 2) ? (eob_pt - 2) : 0;
         if (eob_offset_bits > 0) {
             const int eob_ctx = eob_pt - 3;
-            const int bit = aom_read_symbol_(r, fc->eob_extra_cdf[txs_ctx][0][eob_ctx], 2);
+            const int bit = aom_read_symbol_(r, fc->eob_extra_cdf[txs_ctx][component_type][eob_ctx], 2);
             if (bit) eob_extra += (1 << (eob_offset_bits - 1));
             for (int i = 1; i < eob_offset_bits; i++) {
                 if (aom_read_bit(r, NULL)) eob_extra += (1 << (eob_offset_bits - 1 - i));
@@ -3048,13 +3057,13 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
         const int c   = eob - 1;
         const int pos = scan[c];
         const int lctx = get_lower_levels_ctx_eob(bwl, height, c);
-        int level = aom_read_symbol_(r, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3) + 1;
+        int level = aom_read_symbol_(r, fc->coeff_base_eob_cdf[txs_ctx][component_type][lctx], 3) + 1;
         if (svtd_script) fprintf(stderr, "R %sbeob c=%d pos=%d lctx=%d %d\n", svtd_trace_tag, c, pos,
                                  lctx, level - 1);
         if (level > NUM_BASE_LEVELS) {
             const int br_ctx = get_br_ctx_eob(pos, bwl, TX_CLASS_2D);
             for (int idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
-                const int k = aom_read_symbol_(r, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                const int k = aom_read_symbol_(r, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
                 level += k;
                 if (svtd_script) fprintf(stderr, "R %sbr c=%d pos=%d brctx=%d k=%d\n", svtd_trace_tag, c,
                                          pos, br_ctx, k);
@@ -3068,9 +3077,9 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
         const int pos = scan[c];
         const int coeff_ctx =
             (eob == 1) ? 0 : get_lower_levels_ctx(levels, pos, bwl, tx_size, TX_CLASS_2D);
-        int level = aom_read_symbol_(r, fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
+        int level = aom_read_symbol_(r, fc->coeff_base_cdf[txs_ctx][component_type][coeff_ctx], 4);
         if (svtd_script) {
-        AomCdfProb* dbgRow = fc->coeff_base_cdf[txs_ctx][0][coeff_ctx];
+        AomCdfProb* dbgRow = fc->coeff_base_cdf[txs_ctx][component_type][coeff_ctx];
         fprintf(stderr,
                 "R %sbase c=%d pos=%d ctx=%d %d row=%u,%u,%u cnt=%u rng=%u dif=%llu cnt2=%d\n",
                 svtd_trace_tag, c, pos, coeff_ctx, level, dbgRow[0], dbgRow[1], dbgRow[2],
@@ -3079,7 +3088,7 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
         if (level > NUM_BASE_LEVELS) {
             const int br_ctx = get_br_ctx(levels, pos, bwl, TX_CLASS_2D);
             for (int idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
-                const int k = aom_read_symbol_(r, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                const int k = aom_read_symbol_(r, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
                 level += k;
                 if (svtd_script) fprintf(stderr, "R %sbrs c=%d pos=%d brctx=%d k=%d\n", svtd_trace_tag, c,
                                          pos, br_ctx, k);
@@ -3095,7 +3104,7 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
         if (!level) continue;
         int sign;
         if (c == 0) {
-            sign = aom_read_symbol_(r, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
+            sign = aom_read_symbol_(r, fc->dc_sign_cdf[component_type][dc_sign_ctx], 2);
             if (svtd_script) fprintf(stderr, "R %ssign0 %d\n", svtd_trace_tag, sign);
         } else {
             sign = aom_read_bit(r, NULL);
@@ -3305,7 +3314,7 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
         aom_write_symbol(&w, 0, fi_cdf, 2);
     }
     // the token chain (the tx-type gate inside is the verbatim FS3-prep fix)
-    svtd_write_coeffs_txb(&w, &fc, qc, scan, ts, eob, 0, 0, (PredictionMode)mode);
+    svtd_write_coeffs_txb(&w, &fc, qc, scan, ts, eob, 0, 0, (PredictionMode)mode, COMPONENT_LUMA);
     aom_stop_encode(&w);
     // FS5b: the tile capture for the per-geometry TU assembly
     memcpy(svtd_fs2_tile, tile_buf, w.pos);
@@ -3388,7 +3397,7 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
     }
 static TranLow rc[4096];
     memset(rc, 0, sizeof(rc));
-    const int reob = svtd_read_coeffs_txb(&r, &fc2, rc, scan, ts, 0, 0, (PredictionMode)mode);
+    const int reob = svtd_read_coeffs_txb(&r, &fc2, rc, scan, ts, 0, 0, (PredictionMode)mode, COMPONENT_LUMA);
     int coeff_eq = (reob == (int)eob) ? 1 : 0;
     int first_mm = -1;
     int mm_count = 0;
@@ -3555,7 +3564,7 @@ static void svtd_fs5_grid_drive(void) {
         }
         const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
         svtd_write_coeffs_txb(&w, &fc, qc, scan32, TX_32X32, eob, 0, dc_sign_ctx,
-                              (PredictionMode)mode);
+                              (PredictionMode)mode, COMPONENT_LUMA);
         // NA update (the ecfrm pattern: cul_level + set_dc_sign, the TU extent)
         int32_t cul = 0;
         for (int q = 0; q < eob; ++q) cul += abs((int)qc[scan32[q]]);
@@ -3654,7 +3663,7 @@ static void svtd_fs5_grid_drive(void) {
         static TranLow rc[1024];
         memset(rc, 0, sizeof(rc));
         const int reob = svtd_read_coeffs_txb(&rr, &fc_r, rc, scan32, TX_32X32, 0, dc_sign_ctx2,
-                                              (PredictionMode)modes[b]);
+                                              (PredictionMode)modes[b], COMPONENT_LUMA);
         int ok = (reob == (int)eobs[b]);
         for (int q = 0; q < (int)eobs[b]; ++q) {
             if (rc[scan32[q]] != all_qc[b][scan32[q]]) { ok = 0; break; }
@@ -3810,7 +3819,7 @@ static void svtd_fs5_grid4_drive(void) {
         }
         const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
         svtd_write_coeffs_txb(&w, &fc, qc, scan4, TX_4X4, eob, 0, dc_sign_ctx,
-                              (PredictionMode)mode);
+                              (PredictionMode)mode, COMPONENT_LUMA);
         int32_t cul = 0;
         for (int q = 0; q < eob; ++q) cul += abs((int)qc[scan4[q]]);
         cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
@@ -3901,7 +3910,7 @@ static void svtd_fs5_grid4_drive(void) {
         static TranLow rc[16];
         memset(rc, 0, sizeof(rc));
         const int reob = svtd_read_coeffs_txb(&rr, &fc_r, rc, scan4, TX_4X4, 0, dc_sign_ctx2,
-                                              (PredictionMode)modes[b]);
+                                              (PredictionMode)modes[b], COMPONENT_LUMA);
         int ok = (reob == (int)eobs[b]);
         for (int q = 0; q < (int)eobs[b]; ++q) {
             if (rc[scan4[q]] != all_qc[b][scan4[q]]) { ok = 0; break; }
@@ -3981,9 +3990,9 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
     // contexts: our whole-block TUs always have plane_bsize == tx_bsize
     // (svt_aom_get_txb_ctx :298-299) -> txb_skip_ctx = 0; dc_sign_ctx = 0
     // (no coded neighbors yet). TS2 ports the general ctx derivation.
-    svtd_write_coeffs_txb(&w, &fc, qc16, scan16, TX_16X16, eob16, 0, 0, DC_PRED);
-    svtd_write_coeffs_txb(&w, &fc, qc8, scan8, TX_8X8, eob8, 0, 0, DC_PRED);
-    svtd_write_coeffs_txb(&w, &fc, qc4, scan4, TX_4X4, eob4, 0, 0, DC_PRED);
+    svtd_write_coeffs_txb(&w, &fc, qc16, scan16, TX_16X16, eob16, 0, 0, DC_PRED, COMPONENT_LUMA);
+    svtd_write_coeffs_txb(&w, &fc, qc8, scan8, TX_8X8, eob8, 0, 0, DC_PRED, COMPONENT_LUMA);
+    svtd_write_coeffs_txb(&w, &fc, qc4, scan4, TX_4X4, eob4, 0, 0, DC_PRED, COMPONENT_LUMA);
     aom_stop_encode(&w);
 
     if (verbose) {
@@ -3998,9 +4007,9 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
     if (aom_reader_init(&r, buf, w.pos)) return 2;
     r.allow_update_cdf = 1;
     TranLow rc16[256], rc8[64], rc4[16];
-    int reob16 = svtd_read_coeffs_txb(&r, &fc_r, rc16, scan16, TX_16X16, 0, 0, DC_PRED);
-    int reob8 = svtd_read_coeffs_txb(&r, &fc_r, rc8, scan8, TX_8X8, 0, 0, DC_PRED);
-    int reob4 = svtd_read_coeffs_txb(&r, &fc_r, rc4, scan4, TX_4X4, 0, 0, DC_PRED);
+    int reob16 = svtd_read_coeffs_txb(&r, &fc_r, rc16, scan16, TX_16X16, 0, 0, DC_PRED, COMPONENT_LUMA);
+    int reob8 = svtd_read_coeffs_txb(&r, &fc_r, rc8, scan8, TX_8X8, 0, 0, DC_PRED, COMPONENT_LUMA);
+    int reob4 = svtd_read_coeffs_txb(&r, &fc_r, rc4, scan4, TX_4X4, 0, 0, DC_PRED, COMPONENT_LUMA);
     if (verbose) printf("ectok_rt %d %d %d\n", reob16, reob8, reob4);
 
     if (reob16 != (int)eob16 || reob8 != (int)eob8 || reob4 != (int)eob4) {
@@ -4034,7 +4043,7 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
 // logic). Per block: kf_y_mode + angle_delta + filter_intra skip + tx_type
 // + txb_skip + eob_pt + eob_extra + base_eob/br + base/br + signs/golomb.
 // The predictor is the DECIDED mode's build_intra_predictors output (M1
-// availability), NOT DC=0 Ã¢â‚¬â€ matching the l6 pipeline's residual computation.
+// availability), NOT DC=0 — matching the l6 pipeline's residual computation.
 static int svtd_ts3_drive(uint8_t* buf) {
     uint8_t src[1024];
     for (int y = 0; y < 32; ++y)
@@ -4182,7 +4191,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
         }
         const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
         svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx,
-                              (PredictionMode)modes[b]);
+                              (PredictionMode)modes[b], COMPONENT_LUMA);
 
         // NA update
         int32_t cul = 0;
@@ -4272,7 +4281,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
         TranLow rc[256];
         memset(rc, 0, sizeof(rc));
         const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx,
-                                              (PredictionMode)m);
+                                              (PredictionMode)m, COMPONENT_LUMA);
         printf(" %d", reob);
         if (reob != (int)eob_q) rt_bad = 1;
         for (int i = 0; i < 256; ++i) if (rc[i] != qc[i]) rt_bad = 1;
@@ -4470,7 +4479,7 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
         const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
         const int eob_tok = svtd_eob_from_coeffs(all_qc[b], scan16, TX_16X16);
         svtd_write_coeffs_txb(&w, &fc, all_qc[b], scan16, TX_16X16, eob_tok, 0, dc_sign_ctx,
-                              (PredictionMode)modes[b]);
+                              (PredictionMode)modes[b], COMPONENT_LUMA);
         if (eob_tok != (int)eobs[b]) { fprintf(stderr, "TS4 tile v2 eob mismatch\n"); return 0; }
         // NA update (packed cul_level + dc sign, over the TU MI extent)
         int32_t cul = 0;
@@ -4623,7 +4632,7 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
         const int eob_tok = svtd_eob_from_coeffs(qc, scan, TX_16X16);
         const int wantEob[7] = { 0, 0, 5, 5, 0, 1, 2 };
         if (eob_tok != wantEob[rung]) { fprintf(stderr, "TD0 rung %d eob %d\n", rung, eob_tok); return 0; }
-        svtd_write_coeffs_txb(&w, &fc, qc, scan, TX_16X16, eob_tok, 0, 0, (PredictionMode)mode);
+        svtd_write_coeffs_txb(&w, &fc, qc, scan, TX_16X16, eob_tok, 0, 0, (PredictionMode)mode, COMPONENT_LUMA);
     }
     svtd_trace = 0;
     aom_stop_encode(&w);
@@ -4666,7 +4675,7 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
             TranLow rc[256];
             memset(rc, 0, sizeof(rc));
             const int reob = svtd_read_coeffs_txb(&r, &fc2, rc, scan2, TX_16X16, 0, 0,
-                                                  (PredictionMode)rmode);
+                                                  (PredictionMode)rmode, COMPONENT_LUMA);
             fprintf(stderr, " reob=%d", reob);
             for (int c2 = 0; c2 < 5; ++c2) fprintf(stderr, " c%d=%d", c2, (int)rc[scan2[c2]]);
         }
@@ -5061,7 +5070,7 @@ static int svtd_ts2_drive(uint8_t* buf) {
         printf(" %d", dc_sign_ctx);
 
         const int eob_tok = svtd_eob_from_coeffs(qc, scan16, TX_16X16);
-        svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx, DC_PRED);
+        svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx, DC_PRED, COMPONENT_LUMA);
 
         // NA update
         int32_t cul = 0;
@@ -5117,7 +5126,7 @@ static int svtd_ts2_drive(uint8_t* buf) {
 
         TranLow rc[256];
         memset(rc, 0, sizeof(rc));
-        const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx, DC_PRED);
+        const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx, DC_PRED, COMPONENT_LUMA);
         printf(" %d", reob);
         if (reob != (int)eob_q) rt_bad = 1;
         for (int i = 0; i < 256; ++i) if (rc[i] != qc[i]) rt_bad = 1;
@@ -5145,5 +5154,248 @@ static int svtd_ts2_drive(uint8_t* buf) {
     if (memcmp(fc.eob_extra_cdf, fc_r.eob_extra_cdf, sizeof(fc.eob_extra_cdf))) cdf_eq = 0;
     if (memcmp(fc.eob_flag_cdf64, fc_r.eob_flag_cdf64, sizeof(fc.eob_flag_cdf64))) cdf_eq = 0;
     printf("ecblk_cdf_eq %d\n", cdf_eq);
+    return 0;
+}
+
+// ---- CS1: chroma entropy gate drives ---------------------------------------
+// (a) uv_mode roundtrip: the [cflAllowed][luma_mode] ctx grid over the
+// verbatim default_uv_mode_cdf (cabac_context_model.c:105); the write
+// alphabet UV_INTRA_MODES - !cflAllowed (entropy_coding.c:1080-1081,
+// encode_intra_chroma_mode_av1's uv_mode symbol; NO cfl_alphas - the named
+// CS1 deferral); the read twin decodemv.c:140-148 (read_intra_mode_uv).
+// The cfl=0 rows cover uv 0..12, the cfl=1 rows spread (luma+5) mod 14 so
+// the full 14-symbol alphabet incl. UV_CFL_PRED is exercised as SYMBOLS
+// (the decision never picks it - the deferral is about emission, and the
+// read twin must still decode every alphabet value).
+static int svtd_cs1_uv_mode_drive(void) {
+    Ts1FrameContext fc, fc_r;
+    ts1_init(&fc, 100);
+    ts1_init(&fc_r, 100);
+    static uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+    AomWriter w;
+    w.ec.buf = buf;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    int syms[CFL_ALLOWED_TYPES * INTRA_MODES];
+    int n = 0;
+    for (int cfl = 0; cfl < CFL_ALLOWED_TYPES; ++cfl) {
+        const int nsymbs = UV_INTRA_MODES - !cfl;
+        for (int luma = 0; luma < INTRA_MODES; ++luma) {
+            const int uv = (cfl ? (luma + 5) % UV_INTRA_MODES : luma);
+            if (w.ec.error) return 10;
+            aom_write_symbol(&w, uv, fc.uv_mode_cdf[cfl][luma], nsymbs);
+            syms[n++] = uv;
+        }
+    }
+    aom_stop_encode(&w);
+    printf("ecuv_mode_bytes %u", w.pos);
+    for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
+    printf("\n");
+    aom_reader r;
+    if (aom_reader_init(&r, buf, w.pos)) return 2;
+    r.allow_update_cdf = 1;
+    printf("ecuv_mode_rt");
+    int rt_bad = 0;
+    n = 0;
+    for (int cfl = 0; cfl < CFL_ALLOWED_TYPES; ++cfl) {
+        const int nsymbs = UV_INTRA_MODES - !cfl;
+        for (int luma = 0; luma < INTRA_MODES; ++luma) {
+            const int s = aom_read_symbol_(&r, fc_r.uv_mode_cdf[cfl][luma], nsymbs);
+            if (s != syms[n]) rt_bad = 1;
+            printf(" %d", s);
+            ++n;
+        }
+    }
+    printf("\n");
+    if (rt_bad) { fprintf(stderr, "CS1 uv_mode roundtrip FAILED\n"); return 3; }
+    printf("ecuv_mode_cdf_eq %d\n",
+           memcmp(fc.uv_mode_cdf, fc_r.uv_mode_cdf, sizeof(fc.uv_mode_cdf)) ? 0 : 1);
+    return 0;
+}
+
+// (b) uv angle-delta roundtrip: entropy_coding.c:1087-1092 (the
+// encode_intra_chroma_mode_av1 angle-delta symbol: delta + MAX_ANGLE_DELTA
+// through angle_delta_cdf[chroma_mode - V_PRED], gated by
+// bsize >= BLOCK_8X8 and the FOLDED mode being directional - the caller
+// owns the bsize gate, the drive covers every directional uv mode 1..8);
+// the read twin decodemv.c:830-833 + read_angle_delta :603-606 (the symbol
+// through angle_delta_cdf[intra_mode - V_PRED], intra_mode = the folded
+// uv mode - numerically the same row for the directional UV modes since
+// g_uv2y[uv] == uv for uv 1..8, common_utils.c:14-31).
+static int svtd_cs1_uv_delta_drive(void) {
+    Ts1FrameContext fc, fc_r;
+    ts1_init(&fc, 100);
+    ts1_init(&fc_r, 100);
+    static uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+    AomWriter w;
+    w.ec.buf = buf;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    int syms[DIRECTIONAL_MODES * (2 * MAX_ANGLE_DELTA + 1)];
+    int n = 0;
+    for (int uv = V_PRED; uv <= D67_PRED; ++uv) {
+        for (int d = -MAX_ANGLE_DELTA; d <= MAX_ANGLE_DELTA; ++d) {
+            const int sym = d + MAX_ANGLE_DELTA;
+            if (w.ec.error) return 10;
+            aom_write_symbol(&w, sym, fc.angle_delta_cdf[uv - V_PRED],
+                             2 * MAX_ANGLE_DELTA + 1);
+            syms[n++] = sym;
+        }
+    }
+    aom_stop_encode(&w);
+    printf("ecuv_delta_bytes %u", w.pos);
+    for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
+    printf("\n");
+    aom_reader r;
+    if (aom_reader_init(&r, buf, w.pos)) return 2;
+    r.allow_update_cdf = 1;
+    printf("ecuv_delta_rt");
+    int rt_bad = 0;
+    n = 0;
+    for (int uv = V_PRED; uv <= D67_PRED; ++uv) {
+        for (int d = -MAX_ANGLE_DELTA; d <= MAX_ANGLE_DELTA; ++d) {
+            const int s = aom_read_symbol_(&r, fc_r.angle_delta_cdf[uv - V_PRED],
+                                           2 * MAX_ANGLE_DELTA + 1);
+            if (s != syms[n]) rt_bad = 1;
+            printf(" %d", s);
+            ++n;
+        }
+    }
+    printf("\n");
+    if (rt_bad) { fprintf(stderr, "CS1 uv angle-delta roundtrip FAILED\n"); return 3; }
+    printf("ecuv_delta_cdf_eq %d\n",
+           memcmp(fc.angle_delta_cdf, fc_r.angle_delta_cdf, sizeof(fc.angle_delta_cdf)) ? 0 : 1);
+    return 0;
+}
+
+// (c) chroma token streams (the CS1 core): the [PLANE_TYPES=1] rows of the
+// six component-dim table families (dc_sign, coeff_base_eob, coeff_base,
+// coeff_br, eob_extra, eob_flag16..1024) + the LUMA-ONLY tx-type symbol
+// (entropy_coding.c:374-376) + the chroma txb_skip_ctx {7,8,9} from the
+// :310-314 branch (ctx_base = (left!=0)+(top!=0), offset 7; the 10-branch
+// is dead for our UV whole-block TUs - plane_bsize == tx_bsize).
+// Per component (U, V) x per reachable UV txs_ctx (the CS4 map:
+// 8x8->TX_4X4, 16x16->TX_8X8, 32x32->TX_16X16, 64x64->TX_32X32): one
+// writer stream, one TU, eob > 0, txb_skip_ctx rotating {7,8,9,7} across
+// the four sizes. The coefficient fixtures are deterministic (documented
+// below), V = the negation of U so the dc_sign symbol differs per
+// component. Plus the eob==0 (txb_skip-only) case per component at
+// TX_4X4 txb_skip_ctx 8. The read twins use per-(comp,t) fresh contexts;
+// the final ecuv_cdf_eq line compares every write context against its
+// read twin (the adapted [1] rows must match).
+// Fixture derivation: levels at scan positions c = 0..eob-1: c==0 -> 3
+// (the dc_sign symbol), c==1 -> 12 (golomb: 12 > 4+2 -> gval 5),
+// c in 2..eob-2 -> (c%3)+1, c==eob-1 -> 2; all other positions 0. U signs
+// alternate starting +, V negated. eob = N/2 (N = S*S).
+static int svtd_cs1_uv_txb_drive(void) {
+    const TxSize txs[4] = { TX_4X4, TX_8X8, TX_16X16, TX_32X32 };
+    const char* tnames[4] = { "4", "8", "16", "32" };
+    const int txb_skip_ctxs[4] = { 7, 8, 9, 7 };
+    Ts1FrameContext fc_w[2][4];
+    Ts1FrameContext fc_r[2][4];
+    int16_t scans[4][1024];
+    svtd_default_scan_4x4(scans[0]);
+    svtd_default_scan_8x8(scans[1]);
+    svtd_default_scan_16x16(scans[2]);
+    svtd_default_scan_32x32(scans[3]);
+    for (int comp = 0; comp < 2; ++comp) {
+        for (int t = 0; t < 4; ++t) {
+            ts1_init(&fc_w[comp][t], 100);
+            ts1_init(&fc_r[comp][t], 100);
+            const int N = tx_size_wide[txs[t]] * tx_size_high[txs[t]];
+            const int eob = N / 2;
+            TranLow qc[1024];
+            memset(qc, 0, sizeof(qc));
+            for (int cpos = 0; cpos < eob; ++cpos) {
+                const int pos = scans[t][cpos];
+                int level;
+                if (cpos == 0) level = 3;
+                else if (cpos == 1) level = 12;
+                else if (cpos == eob - 1) level = 2;
+                else level = (cpos % 3) + 1;
+                int sign = (cpos % 2) == 0 ? 1 : -1;
+                if (comp == 1) sign = -sign;
+                qc[pos] = level * sign;
+            }
+            static uint8_t buf[1024];
+            memset(buf, 0, sizeof(buf));
+            AomWriter w;
+            w.ec.buf = buf;
+            svt_od_ec_enc_reset(&w.ec);
+            w.allow_update_cdf = 1;
+            w.pos = 0;
+            svtd_write_coeffs_txb(&w, &fc_w[comp][t], qc, scans[t], txs[t], eob,
+                                  txb_skip_ctxs[t], 0, DC_PRED,
+                                  comp ? COMPONENT_CHROMA : COMPONENT_LUMA);
+            aom_stop_encode(&w);
+            printf("ecuv%s%s_bytes %u", tnames[t], comp ? "V" : "U", w.pos);
+            for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
+            printf("\n");
+            aom_reader r;
+            if (aom_reader_init(&r, buf, w.pos)) return 2;
+            r.allow_update_cdf = 1;
+            TranLow rc[1024];
+            memset(rc, 0, sizeof(rc));
+            const int reob = svtd_read_coeffs_txb(&r, &fc_r[comp][t], rc, scans[t], txs[t],
+                                                  txb_skip_ctxs[t], 0, DC_PRED,
+                                                  comp ? COMPONENT_CHROMA : COMPONENT_LUMA);
+            int rt_bad = (reob != eob);
+            for (int i = 0; i < N; ++i) if (rc[i] != qc[i]) rt_bad = 1;
+            printf("ecuv%s%s_rt %d\n", tnames[t], comp ? "V" : "U", reob);
+            if (rt_bad) {
+                fprintf(stderr, "CS1 chroma txb %s%s roundtrip FAILED\n", tnames[t],
+                        comp ? "V" : "U");
+                return 3;
+            }
+        }
+        // eob==0 (txb_skip-only) case: TX_4X4, txb_skip_ctx 8
+        static const TranLow zero_qc[16] = {0};
+        static uint8_t buf0[64];
+        memset(buf0, 0, sizeof(buf0));
+        AomWriter w0;
+        w0.ec.buf = buf0;
+        svt_od_ec_enc_reset(&w0.ec);
+        w0.allow_update_cdf = 1;
+        w0.pos = 0;
+        svtd_write_coeffs_txb(&w0, &fc_w[comp][0], zero_qc, scans[0], TX_4X4, 0, 8, 0,
+                              DC_PRED, comp ? COMPONENT_CHROMA : COMPONENT_LUMA);
+        aom_stop_encode(&w0);
+        printf("ecuv0%s_bytes %u", comp ? "V" : "U", w0.pos);
+        for (uint32_t i = 0; i < w0.pos; ++i) printf(" %02x", buf0[i]);
+        printf("\n");
+        aom_reader r0;
+        if (aom_reader_init(&r0, buf0, w0.pos)) return 2;
+        r0.allow_update_cdf = 1;
+        TranLow rc0[16];
+        memset(rc0, 0, sizeof(rc0));
+        const int reob0 = svtd_read_coeffs_txb(&r0, &fc_r[comp][0], rc0, scans[0], TX_4X4, 8,
+                                               0, DC_PRED, comp ? COMPONENT_CHROMA : COMPONENT_LUMA);
+        printf("ecuv%s%s_rt %d\n", comp ? "0V" : "0U", "", reob0);
+        if (reob0 != 0) {
+            fprintf(stderr, "CS1 chroma eob0 roundtrip FAILED\n");
+            return 3;
+        }
+    }
+    int cdf_bad = 0;
+    for (int comp = 0; comp < 2; ++comp) {
+        for (int t = 0; t < 4; ++t) {
+            if (memcmp(&fc_w[comp][t], &fc_r[comp][t], sizeof(Ts1FrameContext))) cdf_bad = 1;
+        }
+    }
+    printf("ecuv_cdf_eq %d\n", cdf_bad ? 0 : 1);
+    return 0;
+}
+
+static int svtd_cs1_drive(void) {
+    const int a = svtd_cs1_uv_mode_drive();
+    if (a) return a;
+    const int b = svtd_cs1_uv_delta_drive();
+    if (b) return b;
+    const int c = svtd_cs1_uv_txb_drive();
+    if (c) return c;
     return 0;
 }

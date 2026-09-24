@@ -2218,5 +2218,20 @@ int main(void) {
                (svtd_ctx_bad == 0 && gr == 0 && sr == 0) ? 1 : 0);
         if (gr != 0 || sr != 0 || svtd_ctx_bad) return 1;
     }
+
+    // ---- CS1: chroma (4:2:0) entropy gate lines ----------------------------
+    // uv_mode + uv angle-delta roundtrips + the per-component chroma token
+    // streams. The uv_mode write alphabet is UV_INTRA_MODES - !cflAllowed
+    // (13 disallowed / 14 allowed, entropy_coding.c:1080-1081) through the
+    // verbatim default_uv_mode_cdf extract (cabac_context_model.c:105); the
+    // uv angle-delta writes through angle_delta_cdf[chroma_mode - V_PRED]
+    // (:1087-1092); NO cfl_alphas - unreachable (UV_CFL_PRED is not a D2
+    // candidate, the named CS1 deferral). The chroma token streams exercise
+    // the [PLANE_TYPES=1] rows of the six component-dim table families and
+    // the chroma txb_skip_ctx values {7,8,9} (entropy_coding.c:310-314).
+    {
+        const int rc1 = svtd_cs1_drive();
+        if (rc1) { fprintf(stderr, "CS1 drive FAILED rc=%d\n", rc1); return 1; }
+    }
     return 0;
 }

@@ -333,3 +333,30 @@ ectx16 745296 28e229ba07f0161b 1
 ectx32 3016544 3a93d035d22dbe7d 1
 ectx64 5287792 eab9839f24073207 1
 ectxg 131076 b54fe8ce0f273377 1
+ecuv_mode_bytes 11 73 8f 88 d0 8f 88 7b b4 42 65 b2
+ecuv_mode_rt 0 1 2 3 4 5 6 7 8 9 10 11 12 5 6 7 8 9 10 11 12 13 0 1 2 3
+ecuv_mode_cdf_eq 1
+ecuv_delta_bytes 23 02 14 35 7d 9a 5b 45 51 70 80 b9 df 66 ce ca bb ee 9a 7a 39 12 56 40
+ecuv_delta_rt 0 1 2 3 4 5 6 0 1 2 3 4 5 6 0 1 2 3 4 5 6 0 1 2 3 4 5 6 0 1 2 3 4 5 6 0 1 2 3 4 5 6 0 1 2 3 4 5 6 0 1 2 3 4 5 6
+ecuv_delta_cdf_eq 1
+ecuv4U_bytes 7 09 a0 ca 10 67 4b 80
+ecuv4U_rt 8
+ecuv8U_bytes 20 25 11 b3 3d 65 60 55 bd d0 58 f6 68 07 67 99 99 9c ff ff c0
+ecuv8U_rt 32
+ecuv16U_bytes 59 4a 50 ed dd fa cd 3b eb 3a 1b b5 a5 68 74 6b 35 22 d0 30 22 cf 78 26 1e a0 16 a1 29 e9 a5 f8 35 79 c8 e9 b3 64 1d af 0a a6 94 d4 fd e0 00 00 00 00 00 00 00 00 00 00 00 00 00 08
+ecuv16U_rt 128
+ecuv32U_bytes 194 26 6b bd bf 7e 82 ee fb 68 15 2e cd 76 b1 34 4f c6 05 0d 8a d5 ed f9 86 47 ae df 96 17 be 7f a9 c8 03 5c a2 12 86 c7 57 80 30 6f 64 fb 49 5c 9c ca ad fc 88 76 90 f2 31 6b 74 f6 58 22 8f b9 86 75 25 20 ad d3 6c bb 48 34 8e c8 0c e6 c1 8a 14 04 ea a6 72 ab e9 45 8c 77 27 c7 9e bf c4 b9 ec bf 38 7e 9a c4 23 92 16 9d 62 4b 22 9b a7 d1 7b 69 65 11 c6 fc 4d 40 6f 0b dc 15 e4 16 20 c2 b5 1c b5 83 ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff c0
+ecuv32U_rt 512
+ecuv0U_bytes 1 c0
+ecuv0U_rt 0
+ecuv4V_bytes 7 17 73 07 8a a3 b0 b8
+ecuv4V_rt 8
+ecuv8V_bytes 20 6b 8e c0 4f a6 e7 af f7 e4 b9 fe 17 21 45 60 ce b4 4a aa ab
+ecuv8V_rt 32
+ecuv16V_bytes 59 c8 10 db ef eb d0 ef c1 17 83 5f dd ef e7 16 b0 f0 cf 52 18 38 7b 24 59 ee 4b a2 0d 0a 79 40 46 7b 71 eb 92 5a 0e 70 8a 57 69 77 7c aa aa aa aa aa aa aa aa aa aa aa aa aa aa 90
+ecuv16V_rt 128
+ecuv32V_bytes 194 27 99 be 2e ff c2 23 c1 6e 66 7b 01 b8 df ed b9 60 c9 cd c6 76 1a 30 b3 a6 a1 88 a9 8c c0 3a 48 b4 a3 ec e1 bf 73 85 90 14 f9 4b 78 e8 7e ef f1 3c 8f 5d 88 9a 56 04 67 4f 09 c9 1f 95 af 69 96 aa fb c0 26 15 02 77 37 a8 80 94 2b 30 d2 7d a1 f9 8f 8a dd c3 37 2e ab 1c db cb 12 8b fc fd 89 86 23 2a 9e f8 3e e6 aa b4 7e 08 84 c1 33 6b 7c 1a a7 1a 5d f2 75 bf ad 69 aa 11 ef 25 34 df 6e 06 40 52 7f ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff fc
+ecuv32V_rt 512
+ecuv0V_bytes 1 c0
+ecuv0V_rt 0
+ecuv_cdf_eq 1

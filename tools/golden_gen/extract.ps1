@@ -462,6 +462,17 @@ Emit-Verbatim "entropy_coding.c" "int32_t svt_aom_partition_cdf_length" "svt_aom
 Emit-Macro "definitions.h" "#define SKIP_CONTEXTS" "SKIP_CONTEXTS"
 Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_skip_cdfs" "default_skip_cdfs"
 
+# ---- uv_mode CDF (CS1) ----
+# default_uv_mode_cdf (cabac_context_model.c:105-132): the chroma mode
+# alphabet [CFL_ALLOWED_TYPES][INTRA_MODES][CDF_SIZE(UV_INTRA_MODES)]. The
+# disallowed slice rows are 13-symbol (AOM_CDF13: 12 probs + terminator,
+# counter at cdf[13]); the allowed slice rows are 14-symbol (AOM_CDF14:
+# 13 probs + terminator, counter at cdf[14]). The write/read alphabet is
+# UV_INTRA_MODES - !cflAllowed (entropy_coding.c:1080-1081 write,
+# decodemv.c:144-147 read). CflAllowedType (definitions.h:1121).
+Emit-Macro "definitions.h" "typedef enum ATTRIBUTE_PACKED { CFL_DISALLOWED, CFL_ALLOWED, CFL_ALLOWED_TYPES } CflAllowedType;" "CflAllowedType"
+Emit-Verbatim "cabac_context_model.c" "static const AomCdfProb default_uv_mode_cdf" "default_uv_mode_cdf"
+
 # ---- bitstream ground floor (BSF2, l8_bitstream) ----
 # Raw-bit-writer + container primitives, all from entropy_coding.{h,c}
 # (the pinned packer's ground floor). AomWriteBitBuffer (entropy_coding.h:
@@ -518,6 +529,13 @@ Emit-Macro "definitions.h" "#define TX_PAD_VER" "TX_PAD_VER"
 Emit-Macro "definitions.h" "#define TX_PAD_END" "TX_PAD_END"
 Emit-Macro "definitions.h" "#define TX_PAD_2D" "TX_PAD_2D"
 Emit-Macro "cabac_context_model.h" "#define DC_SIGN_CONTEXTS" "DC_SIGN_CONTEXTS"
+# TD5a: the TOKEN_CDF_Q_CTXS bucket selection for the coefficient CDF tables:
+# the spec's init_coeff_cdfs (07.bitstream.semantics.md:1800-1820) mandates
+# this exact qindex bucketing. The TD5a commit added this extract to
+# svt_gen.c WITHOUT updating this script (regeneration drift, caught by the
+# CS1 regeneration: ts1_init's get_q_ctx went unresolved). Restored here so
+# the extractor reproduces the committed gate once more.
+Emit-Verbatim "cabac_context_model.c" "static int32_t get_q_ctx" "get_q_ctx"
 Emit-Verbatim "definitions.h" "typedef enum ATTRIBUTE_PACKED { PLANE_TYPE_Y, PLANE_TYPE_UV, PLANE_TYPES } PlaneType;" "PlaneType"
 Emit-Verbatim "definitions.h" "typedef enum ATTRIBUTE_PACKED {
     COMPONENT_LUMA      = 0, // luma" "COMPONENT_TYPE"

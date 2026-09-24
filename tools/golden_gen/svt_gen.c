@@ -6750,6 +6750,39 @@ static const AomCdfProb default_skip_cdfs[SKIP_CONTEXTS][CDF_SIZE(2)] = {
     {AOM_CDF2(31671)}, {AOM_CDF2(16515)}, {AOM_CDF2(4576)}
 };
 
+// ==== SVT-AV1 definitions.h :1121 - CflAllowedType (verbatim extract; do not edit) ====
+typedef enum ATTRIBUTE_PACKED { CFL_DISALLOWED, CFL_ALLOWED, CFL_ALLOWED_TYPES } CflAllowedType;
+
+// ==== SVT-AV1 cabac_context_model.c :105 - default_uv_mode_cdf (verbatim extract; do not edit) ====
+static const AomCdfProb default_uv_mode_cdf[CFL_ALLOWED_TYPES][INTRA_MODES][CDF_SIZE(UV_INTRA_MODES)] = {
+    {{AOM_CDF13(22631, 24152, 25378, 25661, 25986, 26520, 27055, 27923, 28244, 30059, 30941, 31961)},
+     {AOM_CDF13( 9513, 26881, 26973, 27046, 27118, 27664, 27739, 27824, 28359, 29505, 29800, 31796)},
+     {AOM_CDF13( 9845,  9915, 28663, 28704, 28757, 28780, 29198, 29822, 29854, 30764, 31777, 32029)},
+     {AOM_CDF13(13639, 13897, 14171, 25331, 25606, 25727, 25953, 27148, 28577, 30612, 31355, 32493)},
+     {AOM_CDF13( 9764,  9835,  9930,  9954, 25386, 27053, 27958, 28148, 28243, 31101, 31744, 32363)},
+     {AOM_CDF13(11825, 13589, 13677, 13720, 15048, 29213, 29301, 29458, 29711, 31161, 31441, 32550)},
+     {AOM_CDF13(14175, 14399, 16608, 16821, 17718, 17775, 28551, 30200, 30245, 31837, 32342, 32667)},
+     {AOM_CDF13(12885, 13038, 14978, 15590, 15673, 15748, 16176, 29128, 29267, 30643, 31961, 32461)},
+     {AOM_CDF13(12026, 13661, 13874, 15305, 15490, 15726, 15995, 16273, 28443, 30388, 30767, 32416)},
+     {AOM_CDF13(19052, 19840, 20579, 20916, 21150, 21467, 21885, 22719, 23174, 28861, 30379, 32175)},
+     {AOM_CDF13(18627, 19649, 20974, 21219, 21492, 21816, 22199, 23119, 23527, 27053, 31397, 32148)},
+     {AOM_CDF13(17026, 19004, 19997, 20339, 20586, 21103, 21349, 21907, 22482, 25896, 26541, 31819)},
+     {AOM_CDF13(12124, 13759, 14959, 14992, 15007, 15051, 15078, 15166, 15255, 15753, 16039, 16606)}},
+    {{AOM_CDF14(10407, 11208, 12900, 13181, 13823, 14175, 14899, 15656, 15986, 20086, 20995, 22455, 24212)},
+     {AOM_CDF14( 4532, 19780, 20057, 20215, 20428, 21071, 21199, 21451, 22099, 24228, 24693, 27032, 29472)},
+     {AOM_CDF14( 5273,  5379, 20177, 20270, 20385, 20439, 20949, 21695, 21774, 23138, 24256, 24703, 26679)},
+     {AOM_CDF14( 6740,  7167,  7662, 14152, 14536, 14785, 15034, 16741, 18371, 21520, 22206, 23389, 24182)},
+     {AOM_CDF14( 4987,  5368,  5928,  6068, 19114, 20315, 21857, 22253, 22411, 24911, 25380, 26027, 26376)},
+     {AOM_CDF14( 5370,  6889,  7247,  7393,  9498, 21114, 21402, 21753, 21981, 24780, 25386, 26517, 27176)},
+     {AOM_CDF14( 4816,  4961,  7204,  7326,  8765,  8930, 20169, 20682, 20803, 23188, 23763, 24455, 24940)},
+     {AOM_CDF14( 6608,  6740,  8529,  9049,  9257,  9356,  9735, 18827, 19059, 22336, 23204, 23964, 24793)},
+     {AOM_CDF14( 5998,  7419,  7781,  8933,  9255,  9549,  9753, 10417, 18898, 22494, 23139, 24764, 25989)},
+     {AOM_CDF14(10660, 11298, 12550, 12957, 13322, 13624, 14040, 15004, 15534, 20714, 21789, 23443, 24861)},
+     {AOM_CDF14(10522, 11530, 12552, 12963, 13378, 13779, 14245, 15235, 15902, 20102, 22696, 23774, 25838)},
+     {AOM_CDF14(10099, 10691, 12639, 13049, 13386, 13665, 14125, 15163, 15636, 19676, 20474, 23519, 25208)},
+     {AOM_CDF14( 3144,  5087,  7382,  7504,  7593,  7690,  7801,  8064,  8232,  9248,  9875, 10521, 29048)}}
+};
+
 // ==== SVT-AV1 entropy_coding.h :116 - AomWriteBitBuffer (verbatim extract; do not edit) ====
 typedef struct AomWriteBitBuffer {
     uint8_t* bit_buffer;
@@ -6915,6 +6948,23 @@ typedef enum EbErrorType {
 
 // ==== SVT-AV1 cabac_context_model.h :118 - DC_SIGN_CONTEXTS (verbatim extract; do not edit) ====
 #define DC_SIGN_CONTEXTS 3
+
+// ==== SVT-AV1 cabac_context_model.c :1907-1918 - get_q_ctx (verbatim extract; do not edit) ====
+// The TOKEN_CDF_Q_CTXS bucket selection for the coefficient CDF tables: the
+// spec's init_coeff_cdfs (07.bitstream.semantics.md:1800-1820) mandates this
+// exact qindex bucketing (TD5a).
+static int32_t get_q_ctx(int32_t q) {
+    if (q <= 20) {
+        return 0;
+    }
+    if (q <= 60) {
+        return 1;
+    }
+    if (q <= 120) {
+        return 2;
+    }
+    return 3;
+}
 
 // ==== SVT-AV1 definitions.h :685 - PlaneType (verbatim extract; do not edit) ====
 typedef enum ATTRIBUTE_PACKED { PLANE_TYPE_Y, PLANE_TYPE_UV, PLANE_TYPES } PlaneType;
@@ -7933,23 +7983,6 @@ static const AomCdfProb av1_default_eob_multi1024_cdfs[TOKEN_CDF_Q_CTXS][PLANE_T
      {{AOM_CDF11(20569, 22426, 25569, 26859, 28053, 28913, 29486, 29724, 29807, 32570)},
       {AOM_CDF11( 2979,  5958,  8937, 11916, 14895, 17873, 20852, 23831, 26810, 29789)}}}
 };
-
-// ==== SVT-AV1 cabac_context_model.c :1907-1918 - get_q_ctx (verbatim extract; do not edit) ====
-// The TOKEN_CDF_Q_CTXS bucket selection for the coefficient CDF tables: the
-// spec's init_coeff_cdfs (07.bitstream.semantics.md:1800-1820) mandates this
-// exact qindex bucketing (TD5a).
-static int32_t get_q_ctx(int32_t q) {
-    if (q <= 20) {
-        return 0;
-    }
-    if (q <= 60) {
-        return 1;
-    }
-    if (q <= 120) {
-        return 2;
-    }
-    return 3;
-}
 
 // ==== SVT-AV1 cabac_context_model.c :1066 - av1_default_coeff_lps_multi_cdfs (verbatim extract; do not edit) ====
 static const AomCdfProb
