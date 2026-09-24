@@ -66,7 +66,8 @@ twins are held to bit-exact agreement with the SVT host reference.
 Symbol-by-symbol provenance lives in `docs/provenance.md` and
 `tools/golden_gen/README.md`; the gate-line inventory in the latter.
 How the stack works end to end: `docs/layers.md`; the bitstream path:
-`docs/bitstream.md`; decoder-acceptance status:
+`docs/bitstream.md`; the per-geometry emission walks: `docs/emission.md`;
+decoder-acceptance status:
 `docs/decode_conformance.md`.
 
 - **l0_core** — minimal shared types: `Sample` (uint8), `BlockSize`.

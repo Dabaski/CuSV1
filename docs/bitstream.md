@@ -37,9 +37,18 @@ reader end each stream with identical tables.
 `EcFrameContext` (`fc`) holds the frame's CDF tables: kf_y, angle
 delta, filter-intra flag/mode, partition, skip, tx-type
 (`intra_ext_tx_cdf` whole [3][4][13][17]) and the token tables
-(txb_skip, dc_sign, eob flag/extra, base/br — q_ctx = 0 slices via
-committed .inc files). `initDefaultEcFrameContext` seeds them
-verbatim from `cabac_context_model.c`.
+(txb_skip, dc_sign, eob flag/extra, base/br).
+`initDefaultEcFrameContext(fc, base_q_idx)` seeds them verbatim
+from `cabac_context_model.c` — and the
+token tables are QINDEX-BUCKET-SELECTED per the spec's `init_coeff_cdfs`
+(07.bitstream.semantics.md:1800-1820): the 13 token-table families are
+carried as 4-bucket `*_buckets.inc` files (mechanically split from the
+committed verbatim extracts; no hand-transcribed values) and the bucket
+is chosen by the verbatim `getQCtx` mirror of `get_q_ctx`
+(cabac_context_model.c:1907-1918). This was the TD-series root cause:
+the writer originally used the idx-0 bucket for every frame —
+self-consistent with our own reader, but not what a conformant decoder
+replays (see `docs/decode_conformance.md`).
 
 ## 3. The symbol surfaces
 
@@ -50,7 +59,7 @@ verbatim from `cabac_context_model.c`.
 | filter-intra (BSF1) | — | 2 + 5 | flag + mode; DC_PRED-only predicate, bsize <= 32 |
 | partition (ECP1) | partitionPlaneContext: ctx = (left*2 + above) + bsl*4, INVALID -> 0 | 10/10/10/4/8 per bsl | forced SPLIT writes NOTHING; XOR edges use the gathered 2-symbol branches (the temporary's adaptation is discarded) |
 | skip (ECP2) | getSkipContext = above_skip + left_skip of the neighbor mbmis | 2 | the FIRST arithmetic-coded symbol of each I_SLICE block |
-| tx-type (TS3) | eset by getExtTxTypes, intra_dir | 5 (DCT_DCT, eset 2, reduced_tx_set intra) | gated by getExtTxTypes > 1 AND base_q_idx > 0; skipped entirely when eob == 0 (early return) |
+| tx-type (TS3) | eset by getExtTxTypes, intra_dir | 5 (DCT_DCT, eset 2, reduced_tx_set intra) | in-chain gate: requires tx_size_sqr_up < TX_32X32 AND getExtTxTypes > 1 AND base_q_idx > 0 — at TX_32X32/64X64 intra the eset is DCTONLY (1 type), so NO symbol (entropy_coding.c:321-322); also skipped entirely when eob == 0 (early return) |
 | token chain (TS1/TS2) | NA-driven dc_sign_ctx; per-position nz-map contexts | — | see below |
 
 The token chain per TU, in write order: txb_skip -> tx-type (q > 0)
@@ -65,20 +74,32 @@ aom's `read_coeffs_txb`.
 
 ## 4. Who emits what
 
-- `encodeFrameAuto16x16`/`...16x16Q` emit per block (BSF1): kf mode +
-  angle delta + filter-intra flag, with adaptation on; the Q path
-  appends the token chain per block (TS3). Partition/skip symbols are
-  NOT emitted by l6 — they belong to the generator's structural tile
-  walk (ECP1/ECP2).
-- The generator's `svtd_bsf3_tile_data` (v1) walks decode order:
-  partition plane for the 64x64 -> 32x32 -> 16x16 tree (forced SPLIT
-  silent, coded SPLIT at 32x32 ctx 8, four coded NONEs at 16x16 ctx
-  4) + per-leaf skip + kf mode/angle-delta for the ratified modes,
-  all skip = 1 (DC-only tiles).
-- `svtd_bsf3_tile_data_v2` (TS4): the same partition/kf-mode walk
-  with skip = 0 (context 0 everywhere) and the TS3-proven token chain
-  appended per leaf — the only decodable composition, since the v2
-  TU must carry real coefficients.
+The l6 Q loops emit the real wire (FS-series; the detailed per-geometry
+walks are documented in `docs/emission.md`):
+
+- `encodeFrameAuto4x4Q`: no partition symbol (a 4x4 frame reads
+  none) — [skip=0 ctx 0][kf mode][FI iff DC_PRED][tokens].
+- `encodeFrameAuto8x8Q`/`...32x32Q`/`...64x64Q`: the full walk —
+  [partition (4-symbol row at 8x8; 10-symbol rows at 32x32/64x64),
+  RUNNING contexts via `updatePartitionContext` after each coded
+  block][skip=0 ctx 0][kf mode + angle delta when directional at
+  bsize >= 8X8][FI iff DC_PRED && bsize <= 32x32 — dead at
+  64x64][tx-type only below TX_32X32][tokens], mi-unit
+  `writeBlockCoeffs` args (pipeline.cpp:681/:1350/:1687).
+- `encodeFrameAuto16x16`/`...16x16Q` keep the ratified TD5b-era shape:
+  [kf mode + angle delta][FI flag][token chain] with adaptation on —
+  no partition/skip symbols in the loop.
+- All Q emission inits with `initDefaultEcFrameContext(fc, qindex)`
+  (the bucketed init) and ends with `odEcStopEncode`; the 64x64Q
+  emission domain is the TX_64X64 scan contract (compact the fwd64
+  top-left 32x32, quantize n_coeffs = 1024 with the 1024-position
+  token scan, expand for inv64 — see `docs/emission.md`).
+
+The committed artifacts' tile walks are hand-rolled structural walks
+in the tests over the l6 coefficients: the generator's
+`svtd_bsf3_tile_data(_v2)` walks decode order (partition plane +
+per-leaf skip/kf-mode) for the ratified structures; the per-geometry
+artifact structures are in `docs/emission.md`.
 
 ## 5. The OBU container (l8)
 

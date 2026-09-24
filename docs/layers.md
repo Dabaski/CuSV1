@@ -266,5 +266,6 @@ skip with a `SKIP:`-prefixed message when no CUDA device is present.
 - `docs/provenance.md` — the function-by-function provenance table.
 - `tools/golden_gen/README.md` — the extraction inventory, gate-line
   documentation, EC3 scope statement, REFERENCE PINNING note.
-- `docs/bitstream.md`, `docs/decode_conformance.md` — the bitstream
-  path and decoder-acceptance status.
+- `docs/bitstream.md`, `docs/emission.md`,
+  `docs/decode_conformance.md` — the bitstream path, the per-geometry
+  emission walks, and decoder-acceptance status.
