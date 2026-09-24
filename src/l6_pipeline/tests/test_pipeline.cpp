@@ -230,7 +230,7 @@ TEST_CASE("round trip v+dct recon matches svt and recovers the source") {
     // -> fwd 2D -> inv 2D add onto the same predictor. This is the NO-QUANT
     // path: for 4x4 the fixed-point fwd+inv round trip is exactly lossless
     // (shifts {2,0,0}/{0,-4} are complementary), so recon == source. Real
-    // loss comes from quantization (see the Q2 frame test) — the lossy-by-
+    // loss comes from quantization (see the Q2 frame test) - the lossy-by-
     // design caveat is demonstrated there, not here.
     const std::uint8_t srcData[16] = {21, 3, 5, 9, 9, 11, 3, 7, 7, 13, 5, 1, 15, 4, 25, 2};
     const std::uint8_t above[4] = {10, 40, 30, 20};
@@ -443,7 +443,7 @@ TEST_CASE("decide 8x8 picks v for the v fixture (paeth tie broken by index)") {
 }
 
 TEST_CASE("frame auto 8x8 matches the generator policy golden bit-exactly") {
-    // golden: golden_gen golden_frame b7_modes/b7_recon/b7_coeffs — identical
+    // golden: golden_gen golden_frame b7_modes/b7_recon/b7_coeffs - identical
     // D2 policy over verbatim SVT primitives at TX_8X8, decisions evaluated
     // against RECONSTRUCTED neighbor edges, chosen modes feeding filt_type.
     const std::uint8_t srcData[256] = {
@@ -482,7 +482,7 @@ TEST_CASE("frame auto 8x8 matches the generator policy golden bit-exactly") {
         if (modes[i] != goldenModes[i]) modesOk = false;
     }
     CHECK(modesOk);
-    // NOTE: recon != source for 8x8 blocks is BY DESIGN — the 8x8 fwd/inv
+    // NOTE: recon != source for 8x8 blocks is BY DESIGN - the 8x8 fwd/inv
     // shift arrays are scale-non-complementary (fwd total x4 from
     // fwd_shift_8x8 {2,-1,0}, inv total x1/16 from inv_shift_8x8 {-1,-4}).
     // AV1 compensates in per-tx-size dequant, and AV1 lossless restricts to
@@ -492,7 +492,7 @@ TEST_CASE("frame auto 8x8 matches the generator policy golden bit-exactly") {
 }
 
 TEST_CASE("frame auto 4x4 with quantization matches the Q2 generator golden") {
-    // golden: golden_gen q2f_modes/q2f_recon/q2f_coeffs at qindex 100 —
+    // golden: golden_gen q2f_modes/q2f_recon/q2f_coeffs at qindex 100 -
     // D3 policy loop with the FP quantizer wired in (qcoeff = coded coeffs,
     // dqcoeff feeds the inverse). recon now carries REAL quantization loss
     // (compare with the lossless d3_recon / lossless round-trip tests).
@@ -1000,7 +1000,7 @@ TEST_CASE("gpu frame auto matches host encodeFrameAuto4x4 (host decides, gpu exe
 }
 
 TEST_CASE("decide picks vertical for the v fixture (paeth tie broken by index)") {
-    // golden: golden_gen d2_v â€” V SAD 0, PAETH SAD 0, everything else > 0;
+    // golden: golden_gen d2_v -" V SAD 0, PAETH SAD 0, everything else > 0;
     // deterministic tie-break = lowest mode index -> V (1)
     const std::uint8_t src[16] = {10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40};
     const std::uint8_t above[4] = {10, 20, 30, 40};
@@ -1010,7 +1010,7 @@ TEST_CASE("decide picks vertical for the v fixture (paeth tie broken by index)")
 }
 
 TEST_CASE("decide picks horizontal for the h fixture") {
-    // golden: golden_gen d2_h â€” H SAD 0, PAETH SAD 0, tie -> H (2)
+    // golden: golden_gen d2_h -" H SAD 0, PAETH SAD 0, tie -> H (2)
     const std::uint8_t src[16] = {5, 5, 5, 5, 10, 10, 10, 10, 15, 15, 15, 15, 20, 20, 20, 20};
     const std::uint8_t left[4] = {5, 10, 15, 20};
     const auto d = pipeline::decideBlockMode4x4(src, nullptr, 0, 0, left, 4, 0, 0);
@@ -1019,7 +1019,7 @@ TEST_CASE("decide picks horizontal for the h fixture") {
 }
 
 TEST_CASE("decide picks dc on a flat block via thirteen-way tie") {
-    // golden: golden_gen d2_dc â€” all 13 candidate SADs are 0; tie-break -> DC (0)
+    // golden: golden_gen d2_dc -" all 13 candidate SADs are 0; tie-break -> DC (0)
     const std::uint8_t src[16] = {50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50};
     const std::uint8_t above[4] = {50, 50, 50, 50};
     const std::uint8_t left[4] = {50, 50, 50, 50};
@@ -1029,7 +1029,7 @@ TEST_CASE("decide picks dc on a flat block via thirteen-way tie") {
 }
 
 TEST_CASE("decide picks d45 for the diagonal fixture") {
-    // golden: golden_gen d2_d45 â€” D45 SAD 0, next best 233 (SMOOTH_V); strict win
+    // golden: golden_gen d2_d45 -" D45 SAD 0, next best 233 (SMOOTH_V); strict win
     const std::uint8_t src[16] = {10, 20, 30, 40, 20, 30, 40, 50, 30, 40, 50, 60, 40, 50, 60, 70};
     const std::uint8_t above[8] = {0, 10, 20, 30, 40, 50, 60, 70};
     const std::uint8_t left[4] = {0, 10, 20, 30};
@@ -1039,7 +1039,7 @@ TEST_CASE("decide picks d45 for the diagonal fixture") {
 }
 
 TEST_CASE("frame auto matches the generator policy golden bit-exactly") {
-    // golden: golden_gen golden_frame (d3_modes / d3_recon / d3_coeffs) â€”
+    // golden: golden_gen golden_frame (d3_modes / d3_recon / d3_coeffs) -"
     // identical D2 policy over verbatim SVT primitives, decisions evaluated
     // against RECONSTRUCTED neighbor edges, chosen modes feeding filt_type.
     // modes 1 1 0 7 = V, V, DC, D203.
@@ -1559,7 +1559,7 @@ TEST_CASE("gpu inv_txfm_2d_add_8x8 matches host invTxfm2dAdd8x8 (dct + adst)") {
 }
 
 TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
-    // golden: golden_gen qw8_modes/qw8_recon/qw8_coeffs at qindex 100 —
+    // golden: golden_gen qw8_modes/qw8_recon/qw8_coeffs at qindex 100 -
     // B7 policy loop (8x8 blocks) with the FP quantizer wired in
     // (svtd_quantize_fp_8x8, n_coeffs=64/log_scale 0): qcoeff = coded coeffs,
     // dqcoeff feeds svtd_inv2dadd8x8. Loss feeds back through decisions:
@@ -1652,7 +1652,7 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
 TEST_CASE("frame recon 8x8 with quantization matches the QW1 golden block 0") {
     // golden: golden_gen qw8_coeffs/qw8_recon block 0 at qindex 100. Block 0
     // has no neighbors, so the Auto winner (V, qw8_modes[0] = 1) and a forced
-    // V_PRED encode must produce identical coeffs + recon for it — this
+    // V_PRED encode must produce identical coeffs + recon for it - this
     // pins encodeFrameRecon8x8Q's quantized path to the generator.
     const std::uint8_t srcData[256] = {
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18,
@@ -1844,7 +1844,7 @@ TEST_CASE("gpu frame auto 8x8 with quantization matches host encodeFrameAuto8x8Q
             dRecon.downloadTo(reconWin, 256);
             // above = B real recon samples + REAL recon top-right
             // (above[8..15] = recon[(py-1)][px+8..px+15], reconstructed by the
-            // M1 raster rule) — mirrors FR1 host gather
+            // M1 raster rule) - mirrors FR1 host gather
             if (hasTop) {
                 for (int i = 0; i < 16; ++i) aboveHost[i] = reconWin[(py - 1) * 16 + px + i];
             }
@@ -2083,7 +2083,7 @@ TEST_CASE("gpu frame auto 8x8 matches host encodeFrameAuto8x8 (host decides, gpu
             dRecon.downloadTo(reconWin, 256);
             // above = B real recon samples + REAL recon top-right
             // (above[8..15] = recon[(py-1)][px+8..px+15], reconstructed by the
-            // M1 raster rule) — mirrors FR1 host gather
+            // M1 raster rule) - mirrors FR1 host gather
             if (hasTop) {
                 for (int i = 0; i < 16; ++i) aboveHost[i] = reconWin[(py - 1) * 16 + px + i];
             }
@@ -2656,7 +2656,7 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
 
 TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
     // TS3 gate: the 4 f16 blocks (decided modes {1,7,2,2}), skip = 0 for all
-    // four (no skip decision logic — the residual is coded for every block),
+    // four (no skip decision logic - the residual is coded for every block),
     // q100 real residuals through the full token chain (fwd16x16 ->
     // quantizeFp16x16 q100 -> writeBlockCoeffs with getTxbCtx from the NA
     // model + writeTxType reduced_tx_set=1 + decided intra_dir). Decoder
@@ -2796,7 +2796,8 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
                            entropy::BLOCK_16X16, entropy::TX_16X16, &txbSkipCtx, &dcSignCtx);
         std::int32_t qcRead[256] = {0};
         const int reob = entropy::readTxbCoeffs(&r, &fcR, qcRead, scan16,
-                                                entropy::TX_16X16, txbSkipCtx, dcSignCtx, 1, m);
+                                                entropy::TX_16X16, txbSkipCtx, dcSignCtx, 1, m,
+                                                entropy::COMPONENT_LUMA);
         // reob must equal the writer's eob (the roundtrip property)
         for (int i = 0; i < 256; ++i) CHECK(qcRead[i] == coeffs[b * 256 + i]);
 

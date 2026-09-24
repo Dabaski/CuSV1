@@ -511,7 +511,8 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                 }
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_4X4,
                                           entropy::BLOCK_4X4, eob, by, bx, 1,
-                                          static_cast<entropy::PredictionMode>(d.mode));
+                                          static_cast<entropy::PredictionMode>(d.mode),
+                                          entropy::COMPONENT_LUMA);
             }
 
             std::uint8_t blk[16] = {0};
@@ -696,7 +697,8 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                 }
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_8X8,
                                           entropy::BLOCK_8X8, eob, by * 2, bx * 2, 1,
-                                          static_cast<entropy::PredictionMode>(d.mode));
+                                          static_cast<entropy::PredictionMode>(d.mode),
+                                          entropy::COMPONENT_LUMA);
             }
 
             std::uint8_t blk[64] = {0};
@@ -1063,13 +1065,14 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
             transforms::quantizeFp16x16(cb, qt, scan, qc, dq, &eob);
             for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
 
-            // TS3: token emission (skip = 0 for all blocks — no skip decision
+            // TS3: token emission (skip = 0 for all blocks - no skip decision
             // logic; the residual is coded for every block). reduced_tx_set=1,
             // decided intra_dir = d.mode.
             if (w && fc && na) {
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_16X16,
                                           entropy::BLOCK_16X16, eob, by * 4, bx * 4,
-                                          1, static_cast<entropy::PredictionMode>(d.mode));
+                                          1, static_cast<entropy::PredictionMode>(d.mode),
+                                          entropy::COMPONENT_LUMA);
             }
 
             std::uint8_t blk[256] = {0};
@@ -1365,7 +1368,8 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 }
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_32X32,
                                           entropy::BLOCK_32X32, eob, by * 8, bx * 8, 1,
-                                          static_cast<entropy::PredictionMode>(d.mode));
+                                          static_cast<entropy::PredictionMode>(d.mode),
+                                          entropy::COMPONENT_LUMA);
             }
 
             std::uint8_t blk[1024] = {0};
@@ -1699,7 +1703,8 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 transforms::defaultScan32x32(scanTok);
                 entropy::writeBlockCoeffs(w, fc, na, qcTok, scanTok, entropy::TX_64X64,
                                           entropy::BLOCK_64X64, eobTok, by * 16, bx * 16, 1,
-                                          static_cast<entropy::PredictionMode>(d.mode));
+                                          static_cast<entropy::PredictionMode>(d.mode),
+                                          entropy::COMPONENT_LUMA);
             }
         }
     }

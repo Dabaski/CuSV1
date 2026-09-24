@@ -563,6 +563,14 @@ static const AomCdfProb kf_y_mode_cdf_default[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS
      {AOM_CDF13( 7618,  8288,  9859, 10509, 15386, 18657, 22903, 28776, 29180, 31355, 31802, 32593)}}
 };
 
+// svt_aom_default_uv_mode_cdf (cabac_context_model.c:105-132, verbatim
+// extract mechanically split into uv_mode_cdfs_default.inc - no
+// hand-transcribed values). Disallowed rows: 13-symbol; allowed rows:
+// 14-symbol (CS1b).
+static const AomCdfProb uv_mode_cdf_default[CFL_ALLOWED_TYPES][INTRA_MODES][CDF_SIZE(UV_INTRA_MODES)] = {
+#include "uv_mode_cdfs_default.inc"
+};
+
 // default_angle_delta_cdf (cabac_context_model.c:87-96, verbatim)
 static const AomCdfProb angle_delta_cdf_default[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)] = {
     {AOM_CDF7( 2180,  5032,  7567, 22776, 26989, 30217)},
@@ -801,6 +809,7 @@ void initDefaultEcFrameContext(EcFrameContext* fc, std::int32_t base_q_idx) {
     memcpy(fc->eob_flag_cdf512, eob_multi512_cdfs_default[idx], sizeof(fc->eob_flag_cdf512));
     memcpy(fc->eob_flag_cdf1024, eob_multi1024_cdfs_default[idx], sizeof(fc->eob_flag_cdf1024));
     memcpy(fc->intra_ext_tx_cdf, intra_ext_tx_cdfs_default, sizeof(fc->intra_ext_tx_cdf));
+    memcpy(fc->uv_mode_cdf, uv_mode_cdf_default, sizeof(fc->uv_mode_cdf));
 }
 
 int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
@@ -823,7 +832,8 @@ int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
            memcmp(a->eob_flag_cdf256, b->eob_flag_cdf256, sizeof(a->eob_flag_cdf256)) == 0 &&
            memcmp(a->eob_flag_cdf512, b->eob_flag_cdf512, sizeof(a->eob_flag_cdf512)) == 0 &&
            memcmp(a->eob_flag_cdf1024, b->eob_flag_cdf1024, sizeof(a->eob_flag_cdf1024)) == 0 &&
-           memcmp(a->intra_ext_tx_cdf, b->intra_ext_tx_cdf, sizeof(a->intra_ext_tx_cdf)) == 0;
+           memcmp(a->intra_ext_tx_cdf, b->intra_ext_tx_cdf, sizeof(a->intra_ext_tx_cdf)) == 0 &&
+           memcmp(a->uv_mode_cdf, b->uv_mode_cdf, sizeof(a->uv_mode_cdf)) == 0;
 }
 
 // svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021), flattened
@@ -881,6 +891,72 @@ PredictionMode readKfLumaMode(AomReader* r, EcFrameContext* fc, BlockSize bsize,
         *angle_delta = 0;
     }
     return m;
+}
+
+// get_uv_mode (common_utils.h:130-133) = g_uv2y[mode]
+// (common_utils.c:14-31, verbatim table; aom blockd.h:351-367 the same rows).
+PredictionMode uv2y(UvPredictionMode mode) {
+    static const PredictionMode g_uv2y[UV_INTRA_MODES + 2] = {
+        DC_PRED,       // UV_DC_PRED
+        V_PRED,        // UV_V_PRED
+        H_PRED,        // UV_H_PRED
+        D45_PRED,      // UV_D45_PRED
+        D135_PRED,     // UV_D135_PRED
+        D113_PRED,     // UV_D113_PRED
+        D157_PRED,     // UV_D157_PRED
+        D203_PRED,     // UV_D203_PRED
+        D67_PRED,      // UV_D67_PRED
+        SMOOTH_PRED,   // UV_SMOOTH_PRED
+        SMOOTH_V_PRED, // UV_SMOOTH_V_PRED
+        SMOOTH_H_PRED, // UV_SMOOTH_H_PRED
+        PAETH_PRED,    // UV_PAETH_PRED
+        DC_PRED,       // UV_CFL_PRED
+        INTRA_MODES,   // UV_INTRA_MODES (sentinel, aom uses INTRA_INVALID)
+        INTRA_MODES,   // UV_MODE_INVALID (sentinel)
+    };
+    return g_uv2y[mode];
+}
+
+// CS1b: encode_intra_chroma_mode_av1's mode symbol (entropy_coding.c:1080-
+// 1081); the write_cfl_alphas branch (:1083-1085, chroma_mode == UV_CFL_PRED)
+// is DEFERRED - UV_CFL_PRED is not a D2 candidate (pipeline.cpp:1721), the
+// alphas are dead in our emission (named deviation).
+void writeUvMode(AomWriter* w, EcFrameContext* fc, int cfl_allowed, PredictionMode luma_mode,
+                 UvPredictionMode chroma_mode) {
+    odEcWriteSymbol(w, chroma_mode, fc->uv_mode_cdf[cfl_allowed][luma_mode],
+                    UV_INTRA_MODES - !cfl_allowed);
+}
+
+// Read twin: aom decodemv.c:140-148 (read_intra_mode_uv); the write_cfl_alphas
+// read branch (decodemv.c:150-176 read_cfl_alphas at uv_mode == UV_CFL_PRED,
+// :826-828) is deferred with the writer's.
+UvPredictionMode readUvMode(AomReader* r, EcFrameContext* fc, int cfl_allowed,
+                            PredictionMode luma_mode) {
+    return (UvPredictionMode)odEcReadSymbol(r, fc->uv_mode_cdf[cfl_allowed][luma_mode],
+                                            UV_INTRA_MODES - !cfl_allowed);
+}
+
+// CS1b: encode_intra_chroma_mode_av1's angle-delta symbol (entropy_coding.c:
+// 1087-1092); read twin aom decodemv.c:830-833 + read_angle_delta :603-606.
+// Gate: bsize >= BLOCK_8X8 AND isDirectionalMode(uv2y(chroma_mode)) - the
+// reachable chroma modes are UV_V_PRED..UV_D67_PRED (1..8, uv2y[uv] == uv so
+// the writer's raw row equals the reader's folded row); the row index
+// chroma_mode - V_PRED is range-safe only inside the gate (0..7).
+void writeUvAngleDelta(AomWriter* w, EcFrameContext* fc, BlockSize bsize,
+                       UvPredictionMode chroma_mode, int angle_delta) {
+    if (bsize >= BLOCK_8X8 && isDirectionalMode(uv2y(chroma_mode))) {
+        odEcWriteSymbol(w, angle_delta + MAX_ANGLE_DELTA, fc->angle_delta_cdf[chroma_mode - V_PRED],
+                        2 * MAX_ANGLE_DELTA + 1);
+    }
+}
+
+int readUvAngleDelta(AomReader* r, EcFrameContext* fc, BlockSize bsize,
+                     UvPredictionMode chroma_mode) {
+    if (bsize >= BLOCK_8X8 && isDirectionalMode(uv2y(chroma_mode))) {
+        return odEcReadSymbol(r, fc->angle_delta_cdf[chroma_mode - V_PRED],
+                              2 * MAX_ANGLE_DELTA + 1);
+    }
+    return -1;
 }
 
 // Filter-intra pair (entropy_coding.c:5050-5058)
@@ -1291,19 +1367,19 @@ TxType readTxType(AomReader* r, EcFrameContext* fc, int base_q_idx, int reduced_
     const int32_t eset = getExtTxSet(tx_size, is_inter, reduced_tx_set);
     const int32_t num = av1NumExtTxSet[tx_set_type];
     const int32_t sym = odEcReadSymbol(r, fc->intra_ext_tx_cdf[eset][txsizeSqrMap[tx_size]][intra_dir], num);
-    // av1_ext_tx_inv[tx_set_type][sym] — the inverse mapping for DTT4_IDTX (eset 2)
-    // For the reduced intra set (DTT4_IDTX): {9,0,3,1,2,0,...} — index 0→9(IDTX? no,
-    // av1_ext_tx_inv[2][0]=9? hmm — looking at the table: {9, 0, 3, 1, 2, ...}
-    // sym 0 → 9 (IDTX? no — DCT_DCT is 0, so av1_ext_tx_inv maps the read
-    // symbol back to the TxType enum). For DCT_DCT-only port: sym 0 → DCT_DCT.
-    // The av1_ext_tx_inv[2] row: {9, 0, 3, 1, 2, 0, ...} — sym 0→9 (IDTX? no.
+    // av1_ext_tx_inv[tx_set_type][sym] - the inverse mapping for DTT4_IDTX (eset 2)
+    // For the reduced intra set (DTT4_IDTX): {9,0,3,1,2,0,...} - index 0->9(IDTX? no,
+    // av1_ext_tx_inv[2][0]=9? hmm - looking at the table: {9, 0, 3, 1, 2, ...}
+    // sym 0 -> 9 (IDTX? no - DCT_DCT is 0, so av1_ext_tx_inv maps the read
+    // symbol back to the TxType enum). For DCT_DCT-only port: sym 0 -> DCT_DCT.
+    // The av1_ext_tx_inv[2] row: {9, 0, 3, 1, 2, 0, ...} - sym 0->9 (IDTX? no.
     // Actually the aom table maps the CDF index to the TxType. For DTT4_IDTX
     // (eset 2): the set is {DCT_DCT, DCT_ADST, ADST_DCT, ADST_ADST, IDTX} in
-    // the order {0,3,4,2,9} per av1_ext_tx_ind[2] = {1,3,4,2,0,0,...}. Wait —
-    // av1_ext_tx_ind[2] maps TxType → symbol index: DCT_DCT→1, H_DCT→3, V_DCT→4,
-    // ADST_DCT→2, IDTX→0. So the inverse (av1_ext_tx_inv[2]) maps symbol → TxType:
-    // sym 0→IDTX(9), sym 1→DCT_DCT(0), sym 2→ADST_DCT(1), sym 3→H_DCT(11),
-    // sym 4→V_DCT(10). For our DCT_DCT-only port, the DCT_DCT symbol index is
+    // the order {0,3,4,2,9} per av1_ext_tx_ind[2] = {1,3,4,2,0,0,...}. Wait -
+    // av1_ext_tx_ind[2] maps TxType -> symbol index: DCT_DCT->1, H_DCT->3, V_DCT->4,
+    // ADST_DCT->2, IDTX->0. So the inverse (av1_ext_tx_inv[2]) maps symbol -> TxType:
+    // sym 0->IDTX(9), sym 1->DCT_DCT(0), sym 2->ADST_DCT(1), sym 3->H_DCT(11),
+    // sym 4->V_DCT(10). For our DCT_DCT-only port, the DCT_DCT symbol index is
     // av1_ext_tx_ind[2][DCT_DCT] = 1, and the reader inverts: av1_ext_tx_inv[2][1] = 0.
     static const int32_t av1ExtTxInv[EXT_TX_SET_TYPES][16] = {
         {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -1374,7 +1450,7 @@ const std::int32_t ebTxSizeHighUnit[TX_SIZES_ALL] = {1, 2, 4, 8, 16, 2, 1, 4, 2,
 // accumulation (:264-285), dc_sign_ctx derivation (:288-294), then:
 //   plane 0 && plane_bsize == tx_bsize -> txb_skip_ctx = 0 (:298-299)
 //   plane 0 && plane_bsize != tx_bsize -> skip_contexts table (:301-308)
-//   plane != 0 -> chroma path (:310-314) â€” dead for our luma TUs, ported
+//   plane != 0 -> chroma path (:310-314) -" dead for our luma TUs, ported
 //   for the range rule.
 void getTxbCtx(const std::uint8_t* above_ptr, const std::uint8_t* left_ptr, int txb_w_unit,
                int txb_h_unit, int plane, BlockSize plane_bsize, TxSize tx_size,
@@ -1449,14 +1525,17 @@ static void setDcSign(int* cul_level, int dc_val) {
 void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                       const std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
                       BlockSize bsize, int eob, int mi_row, int mi_col,
-                      int reduced_tx_set, PredictionMode intra_dir) {
+                      int reduced_tx_set, PredictionMode intra_dir,
+                      ComponentType component_type) {
     const int tx_w_unit = static_cast<int>(ebTxSizeWideUnit[tx_size]);
     const int tx_h_unit = static_cast<int>(ebTxSizeHighUnit[tx_size]);
     int txb_skip_ctx = 0, dc_sign_ctx = 0;
-    getTxbCtx(&na->above[mi_col], &na->left[mi_row], tx_w_unit, tx_h_unit, 0, bsize, tx_size,
+    getTxbCtx(&na->above[mi_col], &na->left[mi_row], tx_w_unit, tx_h_unit,
+              (component_type == COMPONENT_CHROMA) ? PLANE_TYPE_UV : PLANE_TYPE_Y, bsize, tx_size,
               &txb_skip_ctx, &dc_sign_ctx);
 
-    writeTxbCoeffs(w, fc, coeff, scan, tx_size, eob, txb_skip_ctx, dc_sign_ctx, reduced_tx_set, intra_dir);
+    writeTxbCoeffs(w, fc, coeff, scan, tx_size, eob, txb_skip_ctx, dc_sign_ctx, reduced_tx_set,
+                   intra_dir, component_type);
 
     // cul_level: sum of abs levels (entropy_coding.c:487/:510 accumulation,
     // clamped at :541), then set_dc_sign (:542). NA update: write the packed
@@ -1475,14 +1554,17 @@ void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
 int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                     std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
                     BlockSize bsize, int mi_row, int mi_col,
-                    int reduced_tx_set, PredictionMode intra_dir) {
+                    int reduced_tx_set, PredictionMode intra_dir,
+                    ComponentType component_type) {
     const int tx_w_unit = static_cast<int>(ebTxSizeWideUnit[tx_size]);
     const int tx_h_unit = static_cast<int>(ebTxSizeHighUnit[tx_size]);
     int txb_skip_ctx = 0, dc_sign_ctx = 0;
-    getTxbCtx(&na->above[mi_col], &na->left[mi_row], tx_w_unit, tx_h_unit, 0, bsize, tx_size,
+    getTxbCtx(&na->above[mi_col], &na->left[mi_row], tx_w_unit, tx_h_unit,
+              (component_type == COMPONENT_CHROMA) ? PLANE_TYPE_UV : PLANE_TYPE_Y, bsize, tx_size,
               &txb_skip_ctx, &dc_sign_ctx);
 
-    const int eob = readTxbCoeffs(r, fc, coeff, scan, tx_size, txb_skip_ctx, dc_sign_ctx, reduced_tx_set, intra_dir);
+    const int eob = readTxbCoeffs(r, fc, coeff, scan, tx_size, txb_skip_ctx, dc_sign_ctx,
+                                  reduced_tx_set, intra_dir, component_type);
     // NA update: same as the writer (aom read side: av1_set_entropy_contexts)
     int32_t cul_level = 0;
     for (int c = 0; c < eob; ++c) cul_level += std::abs(coeff[scan[c]]);
@@ -1493,10 +1575,13 @@ int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
     return eob;
 }
 
-// entropy_coding.c:355-544 (LUMA DCT_DCT port)
+// entropy_coding.c:355-544 (LUMA DCT_DCT port; CS1b: the component_type
+// threading - the six component-dim families select the [component_type]
+// row, and the tx-type symbol is LUMA-only per :374-376)
 void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
                     const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
-                    int dc_sign_ctx, int reduced_tx_set, PredictionMode intra_dir) {
+                    int dc_sign_ctx, int reduced_tx_set, PredictionMode intra_dir,
+                    ComponentType component_type) {
     (void)reduced_tx_set;  // FS3-prep: the gate folds use_reduced_set = 1
     const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
     const int    eob_multi_size = txsizeLog2Minus4[tx_size];
@@ -1514,9 +1599,11 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
     // previous ungated emission - the 16x16 gate lines diff-0 prove it).
     // reduced_tx_set = 1 (the ratified header config); base_q_idx > 0 is
     // implied by the callers (the lossless paths never enter the chain).
+    // CS1b: LUMA-ONLY (entropy_coding.c:374-376 `if (component_type ==
+    // COMPONENT_LUMA) av1_write_tx_type(...)`) - chroma TUs emit no symbol.
     {
         const TxSize tx_size_sqr_up = txsizeSqrUpMap[tx_size];
-        if (tx_size_sqr_up < TX_32X32) {
+        if (component_type == COMPONENT_LUMA && tx_size_sqr_up < TX_32X32) {
             const TxSize sq = txsizeSqrMap[tx_size];
             odEcWriteSymbol(w, av1ExtTxInd[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
                             fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
@@ -1528,19 +1615,19 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
     AomCdfProb* eob_cdf;
     int nsyms;
     switch (eob_multi_size) {
-    case 0: eob_cdf = fc->eob_flag_cdf16[0][eob_multi_ctx]; nsyms = 5; break;
-    case 1: eob_cdf = fc->eob_flag_cdf32[0][eob_multi_ctx]; nsyms = 6; break;
-    case 2: eob_cdf = fc->eob_flag_cdf64[0][eob_multi_ctx]; nsyms = 7; break;
-    case 3: eob_cdf = fc->eob_flag_cdf128[0][eob_multi_ctx]; nsyms = 8; break;
-    case 4: eob_cdf = fc->eob_flag_cdf256[0][eob_multi_ctx]; nsyms = 9; break;
-    case 5: eob_cdf = fc->eob_flag_cdf512[0][eob_multi_ctx]; nsyms = 10; break;
-    default: eob_cdf = fc->eob_flag_cdf1024[0][eob_multi_ctx]; nsyms = 11; break;
+    case 0: eob_cdf = fc->eob_flag_cdf16[component_type][eob_multi_ctx]; nsyms = 5; break;
+    case 1: eob_cdf = fc->eob_flag_cdf32[component_type][eob_multi_ctx]; nsyms = 6; break;
+    case 2: eob_cdf = fc->eob_flag_cdf64[component_type][eob_multi_ctx]; nsyms = 7; break;
+    case 3: eob_cdf = fc->eob_flag_cdf128[component_type][eob_multi_ctx]; nsyms = 8; break;
+    case 4: eob_cdf = fc->eob_flag_cdf256[component_type][eob_multi_ctx]; nsyms = 9; break;
+    case 5: eob_cdf = fc->eob_flag_cdf512[component_type][eob_multi_ctx]; nsyms = 10; break;
+    default: eob_cdf = fc->eob_flag_cdf1024[component_type][eob_multi_ctx]; nsyms = 11; break;
     }
     odEcWriteSymbol(w, eob_pt - 1, eob_cdf, nsyms);
     if (eob_pt > 2) {
         const int cnt = eob_pt - 3;
         const int bit = (eob_extra >> cnt) & 1;
-        odEcWriteSymbol(w, bit, fc->eob_extra_cdf[txs_ctx][0][cnt], 2);
+        odEcWriteSymbol(w, bit, fc->eob_extra_cdf[txs_ctx][component_type][cnt], 2);
         odEcWriteLiteralBits(w, eob_extra, cnt);
     }
 
@@ -1562,7 +1649,7 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
         const int pos = scan[c];
         const int lctx = (eob == 1) ? 0 : coeff_contexts[pos];
         const std::int32_t level = std::abs(coeff[pos]);
-        odEcWriteSymbol(w, AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3);
+        odEcWriteSymbol(w, AOMMIN(level, 3) - 1, fc->coeff_base_eob_cdf[txs_ctx][component_type][lctx], 3);
         if (level > NUM_BASE_LEVELS) {
             const int32_t base_range = level - 1 - NUM_BASE_LEVELS;
             const int br_ctx = (eob == 1) ? 0 : getBrCtxEob(pos, bwl, TX_CLASS_2D);
@@ -1571,7 +1658,7 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
             }
             for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
-                odEcWriteSymbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                odEcWriteSymbol(w, k, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
                 if (k < BR_CDF_SIZE - 1) break;
             }
         }
@@ -1581,13 +1668,13 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
         const int pos = scan[c];
         const int coeff_ctx = coeff_contexts[pos];
         const std::int32_t level = std::abs(coeff[pos]);
-        odEcWriteSymbol(w, AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
+        odEcWriteSymbol(w, AOMMIN(level, 3), fc->coeff_base_cdf[txs_ctx][component_type][coeff_ctx], 4);
         if (level > NUM_BASE_LEVELS) {
             const int32_t base_range = level - 1 - NUM_BASE_LEVELS;
             const int br_ctx = getBrCtx(levels, pos, bwl, TX_CLASS_2D);
             for (int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
                 const int32_t k = AOMMIN(base_range - idx, BR_CDF_SIZE - 1);
-                odEcWriteSymbol(w, k, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                odEcWriteSymbol(w, k, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
                 if (k < BR_CDF_SIZE - 1) break;
             }
         }
@@ -1599,7 +1686,7 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
         const std::int32_t level = std::abs(v);
         if (!level) continue;
         if (c == 0) {
-            odEcWriteSymbol(w, (v < 0) ? 1 : 0, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
+            odEcWriteSymbol(w, (v < 0) ? 1 : 0, fc->dc_sign_cdf[component_type][dc_sign_ctx], 2);
         } else {
             odEcWriteLiteralBit(w, (v < 0) ? 1 : 0, 1);
         }
@@ -1612,7 +1699,8 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
 // aom decodetxb.c read_coeffs_txb (symbol-for-symbol twin)
 int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
                   const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx,
-                  int reduced_tx_set, PredictionMode intra_dir) {
+                  int reduced_tx_set, PredictionMode intra_dir,
+                  ComponentType component_type) {
     (void)reduced_tx_set;  // FS3-prep: the gate folds use_reduced_set = 1
     const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
     const int    eob_multi_size = txsizeLog2Minus4[tx_size];
@@ -1624,10 +1712,11 @@ int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
 
     // TS3: tx-type read (entropy_coding.c:374-376 mirror), the same verbatim
     // gate as the writer side (av1_read_tx_type folds it: <= 1 types ->
-    // DCT_DCT implicit, no symbol) - FS3-prep.
+    // DCT_DCT implicit, no symbol) - FS3-prep. CS1b: LUMA-ONLY (the writer's
+    // :374-376 gate mirror - chroma reads no tx-type symbol).
     {
         const TxSize tx_size_sqr_up = txsizeSqrUpMap[tx_size];
-        if (tx_size_sqr_up < TX_32X32) {
+        if (component_type == COMPONENT_LUMA && tx_size_sqr_up < TX_32X32) {
             const TxSize sq = txsizeSqrMap[tx_size];
             const int ttx = odEcReadSymbol(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
             (void)ttx;  // DCT_DCT-only port
@@ -1636,20 +1725,20 @@ int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
 
     int eob_pt;
     switch (eob_multi_size) {
-    case 0: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf16[0][eob_multi_ctx], 5) + 1; break;
-    case 1: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf32[0][eob_multi_ctx], 6) + 1; break;
-    case 2: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf64[0][eob_multi_ctx], 7) + 1; break;
-    case 3: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf128[0][eob_multi_ctx], 8) + 1; break;
-    case 4: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf256[0][eob_multi_ctx], 9) + 1; break;
-    case 5: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf512[0][eob_multi_ctx], 10) + 1; break;
-    default: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf1024[0][eob_multi_ctx], 11) + 1; break;
+    case 0: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf16[component_type][eob_multi_ctx], 5) + 1; break;
+    case 1: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf32[component_type][eob_multi_ctx], 6) + 1; break;
+    case 2: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf64[component_type][eob_multi_ctx], 7) + 1; break;
+    case 3: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf128[component_type][eob_multi_ctx], 8) + 1; break;
+    case 4: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf256[component_type][eob_multi_ctx], 9) + 1; break;
+    case 5: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf512[component_type][eob_multi_ctx], 10) + 1; break;
+    default: eob_pt = odEcReadSymbol(r, fc->eob_flag_cdf1024[component_type][eob_multi_ctx], 11) + 1; break;
     }
     int eob_extra = 0;
     {
         const int eob_offset_bits = (eob_pt > 2) ? (eob_pt - 2) : 0;
         if (eob_offset_bits > 0) {
             const int eob_ctx = eob_pt - 3;
-            if (odEcReadSymbol(r, fc->eob_extra_cdf[txs_ctx][0][eob_ctx], 2)) {
+            if (odEcReadSymbol(r, fc->eob_extra_cdf[txs_ctx][component_type][eob_ctx], 2)) {
                 eob_extra += (1 << (eob_offset_bits - 1));
             }
             for (int i = 1; i < eob_offset_bits; i++) {
@@ -1673,11 +1762,11 @@ int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
         const int c   = eob - 1;
         const int pos = scan[c];
         const int lctx = getLowerLevelsCtxEob(bwl, height, c);
-        int level = odEcReadSymbol(r, fc->coeff_base_eob_cdf[txs_ctx][0][lctx], 3) + 1;
+        int level = odEcReadSymbol(r, fc->coeff_base_eob_cdf[txs_ctx][component_type][lctx], 3) + 1;
         if (level > NUM_BASE_LEVELS) {
             const int br_ctx = getBrCtxEob(pos, bwl, TX_CLASS_2D);
             for (int idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
-                const int k = odEcReadSymbol(r, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                const int k = odEcReadSymbol(r, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
                 level += k;
                 if (k < BR_CDF_SIZE - 1) break;
             }
@@ -1688,11 +1777,11 @@ int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
     for (int c = eob - 2; c >= 0; --c) {
         const int pos = scan[c];
         const int coeff_ctx = getLowerLevelsCtx(levels, pos, bwl, tx_size, TX_CLASS_2D);
-        int level = odEcReadSymbol(r, fc->coeff_base_cdf[txs_ctx][0][coeff_ctx], 4);
+        int level = odEcReadSymbol(r, fc->coeff_base_cdf[txs_ctx][component_type][coeff_ctx], 4);
         if (level > NUM_BASE_LEVELS) {
             const int br_ctx = getBrCtx(levels, pos, bwl, TX_CLASS_2D);
             for (int idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
-                const int k = odEcReadSymbol(r, fc->coeff_br_cdf[br_txs_ctx][0][br_ctx], BR_CDF_SIZE);
+                const int k = odEcReadSymbol(r, fc->coeff_br_cdf[br_txs_ctx][component_type][br_ctx], BR_CDF_SIZE);
                 level += k;
                 if (k < BR_CDF_SIZE - 1) break;
             }
@@ -1706,7 +1795,7 @@ int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
         if (!level) continue;
         int sign;
         if (c == 0) {
-            sign = odEcReadSymbol(r, fc->dc_sign_cdf[0][dc_sign_ctx], 2);
+            sign = odEcReadSymbol(r, fc->dc_sign_cdf[component_type][dc_sign_ctx], 2);
         } else {
             sign = odEcReadBit(r);
         }

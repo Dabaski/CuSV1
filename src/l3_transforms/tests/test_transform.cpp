@@ -942,7 +942,7 @@ TEST_CASE("quantize fp/b 8x8 and ADST proof match the QC1 gate vectors") {
     // qadst4fp_q100 / qadst4b_q100 / qadst8fp_q100.
     // log_scale = av1_get_tx_scale_tab[TX_8X8] = 0 (full_loop.c:22 + :1617),
     // so 8x8 uses the same helper at n_coeffs=64. The ADST proof: the fp/b
-    // helpers are TxType-agnostic — the fixtures are ADST fwd outputs of the
+    // helpers are TxType-agnostic - the fixtures are ADST fwd outputs of the
     // same fixtures the gate recomputes.
     std::int16_t scan8[64];
     transforms::defaultScan8x8(scan8);

@@ -247,7 +247,8 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
         }
         entropy::writeBlockCoeffs(&w, &fc, &na, coeffs + b * 256, scan16, entropy::TX_16X16,
                                   entropy::BLOCK_16X16, ec, lr[b], lc[b], 1,
-                                  static_cast<entropy::PredictionMode>(modes[b]));
+                                  static_cast<entropy::PredictionMode>(modes[b]),
+                                  entropy::COMPONENT_LUMA);
     }
     entropy::odEcStopEncode(&w);
 
@@ -327,7 +328,8 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
         }
         entropy::writeBlockCoeffs(&w, &fc, &na, coeffs + b * 256, scan16, entropy::TX_16X16,
                                   entropy::BLOCK_16X16, ec, lr[b], lc[b], 1,
-                                  static_cast<entropy::PredictionMode>(modes[b]));
+                                  static_cast<entropy::PredictionMode>(modes[b]),
+                                  entropy::COMPONENT_LUMA);
     }
     entropy::odEcStopEncode(&w);
     unsigned char tuBuf[128];
@@ -487,7 +489,8 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
                 }
                 entropy::writeBlockCoeffs(&w, &fc, &na, coeffs8 + b * 16, scan4, entropy::TX_4X4,
                                           entropy::BLOCK_4X4, eob, lr4[b], lc4[b], 1,
-                                          static_cast<entropy::PredictionMode>(modes8[b]));
+                                          static_cast<entropy::PredictionMode>(modes8[b]),
+                                          entropy::COMPONENT_LUMA);
             }
             entropy::odEcStopEncode(&w);
             tilePos = w.pos;
@@ -527,7 +530,8 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
             }
             entropy::writeBlockCoeffs(&w, &fc, &na, coeffs, scan16, entropy::TX_16X16,
                                       entropy::BLOCK_16X16, eob, 0, 0, 1,
-                                      static_cast<entropy::PredictionMode>(modes[0]));
+                                      static_cast<entropy::PredictionMode>(modes[0]),
+                                      entropy::COMPONENT_LUMA);
             entropy::odEcStopEncode(&w);
             tilePos = w.pos;
         } else if (S == 8) {

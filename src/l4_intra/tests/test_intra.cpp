@@ -238,7 +238,7 @@ TEST_CASE("gpu block predictor filter intra matches the builder") {
 
 TEST_CASE("filter intra predictor 8x8 matches svt golden") {
     // golden: svt_av1_filter_intra_predictor_c at TX_8X8, FILTER_V_PRED,
-    // corner 10, above {20..90}, left {21,31..91} — the two-column strip case
+    // corner 10, above {20..90}, left {21,31..91} - the two-column strip case
     // (bw=8, strips at c=1,5). Gate line b5_fiv8.
     unsigned char ab[10] = {10, 20, 30, 40, 50, 60, 70, 80, 90};
     const unsigned char left[8] = {21, 31, 41, 51, 61, 71, 81, 91};
@@ -291,7 +291,7 @@ TEST_CASE("builder v 8x8 matches svt golden") {
 
 TEST_CASE("builder d67 8x8 exercises the upsample path") {
     // golden: build_intra_predictors TX_8X8 D67_PRED, above (8+8 topright),
-    // left {9x8}, corner 7 — blk_wh=16, delta=-23, 0<d<40 → upsample IS live
+    // left {9x8}, corner 7 - blk_wh=16, delta=-23, 0<d<40 -> upsample IS live
     // gate line b5_d67_8
     const unsigned char above[16] = {10, 20, 30, 100, 50, 60, 70, 80, 90, 40, 25, 66, 11, 72, 33, 58};
     const unsigned char left[8] = {9, 9, 9, 9, 9, 9, 9, 9};
@@ -308,7 +308,7 @@ TEST_CASE("builder d67 8x8 exercises the upsample path") {
 }
 
 TEST_CASE("builder dc128 8x8 fills 128 with no neighbors") {
-    // golden: build_intra_predictors TX_8X8 DC_PRED, no edges — gate line b5_dc128_8
+    // golden: build_intra_predictors TX_8X8 DC_PRED, no edges - gate line b5_dc128_8
     unsigned char dst[64] = {0};
     intra::buildIntraPredictors(dst, 8, intra::DC_PRED, 0, 8, 8, 0, nullptr, 0, 0, nullptr, 0, 0);
     bool ok = true;
@@ -349,7 +349,7 @@ TEST_CASE("builder v 16x16 matches svt golden") {
 }
 
 TEST_CASE("builder dc 16x16 averages 32 edge samples") {
-    // golden: gate line b16_dc — DC over above16+left16 (sum 2750/32 = 85.94
+    // golden: gate line b16_dc - DC over above16+left16 (sum 2750/32 = 85.94
     // -> 86 with rounding)
     unsigned char dst[256] = {0};
     intra::buildIntraPredictors(dst, 16, intra::DC_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
@@ -372,7 +372,7 @@ TEST_CASE("builder dc128 16x16 fills 128 with no neighbors") {
 }
 
 TEST_CASE("builder d45 16x16 consumes real top-right zone 1") {
-    // golden: gate line b16_d45 — need_right at p_angle 45: numTop = 32 from
+    // golden: gate line b16_d45 - need_right at p_angle 45: numTop = 32 from
     // above16+TR; upsample OFF at blk_wh 32 (svt_aom_use_intra_edge_upsample
     // returns 0); edge filter strength 2 (filt_str(16,16,-23,0): d=23 -> 2).
     // head from the gate line: 23 33 44 55 66 77 88 99 110 120 130 140 150
@@ -402,7 +402,7 @@ TEST_CASE("builder d135 16x16 zone 2 matches svt golden head") {
 }
 
 TEST_CASE("builder d203 16x16 zone 3 extends left edge to 32") {
-    // golden: gate line b16_d203 head — need_bottom: numLeft = 32 (replication
+    // golden: gate line b16_d203 head - need_bottom: numLeft = 32 (replication
     // past 16 exercises the extension path)
     unsigned char dst[256] = {0};
     intra::buildIntraPredictors(dst, 16, intra::D203_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
@@ -416,7 +416,7 @@ TEST_CASE("builder d203 16x16 zone 3 extends left edge to 32") {
 }
 
 TEST_CASE("builder smooth 16x16 uses the bs=16 weight row") {
-    // golden: gate line b16_sm head — sm_weight_arrays[16..31]
+    // golden: gate line b16_sm head - sm_weight_arrays[16..31]
     unsigned char dst[256] = {0};
     intra::buildIntraPredictors(dst, 16, intra::SMOOTH_PRED, 0, 16, 16, 7, kAbove16, 16, 0, kLeft16, 16, 0);
     const unsigned char goldenHead[16] = {9, 24, 39, 52, 66, 79, 91, 102,
@@ -468,7 +468,7 @@ TEST_CASE("16x16 upsample never fires (blk_wh 32 exceeds both limits)") {
 }
 
 TEST_CASE("builder dc128 8x8 fills 128 with no neighbors") {
-    // golden: build_intra_predictors TX_8X8 DC_PRED, no edges — gate line b5_dc128_8
+    // golden: build_intra_predictors TX_8X8 DC_PRED, no edges - gate line b5_dc128_8
     unsigned char dst[64] = {0};
     intra::buildIntraPredictors(dst, 8, intra::DC_PRED, 0, 8, 8, 0, nullptr, 0, 0, nullptr, 0, 0);
     bool ok = true;
@@ -2442,7 +2442,7 @@ TEST_CASE("gpu block predictor dr corner fill derives above-left from left edge 
     CHECK(ok);
 }
 
-// ---- CH1: chroma (UV) prediction — fold + size-generic builder -------------
+// ---- CH1: chroma (UV) prediction - fold + size-generic builder -------------
 // SVT chroma flow: uv_mode folds to the LUMA primitive set via g_uv2y
 // (get_uv_mode, common_utils.h:130-133; UV_CFL_PRED -> DC_PRED,
 // common_utils.c:28) and chroma NEVER uses filter-intra

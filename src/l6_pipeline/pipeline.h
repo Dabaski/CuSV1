@@ -23,7 +23,7 @@ void encodeBlock4x4(const pixels::Plane& plane, int px, int py, const std::uint8
 
 // Round trip: encode (predict + residual + fwd 2D) then reconstruct
 // (invTxfm2dAdd4x4 onto the same predictor). recon = SVT's recon for the
-// same chain — fixed-point fwd+inv is lossy in general, so recon is NOT
+// same chain - fixed-point fwd+inv is lossy in general, so recon is NOT
 // guaranteed to equal the source block.
 void encodeRecon4x4(const pixels::Plane& plane, int px, int py, const std::uint8_t* aboveRef, int nTopPx,
                     int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
@@ -148,7 +148,7 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
                            entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
                            entropy::DcSignLevelCoeffNa* na = nullptr);
 
-// D2 mode decision — THE POLICY IS THIS PROJECT'S, NOT SVT's: SVT's real
+// D2 mode decision - THE POLICY IS THIS PROJECT'S, NOT SVT's: SVT's real
 // mode decision is full RD with rate costs. The 1:1 guarantee covers every
 // primitive (predict / transform / SAD); the policy (SAD-only, fixed
 // candidate set of all 13 PredictionModes, deterministic tie-break = lowest

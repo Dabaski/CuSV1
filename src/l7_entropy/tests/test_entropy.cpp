@@ -487,7 +487,7 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     // TUs: txb_skip_ctx = 0 (get_txb_ctx :298-299 plane_bsize == tx_bsize),
     // dc_sign_ctx = 0 (no coded neighbors). TS3: the token chain emits the
     // tx-type symbol between txb_skip and eob_pt (entropy_coding.c:374-376)
-    // for every q>0 TU — the DCT_DCT index through intra_ext_tx_cdf with
+    // for every q>0 TU - the DCT_DCT index through intra_ext_tx_cdf with
     // intra_dir = DC_PRED, exactly the generator's TS1 drive call sites
     // (composition.c:2901-2903); the eob=0 4x4 TU skips it via the early
     // return. Quantized through the f16q path (quantize_fp at q100).
@@ -546,9 +546,12 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     w.allow_update_cdf = 1;
     w.pos = 0;
 
-    entropy::writeTxbCoeffs(&w, &fc, qc16, scan16, entropy::TX_16X16, eob16, 0, 0, 1, entropy::DC_PRED);
-    entropy::writeTxbCoeffs(&w, &fc, qc8, scan8, entropy::TX_8X8, eob8, 0, 0, 1, entropy::DC_PRED);
-    entropy::writeTxbCoeffs(&w, &fc, qc4, scan4, entropy::TX_4X4, eob4, 0, 0, 1, entropy::DC_PRED);
+    entropy::writeTxbCoeffs(&w, &fc, qc16, scan16, entropy::TX_16X16, eob16, 0, 0, 1, entropy::DC_PRED,
+                            entropy::COMPONENT_LUMA);
+    entropy::writeTxbCoeffs(&w, &fc, qc8, scan8, entropy::TX_8X8, eob8, 0, 0, 1, entropy::DC_PRED,
+                            entropy::COMPONENT_LUMA);
+    entropy::writeTxbCoeffs(&w, &fc, qc4, scan4, entropy::TX_4X4, eob4, 0, 0, 1, entropy::DC_PRED,
+                            entropy::COMPONENT_LUMA);
     entropy::odEcStopEncode(&w);
     // TD5b: the token tables are the q100 bucket (idx 2) - the bytes follow
     // the regenerated ectok_bytes gate line.
@@ -564,9 +567,12 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     std::int32_t rc16[256] = {0};
     std::int32_t rc8[64] = {0};
     std::int32_t rc4[16] = {0};
-    const int reob16 = entropy::readTxbCoeffs(&r, &fcR, rc16, scan16, entropy::TX_16X16, 0, 0, 1, entropy::DC_PRED);
-    const int reob8 = entropy::readTxbCoeffs(&r, &fcR, rc8, scan8, entropy::TX_8X8, 0, 0, 1, entropy::DC_PRED);
-    const int reob4 = entropy::readTxbCoeffs(&r, &fcR, rc4, scan4, entropy::TX_4X4, 0, 0, 1, entropy::DC_PRED);
+    const int reob16 = entropy::readTxbCoeffs(&r, &fcR, rc16, scan16, entropy::TX_16X16, 0, 0, 1,
+                                              entropy::DC_PRED, entropy::COMPONENT_LUMA);
+    const int reob8 = entropy::readTxbCoeffs(&r, &fcR, rc8, scan8, entropy::TX_8X8, 0, 0, 1,
+                                             entropy::DC_PRED, entropy::COMPONENT_LUMA);
+    const int reob4 = entropy::readTxbCoeffs(&r, &fcR, rc4, scan4, entropy::TX_4X4, 0, 0, 1,
+                                             entropy::DC_PRED, entropy::COMPONENT_LUMA);
     CHECK(reob16 == 21);
     CHECK(reob8 == 10);
     CHECK(reob4 == 0);
@@ -586,7 +592,7 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
     // DC_PRED at every call site, matching the generator drive.
     // The skip_contexts table branch (:301-308) and the chroma branch
     // (:310-314) are dead for whole-block luma TUs (plane_bsize == tx_bsize
-    // always) — ported in l7 for the range rule but never exercised here.
+    // always) - ported in l7 for the range rule but never exercised here.
     static const int px[4][2] = {{0, 0}, {16, 0}, {0, 16}, {16, 16}};
     static const int mi[4][2] = {{0, 0}, {0, 4}, {4, 0}, {4, 4}};
     static const int wantCtx[4] = {0, 2, 2, 2};
@@ -629,7 +635,8 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
 
     for (int b = 0; b < 4; ++b) {
         entropy::writeBlockCoeffs(&w, &fc, &na, qc[b], scan16, entropy::TX_16X16,
-                                  entropy::BLOCK_16X16, eob[b], mi[b][0], mi[b][1], 1, entropy::DC_PRED);
+                                  entropy::BLOCK_16X16, eob[b], mi[b][0], mi[b][1], 1,
+                                  entropy::DC_PRED, entropy::COMPONENT_LUMA);
     }
     entropy::odEcStopEncode(&w);
     // TD5b: the token tables are the q100 bucket (idx 2) - the bytes follow
@@ -649,9 +656,488 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
     for (int b = 0; b < 4; ++b) {
         std::int32_t rc[256] = {0};
         const int reob = entropy::readBlockCoeffs(&r, &fcR, &naR, rc, scan16, entropy::TX_16X16,
-                                                  entropy::BLOCK_16X16, mi[b][0], mi[b][1], 1, entropy::DC_PRED);
+                                                  entropy::BLOCK_16X16, mi[b][0], mi[b][1], 1,
+                                                  entropy::DC_PRED, entropy::COMPONENT_LUMA);
         CHECK(reob == (int)eob[b]);
         for (int i = 0; i < 256; ++i) CHECK(rc[i] == qc[b][i]);
     }
+CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+}
+
+TEST_CASE("uv angle-delta pair matches gate bytes, gate enumerated (CS1b)") {
+    // Gate: ecuv_delta_bytes 23 02 14 35 7d 9a 5b 45 51 70 80 b9 df 66 ce ca
+    // bb ee 9a 7a 39 12 56 40, ecuv_delta_cdf_eq 1 (composition.c
+    // svtd_cs1_uv_delta_drive: entropy_coding.c:1087-1092, the symbol
+    // delta + MAX_ANGLE_DELTA through angle_delta_cdf[chroma_mode - V_PRED];
+    // read twin aom decodemv.c:830-833 + read_angle_delta :603-606).
+    // Gate enumeration (the full UvPredictionMode domain 0..13, both bsize
+    // regimes): the symbol is emitted ONLY when bsize >= BLOCK_8X8
+    // (av1_use_angle_delta, aom reconintra.h:59-61) AND
+    // isDirectionalMode(uv2y(chroma_mode)) - directional chroma modes are
+    // exactly UV_V_PRED..UV_D67_PRED (1..8, uv2y[uv] == uv so the SVT writer
+    // row :1090 == the aom reader's folded row); DC/SMOOTH/PAETH/CFL fold to
+    // non-directional and consume NOTHING. The cdf row index chroma_mode -
+    // V_PRED is only evaluated inside that gate (range-safe: 0..7).
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc, 100);
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR, 100);
+
+    entropy::AomWriter w{};
+    unsigned char buf[64] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    int syms[DIRECTIONAL_MODES * (2 * MAX_ANGLE_DELTA + 1)];
+    int n = 0;
+    for (int uv = entropy::V_PRED; uv <= entropy::D67_PRED; ++uv) {
+        for (int d = -MAX_ANGLE_DELTA; d <= MAX_ANGLE_DELTA; ++d) {
+            entropy::writeUvAngleDelta(&w, &fc, entropy::BLOCK_16X16,
+                                       (entropy::UvPredictionMode)uv, d);
+            syms[n++] = d + MAX_ANGLE_DELTA;
+        }
+    }
+    entropy::odEcStopEncode(&w);
+    REQUIRE(w.pos == 23);
+    static const unsigned char wantBytes[23] = {0x02, 0x14, 0x35, 0x7d, 0x9a, 0x5b, 0x45, 0x51,
+                                                0x70, 0x80, 0xb9, 0xdf, 0x66, 0xce, 0xca, 0xbb,
+                                                0xee, 0x9a, 0x7a, 0x39, 0x12, 0x56, 0x40};
+    for (int i = 0; i < 23; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    n = 0;
+    for (int uv = entropy::V_PRED; uv <= entropy::D67_PRED; ++uv) {
+        for (int d = -MAX_ANGLE_DELTA; d <= MAX_ANGLE_DELTA; ++d) {
+            const int s = entropy::readUvAngleDelta(&r, &fcR, entropy::BLOCK_16X16,
+                                                    (entropy::UvPredictionMode)uv);
+            CHECK(s == syms[n++]);
+        }
+    }
     CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+
+    // The gate: bsize < BLOCK_8X8 -> NOTHING for every UV mode 0..13
+    // (writer emits no symbol - odEcEncTell unchanged; reader consumes none
+    // and returns -1). The empty-stream odEcStopEncode flush is a machinery
+    // constant, not gate evidence - not asserted.
+    for (int uv = 0; uv < entropy::UV_INTRA_MODES; ++uv) {
+        entropy::AomWriter wg{};
+        unsigned char bufG[8] = {0};
+        wg.ec.buf = bufG;
+        entropy::odEcEncReset(&wg.ec);
+        wg.allow_update_cdf = 1;
+        wg.pos = 0;
+        const int tellBefore = entropy::odEcEncTell(&wg.ec);
+        entropy::writeUvAngleDelta(&wg, &fc, entropy::BLOCK_4X4, (entropy::UvPredictionMode)uv, 2);
+        CHECK(entropy::odEcEncTell(&wg.ec) == tellBefore);
+        entropy::AomReader rg;
+        REQUIRE(entropy::odEcReaderInit(&rg, bufG, 0) == 0);
+        rg.allow_update_cdf = 1;
+        const int tellRBefore = entropy::odEcDecTell(&rg.ec);
+        CHECK(entropy::readUvAngleDelta(&rg, &fcR, entropy::BLOCK_4X4, (entropy::UvPredictionMode)uv) == -1);
+        CHECK(entropy::odEcDecTell(&rg.ec) == tellRBefore);
+    }
+    // bsize >= BLOCK_8X8: exactly the directional UV modes 1..8 emit one
+    // symbol (odEcEncTell advances; the read-back re-adapts fcR so the final
+    // cdf compare holds); 0 and 9..13 (non-directional, incl. UV_CFL_PRED)
+    // emit nothing and read -1 with no consumption.
+    for (int uv = 0; uv < entropy::UV_INTRA_MODES; ++uv) {
+        entropy::AomWriter wg{};
+        unsigned char bufG2[8] = {0};
+        wg.ec.buf = bufG2;
+        entropy::odEcEncReset(&wg.ec);
+        wg.allow_update_cdf = 1;
+        wg.pos = 0;
+        const int tellBefore2 = entropy::odEcEncTell(&wg.ec);
+        entropy::writeUvAngleDelta(&wg, &fc, entropy::BLOCK_8X8, (entropy::UvPredictionMode)uv, 2);
+        const int tellAfter2 = entropy::odEcEncTell(&wg.ec);
+        entropy::odEcStopEncode(&wg);
+        if (uv >= entropy::V_PRED && uv <= entropy::D67_PRED) {
+            CHECK(tellAfter2 > tellBefore2);
+            entropy::AomReader rg;
+            REQUIRE(entropy::odEcReaderInit(&rg, bufG2, wg.pos) == 0);
+            rg.allow_update_cdf = 1;
+            CHECK(entropy::readUvAngleDelta(&rg, &fcR, entropy::BLOCK_8X8, (entropy::UvPredictionMode)uv) ==
+                  2 + MAX_ANGLE_DELTA);
+        } else {
+            CHECK(tellAfter2 == tellBefore2);
+            entropy::AomReader rg;
+            REQUIRE(entropy::odEcReaderInit(&rg, bufG2, 0) == 0);
+            rg.allow_update_cdf = 1;
+            const int tellRBefore2 = entropy::odEcDecTell(&rg.ec);
+            CHECK(entropy::readUvAngleDelta(&rg, &fcR, entropy::BLOCK_8X8, (entropy::UvPredictionMode)uv) == -1);
+            CHECK(entropy::odEcDecTell(&rg.ec) == tellRBefore2);
+        }
+    }
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+}
+
+TEST_CASE("uv_mode symbol pair matches gate bytes and round-trips (CS1b)") {
+    // Gate: ecuv_mode_bytes 11 73 8f 88 d0 8f 88 7b b4 42 65 b2,
+    // ecuv_mode_cdf_eq 1 (composition.c svtd_cs1_uv_mode_drive; the
+    // default_uv_mode_cdf extract, cabac_context_model.c:105). Alphabet:
+    // UV_INTRA_MODES - !cflAllowed (entropy_coding.c:1080-1081 write /
+    // aom decodemv.c:140-148 read), ctx [cflAllowed][luma_mode]. The cfl=1
+    // rows spread (luma+5) mod 14 so the 14-symbol alphabet incl.
+    // UV_CFL_PRED round-trips as a symbol (the D2 decision never picks it;
+    // write_cfl_alphas :1083-1085 stays deferred).
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc, 100);
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR, 100);
+
+    entropy::AomWriter w{};
+    unsigned char buf[64] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+
+    int syms[2 * entropy::INTRA_MODES];
+    int n = 0;
+    for (int cfl = 0; cfl < entropy::CFL_ALLOWED_TYPES; ++cfl) {
+        for (int luma = 0; luma < entropy::INTRA_MODES; ++luma) {
+            const entropy::UvPredictionMode uv =
+                cfl ? (entropy::UvPredictionMode)((luma + 5) % entropy::UV_INTRA_MODES)
+                    : (entropy::UvPredictionMode)luma;
+            entropy::writeUvMode(&w, &fc, cfl, (entropy::PredictionMode)luma, uv);
+            syms[n++] = (int)uv;
+        }
+    }
+    entropy::odEcStopEncode(&w);
+    REQUIRE(w.pos == 11);
+    static const unsigned char wantBytes[11] = {0x73, 0x8f, 0x88, 0xd0, 0x8f, 0x88,
+                                                0x7b, 0xb4, 0x42, 0x65, 0xb2};
+    for (int i = 0; i < 11; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    n = 0;
+    for (int cfl = 0; cfl < entropy::CFL_ALLOWED_TYPES; ++cfl) {
+        for (int luma = 0; luma < entropy::INTRA_MODES; ++luma) {
+            const entropy::UvPredictionMode s =
+                entropy::readUvMode(&r, &fcR, cfl, (entropy::PredictionMode)luma);
+            CHECK((int)s == syms[n++]);
+        }
+    }
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+}
+
+static const unsigned char ecuv4U_bytes[7] = {
+    0x09, 0xa0, 0xca, 0x10, 0x67, 0x4b, 0x80
+};
+
+static const unsigned char ecuv8U_bytes[20] = {
+    0x25, 0x11, 0xb3, 0x3d, 0x65, 0x60, 0x55, 0xbd, 0xd0, 0x58, 0xf6, 0x68,
+    0x07, 0x67, 0x99, 0x99, 0x9c, 0xff, 0xff, 0xc0
+};
+
+static const unsigned char ecuv16U_bytes[59] = {
+    0x4a, 0x50, 0xed, 0xdd, 0xfa, 0xcd, 0x3b, 0xeb, 0x3a, 0x1b, 0xb5, 0xa5,
+    0x68, 0x74, 0x6b, 0x35, 0x22, 0xd0, 0x30, 0x22, 0xcf, 0x78, 0x26, 0x1e,
+    0xa0, 0x16, 0xa1, 0x29, 0xe9, 0xa5, 0xf8, 0x35, 0x79, 0xc8, 0xe9, 0xb3,
+    0x64, 0x1d, 0xaf, 0x0a, 0xa6, 0x94, 0xd4, 0xfd, 0xe0, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08
+};
+
+static const unsigned char ecuv32U_bytes[194] = {
+    0x26, 0x6b, 0xbd, 0xbf, 0x7e, 0x82, 0xee, 0xfb, 0x68, 0x15, 0x2e, 0xcd,
+    0x76, 0xb1, 0x34, 0x4f, 0xc6, 0x05, 0x0d, 0x8a, 0xd5, 0xed, 0xf9, 0x86,
+    0x47, 0xae, 0xdf, 0x96, 0x17, 0xbe, 0x7f, 0xa9, 0xc8, 0x03, 0x5c, 0xa2,
+    0x12, 0x86, 0xc7, 0x57, 0x80, 0x30, 0x6f, 0x64, 0xfb, 0x49, 0x5c, 0x9c,
+    0xca, 0xad, 0xfc, 0x88, 0x76, 0x90, 0xf2, 0x31, 0x6b, 0x74, 0xf6, 0x58,
+    0x22, 0x8f, 0xb9, 0x86, 0x75, 0x25, 0x20, 0xad, 0xd3, 0x6c, 0xbb, 0x48,
+    0x34, 0x8e, 0xc8, 0x0c, 0xe6, 0xc1, 0x8a, 0x14, 0x04, 0xea, 0xa6, 0x72,
+    0xab, 0xe9, 0x45, 0x8c, 0x77, 0x27, 0xc7, 0x9e, 0xbf, 0xc4, 0xb9, 0xec,
+    0xbf, 0x38, 0x7e, 0x9a, 0xc4, 0x23, 0x92, 0x16, 0x9d, 0x62, 0x4b, 0x22,
+    0x9b, 0xa7, 0xd1, 0x7b, 0x69, 0x65, 0x11, 0xc6, 0xfc, 0x4d, 0x40, 0x6f,
+    0x0b, 0xdc, 0x15, 0xe4, 0x16, 0x20, 0xc2, 0xb5, 0x1c, 0xb5, 0x83, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xc0
+};
+
+static const unsigned char ecuv0U_bytes[1] = {
+    0xc0
+};
+
+static const unsigned char ecuv4V_bytes[7] = {
+    0x17, 0x73, 0x07, 0x8a, 0xa3, 0xb0, 0xb8
+};
+
+static const unsigned char ecuv8V_bytes[20] = {
+    0x6b, 0x8e, 0xc0, 0x4f, 0xa6, 0xe7, 0xaf, 0xf7, 0xe4, 0xb9, 0xfe, 0x17,
+    0x21, 0x45, 0x60, 0xce, 0xb4, 0x4a, 0xaa, 0xab
+};
+
+static const unsigned char ecuv16V_bytes[59] = {
+    0xc8, 0x10, 0xdb, 0xef, 0xeb, 0xd0, 0xef, 0xc1, 0x17, 0x83, 0x5f, 0xdd,
+    0xef, 0xe7, 0x16, 0xb0, 0xf0, 0xcf, 0x52, 0x18, 0x38, 0x7b, 0x24, 0x59,
+    0xee, 0x4b, 0xa2, 0x0d, 0x0a, 0x79, 0x40, 0x46, 0x7b, 0x71, 0xeb, 0x92,
+    0x5a, 0x0e, 0x70, 0x8a, 0x57, 0x69, 0x77, 0x7c, 0xaa, 0xaa, 0xaa, 0xaa,
+    0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0x90
+};
+
+static const unsigned char ecuv32V_bytes[194] = {
+    0x27, 0x99, 0xbe, 0x2e, 0xff, 0xc2, 0x23, 0xc1, 0x6e, 0x66, 0x7b, 0x01,
+    0xb8, 0xdf, 0xed, 0xb9, 0x60, 0xc9, 0xcd, 0xc6, 0x76, 0x1a, 0x30, 0xb3,
+    0xa6, 0xa1, 0x88, 0xa9, 0x8c, 0xc0, 0x3a, 0x48, 0xb4, 0xa3, 0xec, 0xe1,
+    0xbf, 0x73, 0x85, 0x90, 0x14, 0xf9, 0x4b, 0x78, 0xe8, 0x7e, 0xef, 0xf1,
+    0x3c, 0x8f, 0x5d, 0x88, 0x9a, 0x56, 0x04, 0x67, 0x4f, 0x09, 0xc9, 0x1f,
+    0x95, 0xaf, 0x69, 0x96, 0xaa, 0xfb, 0xc0, 0x26, 0x15, 0x02, 0x77, 0x37,
+    0xa8, 0x80, 0x94, 0x2b, 0x30, 0xd2, 0x7d, 0xa1, 0xf9, 0x8f, 0x8a, 0xdd,
+    0xc3, 0x37, 0x2e, 0xab, 0x1c, 0xdb, 0xcb, 0x12, 0x8b, 0xfc, 0xfd, 0x89,
+    0x86, 0x23, 0x2a, 0x9e, 0xf8, 0x3e, 0xe6, 0xaa, 0xb4, 0x7e, 0x08, 0x84,
+    0xc1, 0x33, 0x6b, 0x7c, 0x1a, 0xa7, 0x1a, 0x5d, 0xf2, 0x75, 0xbf, 0xad,
+    0x69, 0xaa, 0x11, 0xef, 0x25, 0x34, 0xdf, 0x6e, 0x06, 0x40, 0x52, 0x7f,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xfc
+};
+
+static const unsigned char ecuv0V_bytes[1] = {
+    0xc0
+};
+
+// CS1b chroma fixture (mechanical mirror of composition.c
+// svtd_cs1_uv_txb_drive): per (component, txs), eob = N/2, levels
+// c==0 -> 3, c==1 -> 12, c==eob-1 -> 2, else (c%3)+1, all other positions 0;
+// signs alternate starting +, V = negated U; txb_skip_ctx rotation {7,8,9,7};
+// dc_sign_ctx 0; intra_dir DC_PRED; fresh default CDFs (q100 bucket) per
+// stream. Byte arrays mechanically emitted from expected_primitives.txt.
+static void cs1bFillQc(std::int32_t* qc, const std::int16_t* scan, int eob, int negate) {
+    for (int cpos = 0; cpos < eob; ++cpos) {
+        const int pos = scan[cpos];
+        int level;
+        if (cpos == 0) level = 3;
+        else if (cpos == 1) level = 12;
+        else if (cpos == eob - 1) level = 2;
+        else level = (cpos % 3) + 1;
+        int sign = (cpos % 2) == 0 ? 1 : -1;
+        if (negate) sign = -sign;
+        qc[pos] = level * sign;
+    }
+}
+
+TEST_CASE("chroma token chain per-component per-txs matches gate bytes (CS1b)") {
+    // Gate: ecuv4U/8U/16U/32U + ecuv4V/8V/16V/32V + ecuv0U/ecuv0V bytes,
+    // ecuv_cdf_eq 1 (composition.c svtd_cs1_uv_txb_drive). The six
+    // component-dim CDF families thread component_type through
+    // writeTxbCoeffs/readTxbCoeffs (entropy_coding.c:355-544); the tx-type
+    // symbol is LUMA-ONLY (entropy_coding.c:374-376 - chroma TUs emit no
+    // tx-type symbol; without that gate the byte streams would diverge);
+    // the chroma txb_skip_ctx rotation {7,8,9,7} is the :310-314 branch
+    // (ctx_base + offset 7). Byte arrays mechanically emitted from
+    // expected_primitives.txt (emit_ecuv_arrays.ps1); no hand-typed values.
+    static const entropy::TxSize ts[4] = {entropy::TX_4X4, entropy::TX_8X8, entropy::TX_16X16,
+                                          entropy::TX_32X32};
+    static const int dims[4] = {16, 64, 256, 1024};
+    static const int txbSkipCtxs[4] = {7, 8, 9, 7};
+    static const unsigned char* const wantBytes[2][4] = {
+        {ecuv4U_bytes, ecuv8U_bytes, ecuv16U_bytes, ecuv32U_bytes},
+        {ecuv4V_bytes, ecuv8V_bytes, ecuv16V_bytes, ecuv32V_bytes}};
+    static const int wantLen[2][4] = {{7, 20, 59, 194}, {7, 20, 59, 194}};
+    static std::int16_t scans[4][1024];
+    transforms::defaultScan4x4(scans[0]);
+    transforms::defaultScan8x8(scans[1]);
+    transforms::defaultScan16x16(scans[2]);
+    transforms::defaultScan32x32(scans[3]);
+
+    int cdfBad = 0;
+    for (int comp = 0; comp < 2; ++comp) {
+        const entropy::ComponentType component =
+            comp ? entropy::COMPONENT_CHROMA : entropy::COMPONENT_LUMA;
+        for (int t = 0; t < 4; ++t) {
+            const int n = dims[t];
+            const int eob = n / 2;
+            std::int32_t qc[1024] = {0};
+            cs1bFillQc(qc, scans[t], eob, comp);
+
+            entropy::EcFrameContext fc;
+            entropy::initDefaultEcFrameContext(&fc, 100);
+            entropy::EcFrameContext fcR;
+            entropy::initDefaultEcFrameContext(&fcR, 100);
+
+            entropy::AomWriter w{};
+            unsigned char buf[256] = {0};
+            w.ec.buf = buf;
+            entropy::odEcEncReset(&w.ec);
+            w.allow_update_cdf = 1;
+            w.pos = 0;
+            entropy::writeTxbCoeffs(&w, &fc, qc, scans[t], ts[t], eob, txbSkipCtxs[t], 0, 1,
+                                    entropy::DC_PRED, component);
+            entropy::odEcStopEncode(&w);
+            REQUIRE(w.pos == wantLen[comp][t]);
+            for (int i = 0; i < wantLen[comp][t]; ++i) CHECK((unsigned)buf[i] == wantBytes[comp][t][i]);
+
+            entropy::AomReader r;
+            REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+            r.allow_update_cdf = 1;
+            std::int32_t rc[1024];
+            memset(rc, 0, sizeof(rc));
+            const int reob = entropy::readTxbCoeffs(&r, &fcR, rc, scans[t], ts[t], txbSkipCtxs[t], 0, 1,
+                                                     entropy::DC_PRED, component);
+            CHECK(reob == eob);
+            for (int i = 0; i < n; ++i) CHECK(rc[i] == qc[i]);
+            if (entropy::ecFrameCdfsEqual(&fc, &fcR) != 1) cdfBad = 1;
+        }
+        // eob == 0 (txb_skip-only) case: TX_4X4, txb_skip_ctx 8.
+        std::int32_t zeroQc[16] = {0};
+        entropy::EcFrameContext fc0;
+        entropy::initDefaultEcFrameContext(&fc0, 100);
+        entropy::EcFrameContext fc0R;
+        entropy::initDefaultEcFrameContext(&fc0R, 100);
+        entropy::AomWriter w0{};
+        unsigned char buf0[8] = {0};
+        w0.ec.buf = buf0;
+        entropy::odEcEncReset(&w0.ec);
+        w0.allow_update_cdf = 1;
+        w0.pos = 0;
+        entropy::writeTxbCoeffs(&w0, &fc0, zeroQc, scans[0], entropy::TX_4X4, 0, 8, 0, 1,
+                                entropy::DC_PRED, component);
+        entropy::odEcStopEncode(&w0);
+        REQUIRE(w0.pos == 1);
+        CHECK((unsigned)buf0[0] == (comp ? ecuv0V_bytes[0] : ecuv0U_bytes[0]));
+        entropy::AomReader r0;
+        REQUIRE(entropy::odEcReaderInit(&r0, buf0, w0.pos) == 0);
+        r0.allow_update_cdf = 1;
+        std::int32_t rc0[16] = {0};
+        const int reob0 = entropy::readTxbCoeffs(&r0, &fc0R, rc0, scans[0], entropy::TX_4X4, 8, 0, 1,
+                                                 entropy::DC_PRED, component);
+        CHECK(reob0 == 0);
+        if (entropy::ecFrameCdfsEqual(&fc0, &fc0R) != 1) cdfBad = 1;
+    }
+    CHECK(cdfBad == 0);
+}
+
+TEST_CASE("chroma per-block wrapper derives txb_skip_ctx offset 7 (CS1b)") {
+    // The :310-314 branch made live: writeBlockCoeffs/readBlockCoeffs route
+    // component_type into getTxbCtx's plane arg (chroma -> PLANE_TYPE_UV).
+    // Discrimination: with a poisoned NA (a coded chroma neighbor above:
+    // nonzero packed byte 0x01; left INVALID) the chroma wrapper must derive
+    // ctx = (left!=0) + (top!=0) + 7 = 8 - its byte stream must EQUAL a
+    // direct writeTxbCoeffs call at txb_skip_ctx 8. The luma routing
+    // (plane 0, plane_bsize == tx_bsize -> ctx 0) would diverge.
+    // Plus the getTxbCtx chroma domain enumerated directly: ctx_base over
+    // {top,left} in {INVALID, 0x00, nonzero} (ctx 7..9), the dc_sign_ctx
+    // 3x3 sign grid, and the offset-10 characterization rows (plane_bsize >
+    // tx_bsize; dead for whole-block TUs, ported per the range rule).
+    std::int16_t scan4[16];
+    transforms::defaultScan4x4(scan4);
+    std::int32_t qc[16] = {0};
+    qc[scan4[0]] = 3;
+    qc[scan4[1]] = -2;
+    qc[scan4[2]] = 5;
+    qc[scan4[3]] = 2;
+    const int eob = 4;
+
+    entropy::EcFrameContext fcW;
+    entropy::initDefaultEcFrameContext(&fcW, 100);
+    entropy::DcSignLevelCoeffNa naW;
+    memset(&naW, 0xFF, sizeof(naW));
+    naW.above[0] = 0x01;  // coded chroma neighbor above (nonzero cul, no sign)
+    entropy::AomWriter w{};
+    unsigned char buf[16] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    entropy::writeBlockCoeffs(&w, &fcW, &naW, qc, scan4, entropy::TX_4X4, entropy::BLOCK_4X4, eob,
+                              0, 0, 1, entropy::DC_PRED, entropy::COMPONENT_CHROMA);
+    entropy::odEcStopEncode(&w);
+
+    entropy::EcFrameContext fcD;
+    entropy::initDefaultEcFrameContext(&fcD, 100);
+    entropy::AomWriter wd{};
+    unsigned char bufD[16] = {0};
+    wd.ec.buf = bufD;
+    entropy::odEcEncReset(&wd.ec);
+    wd.allow_update_cdf = 1;
+    wd.pos = 0;
+    entropy::writeTxbCoeffs(&wd, &fcD, qc, scan4, entropy::TX_4X4, eob, 8, 0, 1, entropy::DC_PRED,
+                            entropy::COMPONENT_CHROMA);
+    entropy::odEcStopEncode(&wd);
+    REQUIRE(w.pos == wd.pos);
+    for (unsigned i = 0; i < w.pos; ++i) CHECK((unsigned)buf[i] == (unsigned)bufD[i]);
+
+    // reader twin with the same poisoned NA (fresh): derives ctx 8 and
+    // round-trips; the NA update writes the packed byte over the TU extent.
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR, 100);
+    entropy::DcSignLevelCoeffNa naR;
+    memset(&naR, 0xFF, sizeof(naR));
+    naR.above[0] = 0x01;
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    std::int32_t rc[16] = {0};
+    const int reob = entropy::readBlockCoeffs(&r, &fcR, &naR, rc, scan4, entropy::TX_4X4,
+                                              entropy::BLOCK_4X4, 0, 0, 1, entropy::DC_PRED,
+                                              entropy::COMPONENT_CHROMA);
+    CHECK(reob == eob);
+    for (int i = 0; i < 16; ++i) CHECK(rc[i] == qc[i]);
+    CHECK(entropy::ecFrameCdfsEqual(&fcW, &fcR) == 1);
+
+    // luma equivalence: all-INVALID NA -> ctx 0 (the whole-block luma rule)
+    entropy::EcFrameContext fcL;
+    entropy::initDefaultEcFrameContext(&fcL, 100);
+    entropy::DcSignLevelCoeffNa naL;
+    memset(&naL, 0xFF, sizeof(naL));
+    entropy::AomWriter wl{};
+    unsigned char bufL[16] = {0};
+    wl.ec.buf = bufL;
+    entropy::odEcEncReset(&wl.ec);
+    wl.allow_update_cdf = 1;
+    wl.pos = 0;
+    entropy::writeBlockCoeffs(&wl, &fcL, &naL, qc, scan4, entropy::TX_4X4, entropy::BLOCK_4X4, eob,
+                              0, 0, 1, entropy::DC_PRED, entropy::COMPONENT_LUMA);
+    entropy::odEcStopEncode(&wl);
+    entropy::EcFrameContext fcLD;
+    entropy::initDefaultEcFrameContext(&fcLD, 100);
+    entropy::AomWriter wld{};
+    unsigned char bufLD[16] = {0};
+    wld.ec.buf = bufLD;
+    entropy::odEcEncReset(&wld.ec);
+    wld.allow_update_cdf = 1;
+    wld.pos = 0;
+    entropy::writeTxbCoeffs(&wld, &fcLD, qc, scan4, entropy::TX_4X4, eob, 0, 0, 1,
+                            entropy::DC_PRED, entropy::COMPONENT_LUMA);
+    entropy::odEcStopEncode(&wld);
+    REQUIRE(wl.pos == wld.pos);
+    for (unsigned i = 0; i < wl.pos; ++i) CHECK((unsigned)bufL[i] == (unsigned)bufLD[i]);
+
+    // getTxbCtx chroma domain, enumerated (plane_bsize == tx_bsize -> the
+    // offset-7 branch): ctx_base = (left!=0) + (top!=0), INVALID -> absent.
+    struct CtxCase {
+        std::uint8_t above;
+        std::uint8_t left;
+        int wantCtx;
+        int wantSign;
+    };
+    static const CtxCase cases[7] = {
+        {0xFF, 0xFF, 7, 0}, {0x01, 0xFF, 8, 0}, {0xFF, 0x01, 8, 0}, {0x01, 0x01, 9, 0},
+        {0x40, 0x80, 9, 0}, {0x80, 0x00, 8, 2}, {0x00, 0x40, 8, 1},
+    };
+    for (int ci = 0; ci < 7; ++ci) {
+        int ctx = -1, sign = -1;
+        entropy::getTxbCtx(&cases[ci].above, &cases[ci].left, 1, 1, 1, entropy::BLOCK_4X4,
+                           entropy::TX_4X4, &ctx, &sign);
+        CHECK(ctx == cases[ci].wantCtx);
+        CHECK(sign == cases[ci].wantSign);
+    }
+    // offset-10 characterization rows (plane_bsize 8x8 > tx 4x4): ctx 10..12.
+    int ctx10 = -1, sign10 = -1;
+    entropy::getTxbCtx(&cases[3].above, &cases[3].left, 1, 1, 1, entropy::BLOCK_8X8,
+                       entropy::TX_4X4, &ctx10, &sign10);
+    CHECK(ctx10 == 12);
 }

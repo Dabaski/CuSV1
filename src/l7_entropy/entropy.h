@@ -237,6 +237,37 @@ enum FilterIntraMode {
 #define DIRECTIONAL_MODES 8     // definitions.h:1305
 #define MAX_ANGLE_DELTA 3       // definitions.h:1306
 
+// CflAllowedType (definitions.h:1121, verbatim)
+enum CflAllowedType { CFL_DISALLOWED, CFL_ALLOWED, CFL_ALLOWED_TYPES };
+
+// UvPredictionMode (definitions.h:1210-1227, verbatim order). UV_CFL_PRED is
+// enumerated but the CFL-specific combine (cfl_alpha AC-from-luma) is OUT of
+// scope (named deviation, CH-series/CS1): at the prediction surface SVT folds
+// UV_CFL_PRED to DC_PRED (g_uv2y, common_utils.c:14-31).
+enum UvPredictionMode {
+    UV_DC_PRED = 0,
+    UV_V_PRED = 1,
+    UV_H_PRED = 2,
+    UV_D45_PRED = 3,
+    UV_D135_PRED = 4,
+    UV_D113_PRED = 5,
+    UV_D157_PRED = 6,
+    UV_D203_PRED = 7,
+    UV_D67_PRED = 8,
+    UV_SMOOTH_PRED = 9,
+    UV_SMOOTH_V_PRED = 10,
+    UV_SMOOTH_H_PRED = 11,
+    UV_PAETH_PRED = 12,
+    UV_CFL_PRED = 13,
+    UV_INTRA_MODES = 14,
+    UV_MODE_INVALID = 15,
+};
+
+// get_uv_mode (common_utils.h:130-133) = g_uv2y[mode]
+// (common_utils.c:14-31, verbatim table): UV modes fold to the luma
+// primitive set, UV_CFL_PRED -> DC_PRED, sentinels -> INTRA_INVALID.
+PredictionMode uv2y(UvPredictionMode mode);
+
 // ---------------------------------------------------------------------------
 // Partition symbol surface (ECP1, court-ordered l7 exception).
 // ---------------------------------------------------------------------------
@@ -300,6 +331,20 @@ enum TxSetType {
 
 // PlaneType (definitions.h:685)
 enum PlaneType { PLANE_TYPE_Y, PLANE_TYPE_UV, PLANE_TYPES };
+
+// COMPONENT_TYPE (definitions.h:674-681, verbatim values). The token-chain
+// component index (entropy_coding.c:374-376 gates the tx-type symbol
+// LUMA-only; the six component-dim CDF families index [PLANE_TYPES] =
+// {0, 1} - COMPONENT_LUMA/COMPONENT_CHROMA are numerically the PLANE_TYPE
+// rows; CB/CR distinctions select buffers, not CDF rows, in our surface).
+enum ComponentType {
+    COMPONENT_LUMA = 0,       // luma
+    COMPONENT_CHROMA = 1,     // chroma (Cb+Cr)
+    COMPONENT_CHROMA_CB = 2,  // chroma Cb
+    COMPONENT_CHROMA_CR = 3,  // chroma Cr
+    COMPONENT_ALL = 4,        // Y+Cb+Cr
+    COMPONENT_NONE = 15
+};
 // TxClass (definitions.h:989-994)
 enum TxClass { TX_CLASS_2D = 0, TX_CLASS_HORIZ = 1, TX_CLASS_VERT = 2, TX_CLASSES = 3 };
 // TxSize (definitions.h:951-983, full verbatim order - the txb helpers index
@@ -365,6 +410,10 @@ struct EcFrameContext {
     AomCdfProb eob_flag_cdf512[PLANE_TYPES][2][CDF_SIZE(10)];
     AomCdfProb eob_flag_cdf1024[PLANE_TYPES][2][CDF_SIZE(11)];
     AomCdfProb intra_ext_tx_cdf[EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][CDF_SIZE(TX_TYPES)];
+    // CS1b: the uv_mode CDF (cabac_context_model.c:105 verbatim extract).
+    // Disallowed rows: 13-symbol (counter at cdf[13]); allowed rows:
+    // 14-symbol (counter at cdf[14]).
+    AomCdfProb uv_mode_cdf[CFL_ALLOWED_TYPES][INTRA_MODES][CDF_SIZE(UV_INTRA_MODES)];
 };
 
 // Initialize from the SVT default tables (cabac_context_model.c:59-97,
@@ -496,15 +545,21 @@ int readGolomb(AomReader* r);
 // entropy_coding.c:355-544 port (LUMA DCT_DCT): txb_skip :366 -> eob_pt/extra
 // :378-411 -> last-coeff base_eob+br :479-500 -> reverse base/br :502-524 ->
 // forward signs+golomb :527-539. coeff: raster-order quantized coefficients;
-// scan: forward scan (svt_aom_init_iscan family).
+// scan: forward scan (svt_aom_init_iscan family). CS1b: component_type
+// threads the six component-dim CDF families (dc_sign, eob_flag16..1024,
+// eob_extra, coeff_base_eob, coeff_base, coeff_br - the [PLANE_TYPES] rows)
+// and gates the tx-type symbol LUMA-only (entropy_coding.c:374-376: chroma
+// TUs emit no tx-type symbol).
 void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
                     const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
-                    int dc_sign_ctx, int reduced_tx_set, PredictionMode intra_dir);
+                    int dc_sign_ctx, int reduced_tx_set, PredictionMode intra_dir,
+                    ComponentType component_type);
 // read twin (aom decodetxb.c read_coeffs_txb, symbol-for-symbol). Fills
-// coeff (raster, signed); returns eob.
+// coeff (raster, signed); returns eob. Same component_type threading.
 int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
                   const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx,
-                  int reduced_tx_set, PredictionMode intra_dir);
+                  int reduced_tx_set, PredictionMode intra_dir,
+                  ComponentType component_type);
 
 // ---------------------------------------------------------------------------
 // TS3: tx-type surface (entropy_coding.c:317-353, intra path only).
@@ -532,7 +587,7 @@ extern const int32_t av1ExtTxInd[EXT_TX_SET_TYPES][16];
 // av1_num_ext_tx_set[tx_set_type].
 void writeTxType(AomWriter* w, EcFrameContext* fc, int base_q_idx, int reduced_tx_set,
                  PredictionMode intra_dir, TxType tx_type, TxSize tx_size);
-// Read twin (aom decodetxb.c: av1_read_tx_type — reads from intra_ext_tx_cdf
+// Read twin (aom decodetxb.c: av1_read_tx_type - reads from intra_ext_tx_cdf
 // at [eset][square][intra_dir] and inverts via av1_ext_tx_inv)
 TxType readTxType(AomReader* r, EcFrameContext* fc, int base_q_idx, int reduced_tx_set,
                   PredictionMode intra_dir, TxSize tx_size);
@@ -571,14 +626,21 @@ extern const std::int32_t ebTxSizeHighUnit[TX_SIZES_ALL];
 //   getTxbCtx -> writeTxbCoeffs -> NA update. The NA update packs
 //   cul_level (clamped to COEFF_CONTEXT_MASK) + set_dc_sign into a uint8_t
 //   and writes it to the above/left arrays over the TU's mi extent.
+// CS1b: component_type routes getTxbCtx's plane arg (COMPONENT_CHROMA ->
+// PLANE_TYPE_UV, the :310-314 branch: ctx_base + offset 7) and threads the
+// six component-dim families through the chain. bsize is the PLANE block
+// size (the luma bsize for COMPONENT_LUMA; the UV-plane bsize for
+// COMPONENT_CHROMA).
 void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                       const std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
                       BlockSize bsize, int eob, int mi_row, int mi_col,
-                      int reduced_tx_set, PredictionMode intra_dir);
+                      int reduced_tx_set, PredictionMode intra_dir,
+                      ComponentType component_type);
 int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                     std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
                     BlockSize bsize, int mi_row, int mi_col,
-                    int reduced_tx_set, PredictionMode intra_dir);
+                    int reduced_tx_set, PredictionMode intra_dir,
+                    ComponentType component_type);
 
 // encode_intra_luma_mode_kf_av1 (entropy_coding.c:1026-1040): mode symbol
 // from kf_y_cdf[above_ctx][left_ctx], then the angle-delta symbol when
@@ -591,6 +653,36 @@ void writeKfLumaMode(AomWriter* w, EcFrameContext* fc, BlockSize bsize,
 // indexed by the DECODED mode (delta out as delta + MAX_ANGLE_DELTA).
 PredictionMode readKfLumaMode(AomReader* r, EcFrameContext* fc, BlockSize bsize,
                               int above_ctx, int left_ctx, int* angle_delta);
+
+// ---------------------------------------------------------------------------
+// CS1b: the chroma (uv_mode) symbol surface.
+// ---------------------------------------------------------------------------
+// encode_intra_chroma_mode_av1's mode symbol (entropy_coding.c:1080-1081):
+// uv_mode_cdf[cflAllowed][luma_mode], alphabet UV_INTRA_MODES - !cflAllowed
+// (13 disallowed / 14 allowed). The write_cfl_alphas branch (:1083-1085,
+// chroma_mode == UV_CFL_PRED) is DEFERRED - named (UV_CFL_PRED is not a D2
+// candidate, pipeline.cpp:1721; the alphas are dead in our emission).
+// Read twin: aom decodemv.c:140-148 (read_intra_mode_uv).
+void writeUvMode(AomWriter* w, EcFrameContext* fc, int cfl_allowed, PredictionMode luma_mode,
+                 UvPredictionMode chroma_mode);
+UvPredictionMode readUvMode(AomReader* r, EcFrameContext* fc, int cfl_allowed,
+                            PredictionMode luma_mode);
+
+// encode_intra_chroma_mode_av1's angle-delta symbol (entropy_coding.c:1087-
+// 1092): symbol = angle_delta + MAX_ANGLE_DELTA through
+// angle_delta_cdf[chroma_mode - V_PRED], gated by bsize >= BLOCK_8X8
+// (av1_use_angle_delta, aom reconintra.h:59-61) AND
+// isDirectionalMode(uv2y(chroma_mode)) - i.e. exactly the directional chroma
+// modes UV_V_PRED..UV_D67_PRED (1..8; uv2y[uv] == uv there, so the writer's
+// :1090 row equals the aom reader's folded row, decodemv.c:830-833 +
+// read_angle_delta :603-606). The cdf row index is only evaluated inside the
+// gate (range-safe: 0..7). Gated off: writeUvAngleDelta emits nothing,
+// readUvAngleDelta consumes nothing and returns -1; else it returns the raw
+// decoded symbol (delta + MAX_ANGLE_DELTA).
+void writeUvAngleDelta(AomWriter* w, EcFrameContext* fc, BlockSize bsize,
+                       UvPredictionMode chroma_mode, int angle_delta);
+int readUvAngleDelta(AomReader* r, EcFrameContext* fc, BlockSize bsize,
+                     UvPredictionMode chroma_mode);
 
 // Filter-intra pair (entropy_coding.c:5050-5058): flag symbol
 // (fi_mode != FILTER_INTRA_MODES) then, when set, the FI mode symbol.

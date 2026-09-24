@@ -103,19 +103,25 @@ A0. SLICE-LEVEL STATE (the live register)
   CS-series PLANNED (CS0 scoping of record 2026-09-24, all claims
   court-verified in the pinned tree; statuses flip to [~] per slice on
   landing):
-- [ ] CS1 l7 chroma entropy: uv_mode write/read (entropy_coding.c:1077-1095
+- [~] CS1 l7 chroma entropy (CS1a 4d73945 generator gate + CS1b the l7
+      mirror): uv_mode write/read (entropy_coding.c:1077-1095
       write, decodemv.c:144-147/:823-837 read; ctx = [cflAllowed][luma_mode],
       the DECIDED luma mode; alphabet UV_INTRA_MODES - !cflAllowed = 14 at
       bsize <= 32x32 / 13 at 64x64; default_uv_mode_cdf cabac_context_model.c:105
-      NOT yet in l7 NOR the svt_gen.c extract - extract extension first) +
-      the component index threading through writeTxbCoeffs/readBlockCoeffs
-      (six component-dim table families; the l7 CDF data ALREADY carries
-      [PLANE_TYPES] - entropy.cpp:630/:790-802 - the use sites hardcode [0],
-      :1497-1538) + writeUvAngleDelta/readUvAngleDelta (entropy_coding.c:1087-1092,
-      decodemv.c:830-833; LUMA bsize >= 8X8 gate) + the chroma txb_skip_ctx
-      (offset 7 for every reachable pair - the 10-branch dead, named).
-      DEFERRED (named): write_cfl_alphas (:1060-1071) - UV_CFL_PRED is not a
-      D2 candidate (pipeline.cpp:1721), the alphas are dead in our emission.
+      extract + uv_mode_cdfs_default.inc mechanically split) LANDED +
+      the component index threading through writeTxbCoeffs/readTxbCoeffs AND
+      writeBlockCoeffs/readBlockCoeffs (six component-dim table families;
+      the [PLANE_TYPES] rows selected by ComponentType; LUMA-only tx-type
+      gate entropy_coding.c:374-376) LANDED + writeUvAngleDelta/
+      readUvAngleDelta (entropy_coding.c:1087-1092, decodemv.c:830-833;
+      bsize >= 8X8 AND the FOLDED mode directional; gate enumerated over the
+      full 14-mode domain) LANDED + the chroma txb_skip_ctx (offset 7 made
+      live at the Block wrappers; ctx {7,8,9} enumerated; the 10-branch dead,
+      named) LANDED. Gate: the ecuv set (27 lines, 362-line gate) mirrors
+      byte-exact in l7 doctests; mutation-checked (the tx-type gate removal
+      fails 17 assertions). DEFERRED (named): write_cfl_alphas (:1060-1071) -
+      UV_CFL_PRED is not a D2 candidate (pipeline.cpp:1721), the alphas are
+      dead in our emission.
 - [ ] CS2 uv dequant + chroma Q drives: the quant tables are SINGLE lookups
       (inv_transforms.c:3467/:3484); svt_av1_build_quantizer (md_config_process.c:101-152)
       builds U/V from the same lookups with deltas, the runtime call passes all
@@ -330,3 +336,10 @@ shipped feature set (mono/color intra streams).
 - PROCESS (new, 2026-09-23): untracked files are NEVER strays - deletion
   requires user/court confirmation; the court commits its authored docs
   immediately (the todo.md deletion incident)
+- Debug-config /RTC finding (2026-09-24, observed, NOT fixed - out of the
+  CS1 agent's partition): av1_l4_intra_tests.exe in Debug aborts with
+  Run-Time Check Failure #2 (stack around 'buf' corrupted); all in-tree
+  changes to its link set at observation time were comment-only, so the
+  corruption is almost certainly pre-existing (Release, the standing suite
+  config, has /RTC off and passes 9/9). Court to route to the l4 owner or
+  order a fix; Debug ctest runs will block on the modal dialog until then.

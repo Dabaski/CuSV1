@@ -122,7 +122,7 @@ std::string fwdTxfmCuSource();
 
 // Luma quantizer tables at sharpness == 0, mirroring the luma rows of
 // svt_av1_build_quantizer (md_config_process.c:106-135). Index 0 = dc,
-// index 1 = ac (the "dc path" is table index 0 — this SVT tree has no
+// index 1 = ac (the "dc path" is table index 0 - this SVT tree has no
 // separate av1_quantize_dc).
 struct QuantTables {
     std::int16_t quant[2];        // y_quant (:130 via svt_aom_invert_quant)
