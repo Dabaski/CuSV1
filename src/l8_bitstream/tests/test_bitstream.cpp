@@ -584,3 +584,59 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
         (void)n;
     }
 }
+
+TEST_CASE("color header v3: SPS + 42-bit frame header + TU over the CS2 tile (CS3)") {
+    // Gate: sps_obu_v3 11 0a 09 10 00 00 02 af ff 98 30 21,
+    // frame_obu_v3 42 32 28 10 d9 00 00 00 40 ..., tu_bytes_v3 55 ...
+    // (tools/golden_gen CS3 block). EXPECTED-DIFF slice: the SPS color
+    // config goes spec-faithful non-mono (write_color_config :2687-2752):
+    // mono bit 1 -> 0 (D1 span 1 inverted), the mono early-return DIES
+    // (D1 span 2 - the subsampling region :2720-2745 and separate_uv_delta_q
+    // :2747-2751 flow through): color section 4 bits -> 7 bits (+3 =
+    // chroma_sample_position 2 bits = EB_CSP_UNKNOWN 0 (the SVT default,
+    // enc_settings.c:1028 / EbSvtAv1Formats.h:114) + separate_uv_delta_q 1
+    // bit = 0; color_range 1 keeps its value from the spec branch :2718;
+    // profile MAIN -> no subsampling bits). SPS dims: max_dim 64 (the CS2
+    // fixture's parent 64x64 4:2:0 frame). Frame header v3 = the 40-bit v2
+    // walk + the U/V delta_q writes (:2385-2386 unconditional, write_delta_q
+    // = 1 bit each at delta 0 -> 42 bits, 6 bytes at byte_alignment with 6
+    // zero pad bits; NO diff_uv_delta bit - equal deltas, the vendored
+    // writer emits it only at 1 (:2379-2381) and the aom reader reads it
+    // only when separate_uv_delta_q (aom decodeframe.c:1823-1825)). The
+    // tile fixture = the ecs216_bytes gate stream verbatim (the CS2 S=16
+    // chroma chains; the l6 chroma mirror rides CS4). The mono v1/v2 gate
+    // lines and the committed mono artifact set stay pinned (diff-0).
+    unsigned char spsBuf[64] = {0};
+    const std::uint32_t spsSize = bitstream::writeSequenceHeaderObuV3(spsBuf, 64);
+    REQUIRE(spsSize == 9);
+    // the 9-byte payload; the gate's 11-byte sps_obu_v3 = the OBU header
+    // 0x0a + uleb 0x09 + this payload (covered byte-for-byte by the TU pin)
+    static const unsigned char wantSps[9] = {0x10, 0x00, 0x00, 0x02, 0xaf,
+                                             0xff, 0x98, 0x30, 0x21};
+    for (int i = 0; i < 9; ++i) CHECK((unsigned)spsBuf[i] == wantSps[i]);
+
+    // frame header v3: 6 bytes (the 42-bit walk byte-aligned; bytes 2..7 of
+    // frame_obu_v3)
+    unsigned char fhBuf[64] = {0};
+    const std::uint32_t fhSize = bitstream::writeFrameHeaderV3(fhBuf);
+    REQUIRE(fhSize == 6);
+    static const unsigned char wantFh3[6] = {0x10, 0xd9, 0x00, 0x00, 0x00, 0x40};
+    for (int i = 0; i < 6; ++i) CHECK((unsigned)fhBuf[i] == wantFh3[i]);
+
+    static const unsigned char tile[34] = {0x12, 0xe3, 0xdc, 0xc8, 0xe1, 0x90, 0xa4, 0xe1,
+                                           0x1a, 0x48, 0x91, 0x6a, 0x75, 0x30, 0xa2, 0x67,
+                                           0x9e, 0x47, 0xaa, 0x73, 0x58, 0x90, 0xd5, 0x3b,
+                                           0x5b, 0x51, 0x97, 0xf3, 0x33, 0xe6, 0x82, 0x63,
+                                           0x0f, 0x80};
+    unsigned char tuBuf[128];
+    memset(tuBuf, 0, sizeof(tuBuf));
+    const std::uint32_t tuSize =
+        bitstream::assembleStructuralKeyframeTUv3(tuBuf, tile, sizeof(tile), 64);
+    REQUIRE(tuSize == 55);
+    static const unsigned char wantTu3[55] = {
+        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0xaf, 0xff, 0x98, 0x30, 0x21, 0x32, 0x28,
+        0x10, 0xd9, 0x00, 0x00, 0x00, 0x40, 0x12, 0xe3, 0xdc, 0xc8, 0xe1, 0x90, 0xa4, 0xe1, 0x1a,
+        0x48, 0x91, 0x6a, 0x75, 0x30, 0xa2, 0x67, 0x9e, 0x47, 0xaa, 0x73, 0x58, 0x90, 0xd5, 0x3b,
+        0x5b, 0x51, 0x97, 0xf3, 0x33, 0xe6, 0x82, 0x63, 0x0f, 0x80};
+    for (int i = 0; i < 55; ++i) CHECK((unsigned)tuBuf[i] == wantTu3[i]);
+}

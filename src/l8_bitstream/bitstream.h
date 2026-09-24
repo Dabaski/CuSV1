@@ -148,4 +148,36 @@ std::uint32_t writeFrameHeaderV2(std::uint8_t* dst);
 std::uint32_t assembleStructuralKeyframeTUv2(std::uint8_t* dst, const std::uint8_t* tile_data,
                                              std::uint32_t tile_size, int maxDim = 32);
 
+// CS3: the color header v3 - the D1 un-patch lands as the spec-faithful
+// non-mono walks; the D1 mono producers (writeSequenceHeaderObu /
+// writeFrameHeaderV2 / assembleStructuralKeyframeTUv2) stay pinned (the
+// committed mono artifact set's format; their gate lines remain diff-0).
+// SPS v3: write_sequence_header_obu (:3699-3763) with the spec-faithful
+// color config (write_color_config :2687-2752, non-mono path): monochrome 0
+// (D1 span 1 inverted - the vendored const 0 correct as-is), the mono
+// early-return DEAD (D1 span 2 - the subsampling region :2720-2745 and
+// separate_uv_delta_q :2747-2751 flow through), profile MAIN -> no
+// subsampling bits, chroma_sample_position 2 bits = EB_CSP_UNKNOWN 0 (the
+// SVT default, enc_settings.c:1028 / EbSvtAv1Formats.h:114),
+// separate_uv_delta_q 0; color section 4 -> 7 bits (+3). maxDim
+// parameterizes the max frame dims as in the pinned walk (64 = the CS2
+// fixture's parent 64x64 4:2:0 frame).
+std::uint32_t writeSequenceHeaderObuV3(std::uint8_t* dst, int maxDim);
+
+// CS3: the 42-bit frame header v3 - the 40-bit v2 walk + the U/V delta_q
+// writes (:2385-2386) unconditional per the vendored encode_quantization
+// (D1 span 3 reverted): write_delta_q (:2365-2372) = 1 bit each at delta 0.
+// NO diff_uv_delta bit - equal deltas, the vendored writer emits it only at
+// 1 (:2379-2381) and the aom reader reads it only when separate_uv_delta_q
+// (aom decodeframe.c:1823-1825; the SPS carries separate_uv_delta_q = 0).
+// 42 bits -> 6 bytes at byte_alignment (6 zero pad bits, guaranteed by the
+// assembler's zeroing - named as in v1/v2).
+std::uint32_t writeFrameHeaderV3(std::uint8_t* dst);
+
+// CS3 v3 full temporal unit: TD + SPS_v3 + OBU_FRAME (the v2 packer
+// structure; tile_data = the CS2 chroma tile - the generator-captured
+// stream). Returns the total TU length in bytes.
+std::uint32_t assembleStructuralKeyframeTUv3(std::uint8_t* dst, const std::uint8_t* tile_data,
+                                             std::uint32_t tile_size, int maxDim);
+
 }  // namespace bitstream

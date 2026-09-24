@@ -134,13 +134,17 @@ A0. SLICE-LEVEL STATE (the live register)
       :310-314 offset-7 branch)/dequant->inv->per-plane recon; the ecs2S_
       gate set (24 lines, 386-line gate); internal read-twin + cdf-equal
       asserts. l6 mirror rides CS4.
-- [ ] CS3 the D1 un-patch: bitstream.cpp:185 (mono bit), :187-190 (the mono
-      early-return), :228/:262 (the U/V delta_q writes); the vendored
-      write_color_config (entropy_coding.c:2687-2752) already writes the full
-      non-mono path (is_monochrome=0 :2689); the frame header quant section
-      (:2375-2400) writes U dc/ac unconditionally (:2385-2386), write_delta_q
-      (:2365-2372) = 1 bit each at delta 0 -> +2 bits expected. Mono artifact
-      set stays pinned. Other mono-gated spans (grep-verified): :3149 (LR flag,
+- [~] CS3 the D1 un-patch (LANDED as the spec-faithful v3 surfaces; the D1
+      mono producers stay pinned - the artifact format, gate lines diff-0):
+      SPS v3 color config (mono 0, no early return, csp UNKNOWN 2 bits,
+      separate_uv_delta_q 0; color section 4 -> 7 bits, +3), frame-header v3
+      (40 -> 42 bits, +2 = U/V delta_q 1 bit each at 0; NO diff_uv_delta
+      bit - the vendored writer emits it only at 1 (:2379-2381), the aom
+      reader reads it only when separate_uv_delta_q, decodeframe.c:1823-
+      1825); sps_obu_v3/frame_obu_v3/tu_bytes_v3 gate lines (389-line gate);
+      the mono spans' inversions cited in the code. The color .obu artifact
+      + the per-plane decode check ride CS5 (CS3 stops at the gate).
+      Other mono-gated spans (grep-verified): :3149 (LR flag,
       already-positioned), :3581 (deblock count, not bitstream).
 - [ ] CS4 l6 integration: the per-block walk order (write_modes_b :5015-5112
       -> av1_encode_coeff_1d :757-904): [modes: luma kf -> uv_mode] then LUMA

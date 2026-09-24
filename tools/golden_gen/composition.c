@@ -5401,6 +5401,10 @@ static int svtd_cs1_drive(void) {
 }
 
 // ---- CS2: chroma Q drives (uv dequant + the per-plane Q composition) -------
+// CS3: the captured S=16 stream (the CH3-template shape) for the v3 color
+// TU composition (svtd_bsf3_tile_data_v3).
+static uint8_t svtd_cs2_tile16[4096];
+static uint32_t svtd_cs2_tile16_pos;
 // The CH3 32x32 UV plane template generalized (svtd_frame_chroma_auto_16x16_q
 // is the S==16 shape). U plane = the CH3 source (the 4:2:0 box average of the
 // 64x64 luma ramp: rows 0-15 = 2*(i+j+2), rows 16-31 = 0); V plane = 255 - U
@@ -5669,6 +5673,12 @@ static int svtd_cs2_uv_q_drive(int S) {
         }
     }
     aom_stop_encode(&w);
+    // CS3: capture the S=16 stream (the CH3-template shape) for the v3 color
+    // TU composition (svtd_bsf3_tile_data_v3); the statics are file-scope.
+    if (S == 16) {
+        memcpy(svtd_cs2_tile16, buf, w.pos);
+        svtd_cs2_tile16_pos = w.pos;
+    }
 
     // read twin: fresh reader + fresh CDFs, per-plane read NAs deriving the
     // same ctxs; every chain must round-trip and the CDFs must end equal.
@@ -5761,5 +5771,161 @@ static int svtd_cs2_drive(void) {
         const int rc = svtd_cs2_uv_q_drive(sizes[i]);
         if (rc) return rc;
     }
+    return 0;
+}
+
+// ---- CS3: the D1 un-patch, the color header (expected-diff slice) ----------
+// The spec-faithful v3 surfaces. The D1 mono producers (svtd_bsf3_color_
+// config / svtd_bsf3_sps_payload / svtd_bsf3_frame_header_v2 / _frame_obu_v2)
+// stay PINNED - the committed mono artifact set's format (their gate lines
+// must remain diff-0); the un-patch lands on the v3 walks:
+//   span 1 (entropy_coding.c:2689 is_monochrome const 0 -> 1) INVERTED: the
+//   vendored const 0 is correct as-is, the mono bit writes 0;
+//   span 2 (:2706-2710 the commented mono branch made live) DIES: the
+//   subsampling region :2720-2745 and separate_uv_delta_q :2747-2751 flow
+//   through;
+//   span 3 (:2385-2386 the U/V delta_q skips) REVERTED: the writes are
+//   unconditional per the vendored encode_quantization.
+static void svtd_bsf3_color_config_v3(AomWriteBitBuffer* wb) {
+    // write_color_config (entropy_coding.c:2687-2752), profile 0 MAIN,
+    // 8-bit, CP/TC/MC unspecified, color_range 1 (the ratified full-range
+    // value): high_bitdepth 0 (:2676-2679); monochrome 0 - the bit IS
+    // written (profile != HIGH_PROFILE, :2691-2692); color_description_
+    // present 0 (:2696-2699; CP/TC/MC unspecified); NOT the sRGB/IDENTITY
+    // branch (the :2705 condition fails on unspecified TC/MC) -> the else
+    // region: color_range (:2718); profile MAIN -> NO subsampling bits (the
+    // :2721-2723 assert only); matrix != IDENTITY -> the :2744-2746 guard
+    // no-op; subsampling 1x1 -> chroma_sample_position 2 bits = EB_CSP_
+    // UNKNOWN = 0 (the SVT default, enc_settings.c:1028;
+    // EbSvtAv1Formats.h:114); separate_uv_delta_q 0 (:2747-2751; all four
+    // chroma qindex offsets 0). Total 7 bits (mono wrote 4: +3).
+    svt_aom_wb_write_bit(wb, 0);         // high_bitdepth: 8-bit (:2676-2679)
+    svt_aom_wb_write_bit(wb, 0);         // monochrome = 0 (D1 span 1 inverted)
+    svt_aom_wb_write_bit(wb, 0);         // color_description_present (:2696-2699)
+    svt_aom_wb_write_bit(wb, 1);         // color_range = 1 (:2718)
+    svt_aom_wb_write_literal(wb, 0, 2);  // chroma_sample_position = UNKNOWN (:2744-2745)
+    svt_aom_wb_write_bit(wb, 0);         // separate_uv_delta_q (:2747-2751)
+}
+
+// write_sequence_header_obu (:3699-3763) v3: the pinned walk with the
+// spec-faithful color config (max_dim 64 = the CS2 fixture's parent 64x64
+// 4:2:0 frame; the UV plane is the 32x32 CH3 template).
+static uint32_t svtd_bsf3_sps_payload_v3(AomWriteBitBuffer* wb, int max_dim) {
+    svt_aom_wb_write_literal(wb, 0, 3);  // profile = MAIN_PROFILE (:3705)
+    svt_aom_wb_write_bit(wb, 1);         // still_picture (:3708)
+    svt_aom_wb_write_bit(wb, 0);         // reduced_still_picture_header (:3712; D2)
+    if (1) {  // !reduced (:3716)
+        svt_aom_wb_write_bit(wb, 0);          // timing_info_present (:3717)
+        svt_aom_wb_write_bit(wb, 0);          // initial_display_delay_present (:3726)
+        svt_aom_wb_write_literal(wb, 0, 5);   // operating_points_cnt_minus_1 (:3728-3729)
+        svt_aom_wb_write_literal(wb, 0, 12);  // operating_point[0].op_idc (:3732)
+        svt_aom_wb_write_literal(wb, 0, 5);   // seq_level_idx = 0 (:3733)
+    }
+    svtd_bsf3_sequence_header(wb, max_dim);
+    svtd_bsf3_color_config_v3(wb);
+    svt_aom_wb_write_bit(wb, 0);  // film_grain_params_present (:3757)
+    add_trailing_bits(wb);        // (:3759)
+    return svt_aom_wb_bytes_written(wb);
+}
+
+static uint32_t svtd_bsf3_encode_sps_v3(uint8_t* dst) {
+    const uint32_t obu_header_size  = write_obu_header(OBU_SEQUENCE_HEADER, 0, dst);
+    AomWriteBitBuffer wb            = {dst + obu_header_size, 0};
+    const uint32_t obu_payload_size = svtd_bsf3_sps_payload_v3(&wb, 64);
+    const size_t length_field_size  = svt_aom_uleb_size_in_bytes(obu_payload_size);
+    size_t coded_size;
+    svt_aom_uleb_encode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
+    AomWriteBitBuffer wb2 = {dst + obu_header_size + length_field_size, 0};
+    svtd_bsf3_sps_payload_v3(&wb2, 64);  // phase 2 rewrite
+    return obu_header_size + (uint32_t)length_field_size + obu_payload_size;
+}
+
+// write_uncompressed_header_obu (:3294-3637) v3: the v2 walk + the U/V
+// delta_q writes (:2385-2386) unconditional per the vendored
+// encode_quantization (D1 span 3 reverted). write_delta_q (:2365-2372) = 1
+// bit each at delta 0 -> the 40-bit v2 walk grows to 42 bits. NO
+// diff_uv_delta bit: the deltas are equal (0) - the vendored writer emits
+// the diff bit only at 1 (:2379-2381) and the aom reader reads it only when
+// separate_uv_delta_q (aom decodeframe.c:1823-1825; our SPS carries
+// separate_uv_delta_q = 0). 42 bits -> 6 bytes at byte_alignment (6 zero
+// pad bits, the assembler's zeroing guarantees them, named as in v1/v2).
+static void svtd_bsf3_frame_header_v3(AomWriteBitBuffer* wb) {
+    svt_aom_wb_write_bit(wb, 0);           // show_existing_frame (:3333)
+    svt_aom_wb_write_literal(wb, 0, 2);    // frame_type = KEY_FRAME (:3336)
+    svt_aom_wb_write_bit(wb, 1);           // show_frame (:3338)
+    svt_aom_wb_write_bit(wb, 0);           // disable_cdf_update (:3350; BSF4-fix)
+    svt_aom_wb_write_bit(wb, 0);           // allow_screen_content_tools (:3352-3353)
+    svt_aom_wb_write_bit(wb, 0);           // frame_size_override_flag (:3386)
+    svt_aom_wb_write_bit(wb, 0);           // render_and_frame_size_different (:2616-2624)
+    svt_aom_wb_write_bit(wb, 1);           // refresh_frame_context == DISABLED (:3553)
+    svt_aom_wb_write_bit(wb, 1);           // uniform_tile_spacing_flag (:2405)
+    svt_aom_wb_write_literal(wb, 100, 8);  // base_q_idx = 100 (encode_quantization :2376)
+    svt_aom_wb_write_bit(wb, 0);           // delta_q Y dc (write_delta_q :2365-2372)
+    svt_aom_wb_write_bit(wb, 0);           // delta_q U dc (:2385; D1 span 3 reverted)
+    svt_aom_wb_write_bit(wb, 0);           // delta_q U ac (:2386)
+    // diff_uv_delta: no bit (equal deltas, :2379-2381; the reader's
+    // separate_uv_delta_q guard, aom decodeframe.c:1823-1825)
+    svt_aom_wb_write_bit(wb, 0);           // using_qmatrix (:2391)
+    svt_aom_wb_write_bit(wb, 0);           // segmentation_enabled (:2255)
+    svt_aom_wb_write_bit(wb, 0);           // delta_q_present (:3565-3587; delta_lf nested)
+    svt_aom_wb_write_literal(wb, 0, 6);    // loop_filter_level[0] (:2290-2299)
+    svt_aom_wb_write_literal(wb, 0, 6);    // loop_filter_level[1] (U/V pair [2]/[3] skipped)
+    svt_aom_wb_write_literal(wb, 0, 3);    // loop_filter_sharpness
+    svt_aom_wb_write_bit(wb, 0);           // loop_filter_delta_enabled (deltas skipped)
+    // CDEF/restoration skipped (seq cdef_level = 0 / enable_restoration = 0)
+    svt_aom_wb_write_bit(wb, 0);           // tx_mode_select = 0 -> TX_MODE_LARGEST (:3603-3607)
+    svt_aom_wb_write_bit(wb, 1);           // reduced_tx_set (:3626; ratified)
+}
+
+static uint32_t svtd_bsf3_frame_header_obu_v3(uint8_t* dst) {
+    AomWriteBitBuffer wb = {dst, 0};
+    svtd_bsf3_frame_header_v3(&wb);
+    return svt_aom_wb_bytes_written(&wb);
+}
+
+static uint32_t svtd_bsf3_frame_obu_v3(uint8_t* dst, const uint8_t* tile_data, uint32_t tile_size) {
+    const uint32_t obu_header_size = write_obu_header(OBU_FRAME, 0, dst);
+    const uint32_t frame_hdr_size  = svtd_bsf3_frame_header_obu_v3(dst + obu_header_size);
+    const uint32_t tg_hdr_size     = 0;  // single tile: 0 bytes (:3770-3772)
+    const uint32_t obu_payload_size = frame_hdr_size + tg_hdr_size + tile_size;
+    const size_t length_field_size  = svt_aom_uleb_size_in_bytes(obu_payload_size);
+    size_t coded_size;
+    svt_aom_uleb_encode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
+    const uint32_t write_offset = obu_header_size + (uint32_t)length_field_size;
+    svtd_bsf3_frame_header_obu_v3(dst + write_offset);  // phase 2 rewrite
+    // the caller zeroes dst: the 42-bit header's 6 byte_alignment pad bits
+    // (bits 42..47) are the spec's zero bits (named, as in the v1 packer).
+    memcpy(dst + write_offset + frame_hdr_size + tg_hdr_size, tile_data, tile_size);
+    return write_offset + obu_payload_size;
+}
+
+static int svtd_cs3_drive(void) {
+    static uint8_t sps_buf[64];
+    static uint8_t obu_buf[256];
+    static uint8_t tu_buf[256];
+    memset(sps_buf, 0, sizeof(sps_buf));
+    memset(obu_buf, 0, sizeof(obu_buf));
+    memset(tu_buf, 0, sizeof(tu_buf));
+
+    const uint32_t sps_size = svtd_bsf3_encode_sps_v3(sps_buf);
+    printf("sps_obu_v3 %u", sps_size);
+    for (uint32_t i = 0; i < sps_size; ++i) printf(" %02x", sps_buf[i]);
+    printf("\n");
+
+    const uint32_t tile_size = svtd_cs2_tile16_pos;
+    const uint8_t* tile_data = svtd_cs2_tile16;
+    const uint32_t frame_size = svtd_bsf3_frame_obu_v3(obu_buf, tile_data, tile_size);
+    printf("frame_obu_v3 %u", frame_size);
+    for (uint32_t i = 0; i < frame_size; ++i) printf(" %02x", obu_buf[i]);
+    printf("\n");
+
+    // the full color TU = TD + SPS_v3 + OBU_FRAME with the CS2 tile
+    svt_aom_encode_td_av1(tu_buf);
+    memcpy(tu_buf + 2, sps_buf, sps_size);
+    memcpy(tu_buf + 2 + sps_size, obu_buf, frame_size);
+    const uint32_t tu_size = 2 + sps_size + frame_size;
+    printf("tu_bytes_v3 %u", tu_size);
+    for (uint32_t i = 0; i < tu_size; ++i) printf(" %02x", tu_buf[i]);
+    printf("\n");
     return 0;
 }

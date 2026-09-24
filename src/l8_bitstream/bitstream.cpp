@@ -348,7 +348,7 @@ std::uint32_t assembleStructuralKeyframeTU(std::uint8_t* dst, const std::uint8_t
                                            std::uint32_t tile_size) {
     // Zero the region first: the 3 pad bits after the 21-bit frame header
     // must be the spec's byte_alignment zero bits (the SVT packer relies on
-    // its OutputBitstreamUnit buffer state; we guarantee zeros - named).
+    // its OutputBitStreamUnit buffer state; we guarantee zeros - named).
     // Upper bound: 2 (TD) + SPS (<= 16) + FRAME (<= 64); zero 128 to cover
     // every ratified-config TU.
     for (std::uint32_t i = 0; i < 128; ++i) dst[i] = 0;
@@ -357,6 +357,133 @@ std::uint32_t assembleStructuralKeyframeTU(std::uint8_t* dst, const std::uint8_t
     offset += 2;  // TD_SIZE (packetization_process.c:300)
     offset += bsf3EncodeSps(dst + offset, 32);
     offset += bsf3FrameObu(dst + offset, tile_data, tile_size);
+    return offset;
+}
+
+// ---- CS3: the color header v3 (the D1 un-patch) ----------------------------
+// write_color_config (entropy_coding.c:2687-2752) spec-faithful non-mono.
+// D1 span 1 (:2689 const is_monochrome 0 -> 1) INVERTED - the vendored const
+// 0 is correct as-is; the mono bit writes 0. D1 span 2 (:2706-2710 the
+// commented mono branch live) DEAD - the subsampling region (:2720-2745) and
+// separate_uv_delta_q (:2747-2751) flow through. Color section = 7 bits
+// (mono wrote 4): high_bitdepth 0 (:2676-2679), monochrome 0 (the bit IS
+// written, profile != HIGH_PROFILE :2691-2692), color_description_present 0
+// (:2696-2699; CP/TC/MC unspecified), NOT the sRGB/IDENTITY branch (the
+// :2705 condition fails on unspecified TC/MC) -> the else region:
+// color_range 1 (:2718; the ratified full-range value), profile MAIN -> NO
+// subsampling bits (the :2721-2723 assert only), matrix != IDENTITY -> the
+// :2744-2746 guard no-op, chroma_sample_position 2 bits = EB_CSP_UNKNOWN 0
+// (the SVT default, enc_settings.c:1028; EbSvtAv1Formats.h:114),
+// separate_uv_delta_q 0 (:2747-2751; all four chroma qindex offsets 0).
+static void bsf3ColorConfigV3(AomWriteBitBuffer* wb) {
+    wbWriteBit(wb, 0);          // high_bitdepth: 8-bit (:2676-2679)
+    wbWriteBit(wb, 0);          // monochrome = 0 (D1 span 1 inverted)
+    wbWriteBit(wb, 0);          // color_description_present (:2696-2699)
+    wbWriteBit(wb, 1);          // color_range = 1 (:2718)
+    wbWriteLiteral(wb, 0, 2);   // chroma_sample_position = UNKNOWN (:2744-2745)
+    wbWriteBit(wb, 0);          // separate_uv_delta_q (:2747-2751)
+}
+
+// write_sequence_header_obu (:3699-3763) v3: the pinned walk with the
+// spec-faithful color config (maxDim 64 = the CS2 fixture's parent 64x64
+// 4:2:0 frame; the UV plane is the 32x32 CH3 template).
+std::uint32_t writeSequenceHeaderObuV3(std::uint8_t* dst, int maxDim) {
+    AomWriteBitBuffer wb = {dst, 0};
+    wbWriteLiteral(&wb, 0, 3);  // profile = MAIN_PROFILE (:3705)
+    wbWriteBit(&wb, 1);         // still_picture (:3708)
+    wbWriteBit(&wb, 0);         // reduced_still_picture_header (:3712; D2)
+    wbWriteBit(&wb, 0);         // timing_info_present (:3717)
+    wbWriteBit(&wb, 0);         // initial_display_delay_present (:3726)
+    wbWriteLiteral(&wb, 0, 5);  // operating_points_cnt_minus_1 (:3728-3729)
+    wbWriteLiteral(&wb, 0, 12);  // operating_point[0].op_idc (:3732)
+    wbWriteLiteral(&wb, 0, 5);  // seq_level_idx = 0 (:3733)
+    bsf3SequenceHeader(&wb, maxDim);
+    bsf3ColorConfigV3(&wb);
+    wbWriteBit(&wb, 0);      // film_grain_params_present (:3757)
+    wbAddTrailingBits(&wb);  // (:3759)
+    return wbBytesWritten(&wb);
+}
+
+// CS3: the 42-bit frame header v3 (the v2 walk + D1 span 3 reverted). The
+// U/V delta_q writes (:2385-2386) are unconditional per the vendored
+// encode_quantization; write_delta_q (:2365-2372) = 1 bit each at delta 0.
+// NO diff_uv_delta bit (equal deltas; the writer :2379-2381 emits it only
+// at 1, the aom reader decodeframe.c:1823-1825 reads it only when
+// separate_uv_delta_q). 42 bits -> 6 bytes (6 zero pad bits).
+std::uint32_t writeFrameHeaderV3(std::uint8_t* dst) {
+    AomWriteBitBuffer wb = {dst, 0};
+    wbWriteBit(&wb, 0);           // show_existing_frame (:3333)
+    wbWriteLiteral(&wb, 0, 2);    // frame_type = KEY_FRAME (:3336)
+    wbWriteBit(&wb, 1);           // show_frame (:3338)
+    wbWriteBit(&wb, 0);           // disable_cdf_update (:3350; BSF4-fix)
+    wbWriteBit(&wb, 0);           // allow_screen_content_tools (:3352-3353)
+    wbWriteBit(&wb, 0);           // frame_size_override_flag (:3386)
+    wbWriteBit(&wb, 0);           // render_and_frame_size_different (:2616-2624)
+    wbWriteBit(&wb, 1);           // refresh_frame_context == DISABLED (:3553)
+    wbWriteBit(&wb, 1);           // uniform_tile_spacing_flag (:2405)
+    wbWriteLiteral(&wb, 100, 8);  // base_q_idx = 100 (encode_quantization :2376)
+    wbWriteBit(&wb, 0);           // delta_q Y dc (:2365-2372)
+    wbWriteBit(&wb, 0);           // delta_q U dc (:2385; D1 span 3 reverted)
+    wbWriteBit(&wb, 0);           // delta_q U ac (:2386)
+    // diff_uv_delta: no bit (equal deltas; :2379-2381 writer / the reader's
+    // separate_uv_delta_q guard, aom decodeframe.c:1823-1825)
+    wbWriteBit(&wb, 0);           // using_qmatrix (:2391)
+    wbWriteBit(&wb, 0);           // segmentation_enabled (:2255)
+    wbWriteBit(&wb, 0);           // delta_q_present (:3565-3587; delta_lf nested)
+    wbWriteLiteral(&wb, 0, 6);    // loop_filter_level[0] (:2290-2299)
+    wbWriteLiteral(&wb, 0, 6);    // loop_filter_level[1] (U/V pair [2]/[3] skipped)
+    wbWriteLiteral(&wb, 0, 3);    // loop_filter_sharpness
+    wbWriteBit(&wb, 0);           // loop_filter_delta_enabled (deltas skipped)
+    wbWriteBit(&wb, 0);           // tx_mode_select = 0 -> TX_MODE_LARGEST (:3603-3607)
+    wbWriteBit(&wb, 1);           // reduced_tx_set (:3626)
+    // NO trailing bits: appendTrailingBits = show_existing = 0 (:3858)
+    return wbBytesWritten(&wb);
+}
+
+// svt_aom_encode_sps_av1 structure with the v3 payload (phase 1 measure,
+// phase 2 rewrite)
+static std::uint32_t bsf3EncodeSpsV3(std::uint8_t* dst, int maxDim) {
+    const std::uint32_t obu_header_size = writeObuHeader(OBU_SEQUENCE_HEADER, 0, dst);
+    const std::uint32_t obu_payload_size = writeSequenceHeaderObuV3(dst + obu_header_size, maxDim);
+    const std::size_t length_field_size = ulebSizeInBytes(obu_payload_size);
+    std::size_t coded_size = 0;
+    ulebEncode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
+    writeSequenceHeaderObuV3(dst + obu_header_size + length_field_size,
+                             maxDim);  // phase 2 rewrite
+    return obu_header_size + static_cast<std::uint32_t>(length_field_size) + obu_payload_size;
+}
+
+// CS3 v3 packer: the v2 structure with the 42-bit header. The caller zeroes
+// dst: the 6 byte_alignment pad bits (bits 42..47) are the spec's zero bits
+// (named, as in the v1 packer).
+static std::uint32_t bsf3FrameObuV3(std::uint8_t* dst, const std::uint8_t* tile_data,
+                                    std::uint32_t tile_size) {
+    const std::uint32_t obu_header_size = writeObuHeader(OBU_FRAME, 0, dst);
+    const std::uint32_t frame_hdr_size = writeFrameHeaderV3(dst + obu_header_size);
+    const std::uint32_t tg_hdr_size = 0;  // single tile: 0 bytes (:3770-3772)
+    const std::uint32_t obu_payload_size = frame_hdr_size + tg_hdr_size + tile_size;
+    const std::size_t length_field_size = ulebSizeInBytes(obu_payload_size);
+    std::size_t coded_size = 0;
+    ulebEncode(obu_payload_size, sizeof(obu_payload_size), dst + obu_header_size, &coded_size);
+    const std::uint32_t write_offset = obu_header_size + static_cast<std::uint32_t>(length_field_size);
+    writeFrameHeaderV3(dst + write_offset);  // phase 2 rewrite (:3896)
+    for (std::uint32_t i = 0; i < tile_size; ++i) {
+        dst[write_offset + frame_hdr_size + tg_hdr_size + i] = tile_data[i];
+    }
+    return write_offset + obu_payload_size;
+}
+
+std::uint32_t assembleStructuralKeyframeTUv3(std::uint8_t* dst, const std::uint8_t* tile_data,
+                                             std::uint32_t tile_size, int maxDim) {
+    // Zero first: the 42-bit header's 6 byte_alignment pad bits must be the
+    // spec's zero bits (named, as in the v1/v2 assemblers). Upper bound:
+    // 2 (TD) + SPS (<= 16) + FRAME (<= 96); zero 128 covers it.
+    for (std::uint32_t i = 0; i < 128; ++i) dst[i] = 0;
+    std::uint32_t offset = 0;
+    encodeTdAv1(dst + offset);
+    offset += 2;  // TD_SIZE (packetization_process.c:300)
+    offset += bsf3EncodeSpsV3(dst + offset, maxDim);
+    offset += bsf3FrameObuV3(dst + offset, tile_data, tile_size);
     return offset;
 }
 

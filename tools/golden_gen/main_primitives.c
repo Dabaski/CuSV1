@@ -2250,5 +2250,22 @@ int main(void) {
         const int rc2 = svtd_cs2_drive();
         if (rc2) { fprintf(stderr, "CS2 drive FAILED rc=%d\n", rc2); return 1; }
     }
+
+    // ---- CS3: the D1 un-patch, the color header (expected-diff slice) ------
+    // The spec-faithful v3 surfaces (the mono v1/v2 producers stay pinned -
+    // the artifact format): SPS v3 color config (mono bit 0, no early return,
+    // chroma_sample_position 2 bits = EB_CSP_UNKNOWN 0 per the SVT default
+    // enc_settings.c:1028 / EbSvtAv1Formats.h:114, separate_uv_delta_q 0 =
+    // the :2747-2751 bit flows through at all-zero chroma offsets), the
+    // 42-bit frame header v3 (the 40-bit v2 walk + the U/V delta_q writes
+    // :2385-2386 unconditional, 1 bit each at delta 0; NO diff_uv_delta bit -
+    // the vendored writer writes it only at 1 (:2379-2381) and the aom reader
+    // reads it only when separate_uv_delta_q (decodeframe.c:1823-1825)).
+    // The tile = the captured CS2 S=16 chroma stream. Gate lines:
+    // sps_obu_v3 / frame_obu_v3 / tu_bytes_v3. No decode check (CS5).
+    {
+        const int rc3 = svtd_cs3_drive();
+        if (rc3) { fprintf(stderr, "CS3 drive FAILED rc=%d\n", rc3); return 1; }
+    }
     return 0;
 }
