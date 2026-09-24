@@ -122,12 +122,18 @@ A0. SLICE-LEVEL STATE (the live register)
       fails 17 assertions). DEFERRED (named): write_cfl_alphas (:1060-1071) -
       UV_CFL_PRED is not a D2 candidate (pipeline.cpp:1721), the alphas are
       dead in our emission.
-- [ ] CS2 uv dequant + chroma Q drives: the quant tables are SINGLE lookups
-      (inv_transforms.c:3467/:3484); svt_av1_build_quantizer (md_config_process.c:101-152)
-      builds U/V from the same lookups with deltas, the runtime call passes all
-      deltas 0 (initial_rc_process.c:807) -> U == V == Y; l3 tables reused
-      verbatim. UV frame Q loops at UV sizes 4/8/16/32 (the CH3 16x16 template
-      generalized; buildIntraPredictorsUv size-generic).
+- [~] CS2 uv dequant + chroma Q drives (LANDED, generator-side): the quant
+      tables are SINGLE lookups (inv_transforms.c:3467/:3484);
+      svt_av1_build_quantizer (md_config_process.c:101-152) builds U/V from
+      the same lookups with deltas, the runtime call passes all deltas 0
+      (initial_rc_process.c:805-807) -> U == V == Y; l3 tables reused
+      verbatim (source-confirmed, cited; no l3 code change). The CH3 32x32
+      UV plane template generalized per reachable size {4,8,16,32}: per
+      block U chain then V chain (U-before-V), D2 fold modes, fwd/FP
+      quantize at q100/the CS1 chroma token chains (per-plane NA ctx, the
+      :310-314 offset-7 branch)/dequant->inv->per-plane recon; the ecs2S_
+      gate set (24 lines, 386-line gate); internal read-twin + cdf-equal
+      asserts. l6 mirror rides CS4.
 - [ ] CS3 the D1 un-patch: bitstream.cpp:185 (mono bit), :187-190 (the mono
       early-return), :228/:262 (the U/V delta_q writes); the vendored
       write_color_config (entropy_coding.c:2687-2752) already writes the full

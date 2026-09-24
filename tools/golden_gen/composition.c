@@ -5399,3 +5399,367 @@ static int svtd_cs1_drive(void) {
     if (c) return c;
     return 0;
 }
+
+// ---- CS2: chroma Q drives (uv dequant + the per-plane Q composition) -------
+// The CH3 32x32 UV plane template generalized (svtd_frame_chroma_auto_16x16_q
+// is the S==16 shape). U plane = the CH3 source (the 4:2:0 box average of the
+// 64x64 luma ramp: rows 0-15 = 2*(i+j+2), rows 16-31 = 0); V plane = 255 - U
+// (the documented complement fixture - distinct texture so the V chains,
+// signs and recon differ from U's). Per reachable UV size S in {4,8,16,32}
+// (the chroma_tx_size map: luma 8x8->4, 16x16->8, 32x32->16, 64x64->32):
+// one interleaved drive, per UV block in raster order:
+//   [U: D2 mode over uv 0..12 via the g_uv2y fold (CFL excluded, the CH3
+//   policy), predict through svtd_call_builder_tx at the UV tx size, int16
+//   residual, fwd at the UV tx size, FP quantize at q100, the CS1 chroma
+//   token chain (svtd_write_coeffs_txb at COMPONENT_CHROMA; txb_skip_ctx =
+//   (left!=0)+(top!=0) + 7 from the per-plane packed NA, the :310-314 branch;
+//   dc_sign_ctx from the same NA), NA update (the ecfrm pattern), dequant
+//   feeds inv onto the predictor, recon writeback] then [V: the same through
+//   the V plane arrays] - U BEFORE V (the CS4 walk order).
+// The quantizer tables are the LUMA rows (svtd_build_quantizer_luma) reused
+// for U/V: at the runtime all-zero delta call (initial_rc_process.c:805-807
+// "assuming the qindex offset(s) are 0") svt_av1_build_quantizer
+// (md_config_process.c:101-152) computes u_/v_ rows from the SAME
+// dc/ac_quant_qtx(q, 0) lookups as the y_ rows -> U == V == Y verbatim.
+// Gate lines per size: ecs2S_modes (per block u v), ecs2S_eobs (u v),
+// ecs2S_bytes (the shared interleaved stream), ecs2S_coeffs (per block: U's
+// S*S then V's S*S), ecs2S_recon_u / ecs2S_recon_v (the 1024-value planes).
+// Internal asserts: a read twin over the same stream (fresh reader + fresh
+// CDFs, per-plane read NAs deriving the same ctxs) must round-trip every
+// chain (reob + coefficients) and end cdf-equal; any mismatch returns
+// nonzero (the gate fails loudly, no silent golden).
+static int svtd_cs2_uv_q_drive(int S) {
+    static uint8_t u_src[1024], v_src[1024];
+    for (int i = 0; i < 32; ++i)
+        for (int j = 0; j < 32; ++j) {
+            const uint8_t u = (uint8_t)((i < 16) ? 2 * (i + j + 2) : 0);
+            u_src[i * 32 + j] = u;
+            v_src[i * 32 + j] = (uint8_t)(255 - u);
+        }
+    uint8_t recon_u[1024], recon_v[1024];
+    memset(recon_u, 0, 1024);
+    memset(recon_v, 0, 1024);
+    const TxSize txs = (S == 4) ? TX_4X4 : (S == 8) ? TX_8X8 : (S == 16) ? TX_16X16 : TX_32X32;
+    const int grid = 32 / S;
+    const int nb = grid * grid;
+    const int tx_w_unit = (S == 4) ? 1 : (S == 8) ? 2 : (S == 16) ? 4 : 8;
+    int16_t scan[1024];
+    if (S == 4) svtd_default_scan_4x4(scan);
+    else if (S == 8) svtd_default_scan_8x8(scan);
+    else if (S == 16) svtd_default_scan_16x16(scan);
+    else svtd_default_scan_32x32(scan);
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(100, &t);
+    Ts1FrameContext fc, fc_r;
+    ts1_init(&fc, 100);
+    ts1_init(&fc_r, 100);
+    static uint8_t buf[16384];
+    memset(buf, 0, sizeof(buf));
+    AomWriter w;
+    w.ec.buf = buf;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    static int u_modes[64], v_modes[64];
+    static uint8_t na_above_u[8], na_left_u[8], na_above_v[8], na_left_v[8];
+    static uint8_t na_above_ur[8], na_left_ur[8], na_above_vr[8], na_left_vr[8];
+    memset(na_above_u, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_left_u, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_above_v, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_left_v, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_above_ur, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_left_ur, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_above_vr, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_left_vr, (int)INVALID_NEIGHBOR_DATA, 8);
+    static const int8_t signs[3] = {0, -1, 1};
+    uint16_t eobs_u[64], eobs_v[64];
+    static TranLow coeffs_u[64][1024], coeffs_v[64][1024];
+    for (int by = 0; by < grid; ++by) {
+        for (int bx = 0; bx < grid; ++bx) {
+            const int px = bx * S, py = by * S;
+            const int mi_col = px / 4, mi_row = py / 4;
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? S : 0;
+            const int nLeft = hasLeft ? S : 0;
+            const int nTr = (hasTop && bx + 1 < grid) ? S : 0;
+            const int bidx = by * grid + bx;
+            // ---- U chain ----
+            {
+                uint8_t above[33] = {0};
+                uint8_t left[33] = {0};
+                uint8_t al = 0;
+                if (hasTop) svtd_gather_above(above, recon_u, 32, px, py, S, nTr);
+                if (hasLeft)
+                    for (int i = 0; i < S; ++i) left[i] = recon_u[(py + i) * 32 + px - 1];
+                if (hasTop && hasLeft) al = recon_u[(py - 1) * 32 + px - 1];
+                const int aboveMode = hasTop ? u_modes[(by - 1) * grid + bx] : UV_DC_PRED;
+                const int leftMode = hasLeft ? u_modes[by * grid + bx - 1] : UV_DC_PRED;
+                svtd_filt_type =
+                    ((aboveMode == UV_SMOOTH_PRED || aboveMode == UV_SMOOTH_V_PRED ||
+                      aboveMode == UV_SMOOTH_H_PRED) ||
+                     (leftMode == UV_SMOOTH_PRED || leftMode == UV_SMOOTH_V_PRED ||
+                      leftMode == UV_SMOOTH_H_PRED))
+                        ? 1
+                        : 0;
+                uint8_t srcblk[1024];
+                for (int i = 0; i < S; ++i)
+                    for (int j = 0; j < S; ++j) srcblk[i * S + j] = u_src[(py + i) * 32 + px + j];
+                uint32_t best_sad = 0;
+                int mode = -1;
+                for (int m = 0; m < UV_CFL_PRED; ++m) {
+                    uint8_t pred[1024];
+                    svtd_call_builder_tx(pred, g_uv2y[m], 0, FILTER_INTRA_MODES, 0, above, nTop,
+                                         nTr, left, nLeft, 0, al, txs);
+                    const uint32_t sad =
+                        svt_nxm_sad_kernel_helper_c(srcblk, S, pred, S, S, S);
+                    if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+                }
+                u_modes[bidx] = mode;
+                uint8_t pred[1024];
+                svtd_call_builder_tx(pred, g_uv2y[mode], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr,
+                                     left, nLeft, 0, al, txs);
+                int16_t res[1024];
+                for (int i = 0; i < S * S; ++i)
+                    res[i] = (int16_t)(srcblk[i] - pred[i]);
+                int32_t cb[1024];
+                if (S == 4) svtd_fwd2d4x4(res, S, cb, svt_av1_fdct4_new);
+                else if (S == 8) svtd_fwd2d8x8(res, S, cb, svt_av1_fdct8_new);
+                else if (S == 16) svtd_fwd2d16x16(res, S, cb, svt_av1_fdct16_new);
+                else svtd_fwd2d32x32(res, S, cb, svt_av1_fdct32_new);
+                TranLow qc[1024], dq[1024];
+                memset(qc, 0, sizeof(qc));
+                memset(dq, 0, sizeof(dq));
+                uint16_t eob = 0;
+                if (S == 4) svtd_quantize_fp_4x4(cb, &t, scan, qc, dq, &eob);
+                else if (S == 8) svtd_quantize_fp_8x8(cb, &t, scan, qc, dq, &eob);
+                else if (S == 16) svtd_quantize_fp_16x16(cb, &t, scan, qc, dq, &eob);
+                else svtd_quantize_fp_32x32(cb, &t, scan, qc, dq, &eob);
+                eobs_u[bidx] = eob;
+                memcpy(coeffs_u[bidx], qc, sizeof(TranLow) * S * S);
+                // per-plane NA ctx (the l7 getTxbCtx chroma branch, :310-314)
+                int16_t dc_sign = 0;
+                int32_t top = 0, leftacc = 0;
+                for (int k = 0; k < tx_w_unit; ++k) {
+                    const uint8_t v = na_above_u[mi_col + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        top |= v;
+                    }
+                }
+                for (int k = 0; k < tx_w_unit; ++k) {
+                    const uint8_t v = na_left_u[mi_row + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        leftacc |= v;
+                    }
+                }
+                const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+                const int txb_skip_ctx = ((leftacc != 0) + (top != 0)) + 7;
+                svtd_write_coeffs_txb(&w, &fc, qc, scan, txs, eob, txb_skip_ctx, dc_sign_ctx,
+                                      DC_PRED, COMPONENT_CHROMA);
+                // NA update (the ecfrm pattern)
+                int32_t cul = 0;
+                for (int q = 0; q < eob; ++q) cul += abs((int)qc[scan[q]]);
+                cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+                if (eob > 0) {
+                    if (qc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+                    else if (qc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+                }
+                for (int k = 0; k < tx_w_unit; ++k) na_above_u[mi_col + k] = (uint8_t)cul;
+                for (int k = 0; k < tx_w_unit; ++k) na_left_u[mi_row + k] = (uint8_t)cul;
+                // dequant feeds the inverse onto the predictor; recon writeback
+                if (S == 4) svtd_inv2dadd4x4(dq, pred, S, svt_av1_idct4_new);
+                else if (S == 8) svtd_inv2dadd8x8(dq, pred, S, svt_av1_idct8_new);
+                else if (S == 16) svtd_inv2dadd16x16(dq, pred, S, svt_av1_idct16_new);
+                else svtd_inv2dadd32x32(dq, pred, S, svt_av1_idct32_new);
+                for (int i = 0; i < S; ++i)
+                    for (int j = 0; j < S; ++j)
+                        recon_u[(py + i) * 32 + px + j] = pred[i * S + j];
+            }
+            // ---- V chain (U BEFORE V: the CS4 walk order) ----
+            {
+                uint8_t above[33] = {0};
+                uint8_t left[33] = {0};
+                uint8_t al = 0;
+                if (hasTop) svtd_gather_above(above, recon_v, 32, px, py, S, nTr);
+                if (hasLeft)
+                    for (int i = 0; i < S; ++i) left[i] = recon_v[(py + i) * 32 + px - 1];
+                if (hasTop && hasLeft) al = recon_v[(py - 1) * 32 + px - 1];
+                const int aboveMode = hasTop ? v_modes[(by - 1) * grid + bx] : UV_DC_PRED;
+                const int leftMode = hasLeft ? v_modes[by * grid + bx - 1] : UV_DC_PRED;
+                svtd_filt_type =
+                    ((aboveMode == UV_SMOOTH_PRED || aboveMode == UV_SMOOTH_V_PRED ||
+                      aboveMode == UV_SMOOTH_H_PRED) ||
+                     (leftMode == UV_SMOOTH_PRED || leftMode == UV_SMOOTH_V_PRED ||
+                      leftMode == UV_SMOOTH_H_PRED))
+                        ? 1
+                        : 0;
+                uint8_t srcblk[1024];
+                for (int i = 0; i < S; ++i)
+                    for (int j = 0; j < S; ++j) srcblk[i * S + j] = v_src[(py + i) * 32 + px + j];
+                uint32_t best_sad = 0;
+                int mode = -1;
+                for (int m = 0; m < UV_CFL_PRED; ++m) {
+                    uint8_t pred[1024];
+                    svtd_call_builder_tx(pred, g_uv2y[m], 0, FILTER_INTRA_MODES, 0, above, nTop,
+                                         nTr, left, nLeft, 0, al, txs);
+                    const uint32_t sad =
+                        svt_nxm_sad_kernel_helper_c(srcblk, S, pred, S, S, S);
+                    if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
+                }
+                v_modes[bidx] = mode;
+                uint8_t pred[1024];
+                svtd_call_builder_tx(pred, g_uv2y[mode], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr,
+                                     left, nLeft, 0, al, txs);
+                int16_t res[1024];
+                for (int i = 0; i < S * S; ++i)
+                    res[i] = (int16_t)(srcblk[i] - pred[i]);
+                int32_t cb[1024];
+                if (S == 4) svtd_fwd2d4x4(res, S, cb, svt_av1_fdct4_new);
+                else if (S == 8) svtd_fwd2d8x8(res, S, cb, svt_av1_fdct8_new);
+                else if (S == 16) svtd_fwd2d16x16(res, S, cb, svt_av1_fdct16_new);
+                else svtd_fwd2d32x32(res, S, cb, svt_av1_fdct32_new);
+                TranLow qc[1024], dq[1024];
+                memset(qc, 0, sizeof(qc));
+                memset(dq, 0, sizeof(dq));
+                uint16_t eob = 0;
+                if (S == 4) svtd_quantize_fp_4x4(cb, &t, scan, qc, dq, &eob);
+                else if (S == 8) svtd_quantize_fp_8x8(cb, &t, scan, qc, dq, &eob);
+                else if (S == 16) svtd_quantize_fp_16x16(cb, &t, scan, qc, dq, &eob);
+                else svtd_quantize_fp_32x32(cb, &t, scan, qc, dq, &eob);
+                eobs_v[bidx] = eob;
+                memcpy(coeffs_v[bidx], qc, sizeof(TranLow) * S * S);
+                int16_t dc_sign = 0;
+                int32_t top = 0, leftacc = 0;
+                for (int k = 0; k < tx_w_unit; ++k) {
+                    const uint8_t v = na_above_v[mi_col + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        top |= v;
+                    }
+                }
+                for (int k = 0; k < tx_w_unit; ++k) {
+                    const uint8_t v = na_left_v[mi_row + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        leftacc |= v;
+                    }
+                }
+                const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+                const int txb_skip_ctx = ((leftacc != 0) + (top != 0)) + 7;
+                svtd_write_coeffs_txb(&w, &fc, qc, scan, txs, eob, txb_skip_ctx, dc_sign_ctx,
+                                      DC_PRED, COMPONENT_CHROMA);
+                int32_t cul = 0;
+                for (int q = 0; q < eob; ++q) cul += abs((int)qc[scan[q]]);
+                cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+                if (eob > 0) {
+                    if (qc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+                    else if (qc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+                }
+                for (int k = 0; k < tx_w_unit; ++k) na_above_v[mi_col + k] = (uint8_t)cul;
+                for (int k = 0; k < tx_w_unit; ++k) na_left_v[mi_row + k] = (uint8_t)cul;
+                if (S == 4) svtd_inv2dadd4x4(dq, pred, S, svt_av1_idct4_new);
+                else if (S == 8) svtd_inv2dadd8x8(dq, pred, S, svt_av1_idct8_new);
+                else if (S == 16) svtd_inv2dadd16x16(dq, pred, S, svt_av1_idct16_new);
+                else svtd_inv2dadd32x32(dq, pred, S, svt_av1_idct32_new);
+                for (int i = 0; i < S; ++i)
+                    for (int j = 0; j < S; ++j)
+                        recon_v[(py + i) * 32 + px + j] = pred[i * S + j];
+            }
+        }
+    }
+    aom_stop_encode(&w);
+
+    // read twin: fresh reader + fresh CDFs, per-plane read NAs deriving the
+    // same ctxs; every chain must round-trip and the CDFs must end equal.
+    aom_reader r;
+    if (aom_reader_init(&r, buf, w.pos)) return 2;
+    r.allow_update_cdf = 1;
+    for (int by = 0; by < grid; ++by) {
+        for (int bx = 0; bx < grid; ++bx) {
+            const int mi_col = (bx * S) / 4, mi_row = (by * S) / 4;
+            const int bidx = by * grid + bx;
+            for (int comp = 0; comp < 2; ++comp) {
+                uint8_t* aA = comp ? na_above_vr : na_above_ur;
+                uint8_t* aL = comp ? na_left_vr : na_left_ur;
+                int16_t dc_sign = 0;
+                int32_t top = 0, leftacc = 0;
+                for (int k = 0; k < tx_w_unit; ++k) {
+                    const uint8_t v = aA[mi_col + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        top |= v;
+                    }
+                }
+                for (int k = 0; k < tx_w_unit; ++k) {
+                    const uint8_t v = aL[mi_row + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        leftacc |= v;
+                    }
+                }
+                const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+                const int txb_skip_ctx = ((leftacc != 0) + (top != 0)) + 7;
+                TranLow rc[1024];
+                memset(rc, 0, sizeof(rc));
+                const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan, txs, txb_skip_ctx,
+                                                      dc_sign_ctx, DC_PRED, COMPONENT_CHROMA);
+                const uint16_t want = comp ? eobs_v[bidx] : eobs_u[bidx];
+                const TranLow* wantc = comp ? coeffs_v[bidx] : coeffs_u[bidx];
+                if (reob != (int)want) { fprintf(stderr, "CS2 rt eob %u %d\n", S, reob); return 3; }
+                for (int i = 0; i < S * S; ++i) {
+                    if (rc[i] != wantc[i]) {
+                        fprintf(stderr, "CS2 rt coeff %u c%d\n", S, i);
+                        return 3;
+                    }
+                }
+                int32_t cul = 0;
+                for (int q = 0; q < reob; ++q) cul += abs((int)rc[scan[q]]);
+                cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+                if (reob > 0) {
+                    if (rc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+                    else if (rc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+                }
+                for (int k = 0; k < tx_w_unit; ++k) aA[mi_col + k] = (uint8_t)cul;
+                for (int k = 0; k < tx_w_unit; ++k) aL[mi_row + k] = (uint8_t)cul;
+            }
+        }
+    }
+    if (memcmp(&fc, &fc_r, sizeof(Ts1FrameContext))) {
+        fprintf(stderr, "CS2 cdf mismatch %u\n", S);
+        return 4;
+    }
+
+    // gate lines
+    printf("ecs2%u_modes", S);
+    for (int b = 0; b < nb; ++b) printf(" %d %d", u_modes[b], v_modes[b]);
+    printf("\n");
+    printf("ecs2%u_eobs", S);
+    for (int b = 0; b < nb; ++b) printf(" %u %u", eobs_u[b], eobs_v[b]);
+    printf("\n");
+    printf("ecs2%u_bytes %u", S, w.pos);
+    for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
+    printf("\n");
+    printf("ecs2%u_coeffs", S);
+    for (int b = 0; b < nb; ++b) {
+        for (int i = 0; i < S * S; ++i) printf(" %d", (int)coeffs_u[b][i]);
+        for (int i = 0; i < S * S; ++i) printf(" %d", (int)coeffs_v[b][i]);
+    }
+    printf("\n");
+    printf("ecs2%u_recon_u", S);
+    for (int i = 0; i < 1024; ++i) printf(" %u", recon_u[i]);
+    printf("\n");
+    printf("ecs2%u_recon_v", S);
+    for (int i = 0; i < 1024; ++i) printf(" %u", recon_v[i]);
+    printf("\n");
+    return 0;
+}
+
+static int svtd_cs2_drive(void) {
+    static const int sizes[4] = {4, 8, 16, 32};
+    for (int i = 0; i < 4; ++i) {
+        const int rc = svtd_cs2_uv_q_drive(sizes[i]);
+        if (rc) return rc;
+    }
+    return 0;
+}

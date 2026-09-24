@@ -2233,5 +2233,22 @@ int main(void) {
         const int rc1 = svtd_cs1_drive();
         if (rc1) { fprintf(stderr, "CS1 drive FAILED rc=%d\n", rc1); return 1; }
     }
+
+    // ---- CS2: chroma Q drives (uv dequant + the per-plane Q composition) ----
+    // The CH3 32x32 UV plane template generalized: per reachable UV size
+    // {4,8,16,32} (the chroma_tx_size map), one interleaved drive per size -
+    // per UV block: U chain then V chain (U BEFORE V, the CS4 walk order),
+    // D2 mode over uv 0..12 via the g_uv2y fold, fwd at the UV tx size, FP
+    // quantize at q100 (the luma tables serve U/V verbatim at zero deltas:
+    // initial_rc_process.c:805-807 all-delta-0 call + md_config_process.c:
+    // 101-152 the U/V rows hit the same dc/ac lookups as Y), the CS1 chroma
+    // token chains (svtd_write_coeffs_txb at COMPONENT_CHROMA, per-plane NA
+    // txb_skip_ctx = ctx_base + 7), dequant -> inv -> per-plane recon.
+    // Gate lines per size: ecs2S_modes / ecs2S_eobs / ecs2S_bytes /
+    // ecs2S_coeffs / ecs2S_recon_u / ecs2S_recon_v.
+    {
+        const int rc2 = svtd_cs2_drive();
+        if (rc2) { fprintf(stderr, "CS2 drive FAILED rc=%d\n", rc2); return 1; }
+    }
     return 0;
 }
