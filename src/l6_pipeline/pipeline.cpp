@@ -1737,6 +1737,324 @@ ModeDecision decideBlockModeUv16x16(const std::uint8_t* src, const std::uint8_t*
     return best;
 }
 
+// CS4: the size-generic UV D2 decision (the same CH3 policy; SAD at the UV
+// size).
+ModeDecision decideBlockModeUv(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                               int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                               int nBottomLeftPx, std::uint8_t aboveLeft, int uvB,
+                               const intra::NeighborContext& neighbors) {
+    ModeDecision best{intra::DC_PRED, 0};
+    bool haveBest = false;
+    for (int m = 0; m < intra::UV_CFL_PRED; ++m) {
+        std::uint8_t pred[1024] = {0};
+        intra::buildIntraPredictorsUv(pred, uvB, static_cast<intra::UvPredictionMode>(m), 0, uvB,
+                                      uvB, aboveLeft, aboveRef, nTopPx, nTopRightPx, leftRef,
+                                      nLeftPx, nBottomLeftPx, neighbors);
+        std::uint32_t sad = 0;
+        if (uvB == 4) sad = motion::sad4x4(src, uvB, pred, uvB);
+        else if (uvB == 8) sad = motion::sad8x8(src, uvB, pred, uvB);
+        else if (uvB == 16) sad = motion::sad16x16(src, uvB, pred, uvB);
+        else sad = motion::sad32x32(src, uvB, pred, uvB);
+        if (!haveBest || sad < best.sad) {
+            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad};
+            haveBest = true;
+        }
+    }
+    return best;
+}
+
+// CS4: the chroma-emitting Q loop (the signature comment in pipeline.h).
+void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
+                        const pixels::Plane& srcV, pixels::Plane& reconY, pixels::Plane& reconU,
+                        pixels::Plane& reconV, std::int32_t* coeffsY, std::int32_t* coeffsU,
+                        std::int32_t* coeffsV, std::uint8_t* modesY, std::uint8_t* modesU,
+                        std::uint8_t* modesV, std::uint16_t* eobsY, std::uint16_t* eobsU,
+                        std::uint16_t* eobsV, std::int32_t qindex, int lumaB,
+                        transforms::TxType txType, entropy::AomWriter* w,
+                        entropy::EcFrameContext* fc, entropy::DcSignLevelCoeffNa* naY,
+                        entropy::DcSignLevelCoeffNa* naU, entropy::DcSignLevelCoeffNa* naV) {
+    const int uvB = lumaB / 2;
+    const int grid = srcY.width() / lumaB;
+    const entropy::TxSize ltxs = (lumaB == 8) ? entropy::TX_8X8
+                               : (lumaB == 16) ? entropy::TX_16X16
+                               : (lumaB == 32) ? entropy::TX_32X32 : entropy::TX_64X64;
+    const entropy::TxSize utxs = (uvB == 4) ? entropy::TX_4X4
+                               : (uvB == 8) ? entropy::TX_8X8
+                               : (uvB == 16) ? entropy::TX_16X16 : entropy::TX_32X32;
+    const entropy::BlockSize lbs = (lumaB == 8) ? entropy::BLOCK_8X8
+                                 : (lumaB == 16) ? entropy::BLOCK_16X16
+                                 : (lumaB == 32) ? entropy::BLOCK_32X32 : entropy::BLOCK_64X64;
+    const entropy::BlockSize ubs = (uvB == 4) ? entropy::BLOCK_4X4
+                                 : (uvB == 8) ? entropy::BLOCK_8X8
+                                 : (uvB == 16) ? entropy::BLOCK_16X16 : entropy::BLOCK_32X32;
+    const int ltxW = lumaB / 4, utxW = uvB / 4;
+    const int cfl = (lumaB <= 32) ? 1 : 0;
+    if (w && fc) {
+        entropy::initDefaultEcFrameContext(fc, qindex);
+        entropy::odEcEncReset(&w->ec);
+        w->allow_update_cdf = 1;  // THE COUPLING (BSF4-fix)
+        w->pos = 0;
+    }
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(qindex, qt);
+    std::int16_t lscan[1024], uscan[1024];
+    if (lumaB == 8) transforms::defaultScan8x8(lscan);
+    else if (lumaB == 16) transforms::defaultScan16x16(lscan);
+    else if (lumaB == 32) transforms::defaultScan32x32(lscan);
+    else transforms::defaultScan32x32(lscan);  // the TX_64X64 token scan (1024 positions)
+    if (uvB == 4) transforms::defaultScan4x4(uscan);
+    else if (uvB == 8) transforms::defaultScan8x8(uscan);
+    else if (uvB == 16) transforms::defaultScan16x16(uscan);
+    else transforms::defaultScan32x32(uscan);
+    for (int by = 0; by < grid; ++by) {
+        for (int bx = 0; bx < grid; ++bx) {
+            const int px = bx * lumaB, py = by * lumaB;
+            const int miRow = py / 4, miCol = px / 4;
+            const int bidx = by * grid + bx;
+            const int bwMi = lumaB / 4;
+            // is_chroma_reference (common_utils.h:315-320), 4:2:0
+            const bool chromaRef =
+                ((miRow & 0x01) || !(bwMi & 0x01)) && ((miCol & 0x01) || !(bwMi & 0x01));
+            const int uvX = ((px >> 3) << 3) >> 1;  // ROUND_UV >> 1 (definitions.h:327)
+            const int uvY = ((py >> 3) << 3) >> 1;
+            const int uvmiCol = uvX / 4, uvmiRow = uvY / 4;
+            // ---- luma: edges (M1 + the REAL recon top-right gather) ----
+            const bool hasTop = by > 0, hasLeft = bx > 0;
+            const int nTopPx = hasTop ? lumaB : 0;
+            const int nLeftPx = hasLeft ? lumaB : 0;
+            const int nTopRightPx = (hasTop && bx + 1 < grid) ? lumaB : 0;
+            std::uint8_t above[129] = {0};
+            std::uint8_t left[129] = {0};
+            if (hasTop)
+                for (int i = 0; i < lumaB + nTopRightPx; ++i) above[i] = reconY.at(px + i, py - 1);
+            if (hasLeft)
+                for (int i = 0; i < lumaB; ++i) left[i] = reconY.at(px - 1, py + i);
+            const std::uint8_t aboveLeft = (hasTop && hasLeft) ? reconY.at(px - 1, py - 1) : 0;
+            intra::NeighborContext nctx;
+            nctx.aboveMode = hasTop
+                                 ? static_cast<intra::PredictionMode>(modesY[(by - 1) * grid + bx])
+                                 : intra::DC_PRED;
+            nctx.leftMode = hasLeft
+                                ? static_cast<intra::PredictionMode>(modesY[by * grid + bx - 1])
+                                : intra::DC_PRED;
+            std::uint8_t srcBlk[4096] = {0};
+            for (int y = 0; y < lumaB; ++y)
+                for (int x = 0; x < lumaB; ++x) srcBlk[y * lumaB + x] = srcY.at(px + x, py + y);
+            ModeDecision d{intra::DC_PRED, 0};
+            if (lumaB == 8)
+                d = decideBlockMode8x8(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, 0,
+                                       aboveLeft, nctx);
+            else if (lumaB == 16)
+                d = decideBlockMode16x16(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, 0,
+                                         aboveLeft, nctx);
+            else if (lumaB == 32)
+                d = decideBlockMode32x32(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, 0,
+                                         aboveLeft, nctx);
+            else
+                d = decideBlockMode64x64(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, 0,
+                                         aboveLeft, nctx);
+            modesY[bidx] = static_cast<std::uint8_t>(d.mode);
+            std::uint8_t pred[4096] = {0};
+            intra::buildIntraPredictors(pred, lumaB, d.mode, 0, lumaB, lumaB, aboveLeft, above,
+                                        nTopPx, nTopRightPx, left, nLeftPx, 0, nctx);
+            std::int16_t residual[4096];
+            for (int i = 0; i < lumaB * lumaB; ++i) {
+                const int x = i % lumaB, y = i / lumaB;
+                residual[i] = static_cast<std::int16_t>(srcY.at(px + x, py + y) - pred[i]);
+            }
+            std::int32_t cb[4096] = {0};
+            std::int32_t qc[4096] = {0}, dq[4096] = {0};
+            std::uint16_t eob = 0;
+            if (lumaB == 8) {
+                transforms::fwdTxfm2d8x8(residual, cb, lumaB, txType);
+                transforms::quantizeFp8x8(cb, qt, lscan, qc, dq, &eob);
+            } else if (lumaB == 16) {
+                transforms::fwdTxfm2d16x16(residual, cb, lumaB, txType);
+                transforms::quantizeFp16x16(cb, qt, lscan, qc, dq, &eob);
+            } else if (lumaB == 32) {
+                transforms::fwdTxfm2d32x32(residual, cb, lumaB, txType);
+                transforms::quantizeFp32x32(cb, qt, lscan, qc, dq, &eob);
+            } else {
+                transforms::fwdTxfm2d64x64(residual, cb, lumaB, txType);
+            }
+            if (lumaB == 64) {
+                if (w && fc) {
+                    std::int32_t cbTok[1024] = {0};
+                    for (int r = 0; r < 32; ++r)
+                        for (int c = 0; c < 32; ++c) cbTok[r * 32 + c] = cb[r * 64 + c];
+                    transforms::quantizeFp64x64Token(cbTok, qt, lscan, qc, dq, &eob);
+                } else {
+                    transforms::quantizeFp64x64(cb, qt, lscan, qc, dq, &eob);
+                }
+            }
+            for (int i = 0; i < lumaB * lumaB; ++i) coeffsY[bidx * lumaB * lumaB + i] = qc[i];
+            eobsY[bidx] = eob;
+            // symbols: luma kf mode (+ the angle delta when gated), then
+            // uv_mode + the uv angle-delta (chroma-referenced only)
+            if (w && fc) {
+                int topCtx = 0, leftCtx = 0;
+                entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
+                                       hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode), &topCtx,
+                                       &leftCtx);
+                entropy::writeKfLumaMode(w, fc, lbs, static_cast<entropy::PredictionMode>(d.mode),
+                                         topCtx, leftCtx, 0);
+            }
+            std::uint8_t uvMode = 0xFF;
+            if (chromaRef) {
+                // the UV decision on the U plane (the CH3 D2 policy); the V
+                // TU shares the decided mode (ONE uv_mode symbol per block)
+                std::uint8_t uvAbove[65] = {0};
+                std::uint8_t uvLeft[65] = {0};
+                const bool uvHasTop = uvY > 0, uvHasLeft = uvX > 0;
+                const int uvGrid = 32 / uvB;
+                const int uRow = uvY / uvB, uCol = uvX / uvB;
+                const int nTopUv = uvHasTop ? uvB : 0;
+                const int nLeftUv = uvHasLeft ? uvB : 0;
+                const int nTrUv = (uvHasTop && uCol + 1 < uvGrid) ? uvB : 0;
+                if (uvHasTop)
+                    for (int i = 0; i < uvB + nTrUv; ++i) uvAbove[i] = reconU.at(uvX + i, uvY - 1);
+                if (uvHasLeft)
+                    for (int i = 0; i < uvB; ++i) uvLeft[i] = reconU.at(uvX - 1, uvY + i);
+                const std::uint8_t uvAl = (uvHasTop && uvHasLeft) ? reconU.at(uvX - 1, uvY - 1) : 0;
+                intra::NeighborContext uvNctx;
+                uvNctx.aboveMode =
+                    uvHasTop
+                        ? static_cast<intra::PredictionMode>(modesU[(uRow - 1) * uvGrid + uCol])
+                        : intra::DC_PRED;
+                uvNctx.leftMode =
+                    uvHasLeft ? static_cast<intra::PredictionMode>(modesU[uRow * uvGrid + uCol - 1])
+                              : intra::DC_PRED;
+                std::uint8_t uvSrc[1024] = {0};
+                for (int y = 0; y < uvB; ++y)
+                    for (int x = 0; x < uvB; ++x) uvSrc[y * uvB + x] = srcU.at(uvX + x, uvY + y);
+                const ModeDecision dUv =
+                    decideBlockModeUv(uvSrc, uvAbove, nTopUv, nTrUv, uvLeft, nLeftUv, 0, uvAl, uvB,
+                                      uvNctx);
+                uvMode = static_cast<std::uint8_t>(dUv.mode);
+                modesU[uRow * uvGrid + uCol] = uvMode;
+                modesV[uRow * uvGrid + uCol] = uvMode;  // ONE uv_mode per block
+                if (w && fc) {
+                    entropy::writeUvMode(w, fc, cfl, static_cast<entropy::PredictionMode>(d.mode),
+                                         static_cast<entropy::UvPredictionMode>(dUv.mode));
+                    entropy::writeUvAngleDelta(w, fc, lbs,
+                                               static_cast<entropy::UvPredictionMode>(dUv.mode), 0);
+                }
+            } else {
+                eobsU[bidx] = 0xFFFF;
+                eobsV[bidx] = 0xFFFF;
+                modesU[bidx] = 0xFF;
+                modesV[bidx] = 0xFF;
+            }
+            // ---- the LUMA chain (U BEFORE V: the luma chain first, the
+            // ratified CS4 walk order) ----
+            if (w && fc) {
+                entropy::writeBlockCoeffs(w, fc, naY, qc, lscan, ltxs, lbs, eob, miRow, miCol, 1,
+                                          static_cast<entropy::PredictionMode>(d.mode),
+                                          entropy::COMPONENT_LUMA);
+            }
+            // ---- the U chain then the V chain (U BEFORE V) ----
+            if (chromaRef) {
+                const int uRow = uvY / uvB, uCol = uvX / uvB;
+                const int uvGrid = 32 / uvB;
+                const bool uvHasTop = uvY > 0, uvHasLeft = uvX > 0;
+                const int nTopUv = uvHasTop ? uvB : 0;
+                const int nLeftUv = uvHasLeft ? uvB : 0;
+                const int nTrUv = (uvHasTop && uCol + 1 < uvGrid) ? uvB : 0;
+                for (int comp = 0; comp < 2; ++comp) {
+                    const pixels::Plane& csrc = comp ? srcV : srcU;
+                    pixels::Plane& crecon = comp ? reconV : reconU;
+                    std::int32_t* ccoeffs = comp ? coeffsV : coeffsU;
+                    std::uint16_t* ceobs = comp ? eobsV : eobsU;
+                    entropy::DcSignLevelCoeffNa* cna = comp ? naV : naU;
+                    std::uint8_t cAbove[65] = {0};
+                    std::uint8_t cLeft[65] = {0};
+                    if (uvHasTop)
+                        for (int i = 0; i < uvB + nTrUv; ++i)
+                            cAbove[i] = crecon.at(uvX + i, uvY - 1);
+                    if (uvHasLeft)
+                        for (int i = 0; i < uvB; ++i) cLeft[i] = crecon.at(uvX - 1, uvY + i);
+                    const std::uint8_t cAl = (uvHasTop && uvHasLeft) ? crecon.at(uvX - 1, uvY - 1) : 0;
+                    intra::NeighborContext cNctx;
+                    // the shared uv_mode history (the U-plane neighbor
+                    // modes: ONE uv_mode per block, the V TU shares it)
+                    cNctx.aboveMode =
+                        uvHasTop
+                            ? static_cast<intra::PredictionMode>(modesU[(uRow - 1) * uvGrid + uCol])
+                            : intra::DC_PRED;
+                    cNctx.leftMode =
+                        uvHasLeft
+                            ? static_cast<intra::PredictionMode>(modesU[uRow * uvGrid + uCol - 1])
+                            : intra::DC_PRED;
+                    std::uint8_t cPred[1024] = {0};
+                    intra::buildIntraPredictorsUv(
+                        cPred, uvB,
+                        static_cast<intra::UvPredictionMode>(modesU[uRow * uvGrid + uCol]), 0, uvB,
+                        uvB, cAl, cAbove, nTopUv, nTrUv, cLeft, nLeftUv, 0, cNctx);
+                    std::int16_t cRes[1024];
+                    for (int i = 0; i < uvB * uvB; ++i) {
+                        const int x = i % uvB, y = i / uvB;
+                        cRes[i] = static_cast<std::int16_t>(csrc.at(uvX + x, uvY + y) - cPred[i]);
+                    }
+                    std::int32_t cCb[1024] = {0};
+                    std::int32_t cQc[1024] = {0}, cDq[1024] = {0};
+                    std::uint16_t cEob = 0;
+                    if (uvB == 4) {
+                        transforms::fwdTxfm2d4x4(cRes, cCb, uvB, txType);
+                        transforms::quantizeFp4x4(cCb, qt, uscan, cQc, cDq, &cEob);
+                    } else if (uvB == 8) {
+                        transforms::fwdTxfm2d8x8(cRes, cCb, uvB, txType);
+                        transforms::quantizeFp8x8(cCb, qt, uscan, cQc, cDq, &cEob);
+                    } else if (uvB == 16) {
+                        transforms::fwdTxfm2d16x16(cRes, cCb, uvB, txType);
+                        transforms::quantizeFp16x16(cCb, qt, uscan, cQc, cDq, &cEob);
+                    } else {
+                        transforms::fwdTxfm2d32x32(cRes, cCb, uvB, txType);
+                        transforms::quantizeFp32x32(cCb, qt, uscan, cQc, cDq, &cEob);
+                    }
+                    for (int i = 0; i < uvB * uvB; ++i) ccoeffs[bidx * uvB * uvB + i] = cQc[i];
+                    ceobs[bidx] = cEob;
+                    if (w && fc) {
+                        entropy::writeBlockCoeffs(w, fc, cna, cQc, uscan, utxs, ubs, cEob,
+                                                  uvmiRow, uvmiCol, 1, entropy::DC_PRED,
+                                                  entropy::COMPONENT_CHROMA);
+                    }
+                    if (uvB == 4) transforms::invTxfm2dAdd4x4(cDq, cPred, uvB, txType);
+                    else if (uvB == 8) transforms::invTxfm2dAdd8x8(cDq, cPred, uvB, txType);
+                    else if (uvB == 16) transforms::invTxfm2dAdd16x16(cDq, cPred, uvB, txType);
+                    else transforms::invTxfm2dAdd32x32(cDq, cPred, uvB, txType);
+                    for (int y = 0; y < uvB; ++y)
+                        for (int x = 0; x < uvB; ++x)
+                            crecon.at(uvX + x, uvY + y) = cPred[y * uvB + x];
+                }
+            }
+            if (lumaB == 64 && w && fc) {
+                // the emission-domain dq expansion before inv64 (the FS2/FS5d
+                // contract)
+                std::int32_t dq64[4096] = {0};
+                for (int r = 0; r < 32; ++r)
+                    for (int c = 0; c < 32; ++c) dq64[r * 64 + c] = dq[r * 32 + c];
+                std::uint8_t blk[4096] = {0};
+                for (int i = 0; i < 4096; ++i) blk[i] = pred[i];
+                transforms::invTxfm2dAdd64x64(dq64, blk, 64, txType);
+                for (int y = 0; y < 64; ++y)
+                    for (int x = 0; x < 64; ++x) reconY.at(px + x, py + y) = blk[y * 64 + x];
+            } else {
+                std::uint8_t blk[4096] = {0};
+                for (int i = 0; i < lumaB * lumaB; ++i) blk[i] = pred[i];
+                if (lumaB == 8) transforms::invTxfm2dAdd8x8(dq, blk, lumaB, txType);
+                else if (lumaB == 16) transforms::invTxfm2dAdd16x16(dq, blk, lumaB, txType);
+                else if (lumaB == 32) transforms::invTxfm2dAdd32x32(dq, blk, lumaB, txType);
+                else transforms::invTxfm2dAdd64x64(dq, blk, lumaB, txType);
+                for (int y = 0; y < lumaB; ++y)
+                    for (int x = 0; x < lumaB; ++x) reconY.at(px + x, py + y) = blk[y * lumaB + x];
+            }
+            (void)ltxW;
+            (void)utxW;
+        }
+    }
+    if (w) entropy::odEcStopEncode(w);
+}
+
 void encodeFrameReconChroma16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                                  intra::UvPredictionMode mode, int angleDelta, transforms::TxType txType) {
     const int gridW = src.width() / 16;

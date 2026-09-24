@@ -146,18 +146,23 @@ A0. SLICE-LEVEL STATE (the live register)
       + the per-plane decode check ride CS5 (CS3 stops at the gate).
       Other mono-gated spans (grep-verified): :3149 (LR flag,
       already-positioned), :3581 (deblock count, not bitstream).
-- [ ] CS4 l6 integration: the per-block walk order (write_modes_b :5015-5112
-      -> av1_encode_coeff_1d :757-904): [modes: luma kf -> uv_mode] then LUMA
-      chain -> CB chain -> CR chain (U BEFORE V), three separate NAs
-      (:4159-4161), one UV TU per block (txb_count_uv = 1),
-      chroma_tx_size = av1_get_max_uv_txsize (common_utils.h:142-149):
-      8x8->TX_4X4, 16x16->TX_8X8, 32x32->TX_16X16, 64x64->TX_32X32.
-      THE 4x4 GEOMETRY: is_chroma_reference (common_utils.h:315-320) is TRUE
-      only at odd mi_row AND odd mi_col - the (1,1) 4x4 block owns ONE TX_4X4
-      UV TU at uv (0,0) (ROUND_UV(x) = ((x)>>3)<<3, definitions.h:327 -
-      ROUND_UV(4)>>1 = 0), covering the whole 8x8-aligned quad's chroma; a
-      single-4x4-TU frame codes NO chroma; the d4 artifact carries chroma via
-      the (1,1) owner.
+- [~] CS4 l6 integration (LANDED): the chroma-emitting Q loop
+      (encodeFrameChromaQ, lumaB 8/16/32/64 -> UV 4/8/16/32 per the
+      av1_get_max_uv_txsize map common_utils.h:142-149): per luma block in
+      raster order [luma kf mode symbol -> uv_mode symbol (writeUvMode, ONE
+      uv_mode per block - the V TU shares the U-plane decision, the
+      documented walk policy) -> the uv angle-delta where gated] then the
+      LUMA chain -> the U chain -> the V chain (U BEFORE V, three separate
+      per-plane NAs, the CS1 wrapper ctx plumbing). THE CHROMA-OWNERSHIP
+      RULE (is_chroma_reference common_utils.h:315-320) implemented + the
+      4x4-frame NO-chroma / (1,1)-owner asserts. ALL FOUR UV sizes landed
+      (S=32 = the TX_64X64 compacted emission domain). The gate: the ecs4
+      walk lines (28) + the CS2 cross-check (the U fields == the CS2 U
+      fields; the V fields legitimately differ - shared mode). The v3
+      SPS/frame-header NOT wired into l6 (rides CS5). The l6 mirror proved
+      bit-exact vs the generator (454 assertions); the walk-order inversion
+      (luma-after-UV) and the CS2 fixture mismatch (box average vs the CH3
+      template 2*(i+j+2)) were both caught by the gate and fixed.
 - [ ] CS5 color artifacts + per-plane instrument (yuv420p: Y/U/V compared
       separately vs the generator's per-plane recon) + USER decode checks.
 - [ ] CS6 docs currency (currency item noted: docs/ffmpeg_integration.md's

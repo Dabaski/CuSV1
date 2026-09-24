@@ -2267,5 +2267,25 @@ int main(void) {
         const int rc3 = svtd_cs3_drive();
         if (rc3) { fprintf(stderr, "CS3 drive FAILED rc=%d\n", rc3); return 1; }
     }
+
+    // ---- CS4: the chroma-emitting Q walk (the l6 mirror gate) --------------
+    // The CS2 fixture per luma size B in {8,16,32,64} (UV tx S = B/2 per the
+    // av1_get_max_uv_txsize map, common_utils.h:142-149): per luma block in
+    // raster order [luma kf mode symbol -> uv_mode symbol (the DECIDED
+    // chroma mode, cfl = B <= 32 per aom cfl.h:19-33) -> the uv angle-delta
+    // symbol when B >= 8X8 and the folded mode directional] then the LUMA
+    // chain -> the U chain -> the V chain (U BEFORE V, three separate
+    // per-plane NAs). CHROMA OWNERSHIP (is_chroma_reference,
+    // common_utils.h:315-320): 4x4 luma blocks reference chroma only at odd
+    // mi_row AND odd mi_col - a single-4x4-TU frame codes NO chroma; the
+    // (1,1) owner carries the quad's UV TU (ROUND_UV, definitions.h:327).
+    // The S=32 luma chain runs the TX_64X64 scan contract (the FS2/FS5d
+    // compacted emission domain). Gate lines per size: ecs4S_bytes /
+    // ecs4S_modes / ecs4S_eobs / ecs4S_coeffs / ecs4S_recon_y / ecs4S_recon_u
+    // / ecs4S_recon_v.
+    {
+        const int rc4 = svtd_cs4_drive();
+        if (rc4) { fprintf(stderr, "CS4 drive FAILED rc=%d\n", rc4); return 1; }
+    }
     return 0;
 }

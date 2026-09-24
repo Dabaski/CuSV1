@@ -187,6 +187,42 @@ void encodeFrameReconChroma16x16Q(const pixels::Plane& src, pixels::Plane& recon
 void encodeFrameAutoChroma16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                                  std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType);
 
+// ---- CS4: the chroma-emitting Q walk ---------------------------------------
+// The size-generic UV D2 decision (the CH3 policy: 13 folded candidates via
+// intra::uv2y, UV_CFL_PRED excluded, SAD at the UV size, tie = lowest index).
+ModeDecision decideBlockModeUv(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                               int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                               int nBottomLeftPx, std::uint8_t aboveLeft, int uvB,
+                               const intra::NeighborContext& neighbors = intra::NeighborContext());
+
+// The chroma-emitting Q loop over the 4:2:0 planes. Per luma block (lumaB in
+// {8, 16, 32, 64}; the UV tx = lumaB/2 per the av1_get_max_uv_txsize map,
+// common_utils.h:142-149) in raster order: [luma kf mode symbol -> uv_mode
+// symbol (writeUvMode, the DECIDED chroma mode; ONE uv_mode per block - the
+// V TU shares the U-plane decision, the walk's documented policy) -> the uv
+// angle-delta symbol where gated (bsize >= 8X8 AND the folded mode
+// directional)] then the LUMA chain -> the U chain -> the V chain (U BEFORE
+// V, three separate per-plane NAs; luma whole-block txb_skip_ctx 0; chroma
+// ctx_base + 7 per the :310-314 branch via the CS1 wrapper plumbing). CHROMA
+// OWNERSHIP (is_chroma_reference, common_utils.h:315-320): 4:2:0, TRUE only
+// at odd mi_row AND odd mi_col for 4x4 luma blocks - a single-4x4-TU frame
+// codes NO chroma; the (1,1) owner carries the quad's UV TU at UV
+// ((px & ~7) >> 1, (py & ~7) >> 1) (ROUND_UV, definitions.h:327). The
+// modes/eobs arrays carry 0xFF/0xFFFF markers for non-referenced blocks. The
+// lumaB=64 luma chain runs the TX_64X64 scan contract (the compacted
+// 1024-position emission domain). No partition/skip symbols (the ratified
+// TD5b-era shape extended). The v3 SPS/frame-header composition is NOT
+// wired here (CS5).
+void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
+                        const pixels::Plane& srcV, pixels::Plane& reconY, pixels::Plane& reconU,
+                        pixels::Plane& reconV, std::int32_t* coeffsY, std::int32_t* coeffsU,
+                        std::int32_t* coeffsV, std::uint8_t* modesY, std::uint8_t* modesU,
+                        std::uint8_t* modesV, std::uint16_t* eobsY, std::uint16_t* eobsU,
+                        std::uint16_t* eobsV, std::int32_t qindex, int lumaB,
+                        transforms::TxType txType, entropy::AomWriter* w,
+                        entropy::EcFrameContext* fc, entropy::DcSignLevelCoeffNa* naY,
+                        entropy::DcSignLevelCoeffNa* naU, entropy::DcSignLevelCoeffNa* naV);
+
 // Sum of squared sample differences over the full frame (integer, exact).
 std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 

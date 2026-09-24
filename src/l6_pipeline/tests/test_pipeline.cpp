@@ -4871,3 +4871,253 @@ TEST_CASE("gpu frame auto chroma 16x16 matches host encodeFrameAutoChroma16x16")
     }
     CHECK(coeffsOk);
 }
+
+// CS4 fixtures (mechanically emitted from expected_primitives.txt; see the
+// .inc header): the ecs4S_* walk lines and the ecs2S_* cross-check lines.
+#include "ecs4_gate.inc"
+
+TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
+    // THE WALK (the ratified CS4 order, the write_modes_b shape): per luma
+    // block in raster order [luma kf mode symbol -> uv_mode symbol
+    // (writeUvMode, the DECIDED chroma mode; ONE uv_mode per block - the V
+    // TU shares the U-plane decision, so the walk's V chains legitimately
+    // differ from the CS2 drive's per-plane V fixtures; the U fields match
+    // exactly, asserted below)] -> the uv angle-delta symbol when gated
+    // (bsize >= 8X8 AND the folded mode directional) then the LUMA chain ->
+    // the U chain -> the V chain (U BEFORE V, three separate per-plane NAs,
+    // the CS1 wrapper plumbing: luma whole-block txb_skip_ctx 0; chroma
+    // ctx_base + 7). chroma_tx_size per the av1_get_max_uv_txsize map
+    // (common_utils.h:142-149: 8x8->TX_4X4, 16x16->TX_8X8, 32x32->TX_16X16,
+    // 64x64->TX_32X32).
+    // THE CHROMA-OWNERSHIP RULE (is_chroma_reference, common_utils.h:315-320,
+    // 4:2:0): TRUE only at odd mi_row AND odd mi_col for 4x4 luma blocks
+    // (bw = bh = 1) - a single-4x4-TU frame codes NO chroma (the (0,0)
+    // block is never chroma-referenced); the (1,1) owner carries the quad's
+    // UV TU at UV ((px & ~7) >> 1, (py & ~7) >> 1) (ROUND_UV,
+    // definitions.h:327). The modes/eobs arrays carry 0xFF/0xFFFF markers
+    // for non-referenced blocks (the gate's -1). All four UV sizes land:
+    // the S=32 luma chain runs the TX_64X64 scan contract (the compacted
+    // 1024-position emission domain, quantizeFp64x64Token + the dq
+    // expansion). The v3 SPS/frame-header composition is NOT wired here
+    // (CS5); the D2 chroma decision is the CH3 policy (ours, documented).
+    for (int si = 0; si < 4; ++si) {
+        static const int sizes[4] = {4, 8, 16, 32};
+        const int S = sizes[si];
+        const int B = 2 * S;
+        const int grid = 64 / B;
+        const int nb = grid * grid;
+        const ecs4::Gate& G = ecs4::gates[si];
+        pixels::Plane srcY(64, 64, 8), reconY(64, 64, 8);
+        pixels::Plane srcU(32, 32, 8), reconU(32, 32, 8);
+        pixels::Plane srcV(32, 32, 8), reconV(32, 32, 8);
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x)
+                srcY.at(x, y) = (y < 32) ? static_cast<std::uint8_t>(x + y + 1) : 0;
+        // the UV planes = the CH3 template values (the CS2 fixture: rows
+        // 0-15 = 2*(x+y+2), rows 16-31 = 0; V = 255 - U - the cross-slice
+        // check compares against the CS2 drives, so the fixture is theirs)
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x) {
+                const std::uint8_t u = static_cast<std::uint8_t>(
+                    (y < 16) ? 2 * (x + y + 2) : 0);
+                srcU.at(x, y) = u;
+                srcV.at(x, y) = static_cast<std::uint8_t>(255 - u);
+            }
+        static std::int32_t coeffsY[64 * 4096], coeffsU[64 * 1024], coeffsV[64 * 1024];
+        static std::uint8_t modesY[64], modesU[64], modesV[64];
+        static std::uint16_t eobsY[64], eobsU[64], eobsV[64];
+        memset(coeffsY, 0, sizeof(coeffsY));
+        memset(coeffsU, 0, sizeof(coeffsU));
+        memset(coeffsV, 0, sizeof(coeffsV));
+        memset(modesY, 0, sizeof(modesY));
+        memset(modesU, 0, sizeof(modesU));
+        memset(modesV, 0, sizeof(modesV));
+        memset(eobsY, 0, sizeof(eobsY));
+        memset(eobsU, 0, sizeof(eobsU));
+        memset(eobsV, 0, sizeof(eobsV));
+        entropy::AomWriter w{};
+        static unsigned char buf[32768];
+        memset(buf, 0, sizeof(buf));
+        w.ec.buf = buf;
+        entropy::EcFrameContext fc;
+        entropy::DcSignLevelCoeffNa naY, naU, naV;
+        memset(&naY, 0xFF, sizeof(naY));
+        memset(&naU, 0xFF, sizeof(naU));
+        memset(&naV, 0xFF, sizeof(naV));
+        pipeline::encodeFrameChromaQ(srcY, srcU, srcV, reconY, reconU, reconV, coeffsY, coeffsU,
+                                     coeffsV, modesY, modesU, modesV, eobsY, eobsU, eobsV, 100, B,
+                                     transforms::TxType::DCT_DCT, &w, &fc, &naY, &naU, &naV);
+        // the loop stops the encoder internally (the odEcStopEncode inside);
+        // a second stop here would append a duplicated tail (measured)
+        // the full walk stream (the byte loop FIRST: the first mismatch
+        // index localizes a divergence; then the length)
+        const unsigned minLen = w.pos < G.bytesLen ? w.pos : G.bytesLen;
+        for (unsigned i = 0; i < minLen; ++i) CHECK((unsigned)buf[i] == G.bytes[i]);
+        CHECK(w.pos == G.bytesLen);
+        // modes per block (0xFF markers for non-referenced blocks)
+        bool modesOk = true;
+        for (int b = 0; b < nb; ++b) {
+            const int um = G.modes[3 * b + 1], vm = G.modes[3 * b + 2];
+            if (modesY[b] != (std::uint8_t)G.modes[3 * b]) modesOk = false;
+            if (um < 0 ? (modesU[b] != 0xFF) : (modesU[b] != (std::uint8_t)um)) modesOk = false;
+            if (vm < 0 ? (modesV[b] != 0xFF) : (modesV[b] != (std::uint8_t)vm)) modesOk = false;
+        }
+        CHECK(modesOk);
+        // eobs per block (0xFFFF markers)
+        bool eobsOk = true;
+        for (int b = 0; b < nb; ++b) {
+            const int ue = G.eobs[3 * b + 1], ve = G.eobs[3 * b + 2];
+            if (eobsY[b] != (std::uint16_t)G.eobs[3 * b]) eobsOk = false;
+            if (ue < 0 ? (eobsU[b] != 0xFFFF) : (eobsU[b] != (std::uint16_t)ue)) eobsOk = false;
+            if (ve < 0 ? (eobsV[b] != 0xFFFF) : (eobsV[b] != (std::uint16_t)ve)) eobsOk = false;
+        }
+        CHECK(eobsOk);
+        // coeffs (the gate order: per block luma B*B, then U S*S + V S*S for
+        // referenced blocks)
+        int off = 0;
+        bool coeffsOk = true;
+        for (int b = 0; b < nb; ++b) {
+            for (int i = 0; i < B * B; ++i, ++off)
+                if (coeffsY[b * B * B + i] != G.coeffs[off]) coeffsOk = false;
+            if (G.eobs[3 * b + 1] >= 0) {
+                for (int i = 0; i < S * S; ++i, ++off)
+                    if (coeffsU[b * S * S + i] != G.coeffs[off]) coeffsOk = false;
+                for (int i = 0; i < S * S; ++i, ++off)
+                    if (coeffsV[b * S * S + i] != G.coeffs[off]) coeffsOk = false;
+            }
+        }
+        CHECK(off == (int)G.coeffsLen);
+        CHECK(coeffsOk);
+        // the per-plane recons
+        bool reconOk = true;
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x)
+                if (reconY.at(x, y) != (std::uint8_t)G.recon_y[y * 64 + x]) reconOk = false;
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x) {
+                if (reconU.at(x, y) != (std::uint8_t)G.recon_u[y * 32 + x]) reconOk = false;
+                if (reconV.at(x, y) != (std::uint8_t)G.recon_v[y * 32 + x]) reconOk = false;
+            }
+        CHECK(reconOk);
+        // THE CROSS-SLICE CHECK vs the CS2 quant-drive lines: the U-plane
+        // fields (modes/eobs/coeffs/recon) are identical - the walk decides
+        // on the U plane with the same CH3 D2 policy, per-plane NAs and
+        // ctxs. The walk's V fields share the U mode (one uv_mode symbol
+        // per block) and legitimately differ from the CS2 per-plane V
+        // fixtures - named, not a defect.
+        const int uvGrid = 32 / S;
+        const int nuv = uvGrid * uvGrid;
+        bool uModesOk = true, uEobsOk = true, uCoeffsOk = true, uReconOk = true;
+        for (int b = 0; b < nuv; ++b) {
+            if ((int)modesU[b] != G.c2_modes[2 * b]) uModesOk = false;
+            if ((int)eobsU[b] != G.c2_eobs[2 * b]) uEobsOk = false;
+        }
+        int coff2 = 0;
+        for (int b = 0; b < nuv; ++b) {
+            for (int i = 0; i < S * S; ++i, ++coff2)
+                if (coeffsU[b * S * S + i] != G.c2_coeffs[coff2]) uCoeffsOk = false;
+            coff2 += S * S;  // the CS2 V coefficients (skipped - shared-mode walk)
+        }
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x)
+                if (reconU.at(x, y) != (std::uint8_t)G.c2_recon_u[y * 32 + x]) uReconOk = false;
+        CHECK(uModesOk);
+        CHECK(uEobsOk);
+        CHECK(uCoeffsOk);
+        CHECK(uReconOk);
+    }
+}
+
+TEST_CASE("CS4: the chroma-ownership rule - a 4x4 frame codes NO chroma, the (1,1) owner carries the quad TU") {
+    // is_chroma_reference (common_utils.h:315-320) at 4:2:0 for 4x4 luma
+    // blocks (bw = bh = 1): TRUE only at odd mi_row AND odd mi_col.
+    // (a) A single-4x4-TU frame (one 4x4 luma block at (0,0)): NOT
+    //     chroma-referenced -> no uv_mode symbol, no UV chains; the eobs
+    //     markers stay 0xFFFF and the modes 0xFF.
+    // (b) An 8x8 frame of 4x4 luma blocks (2x2 grid): exactly the (1,1)
+    //     block references chroma - its UV TU sits at UV (0,0)
+    //     (ROUND_UV(4) >> 1 = 0) and covers the whole 8x8-aligned quad's
+    //     chroma; the other three blocks carry the 0xFF/0xFFFF markers.
+    // (a)
+    {
+        pixels::Plane srcY(4, 4, 8), reconY(4, 4, 8);
+        pixels::Plane srcU(2, 2, 8), reconU(2, 2, 8);
+        pixels::Plane srcV(2, 2, 8), reconV(2, 2, 8);
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) srcY.at(x, y) = static_cast<std::uint8_t>(x + y + 1);
+        for (int y = 0; y < 2; ++y)
+            for (int x = 0; x < 2; ++x) {
+                const std::uint8_t u = static_cast<std::uint8_t>(2 * (x + y + 2));
+                srcU.at(x, y) = u;
+                srcV.at(x, y) = static_cast<std::uint8_t>(255 - u);
+            }
+        std::int32_t coeffsY[16], coeffsU[4], coeffsV[4];
+        std::uint8_t modesY[1], modesU[1], modesV[1];
+        std::uint16_t eobsY[1], eobsU[1], eobsV[1];
+        memset(modesU, 0, sizeof(modesU));
+        memset(modesV, 0, sizeof(modesV));
+        memset(eobsU, 0, sizeof(eobsU));
+        memset(eobsV, 0, sizeof(eobsV));
+        entropy::AomWriter w{};
+        unsigned char buf[64] = {0};
+        w.ec.buf = buf;
+        entropy::EcFrameContext fc;
+        entropy::DcSignLevelCoeffNa naY, naU, naV;
+        memset(&naY, 0xFF, sizeof(naY));
+        memset(&naU, 0xFF, sizeof(naU));
+        memset(&naV, 0xFF, sizeof(naV));
+        pipeline::encodeFrameChromaQ(srcY, srcU, srcV, reconY, reconU, reconV, coeffsY, coeffsU,
+                                     coeffsV, modesY, modesU, modesV, eobsY, eobsU, eobsV, 100, 4,
+                                     transforms::TxType::DCT_DCT, &w, &fc, &naY, &naU, &naV);
+        CHECK(eobsU[0] == 0xFFFF);
+        CHECK(eobsV[0] == 0xFFFF);
+        CHECK(modesU[0] == 0xFF);
+        CHECK(modesV[0] == 0xFF);
+    }
+    // (b)
+    {
+        pixels::Plane srcY(8, 8, 8), reconY(8, 8, 8);
+        pixels::Plane srcU(4, 4, 8), reconU(4, 4, 8);
+        pixels::Plane srcV(4, 4, 8), reconV(4, 4, 8);
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x) srcY.at(x, y) = static_cast<std::uint8_t>(x + y + 1);
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) {
+                const std::uint8_t u = static_cast<std::uint8_t>(2 * (x + y + 2));
+                srcU.at(x, y) = u;
+                srcV.at(x, y) = static_cast<std::uint8_t>(255 - u);
+            }
+        std::int32_t coeffsY[4 * 64], coeffsU[16], coeffsV[16];
+        std::uint8_t modesY[4], modesU[4], modesV[4];
+        std::uint16_t eobsY[4], eobsU[4], eobsV[4];
+        memset(modesU, 0, sizeof(modesU));
+        memset(modesV, 0, sizeof(modesV));
+        memset(eobsU, 0, sizeof(eobsU));
+        memset(eobsV, 0, sizeof(eobsV));
+        entropy::AomWriter w{};
+        unsigned char buf[256] = {0};
+        w.ec.buf = buf;
+        entropy::EcFrameContext fc;
+        entropy::DcSignLevelCoeffNa naY, naU, naV;
+        memset(&naY, 0xFF, sizeof(naY));
+        memset(&naU, 0xFF, sizeof(naU));
+        memset(&naV, 0xFF, sizeof(naV));
+        pipeline::encodeFrameChromaQ(srcY, srcU, srcV, reconY, reconU, reconV, coeffsY, coeffsU,
+                                     coeffsV, modesY, modesU, modesV, eobsY, eobsU, eobsV, 100, 4,
+                                     transforms::TxType::DCT_DCT, &w, &fc, &naY, &naU, &naV);
+        CHECK(eobsU[0] == 0xFFFF);
+        CHECK(eobsU[1] == 0xFFFF);
+        CHECK(eobsU[2] == 0xFFFF);
+        CHECK(eobsU[3] != 0xFFFF);  // the (1,1) owner
+        CHECK(eobsV[3] != 0xFFFF);
+        CHECK(modesU[3] != 0xFF);
+        CHECK(modesV[3] != 0xFF);
+        // the owner's UV TU sits at UV (0,0) and covers the quad: the recon
+        // planes are fully written (the decoder-visible chroma of the frame)
+        bool reconWritten = true;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x)
+                if (reconU.at(x, y) == 0xFF) reconWritten = false;
+        CHECK(reconWritten);
+    }
+}

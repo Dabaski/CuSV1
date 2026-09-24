@@ -5406,7 +5406,7 @@ static int svtd_cs1_drive(void) {
 static uint8_t svtd_cs2_tile16[4096];
 static uint32_t svtd_cs2_tile16_pos;
 // The CH3 32x32 UV plane template generalized (svtd_frame_chroma_auto_16x16_q
-// is the S==16 shape). U plane = the CH3 source (the 4:2:0 box average of the
+// is the S==16 shape). U plane = the CH3 template source (the CS2 fixture).
 // 64x64 luma ramp: rows 0-15 = 2*(i+j+2), rows 16-31 = 0); V plane = 255 - U
 // (the documented complement fixture - distinct texture so the V chains,
 // signs and recon differ from U's). Per reachable UV size S in {4,8,16,32}
@@ -5927,5 +5927,574 @@ static int svtd_cs3_drive(void) {
     printf("tu_bytes_v3 %u", tu_size);
     for (uint32_t i = 0; i < tu_size; ++i) printf(" %02x", tu_buf[i]);
     printf("\n");
+    return 0;
+}
+
+// ---- CS4: the chroma-emitting Q walk (the l6 mirror gate) ------------------
+// Fixture: the CS2 fixture (the 64x64 luma ramp rows 0-31 = x+y+1, rows
+// 32-63 = 0; U = the CH3 template 32x32 (rows 0-15 = 2*(i+j+2)), V = 255 - U).
+// B in {8, 16, 32, 64} (the UV tx S = B/2 per the av1_get_max_uv_txsize
+// map, common_utils.h:142-149): one walk-faithful drive, per luma block in
+// raster order:
+//   [luma kf mode symbol (ctx = intra_mode_context of the neighbor luma
+//   modes, unavailable -> DC_PRED; the angle-delta symbol when B >= 8X8 and
+//   the mode directional, delta 0) -> uv_mode symbol (the DECIDED chroma
+//   mode through uv_mode_cdf[cfl][luma_mode], cfl = is_cfl_allowed =
+//   (B <= 32) at q100 lossy - aom cfl.h:19-33, the SVT rate-est predicate
+//   rd_cost.c:483; alphabet UV_INTRA_MODES - !cfl) -> the uv angle-delta
+//   symbol when B >= 8X8 AND the folded mode directional
+//   (entropy_coding.c:1087-1092)] then the LUMA chain -> the U chain -> the
+//   V chain (U BEFORE V, three separate per-plane NAs, the CS1 wrapper ctx
+//   plumbing: luma whole-block txb_skip_ctx 0; chroma ctx_base + 7, the
+//   :310-314 branch; the UV chains' intra_dir is DC_PRED - unused, the
+//   tx-type symbol is LUMA-only).
+// CHROMA OWNERSHIP (is_chroma_reference, common_utils.h:315-320): 4:2:0,
+// TRUE only at odd mi_row AND odd mi_col for 4x4 luma blocks - a single-
+// 4x4-TU frame codes NO chroma; the (1,1) owner carries the quad's UV TU at
+// UV ((px & ~7) >> 1, (py & ~7) >> 1) (ROUND_UV, definitions.h:327). At
+// B >= 8 every block references chroma (bw/bh even).
+// The D2 decisions (luma 13 modes; UV 0..12 via the g_uv2y fold, CFL
+// excluded) are the CH3 policy (ours, documented). The S=32 luma chain runs
+// the TX_64X64 scan contract (svtd_default_scan_64x64_token: fwd64 -> the
+// top-left 32x32 compaction -> quantize n_coeffs = 1024 -> the dq expansion
+// before inv64 - the FS2/FS5d emission domain).
+// Internal read twin: the full decoder walk (kf/uv_mode/delta reads + the
+// three chains with read NAs) must round-trip and end cdf-equal; any
+// mismatch returns nonzero (loud gate).
+// Gate lines per size: ecs4S_bytes (the full walk stream), ecs4S_modes
+// (per block: luma u v; u = v = -1 when not chroma-referenced), ecs4S_eobs
+// (same convention), ecs4S_coeffs (per block: luma B*B then, if referenced,
+// U S*S + V S*S), ecs4S_recon_y / ecs4S_recon_u / ecs4S_recon_v.
+static int svtd_cs4_uv_q_drive(int S) {
+    const int B = 2 * S;  // the luma block size
+    static uint8_t y_src[4096], u_src[1024], v_src[1024];
+    for (int i = 0; i < 64; ++i)
+        for (int j = 0; j < 64; ++j) y_src[i * 64 + j] = (uint8_t)((i < 32) ? (i + j + 1) : 0);
+    // the UV planes = the CH3 template values (the CS2 fixture: rows 0-15 =
+    // 2*(i+j+2), rows 16-31 = 0; V = 255 - U) - the cross-slice check
+    // compares against the CS2 drives, so the fixture is theirs, not a
+    // re-derived box average
+    for (int i = 0; i < 32; ++i)
+        for (int j = 0; j < 32; ++j) {
+            const uint8_t u = (uint8_t)((i < 16) ? 2 * (i + j + 2) : 0);
+            u_src[i * 32 + j] = u;
+            v_src[i * 32 + j] = (uint8_t)(255 - u);
+        }
+    static uint8_t recon_y[4096], recon_u[1024], recon_v[1024];
+    memset(recon_y, 0, 4096);
+    memset(recon_u, 0, 1024);
+    memset(recon_v, 0, 1024);
+    const int grid = 64 / B;
+    const int nb = grid * grid;
+    const TxSize ltxs = (B == 8) ? TX_8X8 : (B == 16) ? TX_16X16 : (B == 32) ? TX_32X32 : TX_64X64;
+    const TxSize utxs = (S == 4) ? TX_4X4 : (S == 8) ? TX_8X8 : (S == 16) ? TX_16X16 : TX_32X32;
+    const int ltx_w_unit = B / 4, utx_w_unit = S / 4;
+    const int cfl = (B <= 32) ? 1 : 0;
+    const int uv_abc = UV_INTRA_MODES - !cfl;
+    int16_t lscan[1024], uscan[1024];
+    if (B == 8) svtd_default_scan_8x8(lscan);
+    else if (B == 16) svtd_default_scan_16x16(lscan);
+    else if (B == 32) svtd_default_scan_32x32(lscan);
+    else svtd_default_scan_64x64_token(lscan);  // the TX_64X64 scan contract
+    if (S == 4) svtd_default_scan_4x4(uscan);
+    else if (S == 8) svtd_default_scan_8x8(uscan);
+    else if (S == 16) svtd_default_scan_16x16(uscan);
+    else svtd_default_scan_32x32(uscan);
+    SvtdQuantTables t;
+    svtd_build_quantizer_luma(100, &t);
+    Ts1FrameContext fc, fc_r;
+    ts1_init(&fc, 100);
+    ts1_init(&fc_r, 100);
+    static uint8_t buf[32768];
+    memset(buf, 0, sizeof(buf));
+    AomWriter w;
+    w.ec.buf = buf;
+    svt_od_ec_enc_reset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    static const int8_t signs[3] = {0, -1, 1};
+    static int lmodes[64], umodes[64], vmodes[64];
+    static int leobs[64], ueobs[64], veobs[64];
+    static TranLow lcoeffs[64][4096], ucoeffs[64][1024], vcoeffs[64][1024];
+    static uint8_t na_l_above[16], na_l_left[16];
+    static uint8_t na_u_above[8], na_u_left[8], na_v_above[8], na_v_left[8];
+    static uint8_t na_l_above_r[16], na_l_left_r[16];
+    static uint8_t na_u_above_r[8], na_u_left_r[8], na_v_above_r[8], na_v_left_r[8];
+    memset(na_l_above, (int)INVALID_NEIGHBOR_DATA, 16);
+    memset(na_l_left, (int)INVALID_NEIGHBOR_DATA, 16);
+    memset(na_u_above, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_u_left, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_v_above, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_v_left, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_l_above_r, (int)INVALID_NEIGHBOR_DATA, 16);
+    memset(na_l_left_r, (int)INVALID_NEIGHBOR_DATA, 16);
+    memset(na_u_above_r, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_u_left_r, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_v_above_r, (int)INVALID_NEIGHBOR_DATA, 8);
+    memset(na_v_left_r, (int)INVALID_NEIGHBOR_DATA, 8);
+    for (int by = 0; by < grid; ++by) {
+        for (int bx = 0; bx < grid; ++bx) {
+            const int px = bx * B, py = by * B;
+            const int mi_row = py / 4, mi_col = px / 4;
+            const int bidx = by * grid + bx;
+            // is_chroma_reference (common_utils.h:315-320), 4:2:0, bw = bh = B/4
+            const int bw_mi = B / 4;
+            const int chroma_ref =
+                ((mi_row & 0x01) || !(bw_mi & 0x01)) && ((mi_col & 0x01) || !(bw_mi & 0x01));
+            const int uv_x = ((px >> 3) << 3) >> 1;  // ROUND_UV >> 1 (definitions.h:327)
+            const int uv_y = ((py >> 3) << 3) >> 1;
+            const int uvmi_col = uv_x / 4, uvmi_row = uv_y / 4;
+            // ---- luma: edges (M1 + the REAL recon top-right gather) ----
+            const int hasTop = by > 0, hasLeft = bx > 0;
+            const int nTop = hasTop ? B : 0;
+            const int nLeft = hasLeft ? B : 0;
+            const int nTr = (hasTop && bx + 1 < grid) ? B : 0;
+            uint8_t labove[129] = {0};
+            uint8_t lleft[129] = {0};
+            uint8_t lal = 0;
+            if (hasTop)
+                for (int i = 0; i < B + nTr; ++i) labove[i] = recon_y[(py - 1) * 64 + px + i];
+            if (hasLeft)
+                for (int i = 0; i < B; ++i) lleft[i] = recon_y[(py + i) * 64 + px - 1];
+            if (hasTop && hasLeft) lal = recon_y[(py - 1) * 64 + px - 1];
+            const int laboveMode = hasTop ? lmodes[(by - 1) * grid + bx] : DC_PRED;
+            const int lleftMode = hasLeft ? lmodes[by * grid + bx - 1] : DC_PRED;
+            svtd_filt_type =
+                ((laboveMode >= SMOOTH_PRED && laboveMode <= SMOOTH_H_PRED) ||
+                 (lleftMode >= SMOOTH_PRED && lleftMode <= SMOOTH_H_PRED))
+                    ? 1
+                    : 0;
+            static uint8_t lsrc[4096];
+            for (int i = 0; i < B; ++i)
+                for (int j = 0; j < B; ++j) lsrc[i * B + j] = y_src[(py + i) * 64 + px + j];
+            uint32_t best_sad = 0;
+            int lmode = -1;
+            static uint8_t lpred[4096];
+            for (int m = 0; m <= PAETH_PRED; ++m) {
+                svtd_call_builder_tx(lpred, m, 0, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
+                                     nLeft, 0, lal, ltxs);
+                const uint32_t sad = svt_nxm_sad_kernel_helper_c(lsrc, B, lpred, B, B, B);
+                if (lmode < 0 || sad < best_sad) { best_sad = sad; lmode = m; }
+            }
+            lmodes[bidx] = lmode;
+            svtd_call_builder_tx(lpred, lmode, 0, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
+                                 nLeft, 0, lal, ltxs);
+            // symbols: luma kf mode (+ the angle delta when gated)
+            const int top_ctx = intra_mode_context[hasTop ? laboveMode : DC_PRED];
+            const int left_ctx = intra_mode_context[hasLeft ? lleftMode : DC_PRED];
+            aom_write_symbol(&w, lmode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+            if (B >= 8 && av1_is_directional_mode((PredictionMode)lmode)) {
+                aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[lmode - V_PRED],
+                                 2 * MAX_ANGLE_DELTA + 1);
+            }
+            // uv_mode + the uv angle-delta symbols (chroma-referenced only)
+            int uvm = -1;
+            if (chroma_ref) {
+                const int uvHasTop = (uv_y > 0), uvHasLeft = (uv_x > 0);
+                const int uRow = uv_y / S, uCol = uv_x / S;
+                const int uvGrid = 32 / S;
+                uint8_t uabove[65] = {0};
+                uint8_t uleft[65] = {0};
+                uint8_t ual = 0;
+                if (uvHasTop)
+                    for (int i = 0; i < S + ((uvHasTop && uCol + 1 < uvGrid) ? S : 0); ++i)
+                        uabove[i] = recon_u[(uv_y - 1) * 32 + uv_x + i];
+                if (uvHasLeft)
+                    for (int i = 0; i < S; ++i) uleft[i] = recon_u[(uv_y + i) * 32 + uv_x - 1];
+                if (uvHasTop && uvHasLeft) ual = recon_u[(uv_y - 1) * 32 + uv_x - 1];
+                const int uAboveMode = uvHasTop ? umodes[(uRow - 1) * uvGrid + uCol] : UV_DC_PRED;
+                const int uLeftMode = uvHasLeft ? umodes[uRow * uvGrid + uCol - 1] : UV_DC_PRED;
+                svtd_filt_type = ((uAboveMode == UV_SMOOTH_PRED || uAboveMode == UV_SMOOTH_V_PRED ||
+                                   uAboveMode == UV_SMOOTH_H_PRED) ||
+                                  (uLeftMode == UV_SMOOTH_PRED || uLeftMode == UV_SMOOTH_V_PRED ||
+                                   uLeftMode == UV_SMOOTH_H_PRED))
+                                     ? 1
+                                     : 0;
+                static uint8_t usrc[1024];
+                for (int i = 0; i < S; ++i)
+                    for (int j = 0; j < S; ++j) usrc[i * S + j] = u_src[(uv_y + i) * 32 + uv_x + j];
+                static uint8_t upred[1024];
+                uint32_t ubest = 0;
+                uvm = -1;
+                for (int m = 0; m < UV_CFL_PRED; ++m) {
+                    svtd_call_builder_tx(upred, g_uv2y[m], 0, FILTER_INTRA_MODES, 0, uabove,
+                                         uvHasTop ? S : 0, (uvHasTop && uCol + 1 < uvGrid) ? S : 0,
+                                         uleft, uvHasLeft ? S : 0, 0, ual, utxs);
+                    const uint32_t sad = svt_nxm_sad_kernel_helper_c(usrc, S, upred, S, S, S);
+                    if (uvm < 0 || sad < ubest) { ubest = sad; uvm = m; }
+                }
+                umodes[uRow * uvGrid + uCol] = uvm;
+                svtd_call_builder_tx(upred, g_uv2y[uvm], 0, FILTER_INTRA_MODES, 0, uabove,
+                                     uvHasTop ? S : 0, (uvHasTop && uCol + 1 < uvGrid) ? S : 0,
+                                     uleft, uvHasLeft ? S : 0, 0, ual, utxs);
+                aom_write_symbol(&w, uvm, fc.uv_mode_cdf[cfl][lmode], uv_abc);
+                if (B >= 8 && av1_is_directional_mode((PredictionMode)g_uv2y[uvm])) {
+                    aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[uvm - V_PRED],
+                                     2 * MAX_ANGLE_DELTA + 1);
+                }
+            }
+            // ---- the LUMA chain ----
+            static int32_t lcb[4096];
+            static TranLow lqc[4096], ldq[4096], ldq64[4096];
+            memset(lqc, 0, sizeof(lqc));
+            memset(ldq, 0, sizeof(ldq));
+            uint16_t leob = 0;
+            static int16_t lres[4096];
+            for (int i = 0; i < B * B; ++i) lres[i] = (int16_t)(lsrc[i] - lpred[i]);
+            if (B == 8) {
+                svtd_fwd2d8x8(lres, B, lcb, svt_av1_fdct8_new);
+                svtd_quantize_fp_8x8(lcb, &t, lscan, lqc, ldq, &leob);
+            } else if (B == 16) {
+                svtd_fwd2d16x16(lres, B, lcb, svt_av1_fdct16_new);
+                svtd_quantize_fp_16x16(lcb, &t, lscan, lqc, ldq, &leob);
+            } else if (B == 32) {
+                svtd_fwd2d32x32(lres, B, lcb, svt_av1_fdct32_new);
+                svtd_quantize_fp_32x32(lcb, &t, lscan, lqc, ldq, &leob);
+            } else {
+                // the TX_64X64 scan contract (the FS2/FS5d emission domain):
+                // fwd64 -> the top-left 32x32 compaction -> quantize
+                // n_coeffs = 1024 with the 1024-position token scan
+                svtd_fwd2d64x64(lres, B, lcb, svt_av1_fdct64_new);
+                for (int r = 1; r < 32; ++r)
+                    memcpy(lcb + r * 32, lcb + r * 64, 32 * sizeof(*lcb));
+                svtd_quantize_fp_64x64_token(lcb, &t, lscan, lqc, ldq, &leob);
+            }
+            leobs[bidx] = leob;
+            memcpy(lcoeffs[bidx], lqc, sizeof(TranLow) * B * B);
+            {
+                int16_t dc_sign = 0;
+                int32_t top = 0, leftacc = 0;
+                for (int k = 0; k < ltx_w_unit; ++k) {
+                    const uint8_t v = na_l_above[mi_col + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        top |= v;
+                    }
+                }
+                for (int k = 0; k < ltx_w_unit; ++k) {
+                    const uint8_t v = na_l_left[mi_row + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        leftacc |= v;
+                    }
+                }
+                const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+                // the LUMA chain's intra_dir = the DECIDED luma mode (the
+                // tx-type symbol's cdf row folds it, entropy_coding.c:339-342;
+                // at TX_32X32/64X64 the DCTONLY gate makes it moot)
+                svtd_write_coeffs_txb(&w, &fc, lqc, lscan, ltxs, leob, 0, dc_sign_ctx,
+                                      (PredictionMode)lmode,
+                                      COMPONENT_LUMA);
+                int32_t cul = 0;
+                for (int q = 0; q < leob; ++q) cul += abs((int)lqc[lscan[q]]);
+                cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+                if (leob > 0) {
+                    if (lqc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+                    else if (lqc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+                }
+                for (int k = 0; k < ltx_w_unit; ++k) na_l_above[mi_col + k] = (uint8_t)cul;
+                for (int k = 0; k < ltx_w_unit; ++k) na_l_left[mi_row + k] = (uint8_t)cul;
+            }
+            // luma recon (the B=64 dq expansion before inv64)
+            if (B == 64) {
+                memset(ldq64, 0, sizeof(ldq64));
+                for (int r = 0; r < 32; ++r)
+                    for (int c = 0; c < 32; ++c) ldq64[r * 64 + c] = ldq[r * 32 + c];
+                svtd_inv2dadd64x64(ldq64, lpred, B, svt_av1_idct64_new);
+            } else if (B == 32) {
+                svtd_inv2dadd32x32(ldq, lpred, B, svt_av1_idct32_new);
+            } else if (B == 16) {
+                svtd_inv2dadd16x16(ldq, lpred, B, svt_av1_idct16_new);
+            } else {
+                svtd_inv2dadd8x8(ldq, lpred, B, svt_av1_idct8_new);
+            }
+            for (int i = 0; i < B; ++i)
+                for (int j = 0; j < B; ++j) recon_y[(py + i) * 64 + px + j] = lpred[i * B + j];
+            // ---- the U chain then the V chain (U BEFORE V) ----
+            if (chroma_ref) {
+                const int uvHasTop = (uv_y > 0), uvHasLeft = (uv_x > 0);
+                const int uRow = uv_y / S, uCol = uv_x / S;
+                const int uvGrid = 32 / S;
+                for (int comp = 0; comp < 2; ++comp) {
+                    const uint8_t* csrc = comp ? v_src : u_src;
+                    uint8_t* crecon = comp ? recon_v : recon_u;
+                    // the shared uv_mode history (ONE uv_mode symbol per
+                    // block: the V TU shares the U decision, so the
+                    // filt_type neighbor history is the U-plane mode
+                    // history for both planes)
+                    const int* cmodes = umodes;
+                    uint8_t* naA = comp ? na_v_above : na_u_above;
+                    uint8_t* naL = comp ? na_v_left : na_u_left;
+                    TranLow* ccoeffs = comp ? vcoeffs[bidx] : ucoeffs[bidx];
+                    int* ceob = comp ? &veobs[bidx] : &ueobs[bidx];
+                    uint8_t cabove[65] = {0};
+                    uint8_t cleft[65] = {0};
+                    uint8_t cal = 0;
+                    if (uvHasTop)
+                        for (int i = 0; i < S + ((uvHasTop && uCol + 1 < uvGrid) ? S : 0); ++i)
+                            cabove[i] = crecon[(uv_y - 1) * 32 + uv_x + i];
+                    if (uvHasLeft)
+                        for (int i = 0; i < S; ++i) cleft[i] = crecon[(uv_y + i) * 32 + uv_x - 1];
+                    if (uvHasTop && uvHasLeft) cal = crecon[(uv_y - 1) * 32 + uv_x - 1];
+                    const int cAboveMode =
+                        uvHasTop ? cmodes[(uRow - 1) * uvGrid + uCol] : UV_DC_PRED;
+                    const int cLeftMode = uvHasLeft ? cmodes[uRow * uvGrid + uCol - 1] : UV_DC_PRED;
+                    svtd_filt_type =
+                        ((cAboveMode == UV_SMOOTH_PRED || cAboveMode == UV_SMOOTH_V_PRED ||
+                          cAboveMode == UV_SMOOTH_H_PRED) ||
+                         (cLeftMode == UV_SMOOTH_PRED || cLeftMode == UV_SMOOTH_V_PRED ||
+                          cLeftMode == UV_SMOOTH_H_PRED))
+                            ? 1
+                            : 0;
+                    static uint8_t csrcblk[1024];
+                    for (int i = 0; i < S; ++i)
+                        for (int j = 0; j < S; ++j)
+                            csrcblk[i * S + j] = csrc[(uv_y + i) * 32 + uv_x + j];
+                    static uint8_t cpred[1024];
+                    // the DECIDED mode's prediction (decided on the U plane;
+                    // the V plane reuses the SAME mode per the walk - the
+                    // CS2 drive decided U and V independently, but the
+                    // emission walk codes ONE uv_mode symbol per block: the
+                    // V TU shares the U decision, the CS0 CS4 map's
+                    // "one UV TU per block (txb_count_uv = 1)" for the U/V
+                    // PAIR; the CS2 fixture comparison re-derives V's own
+                    // decision, see the V-mode note at the gate line below)
+                    svtd_call_builder_tx(cpred, g_uv2y[uvm], 0, FILTER_INTRA_MODES, 0, cabove,
+                                         uvHasTop ? S : 0, (uvHasTop && uCol + 1 < uvGrid) ? S : 0,
+                                         cleft, uvHasLeft ? S : 0, 0, cal, utxs);
+                    static int16_t cres[1024];
+                    for (int i = 0; i < S * S; ++i) cres[i] = (int16_t)(csrcblk[i] - cpred[i]);
+                    static int32_t ccb[1024];
+                    static TranLow cqc[1024], cdq[1024];
+                    memset(cqc, 0, sizeof(cqc));
+                    memset(cdq, 0, sizeof(cdq));
+                    uint16_t ceobv = 0;
+                    if (S == 4) {
+                        svtd_fwd2d4x4(cres, S, ccb, svt_av1_fdct4_new);
+                        svtd_quantize_fp_4x4(ccb, &t, uscan, cqc, cdq, &ceobv);
+                    } else if (S == 8) {
+                        svtd_fwd2d8x8(cres, S, ccb, svt_av1_fdct8_new);
+                        svtd_quantize_fp_8x8(ccb, &t, uscan, cqc, cdq, &ceobv);
+                    } else if (S == 16) {
+                        svtd_fwd2d16x16(cres, S, ccb, svt_av1_fdct16_new);
+                        svtd_quantize_fp_16x16(ccb, &t, uscan, cqc, cdq, &ceobv);
+                    } else {
+                        svtd_fwd2d32x32(cres, S, ccb, svt_av1_fdct32_new);
+                        svtd_quantize_fp_32x32(ccb, &t, uscan, cqc, cdq, &ceobv);
+                    }
+                    *ceob = ceobv;
+                    memcpy(ccoeffs, cqc, sizeof(TranLow) * S * S);
+                    int16_t dc_sign = 0;
+                    int32_t top = 0, leftacc = 0;
+                    for (int k = 0; k < utx_w_unit; ++k) {
+                        const uint8_t v = naA[uvmi_col + k];
+                        if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                            dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                            top |= v;
+                        }
+                    }
+                    for (int k = 0; k < utx_w_unit; ++k) {
+                        const uint8_t v = naL[uvmi_row + k];
+                        if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                            dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                            leftacc |= v;
+                        }
+                    }
+                    const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+                    const int txb_skip_ctx = ((leftacc != 0) + (top != 0)) + 7;
+                    svtd_write_coeffs_txb(&w, &fc, cqc, uscan, utxs, ceobv, txb_skip_ctx,
+                                          dc_sign_ctx, DC_PRED, COMPONENT_CHROMA);
+                    int32_t cul = 0;
+                    for (int q = 0; q < ceobv; ++q) cul += abs((int)cqc[uscan[q]]);
+                    cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+                    if (ceobv > 0) {
+                        if (cqc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+                        else if (cqc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+                    }
+                    for (int k = 0; k < utx_w_unit; ++k) naA[uvmi_col + k] = (uint8_t)cul;
+                    for (int k = 0; k < utx_w_unit; ++k) naL[uvmi_row + k] = (uint8_t)cul;
+                    if (S == 4) svtd_inv2dadd4x4(cdq, cpred, S, svt_av1_idct4_new);
+                    else if (S == 8) svtd_inv2dadd8x8(cdq, cpred, S, svt_av1_idct8_new);
+                    else if (S == 16) svtd_inv2dadd16x16(cdq, cpred, S, svt_av1_idct16_new);
+                    else svtd_inv2dadd32x32(cdq, cpred, S, svt_av1_idct32_new);
+                    for (int i = 0; i < S; ++i)
+                        for (int j = 0; j < S; ++j)
+                            crecon[(uv_y + i) * 32 + uv_x + j] = cpred[i * S + j];
+                }
+                vmodes[uRow * uvGrid + uCol] = uvm;  // one uv_mode symbol per block
+            } else {
+                ueobs[bidx] = -1;
+                veobs[bidx] = -1;
+                umodes[bidx] = -1;
+                vmodes[bidx] = -1;
+            }
+        }
+    }
+    aom_stop_encode(&w);
+
+    // read twin: the full decoder walk (fresh reader + fresh CDFs). The kf
+    // ctx derives from the DECODED luma modes (= the decided modes, raster);
+    // the uv_mode read consumes the DECODED luma mode row; the three chains
+    // derive ctxs from the read NAs. Every symbol must match the writer and
+    // the CDFs must end equal - any mismatch returns nonzero (loud gate).
+    aom_reader r;
+    if (aom_reader_init(&r, buf, w.pos)) return 2;
+    r.allow_update_cdf = 1;
+    for (int by = 0; by < grid; ++by) {
+        for (int bx = 0; bx < grid; ++bx) {
+            const int px = bx * B, py = by * B;
+            const int mi_row = py / 4, mi_col = px / 4;
+            const int bidx = by * grid + bx;
+            const int bw_mi = B / 4;
+            const int chroma_ref =
+                ((mi_row & 0x01) || !(bw_mi & 0x01)) && ((mi_col & 0x01) || !(bw_mi & 0x01));
+            const int uv_x = ((px >> 3) << 3) >> 1;
+            const int uv_y = ((py >> 3) << 3) >> 1;
+            const int uvmi_col = uv_x / 4, uvmi_row = uv_y / 4;
+            const int laboveMode = by > 0 ? lmodes[(by - 1) * grid + bx] : DC_PRED;
+            const int lleftMode = bx > 0 ? lmodes[by * grid + bx - 1] : DC_PRED;
+            const int top_ctx = intra_mode_context[by > 0 ? laboveMode : DC_PRED];
+            const int left_ctx = intra_mode_context[bx > 0 ? lleftMode : DC_PRED];
+            const int rlm =
+                aom_read_symbol_(&r, fc_r.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+            if (rlm != lmodes[bidx]) { fprintf(stderr, "CS4 rt lmode %d\n", S); return 3; }
+            if (B >= 8 && av1_is_directional_mode((PredictionMode)rlm)) {
+                const int rd = aom_read_symbol_(&r, fc_r.angle_delta_cdf[rlm - V_PRED],
+                                                2 * MAX_ANGLE_DELTA + 1);
+                if (rd != MAX_ANGLE_DELTA) { fprintf(stderr, "CS4 rt ldelta %d\n", S); return 3; }
+            }
+            if (chroma_ref) {
+                const int ruv = aom_read_symbol_(&r, fc_r.uv_mode_cdf[cfl][rlm], uv_abc);
+                if (ruv != umodes[bidx]) { fprintf(stderr, "CS4 rt uvmode %d\n", S); return 3; }
+                if (B >= 8 && av1_is_directional_mode((PredictionMode)g_uv2y[ruv])) {
+                    const int rd = aom_read_symbol_(&r, fc_r.angle_delta_cdf[ruv - V_PRED],
+                                                    2 * MAX_ANGLE_DELTA + 1);
+                    if (rd != MAX_ANGLE_DELTA) { fprintf(stderr, "CS4 rt udelta %d\n", S); return 3; }
+                }
+            }
+            // the LUMA chain
+            {
+                int16_t dc_sign = 0;
+                int32_t top = 0, leftacc = 0;
+                for (int k = 0; k < ltx_w_unit; ++k) {
+                    const uint8_t v = na_l_above_r[mi_col + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        top |= v;
+                    }
+                }
+                for (int k = 0; k < ltx_w_unit; ++k) {
+                    const uint8_t v = na_l_left_r[mi_row + k];
+                    if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                        dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                        leftacc |= v;
+                    }
+                }
+                const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+                TranLow rc[4096];
+                memset(rc, 0, sizeof(rc));
+                const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, lscan, ltxs, 0, dc_sign_ctx,
+                                                      (PredictionMode)lmodes[bidx], COMPONENT_LUMA);
+                if (reob != leobs[bidx]) { fprintf(stderr, "CS4 rt leob %d\n", S); return 3; }
+                for (int i = 0; i < B * B; ++i) {
+                    if (rc[i] != lcoeffs[bidx][i]) { fprintf(stderr, "CS4 rt lcoeff %d\n", S); return 3; }
+                }
+                int32_t cul = 0;
+                for (int q = 0; q < reob; ++q) cul += abs((int)rc[lscan[q]]);
+                cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+                if (reob > 0) {
+                    if (rc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+                    else if (rc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+                }
+                for (int k = 0; k < ltx_w_unit; ++k) na_l_above_r[mi_col + k] = (uint8_t)cul;
+                for (int k = 0; k < ltx_w_unit; ++k) na_l_left_r[mi_row + k] = (uint8_t)cul;
+            }
+            // the U chain then the V chain
+            if (chroma_ref) {
+                for (int comp = 0; comp < 2; ++comp) {
+                    uint8_t* aA = comp ? na_v_above_r : na_u_above_r;
+                    uint8_t* aL = comp ? na_v_left_r : na_u_left_r;
+                    const TranLow* wantc = comp ? vcoeffs[bidx] : ucoeffs[bidx];
+                    const int wanteob = comp ? veobs[bidx] : ueobs[bidx];
+                    int16_t dc_sign = 0;
+                    int32_t top = 0, leftacc = 0;
+                    for (int k = 0; k < utx_w_unit; ++k) {
+                        const uint8_t v = aA[uvmi_col + k];
+                        if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                            dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                            top |= v;
+                        }
+                    }
+                    for (int k = 0; k < utx_w_unit; ++k) {
+                        const uint8_t v = aL[uvmi_row + k];
+                        if (v != (uint8_t)INVALID_NEIGHBOR_DATA) {
+                            dc_sign += signs[v >> COEFF_CONTEXT_BITS];
+                            leftacc |= v;
+                        }
+                    }
+                    const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
+                    const int txb_skip_ctx = ((leftacc != 0) + (top != 0)) + 7;
+                    TranLow rc[1024];
+                    memset(rc, 0, sizeof(rc));
+                    const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, uscan, utxs, txb_skip_ctx,
+                                                          dc_sign_ctx, DC_PRED, COMPONENT_CHROMA);
+                    if (reob != wanteob) { fprintf(stderr, "CS4 rt ceob %d\n", S); return 3; }
+                    for (int i = 0; i < S * S; ++i) {
+                        if (rc[i] != wantc[i]) { fprintf(stderr, "CS4 rt ccoeff %d\n", S); return 3; }
+                    }
+                    int32_t cul = 0;
+                    for (int q = 0; q < reob; ++q) cul += abs((int)rc[uscan[q]]);
+                    cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
+                    if (reob > 0) {
+                        if (rc[0] < 0) cul |= 1 << COEFF_CONTEXT_BITS;
+                        else if (rc[0] > 0) cul += 2 << COEFF_CONTEXT_BITS;
+                    }
+                    for (int k = 0; k < utx_w_unit; ++k) aA[uvmi_col + k] = (uint8_t)cul;
+                    for (int k = 0; k < utx_w_unit; ++k) aL[uvmi_row + k] = (uint8_t)cul;
+                }
+            }
+        }
+    }
+    if (memcmp(&fc, &fc_r, sizeof(Ts1FrameContext))) {
+        fprintf(stderr, "CS4 cdf mismatch %d\n", S);
+        return 4;
+    }
+    // gate lines
+    printf("ecs4%d_bytes %u", S, w.pos);
+    for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
+    printf("\n");
+    printf("ecs4%d_modes", S);
+    for (int b = 0; b < nb; ++b) printf(" %d %d %d", lmodes[b], umodes[b], vmodes[b]);
+    printf("\n");
+    printf("ecs4%d_eobs", S);
+    for (int b = 0; b < nb; ++b) printf(" %d %d %d", leobs[b], ueobs[b], veobs[b]);
+    printf("\n");
+    printf("ecs4%d_coeffs", S);
+    for (int b = 0; b < nb; ++b) {
+        for (int i = 0; i < B * B; ++i) printf(" %d", (int)lcoeffs[b][i]);
+        if (ueobs[b] >= 0) {
+            for (int i = 0; i < S * S; ++i) printf(" %d", (int)ucoeffs[b][i]);
+            for (int i = 0; i < S * S; ++i) printf(" %d", (int)vcoeffs[b][i]);
+        }
+    }
+    printf("\n");
+    printf("ecs4%d_recon_y", S);
+    for (int i = 0; i < 4096; ++i) printf(" %u", recon_y[i]);
+    printf("\n");
+    printf("ecs4%d_recon_u", S);
+    for (int i = 0; i < 1024; ++i) printf(" %u", recon_u[i]);
+    printf("\n");
+    printf("ecs4%d_recon_v", S);
+    for (int i = 0; i < 1024; ++i) printf(" %u", recon_v[i]);
+    printf("\n");
+    return 0;
+}
+
+static int svtd_cs4_drive(void) {
+    static const int sizes[4] = {4, 8, 16, 32};
+    for (int i = 0; i < 4; ++i) {
+        const int rc = svtd_cs4_uv_q_drive(sizes[i]);
+        if (rc) return rc;
+    }
     return 0;
 }
