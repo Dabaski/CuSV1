@@ -4043,7 +4043,7 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
 // logic). Per block: kf_y_mode + angle_delta + filter_intra skip + tx_type
 // + txb_skip + eob_pt + eob_extra + base_eob/br + base/br + signs/golomb.
 // The predictor is the DECIDED mode's build_intra_predictors output (M1
-// availability), NOT DC=0 — matching the l6 pipeline's residual computation.
+// availability), NOT DC=0 - matching the l6 pipeline's residual computation.
 static int svtd_ts3_drive(uint8_t* buf) {
     uint8_t src[1024];
     for (int y = 0; y < 32; ++y)
@@ -4174,7 +4174,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
         // 3. filter-intra: never for {1,7,3,2} (svt_aom_filter_intra_allowed is
         // DC_PRED-only, mode_decision.c:108-119; no decided mode is DC_PRED)
         // 4. tx-type: emitted INSIDE svtd_write_coeffs_txb (one symbol, after
-        // txb_skip, before eob_pt) — mirroring the l7 writeTxbCoeffs structure
+        // txb_skip, before eob_pt) - mirroring the l7 writeTxbCoeffs structure
 
         // 5. token chain (TS1+TS2)
         const int eob_tok = svtd_eob_from_coeffs(qc, scan16, TX_16X16);
@@ -4220,7 +4220,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
     printf("ecfrm_rt");
     for (int b = 0; b < 4; ++b) {
         const int bx = b % 2, by = b / 2;
-        // NOTE: `row`/`col`, NOT `r` — `r` here would shadow the aom_reader
+        // NOTE: `row`/`col`, NOT `r` - `r` here would shadow the aom_reader
         // above, and every &r read would decode from the row int as garbage.
         const int row = px[b][1], col = px[b][0];
         const int hasTop = by > 0, hasLeft = bx > 0;
@@ -4313,7 +4313,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
     if (memcmp(fc.angle_delta_cdf, fc_r.angle_delta_cdf, sizeof(fc.angle_delta_cdf))) cdf_eq = 0;
     printf("ecfrm_cdf_eq %d\n", cdf_eq);
     // TS3c: the l6 acceptance compares its modes, eobs, coeffs and recon
-    // against the generator's, bit-exact — publish coeffs and recon too
+    // against the generator's, bit-exact - publish coeffs and recon too
     // (raster order, 4x256 + 32x32).
     printf("ecfrm_coeffs");
     for (int b2 = 0; b2 < 4; ++b2)
@@ -4638,7 +4638,7 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
     aom_stop_encode(&w);
 
     // TD0 probe: read the tile back with the aom-entdec reader (the decoder
-    // oracle's own primitives) and print the decoded symbol sequence —
+    // oracle's own primitives) and print the decoded symbol sequence -
     // whatever THIS reads is what a conformant decoder reads.
     {
         aom_reader r;
