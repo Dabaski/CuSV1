@@ -1,8 +1,8 @@
-# CS5c — the coefficient semantics delta table (audit only)
+# CS5c - the coefficient semantics delta table (audit only)
 
 Every place our quantizer/entropy port differs in semantics from SVT's, named
 and verdict-tagged. The pinned reference is `third_party/SVT-AV1/` (the
-vendored 4.2-era snapshot). No code changes in this ticket — the deltas are
+vendored 4.2-era snapshot). No code changes in this ticket - the deltas are
 named so we know what is exact and what is a shortcut. Each verdict: EXACT
 (bit-exact with the pinned reference), SHORTCUT (a documented simplification
 that does not diverge for the committed fixtures), or CRITICAL (a genuine
@@ -10,7 +10,7 @@ bit-exactness divergence).
 
 ## Delta 1: Dead-quant skip
 
-**Verdict: EXACT — no delta exists. The briefing's description is false.**
+**Verdict: EXACT - no delta exists. The briefing's description is false.**
 
 The briefing described a "whole-TU short-circuit" in quantizeFpN/quantizeBN
 that SVT checks per-coefficient. The code shows otherwise:
@@ -30,13 +30,13 @@ that SVT checks per-coefficient. The code shows otherwise:
   loop from n_coeffs-1 down to 0, the same `break` on the first coefficient
   outside the zbin window, the same non_zero_count decrement.
 
-- The FP path has no pre-scan (SVT's quantize_fp_helper_c also does not —
+- The FP path has no pre-scan (SVT's quantize_fp_helper_c also does not -
   the zbin_ptr parameter is explicitly `(void)zbin_ptr` at full_loop.c:229).
   The FP path relies on the per-coefficient threshold check alone, and the
   eob tracks the last nonzero coefficient (full_loop.c:252-255 = our
   :7760-7764).
 
-No size or position can be "silently zeroed" that SVT would not zero — the
+No size or position can be "silently zeroed" that SVT would not zero - the
 per-coefficient zbin gate is the same gate SVT applies. The briefing's
 description was a mischaracterization; the audit finding is that the delta
 does not exist.
@@ -58,39 +58,39 @@ The escalated arithmetic (ROUND_POWER_OF_TWO / threshold shift / quant shift
   (transform.cpp:7731-7733 FP; :7822-7823 BN) =
   `ROUND_POWER_OF_TWO(round_ptr[k], log_scale)` (full_loop.c:228 FP,
   :67 BN). The ROUND_POWER_OF_TWO macro (definitions.h:457) is
-  `(((value) + ((1 << (n)) >> 1)) >> (n))` — the formulations are identical.
+  `(((value) + ((1 << (n)) >> 1)) >> (n))` - the formulations are identical.
   At logScale 0 the inner shift is 0, degenerating to the identity.
 
 - Threshold: our `(absCoeff << (1 + logScale)) >= thresh`
   (transform.cpp:7745) = SVT `(abs_coeff << (1 + log_scale)) >= thresh`
   (full_loop.c:244 FP). The BN path: `absCoeff * (1 << 5) >= (zbin << 5)` =
   SVT `abs_coeff * wt >= (zbins[rc != 0] << AOM_QM_BITS)` (full_loop.c:66)
-  with qm_ptr = NULL, wt = 1 << AOM_QM_BITS = 32 ✓.
+  with qm_ptr = NULL, wt = 1 << AOM_QM_BITS = 32 <=.
 
 - Quant: our `(absCoeff * quantFp[rc != 0]) >> (16 - logScale)` =
   SVT `(abs_coeff * quant_ptr[rc != 0]) >> (16 - log_scale)`
-  (full_loop.c:246) ✓. The BN quant-shift formula:
+  (full_loop.c:246) <=. The BN quant-shift formula:
   `((((tmp * quant[rc != 0]) >> 16) + tmp) * quantShift[rc != 0]) >>
   (16 - logScale + 5)` (transform.cpp:7827-7829) =
   SVT `(((((tmp * quant_ptr[rc != 0]) >> 16) + tmp) * quant_shift_ptr[rc != 0])
-  >> (16 - log_scale + AOM_QM_BITS))` (full_loop.c:69) ✓ (AOM_QM_BITS = 5).
+  >> (16 - log_scale + AOM_QM_BITS))` (full_loop.c:69) <= (AOM_QM_BITS = 5).
 
 - DQ: our `(tmp32 * dequant[rc != 0]) >> logScale` (transform.cpp:7754-7756
   FP; :7831-7834 BN) = SVT `(tmp32 * dequant_ptr[rc != 0]) >> log_scale`
-  (full_loop.c:249 FP; :72 BN) ✓.
+  (full_loop.c:249 FP; :72 BN) <=.
 
 The log_scale per size follows av1_get_tx_scale_tab (full_loop.c:22):
 `{0, 0, 0, 1, 2, ...}` for the first five square sizes. Our wrappers:
-quantizeFp4x4 → logScale 0, quantizeFp8x8 → 0, quantizeFp16x16 → 0,
-quantizeFp32x32 → 1 (transform.cpp:7869), quantizeFp64x64 → 2 (:7881),
-quantizeFp64x64Token → 2 (:7894). Same for the BN wrappers. The values
-match the table entry-for-entry ✓.
+quantizeFp4x4 <= logScale 0, quantizeFp8x8 <= 0, quantizeFp16x16 <= 0,
+quantizeFp32x32 <= 1 (transform.cpp:7869), quantizeFp64x64 <= 2 (:7881),
+quantizeFp64x64Token <= 2 (:7894). Same for the BN wrappers. The values
+match the table entry-for-entry <=.
 
 The clamp: our `if (clamped < -32768) ... if (clamped > 32767)` (two
 conditionals, transform.cpp:7747-7748 FP; :7824-7825 BN) = SVT
 `clamp64(abs_coeff + rounding[rc != 0], INT16_MIN, INT16_MAX)`
 (full_loop.c:245 FP; `clamp(...)` :67 BN). The clamp64 helper
-(definitions.h:691) does the same min/max — semantically identical ✓.
+(definitions.h:691) does the same min/max - semantically identical <=.
 
 Citations: full_loop.c:22 (the tx_scale_tab), :222-255 (quantize_fp_helper_c),
 :31-75 (svt_aom_quantize_b_c), transform.cpp:7724-7765 (quantizeFpN),
@@ -99,25 +99,25 @@ Citations: full_loop.c:22 (the tx_scale_tab), :222-255 (quantize_fp_helper_c),
 ## Delta 3: DC/AC unified path
 
 **Verdict: EXACT. The unified [rc != 0] indexing mirrors SVT's own design.
-The vendored tree has no av1_quantize_dc — the unification is deliberate.**
+The vendored tree has no av1_quantize_dc - the unification is deliberate.**
 
 Both quantize_fp_helper_c (full_loop.c:239) and svt_aom_quantize_b_c
 (full_loop.c:50/:66) index the dequant/zbin/quant/round tables via
-`[rc != 0]` — a 2-element table lookup where index 0 = DC (scan position 0)
+`[rc != 0]` - a 2-element table lookup where index 0 = DC (scan position 0)
 and index 1 = AC. Our port uses the identical `tables.dequant[rc != 0]`,
 `tables.quantFp[rc != 0]`, `tables.round[rc != 0]` indexing
-(transform.cpp:7740/:7746/:7750/:7755 FP; :7803/:7819/:7823/:7828 BN) ✓.
+(transform.cpp:7740/:7746/:7750/:7755 FP; :7803/:7819/:7823/:7828 BN) <=.
 
 The vendored SVT tree has NO `av1_quantize_dc` function (grep-verified:
 zero hits in the Codec/ directory). The aom tree (the out-of-tree arbiter,
 third_party/aom/av1/encoder/) HAS av1_quantize_dc_facade
-(aom av1_quantize.c:409) — but that is the decoder-side oracle, not the
+(aom av1_quantize.c:409) - but that is the decoder-side oracle, not the
 ported encoder path. The single-table [rc != 0] path is correct for all
 sizes: the dc_quant_qtx and ac_quant_qtx lookups (inv_transforms.c:3467/
 :3484) produce the two-entry dequant table, and every quantize function
 indexes it by [rc != 0] = whether scan position == 0 (DC) or not (AC).
 
-No size takes a separate DC or AC path — the unification is SVT's design,
+No size takes a separate DC or AC path - the unification is SVT's design,
 mirrored exactly.
 
 Citations: full_loop.c:239/:246/:249/:265/:269 (the [rc != 0] indexing in
@@ -144,7 +144,7 @@ with n_coeffs=4096 and the full 64x64 scan. The GPU quant_dequant_64x64
 kernel is a 4096-position kernel.
 
 For the fs264 fixture the two domains' recons coincide (the outer-ring
-coefficients quantize to 0 at q100 — the named FS5d deviation in
+coefficients quantize to 0 at q100 - the named FS5d deviation in
 provenance.md #12). The emission domain is the compacted 1024-position
 token scan (full_loop.c:1262 / inv_transforms.h:129-137); the facade keeps
 the 4096-wide view. Unification = a 1024-position GPU kernel + bench work
@@ -162,7 +162,7 @@ The mapping:
 
 Where the legacy/GPU callers still see the 4096 facade: the non-emission
 callers (the GPU frame paths, the Recon non-Q variants) call
-quantizeFp64x64 with the full 64x64 scan — the two paths coexist (the
+quantizeFp64x64 with the full 64x64 scan - the two paths coexist (the
 FS5d named deviation).
 
 Citations: full_loop.c:1262 (the quantize at n_coeffs 1024),
