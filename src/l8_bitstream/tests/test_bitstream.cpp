@@ -640,3 +640,51 @@ TEST_CASE("color header v3: SPS + 42-bit frame header + TU over the CS2 tile (CS
         0x5b, 0x51, 0x97, 0xf3, 0x33, 0xe6, 0x82, 0x63, 0x0f, 0x80};
     for (int i = 0; i < 55; ++i) CHECK((unsigned)tuBuf[i] == wantTu3[i]);
 }
+
+// CS5 color-artifact fixtures (mechanically emitted from expected_primitives
+// .txt; see the .inc header): the tu_colorS gate TUs and the ecs4S walk tiles.
+#include "ecs5_gate.inc"
+
+TEST_CASE("CS5: the color TU artifacts - three-way identity per size") {
+    // THE COLOR MILESTONE: the full color TU = TD + SPS_v3 (the CS3 writer,
+    // max_frame 64x64 - the 4:2:0 chroma planes are 32x32) + OBU_FRAME (the
+    // 42-bit header v3 + the CS4 walk tile). The tile carries the FULL color
+    // walk (the kf mode + uv_mode + uv angle-delta symbols and the three
+    // per-plane chains, the ratified CS4 order). The three-way identity per
+    // artifact: the l8 assembleStructuralKeyframeTUv3 output == the
+    // committed file == the gate tu_colorS bytes. The committed mono
+    // artifact set stays pinned diff-0 (the mono producers untouched).
+    const std::string f = __FILE__;
+    std::string dir = f.substr(0, f.find_last_of("/\\") + 1);
+    static const int sizes[4] = {4, 8, 16, 32};
+    for (int si = 0; si < 4; ++si) {
+        const int S = sizes[si];
+        unsigned char tuBuf[2048];
+        memset(tuBuf, 0, sizeof(tuBuf));
+        const unsigned char* tile = (S == 4) ? ecs44_tile : (S == 8) ? ecs48_tile
+                                    : (S == 16) ? ecs416_tile : ecs432_tile;
+        const unsigned tileLen = (S == 4) ? sizeof(ecs44_tile) : (S == 8) ? sizeof(ecs48_tile)
+                                 : (S == 16) ? sizeof(ecs416_tile) : sizeof(ecs432_tile);
+        const std::uint32_t tuSize =
+            bitstream::assembleStructuralKeyframeTUv3(tuBuf, tile, tileLen, 64);
+        const unsigned char* wantTu = (S == 4) ? tu_color4 : (S == 8) ? tu_color8
+                                      : (S == 16) ? tu_color16 : tu_color32;
+        const unsigned wantLen = (S == 4) ? sizeof(tu_color4) : (S == 8) ? sizeof(tu_color8)
+                                 : (S == 16) ? sizeof(tu_color16) : sizeof(tu_color32);
+        REQUIRE(tuSize == wantLen);
+        for (unsigned i = 0; i < tuSize; ++i) CHECK((unsigned)tuBuf[i] == wantTu[i]);
+
+        // the committed artifact: composed == file == gate (three-way)
+        char tuFilePath[256];
+        snprintf(tuFilePath, sizeof(tuFilePath),
+                 "%sgoldens/structural_keyframe_color%d.obu", dir.c_str(), S);
+        FILE* fp = nullptr;
+        fopen_s(&fp, tuFilePath, "rb");
+        REQUIRE(fp != nullptr);
+        unsigned char fileBytes[4096] = {0};
+        const size_t rd = fread(fileBytes, 1, sizeof(fileBytes), fp);
+        fclose(fp);
+        REQUIRE(rd == tuSize);
+        for (std::uint32_t i = 0; i < tuSize; ++i) CHECK(fileBytes[i] == tuBuf[i]);
+    }
+}

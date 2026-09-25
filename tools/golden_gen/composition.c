@@ -5405,6 +5405,9 @@ static int svtd_cs1_drive(void) {
 // TU composition (svtd_bsf3_tile_data_v3).
 static uint8_t svtd_cs2_tile16[4096];
 static uint32_t svtd_cs2_tile16_pos;
+// CS5: the captured CS4 walk tiles per size (the color TU payloads).
+static uint8_t svtd_cs4_tile[4][32768];
+static uint32_t svtd_cs4_tile_pos[4];
 // The CH3 32x32 UV plane template generalized (svtd_frame_chroma_auto_16x16_q
 // is the S==16 shape). U plane = the CH3 template source (the CS2 fixture).
 // 64x64 luma ramp: rows 0-15 = 2*(i+j+2), rows 16-31 = 0); V plane = 255 - U
@@ -6079,7 +6082,23 @@ static int svtd_cs4_uv_q_drive(int S) {
             lmodes[bidx] = lmode;
             svtd_call_builder_tx(lpred, lmode, 0, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
                                  nLeft, 0, lal, ltxs);
-            // symbols: luma kf mode (+ the angle delta when gated)
+            // symbols: luma kf mode (+ the angle delta when gated), preceded
+            // by the partition symbols (the SB tree) and the skip flag - the
+            // aom decode order (decodemv.c:787 the skip read is unconditional
+            // for intra blocks; the partition symbols per node)
+            {
+                const int qctx32 = ecpart_derive_ctx(pAboveRun, pLeftRun, (by / 2) * 8,
+                                                     (bx / 2) * 8, BLOCK_32X32);
+                aom_write_symbol(&w, (B == 32) ? PARTITION_NONE : PARTITION_SPLIT,
+                                 default_partition_cdf[qctx32],
+                                 svt_aom_partition_cdf_length(BLOCK_32X32));
+            }
+            {
+                const int q16ctx = ecpart_derive_ctx(pAboveRun, pLeftRun, (by / 4) * 4,
+                                                     (bx / 4) * 4, BLOCK_16X16);
+                aom_write_symbol(&w, PARTITION_SPLIT, default_partition_cdf[q16ctx],
+                                 svt_aom_partition_cdf_length(BLOCK_16X16));
+            }
             const int top_ctx = intra_mode_context[hasTop ? laboveMode : DC_PRED];
             const int left_ctx = intra_mode_context[hasLeft ? lleftMode : DC_PRED];
             aom_write_symbol(&w, lmode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
@@ -6331,6 +6350,12 @@ static int svtd_cs4_uv_q_drive(int S) {
         }
     }
     aom_stop_encode(&w);
+    // CS5: capture the walk tile (the CS4 stream) per size for the color TU
+    // assembly (svtd_cs5_drive); the statics are file-scope.
+    if (S == 4) { memcpy(svtd_cs4_tile[0], buf, w.pos); svtd_cs4_tile_pos[0] = w.pos; }
+    else if (S == 8) { memcpy(svtd_cs4_tile[1], buf, w.pos); svtd_cs4_tile_pos[1] = w.pos; }
+    else if (S == 16) { memcpy(svtd_cs4_tile[2], buf, w.pos); svtd_cs4_tile_pos[2] = w.pos; }
+    else { memcpy(svtd_cs4_tile[3], buf, w.pos); svtd_cs4_tile_pos[3] = w.pos; }
 
     // read twin: the full decoder walk (fresh reader + fresh CDFs). The kf
     // ctx derives from the DECODED luma modes (= the decided modes, raster);
@@ -6495,6 +6520,44 @@ static int svtd_cs4_drive(void) {
     for (int i = 0; i < 4; ++i) {
         const int rc = svtd_cs4_uv_q_drive(sizes[i]);
         if (rc) return rc;
+    }
+    return 0;
+}
+
+// ---- CS5: the color TU artifacts -------------------------------------------
+// Per size S: the full color TU = TD + SPS_v3 (the CS3 writer, max_frame
+// 64x64 = the fixture frame; the 4:2:0 chroma planes are 32x32) + OBU_FRAME
+// (the 42-bit header v3 + the CS4 walk tile captured by svtd_cs4_uv_q_
+// drive). The tile carries the FULL color walk: the kf mode + uv_mode +
+// uv angle-delta symbols and the three per-plane chains (the ratified CS4
+// order), so the artifact is the complete color keyframe TU. Gate lines:
+// tu_colorS (the composed TU bytes; the three-way identity instrument =
+// the l8 assembleStructuralKeyframeTUv3 output == the committed file ==
+// these bytes).
+static int svtd_cs5_drive(void) {
+    static uint8_t sps_buf[64];
+    static uint8_t obu_buf[256];
+    static uint8_t tu_buf[2048];
+    memset(sps_buf, 0, sizeof(sps_buf));
+    memset(obu_buf, 0, sizeof(obu_buf));
+    memset(tu_buf, 0, sizeof(tu_buf));
+
+    const uint32_t sps_size = svtd_bsf3_encode_sps_v3(sps_buf);
+    static const int sizes[4] = {4, 8, 16, 32};
+    for (int i = 0; i < 4; ++i) {
+        const int S = sizes[i];
+        const uint8_t* tile_data = svtd_cs4_tile[i];
+        const uint32_t tile_size = svtd_cs4_tile_pos[i];
+        memset(obu_buf, 0, sizeof(obu_buf));
+        memset(tu_buf, 0, sizeof(tu_buf));
+        const uint32_t frame_size = svtd_bsf3_frame_obu_v3(obu_buf, tile_data, tile_size);
+        svt_aom_encode_td_av1(tu_buf);
+        memcpy(tu_buf + 2, sps_buf, sps_size);
+        memcpy(tu_buf + 2 + sps_size, obu_buf, frame_size);
+        const uint32_t tu_size = 2 + sps_size + frame_size;
+        printf("tu_color%d %u", S, tu_size);
+        for (uint32_t k = 0; k < tu_size; ++k) printf(" %02x", tu_buf[k]);
+        printf("\n");
     }
     return 0;
 }

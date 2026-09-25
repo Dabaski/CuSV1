@@ -2287,5 +2287,17 @@ int main(void) {
         const int rc4 = svtd_cs4_drive();
         if (rc4) { fprintf(stderr, "CS4 drive FAILED rc=%d\n", rc4); return 1; }
     }
+
+    // ---- CS5: the color TU artifacts (TD + SPS_v3 + OBU_FRAME_v3 + the CS4
+    // walk tile) -----------------------------------------------------------
+    // Per size S in {4,8,16,32}: the full color TU over the CS4 walk tile
+    // (the captured svtd_cs4 stream). The SPS carries max_frame 64x64 (the
+    // fixture frame; the 4:2:0 chroma planes are 32x32). Gate lines:
+    // tu_colorS (the composed TU bytes; the three-way identity instrument =
+    // the l8 assembler == the committed file == these bytes).
+    {
+        const int rc5 = svtd_cs5_drive();
+        if (rc5) { fprintf(stderr, "CS5 drive FAILED rc=%d\n", rc5); return 1; }
+    }
     return 0;
 }
