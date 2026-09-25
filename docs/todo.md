@@ -351,10 +351,16 @@ shipped feature set (mono/color intra streams).
 - PROCESS (new, 2026-09-23): untracked files are NEVER strays - deletion
   requires user/court confirmation; the court commits its authored docs
   immediately (the todo.md deletion incident)
-- Debug-config /RTC finding (2026-09-24, observed, NOT fixed - out of the
-  CS1 agent's partition): av1_l4_intra_tests.exe in Debug aborts with
-  Run-Time Check Failure #2 (stack around 'buf' corrupted); all in-tree
-  changes to its link set at observation time were comment-only, so the
-  corruption is almost certainly pre-existing (Release, the standing suite
-  config, has /RTC off and passes 9/9). Court to route to the l4 owner or
-  order a fix; Debug ctest runs will block on the modal dialog until then.
+- Debug-config /RTC finding (2026-09-24, RESOLVED c462872): av1_l4_intra_tests
+  in Debug aborted with Run-Time Check Failure #2 (stack around 'buf'
+  corrupted). ROOT CAUSE: three test fixtures passed p = buf + 1 to
+  upsampleIntraEdge, but the function writes p[-2] (the SVT reference
+  svt_av1_upsample_intra_edge_c:53 - the port exact, the library NOT the
+  bug); p = buf + 1 gave only 1 byte of prefix, the p[-2] write landed at
+  buf[-1]. THE FIX: three test-fixture buffer enlargements (buf[16] -> [18],
+  raw[18] -> [20], p adjusted +2; the third call site verified safe).
+  Debug suite 119/119 clean; Release 9/9 unchanged (the /RTC check is
+  Debug-only). LESSON: the SVT C functions that write before the pointer
+  require the test fixtures to provide the prefix space; the Release-only
+  suite cannot catch this class (no /RTC guards); the Debug build is the
+  canary.
