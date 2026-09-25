@@ -5991,6 +5991,15 @@ static int svtd_cs4_uv_q_drive(int S) {
     const int nb = grid * grid;
     const TxSize ltxs = (B == 8) ? TX_8X8 : (B == 16) ? TX_16X16 : (B == 32) ? TX_32X32 : TX_64X64;
     const TxSize utxs = (S == 4) ? TX_4X4 : (S == 8) ? TX_8X8 : (S == 16) ? TX_16X16 : TX_32X32;
+    const BlockSize lbs = (B == 8) ? BLOCK_8X8 : (B == 16) ? BLOCK_16X16 : (B == 32) ? BLOCK_32X32 : BLOCK_64X64;
+    static AomCdfProb part_cdf[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+    memcpy(part_cdf, default_partition_cdf, sizeof(part_cdf));
+    static AomCdfProb skip_cdf[SKIP_CONTEXTS][CDF_SIZE(2)];
+    memcpy(skip_cdf, default_skip_cdfs, sizeof(skip_cdf));
+    static AomCdfProb part_cdf_r[PARTITION_CONTEXTS][CDF_SIZE(EXT_PARTITION_TYPES)];
+    memcpy(part_cdf_r, default_partition_cdf, sizeof(part_cdf_r));
+    static AomCdfProb skip_cdf_r[SKIP_CONTEXTS][CDF_SIZE(2)];
+    memcpy(skip_cdf_r, default_skip_cdfs, sizeof(skip_cdf_r));
     const int ltx_w_unit = B / 4, utx_w_unit = S / 4;
     const int cfl = (B <= 32) ? 1 : 0;
     const int uv_abc = UV_INTRA_MODES - !cfl;
@@ -6015,6 +6024,17 @@ static int svtd_cs4_uv_q_drive(int S) {
     svt_od_ec_enc_reset(&w.ec);
     w.allow_update_cdf = 1;
     w.pos = 0;
+    // the partition + skip surfaces (the aom decode order): the running
+    // partition contexts (the FS5a machinery) + the SB root symbol + the
+    // per-block leaf symbol + the skip flag (decodemv.c:787)
+    static uint8_t pAboveRun[64], pLeftRun[16];
+    memset(pAboveRun, (int)INVALID_NEIGHBOR_DATA, sizeof(pAboveRun));
+    memset(pLeftRun, (int)INVALID_NEIGHBOR_DATA, sizeof(pLeftRun));
+    {
+        const int rootCtx = ecpart_derive_ctx(pAboveRun, pLeftRun, 0, 0, BLOCK_64X64);
+        aom_write_symbol(&w, (grid > 1) ? PARTITION_SPLIT : PARTITION_NONE,
+                         part_cdf[rootCtx], svt_aom_partition_cdf_length(BLOCK_64X64));
+    }
     static const int8_t signs[3] = {0, -1, 1};
     static int lmodes[64], umodes[64], vmodes[64];
     static int leobs[64], ueobs[64], veobs[64];
@@ -6082,23 +6102,29 @@ static int svtd_cs4_uv_q_drive(int S) {
             lmodes[bidx] = lmode;
             svtd_call_builder_tx(lpred, lmode, 0, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
                                  nLeft, 0, lal, ltxs);
-            // symbols: luma kf mode (+ the angle delta when gated), preceded
-            // by the partition symbols (the SB tree) and the skip flag - the
-            // aom decode order (decodemv.c:787 the skip read is unconditional
-            // for intra blocks; the partition symbols per node)
-            {
-                const int qctx32 = ecpart_derive_ctx(pAboveRun, pLeftRun, (by / 2) * 8,
-                                                     (bx / 2) * 8, BLOCK_32X32);
-                aom_write_symbol(&w, (B == 32) ? PARTITION_NONE : PARTITION_SPLIT,
-                                 default_partition_cdf[qctx32],
+            // symbols: the partition surfaces (the interior SPLITs gated by the node
+            // boundaries + the leaf NONE) + the skip flag, THEN the luma kf
+            // mode (+ the angle delta when gated) - the aom decode order
+            // (decodemv.c:787)
+            if (B < 32 && mi_row % 8 == 0 && mi_col % 8 == 0) {
+                const int qctx = ecpart_derive_ctx(pAboveRun, pLeftRun, mi_row, mi_col,
+                                                   BLOCK_32X32);
+                aom_write_symbol(&w, PARTITION_SPLIT, part_cdf[qctx],
                                  svt_aom_partition_cdf_length(BLOCK_32X32));
             }
-            {
-                const int q16ctx = ecpart_derive_ctx(pAboveRun, pLeftRun, (by / 4) * 4,
-                                                     (bx / 4) * 4, BLOCK_16X16);
-                aom_write_symbol(&w, PARTITION_SPLIT, default_partition_cdf[q16ctx],
+            if (B < 16 && mi_row % 4 == 0 && mi_col % 4 == 0) {
+                const int q16ctx = ecpart_derive_ctx(pAboveRun, pLeftRun, mi_row, mi_col,
+                                                     BLOCK_16X16);
+                aom_write_symbol(&w, PARTITION_SPLIT, part_cdf[q16ctx],
                                  svt_aom_partition_cdf_length(BLOCK_16X16));
             }
+            if (B < 64) {
+                const int leafCtx = ecpart_derive_ctx(pAboveRun, pLeftRun, mi_row, mi_col, lbs);
+                aom_write_symbol(&w, PARTITION_NONE, part_cdf[leafCtx],
+                                 svt_aom_partition_cdf_length(lbs));
+            }
+            aom_write_symbol(&w, 0, skip_cdf[0], 2);
+            ecpart_update_ctx(pAboveRun, pLeftRun, mi_row, mi_col, lbs);
             const int top_ctx = intra_mode_context[hasTop ? laboveMode : DC_PRED];
             const int left_ctx = intra_mode_context[hasLeft ? lleftMode : DC_PRED];
             aom_write_symbol(&w, lmode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
@@ -6365,6 +6391,14 @@ static int svtd_cs4_uv_q_drive(int S) {
     aom_reader r;
     if (aom_reader_init(&r, buf, w.pos)) return 2;
     r.allow_update_cdf = 1;
+    // the reader-side partition ctx reset (the writer evolved the shared
+    // arrays; the reader needs a fresh start) + the root partition read
+    memset(pAboveRun, (int)INVALID_NEIGHBOR_DATA, 64);
+    memset(pLeftRun, (int)INVALID_NEIGHBOR_DATA, 16);
+    {
+        const int rootCtx = ecpart_derive_ctx(pAboveRun, pLeftRun, 0, 0, BLOCK_64X64);
+        aom_read_symbol_(&r, part_cdf_r[rootCtx], svt_aom_partition_cdf_length(BLOCK_64X64));
+    }
     for (int by = 0; by < grid; ++by) {
         for (int bx = 0; bx < grid; ++bx) {
             const int px = bx * B, py = by * B;
@@ -6380,6 +6414,24 @@ static int svtd_cs4_uv_q_drive(int S) {
             const int lleftMode = bx > 0 ? lmodes[by * grid + bx - 1] : DC_PRED;
             const int top_ctx = intra_mode_context[by > 0 ? laboveMode : DC_PRED];
             const int left_ctx = intra_mode_context[bx > 0 ? lleftMode : DC_PRED];
+            // the partition + skip reads (the aom decode order mirror)
+            if (B < 32 && mi_row % 8 == 0 && mi_col % 8 == 0) {
+                const int qctx = ecpart_derive_ctx(pAboveRun, pLeftRun, mi_row, mi_col,
+                                                   BLOCK_32X32);
+                aom_read_symbol_(&r, part_cdf_r[qctx], svt_aom_partition_cdf_length(BLOCK_32X32));
+            }
+            if (B < 16 && mi_row % 4 == 0 && mi_col % 4 == 0) {
+                const int q16ctx = ecpart_derive_ctx(pAboveRun, pLeftRun, mi_row, mi_col,
+                                                     BLOCK_16X16);
+                aom_read_symbol_(&r, part_cdf_r[q16ctx],
+                                 svt_aom_partition_cdf_length(BLOCK_16X16));
+            }
+            if (B < 64) {
+                const int leafCtx = ecpart_derive_ctx(pAboveRun, pLeftRun, mi_row, mi_col, lbs);
+                aom_read_symbol_(&r, part_cdf_r[leafCtx], svt_aom_partition_cdf_length(lbs));
+            }
+            aom_read_symbol_(&r, skip_cdf_r[0], 2);
+            ecpart_update_ctx(pAboveRun, pLeftRun, mi_row, mi_col, lbs);
             const int rlm =
                 aom_read_symbol_(&r, fc_r.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
             if (rlm != lmodes[bidx]) { fprintf(stderr, "CS4 rt lmode %d\n", S); return 3; }

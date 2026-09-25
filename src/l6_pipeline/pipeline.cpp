@@ -1784,6 +1784,7 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
     const entropy::BlockSize lbs = (lumaB == 8) ? entropy::BLOCK_8X8
                                  : (lumaB == 16) ? entropy::BLOCK_16X16
                                  : (lumaB == 32) ? entropy::BLOCK_32X32 : entropy::BLOCK_64X64;
+    const entropy::BlockSize leafBs = lbs;  // the leaf coding block's bsize
     const entropy::BlockSize ubs = (uvB == 4) ? entropy::BLOCK_4X4
                                  : (uvB == 8) ? entropy::BLOCK_8X8
                                  : (uvB == 16) ? entropy::BLOCK_16X16 : entropy::BLOCK_32X32;
@@ -1806,6 +1807,19 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
     else if (uvB == 8) transforms::defaultScan8x8(uscan);
     else if (uvB == 16) transforms::defaultScan16x16(uscan);
     else transforms::defaultScan32x32(uscan);
+    // FS5a: the running partition contexts (the FS-series machinery; the
+    // chroma loop REUSES the luma loops' writePartition/writeSkip/
+    // updatePartitionContext, the decode-verified ECP1/ECP2 surfaces)
+    std::uint8_t pAboveRun[64];
+    std::uint8_t pLeftRun[16];
+    memset(pAboveRun, INVALID_NEIGHBOR_DATA, sizeof(pAboveRun));
+    memset(pLeftRun, INVALID_NEIGHBOR_DATA, sizeof(pLeftRun));
+    // the SB root partition symbol (the 64x64 tree root; SPLIT when the
+    // grid descends below 64, NONE when the root IS the block)
+    if (w && fc) {
+        entropy::writePartition(w, fc, entropy::BLOCK_64X64, 1, 1, pAboveRun[0], pLeftRun[0],
+                                lumaB < 64 ? entropy::PARTITION_SPLIT : entropy::PARTITION_NONE);
+    }
     for (int by = 0; by < grid; ++by) {
         for (int bx = 0; bx < grid; ++bx) {
             const int px = bx * lumaB, py = by * lumaB;
@@ -1889,8 +1903,33 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
             }
             for (int i = 0; i < lumaB * lumaB; ++i) coeffsY[bidx * lumaB * lumaB + i] = qc[i];
             eobsY[bidx] = eob;
-            // symbols: luma kf mode (+ the angle delta when gated), then
-            // uv_mode + the uv angle-delta (chroma-referenced only)
+            // symbols: the partition surfaces (the SB tree + the leaf NONE)
+            // + the skip flag, THEN the luma kf mode (+ the angle delta when
+            // gated), then uv_mode + the uv angle-delta (chroma-referenced
+            // only) - the aom decode order (decodemv.c:787 the skip read is
+            // unconditional for intra blocks)
+            if (w && fc) {
+                // the interior partition symbols (the SB tree levels between
+                // the root and the leaf; only for the deeper geometries)
+                if (lumaB < 32 && (miRow % 8) == 0 && (miCol % 8) == 0) {
+                    entropy::writePartition(w, fc, entropy::BLOCK_32X32, 1, 1, pAboveRun[miCol],
+                                            pLeftRun[miRow & 15], entropy::PARTITION_SPLIT);
+                }
+                if (lumaB < 16 && (miRow % 4) == 0 && (miCol % 4) == 0) {
+                    entropy::writePartition(w, fc, entropy::BLOCK_16X16, 1, 1, pAboveRun[miCol],
+                                            pLeftRun[miRow & 15], entropy::PARTITION_SPLIT);
+                }
+                // the leaf partition symbol (NONE at the coding block's bsize;
+                // skipped for lumaB == 64 where the SB root IS the leaf)
+                if (lumaB < 64) {
+                    entropy::writePartition(w, fc, leafBs, 1, 1, pAboveRun[miCol],
+                                            pLeftRun[miRow & 15], entropy::PARTITION_NONE);
+                }
+                entropy::updatePartitionContext(pAboveRun, pLeftRun, miRow, miCol, leafBs);
+                // the skip symbol (ECP2; skip=0, the ctx from the above/left
+                // skip flags - all coded skip=0 -> ctx 0 for every block)
+                entropy::writeSkip(w, fc, 0, 0);
+            }
             if (w && fc) {
                 int topCtx = 0, leftCtx = 0;
                 entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
