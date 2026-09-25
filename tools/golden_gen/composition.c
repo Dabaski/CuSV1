@@ -5968,6 +5968,24 @@ static int svtd_cs3_drive(void) {
 // (per block: luma u v; u = v = -1 when not chroma-referenced), ecs4S_eobs
 // (same convention), ecs4S_coeffs (per block: luma B*B then, if referenced,
 // U S*S + V S*S), ecs4S_recon_y / ecs4S_recon_u / ecs4S_recon_v.
+// The decode_partition leaf order (aom decodeframe.c:1392-1397): the DFS
+// visits the four quadrants TL, TR, BL, BR at every level, so the leaf
+// sequence of a single-64x64-SB walk = the Z-order curve of the leaf grid.
+// The SPLIT nodes themselves emit their partition symbol at the FIRST leaf
+// visited inside them (the TL leaf), which is where the origin guards
+// (mi_row % 8 == 0 / mi_row % 4 == 0) fire in this order.
+static void svtd_zorder(int size, int x0, int y0, int grid, int* out, int* n) {
+    if (size == 1) {
+        out[(*n)++] = y0 * grid + x0;
+        return;
+    }
+    const int h = size / 2;
+    svtd_zorder(h, x0, y0, grid, out, n);
+    svtd_zorder(h, x0 + h, y0, grid, out, n);
+    svtd_zorder(h, x0, y0 + h, grid, out, n);
+    svtd_zorder(h, x0 + h, y0 + h, grid, out, n);
+}
+
 static int svtd_cs4_uv_q_drive(int S) {
     const int B = 2 * S;  // the luma block size
     static uint8_t y_src[4096], u_src[1024], v_src[1024];
@@ -6055,11 +6073,27 @@ static int svtd_cs4_uv_q_drive(int S) {
     memset(na_u_left_r, (int)INVALID_NEIGHBOR_DATA, 8);
     memset(na_v_above_r, (int)INVALID_NEIGHBOR_DATA, 8);
     memset(na_v_left_r, (int)INVALID_NEIGHBOR_DATA, 8);
-    for (int by = 0; by < grid; ++by) {
-        for (int bx = 0; bx < grid; ++bx) {
+    // the tree-order leaf iteration (the RT6 fix): both the writer and the
+    // read twin visit the leaves in the decode_partition DFS order - the
+    // interior partition symbols then land at the node entries (the first
+    // leaf of each node = the TL leaf in this order), matching the
+    // decoder's recursive walk (the flat raster order interleaved the
+    // interior symbols mid-quadrant and desynced ffmpeg on c4/c8)
+    static int zord[64];
+    int zn = 0;
+    svtd_zorder(grid, 0, 0, grid, zord, &zn);
+    // the RT6 tree-order leaf iteration: the DFS/Z-order sequence (the
+    // decode_partition recursion visits TL -> TR -> BL -> BR at every level,
+    // so the leaf sequence = the Z-order curve of the leaf grid). The
+    // interior partition symbols land at the subtree starts (the TL leaf
+    // origin guards fire correctly in this order). The flat raster order
+    // interleaved the interior symbols mid-quadrant and desynced ffmpeg on
+    // c4/c8.
+    for (int zi = 0; zi < nb; ++zi) {
+        const int bidx = zord[zi];
+        const int by = bidx / grid, bx = bidx % grid;
             const int px = bx * B, py = by * B;
             const int mi_row = py / 4, mi_col = px / 4;
-            const int bidx = by * grid + bx;
             // is_chroma_reference (common_utils.h:315-320), 4:2:0, bw = bh = B/4
             const int bw_mi = B / 4;
             const int chroma_ref =
@@ -6373,7 +6407,6 @@ static int svtd_cs4_uv_q_drive(int S) {
                 umodes[bidx] = -1;
                 vmodes[bidx] = -1;
             }
-        }
     }
     aom_stop_encode(&w);
     // CS5: capture the walk tile (the CS4 stream) per size for the color TU
@@ -6399,12 +6432,13 @@ static int svtd_cs4_uv_q_drive(int S) {
         const int rootCtx = ecpart_derive_ctx(pAboveRun, pLeftRun, 0, 0, BLOCK_64X64);
         aom_read_symbol_(&r, part_cdf_r[rootCtx], svt_aom_partition_cdf_length(BLOCK_64X64));
     }
-    for (int by = 0; by < grid; ++by) {
-        for (int bx = 0; bx < grid; ++bx) {
-            const int px = bx * B, py = by * B;
-            const int mi_row = py / 4, mi_col = px / 4;
-            const int bidx = by * grid + bx;
-            const int bw_mi = B / 4;
+    // the twin iterates the SAME zord order (the tree-order mirror)
+    for (int zi = 0; zi < nb; ++zi) {
+        const int bidx = zord[zi];
+        const int by = bidx / grid, bx = bidx % grid;
+        const int px = bx * B, py = by * B;
+        const int mi_row = py / 4, mi_col = px / 4;
+        const int bw_mi = B / 4;
             const int chroma_ref =
                 ((mi_row & 0x01) || !(bw_mi & 0x01)) && ((mi_col & 0x01) || !(bw_mi & 0x01));
             const int uv_x = ((px >> 3) << 3) >> 1;
@@ -6530,7 +6564,6 @@ static int svtd_cs4_uv_q_drive(int S) {
                     for (int k = 0; k < utx_w_unit; ++k) aL[uvmi_row + k] = (uint8_t)cul;
                 }
             }
-        }
     }
     if (memcmp(&fc, &fc_r, sizeof(Ts1FrameContext))) {
         fprintf(stderr, "CS4 cdf mismatch %d\n", S);

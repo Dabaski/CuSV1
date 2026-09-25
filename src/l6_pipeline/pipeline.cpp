@@ -1763,6 +1763,24 @@ ModeDecision decideBlockModeUv(const std::uint8_t* src, const std::uint8_t* abov
     return best;
 }
 
+// The decode_partition leaf order (aom decodeframe.c:1392-1397): the DFS
+// visits the four quadrants TL, TR, BL, BR at every level, so the leaf
+// sequence of a single-64x64-SB walk = the Z-order curve of the leaf grid.
+// The SPLIT nodes themselves emit their partition symbol at the FIRST leaf
+// visited inside them (the TL leaf), which is where the origin guards
+// (miRow % 8 == 0 / miRow % 4 == 0) fire in this order.
+static void zorderLeaves(int size, int x0, int y0, int grid, int* out, int* n) {
+    if (size == 1) {
+        out[(*n)++] = y0 * grid + x0;
+        return;
+    }
+    const int h = size / 2;
+    zorderLeaves(h, x0, y0, grid, out, n);
+    zorderLeaves(h, x0 + h, y0, grid, out, n);
+    zorderLeaves(h, x0, y0 + h, grid, out, n);
+    zorderLeaves(h, x0 + h, y0 + h, grid, out, n);
+}
+
 // CS4: the chroma-emitting Q loop (the signature comment in pipeline.h).
 void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                         const pixels::Plane& srcV, pixels::Plane& reconY, pixels::Plane& reconU,
@@ -1820,11 +1838,19 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
         entropy::writePartition(w, fc, entropy::BLOCK_64X64, 1, 1, pAboveRun[0], pLeftRun[0],
                                 lumaB < 64 ? entropy::PARTITION_SPLIT : entropy::PARTITION_NONE);
     }
-    for (int by = 0; by < grid; ++by) {
-        for (int bx = 0; bx < grid; ++bx) {
+    // the tree-order leaf iteration (the RT6 fix): the leaves are visited in
+    // the decode_partition DFS order (the same iteration the l7 read twin and
+    // the generator's svtd_cs4_uv_q_drive use) - the interior partition
+    // symbols then land at the node entries (the first leaf of each node =
+    // the TL leaf in this order), matching the decoder's recursive walk
+    static int zord[64];
+    int zn = 0;
+    zorderLeaves(grid, 0, 0, grid, zord, &zn);
+    for (int t = 0; t < grid * grid; ++t) {
+        const int bidx = zord[t];
+        const int by = bidx / grid, bx = bidx % grid;
             const int px = bx * lumaB, py = by * lumaB;
             const int miRow = py / 4, miCol = px / 4;
-            const int bidx = by * grid + bx;
             const int bwMi = lumaB / 4;
             // is_chroma_reference (common_utils.h:315-320), 4:2:0
             const bool chromaRef =
@@ -2089,7 +2115,6 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
             }
             (void)ltxW;
             (void)utxW;
-        }
     }
     if (w) entropy::odEcStopEncode(w);
 }
