@@ -140,12 +140,15 @@ above, not zeros).
 - Chroma frame compositions run the same grid over the 4:2:0 UV plane:
   UV-sized blocks, per-plane availability, the `uv2y` fold at the call
   site, filt_type from the UV mode map.
- - Entropy emission: the Auto/Q paths at ALL five geometries (4x4..64x64,
-   FS3/FS4b) emit, per block, the partition symbol where the tree codes
-   one, skip, the kf y-mode + angle-delta + filter-intra symbols (BSF1;
-   FI predicate-gated: DC_PRED, bsize <= 32x32) and - in the Q path -
-   the real per-block token stream (TS3, skip = 0, NA-driven contexts).
-   Multi-block grids emit running partition contexts (FS5a,
+- Entropy emission: the Auto/Q paths at ALL five geometries (4x4..64x64,
+  FS3/FS4b) emit, per block, the kf y-mode + angle-delta + filter-intra
+  symbols (BSF1; FI predicate-gated: DC_PRED, bsize <= 32x32) and - in
+  the Q path - the real per-block token stream (TS3, skip = 0, NA-driven
+  contexts). THE PER-SIZE SHAPES DIFFER (emission.md:27-31): 4x4Q emits
+  skip but NO partition symbol (a 4x4 block is never a partition point);
+  16x16Q emits NEITHER (the ratified D3-era shape); 8x8Q/32x32Q/64x64Q
+  emit both as applicable. Multi-block grids emit running partition
+  contexts (FS5a,
    `updatePartitionContext`, the fs5g32 grid gate). The chosen modes
    feed `NeighborContext` (filt_type live).
 - GPU frame paths run the per-block kernel chain (`predict_block_*` +
@@ -181,8 +184,10 @@ the committed gate (see `docs/bitstream.md` for the narrative):
 - Reader halves of partition/skip/txb follow the aom decoder
   semantics (out-of-tree arbiter; no aom code is extracted).
 - Named scope: LUMA DCT_DCT only, whole-block TUs (txb_count = 1 at
-  tx_depth = 0). Deferred: chroma uv_mode/CFL symbols, the nonkey
-  y-mode path, palette, intrabc.
+  tx_depth = 0). Landed (CS1/CS4): the chroma uv_mode/uv-delta symbols
+  and the per-component token chains. Deferred: the CFL alphas
+  (UV_CFL_PRED is not a D2 candidate), the nonkey y-mode path,
+  palette, intrabc.
 
 ## l8_bitstream - raw-bit writer + OBU
 
@@ -247,7 +252,7 @@ hand-traces:
 3. `composition.c` wires the extracts into the dispatch tables and the
    frame/policy/chroma/bitstream/token drivers.
 4. `golden_primitives.exe` dumps the primitive vectors; its output is
-   diffed against `committed expected_primitives.txt` (currently 335
+   diffed against `committed expected_primitives.txt` (currently 421
    lines - 0 diff is a commit precondition). Round-trips and
    inequalities exit nonzero inside the generator itself.
 5. `golden_frame.exe` captures the D-policy frame golden.

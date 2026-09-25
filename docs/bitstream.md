@@ -176,3 +176,32 @@ stream is unspecifiable: the writer adapts CDFs a conformant decoder
 will not replay. The fix was found by the decoder itself
 (libdav1d AVERROR_INVALIDDATA at the frame OBU) and is stated as an
 invariant at both emission sites (pipeline.cpp).
+
+
+## The color era (CS-series, 2026-09)
+
+The monochrome limitation ended across CS1-CS5: the uv_mode/uv-delta
+symbols, the per-component (U/V) token chains, the color SPS v3
+(the D1 un-patch: mono bit 0, the 4:2:0 config, the U/V delta_q bits
+- the frame header went 40 -> 42 bits), and the chroma-emitting l6
+walk. The color artifact set: structural_keyframe_color{4,8,16,32}.obu
+(the 64x64 luma parent; S = the UV transform size). Decode outcomes
+(ffmpeg/libdav1d, tools/verify_decode4.ps1 -Color N):
+
+- color32 (165 B): CONTENT 1:1 ON ALL THREE PLANES (Y 4096/4096,
+  U 1024/1024, V 1024/1024) - the first color frame this project
+  produces decoded by an independent reference decoder.
+- color16 (80 B): the luma plane matches (4096/4096); the U/V planes
+  diverge (510/1024 each) - the chroma-NA/recon evolution at the
+  second 32x32 block; OPEN.
+- color4 (146 B) / color8 (107 B): the decode desyncs (exit 69) -
+  the flat walk emits the interior partition SPLIT symbols in raster
+  order, diverging from decode_partition's hierarchical traversal at
+  the deeper SB trees (4 levels at lumaB=8); the recursive
+  tree-traversal emission is the named follow-up; OPEN.
+
+The self-consistency lesson fired its fourth entry: the CS4 walk's
+partition/skip omission was shared by BOTH sides of every internal
+check (the l6 mirror and the generator drives) - every internal
+roundtrip agreed while the real decoder desynced. The real decoder
+is the only referee.

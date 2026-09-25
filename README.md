@@ -57,7 +57,7 @@ JIT-compiled at runtime via NVRTC.
   fixture and the 64x64 dual-domain GPU unification remain named
   follow-ups.
 - All layers green: 9 doctest targets pass, and the golden gate
-  reproduces the committed `expected_primitives.txt` 335/335 lines.
+  reproduces the committed `expected_primitives.txt` 421/421 lines.
 
 ## What's implemented
 
@@ -147,9 +147,10 @@ decoder-acceptance status:
   per-position nz-map context LUT, plus the tx-type symbol through
   `intra_ext_tx_cdf`. Named scope: LUMA DCT_DCT only, token CDF
   slices at q_ctx = 0, whole-block TUs; writer and reader adapt CDFs
-  identically (encoder/decoder mutual-consistency test). Deferred:
-  chroma uv_mode/CFL symbols, the nonkey y-mode path, palette,
-  intrabc.
+  identically (encoder/decoder mutual-consistency test). Landed
+  (CS1/CS4): the chroma uv_mode/uv-delta symbols and the per-component
+  token chains (U and V). Deferred: the CFL alphas (UV_CFL_PRED is not
+  a D2 candidate), the nonkey y-mode path, palette, intrabc.
 - **l8_bitstream** - raw-bit writer + OBU container ground floor
   (bit/literal/inv-signed-literal writers, uleb128, OBU header +
   uleb payload size, temporal delimiter) and structural keyframe

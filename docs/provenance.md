@@ -15,7 +15,7 @@ classification section). Status vocabulary:
 - **exact (hand)** - hand-transcribed from the SVT source with the
   arithmetic text unchanged (mechanical renames, C++ `std::` spellings);
   bit-exactness is gate-proven by `tools/golden_gen`
-  (expected_primitives.txt, 335 lines). All pre-extract-era ports (the
+  (expected_primitives.txt, 421 lines). All pre-extract-era ports (the
   C-series 4x4/8x8/16x16 kernels, the L-series 32x32 kernels, the helpers,
   and all of l4/l5) are this class.
 - **adapted** - SVT structure is preserved but the port changes shape:

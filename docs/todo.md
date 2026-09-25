@@ -89,7 +89,7 @@ A0. SLICE-LEVEL STATE (the live register)
     (d4 30B / d8 30B / d16 44B / d32 47B / d64 441B)
 [x] MILESTONE: decoder-accepted AND content-bit-identical at EVERY
     geometry (libdav1d via ffmpeg; verify_decode4.ps1 -Geometry N)
-[x] Infrastructure: tools/golden_gen (committed gate, 335 lines, the
+[x] Infrastructure: tools/golden_gen (committed gate, 421 lines, the
     exhaustive ectx4..ectx64+ectxg context gates), tools/td0_ladder.ps1
     (7/7), tools/decode_handoff.ps1, tools/bench, tools/verify_decode4.ps1
 [x] Docs: README, AGENTS.md layer map, provenance.md, decode_conformance.md

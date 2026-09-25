@@ -1,4 +1,4 @@
-# tools/golden_gen — SVT-AV1 golden-vector generator
+# tools/golden_gen - SVT-AV1 golden-vector generator
 
 Generates every golden vector used by the test suites in `src/`, directly
 from the vendored SVT-AV1 tree (`third_party/SVT-AV1`). The extraction is
@@ -8,16 +8,16 @@ above each). No golden is hand-typed.
 
 ## Layout
 
-- `extract.ps1` — pulls the symbols listed below out of
+- `extract.ps1` - pulls the symbols listed below out of
   `third_party/SVT-AV1/Source/Lib/...` into `svt_gen.c` (generated, committed
   so the gate is reproducible without re-running extraction).
-- `shims.h` — plumbing only (typedefs, RTCD name resolutions like
+- `shims.h` - plumbing only (typedefs, RTCD name resolutions like
   `svt_av1_dr_prediction_z1 -> ..._c`, `clip_pixel`), each citing its SVT
   header. No arithmetic.
-- `composition.c` — wires the extracts together: dispatch-table population
+- `composition.c` - wires the extracts together: dispatch-table population
   (`svtd_eb_pred[13][5]` / `svtd_dc_pred[2][2][5]`, the TX_32X32 and
   TX_64X64 columns populated via the SVTD_ADAPTER32 adapters and plain
-  64x64 static functions), the FIVE 2D core pairs — documented
+  64x64 static functions), the FIVE 2D core pairs - documented
   specializations of `av1_tranform_two_d_core_c` / `inv_txfm2d_add_c`,
   all five enumerated:
   TX_4X4 (fwd_shift {2,0,0}, cos_bit 13/13),
@@ -30,16 +30,16 @@ above each). No golden is hand-typed.
   (`svtd_quantize_fp_32x32/_b_32x32/_64x64/_b_64x64`, n_coeffs 1024/4096),
   and the frame-policy drivers (`svtd_frame_auto_32x32_blocks/_q`,
   `svtd_frame_v_dct_32x32/_q`, `svtd_frame_auto_64x64_blocks/_q`,
-  `svtd_frame_v_dct_64x64/_q` — 2x2 grids on 64x64 / 128x128 frames with the
+  `svtd_frame_v_dct_64x64/_q` - 2x2 grids on 64x64 / 128x128 frames with the
   FR-series REAL recon top-right gather), plus the entropy/bitstream
   composition blocks: the BSF3 packer family (svtd_bsf3_sps_payload/
   frame_header(+_v2)/frame_obu(+_v2)/encode_sps/tile_data(+_v2)), the
   TS-series token drives (svtd_ts1/ts2/ts3_drive,
   svtd_write/read_coeffs_txb, svtd_eob_from_coeffs), the chroma frame
   drivers (svtd_frame_chroma_*) and the ECP1 partition helpers.
-- `main_primitives.c` — per-primitive golden dump (diffed against
+- `main_primitives.c` - per-primitive golden dump (diffed against
   `expected_primitives.txt` by the validation gate).
-- `main_frame.c` — frame-policy composition: raster 4x4 loop where each
+- `main_frame.c` - frame-policy composition: raster 4x4 loop where each
   block's mode is decided by the D2 policy (all 13 PredictionModes scored by
   SAD, lowest wins, tie = lowest index) against RECONSTRUCTED neighbors.
   Outputs mode map + recon + coeffs.
@@ -148,7 +148,7 @@ inside `build_intra_predictors` is replaced by a generator-controlled global
 `expected_primitives.txt` holds the golden values transcribed from the
 committed tests (test_transform.cpp, test_intra.cpp, test_motion.cpp,
 test_pipeline.cpp). The gate is `golden_primitives.exe` output diffed against
-that file — currently **335/335 lines identical**, covering:
+that file - currently **421/421 lines identical**, covering:
 
 - transforms: fdct/fadst/idct/iadst 1D vectors at 4/8/16/32/64 (fdct64/idct64
   DCT-only), fwd2d/inv2d gate lines at 4x4/8x8/16x16/32x32 (DCT + ADST) and
@@ -179,8 +179,8 @@ that file — currently **335/335 lines identical**, covering:
 - EC3 intra-frame KF symbol lines: eckf_ctx (context pairs via
   intra_mode_context), eckf_bytes (mode + angle-delta + filter-intra pair
   with adaptation), eckf_rt (decode-back), eckf_cdf_eq.
-- BSF1 l6-emission gate lines: bsf1_modes (f16dc fixture — top half = f16
-  ramp, bottom-left 16x16 flat 94, bottom-right 16x16 flat 126 — decided by
+- BSF1 l6-emission gate lines: bsf1_modes (f16dc fixture - top half = f16
+  ramp, bottom-left 16x16 flat 94, bottom-right 16x16 flat 126 - decided by
   the same svtd_frame_auto_16x16_blocks D2 driver to {V, D203, DC, DC}),
   bsf1_ctx (context pairs from the DECIDED neighbor modes,
   unavailable -> DC_PRED context), bsf1_bytes (the kf y mode + angle-delta +
@@ -224,8 +224,8 @@ that file — currently **335/335 lines identical**, covering:
   per-position offset LUT (coefficients.c:24-303) is the critical context
   input - extracted whole, consumed by get_nz_map_ctx_from_stats.
 - TS2 per-block txb-ctx + NA gate lines: ecblk_ctx 0 2 2 2 (dc_sign_ctx
-  across the 4-block 64x32 grid — fresh NA at (0,0) → 0, accumulated
-  neighbors → 2 for the rest), ecblk_bytes 18 (the 4-block token stream
+  across the 4-block 64x32 grid - fresh NA at (0,0) -> 0, accumulated
+  neighbors -> 2 for the rest), ecblk_bytes 18 (the 4-block token stream
   through od_ec with adaptation), ecblk_rt 21 21 0 0 (block 2 eob 0 =
   txb_skip-only), ecblk_cdf_eq 1. The NA model: above[16]/left[8] uint8_t
   arrays, packed (dc_sign << 6 | cul_level), sweep + OR-accumulate per
@@ -336,7 +336,7 @@ l4 FI machinery actually produce and can decode:
 
 The frame-policy golden (`golden_frame.exe`) is captured for D3.
 
-Q0 deviation note: this SVT tree has no `av1_quantize_dc` — dc/ac handling is
+Q0 deviation note: this SVT tree has no `av1_quantize_dc` - dc/ac handling is
 unified inside the quantize helpers via `dequant_ptr[rc != 0]` /
 `quant_ptr[rc != 0]` indexing (full_loop.c:239, :246). The "dc path" is table
 index 0 of the extracted helpers.
