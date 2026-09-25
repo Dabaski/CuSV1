@@ -1388,8 +1388,12 @@ TEST_CASE("edge filter strength 1 filters the last edge sample") {
 }
 
 TEST_CASE("intra edge upsample interpolates the first half sample") {
-    unsigned char buf[16] = {7, 10, 20, 30, 40, 50, 60, 70, 80};
-    unsigned char* p = buf + 1;
+    // the 2-byte prefix: upsampleIntraEdge writes p[-2] (the SVT reference
+    // svt_av1_upsample_intra_edge_c:53), so the fixture must provide 2 bytes
+    // before p (the prior buf[16] with p = buf + 1 gave only 1 - the /RTC1
+    // stack-corruption trigger in Debug builds)
+    unsigned char buf[18] = {0, 7, 10, 20, 30, 40, 50, 60, 70, 80};
+    unsigned char* p = buf + 2;
     intra::upsampleIntraEdge(p, 8);
     CHECK(p[1] == 15);
 }
@@ -1608,8 +1612,8 @@ TEST_CASE("gpu dr z1 matches host reference with upsampled edge") {
     }
     gpurt::GpuContext ctx;
 
-    unsigned char raw[18] = {0};
-    unsigned char* p = raw + 1;
+    unsigned char raw[20] = {0};
+    unsigned char* p = raw + 2;
     p[-1] = 7;
     for (int i = 0; i < 8; ++i) {
         p[i] = (unsigned char)(10 * (i + 1));
