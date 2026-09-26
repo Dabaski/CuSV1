@@ -2010,6 +2010,19 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                 modesU[bidx] = 0xFF;
                 modesV[bidx] = 0xFF;
             }
+            // the filter-intra flag surface (the RT7-b fix): the decoder
+            // reads it after the uv surface for every DC-decided luma block
+            // at bsize <= 32x32 (aom decodemv.c:843, dav1d decode.c:1144) -
+            // the CS4 walk omitted it and c8/c4 desynced at the first
+            // DC-decided leaf (c8 b12 = mi(12,0), c4 b5 = mi(0,10), the
+            // measured divergence sites). The FS-series semantic: the D2
+            // never picks FI, the flag is 0 (the FILTER_INTRA_MODES
+            // sentinel).
+            if (w && fc &&
+                entropy::filterIntraAllowed(1, lbs, 0,
+                                            static_cast<std::uint32_t>(d.mode))) {
+                entropy::writeFilterIntra(w, fc, lbs, entropy::FILTER_INTRA_MODES);
+            }
             // ---- the LUMA chain (U BEFORE V: the luma chain first, the
             // ratified CS4 walk order) ----
             if (w && fc) {

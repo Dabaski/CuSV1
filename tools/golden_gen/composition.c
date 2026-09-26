@@ -4,6 +4,30 @@
 // SVT general cores (provenance inline). Everything else forwards to the
 // verbatim extracts in svt_gen.c.
 #include "svt_gen.c"
+// RT7-a cross-decoder trace: the read twin's per-symbol sequence WITH the cdf
+// row it consumed, so it can be aligned row-for-row against the throwaway
+// dav1d instrument's TD4S lines (which print the row the real decoder used).
+// The macro wraps every aom_read_symbol_ call site in this file (the verbatim
+// extract in svt_gen.c is untouched); the self-referential name is not
+// re-expanded by the preprocessor, so the inner call binds the real symbol.
+static int svtd_rt7 = 0;
+static int svtd_rt7seq = 0;
+static int svtd_rt7_mi = -1;
+static const char* svtd_rt7_plane = "?";
+static int svtd_rd(aom_reader* r, AomCdfProb* cdf, int nsymbs) {
+    AomCdfProb row[16];
+    const int n = nsymbs < 16 ? nsymbs : 15;
+    for (int i = 0; i <= n; ++i) row[i] = cdf[i];
+    const int v = aom_read_symbol_(r, cdf, nsymbs);
+    if (svtd_rt7) {
+        fprintf(stderr, "RS seq=%d mi=%d pl=%s ns=%d v=%d row:", svtd_rt7seq++,
+                svtd_rt7_mi, svtd_rt7_plane, nsymbs, v);
+        for (int i = 0; i <= n; ++i) fprintf(stderr, " %u", row[i]);
+        fprintf(stderr, "\n");
+    }
+    return v;
+}
+#define aom_read_symbol_(r, c, n) svtd_rd((r), (c), (n))
 // TD4d: forward declarations for the drivers defined below the first use
 // (C4013 prototype discipline - MSVC assumes int returns otherwise).
 static int svtd_decide(const uint8_t* src, const uint8_t* above, int n_top, int n_topright,
@@ -6018,6 +6042,12 @@ static int svtd_cs4_uv_q_drive(int S) {
     memcpy(part_cdf_r, default_partition_cdf, sizeof(part_cdf_r));
     static AomCdfProb skip_cdf_r[SKIP_CONTEXTS][CDF_SIZE(2)];
     memcpy(skip_cdf_r, default_skip_cdfs, sizeof(skip_cdf_r));
+    // the filter-intra flag cdf (the RT7-b surface; declared once per drive
+    // so the adaptation evolves across blocks - the FS-era pattern at :3284)
+    static AomCdfProb fi_cdf[CDF_SIZE(2)];
+    memcpy(fi_cdf, default_filter_intra_cdfs[lbs], sizeof(fi_cdf));
+    static AomCdfProb fi_cdf_r[CDF_SIZE(2)];
+    memcpy(fi_cdf_r, default_filter_intra_cdfs[lbs], sizeof(fi_cdf_r));
     const int ltx_w_unit = B / 4, utx_w_unit = S / 4;
     const int cfl = (B <= 32) ? 1 : 0;
     const int uv_abc = UV_INTRA_MODES - !cfl;
@@ -6211,6 +6241,18 @@ static int svtd_cs4_uv_q_drive(int S) {
                     aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[uvm - V_PRED],
                                      2 * MAX_ANGLE_DELTA + 1);
                 }
+            }
+            // the filter-intra flag surface (the RT7-b fix): the decoder reads
+            // it after the uv surface for every DC-decided luma block at
+            // bsize <= 32x32 (aom decodemv.c:843, dav1d decode.c:1144) - the
+            // CS4 walk omitted it and c8/c4 desynced at the first DC-decided
+            // leaf (c8 b12 = mi(12,0), c4 b5 = mi(0,10), the measured
+            // divergence sites). The FS-series semantic: the D2 never picks
+            // FI, the flag is 0 (writeFilterIntra's FILTER_INTRA_MODES
+            // sentinel shape, composition.c:3338).
+            if (lmode == DC_PRED && block_size_wide[lbs] <= 32 &&
+                block_size_high[lbs] <= 32) {
+                aom_write_symbol(&w, 0, fi_cdf, 2);
             }
             // ---- the LUMA chain ----
             static int32_t lcb[4096];
@@ -6429,8 +6471,16 @@ static int svtd_cs4_uv_q_drive(int S) {
     memset(pAboveRun, (int)INVALID_NEIGHBOR_DATA, 64);
     memset(pLeftRun, (int)INVALID_NEIGHBOR_DATA, 16);
     {
+        if (svtd_script) fprintf(stderr, "RT7-BEGIN S=%d\n", S);
+        {
+            const char* rt7s = getenv("RT7_S");
+            svtd_rt7 = (rt7s && atoi(rt7s) == S);
+            if (svtd_rt7) svtd_rt7seq = 0;
+        }
         const int rootCtx = ecpart_derive_ctx(pAboveRun, pLeftRun, 0, 0, BLOCK_64X64);
-        aom_read_symbol_(&r, part_cdf_r[rootCtx], svt_aom_partition_cdf_length(BLOCK_64X64));
+        const int rroot = aom_read_symbol_(&r, part_cdf_r[rootCtx],
+                                           svt_aom_partition_cdf_length(BLOCK_64X64));
+        if (svtd_script) fprintf(stderr, "R p64 mi=0,0 v=%d\n", rroot);
     }
     // the twin iterates the SAME zord order (the tree-order mirror)
     for (int zi = 0; zi < nb; ++zi) {
@@ -6452,26 +6502,40 @@ static int svtd_cs4_uv_q_drive(int S) {
             if (B < 32 && mi_row % 8 == 0 && mi_col % 8 == 0) {
                 const int qctx = ecpart_derive_ctx(pAboveRun, pLeftRun, mi_row, mi_col,
                                                    BLOCK_32X32);
-                aom_read_symbol_(&r, part_cdf_r[qctx], svt_aom_partition_cdf_length(BLOCK_32X32));
+                const int rv32 =
+                    aom_read_symbol_(&r, part_cdf_r[qctx], svt_aom_partition_cdf_length(BLOCK_32X32));
+                if (svtd_script)
+                    fprintf(stderr, "R p32 mi=%d,%d v=%d\n", mi_row, mi_col, rv32);
             }
             if (B < 16 && mi_row % 4 == 0 && mi_col % 4 == 0) {
                 const int q16ctx = ecpart_derive_ctx(pAboveRun, pLeftRun, mi_row, mi_col,
                                                      BLOCK_16X16);
-                aom_read_symbol_(&r, part_cdf_r[q16ctx],
-                                 svt_aom_partition_cdf_length(BLOCK_16X16));
+                const int rv16 =
+                    aom_read_symbol_(&r, part_cdf_r[q16ctx],
+                                     svt_aom_partition_cdf_length(BLOCK_16X16));
+                if (svtd_script)
+                    fprintf(stderr, "R p16 mi=%d,%d v=%d\n", mi_row, mi_col, rv16);
             }
+            if (svtd_rt7) { svtd_rt7_mi = mi_row * 100 + mi_col; svtd_rt7_plane = "blk"; }
             if (B < 64) {
                 const int leafCtx = ecpart_derive_ctx(pAboveRun, pLeftRun, mi_row, mi_col, lbs);
-                aom_read_symbol_(&r, part_cdf_r[leafCtx], svt_aom_partition_cdf_length(lbs));
+                const int rvn = aom_read_symbol_(&r, part_cdf_r[leafCtx],
+                                                svt_aom_partition_cdf_length(lbs));
+                if (svtd_script)
+                    fprintf(stderr, "R pN mi=%d,%d v=%d\n", mi_row, mi_col, rvn);
             }
-            aom_read_symbol_(&r, skip_cdf_r[0], 2);
+            const int rsk = aom_read_symbol_(&r, skip_cdf_r[0], 2);
+            if (svtd_script) fprintf(stderr, "R skip mi=%d,%d v=%d\n", mi_row, mi_col, rsk);
             ecpart_update_ctx(pAboveRun, pLeftRun, mi_row, mi_col, lbs);
             const int rlm =
                 aom_read_symbol_(&r, fc_r.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+            if (svtd_script) fprintf(stderr, "R kf mi=%d,%d v=%d\n", mi_row, mi_col, rlm);
             if (rlm != lmodes[bidx]) { fprintf(stderr, "CS4 rt lmode %d\n", S); return 3; }
             if (B >= 8 && av1_is_directional_mode((PredictionMode)rlm)) {
                 const int rd = aom_read_symbol_(&r, fc_r.angle_delta_cdf[rlm - V_PRED],
                                                 2 * MAX_ANGLE_DELTA + 1);
+                if (svtd_script)
+                    fprintf(stderr, "R ang mi=%d,%d v=%d\n", mi_row, mi_col, rd);
                 if (rd != MAX_ANGLE_DELTA) { fprintf(stderr, "CS4 rt ldelta %d\n", S); return 3; }
             }
             if (chroma_ref) {
@@ -6482,6 +6546,13 @@ static int svtd_cs4_uv_q_drive(int S) {
                                                     2 * MAX_ANGLE_DELTA + 1);
                     if (rd != MAX_ANGLE_DELTA) { fprintf(stderr, "CS4 rt udelta %d\n", S); return 3; }
                 }
+            }
+            // the filter-intra flag read (the RT7-b mirror; the writer emits
+            // 0 - the D2 never picks FI)
+            if (rlm == DC_PRED && block_size_wide[lbs] <= 32 &&
+                block_size_high[lbs] <= 32) {
+                const int rfi = aom_read_symbol_(&r, fi_cdf_r, 2);
+                if (rfi) { fprintf(stderr, "CS4 rt fi %d\n", S); return 3; }
             }
             // the LUMA chain
             {
@@ -6504,6 +6575,7 @@ static int svtd_cs4_uv_q_drive(int S) {
                 const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
                 TranLow rc[4096];
                 memset(rc, 0, sizeof(rc));
+                if (svtd_rt7) svtd_rt7_plane = "Y";
                 const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, lscan, ltxs, 0, dc_sign_ctx,
                                                       (PredictionMode)lmodes[bidx], COMPONENT_LUMA);
                 if (reob != leobs[bidx]) { fprintf(stderr, "CS4 rt leob %d\n", S); return 3; }
@@ -6547,6 +6619,7 @@ static int svtd_cs4_uv_q_drive(int S) {
                     const int txb_skip_ctx = ((leftacc != 0) + (top != 0)) + 7;
                     TranLow rc[1024];
                     memset(rc, 0, sizeof(rc));
+                    if (svtd_rt7) svtd_rt7_plane = "U";
                     const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, uscan, utxs, txb_skip_ctx,
                                                           dc_sign_ctx, DC_PRED, COMPONENT_CHROMA);
                     if (reob != wanteob) { fprintf(stderr, "CS4 rt ceob %d\n", S); return 3; }
@@ -6569,6 +6642,7 @@ static int svtd_cs4_uv_q_drive(int S) {
         fprintf(stderr, "CS4 cdf mismatch %d\n", S);
         return 4;
     }
+    if (svtd_script) fprintf(stderr, "RT7-END S=%d\n", S);
     // gate lines
     printf("ecs4%d_bytes %u", S, w.pos);
     for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
