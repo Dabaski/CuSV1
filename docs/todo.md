@@ -362,6 +362,14 @@ shipped feature set (mono/color intra streams).
   self-consistent use; the TD2 harness crash taught the exchange rule)
 - 4096-facade vs 1024 token domain at 64x64 (FS5d, OPEN)
 - The FI DC-deciding fixture (OPEN)
+- The chroma bottom-left FIX (OPEN, next): CS7 phase (c) CONFIRMED at c8 AND
+  c4 - both sides' gathered left columns match as a bit-exact reversal, so only
+  the extension diverges, and the c16 control passed because both fallbacks
+  repeat the corner value. Site: the CS4 chroma gather in composition.c and
+  the l6 UV chains, availability from the existing pipeline.cpp:1885 Z-order
+  gate, builder keeping ownership of the predicate per the RT10b policy.
+  Falsifiable: c4 and c8 U/V to 0 divergent leaves; if c4 does not follow, the
+  mechanism is not the whole story there.
 - od_ec_dec_bits_ declared-undefined in the pinned tree (named, no
   consumer)
 - Bench baselines are clock-noise-sensitive without NVML lock (BM3)

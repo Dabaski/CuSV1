@@ -6562,28 +6562,66 @@ static int svtd_cs4_uv_q_drive(int S) {
                     if (uvHasLeft)
                         for (int i = 0; i < S; ++i) cleft[i] = crecon[(uv_y + i) * 32 + uv_x - 1];
                         // CS7 step 1: our side of the chroma bottom-left diff,
-                        // for the block the map names. Gated on S and the UV
-                        // leaf index, and it prints the GATHERED left column
-                        // separately from the extension, because the decisive
-                        // check is whether the gathered bytes already agree.
+                        // for the block the map names. The gate is DERIVED from
+                        // the target luma 4px coordinate rather than hardcoded:
+                        // one luma 4px unit is 4 luma px, which is 2 chroma px
+                        // at 4:2:0, so the leaf is (2*tby/S)*uvGrid + 2*tbx/S.
+                        // For the target (8,0) that is leaf 1 at S=16 (the
+                        // control), leaf 2 at S=8 and leaf 4 at S=4 - three
+                        // DIFFERENT leaf indices for the same physical block,
+                        // which is why a single hardcoded index read the wrong
+                        // leaf at c4. A derived-but-unasserted gate is the same
+                        // bug wearing a hat, so every leaf of the active
+                        // geometry is checked against it and a mismatch is
+                        // reported loudly instead of silently skipping.
                         {
                             const char* w = getenv("RT11_S");
-                            if (w && atoi(w) == S && uRow * uvGrid + uCol == 2) {
-                                fprintf(stderr,
-                                        "RT11OURS S=%d plane=U uvleaf=%d uRow=%d uCol=%d "
-                                        "uvm=%d S=%d uvHasTop=%d uvHasLeft=%d "
-                                        "n_left_passed=%d n_bottomleft_passed=0\n",
-                                        S, uRow * uvGrid + uCol, uRow, uCol, uvm, S,
-                                        (int)uvHasTop, (int)uvHasLeft, S);
-                                fprintf(stderr, "RT11OURS left_col[%d] :", S);
-                                for (int i = 0; i < S; ++i) fprintf(stderr, " %d", cleft[i]);
-                                fprintf(stderr, "\n");
-                                // what the builder's :9237 memset will produce
-                                fprintf(stderr, "RT11OURS left_col[%d..%d] (memset :9237) :", S,
-                                        2 * S - 1);
-                                for (int i = S; i < 2 * S; ++i)
-                                    fprintf(stderr, " %d", cleft[S - 1]);
-                                fprintf(stderr, "\n");
+                            if (w && atoi(w) == S) {
+                                const char* ex = getenv("RT11_BX");
+                                const char* ey = getenv("RT11_BY");
+                                const int tbx = ex ? atoi(ex) : 8;
+                                const int tby = ey ? atoi(ey) : 0;
+                                // the plane is 32x32 chroma px, so uvGrid = 32/S
+                                const int expLeaf = (2 * tby / S) * uvGrid + (2 * tbx / S);
+                                const int actLeaf = uRow * uvGrid + uCol;
+                                // ASSERT, not just print: the derived target leaf
+                                // must be reached exactly once PER PLANE. Zero
+                                // means the derivation has gone stale (the silent
+                                // wrong answer); more than two means the leaf
+                                // enumeration disagrees with it. A dump that
+                                // merely printed expected_leaf would let both
+                                // pass unnoticed, which is the whole difference
+                                // between an instrument that reports and one that
+                                // polices. The count is 2 because the leaf loop
+                                // runs for U and for V - the first version of
+                                // this assert wanted 1 and correctly failed,
+                                // which is how the per-plane structure surfaced.
+                                static int hits = 0;
+                                if (actLeaf == expLeaf) {
+                                    ++hits;
+                                    fprintf(stderr,
+                                            "RT11OURS S=%d plane=%c uvleaf=%d uRow=%d uCol=%d "
+                                            "expected_leaf=%d uvm=%d uvHasTop=%d uvHasLeft=%d "
+                                            "n_left_passed=%d n_bottomleft_passed=0\n",
+                                            S, comp ? 'V' : 'U', actLeaf, uRow, uCol, expLeaf, uvm,
+                                            (int)uvHasTop, (int)uvHasLeft, S);
+                                    fprintf(stderr, "RT11OURS left_col[%d] :", S);
+                                    for (int i = 0; i < S; ++i) fprintf(stderr, " %d", cleft[i]);
+                                    fprintf(stderr, "\n");
+                                    // what the builder's :9237 memset will produce
+                                    fprintf(stderr, "RT11OURS left_col[%d..%d] (memset :9237) :", S,
+                                            2 * S - 1);
+                                    for (int i = S; i < 2 * S; ++i)
+                                        fprintf(stderr, " %d", cleft[S - 1]);
+                                    fprintf(stderr, "\n");
+                                }
+                                // the final leaf of the geometry closes the count
+                                if (actLeaf == uvGrid * uvGrid - 1 && hits != 2)
+                                    fprintf(stderr,
+                                            "RT11OURS ASSERT FAILED S=%d target=(%d,%d) "
+                                            "expected_leaf=%d reached %d times, want 2 "
+                                            "(one per plane)\n",
+                                            S, tbx, tby, expLeaf, hits);
                             }
                         }
                     if (uvHasTop && uvHasLeft) cal = crecon[(uv_y - 1) * 32 + uv_x - 1];
