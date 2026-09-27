@@ -3565,7 +3565,49 @@ TxfmFnB fwd1d16B(TxType type) {
     return type == TxType::DCT_DCT ? fdct16B : fadst16B;
 }
 
+
 }  // namespace
+
+// av1_ext_tx_used (common_utils.c:197-204), restricted to the two rows an
+// intra + reduced_tx_set=1 block can select: row 0 = EXT_TX_SET_DCTONLY
+// (index 0 only) and row 2 = EXT_TX_SET_DTT4_IDTX (indices 0,1,2,3,9 - the
+// four separable types plus IDTX=9 per definitions.h:1031-1047). Rows 1, 3, 4
+// and 5 are unreachable here: they need is_inter or use_reduced_set=0
+// (get_ext_tx_set_type, common_utils.h:59-77).
+static const bool kExtTxUsed[2][4] = {
+    {true, false, false, false},   // EXT_TX_SET_DCTONLY
+    {true, true, true, true},      // EXT_TX_SET_DTT4_IDTX
+};
+
+// g_intra_mode_to_tx_type (mode_decision.c:2959-2973), by position. The
+// oblique slots are labelled D117/D153/D207/D63 here and D113/D157/D203/D67 in
+// aom/dav1d; the values are identical in both trees, and the caller supplies the
+// mode already folded into this 0..12 luma-space space.
+static const TxType kIntraModeToTxType[13] = {
+    TxType::DCT_DCT,    // 0 DC
+    TxType::ADST_DCT,   // 1 V
+    TxType::DCT_ADST,   // 2 H
+    TxType::DCT_DCT,    // 3 D45
+    TxType::ADST_ADST,  // 4 D135
+    TxType::ADST_DCT,   // 5 D117
+    TxType::DCT_ADST,   // 6 D153
+    TxType::DCT_ADST,   // 7 D207
+    TxType::ADST_DCT,   // 8 D63
+    TxType::ADST_ADST,  // 9 SMOOTH
+    TxType::ADST_DCT,   // 10 SMOOTH_V
+    TxType::DCT_ADST,   // 11 SMOOTH_H
+    TxType::ADST_ADST,  // 12 PAETH
+};
+
+TxType intraUvTxType(int mode, TxSizeSqUp sqrUp) {
+    // if (txsize_sqr_up_map[tx_size] > TX_32X32) return DCT_DCT;
+    if (sqrUp > TxSizeSqUp::TX_32X32) return TxType::DCT_DCT;
+    const TxType type = kIntraModeToTxType[mode];
+    // get_ext_tx_set_type (common_utils.h:59-77) at is_inter=0,
+    // use_reduced_set=1: DCTONLY when sqr_up >= TX_32X32, else DTT4_IDTX.
+    const int setRow = (sqrUp >= TxSizeSqUp::TX_32X32) ? 0 : 1;
+    return !kExtTxUsed[setRow][static_cast<int>(type)] ? TxType::DCT_DCT : type;
+}
 
 // svt_av1_transform_two_d_4x4_c / av1_tranform_two_d_core_c, TX_4X4 config:
 // shift {2, 0, 0}, cos_bit 13/13, no flips (DCT_DCT / ADST_ADST both ud/lr=0)

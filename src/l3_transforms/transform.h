@@ -74,6 +74,28 @@ enum class TxType {
     ADST_ADST,
 };
 
+// The square-up transform size class, i.e. the range of txsize_sqr_up_map
+// (definitions.h). l3 is a per-size layer with no TxSize enum, so the LUT
+// takes the square-up class directly rather than a TxSize; the gate
+// comparisons below are SVT's own, in the same order.
+enum class TxSizeSqUp {
+    TX_4X4,
+    TX_8X8,
+    TX_16X16,
+    TX_32X32,
+    TX_64X64,
+};
+
+// svt_aom_get_intra_uv_tx_type (mode_decision.c:2985-2997). `mode` is the
+// ALREADY-FOLDED luma-space intra mode (0..12): the reference folds internally
+// via get_uv_mode, but l3 must not depend on l4, so the caller folds with
+// intra::uv2y (the port's 1:1 copy of get_uv_mode, common_utils.h:130-133).
+// That fold is the one place the SVT shape is bent; it is a pure table lookup
+// with an identical value. `reduced_tx_set` is 1 (the ratified config, entropy.cpp
+// writeTxType) and `is_inter` is 0, so get_ext_tx_set_type can only return
+// DCTONLY or DTT4_IDTX.
+TxType intraUvTxType(int mode, TxSizeSqUp sqrUp);
+
 void fwdTxfm2d4x4(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
 
 void fwdTxfm2d8x8(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);

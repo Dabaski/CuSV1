@@ -405,6 +405,43 @@ TEST_CASE("fwdTxfm2d16x16 ADST_DCT is not ADST_ADST (per-pass 1D selection)") {
     CHECK(differs);
 }
 
+TEST_CASE("intraUvTxType pins the 13-entry LUT and both gates") {
+    // g_intra_mode_to_tx_type (mode_decision.c:2959-2973), transcribed by
+    // position. The four oblique slots carry different angle labels in the two
+    // trees (SVT D117/D153/D207/D63 vs aom+dav1d D113/D157/D203/D67) but the
+    // same values, so position is the contract - hence a by-position table.
+    // Position 7 is pinned by name below: it is the entry a handoff
+    // transcription got wrong, and it must fail loudly if re-transcribed.
+    const transforms::TxType lut[13] = {
+        transforms::TxType::DCT_DCT,    // 0 DC
+        transforms::TxType::ADST_DCT,   // 1 V
+        transforms::TxType::DCT_ADST,   // 2 H
+        transforms::TxType::DCT_DCT,    // 3 D45
+        transforms::TxType::ADST_ADST,  // 4 D135
+        transforms::TxType::ADST_DCT,   // 5 D117
+        transforms::TxType::DCT_ADST,   // 6 D153
+        transforms::TxType::DCT_ADST,   // 7 D207 (aom/dav1d D203)
+        transforms::TxType::ADST_DCT,   // 8 D63 (aom/dav1d D67)
+        transforms::TxType::ADST_ADST,  // 9 SMOOTH
+        transforms::TxType::ADST_DCT,   // 10 SMOOTH_V
+        transforms::TxType::DCT_ADST,   // 11 SMOOTH_H
+        transforms::TxType::ADST_ADST,  // 12 PAETH
+    };
+    bool allOk = true;
+    for (int m = 0; m < 13; ++m)
+        if (transforms::intraUvTxType(m, transforms::TxSizeSqUp::TX_16X16) != lut[m]) allOk = false;
+    CHECK(allOk);
+    // the transcription guard, named
+    CHECK(transforms::intraUvTxType(7, transforms::TxSizeSqUp::TX_16X16) == transforms::TxType::DCT_ADST);
+    // the used-mask gate: intra at TX_32X32 selects DCTONLY
+    // (get_ext_tx_set_type, common_utils.h:65-66), so the LUT's ADST_DCT for
+    // V_PRED does not survive av1_ext_tx_used - this is c32's structural pin,
+    // independent of the fixture's coefficients.
+    CHECK(transforms::intraUvTxType(1, transforms::TxSizeSqUp::TX_32X32) == transforms::TxType::DCT_DCT);
+    // the size shortcut: sqr_up > TX_32X32 returns before the LUT
+    CHECK(transforms::intraUvTxType(1, transforms::TxSizeSqUp::TX_64X64) == transforms::TxType::DCT_DCT);
+}
+
 TEST_CASE("fwdTxfm2d8x8 dct matches svt golden full 64") {
     // golden: svtd_fwd2d8x8 (av1_tranform_two_d_core_c @ TX_8X8, DCT_DCT)
     // gate line fwd2d8_dct, input = the 8x8 discriminating fixture
