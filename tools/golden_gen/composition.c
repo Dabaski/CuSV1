@@ -5630,10 +5630,24 @@ static int svtd_cs2_uv_q_drive(int S) {
                 for (int i = 0; i < S * S; ++i)
                     res[i] = (int16_t)(srcblk[i] - pred[i]);
                 int32_t cb[1024];
-                if (S == 4) svtd_fwd2d4x4(res, S, cb, svt_av1_fdct4_new);
-                else if (S == 8) svtd_fwd2d8x8(res, S, cb, svt_av1_fdct8_new);
-                else if (S == 16) svtd_fwd2d16x16(res, S, cb, svt_av1_fdct16_new);
-                else svtd_fwd2d32x32(res, S, cb, svt_av1_fdct32_new);
+                // RT9c: the chroma tx type is DERIVED from this plane's own
+                // decided mode, never transmitted (decodetxb.c:156-159 reads
+                // the tx_type for AOM_PLANE_Y only). `mode` here is already
+                // luma-space (0..12) - the CS2 drive stores the folded mode -
+                // so no g_uv2y fold is needed. The U and V chains are decided
+                // INDEPENDENTLY in CS2 (unlike the CS4 walk's shared-mode
+                // policy), so each plane's type comes from its own mode.
+                const int ctxt = svtd_intra_uv_tx_type(mode, S);
+                if (S == 4)
+                    svtd_fwd2d4x4_t(res, S, cb, svtd_is_adst_col(ctxt) ? svt_av1_fadst4_new : svt_av1_fdct4_new,
+                                    svtd_is_adst_row(ctxt) ? svt_av1_fadst4_new : svt_av1_fdct4_new);
+                else if (S == 8)
+                    svtd_fwd2d8x8_t(res, S, cb, svtd_is_adst_col(ctxt) ? svt_av1_fadst8_new : svt_av1_fdct8_new,
+                                    svtd_is_adst_row(ctxt) ? svt_av1_fadst8_new : svt_av1_fdct8_new);
+                else if (S == 16)
+                    svtd_fwd2d16x16_t(res, S, cb, svtd_is_adst_col(ctxt) ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                                      svtd_is_adst_row(ctxt) ? svt_av1_fadst16_new : svt_av1_fdct16_new);
+                else svtd_fwd2d32x32(res, S, cb, svt_av1_fdct32_new);  // DCTONLY at 32x32
                 TranLow qc[1024], dq[1024];
                 memset(qc, 0, sizeof(qc));
                 memset(dq, 0, sizeof(dq));
@@ -5675,11 +5689,23 @@ static int svtd_cs2_uv_q_drive(int S) {
                 }
                 for (int k = 0; k < tx_w_unit; ++k) na_above_u[mi_col + k] = (uint8_t)cul;
                 for (int k = 0; k < tx_w_unit; ++k) na_left_u[mi_row + k] = (uint8_t)cul;
-                // dequant feeds the inverse onto the predictor; recon writeback
-                if (S == 4) svtd_inv2dadd4x4(dq, pred, S, svt_av1_idct4_new);
-                else if (S == 8) svtd_inv2dadd8x8(dq, pred, S, svt_av1_idct8_new);
-                else if (S == 16) svtd_inv2dadd16x16(dq, pred, S, svt_av1_idct16_new);
-                else svtd_inv2dadd32x32(dq, pred, S, svt_av1_idct32_new);
+                // dequant feeds the inverse onto the predictor; recon writeback.
+                // The inverse runs ROWS first (inv_transforms.c:2532
+                // txfm_func_row, :2541 txfm_func_col) - the row kernel goes in
+                // the first pass, the mirror of the forward's column-first.
+                if (S == 4)
+                    svtd_inv2dadd4x4_t(dq, pred, S,
+                                       svtd_is_adst_row(ctxt) ? svt_av1_iadst4_new : svt_av1_idct4_new,
+                                       svtd_is_adst_col(ctxt) ? svt_av1_iadst4_new : svt_av1_idct4_new);
+                else if (S == 8)
+                    svtd_inv2dadd8x8_t(dq, pred, S,
+                                       svtd_is_adst_row(ctxt) ? svt_av1_iadst8_new : svt_av1_idct8_new,
+                                       svtd_is_adst_col(ctxt) ? svt_av1_iadst8_new : svt_av1_idct8_new);
+                else if (S == 16)
+                    svtd_inv2dadd16x16_t(dq, pred, S,
+                                         svtd_is_adst_row(ctxt) ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                                         svtd_is_adst_col(ctxt) ? svt_av1_iadst16_new : svt_av1_idct16_new);
+                else svtd_inv2dadd32x32(dq, pred, S, svt_av1_idct32_new);  // DCTONLY at 32x32
                 for (int i = 0; i < S; ++i)
                     for (int j = 0; j < S; ++j)
                         recon_u[(py + i) * 32 + px + j] = pred[i * S + j];
@@ -5723,10 +5749,19 @@ static int svtd_cs2_uv_q_drive(int S) {
                 for (int i = 0; i < S * S; ++i)
                     res[i] = (int16_t)(srcblk[i] - pred[i]);
                 int32_t cb[1024];
-                if (S == 4) svtd_fwd2d4x4(res, S, cb, svt_av1_fdct4_new);
-                else if (S == 8) svtd_fwd2d8x8(res, S, cb, svt_av1_fdct8_new);
-                else if (S == 16) svtd_fwd2d16x16(res, S, cb, svt_av1_fdct16_new);
-                else svtd_fwd2d32x32(res, S, cb, svt_av1_fdct32_new);
+                // the V plane's own decided mode - CS2 decides U and V
+                // independently, so this is NOT the U plane's type
+                const int ctxt = svtd_intra_uv_tx_type(mode, S);
+                if (S == 4)
+                    svtd_fwd2d4x4_t(res, S, cb, svtd_is_adst_col(ctxt) ? svt_av1_fadst4_new : svt_av1_fdct4_new,
+                                    svtd_is_adst_row(ctxt) ? svt_av1_fadst4_new : svt_av1_fdct4_new);
+                else if (S == 8)
+                    svtd_fwd2d8x8_t(res, S, cb, svtd_is_adst_col(ctxt) ? svt_av1_fadst8_new : svt_av1_fdct8_new,
+                                    svtd_is_adst_row(ctxt) ? svt_av1_fadst8_new : svt_av1_fdct8_new);
+                else if (S == 16)
+                    svtd_fwd2d16x16_t(res, S, cb, svtd_is_adst_col(ctxt) ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                                      svtd_is_adst_row(ctxt) ? svt_av1_fadst16_new : svt_av1_fdct16_new);
+                else svtd_fwd2d32x32(res, S, cb, svt_av1_fdct32_new);  // DCTONLY at 32x32
                 TranLow qc[1024], dq[1024];
                 memset(qc, 0, sizeof(qc));
                 memset(dq, 0, sizeof(dq));
@@ -5766,10 +5801,19 @@ static int svtd_cs2_uv_q_drive(int S) {
                 }
                 for (int k = 0; k < tx_w_unit; ++k) na_above_v[mi_col + k] = (uint8_t)cul;
                 for (int k = 0; k < tx_w_unit; ++k) na_left_v[mi_row + k] = (uint8_t)cul;
-                if (S == 4) svtd_inv2dadd4x4(dq, pred, S, svt_av1_idct4_new);
-                else if (S == 8) svtd_inv2dadd8x8(dq, pred, S, svt_av1_idct8_new);
-                else if (S == 16) svtd_inv2dadd16x16(dq, pred, S, svt_av1_idct16_new);
-                else svtd_inv2dadd32x32(dq, pred, S, svt_av1_idct32_new);
+                if (S == 4)
+                    svtd_inv2dadd4x4_t(dq, pred, S,
+                                       svtd_is_adst_row(ctxt) ? svt_av1_iadst4_new : svt_av1_idct4_new,
+                                       svtd_is_adst_col(ctxt) ? svt_av1_iadst4_new : svt_av1_idct4_new);
+                else if (S == 8)
+                    svtd_inv2dadd8x8_t(dq, pred, S,
+                                       svtd_is_adst_row(ctxt) ? svt_av1_iadst8_new : svt_av1_idct8_new,
+                                       svtd_is_adst_col(ctxt) ? svt_av1_iadst8_new : svt_av1_idct8_new);
+                else if (S == 16)
+                    svtd_inv2dadd16x16_t(dq, pred, S,
+                                         svtd_is_adst_row(ctxt) ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                                         svtd_is_adst_col(ctxt) ? svt_av1_iadst16_new : svt_av1_idct16_new);
+                else svtd_inv2dadd32x32(dq, pred, S, svt_av1_idct32_new);  // DCTONLY at 32x32
                 for (int i = 0; i < S; ++i)
                     for (int j = 0; j < S; ++j)
                         recon_v[(py + i) * 32 + px + j] = pred[i * S + j];
