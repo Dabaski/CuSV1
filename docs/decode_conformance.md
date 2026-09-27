@@ -297,8 +297,17 @@ bytes where Z-order says the below-left block is reconstructed) becomes
 its own slice. If dav1d also fabricates or also has zeros there, that is
 a second cited dead end, recorded alongside 60f161f.
 
-**Scope.** Luma-only. No claim that c8/c4's U/V residuals (165/1024 and
-205/1024) share this mechanism; they are not folded into a luma slice.
+**Scope.** Luma-only, and that is STRUCTURAL rather than a scoping
+convenience - the two chroma residuals must not be folded into a luma
+slice even after the luma mechanism is confirmed. The chroma chains go
+through buildIntraPredictorsUv, a different builder with its own edge
+setup and its own n_bottomleft call sites, and in dav1d the U/V edge
+availability comes from a SEPARATE dav1d_prepare_intra_edges call that
+is handed LUMA coordinates (recon_tmpl.c:1455-1478) - so the flags
+feeding the chroma path are not even the same variables as the luma
+ones. A confirmed luma fix therefore does not imply anything about
+chroma; chroma needs its own evidence gathered through its own call
+path.
 c16/c32 remain the 1:1 pins. enable_intra_edge_filter = 1 is already
 correct in the v3 header (generator :2544) - the FOOTPRINT is the
 suspect, not the flag.
