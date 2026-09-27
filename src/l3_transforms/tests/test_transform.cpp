@@ -384,6 +384,27 @@ TEST_CASE("fwdTxfm2d16x16 dct matches svt golden full 256") {
     CHECK(ok);
 }
 
+TEST_CASE("fwdTxfm2d16x16 ADST_DCT is not ADST_ADST (per-pass 1D selection)") {
+    // vtx_tab/htx_tab (inv_transforms.h:45-62, :63-80) map ADST_DCT to
+    // col=ADST_1D / row=DCT_1D, so the column pass takes fadst16B and the row
+    // pass fdct16B, each at its own cos_bit (av1_tranform_two_d_core_c,
+    // transforms.c:2420-2421, columns then rows :2428-2450). A single-kernel
+    // selector cannot express it: fwd1d16B returns fadst16B for anything that
+    // is not DCT_DCT, which makes ADST_DCT collapse onto ADST_ADST.
+    std::int16_t in[256];
+    for (int r = 0; r < 16; ++r)
+        for (int c = 0; c < 16; ++c)
+            in[r * 16 + c] = static_cast<std::int16_t>((c * 13 + r * 7 + ((c * r) & 31)) % 211) - 105;
+    std::int32_t adst_dct[256] = {0};
+    std::int32_t adst_adst[256] = {0};
+    transforms::fwdTxfm2d16x16(in, adst_dct, 16, transforms::TxType::ADST_DCT);
+    transforms::fwdTxfm2d16x16(in, adst_adst, 16, transforms::TxType::ADST_ADST);
+    bool differs = false;
+    for (int i = 0; i < 256; ++i)
+        if (adst_dct[i] != adst_adst[i]) differs = true;
+    CHECK(differs);
+}
+
 TEST_CASE("fwdTxfm2d8x8 dct matches svt golden full 64") {
     // golden: svtd_fwd2d8x8 (av1_tranform_two_d_core_c @ TX_8X8, DCT_DCT)
     // gate line fwd2d8_dct, input = the 8x8 discriminating fixture

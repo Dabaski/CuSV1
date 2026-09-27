@@ -3552,6 +3552,15 @@ TxfmFn fwd1d8(TxType type) {
 
 using TxfmFnB = void (*)(const std::int32_t*, std::int32_t*, int);
 
+// vtx_tab/htx_tab (inv_transforms.h:45-62, :63-80) give the 1D type per pass:
+// ADST_DCT is ADST in the column pass and DCT in the row pass, DCT_ADST is the
+// mirror. Only the four in-scope separable types are represented, so the
+// selection reduces to "is this pass ADST" (svt_aom_transform_config,
+// transforms.c:2498-2499 reads the two tables; the per-size 1D widening at
+// :2505-2506 does not change the ADST-vs-DCT choice for square transforms).
+inline bool fwdIsAdstCol(TxType type) { return type == TxType::ADST_DCT || type == TxType::ADST_ADST; }
+inline bool fwdIsAdstRow(TxType type) { return type == TxType::DCT_ADST || type == TxType::ADST_ADST; }
+
 TxfmFnB fwd1d16B(TxType type) {
     return type == TxType::DCT_DCT ? fdct16B : fadst16B;
 }
@@ -3621,7 +3630,10 @@ void fwdTxfm2d8x8(const std::int16_t* input, std::int32_t* output, std::uint32_t
 // = {2, -2, 0} (transforms.c:124), cos_bit col 13 / row 12 from
 // fwd_cos_bit_col/row[2][2] (transforms.c:19-22)
 void fwdTxfm2d16x16(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type) {
-    TxfmFnB txfm = fwd1d16B(type);
+    // columns then rows, each with its own 1D function (transforms.c:2420-2421,
+    // :2428-2450); the symmetric types select the same function twice
+    TxfmFnB txfmCol = fwdIsAdstCol(type) ? fadst16B : fdct16B;
+    TxfmFnB txfmRow = fwdIsAdstRow(type) ? fadst16B : fdct16B;
     std::int32_t buf[16 * 16];
     std::int32_t tempIn[16];
     std::int32_t tempOut[16];
@@ -3634,7 +3646,7 @@ void fwdTxfm2d16x16(const std::int16_t* input, std::int32_t* output, std::uint32
         for (std::uint32_t i = 0; i < 16; ++i) {
             tempIn[i] *= (1 << 2);
         }
-        txfm(tempIn, tempOut, 13);
+        txfmCol(tempIn, tempOut, 13);
         // round_shift_array(..., -shift[1]) with shift[1] = -2 -> >>2 rounding
         for (std::uint32_t i = 0; i < 16; ++i) {
             tempOut[i] = roundShift(tempOut[i], 2);
@@ -3645,7 +3657,7 @@ void fwdTxfm2d16x16(const std::int16_t* input, std::int32_t* output, std::uint32
     }
 
     for (std::uint32_t r = 0; r < 16; ++r) {
-        txfm(buf + r * 16, output + r * 16, 12);
+        txfmRow(buf + r * 16, output + r * 16, 12);
         // round_shift_array(..., -shift[2]) with shift[2] = 0 -> no-op
     }
 }

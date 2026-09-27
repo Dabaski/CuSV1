@@ -69,6 +69,8 @@ void iadst16(const std::int32_t input[16], std::int32_t output[16]);
 
 enum class TxType {
     DCT_DCT,
+    ADST_DCT,
+    DCT_ADST,
     ADST_ADST,
 };
 
