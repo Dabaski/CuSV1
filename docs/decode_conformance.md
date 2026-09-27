@@ -30,6 +30,12 @@ generator's recon line per geometry:
 These establish content equality for the five committed fixtures, not
 every possible encoder input or full SVT encoder behavior.
 Mode-decision/composition remain project-defined policy.
+- **Color (CS-series): full-plane conformance 2/4.** color32 and
+  color16 decode with ALL THREE planes content 1:1; color8/color4
+  decode (the RT-series parse fixes) with the LUMA plane content 1:1
+  and the U/V planes divergent - the honest per-plane matrix is the
+  RT8/RT10 conformance matrix below, and the chroma bottom-left edge
+  is the named next measurement (its own slice, before any fix).
 - Our writer <-> aom-entdec roundtrip is EXACT on every TD probe rung
 (adaptation on): the arithmetic, the CDF evolution and the defaults
 are internally consistent with aom's own decoder primitives.
