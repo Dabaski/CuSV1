@@ -139,7 +139,12 @@ above, not zeros).
   8x8/32x32/64x64 are lossy by design (fwd shifts sum to -2, 0 for 64).
 - Chroma frame compositions run the same grid over the 4:2:0 UV plane:
   UV-sized blocks, per-plane availability, the `uv2y` fold at the call
-  site, filt_type from the UV mode map.
+  site, filt_type from the UV mode map; the chroma-emitting Q walk
+  (CS4: `decideBlockModeUv`, uv_mode ONE per block, U-before-V
+  per-component chains, the chroma-ownership rule) and the RT-series
+  chroma-walk fixes (partition+skip CS5b, tree-order RT6, chroma FI
+  RT7-b, the LUT-domain tx-type RT9, the bottom-left extension RT10b)
+  - how it works end to end: `docs/color.md`.
 - Entropy emission: the Auto/Q paths at ALL five geometries (4x4..64x64,
   FS3/FS4b) emit, per block, the kf y-mode + angle-delta + filter-intra
   symbols (BSF1; FI predicate-gated: DC_PRED, bsize <= 32x32) and - in
@@ -198,15 +203,19 @@ The container ground floor and the structural keyframe assembly (see
 `docs/bitstream.md`): `AomWriteBitBuffer` bit/literal writers, uleb128,
 OBU header + uleb payload size, temporal delimiter (exactly 2 bytes),
 then `writeSequenceHeaderObu`, the frame-header walk (v1 lossless 22
-bits + pad; v2 lossy 40 bits at base_q_idx = 100) and
+bits + pad; v2 lossy 40 bits at base_q_idx = 100; the CS3 color v3 -
+mono bit 0, the 4:2:0 config, 42 bits, the D1 un-patch with the mono
+producers pinned for the mono set) and
 `assembleStructuralKeyframeTU`/`...v2` packing TD + SPS + OBU_FRAME in
-SVT's packer structure with the court-ratified D1 monochrome patch.
-The committed artifacts
-`src/l8_bitstream/tests/goldens/structural_keyframe*.obu` - five files
-(d4 30B, d8 30B, d16 44B, d32 47B, d64 441B; the d32 v2 lossy TU is the
-structural-keyframe milestone artifact) - prove composed TU == committed
-file == gate bytes and are decoder-accepted AND content-1:1 per geometry
-(tools/verify_decode4.ps1 -Geometry N).
+SVT's packer structure. The committed artifacts
+`src/l8_bitstream/tests/goldens/structural_keyframe*.obu` - five
+grayscale (d4 30B, d8 30B, d16 44B, d32 47B, d64 441B; the d32 v2
+lossy TU is the structural-keyframe milestone artifact) + four color
+(color4 138B, color8 105B, color16 79B, color32 165B) - prove composed
+TU == committed file == gate bytes; the grayscale set is
+decoder-accepted AND content-1:1 per geometry
+(tools/verify_decode4.ps1 -Geometry N), the color set 2/4 full-plane
+per the conformance matrix (docs/decode_conformance.md).
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 
@@ -274,6 +283,7 @@ skip with a `SKIP:`-prefixed message when no CUDA device is present.
 - `docs/provenance.md` - the function-by-function provenance table.
 - `tools/golden_gen/README.md` - the extraction inventory, gate-line
   documentation, EC3 scope statement, REFERENCE PINNING note.
-- `docs/bitstream.md`, `docs/emission.md`,
+- `docs/bitstream.md`, `docs/emission.md`, `docs/color.md`,
   `docs/decode_conformance.md` - the bitstream path, the per-geometry
-  emission walks, and decoder-acceptance status.
+  emission walks, the chroma/color pipeline, and decoder-acceptance
+  status.

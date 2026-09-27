@@ -56,6 +56,23 @@ JIT-compiled at runtime via NVRTC.
   the grid fixtures are gate-pinned; the filter-intra DC-deciding
   fixture and the 64x64 dual-domain GPU unification remain named
   follow-ups.
+- **Color emission landed; chroma conformance in progress**
+  (CS-series + RT-series): the monochrome limitation ended - the
+  chroma-emitting l6 walk emits the uv_mode symbol (ONE per block,
+  the V TU sharing the U decision) and the per-component U/V token
+  chains, and the color SPS v3 replaces the D1 mono patch (mono bit
+  0, the 4:2:0 config, the frame header 40 -> 42 bits; the mono
+  producers stay pinned for the mono artifact set). Four committed
+  color artifacts (`tools/verify_decode4.ps1 -Color <4|8|16|32>`).
+  Measured: color16 and color32 decode full-plane content 1:1 (all
+  three planes); color4/color8 decode with the luma plane content 1:1
+  (the RT-series fixes: tree-order leaf emission, the chroma
+  filter-intra flag surface, the LUT-domain chroma tx-type +
+  per-pass 1D selection, the bottom-left edge extension) while their
+  U/V planes still diverge - the chroma bottom-left edge is the named
+  next measurement. The honest per-plane matrix:
+  `docs/decode_conformance.md`; how chroma works end to end:
+  `docs/color.md`.
 - All layers green: 9 doctest targets pass, and the golden gate
   reproduces the committed `expected_primitives.txt` 421/421 lines.
 
@@ -67,7 +84,7 @@ Symbol-by-symbol provenance lives in `docs/provenance.md` and
 `tools/golden_gen/README.md`; the gate-line inventory in the latter.
 How the stack works end to end: `docs/layers.md`; the bitstream path:
 `docs/bitstream.md`; the per-geometry emission walks: `docs/emission.md`;
-decoder-acceptance status:
+the chroma/color pipeline: `docs/color.md`; decoder-acceptance status:
 `docs/decode_conformance.md`.
 
 - **l0_core** - minimal shared types: `Sample` (uint8), `BlockSize`.
@@ -157,20 +174,21 @@ decoder-acceptance status:
   assembly: sequence-header OBU payload (the max frame dims
   parameterized; `frame_width_bits` = msb(dims)), the uncompressed
   frame-header walk and the full temporal unit packer (TD + SPS +
-  OBU_FRAME in SVT's packer structure, with the court-ratified D1
-  monochrome patch - decoder-confirmed gray). The lossless TU
-  carries 22 header bits + 2 pad; the lossy v2 (TS4) carries
-  `base_q_idx` = 100 and a 40-bit header with real token streams.
-  The committed artifact set
-  `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` - the
-  47-byte d32 (the four-16x16-leaves walk, TD5b) plus the
-  per-geometry FS5 set (d4 30B, d8 30B, d16 44B, d64 441B) - each
-  proves the three-way identity composed TU == committed file ==
-  gate bytes and is decoder-accepted with content 1:1 (the d32 =
-  all 1024 pixels == ecfrm_recon; the d4 = the 8x8-frame structure
-  stated above). The BSF4-fix ec coupling is stated as an invariant
-  at both l6 emission sites: allow_update_cdf = 1 only because the
-  ratified config carries disable_cdf_update = 0.
+  OBU_FRAME in SVT's packer structure). Header history: v1 lossless
+  (22 bits + 2 pad), v2 lossy q100 (40 bits, TS4), and the color v3
+  (CS3, the D1 un-patch: mono bit 0, the 4:2:0 config, the U/V
+  delta_q bits, 42 bits - the D1 mono producers stay pinned for the
+  mono artifact set, their gate lines diff-0). The committed artifact
+  set `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` -
+  five grayscale (the 47B d32 four-16x16-leaves walk + d4 30B, d8
+  30B, d16 44B, d64 441B) and four color (color4 138B, color8 105B,
+  color16 79B, color32 165B) - each proves the three-way identity
+  composed TU == committed file == gate bytes; the grayscale set is
+  decoder-accepted with content 1:1 (the d32 = all 1024 pixels ==
+  ecfrm_recon; the d4 = the 8x8-frame structure stated above), the
+  color set per the Status section. The BSF4-fix ec coupling is
+  stated as an invariant at both l6 emission sites: allow_update_cdf
+  = 1 only because the ratified config carries disable_cdf_update = 0.
 
 ## Repository layout
 

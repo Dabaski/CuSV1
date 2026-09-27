@@ -2,10 +2,11 @@
 
 The FS-series story: what exactly is emitted per geometry, the wire
 order of every symbol walk, the 64x64 scan contract, running partition
-contexts, and how the five committed artifacts are structured. The
-symbol surfaces themselves are in `docs/bitstream.md`; the decoder
-measurements in `docs/decode_conformance.md`; provenance in
-`docs/provenance.md`.
+contexts, and how the committed grayscale artifacts are structured -
+plus the chroma/color emission (CS/RT-series). The symbol surfaces
+themselves are in `docs/bitstream.md`; the chroma pipeline end to end
+in `docs/color.md`; the decoder measurements in
+`docs/decode_conformance.md`; provenance in `docs/provenance.md`.
 
 ## The conformance rule this series obeyed
 
@@ -107,6 +108,54 @@ msb(maxDim); svtd_bsf3_encode_sps_dims; the l8
 `writeSequenceHeaderObu` maxDim default 32 = the committed walk) -
 gate lines sps_obu_d4/d8/d32/d64.
 
+## The chroma/color emission (CS/RT-series)
+
+The chroma-emitting Q walk (`encodeFrameChromaQ` family, CS4): per
+LUMA block (lumaB in {8, 16, 32, 64}; the UV tx = lumaB/2 per the
+`av1_get_max_uv_txsize` map, common_utils.h:142-149) in raster order:
+
+1. the luma kf-mode symbol;
+2. the uv_mode symbol (`writeUvMode`, ctx = [cfl_allowed][the DECIDED
+   luma mode]) - ONE uv_mode per block: the V TU shares the U-plane
+   decision (the walk's documented policy); the uv angle-delta where
+   gated (OFF in our emission);
+3. the luma token chain;
+4. the U token chain, then the V chain (U BEFORE V) - three separate
+   per-plane NAs, the CS1 component-dim ctx plumbing, the chroma
+   txb_skip_ctx offset-7 branch live.
+
+The chroma-ownership rule (`is_chroma_reference`,
+common_utils.h:315-320) is implemented, with the 4x4-frame NO-chroma
+and the (1,1)-owner asserts. The partition + skip surfaces landed in
+the chroma walk (CS5b - the CS4 walk had omitted them; the decode
+failure fix); the tree-order leaf emission (RT6) replaced the flat
+raster SPLIT emission that desynced decode_partition's hierarchical
+traversal at deeper SB trees; the filter-intra flag surface joined
+the chroma walk (RT7-b - the c4/c8 exit-69 root cause); the chroma
+chains run in the LUT-derived transform domain (`intraUvTxType`, the
+RT9 fix); the bottom-left edge extension is gathered (RT10b - the
+luma residual at c4/c8 eliminated).
+
+## The color artifacts
+
+Four committed color artifacts (the 64x64 luma parent; S = the UV
+transform size), each with the three-way identity and the per-plane
+decode instrument (`tools/verify_decode4.ps1 -Color <4|8|16|32>`,
+yuv420p output compared plane-by-plane vs the generator's per-plane
+recon):
+
+| Artifact | TU size | Structure | Decode outcome (measured) |
+| --- | --- | --- | --- |
+| structural_keyframe_color32.obu | 165 B | lumaB = 32, UV tx 16 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
+| structural_keyframe_color16.obu | 79 B | lumaB = 16, UV tx 8 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
+| structural_keyframe_color8.obu | 105 B | lumaB = 8, UV tx 4 | luma 1:1 (0/4096); U 165/1024, V 205/1024 - divergent |
+| structural_keyframe_color4.obu | 138 B | lumaB = 8 tree, UV tx 4 (4x4 leaves) | luma 1:1 (0/4096); U 244/1024, V 287/1024 - divergent |
+
+The color header is the CS3 v3 (mono bit 0, the 4:2:0 config, the
+frame header 42 bits); the per-plane decode results and the conformance
+matrix live in `docs/decode_conformance.md`; the coefficient-semantics
+audit deltas in `docs/cs5c_deltas.md`.
+
 ## Named follow-ups (open)
 
 - The filter-intra DC-deciding fixture: the FI branch is
@@ -118,3 +167,9 @@ gate lines sps_obu_d4/d8/d32/d64.
   keep the 4096 facade (the GPU quant_dequant_64x64 is a 4096-position
   kernel); for the fs264 fixture the two domains' recon coincide (the
   outer-ring coefficients quantize to 0 at q100).
+- The chroma bottom-left edge (RT-series): the c8/c4 U/V planes still
+  diverge - needs its own measurement slice before any fix; the
+  dav1d U/V edge availability comes from a SEPARATE
+  dav1d_prepare_intra_edges call handed LUMA coordinates
+  (recon_tmpl.c:1455-1478), so the flags are not even the same
+  variables (decode_conformance.md, "Next open item").

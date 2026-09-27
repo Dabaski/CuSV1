@@ -59,7 +59,9 @@ replays (see `docs/decode_conformance.md`).
 | filter-intra (BSF1) | - | 2 + 5 | flag + mode; DC_PRED-only predicate, bsize <= 32 |
 | partition (ECP1) | partitionPlaneContext: ctx = (left*2 + above) + bsl*4, INVALID -> 0 | 10/10/10/4/8 per bsl | forced SPLIT writes NOTHING; XOR edges use the gathered 2-symbol branches (the temporary's adaptation is discarded) |
 | skip (ECP2) | getSkipContext = above_skip + left_skip of the neighbor mbmis | 2 | the FIRST arithmetic-coded symbol of each I_SLICE block |
-| tx-type (TS3) | eset by getExtTxTypes, intra_dir | 5 (DCT_DCT, eset 2, reduced_tx_set intra) | in-chain gate: requires tx_size_sqr_up < TX_32X32 AND getExtTxTypes > 1 AND base_q_idx > 0 - at TX_32X32/64X64 intra the eset is DCTONLY (1 type), so NO symbol (entropy_coding.c:321-322); also skipped entirely when eob == 0 (early return) |
+| tx-type (TS3) | eset by getExtTxTypes, intra_dir | 5 (DCT_DCT, eset 2, reduced_tx_set intra) | in-chain gate: requires tx_size_sqr_up < TX_32X32 AND getExtTxTypes > 1 AND base_q_idx > 0 - at TX_32X32/64X64 intra the eset is DCTONLY (1 type), so NO symbol (entropy_coding.c:321-322); also skipped entirely when eob == 0 (early return); LUMA-only (entropy_coding.c:374-376) |
+| uv_mode (CS1) | [cfl_allowed][luma_mode] - the DECIDED luma mode's context | 14 (13 at 64x64) | alphabet UV_INTRA_MODES minus cflAllowed; ONE uv_mode per block - the V TU shares the U-plane decision (the documented walk policy); writeUvAngleDelta is gated OFF in our emission (emits nothing) |
+| uv angle delta (CS1) | - | 7 | entropy_coding.c:1087-1092 semantics; gated off: write emits nothing, read consumes nothing and returns -1 (the D2 fold makes no UV directional candidate) |
 | token chain (TS1/TS2) | NA-driven dc_sign_ctx; per-position nz-map contexts | - | see below |
 
 The token chain per TU, in write order: txb_skip -> tx-type (q > 0)
@@ -135,22 +137,30 @@ U/V pair skipped at zero and for mono), tx_mode_select = 0 =
 TX_MODE_LARGEST - 40 bits, exactly 5 bytes, no padding; CDEF/
 restoration still skipped (seq cdef_level = 0, enable_restoration 0).
 
-The monochrome (D1) patch lives in the generator's composition: three
+The monochrome (D1) patch WAS the generator's composition: three
 court-ratified spans in the pinned writer (is_monochrome const 0 -> 1;
 the commented-out spec mono branch live, which writes color_range and
 skips subsampling + separate_uv_delta_q; the U/V quantization delta
 writes skipped - the spec's num_planes guard the pinned writer
-lacks). Decoder-confirmed: libdav1d/ffprobe read the stream back as
-gray(pc).
+lacks). CS3 UN-PATCHED it: the color header v3 carries the
+spec-faithful non-mono walks (mono bit 0, the 4:2:0 config, the U/V
+delta_q bits - the frame header went 40 -> 42 bits), while the D1
+mono producers stay pinned to keep the committed mono artifact set's
+format (their gate lines remain diff-0). The mono era was
+decoder-confirmed gray(pc); the color era is the section below.
 
 ## 6. The committed artifact set
 
-`src/l8_bitstream/tests/goldens/structural_keyframe*.obu` - five
-artifacts, one per geometry, each produced from the generator output -
-never hand-typed. The l8 tests prove the three-way identity per
-artifact: composed TU (l6 decisions through l7 symbols + l8
-assembly) == committed file == gate bytes (tu_bytes_v2_dS; the d32 =
-tu_bytes_v2). The v1 byte stream remains gated (tu_bytes).
+`src/l8_bitstream/tests/goldens/structural_keyframe*.obu` - NINE
+artifacts: five grayscale (one per geometry) + four color
+(color4/8/16/32 - the 64x64 luma parent; S = the UV transform size),
+each produced from the generator output - never hand-typed. The l8
+tests prove the three-way identity per artifact: composed TU (l6
+decisions through l7 symbols + l8 assembly) == committed file == gate
+bytes (tu_bytes_v2_dS for the grayscale set, tu_colorS for the color
+set; the d32 = tu_bytes_v2). The v1 byte stream remains gated
+(tu_bytes). The color structures + decode matrix live in
+`docs/emission.md` and `docs/decode_conformance.md`.
 
 Decoder status (measured, `tools/verify_decode4.ps1 -Geometry`):
 
@@ -191,16 +201,22 @@ walk. The color artifact set: structural_keyframe_color{4,8,16,32}.obu
 - color32 (165 B): CONTENT 1:1 ON ALL THREE PLANES (Y 4096/4096,
   U 1024/1024, V 1024/1024) - the first color frame this project
   produces decoded by an independent reference decoder.
-- color16 (80 B): the luma plane matches (4096/4096); the U/V planes
-  diverge (510/1024 each) - the chroma-NA/recon evolution at the
-  second 32x32 block; OPEN.
-- color4 (146 B) / color8 (107 B): the decode desyncs (exit 69) -
-  the flat walk emits the interior partition SPLIT symbols in raster
-  order, diverging from decode_partition's hierarchical traversal at
-  the deeper SB trees (4 levels at lumaB=8); the recursive
-  tree-traversal emission is the named follow-up; OPEN.
+- color16 (79 B): FULL-PLANE content 1:1 (Y 4096/4096, U 1024/1024,
+  V 1024/1024).
+- color4 (138 B) / color8 (105 B): DECODE (the exit-69 parse desyncs
+  were fixed by the RT-series: RT6 the tree-order leaf emission -
+  the flat walk had emitted the interior partition SPLIT symbols in
+  raster order, diverging from decode_partition's hierarchical
+  traversal - and RT7-b the filter-intra flag surface in the chroma
+  walk). The LUMA plane is content 1:1 at both (0/4096 byte diffs;
+  the RT10b bottom-left edge extension eliminated the luma residual);
+  the U/V planes still diverge (c8 U 165/1024, V 205/1024; c4 U
+  244/1024, V 287/1024) - the chroma bottom-left edge is the named
+  next measurement slice; OPEN.
 
-The self-consistency lesson fired its fourth entry: the CS4 walk's
+The honest per-plane matrix is in `docs/decode_conformance.md` (full
+plane 2/4). The self-consistency lesson fired its fourth entry: the
+CS4 walk's
 partition/skip omission was shared by BOTH sides of every internal
 check (the l6 mirror and the generator drives) - every internal
 roundtrip agreed while the real decoder desynced. The real decoder

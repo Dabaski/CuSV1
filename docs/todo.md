@@ -55,6 +55,17 @@ A0. SLICE-LEVEL STATE (the live register)
   (687625f) - d4 30B 64/64, d8 30B 64/64, d16 44B 256/256, d32 47B
   1024/1024, d64 441B 4096/4096 (tools/verify_decode4.ps1 -Geometry);
   FS6 docs currency (8edc02d).
+- [x] CS-series LANDED (CS0-CS5c): the chroma entropy + emission + the
+  color container + the four color artifacts - register entries in
+  section 1.1; full-plane conformance 2/4 (color16/color32 all three
+  planes 1:1; color4/color8 luma 1:1, chroma divergent).
+- [x] RT-series (the chroma/edge conformance chase): RT1 the /RTC
+  fixture fix, RT6 the tree-order leaf emission, RT7-a/b the
+  cross-decoder instrument + the chroma FI flag surface, RT9 the
+  intra-chroma tx-type LUT + per-pass 1D selection, RT10/RT10b the
+  bottom-left edge extension (the luma residual eliminated); the full
+  record in docs/decode_conformance.md; the open chroma bottom-left =
+  the next measurement slice (its own slice, before any fix).
 - [ ] OPEN (named): the filter-intra DC-deciding fixture (the FI branch is
   predicate-gated but never fires in the committed fixtures).
 - [~] NAMED FOLLOW-UP (FS5d): the 64x64 dual-domain unification - the
@@ -84,11 +95,14 @@ A0. SLICE-LEVEL STATE (the live register)
     mode/delta/FI surfaces, partition/skip symbols, the full token chain,
     qindex-bucketed coefficient CDFs (TD5, spec init_coeff_cdfs),
     updatePartitionContext (ECP1)
-[x] l8: bit writer, uleb128, OBU/SPS/frame-header/TU assembly (v1/v2),
-    per-size SPS (maxDim parameterized), FIVE committed artifacts
-    (d4 30B / d8 30B / d16 44B / d32 47B / d64 441B)
+[x] l8: bit writer, uleb128, OBU/SPS/frame-header/TU assembly (v1/v2/color
+    v3), per-size SPS (maxDim parameterized), NINE committed artifacts -
+    grayscale d4 30B / d8 30B / d16 44B / d32 47B / d64 441B + color
+    color4 138B / color8 105B / color16 79B / color32 165B
 [x] MILESTONE: decoder-accepted AND content-bit-identical at EVERY
-    geometry (libdav1d via ffmpeg; verify_decode4.ps1 -Geometry N)
+    geometry (libdav1d via ffmpeg; verify_decode4.ps1 -Geometry N);
+    color full-plane 1:1 at color16/color32 (2/4 color artifacts -
+    color4/color8 chroma residuals open, the chroma bottom-left next)
 [x] Infrastructure: tools/golden_gen (committed gate, 421 lines, the
     exhaustive ectx4..ectx64+ectxg context gates), tools/td0_ladder.ps1
     (7/7), tools/decode_handoff.ps1, tools/bench, tools/verify_decode4.ps1
@@ -96,7 +110,9 @@ A0. SLICE-LEVEL STATE (the live register)
     (TD CLOSED + FS5 table), bitstream.md, layers.md, this file
 
 ------------------------------------------------------------
-1. KEYFRAME ENCODER COMPLETENESS (intra-only, currently monochrome)
+1. KEYFRAME ENCODER COMPLETENESS (intra-only; luma + 4:2:0 chroma since
+   the CS-series - the monochrome limitation ended, see the CS register
+   below)
 ------------------------------------------------------------
 
 1.1 Chroma residual + uv_mode symbols (ends the monochrome limitation)
@@ -163,8 +179,11 @@ A0. SLICE-LEVEL STATE (the live register)
       bit-exact vs the generator (454 assertions); the walk-order inversion
       (luma-after-UV) and the CS2 fixture mismatch (box average vs the CH3
       template 2*(i+j+2)) were both caught by the gate and fixed.
-- [ ] CS5 color artifacts + per-plane instrument (yuv420p: Y/U/V compared
-      separately vs the generator's per-plane recon) + USER decode checks.
+- [x] CS5 color artifacts + per-plane instrument (yuv420p: Y/U/V compared
+      separately vs the generator's per-plane recon) LANDED (ecc41b5 +
+      CS5b/CS5c): four committed color TUs, verify_decode4.ps1 -Color;
+      decode outcomes in the conformance matrix (color16/color32
+      full-plane 1:1; color4/color8 luma 1:1, chroma divergent).
 - [ ] CS6 docs currency (currency item noted: docs/ffmpeg_integration.md's
       "repo reality" section is stale - pre-quantizer/entropy/bitstream;
       the C-ABI sketch stands as the target contract, the section 8 gate
