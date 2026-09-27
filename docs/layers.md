@@ -143,11 +143,14 @@ above, not zeros).
 - Entropy emission: the Auto/Q paths at ALL five geometries (4x4..64x64,
   FS3/FS4b) emit, per block, the kf y-mode + angle-delta + filter-intra
   symbols (BSF1; FI predicate-gated: DC_PRED, bsize <= 32x32) and - in
-  the Q path - the real per-block token stream (TS3, skip = 0, NA-driven
-  contexts). THE PER-SIZE SHAPES DIFFER (emission.md:27-31): 4x4Q emits
+  the Q path - the real per-block token stream (TS3; every coded block
+  writes the skip symbol with the VALUE skip = 0, which is a property of
+  the data not of the emission, NA-driven contexts). THE PER-SIZE SHAPES
+  DIFFER, and emission.md:27-31 is AUTHORITATIVE for them: 4x4Q emits
   skip but NO partition symbol (a 4x4 block is never a partition point);
-  16x16Q emits NEITHER (the ratified D3-era shape); 8x8Q/32x32Q/64x64Q
-  emit both as applicable. Multi-block grids emit running partition
+  16x16Q emits NEITHER partition NOR skip (the ratified D3-era shape);
+  8x8Q/32x32Q/64x64Q emit both as applicable. Multi-block grids emit
+  running partition
   contexts (FS5a,
    `updatePartitionContext`, the fs5g32 grid gate). The chosen modes
    feed `NeighborContext` (filt_type live).

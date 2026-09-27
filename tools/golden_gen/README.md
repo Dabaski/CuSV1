@@ -327,11 +327,10 @@ l4 FI machinery actually produce and can decode:
   signs -> golomb, getTxbCtx + the DcSignLevelCoeffNa NA model, per-block
   writeBlockCoeffs/readBlockCoeffs, whole-block TUs txb_count = 1, token
   CDF slices at q_ctx = 0).
-- DEFERRED (named): chroma uv_mode/CFL alphas/chroma angle-delta
-  (encode_intra_chroma_mode_av1 :1077-1095 - the CH-agent boundary; deferred
-  to CH coordination per the approved plan); the nonkey y_mode_cdf path
-  (:1046-1058 - the pipeline is intra-only); palette (:4362), intrabc
-  (:4401); od_ec_dec_bits raw bits (declared-undefined in the pinned
+- Landed (CS1/CS4): the chroma uv_mode/uv-delta symbols and the
+  per-component token chains (U and V). DEFERRED (named): the CFL alphas
+  (UV_CFL_PRED is not a D2 candidate), the nonkey y-mode path, palette,
+  intrabc; od_ec_dec_bits raw bits (declared-undefined in the pinned
   tree, EC0 deviation).
 
 The frame-policy golden (`golden_frame.exe`) is captured for D3.
