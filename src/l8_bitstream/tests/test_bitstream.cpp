@@ -587,7 +587,13 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
 
 TEST_CASE("color header v3: SPS + 42-bit frame header + TU over the CS2 tile (CS3)") {
     // Gate: sps_obu_v3 11 0a 09 10 00 00 02 af ff 98 30 21,
-    // frame_obu_v3 42 32 28 10 d9 00 00 00 40 ..., tu_bytes_v3 55 ...
+    // frame_obu_v3 94 ..., tu_bytes_v3 107 ...
+    // (tools/golden_gen CS3 block; the byte COUNTS are the current gate
+    // values - they move with every CS2/RT regen that retiles, while the
+    // 42-bit structure asserted below does not. An earlier revision of this
+    // comment read "frame_obu_v3 42 ... tu_bytes_v3 55", which matched no
+    // recent gate state; the test passed regardless because it asserts the
+    // header walk, not these totals.)
     // (tools/golden_gen CS3 block). EXPECTED-DIFF slice: the SPS color
     // config goes spec-faithful non-mono (write_color_config :2687-2752):
     // mono bit 1 -> 0 (D1 span 1 inverted), the mono early-return DIES

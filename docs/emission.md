@@ -146,10 +146,32 @@ recon):
 
 | Artifact | TU size | Structure | Decode outcome (measured) |
 | --- | --- | --- | --- |
-| structural_keyframe_color32.obu | 165 B | lumaB = 32, UV tx 16 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
-| structural_keyframe_color16.obu | 133 B | lumaB = 16, UV tx 8 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
-| structural_keyframe_color8.obu | 139 B | lumaB = 8, UV tx 4 | luma 1:1 (0/4096); U 165/1024, V 205/1024 - divergent |
-| structural_keyframe_color4.obu | 201 B | lumaB = 8 tree, UV tx 4 (4x4 leaves) | luma 1:1 (0/4096); U 244/1024, V 287/1024 - divergent |
+| structural_keyframe_color32.obu | 165 B | lumaB = 64, UV tx 32 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
+| structural_keyframe_color16.obu | 133 B | lumaB = 32, UV tx 16 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
+| structural_keyframe_color8.obu | 139 B | lumaB = 16, UV tx 8 | luma 1:1 (0/4096); U 165/1024, V 205/1024 - divergent |
+| structural_keyframe_color4.obu | 201 B | lumaB = 8, UV tx 4 | luma 1:1 (0/4096); U 244/1024, V 287/1024 - divergent |
+
+**Deriving the geometry column (do not re-type these numbers).** The
+`lumaB` / `UV tx` pair is not a free annotation - it is fixed by three
+facts about the fixture and the gate, and reproducing it is the check
+that the column is right:
+
+```
+leaves per plane = len(ecs4<S>_modes) / 3    CS4 emits (luma, U, V) per leaf,
+                                               composition.c:6881
+luma leaf edge   = 64 / grid                 recon_y  = 4096 px = 64x64
+UV   leaf edge   = 32 / grid                 recon_u/v = 1024 px = 32x32
+```
+
+with `grid = sqrt(leaves)`. Measured from
+`tools/golden_gen/expected_primitives.txt` at the time of writing:
+S=4 gives len 192 -> 64 leaves -> grid 8 -> 8/4; S=8 gives len 48 ->
+16 -> grid 4 -> 16/8; S=16 gives len 12 -> 4 -> grid 2 -> 32/16; S=32
+gives len 3 -> 1 -> grid 1 -> 64/32. (The CS2 drives emit `(U, V)` per
+block, so the divisor there is 2 - composition.c:5893.) Note the leaf
+edge is the LUMA edge and the UV edge is exactly half of it, which is
+4:2:0 subsampling; the c4 row's "4x4 leaves" is a UV-edge statement and
+is consistent with 8/4, not a substitute for it.
 
 The color header is the CS3 v3 (mono bit 0, the 4:2:0 config, the
 frame header 42 bits); the per-plane decode results and the conformance
