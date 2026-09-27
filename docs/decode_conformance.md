@@ -219,13 +219,14 @@ bucket-selection change (the generator + the l7 mirror) with the
 ladder as the conformance gate. The TS-series closes with
 decoder-acceptance AND content-1:1.
 
-## RT8 - the c8/c4 luma content residual (OPEN; diagnosis only)
+## RT8 - the c8/c4 luma content residual (CLOSED: 9649fbc)
 
-**Status.** Parse layer fully conformant at every SB depth. All four
-color artifacts decode; c16 and c32 are CONTENT 1:1 on all three
-planes. c8 and c4 decode but their luma recon diverges (c8 Y
-794/4096, c4 Y 3674/4096). The residual is bounded to c8/c4 content
-and nothing regresses while it is open.
+**Status.** CLOSED. The luma residual is eliminated at both depths. The
+parse layer is conformant at every SB depth; all four color artifacts
+decode; c4 and c8 luma are now CONTENT 1:1 (0/4096 each) alongside c16
+and c32. Two commits carry the arc: **7fb280d** is the measurement
+(diagnosis only, no fix) and **9649fbc** is the fix. The chroma residual
+at c4/c8 is a SEPARATE open item - see "Next open item" at the end.
 
 **Two falsified hypotheses, recorded so they are not re-run.**
 
@@ -267,11 +268,10 @@ kind, and the falsification of (1) does NOT carry over.**
 Both live in the same edge-prep call, so the two must not be reasoned
 about as one.
 
-**Open candidate (UNCONFIRMED - code reading, not yet measured).** The
-CS4 luma path passes `n_bottomleft = 0` unconditionally
-(composition.c:6283, :6289 - a literal 0 argument). In
-build_intra_predictors a directional mode with p_angle > 180 sets
-need_bottom (svt_gen.c:9222) and needs
+**The candidate, as it stood before measurement.** The CS4 luma path
+passed `n_bottomleft = 0` unconditionally (composition.c:6283, :6289 -
+a literal 0 argument). In build_intra_predictors a directional mode
+with p_angle > 180 sets need_bottom (svt_gen.c:9222) and needs
 `num_left_pixels_needed = txhpx + txwpx` = 32 at 16px (:9224); with
 n_bottomleft_px == 0 the bottom-left extension is skipped and
 left_col[16..31] is filled by `memset(&left_col[i], left_col[i-1], ...)`
@@ -290,49 +290,173 @@ lower-left-localized prediction error is the right shape for a PARTIAL
 `mode_to_angle_map[mode] + angle_delta * ANGLE_STEP` (:9183), and mode 7
 is the oblique directional slot (D203/D207 - the one slot whose two
 trees disagree on naming), so `is_dr_mode` is true (:9179) and p_angle
-falls in (180, 270). The gate is **`is_dr_mode && p_angle > 180`**
-(:9222), not "any directional": mode 7 qualifies on both counts, but a
-patch that assumed "any directional" would mispredict for the 90/180
-cardinal cases, and the filter's own guard at :9303
-(`p_angle != 90 && p_angle != 180`) skips filtering entirely for those.
-The bottom-left extension is also reachable by a SECOND route - the
-non-directional path takes need_bottom from
-`extend_modes[mode] & NEED_BOTTOMLEFT` (:9217) - so the step-2 dump must
-record WHICH route fired for the block under test rather than assuming
-the p_angle branch.
+falls in (180, 270). The effective predicate is
+**`is_dr_mode && p_angle > 180`** (:9222), not "any directional": the
+filter's own guard at :9303 (`p_angle != 90 && p_angle != 180`) skips
+filtering entirely for the 90/180 cardinals, so those are a distinct
+third case.
 
-**The mechanical link (the cleanest single citation in the
-candidate).** The actual gathers are gated on the pixel counts being
-non-zero: the bottom-left gather on `n_bottomleft_px > 0` (:9230) and
-the top-right gather on `n_topright_px > 0` (:9261). Our CS4 luma path
-passes `n_bottomleft = 0` as a literal, so **no gather happens at
-all** - the extension is not merely "wrong data", it is never read, and
-the footprint is filled by the `memset` repetition at :9237 instead.
-That is the direct causal chain from the hardcoded 0 to the
-divergence, and it is the single link to check first in step 2.
+**The predicate is THREE SEQUENTIAL MUTATIONS of one variable, not two
+alternative routes** (corrected after the source read; an earlier draft
+of this section, and the 7fb280d instrument, described them as
+alternatives): svt_gen.c:9217 seeds need_bottom from
+`extend_modes[mode] & NEED_BOTTOMLEFT`; :9218-9220 force it to 0 when
+use_filter_intra; :9221-9222 OVERWRITE it with `is_dr_mode ?
+p_angle > 180`. The effective value is the LAST WRITE. Our D2 never
+picks filter-intra, but the sequence is recorded because a caller that
+re-derives any of it is re-deriving reference logic (see the design
+policy below).
 
-**The decisive measurement (next slice; measure, do not fix).** Patch
-the throwaway dav1d at the intra_pred call site (recon_tmpl.c:1275) to
-print, for the block at bx=2, by=0, the have_bottomleft value and the 16
-bottom-left pixel values it actually feeds into the left edge; dump
-left_col[16..31] as the l4 builder sees it for c8's bidx 2; diff the
-two. Real reconstructed pixels where we have repetition-fill confirms
-the mechanism and the fix (pass the real n_bottomleft plus the gathered
-bytes where Z-order says the below-left block is reconstructed) becomes
-its own slice. If dav1d also fabricates or also has zeros there, that is
-a second cited dead end, recorded alongside 60f161f.
+**The mechanical link (the cleanest single citation).** The actual
+gathers are gated on the pixel counts being non-zero: the bottom-left
+gather on `n_bottomleft_px > 0` (:9230) and the top-right gather on
+`n_topright_px > 0` (:9261). Our CS4 luma path passed
+`n_bottomleft = 0` as a literal, so **no gather happened at all** - the
+extension was not merely "wrong data", it was never read, and the
+footprint was filled by the `memset` repetition at :9237 instead. That
+was the direct causal chain from the hardcoded 0 to the divergence, and
+it is the single link step 2 checked first.
 
-**Scope.** Luma-only, and that is STRUCTURAL rather than a scoping
-convenience - the two chroma residuals must not be folded into a luma
-slice even after the luma mechanism is confirmed. The chroma chains go
-through buildIntraPredictorsUv, a different builder with its own edge
-setup and its own n_bottomleft call sites, and in dav1d the U/V edge
-availability comes from a SEPARATE dav1d_prepare_intra_edges call that
-is handed LUMA coordinates (recon_tmpl.c:1455-1478) - so the flags
-feeding the chroma path are not even the same variables as the luma
-ones. A confirmed luma fix therefore does not imply anything about
-chroma; chroma needs its own evidence gathered through its own call
-path.
-c16/c32 remain the 1:1 pins. enable_intra_edge_filter = 1 is already
-correct in the v3 header (generator :2544) - the FOOTPRINT is the
-suspect, not the flag.
+### RT10 step 2 - the measurement (7fb280d, diagnosis only)
+
+Instrumented the THROWAWAY dav1d 1.5.4 build at **%TEMP%\dav1d_td4**
+(an extracted source tree with NO .git - a SEPARATE copy from the
+in-repo gitignored arbiter at third_party/dav1d, which was never
+patched) and the generator's CS4 luma gather, for c8's bidx 2 only.
+
+**dav1d dump** (leaf bidx 2, reported as `bx=8 by=0` because t->bx is in
+4-PIXEL units; mode 7, 16x16 luma): `angle = 203` (so p_angle is
+measured, not assumed), `intra_edge_filter = 1`, `edge_flags = 0x9` with
+`EDGE_I444_LEFT_HAS_BOTTOM` SET carried structurally by `sb_has_bl = 8`,
+`filter_strength = 2`, `upsample_left = 0`. The window it was handed:
+`bottom_left[16] = 63 62 61 60 59 58 56 55 54 53 53 51 51 51 51 51`,
+`left_col[16] = 45 44 44 43 42 41 41 40 39 38 36 36 35 35 34 34`,
+corner `34`.
+
+**Our dump** (same leaf): `mode=7 p_angle=203 is_dr_mode=1 n_top=0
+n_topright=0 n_left=16 n_bottomleft=0`, `num_left_pixels_needed=32`,
+**`gather_happens=NO`**, giving `left_col[16..31] = 45` repeated 16
+times.
+
+**The diff - 16 of 16 positions differ:**
+
+| pos | dav1d bottom-left | ours (memset fill) |
+|----|-------------------|--------------------|
+| 0-3 | 63 62 61 60      | 45 45 45 45        |
+| 4-7 | 59 58 56 55      | 45 45 45 45        |
+| 8-11| 54 53 53 51      | 45 45 45 45        |
+| 12-15| 51 51 51 51     | 45 45 45 45        |
+
+dav1d: 11 distinct values, range 51..63 - a smooth ramp, real
+reconstructed data from bidx 5. Ours: 1 distinct value. The two sides
+AGREE on the 16 gathered left-edge pixels (ours `34 34 35 ... 45` is
+dav1d's `45 ... 34 34` reversed - the same ramp, opposite indexing);
+only the extension we never gathered diverges. That asymmetry is what
+identifies the block beyond doubt.
+
+**The Z-order availability asymmetry, measured:** `LEFT_HAS_BOTTOM = 0`
+at bidx 1 (`bx=4 by=0`, also mode 7) and `= 1` at bidx 2 (`bx=8 by=0`).
+The below-left really is unavailable at bidx 1 and available at bidx 2 -
+the first block where the extension should have been gathered, exactly
+as the candidate predicted.
+
+**Three ways the measurement could have been misread, all resolved by
+measurement rather than assumption:**
+1. *Which need_bottom route fired* - resolved as the p_angle branch
+   (203 > 180, is_dr_mode true), not the extend_modes seed.
+2. *The cardinals as a third case* - not conflated: mode 7 gives
+   angle 203 and the filter fired (`filter_strength = 2`), so it is not
+   on the :9303 skip path.
+3. *That no gather happens at all* - confirmed directly as
+   `gather_happens=NO`, the strongest form of the causal chain.
+
+**Reconciled byte counts** (the cross-check discipline, against
+verify_decode4.ps1): c8 luma 794/4096, c4 luma 3674/**4096** (the
+denominator 4094 in 7fb280d's commit message is a typo; the 3674 count
+is correct). Both identical to 60f161f's figures, confirming the
+instrumentation changed nothing.
+
+**Two defects in the instrument itself, which is the class's THIRD
+instance of asserting from reading instead of from the output:**
+- The instrument reported the two need_bottom sources as an OR
+  (`need_bottom_dr || need_bottom_nondr`), which misstated the
+  reference's sequential overwrite; the instrument now prints the
+  sequence and the last write.
+- Its first trace gate was `t->bx == 2` and produced NOTHING, because
+  t->bx/t->by are in 4-pixel units and the recon loop steps by the TILE
+  size, not the block size (bidx 2 is bx=8). The gate was opened to all
+  16 calls and the units read off the data rather than converted by
+  hand - which also confirmed the call order is the Z-order walk.
+  (The earlier two instances: the D203 LUT row reported from a handoff
+  transcription while the source was on screen, and the `[int]`-rounding
+  bucket sum in the divergence map.)
+
+### RT10b - the fix (9649fbc)
+
+Two sites together, as the b2ec0b7 lesson demands: the generator's CS4
+luma edge gather (composition.c) AND the l6 encodeFrameChromaQ mirror
+(pipeline.cpp - the four decideBlockMode* calls plus
+buildIntraPredictors). Both previously passed the literal 0.
+
+- **Availability gate:** `zpos[bl] < zpos[bidx]`, the below-left leaf
+  being (by+1, bx-1). On this axis, unlike the top-right,
+  availability IS decode-order dependent - the top-right case is
+  structural (falsification 1 above), the bottom-left is not.
+- **Gather:** the extension continues the left column downward,
+  `left[lumaB + j] = recon(px-1, py + lumaB + j)` for j in [0, B),
+  passed through the EXISTING `n_bottomleft_px` argument so the
+  builder's gather and the :9237 memset needed no change.
+- **num_left_pixels_needed = txhpx + txwpx = 32** at 16px (:9224).
+
+**GATE at closure, measured in the 9649fbc run (not from a report):
+GATE diff-0, 421/421 lines, 884980 B.** The pre-RT10b value was 884961 B
+(202381b), so the +19 B is this slice's regen. Suite 9/9 Release
+(full ctest, 277.91 s), and the CS4 walk test is 592/592 - up from 588 -
+so the l6 mirror reproduces the generator's bytes including the new
+gather. Traces: `-S 8` MATCH 554 = 554, `-S 4` MATCH 999 = 999, both at
+offset 0 (a content-only slice must not move the parse). The
+divergence map reconciles at 0 of 16 divergent leaves (c8) and 0 of 64
+(c4), matching the verifier's 0/4096 on both.
+
+**DESIGN POLICY, stated so the next agent inherits the rule and not
+just the diff: the caller supplies AVAILABILITY (pixels); the verbatim
+extract OWNS USE. No second copy of reference logic in a caller.** The
+caller does not evaluate `is_dr_mode && p_angle > 180` - the extract
+already owns that sequence (svt_gen.c:9216-9224). The OR-vs-overwrite
+defect existed precisely because the instrument reached for a second
+copy; removing the duplication removed the failure mode.
+
+### Conformance matrix (honest, per-scope - do NOT average these)
+
+| artifact | luma | chroma | full-plane |
+|---|---|---|---|
+| c16 | 1:1 | U 1:1, V 1:1 | **1:1** |
+| c32 | 1:1 | U 1:1, V 1:1 | **1:1** |
+| c8  | **1:1 (0/4096)** | U 165/1024, V 205/1024 | divergent |
+| c4  | **1:1 (0/4096)** | U 244/1024, V 287/1024 | divergent |
+
+**Full-plane color conformance is 2/4 artifacts.** The chroma residuals
+at c8/c4 were measured UNCHANGED by the luma fix - no ecs4S_recon_u /
+recon_v line moved in the regen, so the luma recon change never reached
+the UV decisions. A single averaged percentage across these mixed
+scopes would be meaningless; the per-plane figures are the record.
+
+**The pins as the safety net.** ecs416_*, ecs432_*, tu_color16 and
+tu_color32 are byte-identical, and the reason that mattered is that
+c16's mode-7 blocks have no available below-left under EITHER the decode
+order or the Z-order gate - so a moved c16 line would have falsified
+the availability gate. It did not move, which is the evidence that the
+gate is right rather than merely inert.
+
+### Next open item: the chroma bottom-left (its own slice)
+
+c8 U 165/1024 and c4 U 244/1024 remain, and they need their own
+MEASUREMENT slice (the chroma analogue of RT10 step 2) before any fix.
+A confirmed luma mechanism implies NOTHING about them: the chroma
+chains run buildIntraPredictorsUv, a different builder with its own
+edge setup and its own n_bottomleft call sites, and dav1d's U/V edge
+availability comes from a SEPARATE dav1d_prepare_intra_edges call
+handed LUMA coordinates (recon_tmpl.c:1455-1478) - so the flags are not
+even the same variables. enable_intra_edge_filter = 1 is already
+correct in the v3 header (generator :2544) and was confirmed set on the
+decoder side too - the FOOTPRINT is the suspect, never the flag.
