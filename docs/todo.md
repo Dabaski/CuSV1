@@ -364,12 +364,18 @@ shipped feature set (mono/color intra streams).
 - The FI DC-deciding fixture (OPEN)
 - The chroma bottom-left FIX (OPEN, next): CS7 phase (c) CONFIRMED at c8 AND
   c4 - both sides' gathered left columns match as a bit-exact reversal, so only
-  the extension diverges, and the c16 control passed because both fallbacks
-  repeat the corner value. Site: the CS4 chroma gather in composition.c and
-  the l6 UV chains, availability from the existing pipeline.cpp:1885 Z-order
-  gate, builder keeping ownership of the predicate per the RT10b policy.
-  Falsifiable: c4 and c8 U/V to 0 divergent leaves; if c4 does not follow, the
-  mechanism is not the whole story there.
+  the extension diverges. The c16 control passed because dav1d's UNSET branch
+  and ours are the SAME RULE, not the same accident: dav1d does
+  `pixel_set(left - sz, left[0], sz)` (ipred_prepare_tmpl.c:157), and by
+  :138 `left[0]` is the bottom-most left-column entry, i.e. a repeat of the
+  LAST AVAILABLE EDGE SAMPLE - which is what our `cleft[S-1]` memset does. The
+  64 at c16 was one instance of that rule, not a corner special case, so the
+  agreement is structural across content and geometry, not a flat-region
+  coincidence. Site: the CS4 chroma gather in composition.c and the l6 UV
+  chains, availability from the existing pipeline.cpp:1885 Z-order gate, builder
+  keeping ownership of the predicate per the RT10b policy. Falsifiable: c4 and
+  c8 U/V to 0 divergent leaves; if c4 does not follow, the mechanism is not the
+  whole story there.
 - od_ec_dec_bits_ declared-undefined in the pinned tree (named, no
   consumer)
 - Bench baselines are clock-noise-sensitive without NVML lock (BM3)
