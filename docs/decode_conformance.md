@@ -218,3 +218,87 @@ are committed as standing artifacts); TD5a/TD5b made the ratified
 bucket-selection change (the generator + the l7 mirror) with the
 ladder as the conformance gate. The TS-series closes with
 decoder-acceptance AND content-1:1.
+
+## RT8 - the c8/c4 luma content residual (OPEN; diagnosis only)
+
+**Status.** Parse layer fully conformant at every SB depth. All four
+color artifacts decode; c16 and c32 are CONTENT 1:1 on all three
+planes. c8 and c4 decode but their luma recon diverges (c8 Y
+794/4096, c4 Y 3674/4096). The residual is bounded to c8/c4 content
+and nothing regresses while it is open.
+
+**Two falsified hypotheses, recorded so they are not re-run.**
+
+1. *Top-right availability gating* (FALSIFIED, 60f161f). The planned
+   "gate nTopRightPx on zpos" is wrong. dav1d's rule is purely
+   structural: recon_b_intra is called per block with the block's own
+   t->bx/t->by plus the frame dimensions (dav1d decode.c:708, :1214),
+   so inside recon_tmpl.c the y > init_y test is never true and the
+   sb_has_tr ternary reduces to clearing only for blocks reaching the
+   frame's right edge; with ipred_prepare_tmpl.c:176-188 the net rule
+   is "available iff have_top && the block does not reach the tile's
+   right edge". That is already what our gather implements, so the zpos
+   gate would have REMOVED top-right edges the decoder still has.
+2. *A compounding recon cascade* (FALSIFIED by measurement, 60f161f).
+   At c8 the damage is exactly the top-right 32x32 quadrant, the other
+   three quadrants are byte-exact, and bidx 10/11 match even though
+   their direct top neighbours bidx 6/7 are 256/256 divergent. A
+   cascade through reconstructed edges cannot produce that.
+
+**The first divergent leaf is bidx 2 in BOTH geometries** - not the
+bidx 3 that the first-divergent byte offset suggests (62 at c8, 29 at
+c4 land in bidx 3, but the first differing leaf is one earlier).
+tools/rt8_divergence_map.ps1 buckets every divergent byte by leaf
+index; its totals (794, 3674) cross-check verify_decode4.ps1 exactly.
+bidx 2 sits in the TOP ROW, so it has no above edge and no top-right
+extension - which is the data-side confirmation of falsification (1).
+
+**A distinction to preserve: top-right vs bottom-left are different in
+kind, and the falsification of (1) does NOT carry over.**
+
+- *Top-right*: dav1d's flag is structural - it never consults decode
+  order. There is no decode-order dependence on this axis at all.
+- *Bottom-left*: dav1d's have_bottomleft (the EDGE_I444_LEFT_HAS_BOTTOM
+  flag) is derived from the PARTITION structure at decode time; the
+  flag encodes whether the below-left block is part of the structure.
+  The decode-order dependency enters through WHICH PIXELS populate the
+  footprint, not through the flag.
+
+Both live in the same edge-prep call, so the two must not be reasoned
+about as one.
+
+**Open candidate (UNCONFIRMED - code reading, not yet measured).** The
+CS4 luma path passes `n_bottomleft = 0` unconditionally
+(composition.c:6283, :6289 - a literal 0 argument). In
+build_intra_predictors a directional mode with p_angle > 180 sets
+need_bottom (svt_gen.c:9222) and needs
+`num_left_pixels_needed = txhpx + txwpx` = 32 at 16px (:9224); with
+n_bottomleft_px == 0 the bottom-left extension is skipped and
+left_col[16..31] is filled by `memset(&left_col[i], left_col[i-1], ...)`
+- a REPEATED last real pixel, not reconstructed data. The left edge
+filter then smooths `n_px = n_left_px + ab_le + txwpx` = 33 pixels
+from left_col[-1] (:9313-9317), so 17 of the 33 are corner plus
+repetition-fill on our side. For c8/bidx 2 (mode 7, p_angle ~ 203) the
+below-left neighbour is bidx 5 at Z-order position 3, versus bidx 2's
+4 - already reconstructed. bidx 1's below-left is bidx 2 at zpos 4 > 1,
+genuinely not yet decoded. So the first block where a REAL bottom-left
+becomes available is exactly where the divergence starts, and a
+lower-left-localized prediction error is the right shape for a PARTIAL
+79/256 rather than whole-block divergence.
+
+**The decisive measurement (next slice; measure, do not fix).** Patch
+the throwaway dav1d at the intra_pred call site (recon_tmpl.c:1275) to
+print, for the block at bx=2, by=0, the have_bottomleft value and the 16
+bottom-left pixel values it actually feeds into the left edge; dump
+left_col[16..31] as the l4 builder sees it for c8's bidx 2; diff the
+two. Real reconstructed pixels where we have repetition-fill confirms
+the mechanism and the fix (pass the real n_bottomleft plus the gathered
+bytes where Z-order says the below-left block is reconstructed) becomes
+its own slice. If dav1d also fabricates or also has zeros there, that is
+a second cited dead end, recorded alongside 60f161f.
+
+**Scope.** Luma-only. No claim that c8/c4's U/V residuals (165/1024 and
+205/1024) share this mechanism; they are not folded into a luma slice.
+c16/c32 remain the 1:1 pins. enable_intra_edge_filter = 1 is already
+correct in the v3 header (generator :2544) - the FOOTPRINT is the
+suspect, not the flag.
