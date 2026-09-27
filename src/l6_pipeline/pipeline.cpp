@@ -1846,6 +1846,10 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
     static int zord[64];
     int zn = 0;
     zorderLeaves(grid, 0, 0, grid, zord, &zn);
+    // RT10b: the inverse map, leaf index -> Z-order visit position, for the
+    // bottom-left availability gate (decode-order dependent on that axis).
+    int zPos[64];
+    for (int i = 0; i < zn; ++i) zPos[zord[i]] = i;
     for (int t = 0; t < grid * grid; ++t) {
         const int bidx = zord[t];
         const int by = bidx / grid, bx = bidx % grid;
@@ -1863,12 +1867,33 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
             const int nTopPx = hasTop ? lumaB : 0;
             const int nLeftPx = hasLeft ? lumaB : 0;
             const int nTopRightPx = (hasTop && bx + 1 < grid) ? lumaB : 0;
+            // RT10b: the BOTTOM-LEFT extension, previously a literal 0 at both
+            // the decide* and buildIntraPredictors call sites. The caller
+            // supplies AVAILABILITY; whether the extension is USED is derived
+            // inside the builder, which mutates ONE variable in sequence
+            // (enc_intra_prediction.c build_intra_predictors: seed from
+            // extend_modes & NEED_BOTTOMLEFT, force 0 for filter-intra, then
+            // OVERWRITE with is_dr_mode && p_angle > 180) - so the predicate is
+            // deliberately NOT duplicated here. Measured in 7fb280d: with 0 the
+            // gather never runs and the extension is memset repetition, where
+            // dav1d held a real 11-value ramp at all 16 positions.
+            //
+            // Unlike the top-right (structural, per de5321a) this axis IS
+            // decode-order dependent: the below-left leaf is (by+1, bx-1),
+            // available exactly when its Z-order position precedes this leaf's.
+            const int blIdx = (by + 1) * grid + (bx - 1);
+            const int nBottomLeftPx =
+                (hasLeft && by + 1 < grid && zPos[blIdx] < zPos[bidx]) ? lumaB : 0;
             std::uint8_t above[129] = {0};
             std::uint8_t left[129] = {0};
             if (hasTop)
                 for (int i = 0; i < lumaB + nTopRightPx; ++i) above[i] = reconY.at(px + i, py - 1);
             if (hasLeft)
                 for (int i = 0; i < lumaB; ++i) left[i] = reconY.at(px - 1, py + i);
+            // the extension continues the left column downward
+            if (nBottomLeftPx)
+                for (int j = 0; j < nBottomLeftPx; ++j)
+                    left[lumaB + j] = reconY.at(px - 1, py + lumaB + j);
             const std::uint8_t aboveLeft = (hasTop && hasLeft) ? reconY.at(px - 1, py - 1) : 0;
             intra::NeighborContext nctx;
             nctx.aboveMode = hasTop
@@ -1882,21 +1907,21 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                 for (int x = 0; x < lumaB; ++x) srcBlk[y * lumaB + x] = srcY.at(px + x, py + y);
             ModeDecision d{intra::DC_PRED, 0};
             if (lumaB == 8)
-                d = decideBlockMode8x8(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, 0,
+                d = decideBlockMode8x8(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
                                        aboveLeft, nctx);
             else if (lumaB == 16)
-                d = decideBlockMode16x16(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, 0,
+                d = decideBlockMode16x16(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
                                          aboveLeft, nctx);
             else if (lumaB == 32)
-                d = decideBlockMode32x32(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, 0,
+                d = decideBlockMode32x32(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
                                          aboveLeft, nctx);
             else
-                d = decideBlockMode64x64(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, 0,
+                d = decideBlockMode64x64(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
                                          aboveLeft, nctx);
             modesY[bidx] = static_cast<std::uint8_t>(d.mode);
             std::uint8_t pred[4096] = {0};
             intra::buildIntraPredictors(pred, lumaB, d.mode, 0, lumaB, lumaB, aboveLeft, above,
-                                        nTopPx, nTopRightPx, left, nLeftPx, 0, nctx);
+                                        nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
             std::int16_t residual[4096];
             for (int i = 0; i < lumaB * lumaB; ++i) {
                 const int x = i % lumaB, y = i / lumaB;

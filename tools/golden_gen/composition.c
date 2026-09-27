@@ -6233,6 +6233,11 @@ static int svtd_cs4_uv_q_drive(int S) {
     static int zord[64];
     int zn = 0;
     svtd_zorder(grid, 0, 0, grid, zord, &zn);
+    // RT10b: the inverse map, leaf index -> Z-order visit position. The
+    // bottom-left availability gate compares positions, because on this axis
+    // (unlike the top-right) availability IS decode-order dependent.
+    int zpos[64];
+    for (int i = 0; i < zn; ++i) zpos[zord[i]] = i;
     // the RT6 tree-order leaf iteration: the DFS/Z-order sequence (the
     // decode_partition recursion visits TL -> TR -> BL -> BR at every level,
     // so the leaf sequence = the Z-order curve of the leaf grid). The
@@ -6257,6 +6262,29 @@ static int svtd_cs4_uv_q_drive(int S) {
             const int nTop = hasTop ? B : 0;
             const int nLeft = hasLeft ? B : 0;
             const int nTr = (hasTop && bx + 1 < grid) ? B : 0;
+            // RT10b: the BOTTOM-LEFT extension, previously a literal 0. The
+            // caller supplies AVAILABILITY (pixels); whether the extension is
+            // USED is derived inside build_intra_predictors, which mutates ONE
+            // variable in sequence (svt_gen.c:9216-9224) - it is not two
+            // alternatives: :9217 seeds need_bottom from
+            // extend_modes[mode] & NEED_BOTTOMLEFT, :9218-9220 forces it to 0
+            // for filter-intra, and :9221-9222 OVERWRITES it with
+            // is_dr_mode && p_angle > 180. So the effective predicate lives in
+            // the builder and is not duplicated here.
+            //
+            // Availability IS decode-order dependent on this axis, unlike the
+            // top-right (which is structural, per de5321a): the below-left
+            // neighbour is the leaf at (by+1, bx-1), available exactly when its
+            // Z-order position precedes this leaf's. dav1d decides it
+            // structurally via sb_has_bl (recon_tmpl.c:1235-1236, :1254-1255),
+            // which for a square block is the same condition - measured in
+            // 7fb280d as LEFT_HAS_BOTTOM 0 at bidx 1 and 1 at bidx 2.
+            //
+            // The gather at :9230-9234 is gated on n_bottomleft_px > 0, so the
+            // old literal 0 meant NO GATHER AT ALL and :9237's memset filled the
+            // extension by repetition.
+            const int bl_bidx = (by + 1) * grid + (bx - 1);
+            const int nBl = (hasLeft && by + 1 < grid && zpos[bl_bidx] < zpos[bidx]) ? B : 0;
             uint8_t labove[129] = {0};
             uint8_t lleft[129] = {0};
             uint8_t lal = 0;
@@ -6264,6 +6292,9 @@ static int svtd_cs4_uv_q_drive(int S) {
                 for (int i = 0; i < B + nTr; ++i) labove[i] = recon_y[(py - 1) * 64 + px + i];
             if (hasLeft)
                 for (int i = 0; i < B; ++i) lleft[i] = recon_y[(py + i) * 64 + px - 1];
+            // the extension continues the left column downward (:9230-9234)
+            if (nBl)
+                for (int j = 0; j < nBl; ++j) lleft[B + j] = recon_y[(py + B + j) * 64 + px - 1];
             if (hasTop && hasLeft) lal = recon_y[(py - 1) * 64 + px - 1];
             const int laboveMode = hasTop ? lmodes[(by - 1) * grid + bx] : DC_PRED;
             const int lleftMode = hasLeft ? lmodes[by * grid + bx - 1] : DC_PRED;
@@ -6280,7 +6311,7 @@ static int svtd_cs4_uv_q_drive(int S) {
             static uint8_t lpred[4096];
             for (int m = 0; m <= PAETH_PRED; ++m) {
                 svtd_call_builder_tx(lpred, m, 0, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
-                                     nLeft, 0, lal, ltxs);
+                                     nLeft, nBl, lal, ltxs);
                 const uint32_t sad = svt_nxm_sad_kernel_helper_c(lsrc, B, lpred, B, B, B);
                 if (lmode < 0 || sad < best_sad) { best_sad = sad; lmode = m; }
             }
@@ -6299,26 +6330,36 @@ static int svtd_cs4_uv_q_drive(int S) {
                 if (rt10_want && atoi(rt10_want) == bidx && S == 8) {
                     const int is_dr = av1_is_directional_mode((PredictionMode)lmode);
                     const int p_ang = mode_to_angle_map[lmode] + 0 * ANGLE_STEP;
-                    const int need_bottom_dr = is_dr && p_ang > 180;
-                    const int need_bottom_nondr =
-                        !!(extend_modes[lmode] & NEED_BOTTOMLEFT);
+                    // CORRECTED (was an OR of two "routes", which misstated the
+                    // reference): need_bottom is ONE variable mutated in
+                    // sequence - :9217 seeds it, :9218-9220 zeroes it for
+                    // filter-intra, :9221-9222 OVERWRITES it for directional
+                    // modes. The effective predicate is the last write.
+                    int nb = (extend_modes[lmode] & NEED_BOTTOMLEFT) ? 1 : 0;
+                    const int nb_after_fi = 0;  // use_filter_intra forces 0 (:9219)
+                    nb = nb_after_fi;
+                    if (is_dr) nb = p_ang > 180;
                     fprintf(stderr,
                             "RT10OURS S=%d bidx=%d by=%d bx=%d mode=%d "
                             "p_angle=%d is_dr_mode=%d n_top=%d n_topright=%d "
                             "n_left=%d n_bottomleft=%d corner=%d\n",
                             S, bidx, by, bx, lmode, p_ang, is_dr, nTop, nTr, nLeft, 0,
                             (int)lal);
-                    fprintf(stderr, "RT10OURS need_bottom_route=%s\n",
-                            need_bottom_dr      ? "is_dr_mode&&p_angle>180 (svt_gen.c:9222)"
-                            : need_bottom_nondr ? "extend_modes[mode]&NEED_BOTTOMLEFT (:9217)"
-                                                : "NEITHER (need_bottom=0)");
+                    fprintf(stderr,
+                            "RT10OURS need_bottom=%d (seq: seed=%d -> after_fi=%d -> "
+                            "is_dr=%d p_ang=%d -> final=%d)\n",
+                            nb, (extend_modes[lmode] & NEED_BOTTOMLEFT) ? 1 : 0, nb_after_fi,
+                            is_dr, p_ang, nb);
                     fprintf(stderr, "RT10OURS left_col[%d] :", nLeft);
                     for (int i = 0; i < nLeft; ++i) fprintf(stderr, " %d", lleft[i]);
                     fprintf(stderr, "\n");
                     // the derived extension, replicating :9237
-                    const int num_needed = B + (need_bottom_dr || need_bottom_nondr ? B : 0);
-                    fprintf(stderr, "RT10OURS num_left_pixels_needed=%d gather_happens=%s\n",
-                            num_needed, "NO (n_bottomleft_px=0 -> :9230 gather skipped)");
+                    const int num_needed = B + (nb ? B : 0);
+                    fprintf(stderr,
+                            "RT10OURS num_left_pixels_needed=%d n_bottomleft_px=%d "
+                            "gather_happens=%s\n",
+                            num_needed, nBl,
+                            nBl ? "YES (:9230 gather runs)" : "NO (:9230 gather skipped)");
                     if (num_needed > nLeft) {
                         fprintf(stderr, "RT10OURS left_col[%d..%d] (memset :9237) :", nLeft,
                                 num_needed - 1);
@@ -6329,7 +6370,7 @@ static int svtd_cs4_uv_q_drive(int S) {
                 }
             }
             svtd_call_builder_tx(lpred, lmode, 0, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
-                                 nLeft, 0, lal, ltxs);
+                                 nLeft, nBl, lal, ltxs);
             // symbols: the partition surfaces (the interior SPLITs gated by the node
             // boundaries + the leaf NONE) + the skip flag, THEN the luma kf
             // mode (+ the angle delta when gated) - the aom decode order
