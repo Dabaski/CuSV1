@@ -6561,6 +6561,31 @@ static int svtd_cs4_uv_q_drive(int S) {
                             cabove[i] = crecon[(uv_y - 1) * 32 + uv_x + i];
                     if (uvHasLeft)
                         for (int i = 0; i < S; ++i) cleft[i] = crecon[(uv_y + i) * 32 + uv_x - 1];
+                        // CS7 step 1: our side of the chroma bottom-left diff,
+                        // for the block the map names. Gated on S and the UV
+                        // leaf index, and it prints the GATHERED left column
+                        // separately from the extension, because the decisive
+                        // check is whether the gathered bytes already agree.
+                        {
+                            const char* w = getenv("RT11_S");
+                            if (w && atoi(w) == S && uRow * uvGrid + uCol == 2) {
+                                fprintf(stderr,
+                                        "RT11OURS S=%d plane=U uvleaf=%d uRow=%d uCol=%d "
+                                        "uvm=%d S=%d uvHasTop=%d uvHasLeft=%d "
+                                        "n_left_passed=%d n_bottomleft_passed=0\n",
+                                        S, uRow * uvGrid + uCol, uRow, uCol, uvm, S,
+                                        (int)uvHasTop, (int)uvHasLeft, S);
+                                fprintf(stderr, "RT11OURS left_col[%d] :", S);
+                                for (int i = 0; i < S; ++i) fprintf(stderr, " %d", cleft[i]);
+                                fprintf(stderr, "\n");
+                                // what the builder's :9237 memset will produce
+                                fprintf(stderr, "RT11OURS left_col[%d..%d] (memset :9237) :", S,
+                                        2 * S - 1);
+                                for (int i = S; i < 2 * S; ++i)
+                                    fprintf(stderr, " %d", cleft[S - 1]);
+                                fprintf(stderr, "\n");
+                            }
+                        }
                     if (uvHasTop && uvHasLeft) cal = crecon[(uv_y - 1) * 32 + uv_x - 1];
                     const int cAboveMode =
                         uvHasTop ? cmodes[(uRow - 1) * uvGrid + uCol] : UV_DC_PRED;
