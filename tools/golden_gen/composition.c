@@ -6285,6 +6285,49 @@ static int svtd_cs4_uv_q_drive(int S) {
                 if (lmode < 0 || sad < best_sad) { best_sad = sad; lmode = m; }
             }
             lmodes[bidx] = lmode;
+            // RT10 step 2 (our side of the diff): dump the left-edge context the
+            // builder is handed for the block under test, and derive the
+            // bottom-left extension exactly as build_intra_predictors does
+            // (svt_gen.c:9216-9245). left_col[0..n_left) is the gathered edge;
+            // the gather at :9230 is gated on n_bottomleft_px > 0, so with the
+            // literal 0 we pass here NO GATHER HAPPENS and :9237's memset fills
+            // the rest by repeating left_col[i-1]. The self-check below confirms
+            // left_col[0..n_left) == the gathered bytes before the derived
+            // extension is trusted.
+            {
+                const char* rt10_want = getenv("RT10_BIDX");
+                if (rt10_want && atoi(rt10_want) == bidx && S == 8) {
+                    const int is_dr = av1_is_directional_mode((PredictionMode)lmode);
+                    const int p_ang = mode_to_angle_map[lmode] + 0 * ANGLE_STEP;
+                    const int need_bottom_dr = is_dr && p_ang > 180;
+                    const int need_bottom_nondr =
+                        !!(extend_modes[lmode] & NEED_BOTTOMLEFT);
+                    fprintf(stderr,
+                            "RT10OURS S=%d bidx=%d by=%d bx=%d mode=%d "
+                            "p_angle=%d is_dr_mode=%d n_top=%d n_topright=%d "
+                            "n_left=%d n_bottomleft=%d corner=%d\n",
+                            S, bidx, by, bx, lmode, p_ang, is_dr, nTop, nTr, nLeft, 0,
+                            (int)lal);
+                    fprintf(stderr, "RT10OURS need_bottom_route=%s\n",
+                            need_bottom_dr      ? "is_dr_mode&&p_angle>180 (svt_gen.c:9222)"
+                            : need_bottom_nondr ? "extend_modes[mode]&NEED_BOTTOMLEFT (:9217)"
+                                                : "NEITHER (need_bottom=0)");
+                    fprintf(stderr, "RT10OURS left_col[%d] :", nLeft);
+                    for (int i = 0; i < nLeft; ++i) fprintf(stderr, " %d", lleft[i]);
+                    fprintf(stderr, "\n");
+                    // the derived extension, replicating :9237
+                    const int num_needed = B + (need_bottom_dr || need_bottom_nondr ? B : 0);
+                    fprintf(stderr, "RT10OURS num_left_pixels_needed=%d gather_happens=%s\n",
+                            num_needed, "NO (n_bottomleft_px=0 -> :9230 gather skipped)");
+                    if (num_needed > nLeft) {
+                        fprintf(stderr, "RT10OURS left_col[%d..%d] (memset :9237) :", nLeft,
+                                num_needed - 1);
+                        for (int i = nLeft; i < num_needed; ++i)
+                            fprintf(stderr, " %d", lleft[nLeft - 1]);
+                        fprintf(stderr, "\n");
+                    }
+                }
+            }
             svtd_call_builder_tx(lpred, lmode, 0, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
                                  nLeft, 0, lal, ltxs);
             // symbols: the partition surfaces (the interior SPLITs gated by the node
