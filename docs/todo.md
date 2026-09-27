@@ -98,7 +98,7 @@ A0. SLICE-LEVEL STATE (the live register)
 [x] l8: bit writer, uleb128, OBU/SPS/frame-header/TU assembly (v1/v2/color
     v3), per-size SPS (maxDim parameterized), NINE committed artifacts -
     grayscale d4 30B / d8 30B / d16 44B / d32 47B / d64 441B + color
-    color4 138B / color8 105B / color16 79B / color32 165B
+    color4 201B / color8 139B / color16 133B / color32 165B
 [x] MILESTONE: decoder-accepted AND content-bit-identical at EVERY
     geometry (libdav1d via ffmpeg; verify_decode4.ps1 -Geometry N);
     color full-plane 1:1 at color16/color32 (2/4 color artifacts -

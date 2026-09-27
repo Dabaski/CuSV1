@@ -181,8 +181,8 @@ the chroma/color pipeline: `docs/color.md`; decoder-acceptance status:
   mono artifact set, their gate lines diff-0). The committed artifact
   set `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` -
   five grayscale (the 47B d32 four-16x16-leaves walk + d4 30B, d8
-  30B, d16 44B, d64 441B) and four color (color4 138B, color8 105B,
-  color16 79B, color32 165B) - each proves the three-way identity
+  30B, d16 44B, d64 441B) and four color (color4 201B, color8 139B,
+  color16 133B, color32 165B) - each proves the three-way identity
   composed TU == committed file == gate bytes; the grayscale set is
   decoder-accepted with content 1:1 (the d32 = all 1024 pixels ==
   ecfrm_recon; the d4 = the 8x8-frame structure stated above), the

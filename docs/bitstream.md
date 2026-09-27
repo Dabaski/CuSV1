@@ -201,9 +201,9 @@ walk. The color artifact set: structural_keyframe_color{4,8,16,32}.obu
 - color32 (165 B): CONTENT 1:1 ON ALL THREE PLANES (Y 4096/4096,
   U 1024/1024, V 1024/1024) - the first color frame this project
   produces decoded by an independent reference decoder.
-- color16 (79 B): FULL-PLANE content 1:1 (Y 4096/4096, U 1024/1024,
+- color16 (133 B): FULL-PLANE content 1:1 (Y 4096/4096, U 1024/1024,
   V 1024/1024).
-- color4 (138 B) / color8 (105 B): DECODE (the exit-69 parse desyncs
+- color4 (201 B) / color8 (139 B): DECODE (the exit-69 parse desyncs
   were fixed by the RT-series: RT6 the tree-order leaf emission -
   the flat walk had emitted the interior partition SPLIT symbols in
   raster order, diverging from decode_partition's hierarchical

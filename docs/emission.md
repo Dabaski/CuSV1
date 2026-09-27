@@ -147,9 +147,9 @@ recon):
 | Artifact | TU size | Structure | Decode outcome (measured) |
 | --- | --- | --- | --- |
 | structural_keyframe_color32.obu | 165 B | lumaB = 32, UV tx 16 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
-| structural_keyframe_color16.obu | 79 B | lumaB = 16, UV tx 8 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
-| structural_keyframe_color8.obu | 105 B | lumaB = 8, UV tx 4 | luma 1:1 (0/4096); U 165/1024, V 205/1024 - divergent |
-| structural_keyframe_color4.obu | 138 B | lumaB = 8 tree, UV tx 4 (4x4 leaves) | luma 1:1 (0/4096); U 244/1024, V 287/1024 - divergent |
+| structural_keyframe_color16.obu | 133 B | lumaB = 16, UV tx 8 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
+| structural_keyframe_color8.obu | 139 B | lumaB = 8, UV tx 4 | luma 1:1 (0/4096); U 165/1024, V 205/1024 - divergent |
+| structural_keyframe_color4.obu | 201 B | lumaB = 8 tree, UV tx 4 (4x4 leaves) | luma 1:1 (0/4096); U 244/1024, V 287/1024 - divergent |
 
 The color header is the CS3 v3 (mono bit 0, the 4:2:0 config, the
 frame header 42 bits); the per-plane decode results and the conformance

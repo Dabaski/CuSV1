@@ -99,9 +99,9 @@ each three-way-identity-tested and decoded with the per-plane
 instrument (`tools/verify_decode4.ps1 -Color <4|8|16|32>`, yuv420p
 compared plane-by-plane):
 
-- color32 (165 B) and color16 (79 B): FULL-PLANE content 1:1 (all
+- color32 (165 B) and color16 (133 B): FULL-PLANE content 1:1 (all
   three planes equal the generator's recon).
-- color8 (105 B) and color4 (138 B): the luma plane is content 1:1
+- color8 (139 B) and color4 (201 B): the luma plane is content 1:1
   (0/4096; the RT10b bottom-left edge extension eliminated the luma
   residual) but the U/V planes diverge (c8 U 165/1024 V 205/1024;
   c4 U 244/1024 V 287/1024).

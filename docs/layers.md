@@ -211,7 +211,7 @@ SVT's packer structure. The committed artifacts
 `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` - five
 grayscale (d4 30B, d8 30B, d16 44B, d32 47B, d64 441B; the d32 v2
 lossy TU is the structural-keyframe milestone artifact) + four color
-(color4 138B, color8 105B, color16 79B, color32 165B) - prove composed
+(color4 201B, color8 139B, color16 133B, color32 165B) - prove composed
 TU == committed file == gate bytes; the grayscale set is
 decoder-accepted AND content-1:1 per geometry
 (tools/verify_decode4.ps1 -Geometry N), the color set 2/4 full-plane
