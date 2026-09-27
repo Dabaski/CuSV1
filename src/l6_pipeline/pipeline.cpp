@@ -2076,17 +2076,27 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                     std::int32_t cCb[1024] = {0};
                     std::int32_t cQc[1024] = {0}, cDq[1024] = {0};
                     std::uint16_t cEob = 0;
+                    // The intra-chroma tx type is DERIVED from the decided UV
+                    // mode, never transmitted (decodetxb.c:156-159 reads the
+                    // tx_type for AOM_PLANE_Y only). The same decided UV mode
+                    // feeds the U and V chains - the shared-mode walk policy.
+                    const transforms::TxType cTxType = transforms::intraUvTxType(
+                        intra::uv2y(static_cast<intra::UvPredictionMode>(modesU[uRow * uvGrid + uCol])),
+                        uvB == 4    ? transforms::TxSizeSqUp::TX_4X4
+                        : uvB == 8  ? transforms::TxSizeSqUp::TX_8X8
+                        : uvB == 16 ? transforms::TxSizeSqUp::TX_16X16
+                                    : transforms::TxSizeSqUp::TX_32X32);
                     if (uvB == 4) {
-                        transforms::fwdTxfm2d4x4(cRes, cCb, uvB, txType);
+                        transforms::fwdTxfm2d4x4(cRes, cCb, uvB, cTxType);
                         transforms::quantizeFp4x4(cCb, qt, uscan, cQc, cDq, &cEob);
                     } else if (uvB == 8) {
-                        transforms::fwdTxfm2d8x8(cRes, cCb, uvB, txType);
+                        transforms::fwdTxfm2d8x8(cRes, cCb, uvB, cTxType);
                         transforms::quantizeFp8x8(cCb, qt, uscan, cQc, cDq, &cEob);
                     } else if (uvB == 16) {
-                        transforms::fwdTxfm2d16x16(cRes, cCb, uvB, txType);
+                        transforms::fwdTxfm2d16x16(cRes, cCb, uvB, cTxType);
                         transforms::quantizeFp16x16(cCb, qt, uscan, cQc, cDq, &cEob);
                     } else {
-                        transforms::fwdTxfm2d32x32(cRes, cCb, uvB, txType);
+                        transforms::fwdTxfm2d32x32(cRes, cCb, uvB, cTxType);
                         transforms::quantizeFp32x32(cCb, qt, uscan, cQc, cDq, &cEob);
                     }
                     for (int i = 0; i < uvB * uvB; ++i) ccoeffs[bidx * uvB * uvB + i] = cQc[i];
@@ -2096,10 +2106,10 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                                                   uvmiRow, uvmiCol, 1, entropy::DC_PRED,
                                                   entropy::COMPONENT_CHROMA);
                     }
-                    if (uvB == 4) transforms::invTxfm2dAdd4x4(cDq, cPred, uvB, txType);
-                    else if (uvB == 8) transforms::invTxfm2dAdd8x8(cDq, cPred, uvB, txType);
-                    else if (uvB == 16) transforms::invTxfm2dAdd16x16(cDq, cPred, uvB, txType);
-                    else transforms::invTxfm2dAdd32x32(cDq, cPred, uvB, txType);
+                    if (uvB == 4) transforms::invTxfm2dAdd4x4(cDq, cPred, uvB, cTxType);
+                    else if (uvB == 8) transforms::invTxfm2dAdd8x8(cDq, cPred, uvB, cTxType);
+                    else if (uvB == 16) transforms::invTxfm2dAdd16x16(cDq, cPred, uvB, cTxType);
+                    else transforms::invTxfm2dAdd32x32(cDq, cPred, uvB, cTxType);
                     for (int y = 0; y < uvB; ++y)
                         for (int x = 0; x < uvB; ++x)
                             crecon.at(uvX + x, uvY + y) = cPred[y * uvB + x];

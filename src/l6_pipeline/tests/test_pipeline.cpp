@@ -5013,7 +5013,17 @@ TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
         // decisions legitimately diverge from the CS2 raster-decided
         // fixture; the walk's U fields stay pinned to the ecs4 gate lines
         // above instead.
-        const bool treeEqRaster = grid <= 2;
+        // RT9: DROPPED c16 from this check. The CS2 drives still run the
+        // chroma chains in the DCT_DCT domain, while the walk now derives the
+        // chroma tx type from the decided UV mode (intraUvTxType), so at c16
+        // the two are in different transform domains and the comparison is no
+        // longer meaningful - the divergence is a DOMAIN difference, not a
+        // decision difference. c32 stays in the check because the tx-set rule
+        // forces DCT_DCT there (get_ext_tx_set_type -> DCTONLY at
+        // sqr_up == TX_32X32), so both sides are in the same domain
+        // structurally. RT9c brings the CS2 chroma drives onto the LUT domain
+        // and this check widens back to grid <= 2.
+        const bool treeEqRaster = grid <= 1;
         const int uvGrid = 32 / S;
         const int nuv = uvGrid * uvGrid;
         bool uModesOk = true, uEobsOk = true, uCoeffsOk = true, uReconOk = true;

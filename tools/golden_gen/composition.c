@@ -274,7 +274,13 @@ static void svtd_populate_dispatch(void) {
 // 8-bit, no flips: fwd_shift_4x4 = {2, 0, 0} (transforms.c:122), cos_bit 13/13
 // (fwd_cos_bit_col/row[0][0]). Column pass left-shifts by shift[0]=2
 // (round_shift_array with -shift), row pass has no final shift.
-static void svtd_fwd2d4x4(const int16_t* input, uint32_t input_stride, int32_t* output, TxfmFunc txfm) {
+// Per-pass variant: the column pass takes txfm_col, the row pass txfm_row.
+// av1_tranform_two_d_core_c selects txfm_func_col and txfm_func_row
+// independently (transforms.c:2420-2421) and runs columns first (:2428-2450).
+// The single-function form below is the symmetric-type case, where both
+// passes take the same kernel.
+static void svtd_fwd2d4x4_t(const int16_t* input, uint32_t input_stride, int32_t* output,
+                             TxfmFunc txfm_col, TxfmFunc txfm_row) {
     const int8_t* shift       = fwd_shift_4x4;
     const int8_t  cos_bit_col = fwd_cos_bit_col[0][0];
     const int8_t  cos_bit_row = fwd_cos_bit_row[0][0];
@@ -288,16 +294,20 @@ static void svtd_fwd2d4x4(const int16_t* input, uint32_t input_stride, int32_t* 
             temp_in[r] = input[r * input_stride + c];
         }
         svt_av1_round_shift_array_c(temp_in, 4, -shift[0]);
-        txfm(temp_in, temp_out, cos_bit_col, NULL);
+        txfm_col(temp_in, temp_out, cos_bit_col, NULL);
         svt_av1_round_shift_array_c(temp_out, 4, -shift[1]);
         for (r = 0; r < 4; ++r) {
             buf[r * 4 + c] = temp_out[r];
         }
     }
     for (r = 0; r < 4; ++r) {
-        txfm(buf + r * 4, output + r * 4, cos_bit_row, NULL);
+        txfm_row(buf + r * 4, output + r * 4, cos_bit_row, NULL);
         svt_av1_round_shift_array_c(output + r * 4, 4, -shift[2]);
     }
+}
+
+static void svtd_fwd2d4x4(const int16_t* input, uint32_t input_stride, int32_t* output, TxfmFunc txfm) {
+    svtd_fwd2d4x4_t(input, input_stride, output, txfm, txfm);
 }
 
 // ---- inverse 2D add core ---------------------------------------------------
@@ -306,7 +316,12 @@ static void svtd_fwd2d4x4(const int16_t* input, uint32_t input_stride, int32_t* 
 // (INV_COS_BIT, inv_transforms.h:24), clamp bits bd+8=16 and max(bd+6,16)=16
 // (svt_av1_gen_inv_stage_range opt_range, bd=8), add via
 // clip_pixel_highbd(output_r + round_shift(temp_out, -shift[1]), 8).
-static void svtd_inv2dadd4x4(const int32_t* input, uint8_t* pred, int32_t stride, TxfmFunc txfm) {
+// Per-pass variant: ROWS first, then columns (inv_transforms.c:2532
+// txfm_func_row, :2541 txfm_func_col - the inverse of the forward order), with
+// the two functions selected independently via svt_aom_inv_txfm_type_to_func
+// (inv_transforms.c:2518-2521).
+static void svtd_inv2dadd4x4_t(const int32_t* input, uint8_t* pred, int32_t stride, TxfmFunc txfm_row,
+                               TxfmFunc txfm_col) {
     const int8_t* shift       = inv_shift_4x4;
     const int8_t  cos_bit_col = inv_cos_bit_col[0][0];
     const int8_t  cos_bit_row = inv_cos_bit_row[0][0];
@@ -321,7 +336,7 @@ static void svtd_inv2dadd4x4(const int32_t* input, uint8_t* pred, int32_t stride
             temp_in[c] = input[r * 4 + c];
         }
         clamp_buf(temp_in, 4, (int8_t)(8 + 8));
-        txfm(temp_in, buf + r * 4, cos_bit_row, stage_range);
+        txfm_row(temp_in, buf + r * 4, cos_bit_row, stage_range);
         svt_av1_round_shift_array_c(buf + r * 4, 4, -shift[0]);
     }
     for (c = 0; c < 4; ++c) {
@@ -329,13 +344,17 @@ static void svtd_inv2dadd4x4(const int32_t* input, uint8_t* pred, int32_t stride
             temp_in[r] = buf[r * 4 + c];
         }
         clamp_buf(temp_in, 4, (int8_t)(8 + 6 > 16 ? 8 + 6 : 16));
-        txfm(temp_in, temp_out, cos_bit_col, stage_range);
+        txfm_col(temp_in, temp_out, cos_bit_col, stage_range);
         svt_av1_round_shift_array_c(temp_out, 4, -shift[1]);
         for (r = 0; r < 4; ++r) {
             pred[r * stride + c] =
                 (uint8_t)clip_pixel_highbd(pred[r * stride + c] + temp_out[r], 8);
         }
     }
+}
+
+static void svtd_inv2dadd4x4(const int32_t* input, uint8_t* pred, int32_t stride, TxfmFunc txfm) {
+    svtd_inv2dadd4x4_t(input, pred, stride, txfm, txfm);
 }
 
 // ---- builder call helpers --------------------------------------------------
@@ -395,7 +414,8 @@ static void svtd_builder_d67(uint8_t* dst, const uint8_t* above, int n_top, int 
 // 13/13 (fwd_cos_bit_col/row[1][1]). Col pass left-shifts by shift[0]=2,
 // after col transform right-shift by -shift[1]=1 (rounding), row pass no
 // final shift.
-static void svtd_fwd2d8x8(const int16_t* input, uint32_t input_stride, int32_t* output, TxfmFunc txfm) {
+static void svtd_fwd2d8x8_t(const int16_t* input, uint32_t input_stride, int32_t* output,
+                             TxfmFunc txfm_col, TxfmFunc txfm_row) {
     const int8_t* shift       = fwd_shift_8x8;
     const int8_t  cos_bit_col = fwd_cos_bit_col[1][1];
     const int8_t  cos_bit_row = fwd_cos_bit_row[1][1];
@@ -409,23 +429,28 @@ static void svtd_fwd2d8x8(const int16_t* input, uint32_t input_stride, int32_t* 
             temp_in[r] = input[r * input_stride + c];
         }
         svt_av1_round_shift_array_c(temp_in, 8, -shift[0]);
-        txfm(temp_in, temp_out, cos_bit_col, NULL);
+        txfm_col(temp_in, temp_out, cos_bit_col, NULL);
         svt_av1_round_shift_array_c(temp_out, 8, -shift[1]);
         for (r = 0; r < 8; ++r) {
             buf[r * 8 + c] = temp_out[r];
         }
     }
     for (r = 0; r < 8; ++r) {
-        txfm(buf + r * 8, output + r * 8, cos_bit_row, NULL);
+        txfm_row(buf + r * 8, output + r * 8, cos_bit_row, NULL);
         svt_av1_round_shift_array_c(output + r * 8, 8, -shift[2]);
     }
+}
+
+static void svtd_fwd2d8x8(const int16_t* input, uint32_t input_stride, int32_t* output, TxfmFunc txfm) {
+    svtd_fwd2d8x8_t(input, input_stride, output, txfm, txfm);
 }
 
 // ---- inverse 2D add core (8x8) ---------------------------------------------
 // Specialization of inv_txfm2d_add_c (inv_transforms.c:2496) to TX_8X8,
 // 8-bit, no flips: inv_shift_8x8 = {-1, -4} (inv_transforms.c:19), cos_bit
 // 12 (INV_COS_BIT), clamp bits bd+8=16 and max(bd+6,16)=16.
-static void svtd_inv2dadd8x8(const int32_t* input, uint8_t* pred, int32_t stride, TxfmFunc txfm) {
+static void svtd_inv2dadd8x8_t(const int32_t* input, uint8_t* pred, int32_t stride, TxfmFunc txfm_row,
+                               TxfmFunc txfm_col) {
     const int8_t* shift       = inv_shift_8x8;
     const int8_t  cos_bit_col = inv_cos_bit_col[1][1];
     const int8_t  cos_bit_row = inv_cos_bit_row[1][1];
@@ -440,7 +465,7 @@ static void svtd_inv2dadd8x8(const int32_t* input, uint8_t* pred, int32_t stride
             temp_in[c] = input[r * 8 + c];
         }
         clamp_buf(temp_in, 8, (int8_t)(8 + 8));
-        txfm(temp_in, buf + r * 8, cos_bit_row, stage_range);
+        txfm_row(temp_in, buf + r * 8, cos_bit_row, stage_range);
         svt_av1_round_shift_array_c(buf + r * 8, 8, -shift[0]);
     }
     for (c = 0; c < 8; ++c) {
@@ -448,14 +473,56 @@ static void svtd_inv2dadd8x8(const int32_t* input, uint8_t* pred, int32_t stride
             temp_in[r] = buf[r * 8 + c];
         }
         clamp_buf(temp_in, 8, (int8_t)(8 + 6 > 16 ? 8 + 6 : 16));
-        txfm(temp_in, temp_out, cos_bit_col, stage_range);
+        txfm_col(temp_in, temp_out, cos_bit_col, stage_range);
         svt_av1_round_shift_array_c(temp_out, 8, -shift[1]);
         for (r = 0; r < 8; ++r) {
             pred[r * stride + c] =
-                (uint8_t)clip_pixel_highbd(pred[r * stride + c] + temp_out[r], 8);
+                 (uint8_t)clip_pixel_highbd(pred[r * stride + c] + temp_out[r], 8);
         }
     }
 }
+
+static void svtd_inv2dadd8x8(const int32_t* input, uint8_t* pred, int32_t stride, TxfmFunc txfm) {
+    svtd_inv2dadd8x8_t(input, pred, stride, txfm, txfm);
+}
+
+// ---- intra-chroma tx type (the generator's C mirror of the l3 function) -----
+// svt_aom_get_intra_uv_tx_type (mode_decision.c:2985-2997) with the same four
+// sources the l3 copy cites, so the two implementations are auditable against
+// each other: g_intra_mode_to_tx_type (mode_decision.c:2959-2973) for the 13
+// entries, the same function for the two gates, av1_ext_tx_used
+// (common_utils.c:197-204) for the used-mask rows, get_ext_tx_set_type
+// (common_utils.h:59-70) for the set-type rule. The generator is a separate C
+// program and cannot link the l3 port, so this duplication is the repo's
+// standing shape.
+//
+// `mode` is the ALREADY-FOLDED luma-space mode: the reference folds internally
+// via get_uv_mode (common_utils.c:14), and the generator already carries that
+// 1:1 fold as g_uv2y, applied by the caller.
+static int svtd_intra_uv_tx_type(int mode, int sqr_up) {
+    if (sqr_up > 32) return DCT_DCT;  // txsize_sqr_up_map[tx_size] > TX_32X32
+    static const uint8_t lut[13] = {
+        DCT_DCT, ADST_DCT, DCT_ADST, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST,
+        DCT_ADST, ADST_DCT, ADST_ADST, ADST_DCT, DCT_ADST, ADST_ADST};
+    static const uint8_t ext_tx_used[2][4] = {
+        {1, 0, 0, 0},  // EXT_TX_SET_DCTONLY   (common_utils.c:198)
+        {1, 1, 1, 1},  // EXT_TX_SET_DTT4_IDTX (common_utils.c:200)
+    };
+    const int type = lut[mode];
+    // get_ext_tx_set_type at is_inter=0, use_reduced_set=1: DCTONLY when
+    // sqr_up >= TX_32X32, else DTT4_IDTX (common_utils.h:62-69). Rows 1/3/4/5
+    // are unreachable for intra + reduced, hence absent rather than dead.
+    const int set_row = (sqr_up >= 32) ? 0 : 1;
+    return ext_tx_used[set_row][type] ? type : DCT_DCT;
+}
+
+// Per-pass 1D selection from vtx_tab/htx_tab (inv_transforms.h:45-62, :63-80):
+// ADST_DCT is ADST in the column pass and DCT in the row pass, DCT_ADST is the
+// mirror. Named by direction, not by side - the forward runs columns first and
+// the inverse runs rows first, so both select from this same pair and the
+// difference lives in the pass order.
+static int svtd_is_adst_col(int type) { return type == ADST_DCT || type == ADST_ADST; }
+static int svtd_is_adst_row(int type) { return type == DCT_ADST || type == ADST_ADST; }
 
 // ---- forward 2D core (16x16) -----------------------------------------------
 // Specialization of av1_tranform_two_d_core_c (transforms.c:2398) to TX_16X16,
@@ -463,7 +530,8 @@ static void svtd_inv2dadd8x8(const int32_t* input, uint8_t* pred, int32_t stride
 // col 13 = fwd_cos_bit_col[2][2], row 12 = fwd_cos_bit_row[2][2]
 // (transforms.c:19-22). Col pass left-shifts by shift[0]=2, after col
 // transform right-shifts by -shift[1]=2 (rounding), row pass no final shift.
-static void svtd_fwd2d16x16(const int16_t* input, uint32_t input_stride, int32_t* output, TxfmFunc txfm) {
+static void svtd_fwd2d16x16_t(const int16_t* input, uint32_t input_stride, int32_t* output,
+                              TxfmFunc txfm_col, TxfmFunc txfm_row) {
     const int8_t* shift       = fwd_shift_16x16;
     const int8_t  cos_bit_col = 13;  // fwd_cos_bit_col[2][2]
     const int8_t  cos_bit_row = 12;  // fwd_cos_bit_row[2][2]
@@ -477,16 +545,20 @@ static void svtd_fwd2d16x16(const int16_t* input, uint32_t input_stride, int32_t
             temp_in[r] = input[r * input_stride + c];
         }
         svt_av1_round_shift_array_c(temp_in, 16, -shift[0]);
-        txfm(temp_in, temp_out, cos_bit_col, NULL);
+        txfm_col(temp_in, temp_out, cos_bit_col, NULL);
         svt_av1_round_shift_array_c(temp_out, 16, -shift[1]);
         for (r = 0; r < 16; ++r) {
             buf[r * 16 + c] = temp_out[r];
         }
     }
     for (r = 0; r < 16; ++r) {
-        txfm(buf + r * 16, output + r * 16, cos_bit_row, NULL);
+        txfm_row(buf + r * 16, output + r * 16, cos_bit_row, NULL);
         svt_av1_round_shift_array_c(output + r * 16, 16, -shift[2]);
     }
+}
+
+static void svtd_fwd2d16x16(const int16_t* input, uint32_t input_stride, int32_t* output, TxfmFunc txfm) {
+    svtd_fwd2d16x16_t(input, input_stride, output, txfm, txfm);
 }
 
 // ---- inverse 2D add core (16x16) -------------------------------------------
@@ -497,7 +569,8 @@ static void svtd_fwd2d16x16(const int16_t* input, uint32_t input_stride, int32_t
 // opt_range, bd=8). Row pass right-shifts -shift[0]=2 after the row 1D; col
 // pass right-shifts -shift[1]=4 before the clip add. stage_range = opt_range
 // 16 for every stage (DCT16 8 stages, ADST16 10; both read only indices 3-7).
-static void svtd_inv2dadd16x16(const int32_t* input, uint8_t* pred, int32_t stride, TxfmFunc txfm) {
+static void svtd_inv2dadd16x16_t(const int32_t* input, uint8_t* pred, int32_t stride,
+                                 TxfmFunc txfm_row, TxfmFunc txfm_col) {
     const int8_t* shift       = inv_shift_16x16;
     const int8_t  cos_bit_col = inv_cos_bit_col[2][2];
     const int8_t  cos_bit_row = inv_cos_bit_row[2][2];
@@ -516,7 +589,7 @@ static void svtd_inv2dadd16x16(const int32_t* input, uint8_t* pred, int32_t stri
             temp_in[c] = input[r * 16 + c];
         }
         clamp_buf(temp_in, 16, (int8_t)(8 + 8));
-        txfm(temp_in, buf + r * 16, cos_bit_row, stage_range);
+        txfm_row(temp_in, buf + r * 16, cos_bit_row, stage_range);
         svt_av1_round_shift_array_c(buf + r * 16, 16, -shift[0]);
     }
     for (c = 0; c < 16; ++c) {
@@ -524,13 +597,17 @@ static void svtd_inv2dadd16x16(const int32_t* input, uint8_t* pred, int32_t stri
             temp_in[r] = buf[r * 16 + c];
         }
         clamp_buf(temp_in, 16, (int8_t)(8 + 6 > 16 ? 8 + 6 : 16));
-        txfm(temp_in, temp_out, cos_bit_col, stage_range);
+        txfm_col(temp_in, temp_out, cos_bit_col, stage_range);
         svt_av1_round_shift_array_c(temp_out, 16, -shift[1]);
         for (r = 0; r < 16; ++r) {
             pred[r * stride + c] =
                 (uint8_t)clip_pixel_highbd(pred[r * stride + c] + temp_out[r], 8);
         }
     }
+}
+
+static void svtd_inv2dadd16x16(const int32_t* input, uint8_t* pred, int32_t stride, TxfmFunc txfm) {
+    svtd_inv2dadd16x16_t(input, pred, stride, txfm, txfm);
 }
 
 // ---- forward 2D core (32x32, L0) -------------------------------------------
@@ -6390,16 +6467,29 @@ static int svtd_cs4_uv_q_drive(int S) {
                     memset(cqc, 0, sizeof(cqc));
                     memset(cdq, 0, sizeof(cdq));
                     uint16_t ceobv = 0;
+                    // The intra-chroma tx type is DERIVED from the decided UV
+                    // mode, never transmitted (decodetxb.c:156-159 reads the
+                    // tx_type for AOM_PLANE_Y only; both decoders derive the
+                    // chroma type from the mode - dav1d recon_tmpl.c:357-360,
+                    // aom blockd.h:1303-1305). sq_up = S: the chroma plane is
+                    // S x S, and its square-up size class is S.
+                    const int ctxt = svtd_intra_uv_tx_type(g_uv2y[uvm], S);
                     if (S == 4) {
-                        svtd_fwd2d4x4(cres, S, ccb, svt_av1_fdct4_new);
+                        svtd_fwd2d4x4_t(cres, S, ccb, svtd_is_adst_col(ctxt) ? svt_av1_fadst4_new : svt_av1_fdct4_new,
+                                        svtd_is_adst_row(ctxt) ? svt_av1_fadst4_new : svt_av1_fdct4_new);
                         svtd_quantize_fp_4x4(ccb, &t, uscan, cqc, cdq, &ceobv);
                     } else if (S == 8) {
-                        svtd_fwd2d8x8(cres, S, ccb, svt_av1_fdct8_new);
+                        svtd_fwd2d8x8_t(cres, S, ccb, svtd_is_adst_col(ctxt) ? svt_av1_fadst8_new : svt_av1_fdct8_new,
+                                        svtd_is_adst_row(ctxt) ? svt_av1_fadst8_new : svt_av1_fdct8_new);
                         svtd_quantize_fp_8x8(ccb, &t, uscan, cqc, cdq, &ceobv);
                     } else if (S == 16) {
-                        svtd_fwd2d16x16(cres, S, ccb, svt_av1_fdct16_new);
+                        svtd_fwd2d16x16_t(cres, S, ccb, svtd_is_adst_col(ctxt) ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                                          svtd_is_adst_row(ctxt) ? svt_av1_fadst16_new : svt_av1_fdct16_new);
                         svtd_quantize_fp_16x16(ccb, &t, uscan, cqc, cdq, &ceobv);
                     } else {
+                        // TX_32X32: the tx-set rule forces DCT_DCT
+                        // (get_ext_tx_set_type -> DCTONLY), so the single-kernel
+                        // form is exact here - matching 99e8d2d's l3 scope.
                         svtd_fwd2d32x32(cres, S, ccb, svt_av1_fdct32_new);
                         svtd_quantize_fp_32x32(ccb, &t, uscan, cqc, cdq, &ceobv);
                     }
@@ -6434,9 +6524,21 @@ static int svtd_cs4_uv_q_drive(int S) {
                     }
                     for (int k = 0; k < utx_w_unit; ++k) naA[uvmi_col + k] = (uint8_t)cul;
                     for (int k = 0; k < utx_w_unit; ++k) naL[uvmi_row + k] = (uint8_t)cul;
-                    if (S == 4) svtd_inv2dadd4x4(cdq, cpred, S, svt_av1_idct4_new);
-                    else if (S == 8) svtd_inv2dadd8x8(cdq, cpred, S, svt_av1_idct8_new);
-                    else if (S == 16) svtd_inv2dadd16x16(cdq, cpred, S, svt_av1_idct16_new);
+                    if (S == 4)
+                        svtd_inv2dadd4x4_t(cdq, cpred, S,
+                                           svtd_is_adst_row(ctxt) ? svt_av1_iadst4_new : svt_av1_idct4_new,
+                                           svtd_is_adst_col(ctxt) ? svt_av1_iadst4_new : svt_av1_idct4_new);
+                    else if (S == 8)
+                        svtd_inv2dadd8x8_t(cdq, cpred, S,
+                                           svtd_is_adst_row(ctxt) ? svt_av1_iadst8_new : svt_av1_idct8_new,
+                                           svtd_is_adst_col(ctxt) ? svt_av1_iadst8_new : svt_av1_idct8_new);
+                    else if (S == 16)
+                        // the inverse runs ROWS first (inv_transforms.c:2532
+                        // txfm_func_row, :2541 txfm_func_col) - the row kernel
+                        // goes in the first pass, the mirror of the forward
+                        svtd_inv2dadd16x16_t(cdq, cpred, S,
+                                             svtd_is_adst_row(ctxt) ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                                             svtd_is_adst_col(ctxt) ? svt_av1_iadst16_new : svt_av1_idct16_new);
                     else svtd_inv2dadd32x32(cdq, cpred, S, svt_av1_idct32_new);
                     for (int i = 0; i < S; ++i)
                         for (int j = 0; j < S; ++j)
