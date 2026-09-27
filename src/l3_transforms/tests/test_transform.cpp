@@ -405,6 +405,31 @@ TEST_CASE("fwdTxfm2d16x16 ADST_DCT is not ADST_ADST (per-pass 1D selection)") {
     CHECK(differs);
 }
 
+TEST_CASE("invTxfm2dAdd16x16 ADST_DCT is not ADST_ADST (row pass first)") {
+    // The inverse runs ROWS FIRST (inv_transforms.c:2532, txfm_func_row) and
+    // columns second (:2541, txfm_func_col) - the opposite of the forward order
+    // (transforms.c:2428 columns, then rows). txfm_func_col and txfm_func_row are
+    // selected independently from cfg->txfm_type_col / txfm_type_row via
+    // svt_aom_inv_txfm_type_to_func (inv_transforms.c:2518-2521), so the first
+    // pass takes the type's ROW kernel. Mapping the forward's column selector
+    // onto the first pass here would silently transpose ADST_DCT and DCT_ADST
+    // while every symmetric-type golden still passed.
+    std::int32_t coeffs[256];
+    for (int r = 0; r < 16; ++r)
+        for (int c = 0; c < 16; ++c)
+            coeffs[r * 16 + c] = ((c * 13 + r * 7 + ((c * r) & 31)) % 211) - 105;
+    std::uint8_t adstDct[256] = {0};
+    std::uint8_t adstAdst[256] = {0};
+    std::uint8_t zero[256] = {0};
+    transforms::invTxfm2dAdd16x16(coeffs, adstDct, 16, transforms::TxType::ADST_DCT);
+    transforms::invTxfm2dAdd16x16(coeffs, adstAdst, 16, transforms::TxType::ADST_ADST);
+    bool differs = false;
+    for (int i = 0; i < 256; ++i)
+        if (adstDct[i] != adstAdst[i]) differs = true;
+    CHECK(differs);
+    (void)zero;
+}
+
 TEST_CASE("intraUvTxType pins the 13-entry LUT and both gates") {
     // g_intra_mode_to_tx_type (mode_decision.c:2959-2973), transcribed by
     // position. The four oblique slots carry different angle labels in the two
