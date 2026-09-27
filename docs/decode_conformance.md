@@ -286,6 +286,31 @@ becomes available is exactly where the divergence starts, and a
 lower-left-localized prediction error is the right shape for a PARTIAL
 79/256 rather than whole-block divergence.
 
+**The four source-pinned links (no derived steps).** p_angle =
+`mode_to_angle_map[mode] + angle_delta * ANGLE_STEP` (:9183), and mode 7
+is the oblique directional slot (D203/D207 - the one slot whose two
+trees disagree on naming), so `is_dr_mode` is true (:9179) and p_angle
+falls in (180, 270). The gate is **`is_dr_mode && p_angle > 180`**
+(:9222), not "any directional": mode 7 qualifies on both counts, but a
+patch that assumed "any directional" would mispredict for the 90/180
+cardinal cases, and the filter's own guard at :9303
+(`p_angle != 90 && p_angle != 180`) skips filtering entirely for those.
+The bottom-left extension is also reachable by a SECOND route - the
+non-directional path takes need_bottom from
+`extend_modes[mode] & NEED_BOTTOMLEFT` (:9217) - so the step-2 dump must
+record WHICH route fired for the block under test rather than assuming
+the p_angle branch.
+
+**The mechanical link (the cleanest single citation in the
+candidate).** The actual gathers are gated on the pixel counts being
+non-zero: the bottom-left gather on `n_bottomleft_px > 0` (:9230) and
+the top-right gather on `n_topright_px > 0` (:9261). Our CS4 luma path
+passes `n_bottomleft = 0` as a literal, so **no gather happens at
+all** - the extension is not merely "wrong data", it is never read, and
+the footprint is filled by the `memset` repetition at :9237 instead.
+That is the direct causal chain from the hardcoded 0 to the
+divergence, and it is the single link to check first in step 2.
+
 **The decisive measurement (next slice; measure, do not fix).** Patch
 the throwaway dav1d at the intra_pred call site (recon_tmpl.c:1275) to
 print, for the block at bx=2, by=0, the have_bottomleft value and the 16
