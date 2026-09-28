@@ -1881,9 +1881,7 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
             // Unlike the top-right (structural, per de5321a) this axis IS
             // decode-order dependent: the below-left leaf is (by+1, bx-1),
             // available exactly when its Z-order position precedes this leaf's.
-            const int blIdx = (by + 1) * grid + (bx - 1);
-            const int nBottomLeftPx =
-                (hasLeft && by + 1 < grid && zPos[blIdx] < zPos[bidx]) ? lumaB : 0;
+            const int nBottomLeftPx = bottomLeftPx(bidx, by, bx, grid, zPos, lumaB);
             std::uint8_t above[129] = {0};
             std::uint8_t left[129] = {0};
             if (hasTop)
@@ -2417,6 +2415,12 @@ void encodeFrameAutoChroma16x16Q(const pixels::Plane& src, pixels::Plane& recon,
                 for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = blk[y * 16 + x];
         }
     }
+}
+
+int bottomLeftPx(int bIdx, int by, int bx, int grid, const int* zPos, int blockPx) {
+    if (bx <= 0 || by + 1 >= grid) return 0;
+    const int blIdx = (by + 1) * grid + (bx - 1);
+    return zPos[blIdx] < zPos[bIdx] ? blockPx : 0;
 }
 
 }  // namespace pipeline

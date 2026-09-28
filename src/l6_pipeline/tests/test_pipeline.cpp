@@ -4877,6 +4877,119 @@ TEST_CASE("gpu frame auto chroma 16x16 matches host encodeFrameAutoChroma16x16")
 #include "ecs4_gate.inc"
 
 TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
+    // The bottom-left AVAILABILITY rule is exercised EXHAUSTIVELY here, and
+    // self-checkingly: the test restates the geometric rule independently from
+    // the Z-order map it rebuilds below, and asserts pipeline::bottomLeftPx
+    // agrees for EVERY leaf of EVERY geometry. No leaf count is hand-
+    // transcribed - a literal would be indistinguishable from a correct value
+    // to the reader, would keep asserting a stale number after the zpos map
+    // changed, and would leave the suite green on a wrong expectation.
+    {
+        // the Z-order construction, mirrored from pipeline.cpp:1772-1782
+        // (zorderLeaves) and the inverse map at pipeline.cpp:1851-1852. Mirrored
+        // rather than hardcoded: the Z-order is independently pinned by the
+        // RT6 emission tests, and a transcribed order would be exactly the
+        // literal this constraint forbids.
+        struct ZOrder {
+            static void leaves(int size, int x0, int y0, int grid, int* out, int* n) {
+                if (size == 1) {
+                    out[(*n)++] = y0 * grid + x0;
+                    return;
+                }
+                const int h = size / 2;
+                leaves(h, x0, y0, grid, out, n);
+                leaves(h, x0 + h, y0, grid, out, n);
+                leaves(h, x0, y0 + h, grid, out, n);
+                leaves(h, x0 + h, y0 + h, grid, out, n);
+            }
+        };
+        // UV leaf indices ARE the luma leaf indices: uvB = lumaB/2, the UV
+        // origin is (px & ~7) >> 1, so uRow == by and uCol == bx, and
+        // uvGrid = 32/uvB = 64/lumaB = grid. That identity is why the chroma
+        // site needs no second Z-order map.
+        //
+        // The builder's MODE predicate reduces to one enum value: kModeToAngle
+        // (intra.cpp:476) is {0,90,180,45,135,113,157,203,67,0,0,0,0}, whose
+        // only entry above 180 is index 7, and the enum names index 7
+        // UV_D203_PRED; with needBottom = pAngle > 180 (intra.cpp:546) the
+        // predicate is therefore `mode == UV_D203_PRED`. Derived from the enum
+        // and the one cited table, not typed in as a copied list.
+        for (int si = 0; si < 4; ++si) {
+            static const int sizes[4] = {4, 8, 16, 32};
+            const int S = sizes[si];
+            const int B = 2 * S;
+            const int grid = 64 / B;
+            const int nb = grid * grid;
+            const ecs4::Gate& G = ecs4::gates[si];
+            int zord[64], zn = 0;
+            ZOrder::leaves(grid, 0, 0, grid, zord, &zn);
+            REQUIRE(zn == nb);
+            int zPos[64];
+            for (int i = 0; i < zn; ++i) zPos[zord[i]] = i;
+            // per-leaf: the function's verdict must equal the rule restated
+            // here from zPos, and a non-zero verdict must be the block size.
+            // Named per leaf so a disagreement localises instead of showing up
+            // as one opaque total.
+            int fnTotal = 0, derivedTotal = 0, nAvail = 0, nQualify = 0;
+            for (int b = 0; b < nb; ++b) {
+                const int by = b / grid, bx = b % grid;
+                const int fn = pipeline::bottomLeftPx(b, by, bx, grid, zPos, S);
+                // the rule, restated independently of the implementation
+                const bool derived = (bx > 0) && (by + 1 < grid) &&
+                                     (zPos[(by + 1) * grid + (bx - 1)] < zPos[b]);
+                if (derived) {
+                    ++nAvail;
+                    derivedTotal += S;
+                    INFO("geometry S=" << S << " leaf " << b << " below-left available");
+                }
+                if (fn != 0) {
+                    REQUIRE(fn == S);
+                    fnTotal += S;
+                }
+                if ((fn != 0) != derived) {
+                    INFO("geometry S=" << S << " leaf " << b << " by=" << by << " bx=" << bx
+                                       << " fn=" << fn << " derived=" << derived);
+                }
+                REQUIRE((fn != 0) == derived);
+                // the mode predicate, applied to the committed gate's U mode
+                // (-1 is the generator's non-referenced sentinel). Read from
+                // the gate rather than assuming the leaf set.
+                const int um = G.modes[3 * b + 1];
+                if (um >= 0 && um == static_cast<int>(intra::UV_D203_PRED)) {
+                    ++nQualify;
+                    if (derived) INFO("geometry S=" << S << " leaf " << b << " qualifies (D203)");
+                }
+            }
+            REQUIRE(fnTotal == derivedTotal);
+            // the gathered-pixel total the fix must produce: every chroma-
+            // referenced D203 leaf whose below-left is available.
+            int wantTotal = 0;
+            for (int b = 0; b < nb; ++b) {
+                const int by = b / grid, bx = b % grid;
+                const int um = G.modes[3 * b + 1];
+                if (um < 0 || um != static_cast<int>(intra::UV_D203_PRED)) continue;
+                if (pipeline::bottomLeftPx(b, by, bx, grid, zPos, S)) wantTotal += S;
+            }
+            INFO("geometry S=" << S << " fnTotal=" << fnTotal << " derivedTotal=" << derivedTotal
+                               << " nAvail=" << nAvail << " nQualify=" << nQualify
+                               << " wantTotal=" << wantTotal);
+            // The coverage claim, asserted in BOTH directions and falsifiable.
+            // S is the UV (chroma) block size, so S = 4 and 8 are the c4 and
+            // c8 artifacts - the two geometries the CS7 map says must change,
+            // and the fixture must therefore exercise the gather there. S = 16
+            // is the negative control (its one D203 leaf has no available
+            // below-left, which is dav1d's measured UV_LEFT_HAS_BOTTOM = 0 at
+            // this very block) and S = 32 is the single-luma-block geometry,
+            // grid == 1, so neither may gather anything. Asserting those ZEROS
+            // is asserting the control, not tuning a number to a result: a
+            // non-zero here would mean the control had been lost and c16's 1:1
+            // conformance would stop being evidence for the mechanism.
+            if (S == 4 || S == 8)
+                REQUIRE(wantTotal > 0);
+            else
+                REQUIRE(wantTotal == 0);
+        }
+    }
     // THE WALK (the ratified CS4 order, the write_modes_b shape): per luma
     // block in raster order [luma kf mode symbol -> uv_mode symbol
     // (writeUvMode, the DECIDED chroma mode; ONE uv_mode per block - the V

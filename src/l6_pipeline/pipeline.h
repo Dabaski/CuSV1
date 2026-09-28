@@ -213,6 +213,34 @@ ModeDecision decideBlockModeUv(const std::uint8_t* src, const std::uint8_t* abov
 // 1024-position emission domain). No partition/skip symbols (the ratified
 // TD5b-era shape extended). The v3 SPS/frame-header composition is NOT
 // wired here (CS5).
+// The bottom-left AVAILABILITY rule, in one named place, shared by the luma
+// and the chroma call sites and parameterised only by the block size.
+//
+// This is the CALLER side of the RT10b policy and its counterpart: the caller
+// supplies availability, the builder supplies the mode predicate.
+// build_intra_predictors mutates ONE variable in sequence - seed from
+// NEED_BOTTOMLEFT, force 0 for filter-intra, then OVERWRITE with
+// is_dr_mode && p_angle > 180 (intra.cpp:546, needBottom = pAngle > 180) - so
+// duplicating the mode predicate at a call site is the trap RT10b already paid
+// for once. What is NOT duplicated here is the geometric rule.
+//
+// The rule: the below-left leaf of (by, bx) is (by+1, bx-1), and it is
+// available exactly when it exists (bx > 0 and by+1 < grid) and precedes this
+// leaf in Z-order. That axis IS decode-order dependent, unlike the top-right.
+// Note there is no y + th >= h term, and dav1d's unset branch is
+// (!have_left || y + th >= h) - for a WHOLE-LEAF block in a LEAF-ALIGNED frame
+// the two are equivalent, because "touches the plane bottom" is "the leaf is on
+// the last row" is "by + 1 < grid" being false. The one assumption that would
+// make a missing term live is a frame whose dimensions are not leaf-aligned, or
+// a partial block; our walk produces neither.
+//
+// Returns blockPx when the extension is available, 0 otherwise. Exposed (not a
+// test-only seam) so the availability rule is DIRECTLY CALLABLE: the CS4 walk
+// test asserts this function's output for every leaf of every geometry against
+// a sum derived from the Z-order map and the committed gate modes, which is the
+// alternative to hand-transcribing a leaf count into a test.
+int bottomLeftPx(int bIdx, int by, int bx, int grid, const int* zPos, int blockPx);
+
 void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                         const pixels::Plane& srcV, pixels::Plane& reconY, pixels::Plane& reconU,
                         pixels::Plane& reconV, std::int32_t* coeffsY, std::int32_t* coeffsU,
