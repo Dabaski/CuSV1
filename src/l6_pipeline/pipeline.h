@@ -234,11 +234,15 @@ ModeDecision decideBlockModeUv(const std::uint8_t* src, const std::uint8_t* abov
 // make a missing term live is a frame whose dimensions are not leaf-aligned, or
 // a partial block; our walk produces neither.
 //
-// Returns blockPx when the extension is available, 0 otherwise. Exposed (not a
-// test-only seam) so the availability rule is DIRECTLY CALLABLE: the CS4 walk
-// test asserts this function's output for every leaf of every geometry against
-// a sum derived from the Z-order map and the committed gate modes, which is the
-// alternative to hand-transcribing a leaf count into a test.
+// Returns blockPx when the extension is available, 0 otherwise. CONTRACT: bx > 0
+// means "this block has a left neighbour" - the l6 hasLeft conjunct is
+// subsumed by the bx <= 0 test, so a caller holding a DIFFERENT notion of
+// availability must not pass its own flag as bx, and the signature will not warn
+// them. Exposed (not a test-only seam) so the availability rule is DIRECTLY
+// CALLABLE: the CS4 walk test asserts this function's output for every leaf of
+// every geometry against a sum derived from the Z-order map and the committed
+// gate modes, which is the alternative to hand-transcribing a leaf count into a
+// test.
 int bottomLeftPx(int bIdx, int by, int bx, int grid, const int* zPos, int blockPx);
 
 void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,

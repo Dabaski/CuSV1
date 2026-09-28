@@ -4970,9 +4970,15 @@ TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
                 if (um < 0 || um != static_cast<int>(intra::UV_D203_PRED)) continue;
                 if (pipeline::bottomLeftPx(b, by, bx, grid, zPos, S)) wantTotal += S;
             }
-            INFO("geometry S=" << S << " fnTotal=" << fnTotal << " derivedTotal=" << derivedTotal
-                               << " nAvail=" << nAvail << " nQualify=" << nQualify
-                               << " wantTotal=" << wantTotal);
+            // Printed on SUCCESS, not only on failure: an INFO that fires only
+            // on failure leaves the derived numbers unreadable, and a test whose
+            // numbers nobody has read is a test whose numbers nobody has
+            // checked. These totals are quoted by the fix commit, so they have
+            // to be visible without manufacturing a failure to see them.
+            MESSAGE("RT11 derive S=" << S << " (S is the UV block size) nAvail=" << nAvail
+                                     << " nQualify=" << nQualify << " fnTotal=" << fnTotal
+                                     << " derivedTotal=" << derivedTotal
+                                     << " wantTotal=" << wantTotal);
             // The coverage claim, asserted in BOTH directions and falsifiable.
             // S is the UV (chroma) block size, so S = 4 and 8 are the c4 and
             // c8 artifacts - the two geometries the CS7 map says must change,
