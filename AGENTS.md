@@ -80,7 +80,7 @@ compile. If you can split a step into two smaller ones, split it.
     instrument output, not a claim, and no commit hash is quoted here because
     a number measured on a working tree cannot name the commit that the edit
     producing it will create. As measured 2026-09-28:
-    359 citations, 348 resolved in-tree, **0 out-of-range**, 11 unresolvable
+    361 citations, 350 resolved in-tree, **0 out-of-range**, 11 unresolvable
     (the AV1 spec markdown plus three dav1d decoder internals, which are not
     vendored - check those against the external checkouts by hand). The script
     prints the scanned doc set's size and a content hash WITH every count, so a

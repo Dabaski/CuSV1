@@ -663,10 +663,89 @@ shipped feature set (mono/color intra streams).
     while looking exactly like a passing test, and a hand-tuned expectation is
     the one outcome this whole entry exists to prevent.
 
+    **THE STRUCTURAL BOUND, derived from the Z-order alone - so it needs
+    no fixture to establish, and only four committed fixtures sample it.**
+    `nAvail` = the number of leaves whose below-left neighbour both EXISTS and
+    precedes them in the decode_partition visit order. It is a pure function
+    of the grid, obtained by enumerating `zorderLeaves` for that grid and
+    counting `bx > 0 && by+1 < grid && zPos[(by+1)*grid+(bx-1)] < zPos[b]`.
+    Measured 2026-09-28 by that enumeration, with no reference to any gate
+    line:
+
+    | grid | leaves | nAvail | state |
+    |---|---|---|---|
+    | 1 | 1 | 0 | INERT |
+    | 2 | 4 | 0 | INERT |
+    | 4 | 16 | 2 | BOUNDED |
+    | 8 | 64 | 14 | BOUNDED |
+    | 16 | 256 | 70 | BOUNDED |
+    | 32 | 1024 | 310 | BOUNDED |
+
+    NO CLOSED FORM IS CLAIMED. Six measured points, and the enumeration is
+    cheap enough that a wider configuration space should be enumerated rather
+    than fitted - do not extrapolate the table.
+
+    **THE CROSS-CHECK that makes the table trustworthy rather than merely
+    plausible: grid 8 -> 14 and grid 4 -> 2 are exactly the `nAvail` values
+    the committed chroma fixtures report.** The CS4 invariance test prints
+    them on success (`RT11 derive S=4 ... nAvail=14`, `S=8 ... nAvail=2`), and
+    they were independently derived here from the Z-order with no reference
+    to that test. Two derivations, same two numbers. That is the property
+    worth having: the table PREDICTS the fixtures rather than being read off
+    them, which is what makes it safe to apply to a grid no fixture covers.
+
+    **BOUNDED versus INERT, in those words, because the difference is the
+    whole point.** A grid configuration is BOUNDED when the rule CAN fire
+    and its total is finite and non-zero - grid >= 4, so nAvail is 2 at grid
+    4 and grows. A grid configuration is INERT when the rule CANNOT fire at
+    all, so there is nothing to bound and no total to predict - grid <= 2.
+    An INERT configuration is not a configuration with a zero bound; it is a
+    configuration where the question does not arise, because no leaf has an
+    available below-left. Reporting "0" for an inert grid and "0" for a
+    bounded grid that happens to gather nothing would conflate a structural
+    fact with a content-dependent one.
+
+    **16-CLOSED / 8-BOUNDED, the accounting, with the shorthand unpacked
+    because it is not self-explanatory.** "16" and "8" denote the UV BLOCK
+    SIZE, and the grid follows from the plane: the bcf fixtures compose over
+    a 32x32 UV plane, so 16x16 UV blocks give grid 32/16 = 2 (CLOSED, nAvail
+    0) and 8x8 UV blocks give grid 32/8 = 4 (BOUNDED, nAvail 2).
+
+    **AND THE GRID-CONFIGURATION CAVEAT, which is the trap: a bound is a
+    statement about a GRID CONFIGURATION, not about a committed fixture, and
+    the grid is a function of BOTH the block size and the plane size.** The
+    16/8 shorthand above is valid ONLY because the bcf plane is 32x32. The
+    same 16x16 UV block on a 64x64 UV plane would be grid 4 and BOUNDED, not
+    CLOSED. So "16-closed" is not a fact about 16x16 blocks in general; it is
+    a fact about 16x16 blocks on this plane. Anyone reusing the shorthand on
+    a different plane, or reading it as a claim about what a committed .obu
+    contains, will get it wrong. What a FIXTURE contributes is only the
+    per-leaf MODE filter on top of the bound - never the bound itself.
+
+    **FORMAT TRAP, `bcf16_modes` is not an `ecs4` line - two differences,
+    both silent.** In `tools/golden_gen/expected_primitives.txt:187` the line
+    is `bcf16_modes: 1 7 2 2` - note the COLON after the name, where the
+    ecs4 lines use a bare SPACE (`ecs44_modes 1 1 1 7 7 7 ...`). And the
+    ARITY differs: bcf16 is ONE value per leaf, ecs4 is THREE (luma, U, V).
+    So a parser written for the ecs4 shape mis-reads bcf16 twice over - the
+    colon breaks a space-split, and the three-per-leaf assumption is wrong by
+    a factor of three. The `1 7 2 2` are the per-leaf modes of the 2x2 grid
+    = 4 leaves (src/l6_pipeline/tests/test_pipeline.cpp:4544, which declares
+    `goldenModes[4] = {1, 7, 2, 2}` against a 32x32 UV plane). **AND THE
+    GRID-2 REASON, which is why this fixture is the closed case and not a
+    live one:** bcf16 is grid 2, and at grid 2 the decode_partition DFS
+    visit order coincides with raster order, so leaf (0,1)'s below-left leaf
+    (1,0) is always visited AFTER it and can never see reconstructed data.
+      A reader who assumes bcf16 exercises the gather will write a test that
+      passes without the gather running.
+
     **THE c16/c32 HALF IS ALREADY DERIVED, NOT A HOPE - do not report it as
-      "a prediction that held".** Measured 2026-09-27 from the committed gate
-      lines, by rebuilding the Z-order and applying the rule at
-      pipeline.cpp:2420-2424: the bottom-left rule fires ONLY at grid >= 4.
+    "a prediction that held".** Measured 2026-09-27 from the committed gate
+    lines, by rebuilding the Z-order and applying the rule at
+    pipeline.cpp:2420-2424: the bottom-left rule fires ONLY at grid >= 4. The
+    table above extends that statement to every grid; this one adds the
+    per-fixture content on top - the D203 column is the MODE filter, which a
+    bound alone does not and cannot predict:
 
     | S | grid | leaves | below-left available | D203 | D203+avail | wantTotal |
     |---|---|---|---|---|---|---|
