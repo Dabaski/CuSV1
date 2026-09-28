@@ -34,6 +34,6 @@ endif()
 # AGENTS.md). Built alongside the libs; run its exe manually.
 add_subdirectory(tools/bench)
 
-# committed golden-gate infrastructure — regenerates
+# committed golden-gate infrastructure - regenerates
 # expected_primitives.txt; see tools/golden_gen/README.md
 add_subdirectory(tools/golden_gen)
