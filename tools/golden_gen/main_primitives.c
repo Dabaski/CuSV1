@@ -689,7 +689,7 @@ int main(void) {
             svtd_call_builder_tx(dst, DC_PRED, 0, FILTER_INTRA_MODES, 0, dummy, 0, 0, dummy, 0, 0, 0, TX_8X8);
             printf("b5_dc128_8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
         }
-        // (b5-c) D67 at TX_8X8 — upsample path (blk_wh=16, delta=67-90=-23, 0<d<40)
+        // (b5-c) D67 at TX_8X8 - upsample path (blk_wh=16, delta=67-90=-23, 0<d<40)
         {
             const uint8_t above[16] = {10, 20, 30, 100, 50, 60, 70, 80, 90, 40, 25, 66, 11, 72, 33, 58};
             const uint8_t left[8] = {9, 9, 9, 9, 9, 9, 9, 9};
@@ -697,7 +697,7 @@ int main(void) {
             svtd_call_builder_tx(dst, D67_PRED, 0, FILTER_INTRA_MODES, 0, above, 8, 8, left, 8, 0, 7, TX_8X8);
             printf("b5_d67_8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
         }
-        // (b5-d) FILTER_V_PRED at TX_8X8 — two-column strip case (bw=8, strips at c=1,5)
+        // (b5-d) FILTER_V_PRED at TX_8X8 - two-column strip case (bw=8, strips at c=1,5)
         {
             const uint8_t above[9] = {10, 20, 30, 40, 50, 60, 70, 80, 90};
             const uint8_t left[8] = {21, 31, 41, 51, 61, 71, 81, 91};
@@ -705,7 +705,7 @@ int main(void) {
             svtd_call_builder_tx(dst, V_PRED, 0, FILTER_V_PRED /* 1 */, 0, above + 1, 8, 0, left, 8, 0, 10, TX_8X8);
             printf("b5_fiv8:"); for (int i = 0; i < 64; ++i) printf(" %d", dst[i]); printf("\n");
         }
-        // (b5-e) D45 at TX_8X8 — edge-filtered (delta=-45, |d|>=40 → strength 1)
+        // (b5-e) D45 at TX_8X8 - edge-filtered (delta=-45, |d|>=40 -> strength 1)
         {
             const uint8_t above[16] = {10, 20, 30, 40, 50, 60, 70, 80, 90, 15, 25, 35, 45, 55, 65, 75};
             const uint8_t left[8] = {12, 22, 32, 42, 52, 62, 72, 82};
@@ -1154,7 +1154,7 @@ int main(void) {
     // rows 0-7 = diagonal ramp 10*(x+y+1) (max 230, no overflow), rows 8-15
     // zero. The four row-1 4x4 blocks are the d2_d45 structure shifted by 3
     // rows (above row + REAL top-right = the ramp continuation), so D45 wins
-    // with SAD 0 and its zone-1 prediction reads above[4..7] — the extension
+    // with SAD 0 and its zone-1 prediction reads above[4..7] - the extension
     // must be REAL reconstructed samples, not zeros.
     {
         uint8_t src[256];
@@ -1253,7 +1253,7 @@ int main(void) {
     // (get_uv_mode, common_utils.h:130-133; UV_CFL_PRED -> DC_PRED,
     // common_utils.c:28) and chroma NEVER uses filter-intra
     // (enc_intra_prediction.c:641 passes FILTER_INTRA_MODES for plane != 0).
-    // The predictors themselves are plane-agnostic. Fixture policy (OURS —
+    // The predictors themselves are plane-agnostic. Fixture policy (OURS -
     // SVT has no fixtures): UV-subsampled edges aboveUV[8] = (5+3i)%237,
     // leftUV[8] = (11+7i)%237, corner 13 (distinct from every luma fixture
     // so these lines cannot alias a luma line).
