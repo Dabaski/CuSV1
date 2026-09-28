@@ -30,16 +30,18 @@ generator's recon line per geometry:
 These establish content equality for the five committed fixtures, not
 every possible encoder input or full SVT encoder behavior.
 Mode-decision/composition remain project-defined policy.
-- **Color (CS-series): full-plane conformance 2/4.** color32 and
-    color16 decode with ALL THREE planes content 1:1; color8/color4
-    decode (the RT-series parse fixes) with the LUMA plane content 1:1
-    and the U/V planes divergent - the honest per-plane matrix is the
-    RT8/RT10 conformance matrix below. The chroma bottom-left edge is
-    the named next item, and as of CS7 step 1 it is past the
-    measurement phase: the mechanism is CONFIRMED at both c8 and c4
-    (the c2 control held) and the remaining work is the FIX, not the
-    diagnosis. Its scope, its predictions and its falsifier are in
-    `docs/todo.md` section 9.
+- **Color (CS-series + CS7): full-plane conformance 3/4, c4 V-only.**
+    color16, color32 and color8 decode with ALL THREE planes content 1:1.
+    color4 decodes with Y exact and U exact and **V carrying 43 divergent
+    bytes of 1024, first at 647, across UV leaves 41/42/48/56** - recorded
+    as a V-only row and NOT as "3 of 4 conform", because the percentage would
+    bury a specific measured defect. Three of those four leaves are PARTIAL
+    (8, 16, 3, 16 bytes), which points at the gather's extent rather than a
+    whole block being mispredicted. The chroma bottom-left fix LANDED in
+    `5ce0224` and took c8 to exact on all three planes and c4's U to exact;
+    the remaining c4 V residual is the FINDING the CS7 brief predicted it
+    would be if the mechanism were not the whole story there, and it is
+    filed as such. Full record and the per-plane matrix below.
 - Our writer <-> aom-entdec roundtrip is EXACT on every TD probe rung
 (adaptation on): the arithmetic, the CDF evolution and the defaults
 are internally consistent with aom's own decoder primitives.
@@ -440,25 +442,49 @@ copy; removing the duplication removed the failure mode.
 
 ### Conformance matrix (honest, per-scope - do NOT average these)
 
-| artifact | luma | chroma | full-plane |
-|---|---|---|---|
-| c16 | 1:1 | U 1:1, V 1:1 | **1:1** |
-| c32 | 1:1 | U 1:1, V 1:1 | **1:1** |
-| c8  | **1:1 (0/4096)** | U 165/1024, V 205/1024 | divergent |
-| c4  | **1:1 (0/4096)** | U 244/1024, V 287/1024 | divergent |
+Re-measured 2026-09-28 at `5ce0224` (the CS7 fix) with
+`tools/verify_decode4.ps1 -Color N`; the c4 leaf breakdown was recomputed
+independently from the decoded plane against `ecs44_recon_v`.
 
-**Full-plane color conformance is 2/4 artifacts.** The chroma residuals
-at c8/c4 were measured UNCHANGED by the luma fix - no ecs4S_recon_u /
-recon_v line moved in the regen, so the luma recon change never reached
-the UV decisions. A single averaged percentage across these mixed
-scopes would be meaningless; the per-plane figures are the record.
+| artifact | Y | U | V | full-plane |
+|---|---|---|---|---|
+| c16 | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** |
+| c32 | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** |
+| c8  | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** |
+| c4  | 1:1 (0/4096) | 1:1 (0/1024) | **43/1024 diverge, first at 647** | **V-only divergent** |
 
-**The pins as the safety net.** ecs416_*, ecs432_*, tu_color16 and
-tu_color32 are byte-identical, and the reason that mattered is that
-c16's mode-7 blocks have no available below-left under EITHER the decode
-order or the Z-order gate - so a moved c16 line would have falsified
-the availability gate. It did not move, which is the evidence that the
-gate is right rather than merely inert.
+**Full-plane color conformance is 3/4 artifacts, and the fourth is recorded
+V-ONLY on purpose.** c8 went from `U 165/1024, V 205/1024` to exact on all
+three planes. c4 went from `U 244/1024, V 287/1024` to **Y exact and U exact
+with V still carrying 43 divergent bytes** - so the U half of the c4 residual
+was the same defect and is gone, and a second, smaller V-only defect remains.
+**Do NOT report this as "3 of 4 conform": the percentage would bury a
+specific, isolated, measured 43-byte defect behind a rate.** The defect is:
+
+    c4 V plane, 43 of 1024 bytes, first differing byte at offset 647,
+    across exactly four 4x4 UV leaves:
+      leaf 41 (row 5, col 1)   8 bytes
+      leaf 42 (row 5, col 2)  16 bytes
+      leaf 48 (row 6, col 0)   3 bytes
+      leaf 56 (row 7, col 0)  16 bytes
+
+**The per-leaf counts are 8, 16, 3, 16 - three of the four are PARTIAL.**
+That is the most diagnostic fact in the row and it is not lost by the
+totals: a whole-TU mispredict would show 16 on all four leaves, so a partial
+pattern points at the gather's EXTENT or at the Z-order predicate rather than
+at a block being predicted wrong outright. That is the next investigation and
+it has not been run. This asymmetry is the FINDING recorded by the CS7 brief -
+c4's predictions did not fully follow, so the bottom-left mechanism is not the
+whole story at c4 - and it is filed as the finding rather than as a caveat,
+and the expectation was NOT adjusted to match it.
+
+**The pins held, and held for a derived reason.** ecs416_*, ecs432_*,
+tu_color16 (133 B) and tu_color32 (165 B) are byte-identical. That was never
+a prediction - the bottom-left rule provably does not fire at grid <= 2, so
+those two artifacts could not change. They are the evidence that the gate is
+right rather than merely inert. The CS7 regen moved 13 gate lines and every
+one was chroma-side: `ecs4{4,8}_{bytes,modes,eobs,coeffs,recon_u,recon_v}`,
+with `ecs44_recon_y` and `ecs48_recon_y` changing in **0** lines.
 
 ### Next open item: the chroma bottom-left (its own slice)
 

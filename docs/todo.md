@@ -77,10 +77,13 @@ A0. SLICE-LEVEL STATE (the live register)
   (687625f) - d4 30B 64/64, d8 30B 64/64, d16 44B 256/256, d32 47B
   1024/1024, d64 441B 4096/4096 (tools/verify_decode4.ps1 -Geometry);
   FS6 docs currency (8edc02d).
-- [x] CS-series LANDED (CS0-CS5c): the chroma entropy + emission + the
-  color container + the four color artifacts - register entries in
-  section 1.1; full-plane conformance 2/4 (color16/color32 all three
-  planes 1:1; color4/color8 luma 1:1, chroma divergent).
+  - [x] CS-series LANDED (CS0-CS5c) + CS7 fix LANDED (5ce0224): the chroma
+    entropy + emission + the color container + the four color artifacts -
+    register entries in section 1.1; full-plane conformance **3/4**
+    (color16/color32/color8 all three planes 1:1; **color4 Y and U exact,
+    V 43/1024 divergent first at 647 over UV leaves 41/42/48/56** - a
+    V-only row, not "3 of 4 conform", because the percentage would bury a
+    specific measured defect).
 - [x] RT-series (the chroma/edge conformance chase): RT1 the /RTC
   fixture fix, RT6 the tree-order leaf emission, RT7-a/b the
   cross-decoder instrument + the chroma FI flag surface, RT9 the
@@ -247,13 +250,14 @@ last and label it as table transcription, not encoder progress.
 [x] MILESTONE: decoder-accepted AND content-bit-identical at EVERY
     geometry (libdav1d via ffmpeg; verify_decode4.ps1 -Geometry N);
     color full-plane 1:1 at color16/color32 (2/4 color artifacts -
-    color4/color8 chroma residuals open, the chroma bottom-left is the
-    CS7 open item)
-[x] Infrastructure: tools/golden_gen (committed gate, 421 lines,
-    884,980 B), tools/coverage.ps1 + coverage_areas.txt +
-    coverage_baseline.txt (the progress metric), tools/cite_check.ps1
-    (the doc citation audit), tools/td0_ladder.ps1 (7/7),
-    tools/decode_handoff.ps1, tools/bench, tools/verify_decode4.ps1,
+    color4: Y and U exact, **V 43/1024 divergent** - the CS7 V-only finding,
+    the one open conformance item)
+  [x] Infrastructure: tools/golden_gen (committed gate, 421 lines,
+      884,953 B), tools/coverage.ps1 + coverage_areas.txt +
+      coverage_baseline.txt (the progress metric), tools/cite_check.ps1
+      (the doc citation audit), tools/doc_audit.ps1 (advisory numeric-claim
+      audit), tools/td0_ladder.ps1 (7/7),
+      tools/decode_handoff.ps1, tools/bench, tools/verify_decode4.ps1,
     tools/rt7_trace_diff.ps1, tools/rt8_divergence_map.ps1
 [x] Docs: README, AGENTS.md layer map + completion metric,
     provenance.md, decode_conformance.md, bitstream.md, color.md,
@@ -528,9 +532,49 @@ shipped feature set (mono/color intra streams).
   self-consistent use; the TD2 harness crash taught the exchange rule)
 - 4096-facade vs 1024 token domain at 64x64 (FS5d, OPEN)
 - The FI DC-deciding fixture (OPEN)
-- The chroma bottom-left FIX (OPEN, next). **This entry is the brief. If
-  you are reconstructing the task from this repo rather than from whoever
-  handed it to you, THIS is the spec - read it before slicing.**
+- **LANDED 2026-09-28 at `5ce0224` - the chroma bottom-left FIX. c8 is
+  content-1:1 on all three planes; c4 retains a SECOND, V-only defect, and
+  that is the finding, not a failed prediction.** Every number below is read
+  off one run, not transcribed from a commit message.
+  **RUN:** ctest `-C Release` **9/9 passed, 270.41 s** at `5ce0224`.
+  **GATE:** **421/421 lines, diff 0, `expected_primitives.txt` 884,953 B**
+  (0 CR, 0 non-ASCII), byte-identical to the generator output. **Regen: 13
+  gate lines changed, ALL chroma-side** - `ecs4{4,8}_{bytes,modes,eobs,
+  coeffs,recon_u,recon_v}` plus `tu_color4` 201 -> 198 B and `tu_color8`
+  139 -> 137 B. `ecs44_recon_y` and `ecs48_recon_y` changed in **0** lines,
+  and no `ecs416_*` or `ecs432_*` line changed at all.
+  **PREDICTIONS, read off the run:**
+
+  | prediction | measured | verdict |
+  |---|---|---|
+  | c8 U 165 -> 0 divergent | c8 U 1024/1024 content-1:1 | HELD |
+  | c8 V 205 -> 0 divergent | c8 V 1024/1024 content-1:1 | HELD |
+  | c4 U 244 -> 0 divergent | c4 U 1024/1024 content-1:1 | HELD |
+  | c4 V 287 -> 0 divergent | c4 V **43/1024 diverge, first at 647** | **DID NOT HOLD - the finding** |
+  | 0 divergent on all 3 planes, both | c8 yes; **c4 no, V only** | partial |
+  | `tu_color16` / `tu_color32` byte-identical | 133 B / 165 B, unchanged | HELD, and derived not forecast |
+  | luma gate lines unchanged | `ecs44_recon_y` / `ecs48_recon_y` 0 changed lines | HELD |
+
+  **THE c4 RESIDUAL, in full, because the summary line would bury it.** Y is
+  4096/4096 exact and U is 1024/1024 exact; **V diverges on 43 of 1024
+  bytes, first at 647**, across exactly four 4x4 UV leaves - leaf 41 (row 5,
+  col 1) 8 bytes, leaf 42 (row 5, col 2) 16, leaf 48 (row 6, col 0) 3, leaf
+  56 (row 7, col 0) 16. Recomputed from the decoded plane against
+  `ecs44_recon_v`, not read from a commit. **The per-leaf counts are 8, 16,
+  3, 16 - three of the four are PARTIAL, not whole-leaf.** A whole-TU
+  mispredict would give 16 on all four; a partial pattern points at the
+  gather's extent or the Z-order predicate rather than at a whole block being
+  predicted wrong. That is the next diagnostic, and it is NOT yet run.
+  **This is filed as the finding per MUST SAY OUT LOUD #2, not as a caveat and
+  not by rounding the conformance to "3 of 4".** The brief's `1` and `2` for
+  c4 did not follow, and the mechanism is therefore not the whole story at
+  c4 - which is exactly what the brief said would happen, and exactly the
+  case in which the expectation must NOT be adjusted to match.
+
+- The chroma bottom-left FIX (SPEC, retained below as the record of what the
+  slice was built against). **This entry is the brief. If you are
+  reconstructing the task from this repo rather than from whoever handed it
+  to you, THIS is the spec - read it before slicing.**
 
   **State (measured, not inferred).** CS7 phases (a)/(b)/(c)/(c2) CONFIRMED
   the mechanism at BOTH c8 and c4: our gathered left columns match dav1d's
@@ -549,13 +593,15 @@ shipped feature set (mono/color intra streams).
   (1) the generator CS4 chroma gather in `tools/golden_gen/composition.c`:
       `cleft[S + j] = the byte at (uv_x - 1, uv_y + S + j)`, gated on the
       availability the caller supplies;
-    (2) the l6 UV chain: the CS4 walk's `buildIntraPredictorsUv` call at
-        pipeline.cpp:2090, whose argument list at :2093 passes the literal
-        `0` in the `nBottomLeftPx` position. Replace it with the Z-order-gated
-        count, then gather the bytes. The luma side is already done and is the
-        shape to copy: the RULE is the named function `pipeline::bottomLeftPx`
-        (pipeline.cpp:2420-2424, declared pipeline.h:246), the luma CALL SITE
-        is pipeline.cpp:1884, and the luma gather is pipeline.cpp:1892-1894
+    (2) the l6 UV chain: the CS4 walk's chroma call site,
+        pipeline.cpp:2093 - which at the time of this brief was a literal `0`
+        in the `nBottomLeftPx` position of the builder call at :2090, and is
+        now a `bottomLeftPx` call, LANDED in 5ce0224. The luma side was
+        already done and is the shape it copied: the RULE is the named
+        function `pipeline::bottomLeftPx`
+        (DEFINED pipeline.cpp:2459-2463, DECLARED pipeline.h:246), the luma
+        CALL SITE is pipeline.cpp:1884, the CHROMA call site CS7 changed is
+        pipeline.cpp:2093, and the luma gather is pipeline.cpp:1892-1894
         (RT10b). DO NOT ALSO "FIX" pipeline.cpp:2182 - that is
         `encodeFrameReconChroma16x16`, one of the four standalone 16x16-UV
         compositions, whose grid is `src.width()/16 x src.height()/16`
@@ -586,7 +632,7 @@ shipped feature set (mono/color intra streams).
       generator's non-referenced sentinel, per the ecs4 gate note in
       composition.c:6113), rather than assuming the leaf set;
       - apply the SAME gate rule the implementation uses - i.e. CALL
-        `pipeline::bottomLeftPx` itself (pipeline.cpp:2420-2424), which is the
+        `pipeline::bottomLeftPx` itself (pipeline.cpp:2459-2463), which is the
         whole point of the be67d6f extraction: the expectation is produced by
         the same named rule the code runs, not by a second transcription of
         the expression. To keep the test from being tautological, ALSO
@@ -640,8 +686,8 @@ shipped feature set (mono/color intra streams).
   block in a LEAF-ALIGNED frame, "touches the plane bottom" is equivalent to
     "the leaf is on the last row", which is equivalent to our `by + 1 < grid`
     being false - and that is already carried by the rule at
-    pipeline.cpp:2420-2424, in its `by + 1 >= grid` early return
-    (pipeline.cpp:2421). So both of
+    pipeline.cpp:2459-2463, in its `by + 1 >= grid` early return
+    (pipeline.cpp:2460). So both of
   dav1d's terms are already satisfied and the fix adds no condition. THE
   ONE ASSUMPTION THAT WOULD MAKE IT LIVE: a frame whose dimensions are not
   leaf-aligned, or a partial block. Our walk produces neither - every
@@ -742,7 +788,7 @@ shipped feature set (mono/color intra streams).
     **THE c16/c32 HALF IS ALREADY DERIVED, NOT A HOPE - do not report it as
     "a prediction that held".** Measured 2026-09-27 from the committed gate
     lines, by rebuilding the Z-order and applying the rule at
-    pipeline.cpp:2420-2424: the bottom-left rule fires ONLY at grid >= 4. The
+    pipeline.cpp:2459-2463: the bottom-left rule fires ONLY at grid >= 4. The
     table above extends that statement to every grid; this one adds the
     per-fixture content on top - the D203 column is the MODE filter, which a
     bound alone does not and cannot predict:
@@ -778,19 +824,21 @@ shipped feature set (mono/color intra streams).
     rather than in a session exchange, for the reason in the lesson register
     ("a constraint that lives only in a session exchange has not been
     recorded").
-      1. **AGENTS.md, the l6 layer entry - DONE 2026-09-27, verified, and
-         re-read it after l6 lands.** It said "The bottom-left edge extension
-         is gathered under the Z-order gate at pipeline.cpp:1885 (RT10b)",
-         which was wrong twice over: it described the LUMA gather only, and
-         it cited 1885 as "the gate" when the be67d6f extraction had already
-         moved the rule out of the walk entirely. It now names all three
-         sites - the RULE (`pipeline::bottomLeftPx`, pipeline.cpp:2420-2424,
-         declared pipeline.h:246), the luma CALL SITE (pipeline.cpp:1884) and
-         the luma gather (pipeline.cpp:1892-1894) - with an explicit warning
-         not to cite 1884 as the gate, because 1885-1886 are now the
-         above/left buffer declarations. When the CHROMA gather lands, the
-         same sentence must gain the chroma site; and re-run
-         `tools/cite_check.ps1`, because this document moves with the code
+      1. **AGENTS.md, the l6 layer entry - DONE, and re-done 2026-09-28 after
+         the fix, because the rule moved under it.** It first said "The
+         bottom-left edge extension is gathered under the Z-order gate at
+         pipeline.cpp:1885 (RT10b)", which was wrong twice over: it described
+         the LUMA gather only, and it cited 1885 as "the gate" when the
+         be67d6f extraction had already moved the rule out of the walk. It
+         now names the DECLARATION (pipeline.h:246) and the DEFINITION
+         (pipeline.cpp:2459-2463) as different things, the luma CALL SITE
+         (pipeline.cpp:1884), the CHROMA call site CS7 changed
+         (pipeline.cpp:2093), the luma gather (pipeline.cpp:1892-1894), and
+         the four standalone compositions where zero is CORRECT BY GEOMETRY
+         (:2221, :2271, :2346, :2403). Re-run `tools/cite_check.ps1` after
+         any further l6 change: this document moves with the code, and the
+         rule's definition has already slid from :2420 to :2459 in one
+         release.
          and these three line numbers have each been wrong at least once.
     2. **todo.md section 9, this entry: OPEN -> LANDED**, with the MEASURED
        before/after for all four predictions above (not "as predicted" - the
