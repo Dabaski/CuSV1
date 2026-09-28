@@ -1,0 +1,77 @@
+# coverage_areas.txt - the auditable area classification for the portable-C
+# coverage metric (AGENTS.md "Completion metric").
+#
+# WHY THIS FILE IS DATA AND NOT CODE: the metric has two halves and they must
+# not be confused. tools/coverage.ps1 MEASURES (line counts, recomputed from
+# the pinned reference every run). THIS FILE JUDGES (what fraction of each
+# area the port actually covers). The judgement is not derivable from a line
+# count, so it lives here in a form a reviewer can read, argue with, and edit.
+#
+# FORMAT (pipe-separated, '#' starts a comment):
+#   <id>|<name>|<covered_fraction>|<rationale>|<glob;glob;...>
+#
+#   id                 stable area key, referenced from AGENTS.md + todo.md
+#   name               human label
+#   covered_fraction   0.0 .. 1.0 - the ported share of that area
+#   rationale          WHY that fraction, in one line. This is the audit
+#                      surface: a fraction with no reason is not reviewable.
+#   glob               ';' -separated paths relative to
+#                      third_party/SVT-AV1/Source/Lib. A file may appear in at
+#                      most ONE area; coverage.ps1 reports any file matched by
+#                      two areas, and any Codec file matched by none (as the
+#                      drift detector - a file added to the pinned reference
+#                      shows up as UNASSIGNED rather than silently ignored).
+#
+# A file in Codec/ or C_DEFAULT/ matched by no glob is counted in the
+# 'unassigned' row, so the area rows ALWAYS reconcile to the directory total
+# without anyone asserting the reconciliation by hand.
+#
+# The fraction is a judgement about FUNCTIONAL coverage, not about our line
+# count. A ported primitive that is 300 of our lines but 30,000 of SVT's moves
+# the number by 30,000. That is deliberate: the metric asks "how much of SVT
+# is here", not "how many lines did we type".
+#
+# MEASURED 2026-09-27. Re-run tools/coverage.ps1 after ANY edit here; the
+# number quoted in AGENTS.md must come from that run, never from this file.
+
+# ---------------------------------------------------------------- transforms
+A1|Transform/TX|0.33|4 of the 16 TxType members (definitions.h:1031-1046); all 5 square sizes; 1D+2D fwd/inv; quantize fp/b; scans. q_matrices.h (13,424 lines) is 0% - ported nothing. FLIPADST/IDTX/V_DCT/H_DCT/V_ADST/H_ADST absent; highbd absent; trellis absent.|Codec/transforms.c;Codec/transforms.h;Codec/inv_transforms.c;Codec/inv_transforms.h;Codec/full_loop.c;Codec/full_loop.h;Codec/coefficients.c;Codec/coefficients.h;Codec/q_matrices.h
+
+# -------------------------------------------------------------------- intra
+A2|Intra prediction|0.90|All 13 PredictionModes; drZ1/2/3 + drPredictor; smooth x3; edge filter; intra-edge upsample; corner blend; filter-intra; 4 DC-availability variants; missing-neighbour fills; GPU twins at all 5 sizes. Not covered: CFL (cfl_c.c, out of scope by named policy - UV_CFL_PRED folds to DC_PRED) and the highbd paths.|Codec/intra_prediction.c;Codec/intra_prediction.h;Codec/enc_intra_prediction.c;Codec/enc_intra_prediction.h
+
+# ------------------------------------------------------- inter / ME / MC
+A3|Inter prediction + motion estimation|0.02|SAD only: 5 sizes host (motion.cpp), GPU at 4x4/8x8. No search, no subpel filters, no MC, no OBMC, no compound, no global/warped motion, no hash motion, no ref-frame management.|Codec/enc_inter_prediction.c;Codec/enc_inter_prediction.h;Codec/inter_prediction.c;Codec/inter_prediction.h;Codec/mcomp.c;Codec/mcomp.h;Codec/warped_motion.c;Codec/warped_motion.h;Codec/enc_warped_motion.c;Codec/enc_warped_motion.h;Codec/global_motion.c;Codec/global_motion.h;Codec/global_me.c;Codec/global_me.h;Codec/global_me_cost.c;Codec/global_me_cost.h;Codec/adaptive_mv_pred.c;Codec/adaptive_mv_pred.h;Codec/av1me.c;Codec/av1me.h;Codec/motion_estimation.c;Codec/motion_estimation.h;Codec/hash_motion.c;Codec/hash_motion.h;Codec/hash.c;Codec/hash.h;Codec/ransac.c;Codec/ransac.h;Codec/neighbor_arrays.c;Codec/neighbor_arrays.h;Codec/me_context.c;Codec/me_context.h;Codec/me_process.c;Codec/me_process.h;Codec/me_sad_calculation.c;Codec/me_sad_calculation.h;Codec/me_results.c;Codec/me_results.h;Codec/me_sb_results.h;Codec/vector.c;Codec/vector.h;Codec/mv.h;Codec/compute_sad.h;Codec/motion_vector_unit.h
+
+# ------------------------------------------------- mode decision / RDO
+A4|Mode decision + RDO + pc_tree|0.03|Our D2 policy is SAD-only over all 13 modes with a lowest-index tie-break (pipeline.h:151-156 states this is OURS, not SVT's). No rate cost, no lambda, no pc_tree, no partition search, no multi-pass, no md_rate_estimation.|Codec/product_coding_loop.c;Codec/mode_decision.c;Codec/mode_decision.h;Codec/rd_cost.c;Codec/rd_cost.h;Codec/md_rate_estimation.c;Codec/md_rate_estimation.h;Codec/md_config_process.c;Codec/md_config_process.h;Codec/md_process.c;Codec/md_process.h;Codec/enc_mode_config.c;Codec/enc_mode_config.h;Codec/pass2_strategy.c;Codec/pass2_strategy.h;Codec/ac_bias.c;Codec/ac_bias.h;Codec/lambda_rate_tables.h
+
+# ------------------------------------------------------------ entropy / OD
+A5|Entropy coding (CABAC/OD)|0.55|od_ec writer+decoder; updateCdf; the full intra symbol surface (kf mode, angle delta, filter-intra, partition, skip, tx-type, uv_mode, uv delta); the token chain with LIVE neighbour-derived contexts (getKfYModeCtx, getTxbCtx + skip_contexts + nz_map); 4-bucket qindex-selected coefficient CDFs. Not covered: every inter symbol; palette/segmentation symbols; the non-reduced tx sets; angle-delta != 0; delta_lf. STRUCTURAL NOTE - this area's denominator is inflated relative to what the name suggests: in this 4.2 snapshot there is NO separate obu.c/seq-header file, so the whole OBU + sequence-header + frame-header writer (2,064 physical lines, entropy_coding.c:2104-3960) sits inside entropy_coding.c and is therefore charged to A5, not to A7. Do not read A5 vs A7 as "we did more entropy than bitstream work"; the file split does not support that reading.|Codec/entropy_coding.c;Codec/entropy_coding.h;Codec/cabac_context_model.c;Codec/cabac_context_model.h;Codec/ec_process.c;Codec/ec_process.h;Codec/ec_object.h;Codec/ec_results.c;Codec/ec_results.h;Codec/bitstream_unit.c;Codec/bitstream_unit.h
+
+# ------------------------------------------- coding loop / PCS / block store
+A6|Coding loop + PCS + block structures|0.10|A raster per-block walk (predict -> residual -> fwd -> quant -> inv -> recon) with real reconstructed-neighbour gather, at 5 square sizes, plus the emission walk. Not covered: the EbPictureBufferDescriptor/PCS field surface, pred_structure (GOP), pic_operators, the pd_process prediction-detail driver (5,230 lines), block/neighbor stores.|Codec/coding_loop.c;Codec/coding_loop.h;Codec/pcs.c;Codec/pcs.h;Codec/coding_unit.c;Codec/coding_unit.h;Codec/block_structures.c;Codec/block_structures.h;Codec/pd_process.c;Codec/pd_process.h;Codec/src_ops_process.c;Codec/src_ops_process.h;Codec/pred_structure.c;Codec/pred_structure.h;Codec/pic_operators.c;Codec/pic_operators.h;Codec/pd_queue.c;Codec/pd_queue.h;Codec/pd_results.c;Codec/pd_results.h;Codec/pd_reorder_queue.c;Codec/pd_reorder_queue.h
+
+# ------------------------------------------------------- bitstream / OBU
+A7|Bitstream + OBU + headers|0.40|Bit writer, uleb128, OBU header, TD; sequence header (3 variants, maxDim-parameterised); frame header (v1 22-bit lossless, v2 40-bit q100, v3 42-bit color); TU assembly; 9 committed artifacts, external-decoder content-1:1 where the matrix says so. Not covered: multi-tile (tile_info loop, tile-group OBU), metadata OBU, show_existing_frame, frame_size_override, film-grain params writer, global-motion params, bitstream level, redundant frame header, subsampling/bit-depth variants. SMALL DENOMINATOR BY STRUCTURE, not by merit: the only files here are the packetizer (which CALLS the OBU writers rather than building the syntax) and av1_structs.h. The syntax itself - write_uncompressed_header_obu, write_sequence_header_obu, write_frame_header_obu, write_obu_header, write_uleb_obu_size, the tile-info loop, the film-grain writer - is a 2,064-physical-line region inside entropy_coding.c and is charged to A5. Read A7 and A5 together when judging header coverage.|Codec/packetization_process.c;Codec/packetization_process.h;Codec/packetization_reorder_queue.c;Codec/packetization_reorder_queue.h;Codec/av1_structs.h
+
+# ---------------------------------------------------------- post filters
+A8|Post-filters (deblock/CDEF/restoration/grain)|0.00|Nothing. All four filter-tool enable bits are written as literal 0 (bitstream.cpp cdef_level, enable_restoration, film_grain_params_present, and the whole loop_filter_level block is 0 at q0/q100 by configuration). No deblocking, no CDEF, no Wiener/SGR, no grain synthesis, no superres.|Codec/deblocking_filter.c;Codec/deblocking_filter.h;Codec/deblocking_common.c;Codec/deblocking_common.h;Codec/dlf_process.c;Codec/dlf_process.h;Codec/restoration.c;Codec/restoration.h;Codec/restoration_pick.c;Codec/restoration_pick.h;Codec/rest_process.c;Codec/rest_process.h;Codec/grainSynthesis.c;Codec/grainSynthesis.h;Codec/enc_cdef.c;Codec/enc_cdef.h;Codec/cdef.c;Codec/cdef.h;Codec/cdef_process.c;Codec/cdef_process.h;Codec/cdef_copy.h;Codec/corner_match.c;Codec/corner_match.h;Codec/corner_detect.c;Codec/corner_detect.h;Codec/super_res.c;Codec/super_res.h
+
+# ------------------------------------------------------------- rate control
+A9|Rate control|0.00|Nothing. base_q_idx is a caller-supplied constant (0 lossless, 100 lossy); there is no target-bitrate, no CBR/VBR/CRF, no first-pass, no rate model, no qp adaptation loop.|Codec/rc_vbr_cbr.c;Codec/rc_process.c;Codec/rc_process.h;Codec/rc_crf_cqp.c;Codec/rc_rtc_cbr.c;Codec/rc_aq.c;Codec/rc_tables.h;Codec/initial_rc_process.c;Codec/initial_rc_process.h;Codec/initial_rc_results.c;Codec/initial_rc_results.h;Codec/initial_rc_reorder_queue.c;Codec/initial_rc_reorder_queue.h;Codec/rc_results.c;Codec/rc_results.h;Codec/rc_tasks.c;Codec/rc_tasks.h
+
+# ------------------------------------------- picture management + threading
+A10|Picture management + threading|0.00|Nothing. Single keyframe TU, no reference frames, no altref, no picture buffer descriptor, no reorder queues, no thread pool, no resource coordinator. (An intra-only single-TU encoder legitimately needs none of it; the area is 0% because it is unported, not because it is unnecessary for our config.)|Codec/enc_dec_process.c;Codec/enc_dec_process.h;Codec/enc_dec_segments.c;Codec/enc_dec_segments.h;Codec/enc_dec_tasks.c;Codec/enc_dec_tasks.h;Codec/enc_dec_results.c;Codec/enc_dec_results.h;Codec/resource_coordination_process.c;Codec/resource_coordination_process.h;Codec/resource_coordination_results.h;Codec/sys_resource_manager.c;Codec/sys_resource_manager.h;Codec/pic_manager_process.c;Codec/pic_manager_process.h;Codec/pic_manager_queue.c;Codec/pic_manager_queue.h;Codec/pic_buffer_desc.c;Codec/pic_buffer_desc.h;Codec/reference_object.c;Codec/reference_object.h;Codec/svt_threads.c;Codec/svt_threads.h;Codec/sequence_control_set.c;Codec/sequence_control_set.h;Codec/encode_context.c;Codec/encode_context.h;Codec/pic_demux_results.h;Codec/pic_demux_results.c;Codec/resource_coordination_results.c
+
+# --------------------------------------------------------------- analysis
+A11|Content analysis + temporal filtering|0.00|Nothing. No histogram, no activity/scene-change stats, no 8x8 variance, no noise model/flat-block finder, no temporal filtering, no FFT, no resize. This is the recommended next campaign: it never touches the bitstream, so it carries no golden-regeneration and no decoder-gate cost.|Codec/temporal_filtering.c;Codec/temporal_filtering.h;Codec/noise_model.c;Codec/noise_model.h;Codec/noise_util.c;Codec/noise_util.h;Codec/pic_analysis_process.c;Codec/pic_analysis_process.h;Codec/pic_analysis_results.c;Codec/pic_analysis_results.h;Codec/resize.c;Codec/resize.h;Codec/fft.c;Codec/fft_common.h;Codec/firstpass.c;Codec/firstpass.h
+
+# ------------------------------------------------------------- misc tools
+A12|Palette + segmentation + misc|0.00|Nothing. palette_size is threaded as a literal 0; segmentation_enabled is a literal 0 bit; no blend_a64_mask, no k-means colour clustering, no compute_mean.|Codec/palette.c;Codec/segmentation.c;Codec/segmentation.h;Codec/segmentation_params.c;Codec/segmentation_params.h;Codec/k_means_template.h;Codec/blend_a64_mask.c;Codec/compute_mean.h
+
+# ------------------------------------------------------ utility / platform
+A13|Utility + platform + core headers|0.05|Our own equivalents exist (l0_core types, l1_pixels Plane, l2_gpurt NVRTC/driver runtime) but they are project designs, not 1:1 ports, and they are ~230 lines against this area's ~5,800. The four *_rtcd.* files (7,906 lines of generated dispatch tables + inline intrinsic stubs) are excluded from the denominator as non-portable dispatch glue - see the note in AGENTS.md.|Codec/definitions.h;Codec/av1_common.h;Codec/utility.c;Codec/utility.h;Codec/common_utils.c;Codec/common_utils.h;Codec/convolve.c;Codec/convolve.h;Codec/mathutils.h;Codec/object.h;Codec/kernel_dispatch.c;Codec/kernel_dispatch.h;Codec/random.h;Codec/filter.h;Codec/svt_malloc.c;Codec/svt_malloc.h;Codec/svt_log.c;Codec/svt_log.h;Codec/svt_time.c;Codec/svt_time.h;Codec/svt_psnr.c;Codec/svt_psnr.h;Codec/svt_nvtx.h;Codec/encoder.h
+
+# ----------------------------------------- C_DEFAULT (portable ref kernels)
+A14|C_DEFAULT portable reference kernels|0.30|The SAD kernels (compute_sad_c.c/.h, sad_av1.c) are mirrored 1:1 by l5_motion. pack_unpack_c is the intra frame-header read-back twin - not ported (l8 writes headers only; the conformance instrument decodes with external decoders instead). encode_txb_ref_c and the C_DEFAULT intra/filterintra/cfl/picture_operators/variance/inter_prediction/blend kernels are not ported. Denominator is 0.8% of the surface, so this row is present for completeness, not because it moves the number.|C_DEFAULT/compute_sad_c.c;C_DEFAULT/compute_sad_c.h;C_DEFAULT/sad_av1.c;C_DEFAULT/encode_txb_ref_c.c;C_DEFAULT/encode_txb_ref_c.h;C_DEFAULT/intra_prediction_c.c;C_DEFAULT/filterintra_c.c;C_DEFAULT/cfl_c.c;C_DEFAULT/picture_operators_c.c;C_DEFAULT/picture_operators_c.h;C_DEFAULT/variance.c;C_DEFAULT/inter_prediction_c.c;C_DEFAULT/blend_a64_mask_c.c;C_DEFAULT/pack_unpack_c.c;C_DEFAULT/pack_unpack_c.h
