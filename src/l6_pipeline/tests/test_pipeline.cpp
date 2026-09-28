@@ -4990,10 +4990,24 @@ TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
             // is asserting the control, not tuning a number to a result: a
             // non-zero here would mean the control had been lost and c16's 1:1
             // conformance would stop being evidence for the mechanism.
-            if (S == 4 || S == 8)
+            if (S == 4 || S == 8) {
                 REQUIRE(wantTotal > 0);
-            else
+            } else {
                 REQUIRE(wantTotal == 0);
+                // wantTotal == 0 alone does NOT distinguish "no leaf has an
+                // available below-left" from "leaves are available, none of them
+                // D203" - the two have different meanings, and a comment
+                // asserting the intended one is exactly the defect class this
+                // session keeps fixing, in a different medium. Pin the REASON.
+                REQUIRE(nAvail == 0);
+                if (S == 16)
+                    // there IS a D203 leaf at c16, so the zero comes from its
+                    // below-left being unavailable - which is precisely dav1d's
+                    // measured UV_LEFT_HAS_BOTTOM = 0 at this very block. If
+                    // this ever fails, the control is gone and c16's 1:1
+                    // conformance stops being evidence for the mechanism.
+                    REQUIRE(nQualify == 1);
+            }
         }
     }
     // THE WALK (the ratified CS4 order, the write_modes_b shape): per luma
