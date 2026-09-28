@@ -211,7 +211,7 @@ std::uint32_t writeSequenceHeaderObu(std::uint8_t* dst, int maxDim) {
 }
 
 // write_uncompressed_header_obu (:3294-3637), ratified structural KF walk
-// (BSF0(b): 21 bits)
+// (BSF0(b): 22 bits)
 std::uint32_t writeFrameHeader(std::uint8_t* dst) {
     AomWriteBitBuffer wb = {dst, 0};
     wbWriteBit(&wb, 0);          // show_existing_frame (:3333)
