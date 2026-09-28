@@ -13,10 +13,25 @@
   and is the bulk of the remaining work.
 - **Perf:** correctness-first. Throughput is tracked in a separate benchmark
   pass (AGENTS.md rule), never gating the RED/GREEN loop.
-- **Repo reality:** the current port (`l6_pipeline::encodeFrameAuto4x4`) emits
-  `coeffs[]`/`modes[]` to host arrays - no bitstream. There is no quantizer, no
-  chroma, no inter, no entropy coder. The wiring below starts from the
-  *assumed-complete* encoder library, not today's code.
+- **Repo reality (re-measured 2026-09-27 at 4b624b9; this paragraph
+  previously said "no bitstream, no quantizer, no chroma, no entropy
+  coder", which was all four false and is the CS6 currency fix):** the
+  port DOES have a quantizer (`transforms::quantizeFpN`/`quantizeBN` at all
+  five sizes), DOES have chroma (a 4:2:0 chroma-emitting SB-tree walk,
+  `encodeFrameChromaQ`, plus the uv_mode / uv angle-delta entropy
+  surfaces), DOES have an entropy coder (the od_ec writer and reader, the
+  full intra token chain with neighbour-derived contexts), and DOES emit
+  a bitstream (nine committed `.obu` artifacts; seven decode
+  content-1:1 on every plane - the five grayscale plus color16 and
+  color32 - while color4 and color8 decode with the luma plane 1:1
+  and their U/V planes divergent; see `docs/decode_conformance.md` for
+  the authoritative matrix).
+  What is still missing is inter/motion compensation, the partition
+  tree beyond a fixed uniform grid, rate control, the in-loop filters,
+  and multi-frame sequencing. This document's C-ABI sketch remains a
+  target contract for a future library boundary, not a description of
+  today's code: the current surface is per-frame functions over
+  `pixels::Plane`, not a create/send/receive encoder handle.
 
 ## Prerequisite: the encoder-core C contract FFmpeg will consume
 

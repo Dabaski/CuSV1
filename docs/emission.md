@@ -26,10 +26,10 @@ to nullptr (legacy callers unchanged).
 | Loop | Walk per block | Where |
 | --- | --- | --- |
 | encodeFrameAuto4x4Q | [skip=0 ctx 0][kf mode][FI iff DC_PRED][tokens] - NO partition symbol (a 4x4 frame reads none) | pipeline.cpp:499 (skip) |
-| encodeFrameAuto8x8Q | [partition: 4-symbol BLOCK_8X8 row, RUNNING ctx][skip][kf mode][angle delta iff directional][FI iff DC][tx-type iff in-chain gate][tokens] + updatePartitionContext | pipeline.cpp:681-684 |
-| encodeFrameAuto16x16Q | the ratified TD5b-era shape: [kf mode + angle delta][FI flag][tokens] - no partition/skip symbols in the loop | pipeline.cpp:758/:909 (the bucketed inits) |
-| encodeFrameAuto32x32Q | the 8x8Q walk with the 10-symbol BLOCK_32X32 row | pipeline.cpp:1350-1353 |
-| encodeFrameAuto64x64Q | the 32x32Q walk with the 10-symbol BLOCK_64X64 row; NO FI (bsize 64 > 32); NO tx-type (DCTONLY); tokens on the TX_64X64 scan contract | pipeline.cpp:1687-1690 |
+| encodeFrameAuto8x8Q | [partition: 4-symbol BLOCK_8X8 row, RUNNING ctx][skip][kf mode][angle delta iff directional][FI iff DC][tx-type iff in-chain gate][tokens] + updatePartitionContext | pipeline.cpp:682-684 |
+| encodeFrameAuto16x16Q | the ratified TD5b-era shape: [kf mode + angle delta][FI flag][tokens] - no partition/skip symbols in the loop | pipeline.cpp:840/:991 (the bucketed inits) |
+| encodeFrameAuto32x32Q | the 8x8Q walk with the 10-symbol BLOCK_32X32 row | pipeline.cpp:1353-1355 |
+| encodeFrameAuto64x64Q | the 32x32Q walk with the 10-symbol BLOCK_64X64 row; NO FI (bsize 64 > 32); NO tx-type (DCTONLY); tokens on the TX_64X64 scan contract | pipeline.cpp:1691-1693 |
 
 Walk-shape rationale (aom decodeframe.c decode_partition
 has_rows/has_cols semantics): a 4x4 frame reads no partition symbol
@@ -74,7 +74,7 @@ from RUNNING `pAboveRun`/`pLeftRun` arrays and call
 For uniform grids the running contexts coincide with fresh INVALID
 cells: the neighbor's partition-context-lookup bit at the leaf's own
 bsl is 0 for every square size (partitionContextLookupLeft[32X32]=24
-bit2=0, [16X16]=28 bit1=0, [8X8]=30 bit0=0, entropy.cpp:615-619).
+bit2=0, [16X16]=28 bit1=0, [8X8]=30 bit0=0, entropy.cpp:625/:627).
 This was mutation-check-proven - the uniform fixture PASSES under
 fresh-INVALID ctx, so the wiring's necessity was proven by corrupting
 the left-lookup byte (28 instead of 24: bit2=1 -> ctx 10 != 8) and
@@ -158,7 +158,7 @@ that the column is right:
 
 ```
 leaves per plane = len(ecs4<S>_modes) / 3    CS4 emits (luma, U, V) per leaf,
-                                               composition.c:6881
+                                               composition.c:6943-6944
 luma leaf edge   = 64 / grid                 recon_y  = 4096 px = 64x64
 UV   leaf edge   = 32 / grid                 recon_u/v = 1024 px = 32x32
 ```

@@ -87,7 +87,7 @@ walks are documented in `docs/emission.md`):
   block][skip=0 ctx 0][kf mode + angle delta when directional at
   bsize >= 8X8][FI iff DC_PRED && bsize <= 32x32 - dead at
   64x64][tx-type only below TX_32X32][tokens], mi-unit
-  `writeBlockCoeffs` args (pipeline.cpp:681/:1350/:1687).
+    `writeBlockCoeffs` args (pipeline.cpp:698/:1369/:1704).
 - `encodeFrameAuto16x16`/`...16x16Q` keep the ratified TD5b-era shape:
   [kf mode + angle delta][FI flag][token chain] with adaptation on -
   no partition/skip symbols in the loop.

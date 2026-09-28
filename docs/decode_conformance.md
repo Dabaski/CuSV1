@@ -31,11 +31,15 @@ These establish content equality for the five committed fixtures, not
 every possible encoder input or full SVT encoder behavior.
 Mode-decision/composition remain project-defined policy.
 - **Color (CS-series): full-plane conformance 2/4.** color32 and
-  color16 decode with ALL THREE planes content 1:1; color8/color4
-  decode (the RT-series parse fixes) with the LUMA plane content 1:1
-  and the U/V planes divergent - the honest per-plane matrix is the
-  RT8/RT10 conformance matrix below, and the chroma bottom-left edge
-  is the named next measurement (its own slice, before any fix).
+    color16 decode with ALL THREE planes content 1:1; color8/color4
+    decode (the RT-series parse fixes) with the LUMA plane content 1:1
+    and the U/V planes divergent - the honest per-plane matrix is the
+    RT8/RT10 conformance matrix below. The chroma bottom-left edge is
+    the named next item, and as of CS7 step 1 it is past the
+    measurement phase: the mechanism is CONFIRMED at both c8 and c4
+    (the c2 control held) and the remaining work is the FIX, not the
+    diagnosis. Its scope, its predictions and its falsifier are in
+    `docs/todo.md` section 9.
 - Our writer <-> aom-entdec roundtrip is EXACT on every TD probe rung
 (adaptation on): the arithmetic, the CDF evolution and the defaults
 are internally consistent with aom's own decoder primitives.
@@ -275,8 +279,10 @@ Both live in the same edge-prep call, so the two must not be reasoned
 about as one.
 
 **The candidate, as it stood before measurement.** The CS4 luma path
-passed `n_bottomleft = 0` unconditionally (composition.c:6283, :6289 -
-a literal 0 argument). In build_intra_predictors a directional mode
+passed `n_bottomleft = 0` unconditionally (a literal 0 argument where
+the Z-order gate now reads composition.c:6287; the comment at
+composition.c:6283-6285 is the code's own record of the pre-fix
+state). In build_intra_predictors a directional mode
 with p_angle > 180 sets need_bottom (svt_gen.c:9222) and needs
 `num_left_pixels_needed = txhpx + txwpx` = 32 at 16px (:9224); with
 n_bottomleft_px == 0 the bottom-left extension is skipped and

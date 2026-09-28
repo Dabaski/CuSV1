@@ -63,13 +63,41 @@ compile. If you can split a step into two smaller ones, split it.
   MSEs quoted in a commit message come from an actual run, never from
   memory or estimation.
 - **NEVER make a performance change without a before/after bench
-  measurement** (tools/av1_bench, same config, both numbers in the commit
-  message). A perf claim without paired bench lines is not done.
+  measurement** (tools/bench -> av1_bench, same config, both numbers in the
+  commit message). A perf claim without paired bench lines is not done.
 - **Citation rule: existence / negative-existence claims are grep-verified
   against the tree before being written.** Never cite a symbol as missing
   (or present) without checking; precedent: the HK1 l5 citation edit wrongly
   dropped compute8x8_sad_kernel_c as nonexistent (it exists at
   motion_estimation.c:71) and had to be fixed forward in L0.
+  - **Citation rule: file:line citations into src/ or tools/ are re-verified
+    by `tools/cite_check.ps1`, not by memory.** Those files move with every
+    commit, so a line number written three commits ago is a guess. The script
+    extracts every `file.ext:NNN` from the tracked markdown, resolves the path,
+    and prints the ACTUAL bytes at that line for a claim-vs-content diff. It is
+    a doc audit, NOT a build input and NOT a GATE line. **Regenerate the
+    figures below with `powershell -File tools\cite_check.ps1` - they are
+    instrument output, not a claim, and no commit hash is quoted here because
+    a number measured on a working tree cannot name the commit that the edit
+    producing it will create. As measured 2026-09-28:
+    359 citations, 348 resolved in-tree, **0 out-of-range**, 11 unresolvable
+    (the AV1 spec markdown plus three dav1d decoder internals, which are not
+    vendored - check those against the external checkouts by hand). The script
+    prints the scanned doc set's size and a content hash WITH every count, so a
+    disagreement about the total is settled by the doc-set identity rather
+    than by argument: a citation count is a function of the doc set, and the
+    doc set moves whenever any tracked doc is edited. **The out-of-range count
+    went 1 -> 0 because the audit's own finding was applied**: the single
+    out-of-range claim was a bare `CMakeLists.txt` line reference in
+    `tools/golden_gen/README.md` meaning SVT-AV1's OWN build options
+    (the MINIMAL_BUILD / RTC_BUILD definitions, lines 53 and 86), which
+    resolved against the 39-line ROOT `CMakeLists.txt` instead. It is now
+    qualified as SVT-AV1's, and the resolver matches a cited partial path on
+    its SUFFIX rather than its bare basename, so a partial prefix can no
+    longer land on an unrelated file. The failure mode the rule exists to
+    catch is real and was live: `docs/cs5c_deltas.md` had 15 wrong
+    `transform.cpp` line numbers because `transform.cpp` grew by ~700 lines
+    after that doc was written.
 - **REFERENCE PINNING**: the project's 1:1 reference is the VENDORED SVT-AV1
   snapshot in `third_party/SVT-AV1/` - a 4.2-era snapshot (CHANGELOG 4.2.0,
   2026-07-14) that is NOT byte-identical to the official v4.2.0 tag, and
@@ -145,6 +173,52 @@ harness for the language/framework in use -" itself done via the nano-cycle
 Run the full suite with whatever command applies. Run a single test by name
 or file when iterating on one RED/GREEN step, then always re-run the full
 suite before moving on.
+
+### This project's actual commands (step 5 applies: CMake + ctest)
+
+```
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release              # 9 targets; expect 9/9
+ctest --test-dir build -C Release -R l4_intra  # one layer
+```
+
+The **GATE** is separate from ctest and is also separate from the coverage
+metric: build the generator and diff it against the committed
+`tools/golden_gen/expected_primitives.txt`.
+
+```
+cmake --build build --config Release --target golden_primitives
+build\tools\golden_gen\Release\golden_primitives.exe 1> out.txt
+# out.txt must be line-for-line identical to expected_primitives.txt
+```
+
+Three other instruments, none of which gate a commit:
+`tools/verify_decode4.ps1` (decoder acceptance + content-1:1, real decoders),
+`tools/coverage.ps1` (the progress metric, below), and
+`tools/cite_check.ps1` (the doc citation audit).
+
+### Last measured state (2026-09-28, at commit 9e95b5b)
+
+Quote these numbers only with their date; they are re-measured, not permanent.
+**This block still holds at `1e8009c` and at HEAD: the instrument landing
+changed no build input - no code, no CMakeLists, no gate file - so neither
+the suite nor the GATE can have moved.** It will go stale the moment a build
+input changes, and not before.
+
+- **ctest: 9/9 passed, 0 failed, 272.24 s** (l4_intra is the slow one at
+  ~215 s; `pipeline` ~53 s; `l3_transforms` ~7 s; the rest under 0.5 s).
+- **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is 884,980 bytes,
+  0 CR, 0 non-ASCII. (The 275.58 s suite time quoted in earlier commits is
+  the same tree measured earlier; the gate byte count has been 884,980 since
+  RT10b and is unchanged. Always re-measure - `git log` carries stale
+  numbers.)
+- **Portable-C coverage: 13.1%** (see the completion metric section).
+- **Committed artifacts: 9** `.obu` files, of which the per-plane decode
+  matrix records color16 and color32 as content-1:1 on all three planes and
+  color4/color8 as luma-only with chroma divergent. See
+  `docs/decode_conformance.md` for the authoritative matrix rather than a
+  summary line, because that matrix is what changes as the RT-series lands.
 
 ## General dev environment guidance
 
@@ -251,15 +325,110 @@ being close to useless. Do not conflate them.
 
 North star: a working, bit-exact 1:1 port of SVT-AV1 on CUDA 12.2 - every algorithm traceable to the pinned vendored reference in third_party/SVT-AV1 (REFERENCE PINNING rule above); the target is bit-exact 1:1 with the pinned vendored SVT-AV1 reference, not with upstream.
 
-- l0_core -" minimal types (Sample, BlockSize) shared across layers.
-- l1_pixels -" pixels::Plane (strided pixel buffer with padding).
-- l2_gpurt -" NVRTC JIT + driver-API runtime (GpuContext, DeviceBuffer, Kernel, ptxEntryNames); kernels are CUDA C++ source strings compiled for compute_61.
+- l0_core - minimal types (Sample, BlockSize) shared across layers.
+- l1_pixels - pixels::Plane (strided pixel buffer with padding).
+- l2_gpurt - NVRTC JIT + driver-API runtime (GpuContext, DeviceBuffer, Kernel, ptxEntryNames); kernels are CUDA C++ source strings compiled for compute_61. No CUstream anywhere: Kernel::launch uses the hard-coded stream 0 and a cuCtxSynchronize per launch (gpurt.cpp:104-115), so there is no batching, no async copy and no graph capture.
 - l3_transforms - SVT-AV1 fixed-point transforms at 4x4 / 8x8 / 16x16 (C-series) then 32x32 / 64x64 (L-series). Host 1D kernels: fdct4/fadst4, fdct8/fadst8, fdct16/fadst16 (verbatim svt_av1_fdct/fadst_N_new) and idct4/iadst4, idct8/iadst8, idct16/iadst16 (verbatim, clamps only where SVT consumes stage_range: idct16 stages 3-7, iadst16 stages 3/5/7; iadst16 has no all-zero early-out at 16); fdct32/fadst32 + idct32/iadst32 (idct32 clamps ONLY stages 3-9, iadst32 clamps EVERY stage, no all-zero early-out at 32); fdct64/idct64 DCT-only within our TxType scope (av1_txfm_type_ls[4] = {DCT64, INVALID, INVALID, IDENTITY64}, inv_transforms.h:196 - no ADST is signalable at TX_64X64; the IDENTITY64 column is parked, not ported) - ported mechanically from the committed extract svt_gen.c with the SVT pointer-swap structure preserved, fdct64B takes cos_bit. Host 2D: fwdTxfm2d4x4/8x8/16x16/32x32/64x64 + invTxfm2dAdd4x4/8x8/16x16/32x32/64x64 (64x64 DCT-only; the 64x64 fwd has net shift 0 so the roundtrip is lossy like 8x8/32x32). cos_bit findings from the SVT tables (transforms.c:19-22, inv_transforms.h:32-41): fwd 4x4 13/13, 8x8 13/13, 16x16 col 13 / row 12, 32x32 12/12, 64x64 col 13 / row 10 (the only pass below 12 - fdct16/fadst16 and fdct64B are cos_bit-parameterized via cospiRow = cospi_arr mirror); inv is 12/12 (INV_COS_BIT) at every size. Shifts: fwd {2,0,0} / {2,-1,0} / {2,-2,0} / {2,-4,0} / {0,-2,-2}; inv {0,-4} / {-1,-4} / {-2,-4} / {-2,-4} / {-2,-4}. Quantizer stage: buildQuantTables (luma rows of svt_av1_build_quantizer, sharpness=0), size-parameterized quantizeFpN/quantizeBN (verbatim semantics of quantize_fp_helper_c / svt_aom_quantize_b_c) with 4x4/8x8/16x16 (log_scale 0) / 32x32 (log_scale 1) / 64x64 (log_scale 2) wrappers per av1_get_tx_scale_tab (full_loop.c:22) - the escalated arithmetic (rounding ROUND_POWER_OF_TWO(round, log_scale), threshold << (1+log_scale), quant >> (16-log_scale), dq >> log_scale) cited in the L5/L9a commits; defaultScan4x4/8x8/16x16/32x32/64x64 (svt_aom_init_iscan formula); dc/ac unified via table index [rc != 0] - this SVT tree has no av1_quantize_dc. GPU twins at every size: fwd_txfm_2d_4x4..64x64, inv_txfm_2d_add_4x4..64x64, quant_dequant_4x4..64x64 (32x32 fwd/inv cos_bit 12 via kC12f/kC12; 64x64 d_fdct64 selects bit 13 col / 10 row; quant_dequant_64x64 = 4 scan positions per thread). MSVC toolchain limit named: raw string literals > ~16.8KB fire C2026 - all CuSource functions are += chunked (<= ~13.5KB per chunk). Integer only.
-- l4_intra - buildIntraPredictors (1:1 with SVT build_intra_predictors, luma, size-generic over 4/8/16/32/64, DC availability variants, missing-neighbor fills), drZ1/2/3 + drPredictor, edge filter/upsample, smoothPredict family, filterIntraPredictor. Corner blend (enc_intra_prediction.c:600-604, txwpx+txhpx >= 24): dead at 4x4/8x8 (sums 8/16), LIVE at 16x16 (32), 32x32 (64) and 64x64 (128) - the 16x16/32x32/64x64 GPU kernels carry it. Upsample never fires at 16x16/32x32/64x64 (blk_wh 32/64/128 > 16, svt_aom_use_intra_edge_upsample). GPU twins: predict_block_4x4, predict_block_8x8, predict_block_16x16 (256 threads, shared sizing: above/left max 32 used, zone-1 maxBaseX = 31, above[31] reach within 96-byte arrays), predict_block_32x32 (1024 threads = the CUDA block maximum, __launch_bounds__(1024) after CUresult 701 at naive 1024-thread/64-reg; zone-1 maxBaseX = 63, edge-filter nPx = 65, corner blend live) and predict_block_64x64 (1024 threads, FOUR pixels per thread p = t + 1024k - the stated thread-map design; zone-1 maxBaseX = 127, edge-filter nPx = 129 within 256-byte shared arrays; filter-intra NOT signalable at 64x64 so the 64x64 kernel has no FI path).
+- l4_intra - buildIntraPredictors (1:1 with SVT build_intra_predictors, luma, size-generic over 4/8/16/32/64, DC availability variants, missing-neighbor fills), drZ1/2/3 + drPredictor, edge filter/upsample, smoothPredict family, filterIntraPredictor. Corner blend (enc_intra_prediction.c:190-191 8-bit, :392-393 16-bit, the guard `txwpx + txhpx >= 24`): dead at 4x4/8x8 (sums 8/16), LIVE at 16x16 (32), 32x32 (64) and 64x64 (128) - the 16x16/32x32/64x64 GPU kernels carry it. Upsample never fires at 16x16/32x32/64x64 (blk_wh 32/64/128 > 16, svt_aom_use_intra_edge_upsample). GPU twins: predict_block_4x4, predict_block_8x8, predict_block_16x16 (256 threads, shared sizing: above/left max 32 used, zone-1 maxBaseX = 31, above[31] reach within 96-byte arrays), predict_block_32x32 (1024 threads = the CUDA block maximum, __launch_bounds__(1024) after CUresult 701 at naive 1024-thread/64-reg; zone-1 maxBaseX = 63, edge-filter nPx = 65, corner blend live) and predict_block_64x64 (1024 threads, FOUR pixels per thread p = t + 1024k - the stated thread-map design; zone-1 maxBaseX = 127, edge-filter nPx = 129 within 256-byte shared arrays; filter-intra NOT signalable at 64x64 so the 64x64 kernel has no FI path).
 - l5_motion - motion::sad4x4 / sad8x8 / sad16x16 / sad32x32 / sad64x64 (strided uint8) + GPU kernels for 4x4 and 8x8 only; the 16x16 / 32x32 / 64x64 D2 policies score host-side (frame GPU tests are host-decides-gpu-executes, like 8x8). Provenance: sad8x8 mirrors the dedicated 8x8 kernel compute8x8_sad_kernel_c (motion_estimation.c:71); sad4x4 / sad16x16 / sad32x32 / sad64x64 mirror svt_nxm_sad_kernel_helper_c at those dims (compute_sad_c.c:21). (HK1 correction: both citations restored - the HK1 edit had dropped compute8x8_sad_kernel_c, which does exist at motion_estimation.c:71.)
 - l6_pipeline - block + frame composition and DECISION at all five geometries: 4x4 (encode
-Block4x4 / encodeRecon4x4 / encodeFrameRecon4x4 / encodeFrameAuto4x4 / encodeFrameAuto4x4Q), 8x8 (encodeFrameRecon8x8 / Auto8x8 / Recon8x8Q / Auto8x8Q), 16x16 (encodeFrameRecon16x16 / Auto16x16 / Recon16x16Q / Auto16x16Q), 32x32 (encodeFrameRecon32x32 / Auto32x32 / Recon32x32Q / Auto32x32Q + decideBlockMode32x32) and 64x64 (encodeFrameRecon64x64 / Auto64x64 / Recon64x64Q / Auto64x64Q + decideBlockMode64x64, DCT-only within our TxType scope) - raster grids, intra-only, each block predicting from RECONSTRUCTED neighbors (M1 availability rules) with the FR-series REAL recon top-right gather in every variant (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]; row above fully reconstructed by raster order). Each Auto variant's mode is CHOSEN by the D2 SAD policy per geometry (decideBlockMode4x4/8x8/16x16/32x32/64x64 - policy is ours; primitives 1:1) evaluated against reconstructed edges; chosen modes feed NeighborContext (filt_type live) = plane window (l1) + buildIntraPredictors (l4) -> int16 residual (no clamp) -> fwdTxfm2d (l3) -> invTxfm2dAdd (l3 inverse) onto the same predictor. GPU frame paths: per-block kernel chains (predict_block / subtract_4x4..64x64_plane / fwd_txfm_2d / quant_dequant / inv_txfm_2d_add), edges gathered host-side from the device recon buffer; ALL FIVE geometries are bit-exact vs host in both lossless and q100 GPU frame tests. The 16x16 fwd/inv roundtrip is exact (recon == source at 16x16); 8x8 / 32x32 / 64x64 are lossy by design (fwd shift sums -2, 0 for 64). Goldens captured from SVT's own C in the committed generator (tools/golden_gen). Emission sites (TD5b): encodeFrameAuto16x16 inits the frame context with q0 (CodedLossless, bucket 0, pipeline.cpp:758) and encodeFrameAuto16x16Q passes the frame qindex (pipeline.cpp:909) - the l7 init is qindex-bucketed (see l7). FS-series (CLOSED, content-1:1 at all five geometries): the 4x4Q/8x8Q/32x32Q/64x64Q loops take optional w/fc/na (defaults nullptr) and emit the full per-block walk [partition iff the frame reads one: 8x8 = the 4-symbol row, 16/32/64 = the 10-symbol rows, 4x4 = none][skip=0 ctx 0][kf mode + the angle-delta symbol for directional at bsize >= 8X8][FI iff DC_PRED && bsize <= 32x32][writeBlockCoeffs] with initDefaultEcFrameContext(fc, qindex) (the bucketed init, see l7) - bit-exact vs the fs2S_* gate lines per size (the 64x64 emission-domain = the TX_64X64 scan contract: compact the fwd64 top-left 32x32, quantize n_coeffs=1024 with the 1024-position token scan via quantizeFp64x64Token, expand the compacted dqcoeff for inv64; the legacy/GPU callers keep the 4096 facade - the FS5d named follow-up); the 8x8Q/32x32Q/64x64Q emit RUNNING partition contexts (updatePartitionContext after each coded block; for uniform grids these coincide with fresh INVALID - the lookup bit at the leaf's own bsl is 0 for every square size, mutation-check-proven) and writeBlockCoeffs takes mi-unit args; the grid conformance gate = the fs5g32 fixture (the 2x2 of 32x32). Scope: single-TU + the grid fixtures gate-pinned; the FI DC-deciding fixture still open; FS5d the named dual-domain follow-up (a 1024-position GPU kernel + bench work). Per-geometry decode conformance: the five committed artifacts (d4 30B the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px so the 8x8 node reads the partition symbol; d8 30B; d16 44B; d32 47B committed; d64 441B) decode content-1:1 per geometry via tools/verify_decode4.ps1 -Geometry.
-- l7_entropy - the od_ec writer/reader families + the full symbol surface: initDefaultEcFrameContext(fc, base_q_idx) (TD5b: the coefficient tables QINDEX-BUCKET-SELECTED per the spec's init_coeff_cdfs, 07.bitstream.semantics.md:1800-1820, via the verbatim getQCtx mirror of cabac_context_model.c:1907-1918; the 13 token-table families carried as the 4-bucket *_buckets.inc files mechanically split from the committed svt_gen.c extracts - no hand-transcribed values; previously the idx-0 bucket was used for every frame = the TS1 deviation, RESOLVED 2026-09-21: it was the q100 tile-divergence root cause), writeTxbCoeffs/writeBlockCoeffs/readBlockCoeffs (the token chain: txb_skip, tx-type, eob_pt/eob_extra, base_eob+br, reverse base+brs, dc_sign + raw signs + golomb; FS3-prep: the in-chain tx-type symbol requires tx_size_sqr_up < TX_32X32 - DCTONLY at 32x32/64x64 intra writes/reads NO symbol, entropy_coding.c:321-322), writeKfLumaMode/readKfLumaMode, writeSkip, writePartition/readPartition, writeTxType, updatePartitionContext (FS5a: wired into the 8x8Q/32x32Q/64x64Q emission loops), getKfYModeCtx, updateCdf (the spec adaptation rate), writeGolomb/readGolomb. Provenance: every primitive cites the vendored extract; the per-bucket rows cite cabac_context_model.c (the court-cited [2]-bucket EobPt256 row {3089, 3920, ...} = token_cdfs.h:861 on the aom side).
-- l8_bitstream - the bit assembly: wb family (bit writer), uleb128, OBU header + temporal delimiter, SPS encode (writeSequenceHeaderObu, sps_obu; FS5b: maxDim-parameterized max frame dims - frame_width_bits = msb(maxDim), the default 32 = the committed walk), the frame-header v1 (writeFrameHeader, lossless q0, 22-bit walk) and v2 (writeFrameHeaderV2, lossy q100, 40-bit walk - verified field-by-field against both aom decodeframe.c and dav1d obu.c), assembleStructuralKeyframeTUv2 (TD + SPS + OBU_FRAME; FS5b: the dims threaded through bsf3EncodeSps), the committed artifact SET goldens/structural_keyframe*.obu - the 47-byte d32 (TD5b: the v2 header + the idx-2-coded tile, the four-16x16-leaves walk; decodes exit 0 with the content 1:1 - the ecfrm_recon fingerprint 05 08 0c 11, byte-diffs 0/1024) plus the FS5 per-geometry set (d4 30B = the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px; d8 30B; d16 44B; d64 441B - each three-way-identity-tested and content-1:1 measured per geometry; tools/verify_decode4.ps1 -Geometry = the standing instrument). Gate: tu_bytes_v2 47 + tu_bytes_v2_d4/d8/d16/d64 (tools/golden_gen).
-- third_party/ -" vendored SVT-AV1 (1:1 source of truth), doctest, hardware docs (perf-axis only: PTX ISA, GP104 whitepaper, Pascal Tuning Guide, Nsight-focused guides; CUDA 12.2 profiling is ncu, not nvprof).
+Block4x4 / encodeRecon4x4 / encodeFrameRecon4x4 / encodeFrameAuto4x4 / encodeFrameAuto4x4Q), 8x8 (encodeFrameRecon8x8 / Auto8x8 / Recon8x8Q / Auto8x8Q), 16x16 (encodeFrameRecon16x16 / Auto16x16 / Recon16x16Q / Auto16x16Q), 32x32 (encodeFrameRecon32x32 / Auto32x32 / Recon32x32Q / Auto32x32Q + decideBlockMode32x32) and 64x64 (encodeFrameRecon64x64 / Auto64x64 / Recon64x64Q / Auto64x64Q + decideBlockMode64x64, DCT-only within our TxType scope) - raster grids, intra-only, each block predicting from RECONSTRUCTED neighbors (M1 availability rules) with the FR-series REAL recon top-right gather in every variant (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]; row above fully reconstructed by raster order). Each Auto variant's mode is CHOSEN by the D2 SAD policy per geometry (decideBlockMode4x4/8x8/16x16/32x32/64x64 - policy is ours; primitives 1:1) evaluated against reconstructed edges; chosen modes feed NeighborContext (filt_type live) = plane window (l1) + buildIntraPredictors (l4) -> int16 residual (no clamp) -> fwdTxfm2d (l3) -> invTxfm2dAdd (l3 inverse) onto the same predictor. GPU frame paths: per-block kernel chains (predict_block / subtract_4x4..64x64_plane / fwd_txfm_2d / quant_dequant / inv_txfm_2d_add), edges gathered host-side from the device recon buffer; ALL FIVE geometries are bit-exact vs host in both lossless and q100 GPU frame tests. The 16x16 fwd/inv roundtrip is exact (recon == source at 16x16); 8x8 / 32x32 / 64x64 are lossy by design (fwd shift sums -2, 0 for 64). Goldens captured from SVT's own C in the committed generator (tools/golden_gen). Emission sites (TD5b): encodeFrameAuto16x16 (pipeline.cpp:832) inits the frame context with q0 (CodedLossless, bucket 0, pipeline.cpp:840) and encodeFrameAuto16x16Q (pipeline.cpp:982) passes the frame qindex (pipeline.cpp:991) - the l7 init is qindex-bucketed (see l7). FS-series (CLOSED, content-1:1 at all five geometries): the 4x4Q/8x8Q/32x32Q/64x64Q loops take optional w/fc/na (defaults nullptr) and emit the full per-block walk [partition iff the frame reads one: 8x8 = the 4-symbol row, 16/32/64 = the 10-symbol rows, 4x4 = none][skip=0 ctx 0][kf mode + the angle-delta symbol for directional at bsize >= 8X8][FI iff DC_PRED && bsize <= 32x32][writeBlockCoeffs] with initDefaultEcFrameContext(fc, qindex) (the bucketed init, see l7) - bit-exact vs the fs2S_* gate lines per size (the 64x64 emission-domain = the TX_64X64 scan contract: compact the fwd64 top-left 32x32, quantize n_coeffs=1024 with the 1024-position token scan via quantizeFp64x64Token, expand the compacted dqcoeff for inv64; the legacy/GPU callers keep the 4096 facade - the FS5d named follow-up); the 8x8Q/32x32Q/64x64Q emit RUNNING partition contexts (updatePartitionContext after each coded block; for uniform grids these coincide with fresh INVALID - the lookup bit at the leaf's own bsl is 0 for every square size, mutation-check-proven) and writeBlockCoeffs takes mi-unit args. The grid conformance gate = the fs5g32 fixture (the 2x2 of 32x32). CHROMA (CS-series, LANDED - the layer map used to describe l6 as luma-only, which was stale): the 4:2:0 chroma-emitting walk is encodeFrameChromaQ (pipeline.cpp:1785), taking srcY/srcU/srcV and reconY/reconU/reconV, with uvB = lumaB/2 (pipeline.cpp:1794) and UV block sizes {4,8,16,32} selected from lumaB {8,16,32,64} per av1_get_max_uv_txsize (common_utils.h:142-149). The chroma-ownership predicate is the AV1 is_chroma_reference rule for 4:2:0 (pipeline.cpp:1859-1861). The walk is a real superblock tree in the DECODER's Z-order DFS (zorderLeaves, pipeline.cpp:1772-1784, cited to aom decodeframe.c:1392-1397) and it is the only emitter that writes a partition value other than PARTITION_NONE: PARTITION_SPLIT at the 64x64 root and at the 32x32/16x16 interior nodes (pipeline.cpp:1838, :1966, :1970). Per leaf the order is [luma kf mode][uv_mode - ONE per block, the V TU shares the U decision][uv angle-delta where gated][luma chain][U chain][V chain], U BEFORE V, with three separate neighbour arrays naY/naU/naV. Chroma mode decision is the project's own SAD policy (decideBlockModeUv pipeline.cpp:1742, decideBlockModeUv16x16 pipeline.cpp:1720) over 13 folded candidates via intra::uv2y with UV_CFL_PRED excluded (the loop bounds, pipeline.cpp:1726 and :1748) - the CFL alpha combine is out of scope by named policy (pipeline.h:169-171). The chroma transform type is DERIVED, never signalled: transforms::intraUvTxType (transform.h:97, RT9 step 2) 1:1 with svt_aom_get_intra_uv_tx_type (mode_decision.c:2985-2997), called at pipeline.cpp:2108-2113. The bottom-left availability rule is a single named function, `pipeline::bottomLeftPx` (pipeline.cpp:2420-2424, declared pipeline.h:246), extracted so the rule lives in ONE place and is directly callable by the invariance test and by both planes. Read the two sites as different things: the RULE is pipeline.cpp:2420-2424; the luma CALL SITE is pipeline.cpp:1884, and the luma gather that consumes the count is pipeline.cpp:1892-1894 (RT10b). Do not cite 1884 as the gate - since the be67d6f extraction the gate expression is no longer inlined there, and 1885-1886 are the above/left buffer declarations. Read the UV side as three different things, not two. **The site CS7 CHANGES is the CS4 walk's `buildIntraPredictorsUv` call at pipeline.cpp:2090** - its argument list at :2093 passes the literal `0` in the `nBottomLeftPx` position. That is the chroma-side hole the fix closes, and it is a different line from the luma call site (:1884) and from the rule itself (:2420-2424). **Do NOT "fix" pipeline.cpp:2182.** That is `encodeFrameReconChroma16x16`, one of the four standalone 16x16-UV compositions, whose grid is `src.width()/16 x src.height()/16` (pipeline.cpp:2170-2171) - so on the committed 16x16 UV fixture the grid is 1, no below-left neighbour exists, and the `nBottomLeftPx = 0` there is CORRECT BY GEOMETRY rather than by omission. It is on record as a site where zero is right, so that nobody reads it as CS4, and so that nobody believes CS4 is already handled. Its sibling calls are :2266, :2321 and :2394, same fixed 16x16 shape. The one condition that would make :2182 a real hole is a caller passing a UV plane larger than one block; no committed caller does, and the fix should either leave it alone or add the rule behind the same guard rather than special-casing the literal. Four standalone UV-plane compositions also exist at 16x16 UV (encodeFrameReconChroma16x16 pipeline.cpp:2170, AutoChroma16x16 :2220, ReconChroma16x16Q :2290, AutoChroma16x16Q :2348). Scope: single-TU + the grid fixtures gate-pinned; the FI DC-deciding fixture still open; FS5d the named dual-domain follow-up (a 1024-position GPU kernel + bench work). Per-geometry decode conformance: the five committed artifacts (d4 30B the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px so the 8x8 node reads the partition symbol; d8 30B; d16 44B; d32 47B committed; d64 441B) decode content-1:1 per geometry via tools/verify_decode4.ps1 -Geometry.
+- l7_entropy - the od_ec writer/reader families + the full symbol surface: initDefaultEcFrameContext(fc, base_q_idx) (TD5b: the coefficient tables QINDEX-BUCKET-SELECTED per the spec's init_coeff_cdfs, 07.bitstream.semantics.md:1800-1820, via the verbatim getQCtx mirror of cabac_context_model.c:1907-1918; the 13 token-table families carried as the 4-bucket *_buckets.inc files mechanically split from the committed svt_gen.c extracts - no hand-transcribed values; previously the idx-0 bucket was used for every frame = the TS1 deviation, RESOLVED 2026-09-21: it was the q100 tile-divergence root cause), writeTxbCoeffs/writeBlockCoeffs/readBlockCoeffs (the token chain: txb_skip, tx-type, eob_pt/eob_extra, base_eob+br, reverse base+brs, dc_sign + raw signs + golomb; FS3-prep: the in-chain tx-type symbol requires tx_size_sqr_up < TX_32X32 - DCTONLY at 32x32/64x64 intra writes/reads NO symbol, entropy_coding.c:321-322), writeKfLumaMode/readKfLumaMode, writeSkip, writePartition/readPartition, writeTxType, updatePartitionContext (FS5a: wired into the 8x8Q/32x32Q/64x64Q emission loops), getKfYModeCtx (entropy.cpp:840 - the context is DERIVED from live neighbour modes, not pinned), updateCdf (the spec adaptation rate), writeGolomb/readGolomb. CONTEXT DERIVATION IS LIVE, not stubbed: getTxbCtx (entropy.cpp:1455) drives the per-coefficient skip context from the real neighbour arrays via the skip_contexts table, the nz-map offset LUT (nz_map_ctx_offset.inc) and the chroma ctx_base + 7 branch (entropy.h:605-612); the per-block call sites are entropy.cpp:1533 and :1562. Named scope: the skip symbol is always emitted as skip=0 ctx 0 (no skip decision is taken - pipeline.cpp:499, :685, :1356, :1694, :1982), the angle delta is always 0 in our emission (pipeline.h:156, named parked), and the tx sets fold reduced_tx_set=1 (entropy.cpp:1585). Provenance: every primitive cites the vendored extract; the per-bucket rows cite cabac_context_model.c (the court-cited [2]-bucket EobPt256 row {3089, 3920, ...} = token_cdfs.h:861 on the aom side). CHROMA (CS1b, LANDED): the uv_mode write/read pair (entropy_coding.c:1080-1081 write, decodemv.c:144-147/:823-837 read; alphabet UV_INTRA_MODES - !cflAllowed = 14 at bsize <= 32x32 / 13 at 64x64), the uv angle-delta pair (:1087-1092 / :830-833, gated on bsize >= BLOCK_8X8 AND the folded mode directional), a ComponentType enum threading six component-dim CDF families through both twins, and writeFilterIntra for the chroma walk. Named deferral: write_cfl_alphas (:1060-1071) - UV_CFL_PRED is not a D2 candidate (pipeline.cpp:1726), so the alphas are dead in our emission.
+- l8_bitstream - the bit assembly: wb family (bit writer), uleb128, OBU header + temporal delimiter, SPS encode (writeSequenceHeaderObu, sps_obu; FS5b: maxDim-parameterized max frame dims - frame_width_bits = msb(maxDim), the default 32 = the committed walk), the frame-header v1 (writeFrameHeader, lossless q0, 22-bit walk + 2 pad = 3 bytes) and v2 (writeFrameHeaderV2, lossy q100, 40-bit walk - verified field-by-field against both aom decodeframe.c and dav1d obu.c), assembleStructuralKeyframeTUv2 (TD + SPS + OBU_FRAME; FS5b: the dims threaded through bsf3EncodeSps), the committed artifact SET goldens/structural_keyframe*.obu - the 47-byte d32 (TD5b: the v2 header + the idx-2-coded tile, the four-16x16-leaves walk; decodes exit 0 with the content 1:1 - the ecfrm_recon fingerprint 05 08 0c 11, byte-diffs 0/1024) plus the FS5 per-geometry set (d4 30B = the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px; d8 30B; d16 44B; d64 441B - each three-way-identity-tested and content-1:1 measured per geometry; tools/verify_decode4.ps1 -Geometry = the standing instrument). Gate: tu_bytes_v2 47 + tu_bytes_v2_d4/d8/d16/d64 (tools/golden_gen). COLOR HEADERS (CS3, LANDED - the layer map used to stop at v2): writeSequenceHeaderObuV3 (bitstream.cpp:390, the D1 un-patch: mono bit 0, the 4:2:0 colour config, chroma_sample_position = UNKNOWN, separate_uv_delta_q = 0) + writeFrameHeaderV3 (bitstream.cpp:413, v2's 40 bits + the unconditional U/V delta_q bits = 42 bits + 6 pad = 6 bytes) + assembleStructuralKeyframeTUv3 (bitstream.cpp:476). The D1 mono producers stay pinned for the mono artifact set. The committed artifact set is NINE .obu files: the five grayscale above plus color4 201B / color8 139B / color16 133B / color32 165B; the per-artifact decode outcomes are in docs/decode_conformance.md.
+- third_party/ - vendored SVT-AV1 (1:1 source of truth), doctest, hardware docs (perf-axis only: PTX ISA, GP104 whitepaper, Pascal Tuning Guide, Nsight-focused guides; CUDA 12.2 profiling is ncu, not nvprof). NOTE for anyone auditing third_party: it is NOT just SVT-AV1 + doctest. third_party/aom is a FULL libaom checkout (av1/decoder/decodeframe.c, av1/decoder/decodemv.c, av1/common/token_cdfs.h, av1/encoder/av1_quantize.c are all present and are the resolution target for the aom-side citations in docs/provenance.md and docs/color.md), third_party/aom_dsp carries src/entdec.c + src/bitreader.c, and third_party/dav1d is NOT vendored (the RT7 instrument builds a throwaway dav1d outside the repo, so dav1d-side citations cannot be checked in-tree).
+- l9_analysis - PLANNED, NOT YET BUILT. The campaign is scoped in docs/todo.md (section A0, the AN-series) and the target area is A11 in the coverage metric below. No l9 code exists at HEAD; do not cite it as if it did.
+
+
+## Completion metric (the portable-C coverage number)
+
+North star #1 above is "bit-exact 1:1 with the pinned reference". That is a
+QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
+and says nothing about how much is ported. This section defines the progress
+bar, and it is the number to quote when asked "how far along is the port?".
+
+**THE NUMBER, as measured 2026-09-27: 13.1%** (20,659 of 157,718 non-blank
+lines). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
+hand-typed percentage, for the same reason a hand-typed line count is not
+allowed.
+
+**Denominator: the pinned reference's portable C algorithm surface only** -
+`third_party/SVT-AV1/Source/Lib/Codec` (239 files) + `.../C_DEFAULT` (15
+files) = 254 files, 157,718 non-blank lines. Deliberately EXCLUDED:
+
+- all 11 `ASM_*` directories (217,092 non-blank lines of x86/ARM SIMD). Our
+  CUDA kernels are the analog of those, not a separate algorithm, so counting
+  them would measure SVT's optimisation work rather than our coverage. This is
+  the single biggest judgement in the metric and it is the reason the number
+  is 13% rather than 6%.
+- `Source/Lib/Globals`, `Source/API`, `Source/App` - the library shell, the
+  public API and the CLI; none is a 1:1 algorithm target.
+- the four `*_rtcd.*` files inside Codec (7,906 lines of generated
+  function-pointer dispatch tables plus inline intrinsic stubs - dispatch
+  glue, not portable algorithm).
+- `third_party/` in its entirety.
+
+**Metric: NON-BLANK lines.** `Measure-Object -Line` and
+`[IO.File]::ReadAllLines | Where Trim` both report non-blank; the trap is that
+`Get-Content | Measure-Object -Line` LOOKS like it counts physical lines and
+does not. Verified on the pinned tree: `entropy_coding.c` is 4,898 non-blank
+vs 5,551 physical (653 blank). Both sides of the ratio are measured the same
+way, so the percentage is sound - but an absolute line count quoted without
+naming its metric is not.
+
+**The per-area judgement lives in `tools/coverage_areas.txt`, not in the
+script.** `tools/coverage.ps1` MEASURES (line counts, recomputed from the
+reference every run); the file JUDGES (what fraction of each area is ported),
+with a one-line rationale per row that is the audit surface. A fraction with no
+reason is not reviewable. The file lists explicit paths per area, so a file
+claimed by two areas is reported as a classification bug and a reference file
+claimed by none is reported as UNASSIGNED - counted in the denominator, so a
+newly added reference file lowers the percentage loudly rather than silently.
+
+| id | area | files | non-blank | cov% | covered |
+|---|---|---|---|---|---|
+| A1 | Transform/TX | 9 | 27,008 | 33% | 8,913 |
+| A2 | Intra prediction | 4 | 3,478 | 90% | 3,130 |
+| A3 | Inter prediction + motion estimation | 44 | 17,738 | 2% | 355 |
+| A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 3% | 933 |
+| A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 55% | 4,653 |
+| A6 | Coding loop + PCS + block structures | 22 | 13,928 | 10% | 1,393 |
+| A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
+| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 0% | 0 |
+| A9 | Rate control | 17 | 5,951 | 0% | 0 |
+| A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 0% | 0 |
+| A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
+| A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
+| A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 30% | 440 |
+| - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
+| | **TOTAL** | **254** | **157,718** | | **20,659** |
+
+**+1.0 point = 1,577 non-blank reference lines.** So progress is legible
+arithmetically: a slice worth +1 point is worth about 1,600 lines of ported
+reference surface.
+
+**THE NUMBER IS TWO NUMBERS, and the second one is not optional.** A bare LOC
+percentage can be moved by transcribing a data table and cannot be moved by
+fixing an algorithm. The most extreme case is in this very tree: SVT's
+`q_matrices.h` is 13,424 lines of pure quant-matrix data in one file, and
+transcribing it would add 8.5 points while the encoder's behaviour is
+unchanged, because it sits dormant behind `using_qmatrix = 0`. (It is also
+poor value per line - our `.inc` files pack at 8.87 numbers/line against the
+reference's 15.97, so it costs roughly 2,835 of our lines per point, versus
+about 1,580 for algorithm code.) Therefore, alongside the percentage, report
+the **decoder-gated conformance count**: committed artifacts x decoders
+verified content-1:1, per `docs/decode_conformance.md`. **A slice counts as
+progress only if it moves both.** Neither number alone is honest - one is
+gameable by transcription, the other does not scale with coverage.
+
+**Coverage is not quality.** A5 at 55% and A1 at 33% are the two softest
+fractions in the table and are the first thing to attack in review. Neither is
+a claim that the ported half is bit-exact - that is north star #1 and it is
+settled per-slice by the GATE and by the real decoders, not by this table.
+
+**CITATION RULE EXTENSION.** The fractions above are judgement and must be
+grep-verified against the tree before being quoted, exactly as existence and
+negative-existence claims already are. Re-run `tools/coverage.ps1` after any
+edit to `tools/coverage_areas.txt`; the table above and the number in this
+paragraph must agree with that run or this section is stale.
 

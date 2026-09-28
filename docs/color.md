@@ -29,7 +29,7 @@ delta 0 + the 8 dr modes at deltas -1/+1) at 4x4/8x8.
 
 `decideBlockModeUv` (the size-generic CH3 policy): the 13 folded
 candidates via `intra::uv2y`, UV_CFL_PRED excluded (it is not a D2
-candidate, pipeline.cpp:1721), SAD scored at the UV size, tie = lowest
+  candidate, pipeline.cpp:1726), SAD scored at the UV size, tie = lowest
 index. UV-sized blocks; availability is per-plane.
 
 ## 3. Transforms (CS2 + RT9)
