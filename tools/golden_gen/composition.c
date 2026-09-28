@@ -6541,6 +6541,39 @@ static int svtd_cs4_uv_q_drive(int S) {
                 const int uvHasTop = (uv_y > 0), uvHasLeft = (uv_x > 0);
                 const int uRow = uv_y / S, uCol = uv_x / S;
                 const int uvGrid = 32 / S;
+                // CS7: the CHROMA bottom-left extension, previously a literal 0
+                // at the builder call below. The mirror of the luma gather at
+                // :6286-6287 with S in place of B, and the SAME conjunct rather
+                // than a re-derivation: UV leaf indices ARE the luma leaf
+                // indices. uv_x = ((px >> 3) << 3) >> 1 = bx*S for lumaB = 2*S
+                // at 4:2:0, so uCol == bx and uRow == by, and uvGrid = 32/S =
+                // 64/lumaB = grid. No second Z-order map is needed and none is
+                // built here.
+                //
+                // As on the luma axis the caller supplies AVAILABILITY (pixels)
+                // and the BUILDER derives USE: build_intra_predictors mutates
+                // ONE variable in sequence (svt_gen.c:9217-9222 - seed from
+                // extend_modes & NEED_BOTTOMLEFT, force 0 for filter-intra, then
+                // OVERWRITE with is_dr_mode && p_angle > 180), so duplicating
+                // that predicate here would be a second copy of reference logic
+                // free to drift. The gather itself is gated on
+                // n_bottomleft_px > 0 (svt_gen.c:9230), so the old literal 0
+                // meant NO GATHER AT ALL and :9237's memset filled the extension
+                // by repetition - the same failure RT10b measured on luma.
+                //
+                // NO y + th >= h TERM, and its absence is not an omission: for a
+                // WHOLE-LEAF block in a LEAF-ALIGNED frame, "touches the plane
+                // bottom" is exactly "is on the last row", which is exactly this
+                // conjunct's by + 1 >= grid being false. The one assumption that
+                // would make dav1d's term live is a frame whose dimensions are
+                // not leaf-aligned, or a partial block; this walk produces
+                // neither (every geometry is width / lumaB blocks exactly), so
+                // the equivalence is structural here rather than fixture-lucky.
+                // A hypothetical overrun would be a padded READ - the Plane
+                // allocates height + 2*padding rows - never a safety issue.
+                const int cbl_bidx = (by + 1) * grid + (bx - 1);
+                const int cNBl =
+                    (uvHasLeft && by + 1 < grid && zpos[cbl_bidx] < zpos[bidx]) ? S : 0;
                 for (int comp = 0; comp < 2; ++comp) {
                     const uint8_t* csrc = comp ? v_src : u_src;
                     uint8_t* crecon = comp ? recon_v : recon_u;
@@ -6602,18 +6635,34 @@ static int svtd_cs4_uv_q_drive(int S) {
                                     fprintf(stderr,
                                             "RT11OURS S=%d plane=%c uvleaf=%d uRow=%d uCol=%d "
                                             "expected_leaf=%d uvm=%d uvHasTop=%d uvHasLeft=%d "
-                                            "n_left_passed=%d n_bottomleft_passed=0\n",
+                                            "n_left_passed=%d n_bottomleft_passed=%d\n",
                                             S, comp ? 'V' : 'U', actLeaf, uRow, uCol, expLeaf, uvm,
-                                            (int)uvHasTop, (int)uvHasLeft, S);
+                                            (int)uvHasTop, (int)uvHasLeft, S, cNBl);
                                     fprintf(stderr, "RT11OURS left_col[%d] :", S);
                                     for (int i = 0; i < S; ++i) fprintf(stderr, " %d", cleft[i]);
                                     fprintf(stderr, "\n");
-                                    // what the builder's :9237 memset will produce
-                                    fprintf(stderr, "RT11OURS left_col[%d..%d] (memset :9237) :", S,
+                                    // The extension the builder will actually
+                                    // use. The :9230 gather owns it when
+                                    // n_bottomleft_px > 0, and the :9237 memset
+                                    // repetition only fills the REMAINDER - so
+                                    // the memset prediction below is labelled as
+                                    // such and is not a claim about what the
+                                    // builder does. Reporting only the memset
+                                    // would state something false at the two
+                                    // c4 leaves that now gather.
+                                    fprintf(stderr, "RT11OURS left_col[%d..%d] (extension) :", S,
                                             2 * S - 1);
                                     for (int i = S; i < 2 * S; ++i)
-                                        fprintf(stderr, " %d", cleft[S - 1]);
+                                        fprintf(stderr, " %d", cNBl ? cleft[i] : cleft[S - 1]);
                                     fprintf(stderr, "\n");
+                                    if (!cNBl) {
+                                        fprintf(stderr,
+                                                "RT11OURS left_col[%d..%d] (memset :9237) :", S,
+                                                2 * S - 1);
+                                        for (int i = S; i < 2 * S; ++i)
+                                            fprintf(stderr, " %d", cleft[S - 1]);
+                                        fprintf(stderr, "\n");
+                                    }
                                 }
                                 // the final leaf of the geometry closes the count
                                 if (actLeaf == uvGrid * uvGrid - 1 && hits != 2)
@@ -6625,6 +6674,18 @@ static int svtd_cs4_uv_q_drive(int S) {
                             }
                         }
                     if (uvHasTop && uvHasLeft) cal = crecon[(uv_y - 1) * 32 + uv_x - 1];
+                    // CS7: the extension continues the left column downward
+                    // (:9230-9234), per plane - U and V are separate recon
+                    // buffers, so the gather is inside the comp loop and not
+                    // hoisted with the other edge counts. This sits AFTER the
+                    // RT11 instrument block on purpose: that block is the body
+                    // of the brace-less `if (uvHasLeft)` above, and inserting
+                    // here would widen the instrument's reach to leaves with no
+                    // left neighbour. Semantically nothing changes - uvHasLeft
+                    // is uCol > 0, which cNBl's own bx test already subsumes.
+                    if (cNBl)
+                        for (int j = 0; j < cNBl; ++j)
+                            cleft[S + j] = crecon[(uv_y + S + j) * 32 + uv_x - 1];
                     const int cAboveMode =
                         uvHasTop ? cmodes[(uRow - 1) * uvGrid + uCol] : UV_DC_PRED;
                     const int cLeftMode = uvHasLeft ? cmodes[uRow * uvGrid + uCol - 1] : UV_DC_PRED;
@@ -6650,7 +6711,7 @@ static int svtd_cs4_uv_q_drive(int S) {
                     // decision, see the V-mode note at the gate line below)
                     svtd_call_builder_tx(cpred, g_uv2y[uvm], 0, FILTER_INTRA_MODES, 0, cabove,
                                          uvHasTop ? S : 0, (uvHasTop && uCol + 1 < uvGrid) ? S : 0,
-                                         cleft, uvHasLeft ? S : 0, 0, cal, utxs);
+                                         cleft, uvHasLeft ? S : 0, cNBl, cal, utxs);
                     static int16_t cres[1024];
                     for (int i = 0; i < S * S; ++i) cres[i] = (int16_t)(csrcblk[i] - cpred[i]);
                     static int32_t ccb[1024];

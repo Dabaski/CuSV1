@@ -2061,6 +2061,36 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                 const int nTopUv = uvHasTop ? uvB : 0;
                 const int nLeftUv = uvHasLeft ? uvB : 0;
                 const int nTrUv = (uvHasTop && uCol + 1 < uvGrid) ? uvB : 0;
+                // CS7: the CHROMA BOTTOM-LEFT extension, previously a literal 0
+                // in the nBottomLeftPx position of the builder call below. The
+                // SAME named rule the luma call site uses at :1884 - not a
+                // second transcription of the expression - with uvB as the block
+                // size. UV leaf indices ARE the luma leaf indices: uvB =
+                // lumaB/2 and the UV origin is (px & ~7) >> 1, so uRow == by
+                // and uCol == bx and uvGrid == grid, which is why no second
+                // Z-order map is needed and none is built.
+                //
+                // The builder still owns the USE predicate: buildIntraPredictors
+                // mutates one variable in sequence (intra.cpp:541-547 - seed
+                // from kExtendModes & kNeedBottomLeft, force 0 for filter-intra,
+                // then OVERWRITE with isDrMode && pAngle > 180). A second copy
+                // of that in this walk would be reference logic free to drift.
+                // This call site supplies AVAILABILITY and the gathered bytes;
+                // nothing here mentions D203.
+                //
+                // NO y + th >= h TERM, and its absence is not an omission. dav1d
+                // adds that to have_bottomleft (ipred_prepare_tmpl.c:145-149),
+                // but for a whole-leaf block in a leaf-aligned frame "touches
+                // the plane bottom" is exactly "is on the last row", which is
+                // exactly bottomLeftPx's own by + 1 >= grid early return. The
+                // one assumption that would make the term live is a frame whose
+                // dimensions are not leaf-aligned, or a partial block; this walk
+                // produces neither (every geometry is width / lumaB blocks
+                // exactly), so the equivalence is structural rather than a
+                // fixture coincidence. A hypothetical overrun would be a padded
+                // READ - pixels::Plane allocates height + 2*padding rows - never
+                // a memory-safety issue, and no artifact was ever at risk.
+                const int nBottomLeftUv = bottomLeftPx(bidx, by, bx, grid, zPos, uvB);
                 for (int comp = 0; comp < 2; ++comp) {
                     const pixels::Plane& csrc = comp ? srcV : srcU;
                     pixels::Plane& crecon = comp ? reconV : reconU;
@@ -2074,6 +2104,15 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                             cAbove[i] = crecon.at(uvX + i, uvY - 1);
                     if (uvHasLeft)
                         for (int i = 0; i < uvB; ++i) cLeft[i] = crecon.at(uvX - 1, uvY + i);
+                    // CS7: the extension continues the left column downward
+                    // (svt_gen.c:9230-9234), per plane - U and V are separate
+                    // recon buffers, so the gather is inside the comp loop and
+                    // is not hoisted with the other edge counts. cLeft[65] holds
+                    // 2*uvB <= 64, which is what the builder indexes: with
+                    // nLeftPx = uvB it reads leftRef[uvB .. uvB+nBottomLeftPx).
+                    if (nBottomLeftUv)
+                        for (int j = 0; j < nBottomLeftUv; ++j)
+                            cLeft[uvB + j] = crecon.at(uvX - 1, uvY + uvB + j);
                     const std::uint8_t cAl = (uvHasTop && uvHasLeft) ? crecon.at(uvX - 1, uvY - 1) : 0;
                     intra::NeighborContext cNctx;
                     // the shared uv_mode history (the U-plane neighbor
@@ -2090,7 +2129,7 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                     intra::buildIntraPredictorsUv(
                         cPred, uvB,
                         static_cast<intra::UvPredictionMode>(modesU[uRow * uvGrid + uCol]), 0, uvB,
-                        uvB, cAl, cAbove, nTopUv, nTrUv, cLeft, nLeftUv, 0, cNctx);
+                        uvB, cAl, cAbove, nTopUv, nTrUv, cLeft, nLeftUv, nBottomLeftUv, cNctx);
                     std::int16_t cRes[1024];
                     for (int i = 0; i < uvB * uvB; ++i) {
                         const int x = i % uvB, y = i / uvB;

@@ -4875,6 +4875,41 @@ TEST_CASE("gpu frame auto chroma 16x16 matches host encodeFrameAutoChroma16x16")
 // CS4 fixtures (mechanically emitted from expected_primitives.txt; see the
 // .inc header): the ecs4S_* walk lines and the ecs2S_* cross-check lines.
 #include "ecs4_gate.inc"
+// CS7: the chroma bottom-left PRE-FIX baseline, frozen at d2a9322 and NEVER
+// REGENERATE (the reason is in that .inc's own header). It is the ONLY surface
+// that can answer "did this leaf's recon move?", because every ecs4S_recon line
+// carries post-fix bytes the moment the gate is regenerated.
+#include "cs7_prefix_baseline.inc"
+
+// The Z-order construction, mirrored from pipeline.cpp:1772-1782 (zorderLeaves)
+// and the inverse map at pipeline.cpp:1851-1852. At FILE scope rather than
+// inside one test block, because two independent derivations below need it (the
+// availability derivation and the CS7 prefix/boundary derivation) and a second
+// copy of the Z-order is precisely the transcription this file forbids. Mirrored
+// rather than hardcoded: the order is independently pinned by the RT6 emission
+// tests, and a transcribed one would be exactly the literal the constraint bans.
+struct ZOrder {
+    static void leaves(int size, int x0, int y0, int grid, int* out, int* n) {
+        if (size == 1) {
+            out[(*n)++] = y0 * grid + x0;
+            return;
+        }
+        const int h = size / 2;
+        leaves(h, x0, y0, grid, out, n);
+        leaves(h, x0 + h, y0, grid, out, n);
+        leaves(h, x0, y0 + h, grid, out, n);
+        leaves(h, x0 + h, y0 + h, grid, out, n);
+    }
+};
+
+// Byte i of a cs7_prefix_baseline hex array (that file holds two characters
+// per byte, lower case). Decoded here rather than pre-converted so the frozen
+// fixture stays in its committed, reviewed form.
+static std::uint8_t cs7HexByte(const char* p, int i) {
+    const int hi = (p[2 * i] <= '9') ? p[2 * i] - '0' : p[2 * i] - 'a' + 10;
+    const int lo = (p[2 * i + 1] <= '9') ? p[2 * i + 1] - '0' : p[2 * i + 1] - 'a' + 10;
+    return static_cast<std::uint8_t>(hi * 16 + lo);
+}
 
 TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
     // The bottom-left AVAILABILITY rule is exercised EXHAUSTIVELY here, and
@@ -4885,24 +4920,8 @@ TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
     // to the reader, would keep asserting a stale number after the zpos map
     // changed, and would leave the suite green on a wrong expectation.
     {
-        // the Z-order construction, mirrored from pipeline.cpp:1772-1782
-        // (zorderLeaves) and the inverse map at pipeline.cpp:1851-1852. Mirrored
-        // rather than hardcoded: the Z-order is independently pinned by the
-        // RT6 emission tests, and a transcribed order would be exactly the
-        // literal this constraint forbids.
-        struct ZOrder {
-            static void leaves(int size, int x0, int y0, int grid, int* out, int* n) {
-                if (size == 1) {
-                    out[(*n)++] = y0 * grid + x0;
-                    return;
-                }
-                const int h = size / 2;
-                leaves(h, x0, y0, grid, out, n);
-                leaves(h, x0 + h, y0, grid, out, n);
-                leaves(h, x0, y0 + h, grid, out, n);
-                leaves(h, x0 + h, y0 + h, grid, out, n);
-            }
-        };
+        // The Z-order comes from the file-scope ZOrder above, shared with the
+        // CS7 prefix/boundary derivation at the end of the walk block below.
         // UV leaf indices ARE the luma leaf indices: uvB = lumaB/2, the UV
         // origin is (px & ~7) >> 1, so uRow == by and uCol == bx, and
         // uvGrid = 32/uvB = 64/lumaB = grid. That identity is why the chroma
@@ -5132,6 +5151,103 @@ TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
                 if (reconV.at(x, y) != (std::uint8_t)G.recon_v[y * 32 + x]) reconOk = false;
             }
         CHECK(reconOk);
+        // ---- CS7: the chroma bottom-left gather, the cascade-immune half ----
+        // ONE derivation feeds all three assertions, and it is structural
+        // rather than transcribed. The boundary leaf is the FIRST leaf in
+        // Z-order visit order whose below-left is AVAILABLE (pipeline::
+        // bottomLeftPx - the named rule the implementation itself runs, not a
+        // second transcription of its expression) AND whose committed U mode is
+        // D203 (the mode predicate build_intra_predictors derives internally,
+        // which the caller must NOT duplicate). Typing "leaf 2" or "leaf 4"
+        // here would be the literal this file forbids, and it would silently
+        // read the wrong leaf at the other geometry - the error class this
+        // project has already paid for once.
+        {
+            int zord[64], zn = 0;
+            ZOrder::leaves(grid, 0, 0, grid, zord, &zn);
+            REQUIRE(zn == nb);
+            int zPos[64];
+            for (int i = 0; i < zn; ++i) zPos[zord[i]] = i;
+            int boundary = -1, nGather = 0;
+            for (int t = 0; t < zn; ++t) {
+                const int b = zord[t], by = b / grid, bx = b % grid;
+                if (!pipeline::bottomLeftPx(b, by, bx, grid, zPos, S)) continue;
+                if (G.modes[3 * b + 1] != static_cast<int>(intra::UV_D203_PRED)) continue;
+                ++nGather;
+                if (boundary < 0) boundary = b;
+            }
+            if (S == 16 || S == 32) {
+                // The controls must gather NOTHING. Asserted here at the leaf
+                // level; the STRUCTURAL reason (nAvail == 0, i.e. grid <= 2
+                // admits no below-left leaf that precedes its depender in the
+                // visit order, and nQualify == 1 at c16) is asserted in the
+                // availability block above, so a bare zero here cannot be read
+                // as a content-dependent zero.
+                REQUIRE(boundary < 0);
+                REQUIRE(nGather == 0);
+            } else {
+                // PRECONDITION, not a new claim: without a boundary leaf the
+                // prefix below is vacuous (an empty prefix trivially equals the
+                // baseline) and the "differs" assertion has nothing to differ.
+                REQUIRE(boundary >= 0);
+                const char* const baseU = (S == 4) ? ecs44_recon_u_hex : ecs48_recon_u_hex;
+                const char* const baseV = (S == 4) ? ecs44_recon_v_hex : ecs48_recon_v_hex;
+                const int bz = zPos[boundary], bby = boundary / grid, bbx = boundary % grid;
+                // (1) THE PREFIX. Every leaf visited BEFORE the boundary keeps
+                // its pre-fix recon, byte for byte, on BOTH chroma planes.
+                // Sound rather than lucky: a leaf's prediction reads only recon
+                // written by leaves with a LOWER visit position, so nothing
+                // earlier in Z-order can be moved by a later leaf's prediction.
+                // That is what makes this immune to however far the cascade
+                // runs afterwards - and it is why this is not weakened into
+                // "the recon changed somewhere".
+                int prefixBytes = 0, prefixBad = 0;
+                int badLeaf = -1, badPlane = 0, badX = -1, badY = -1;
+                for (int b = 0; b < nb; ++b) {
+                    if (zPos[b] >= bz) continue;
+                    const int by = b / grid, bx = b % grid;
+                    for (int y = 0; y < S; ++y)
+                        for (int x = 0; x < S; ++x) {
+                            const int px = bx * S + x, py = by * S + y, idx = py * 32 + px;
+                            ++prefixBytes;
+                            const int du = reconU.at(px, py) != cs7HexByte(baseU, idx);
+                            const int dv = reconV.at(px, py) != cs7HexByte(baseV, idx);
+                            if ((du || dv) && badLeaf < 0) {
+                                badLeaf = b;
+                                badPlane = du ? 'U' : 'V';
+                                badX = px;
+                                badY = py;
+                            }
+                            prefixBad += du ? 1 : 0;
+                            prefixBad += dv ? 1 : 0;
+                        }
+                }
+                INFO("S=" << S << " boundary leaf=" << boundary << " zpos=" << bz
+                         << " prefix bytes=" << prefixBytes << " first bad leaf=" << badLeaf
+                         << " plane=" << badPlane << " at (" << badX << "," << badY << ")");
+                // the prefix must be non-empty or it proves nothing
+                REQUIRE(prefixBytes > 0);
+                REQUIRE(prefixBad == 0);
+                // (2) THE BOUNDARY LEAF DIFFERS - the slice's evidence. It
+                // FAILS before the fix (nBottomLeftPx was a literal 0, so the
+                // extension was memset repetition and the recon matched the
+                // frozen baseline byte for byte) and PASSES after (the real
+                // gathered bytes moved it). A test that passed on the first
+                // build would have proven nothing.
+                int diffU = 0, diffV = 0;
+                for (int y = 0; y < S; ++y)
+                    for (int x = 0; x < S; ++x) {
+                        const int px = bbx * S + x, py = bby * S + y, idx = py * 32 + px;
+                        if (reconU.at(px, py) != cs7HexByte(baseU, idx)) ++diffU;
+                        if (reconV.at(px, py) != cs7HexByte(baseV, idx)) ++diffV;
+                    }
+                MESSAGE("RT12 CS7 S=" << S << " (S is the UV block size) boundary leaf=" << boundary
+                        << " zpos=" << bz << " gathering leaves=" << nGather
+                        << " prefix bytes=" << prefixBytes << " boundary diff U=" << diffU
+                        << " V=" << diffV);
+                REQUIRE(diffU + diffV > 0);
+            }
+        }
         // THE CROSS-SLICE CHECK vs the CS2 quant-drive lines: the U-plane
         // fields (modes/eobs/coeffs/recon) are identical - the walk decides
         // on the U plane with the same CH3 D2 policy, per-plane NAs and
