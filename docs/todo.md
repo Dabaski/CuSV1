@@ -78,6 +78,20 @@ How to use this file:
     was invisible to the check guarding it. Fixed in 32b2c57
     ({1,3}, `B\b|bytes?\b`); self-test now passes 4/4 and the live
     scan finds 6 gate candidates where the pre-fix scan found 4.
+    The two patterns, run against the real figures in this repo,
+    which is the whole finding in four lines (old was
+    `(\d{1,3}(?:,\d{3}){2,3}|\d{6,9})\s*B\b`; new is the same with
+    `{1,3}` and `(?:B\b|bytes?\b)`):
+      `884,953 B`      old NO  -> new MATCH
+      `884,980 bytes`  old NO  -> new MATCH
+      `884980 B`       old YES -> new MATCH
+      `1,770,750 B`    old YES -> new MATCH
+    The two "old YES" rows are why the check looked alive: it was
+    matching the unpunctuated form and the three-comma-group form, and
+    the ordinary one-comma form is what every number in this file
+    actually uses. **That makes three jointly-necessary conditions, not
+    two** (file named, unit is `B`, punctuation matches), and each of
+    the three presents as a condition that merely looked narrow.
   * A NARROW condition is a broken conjunction in disguise, and it
     does not look like one. Three in one arc: a `bcf16_modes` parser
     written for the ecs4 shape (misfires on the colon and the
@@ -965,17 +979,26 @@ shipped feature set (mono/color intra streams).
 - PROCESS (new, 2026-09-23): untracked files are NEVER strays - deletion
     requires user/court confirmation; the court commits its authored docs
     immediately (the todo.md deletion incident)
-  - PROCESS - the throwaway dav1d tree, RE-MEASURED 2026-09-28. **This entry
-    is written to survive EITHER outcome of RT14; read the last paragraph
-    before assuming the tree still exists.** The instrument lives at
-    `%TEMP%\dav1d_td4` - a dav1d extract with **no `.git`** (15 top-level
-    entries), so its history is only what the patches record. Building a
+  - PROCESS - the throwaway dav1d tree, **RETIRED 2026-09-29.** This entry
+    previously read "RE-MEASURED 2026-09-28" and offered TWO exits, and it
+    resolved to (b): the aom route won, so exit (b) is taken and the tree is
+    retired rather than parked. **SUPERSEDED - do not treat the tree below as
+    available; it lives in `%TEMP%`, and `%TEMP%` does not survive a reboot.
+    The standing instrument for decoder acceptance is
+    `tools/verify_decode4.ps1`, and the arbiter is whatever independent
+    decoder it drives (ffmpeg's `libaom-av1` is available on this box).** The
+    description is kept because the tree, the baseline copies and the two
+    diffs were the evidence for a claim about a DIFFERENT thing - what RT10's
+    instrumentation had touched - and that is settled. The historical record:
+    the instrument lived at `%TEMP%\dav1d_td4` - a dav1d extract with **no
+    `.git`** (15 top-level entries, 408 files), so its history is only what
+    the patches record. Building a
     decoder from an arbiter tree for instrumentation is fine; nothing is
     extracted into the port, and the tree is NOT a substitute for the
     `SKIP`/in-repo rule.
-    **WHERE THE BASELINE COPIES LIVE:** `%TEMP%\opencode\dav1d_baseline\`,
+    **WHERE THE BASELINE COPIES LIVED:** `%TEMP%\opencode\dav1d_baseline\`,
     three files - `ipred_tmpl.c` (871 L), `recon_tmpl.c` (2387 L),
-    `itx_tmpl.c` (311 L). **WHERE THE DIFFS LIVE:** one level UP, in
+    `itx_tmpl.c` (311 L). **WHERE THE DIFFS LIVED:** one level UP, in
     `%TEMP%\opencode\` - `rt12_recon_tmpl.c.diff` (8,898 B) and
     `rt12_itx_tmpl.c.diff` (5,332 B), plus the `rt12_*.err` / `rt12_c4.yuv`
     captures alongside them. Both diffs are in **`fc` format**, not unified
@@ -983,8 +1006,8 @@ shipped feature set (mono/color intra streams).
     ...\dav1d_td4\src\<f>" and use `*****` separators. A `^+`/`^-` line count
     over them returns ZERO and looks like an empty diff - that is the format,
     not a missing patch.
-    **WHAT IS ACTUALLY PATCHED, measured by line delta against the baseline:**
-    `itx_tmpl.c` **+55 L** (311 -> 366, 0 -> 15 RT markers) and
+    **WHAT WAS ACTUALLY PATCHED, measured by line delta against the baseline
+    copies:** `itx_tmpl.c` **+55 L** (311 -> 366, 0 -> 15 RT markers) and
     `recon_tmpl.c` **+104 L** (2387 -> 2491, 4 -> 38 RT markers), both pure
     additions with 0 lines removed - **+159 L across two files.** And
     `ipred_tmpl.c` is **delta 0**: it is byte-identical to the baseline copy
@@ -993,25 +1016,71 @@ shipped feature set (mono/color intra streams).
     difference - the baseline is not a pristine upstream, it is upstream plus
     the earlier patch. Do not read `ipred_tmpl.c delta 0` as "the ipred
     instrumentation was removed".
-    **The RT10 patches were deliberately LEFT IN PLACE**, per the standing
+    **THE RT10 patches were deliberately LEFT IN PLACE**, per the standing
     precedent that an instrumented decoder stays instrumented across
-    slices: `recon_tmpl.c` still carries `RT10 step 2 (throwaway
+    slices: `recon_tmpl.c` still carried `RT10 step 2 (throwaway
     instrument): arm the ipred_z3 trace`, `extern int dav1d_rt10_trace`
-    and the `RT10CALL` print. Removing them would mean re-patching before
-    every use, and a tree that must be re-patched is a tree whose state at
-    the moment of measurement is not the state anyone read.
-    **HOW IT ENDS, and this is why the entry is written conditionally.** Two
-    exits, and the second is the better one. (a) RT14 keeps the dav1d
-    route: the tree, the baseline copies and the two diffs stay as they are
-    and the next slice adds its own patch on top, re-diffs against the
-    baseline copies, and updates these figures. (b) RT14 takes the **aom**
-    route - the parse-conformance and divergence work needs a decoder whose
-    source is already VENDORED here (`third_party/aom/av1/decoder/` is a
-    full libaom checkout), which makes the throwaway **unnecessary** and
-    retires this entry outright. If (b) happens, DELETE this entry rather
-    than leaving it to rot: a process note pointing at a directory that no
-    longer matters is the same stale-document failure as a stale number,
-    and the `%TEMP%` tree will not survive a reboot regardless.
+    and the `RT10CALL` print. Removing them would have meant re-patching
+    before every use, and a tree that must be re-patched is a tree whose
+    state at the moment of measurement is not the state anyone read.
+    **WHY IT IS RETIRED RATHER THAN KEPT, re-measured 2026-09-29** (the brief
+    proposed this outcome and the grounds are partly wrong, so the numbers
+    here are mine):
+    - **It is an INSTRUMENTED decoder, not upstream - the sharpest ground,
+      and stronger than "the numbers are off".** Measured: `dav1d_td4/src/
+      recon_tmpl.c` carries **66** RT-marked lines against the baseline copy's
+      **22**. A patched arbiter is a different decoder wearing upstream's
+      name. The evidence contract in AGENTS.md now says the subject matter
+      of a reference measurement is the decoder, never a build of it, and
+      this tree is the case that proves the rule.
+    - **It diverges from an independent implementation on a committed
+      artifact.** Both decode `structural_keyframe_color16.obu`; luma only,
+      first 4096 B: the throwaway gives **max 158, mean 83.8**, ffmpeg's
+      `libaom-av1` gives **max 93, mean 24.1**. **The brief's figures for
+      this (Y max 255, mean 233.5 vs 94/24.0) do not reproduce and are NOT
+      used** - they appear in no tracked doc, only in SVG path data inside
+      `third_party/SVT-AV1/Docs/img/`, so they were either a different
+      artifact or a different build. Written down as measured, and the
+      direction of the finding is unchanged: a 3.5x mean gap on the luma
+      plane.
+    - **It was never citable anyway.** `%TEMP%` is not the working
+      directory, and that is the case-1 failure the contract now names: a
+      measurement living only in `%TEMP%` is a recollection.
+    - **It is not needed.** ffmpeg exposes `libaom-av1` (and `libdav1d`, and
+      `av1`) on this box, so the acceptance check has a real arbiter that is
+      not this project's own code. **A wrong arbiter that looks like
+      evidence is the specific harm** - worse than no arbiter, because it
+      produces confident numbers.
+    **THE DELETION IS DEFERRED, not done, and deliberately.** The brief
+    authorised deleting `%TEMP%\opencode\dav1d_td4` and the `rt12_*.diff`
+    artifacts. Two reasons to hold, and the first is a correction:
+    **the path in the brief is wrong** - the tree is at `%TEMP%\dav1d_td4`,
+    NOT under `%TEMP%\opencode\`, so a delete aimed at the briefed path would
+    have removed nothing and reported success. Also, the `rt12_*.diff` files
+    are the ONLY record of the RT10 instrumentation delta, since the tree
+    they describe is `%TEMP%`-resident and non-durable. Deleting them makes
+    the delta unrecoverable rather than merely hard to reach. Retention has
+    no ongoing value - the contract already handles the tree by not citing
+    it - but deletion is the user's call and the correction to the path should
+    land with it. **Ask before deleting, and delete the briefed path only
+    after confirming the corrected one.**
+  - **THIRD-PARTY CHECKOUTS ARE NOT GIT-VENDORED, and that is the evidence
+    contract's own case 2, recorded here so the rule is not learned twice.**
+    Measured 2026-09-29: `third_party/dav1d/` and `third_party/aom/` are
+    BOTH in `.gitignore` (lines 9 and 8) and `git ls-files` returns **0** for
+    each. So "vendored" is ambiguous across exactly two senses, and only one
+    is true of each tree: **present in the working directory** (dav1d 359
+    files, no `.git` of its own, `dav1d_api_version_major` 7 / meson
+    `1.5.4`; aom 1522 files excluding its own `.git`, which it HAS, HEAD
+    `208e9c49db`) versus **tracked by git** (neither). Consequence, and it
+    is the one that will be re-derived wrongly: both survive a reboot and
+    **neither survives a fresh clone**, so a citation into either is
+    checkable only while this working directory stands. Say which sense you
+    mean. "dav1d is not vendored, therefore do not use it" is the error - it
+    is not vendored in the git sense, and it IS the resolution target for
+    the dav1d-side citations. The retired throwaway above is identical in
+    KIND to these two, differing only in being non-durable as well as
+    patched. Full statement in AGENTS.md, "The evidence contract".
   - Debug-config /RTC finding (2026-09-24, RESOLVED c462872): av1_l4_intra_tests
   in Debug aborted with Run-Time Check Failure #2 (stack around 'buf'
   corrupted). ROOT CAUSE: three test fixtures passed p = buf + 1 to
