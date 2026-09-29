@@ -125,6 +125,35 @@ How to use this file:
     own, so it is exactly where a recollection enters the tree wearing the
     appearance of a measurement. Re-measurement is not scepticism about the
     brief; it is the only way to find out which artifact a number is about.
+  * **A CLAIM WHOSE ARITHMETIC DOES NOT FOLLOW FROM THE TABLE IT QUOTES
+    IS WITHDRAWN, and the shape is worth more than the story.** RT17's
+    D45 diagnosis is WITHDRAWN, and the register carries the shape rather
+    than the incident because the failure was caught by re-reading one line
+    - the cheapest instrument in the repo, and one that runs while thinking.
+    The premise was that `kModeToAngle[3]` is 0, so `pAngle` is 0. The table
+    at `src/l4_intra/intra.cpp:476` reads
+    `{0, 90, 180, 45, 135, 113, 157, 203, 67, 0, 0, 0, 0}` - **index 3 is
+    45**, not 0. pAngle is therefore 45, which lands in the first dispatch
+    branch at `intra.cpp:796` (`angle > 0 && angle < 90`). The 0 the report
+    read is at **index 0**. The same report also cited `intra.cpp:3` for a
+    table that lives at :476, so the citation itself did not point where the
+    claim was.
+    **Two things made it register-worthy rather than a discarded draft.**
+    First, the blast radius of acting on it: the proposed fix would have put
+    a new code path into `intra.cpp` AND into
+    `tools/golden_gen/svt_gen.c`, and the second of those changes the GATE,
+    `expected_primitives.txt`, and all nine committed `.obu` artifacts. A
+    one-line arithmetic slip with that much behind it is exactly what a
+    measured derivation exists to catch - and note the asymmetry, because it
+    is the practical lesson: a claim whose only instrument was a REASONING
+    step is one refutation away from being believed. Second, the report's
+    own symptoms should have falsified it earlier. It needed TWO mechanisms
+    for one alleged cause (a static-zero buffer at one leaf, a stale buffer
+    at another), and its own discriminator contradicted it: **12 D45 chroma
+    leaves, 2 divergent** - a dispatch that wrote nothing would have broken
+    all twelve. A claim whose own evidence requires extra mechanisms and
+    then contradicts the mechanism is not a diagnosis; it is a pattern that
+    has not been explained yet, and those are different artifacts. Say so.
   * DELETE NOTHING that is evidence. When a fix makes an instrument's
     own written claim stale, the instrument was RIGHT and the comment
     was wrong. 32b2c57 kept the false 884,980 in the file, annotated,

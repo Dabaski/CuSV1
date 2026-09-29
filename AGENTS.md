@@ -145,6 +145,24 @@ compile. If you can split a step into two smaller ones, split it.
   tree is green. Precedent for why the distinction matters: the frozen
   `cs7_prefix_baseline.inc` had to record the pre-fix bytes somewhere,
   because after the fix landed nothing in the repo could show them.
+  **PROVENANCE of these two rules, since they arrived by accident and a
+  reader deserves to know that.** They are on disk at `AGENTS.md:129-147`
+  and they have no commit of their own. They were the court author's
+  uncommitted edit when this file was staged for `c6836e6` - a commit
+  titled for the throwaway's retirement, which is a different subject
+  entirely - and they were swept in with it, so the commit that carries
+  them says nothing about them. Measured, not inferred: `git log -S` for
+  "There are no red commits" over `AGENTS.md` returns `c6836e6` and
+  nothing else, and that commit's own diff carries these paragraphs
+  verbatim. **The two rules above replaced the OPPOSITE rule** - "Do not
+  write test and implementation in the same edit/commit" - which the
+  practice had already stopped obeying for about a dozen slices, and
+  which was jointly unsatisfiable with this file's own commit rule: a
+  test-only commit is a red tree, and a commit requires a green suite.
+  Two rules, each individually reasonable, cannot both be honoured, and
+  the practice resolved it silently by picking one. Recording the
+  replacement is the point; the accident of the carrier is noted only so
+  the next reader does not go looking for a commit that is not there.
 - Do not write a test you already know will pass -" if it passes on first run
   without new code, you skipped ahead or the test is too weak.
 - Do not write more than one new assertion at a time. If two things need
