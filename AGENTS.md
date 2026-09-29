@@ -80,7 +80,7 @@ compile. If you can split a step into two smaller ones, split it.
     instrument output, not a claim, and no commit hash is quoted here because
     a number measured on a working tree cannot name the commit that the edit
     producing it will create. As measured 2026-09-28:
-    364 citations, 353 resolved in-tree, **0 out-of-range**, 11 unresolvable
+    363 citations, 352 resolved in-tree, **0 out-of-range**, 11 unresolvable
     (the AV1 spec markdown plus three dav1d decoder internals, which are not
     vendored - check those against the external checkouts by hand). The script
     prints the scanned doc set's size and a content hash WITH every count, so a
@@ -217,31 +217,73 @@ Three other instruments, none of which gate a commit:
   `tools/coverage.ps1` (the progress metric, below), and
   `tools/cite_check.ps1` (the doc citation audit). A fourth,
   `tools/doc_audit.ps1`, audits NUMERIC claims in prose; it is ADVISORY ONLY,
-  always exits 0, and is deliberately wired into nothing. **It has a
-  two-condition blind spot on the gate byte count, recorded here because the
-  tool is not this file's partition and the fix has to be landed once, in
-  one place, by whoever owns it.** Measured at `db83ea2`: the tool reported
-  **0 mismatches over a tree holding four wrong gate figures.** Its byte
-  check requires BOTH conditions on the SAME line - that the line names the
-  gate file (`expected_primitives` and friends), AND that the unit is the
-  abbreviation `B` rather than the word `bytes`. `AGENTS.md:211` satisfied
-  the first and failed the second ("884,980 bytes"); the
-  `docs/decode_conformance.md` line satisfied the second and failed the
-  first (it says "GATE" but never names the file). **No stale site satisfied
-  both, which is precisely why the tree passed.** The required fix is one line
-  in each condition - accept `bytes` as a unit, and accept a `GATE`-mention
-  as naming the file - after which all four would have been candidates. Do
-  not widen the regex blindly: the tool already documents why it was narrowed
-  (a category that flags correct history is worse than none), and
-  `docs/decode_conformance.md` legitimately carries a correct historical
-  884,980 B, so the fix must distinguish a current claim from a scoped past
-  one by wording, not by deleting the check.
-  **THE PATTERN IS THE FINDING, NOT THE FIX: two conditions that each look
-  sufficient and are jointly necessary, observed THREE times in one arc** -
-  `bcf16_modes` colon-vs-space, the `1>` UTF-16 redirect, and this. Treat
-  "two sufficient-looking conditions" as a review question, not a
-  coincidence, and prefer a check that requires the conjunction to a check
-  that reads as if either alone sufficed.
+  always exits 0, and is deliberately wired into nothing. **It HAD a
+  three-condition blind spot on the gate byte count, since FIXED in `32b2c57`;
+  the mechanism is recorded here because the reasoning behind it is the
+  transferable part.** The check could not fire on any of the four wrong gate
+  figures this tree carried, because it needed THREE conditions on the same
+  line and no stale site met all three:
+  1. the line names the gate file (`expected_primitives` and friends) - its
+     context guard is narrower than its own `$gateCtx`, deliberately, because
+     the bare word "gate" is too loose;
+  2. the unit is the abbreviation `B` - the regex ended `\s*B\b`, which the
+     word "bytes" does not satisfy;
+  3. **the figure is punctuated the way the regex expects** - the comma branch
+     was `{2,3}` comma-groups, so a ONE-comma figure like `884,953 B` never
+     matched at all, and only the unpunctuated `\d{6,9}` branch or a
+     three-group figure like `1,770,750 B` did.
+  Condition 3 is the sharpest of the three, because it means **this file's
+  own gate figure was invisible to the check guarding it** - `884,953 B` is
+  one comma, and the check could only see `884980 B`. `32b2c57` widened the
+  branch to `{1,3}` and the unit to `B\b|bytes?\b`, and added a `-SelfTest`
+  that PASSES 4/4 (cases A-D, including the `out.txt` UTF-16 case that must
+  NOT be flagged), plus a live tree scan that now finds 6 gate candidates
+  where the pre-fix scan found 4. Verified 2026-09-29.
+
+  **PROVENANCE, corrected, because the first version of this paragraph was
+  wrong in a way that is worth recording.** It said "measured at `db83ea2`",
+  and a later reader took that to mean the instrument had been introduced or
+  broken there. It had not. `db83ea2` touches exactly three files -
+  `AGENTS.md`, `docs/decode_conformance.md`, `docs/todo.md` - and no tools
+  file, which is true. But `tools/doc_audit.ps1` was **already in the tree at
+  `db83ea2`**: it was created at `b246d44`, and
+  `git merge-base --is-ancestor b246d44 db83ea2` succeeds. The original
+  paragraph was also self-invalidating, because its worked example cited
+  `AGENTS.md` line 211 as a spelled-out-"bytes" case, and `db83ea2` had
+  already corrected that very line to `884,953 bytes` - the doc was citing
+  evidence it had itself just repaired. The measurement underneath was real:
+  the tool WAS run at `db83ea2` and DID report 0 mismatches over a tree
+  holding four wrong gate figures, and that output is quoted in that commit's
+  own message. The error was the provenance, never the number.
+  **THE LESSON, and it is about direction of inference: a claim about what a
+  commit contains is a claim to be MEASURED, never inferred from which agent
+  was working on what.** The specific trap here is an inference that runs
+  BACKWARDS - "this file has one commit, therefore it did not exist at the
+  later commit" is false, because a file created at commit X exists at every
+  commit after X. The correct reading of "exactly one commit" was "it has
+  existed unchanged since it was created", which is what made the measurement
+  at `db83ea2` valid in the first place. Two independent readers (a briefing
+  and the fix commit's own message) made that inverted inference in the same
+  direction on the same fact, which is the strongest argument in this arc
+  for checking the tree instead of reasoning about it: the claim was specific,
+  plausible and checkable, and no amount of careful reading would have
+  produced it without asking git.
+
+  **THE PATTERN IS THE FINDING, NOT THE FIX: conditions that each look merely
+  NARROW, rather than a broken conjunction, observed THREE times in one arc.**
+  - `bcf16_modes` colon-vs-space: a parser written for the ecs4 shape
+    mis-reads bcf16 twice over, the colon and the three-per-leaf arity.
+  - the `1>` UTF-16 redirect: a command that cannot match, whose naive fix
+    corrupts the golden it is meant to verify.
+  - the gate byte check above: three jointly necessary conditions, one of
+    which made this file's own figure invisible to it.
+  Treat "looks a bit narrow" as a REVIEW QUESTION rather than a reassurance,
+  and prefer a check whose coverage you can demonstrate - `cite_check.ps1`
+  prints the doc-set hash, `coverage.ps1` prints the areas-file hash and the
+  reference pin, and `doc_audit.ps1` now carries a self-test - to one whose
+  silence reads as health. A stale instrument and a clean tree look
+  identical, which is why a self-test is the only thing that distinguishes
+  them.
 
 ### Last measured state (2026-09-28, at commit 5ce0224, the CS7 fix)
 
