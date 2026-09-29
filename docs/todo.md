@@ -62,6 +62,50 @@ How to use this file:
     prediction fails, report the failure and what it implies. An
     expectation quietly edited to match its result has produced zero
     information while looking exactly like a passing test.
+  * A check whose COVERAGE you cannot demonstrate is indistinguishable
+    from a check that is working. A stale instrument and a clean tree
+    look identical, and a scan of a clean tree proves nothing about a
+    check that would have fired on a dirty one. So a numeric-claim
+    auditor gets a SELF-TEST that must fire on a constructed bad case,
+    not just a tree scan. Live instance: `tools/doc_audit.ps1`'s gate
+    byte check needed THREE jointly-necessary conditions - the line
+    names the gate file, the unit is `B` and not `bytes`, and the
+    figure's punctuation matches the regex - and no stale line in the
+    tree met all three, so it reported 0 mismatches over four wrong
+    gate figures. The sharpest was the third: the comma branch was
+    `{2,3}` comma-groups, and a figure written the ordinary way
+    (`884,953 B`) carries exactly ONE, so the file's own gate figure
+    was invisible to the check guarding it. Fixed in 32b2c57
+    ({1,3}, `B\b|bytes?\b`); self-test now passes 4/4 and the live
+    scan finds 6 gate candidates where the pre-fix scan found 4.
+  * A NARROW condition is a broken conjunction in disguise, and it
+    does not look like one. Three in one arc: a `bcf16_modes` parser
+    written for the ecs4 shape (misfires on the colon and the
+    three-per-leaf arity), the `1>` UTF-16 redirect, and the gate byte
+    check above. None reads as suspicious on its own; each looks merely
+    format-sensitive, merely awkward, or merely cautious. The useful
+    form of the rule is therefore not "audit the regexes" - it is that
+    any condition guarding a claim should be checked against the exact
+    shape the claim is actually written in, and the fix is a
+    self-test, not a wider pattern.
+  * DELETE NOTHING that is evidence. When a fix makes an instrument's
+    own written claim stale, the instrument was RIGHT and the comment
+    was wrong. 32b2c57 kept the false 884,980 in the file, annotated,
+    because removing it would have deleted the evidence for the very
+    defect; the self-test carries the proof instead. Same logic as the
+    frozen pre-fix fixture `cs7_prefix_baseline.inc`: a post-change
+    artifact cannot serve as its own baseline.
+  * A claim about WHAT A COMMIT CONTAINS is measured with git, never
+    inferred from a commit count or from who was working on what. The
+    trap is an inference running BACKWARDS: "this file has one commit,
+    so it did not exist at the later commit" is false, because a file
+    created at X exists at every commit after X. Both the 09690c7
+    briefing and 32b2c57's own message made that inverted inference in
+    the same direction on the same fact, about `doc_audit.ps1` at
+    `db83ea2` (created at b246d44, which IS an ancestor - verified with
+    `git merge-base --is-ancestor`). Corrected in 09690c7. "N
+    commits" and "exists at commit C" are different claims and only the
+    second is load-bearing.
 
 ------------------------------------------------------------
 A0. SLICE-LEVEL STATE (the live register)
