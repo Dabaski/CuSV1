@@ -483,6 +483,22 @@ citations; aom is the target for the aom-side ones.
 
 **The contract, in the three cases that actually arise:**
 
+0. **A BRIEF IS NOT A SOURCE.** A figure handed to you in a session is not
+   citable until it is re-derived, and a brief that pairs two numbers invites
+   a comparison between two different SUBJECTS. The general form: **if a
+   figure cannot be re-derived, that is a finding about the BRIEF, not a
+   defect in the number** - so measure the subject, and report which subject
+   you measured. Both parties got this wrong in one exchange, four commits
+   after this contract was written: a brief paired a `%TEMP%` throwaway's
+   luma ("Y max 255, mean 233.5") against ffmpeg's ("94/24.0"), where the
+   second half is real and is **color4** (measured 2026-09-29: Ymin 0, Ymax
+   94, Ymean 23.9629, reproducing exactly) and the first is not citable at
+   all; and the agent then compared the throwaway's **color16** against that
+   color4 half, so the two numbers were about different artifacts. A brief is
+   the one input with no provenance of its own, so it is exactly where a
+   recollection enters the tree wearing the appearance of a measurement.
+   Re-measuring is not scepticism about the brief; it is the only way to find
+   out which artifact a number is about.
 1. **A measurement living only in `%TEMP%` is a RECOLLECTION, not a citation.**
    It is not citable, not verifiable, and it does not become citable by being
    described accurately in a commit message. Either move the subject into the

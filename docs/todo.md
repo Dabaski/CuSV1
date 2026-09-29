@@ -102,6 +102,29 @@ How to use this file:
     any condition guarding a claim should be checked against the exact
     shape the claim is actually written in, and the fix is a
     self-test, not a wider pattern.
+  * **A BRIEF IS NOT A SOURCE.** Every figure handed to an agent must be
+    re-derivable from the working directory, or it is not citable - and a
+    brief that pairs numbers from two different SUBJECTS invites a
+    cross-subject comparison, which is a wrong number wearing a comparison's
+    clothes. Live instance, and both parties were wrong in different ways.
+    A brief offered the throwaway dav1d's luma as "Y max 255, mean 233.5"
+    against ffmpeg's "94/24.0". Measured 2026-09-29: 94/24.0 is real and is
+    **color4** under ffmpeg `libaom-av1` (Ymin 0 / Ymax 94 / Ymean 23.9629),
+    and it reproduces exactly; the 255/233.5 half is the throwaway's figure
+    on the same artifact, from a decoder now retired and un-citable. Two
+    errors, and they compounded. The brief cited a **%TEMP% measurement as
+    though it were citable** - the exact failure the evidence contract exists
+    to prevent, committed four commits after the contract. And the agent
+    compared the throwaway's **color16** figures against that color4 half, so
+    the two numbers being compared were different artifacts - that half was
+    the agent's, not the brief's. **THE RULE, in the form that generalises:
+    if a figure in a brief cannot be re-derived, that is a FINDING ABOUT THE
+    BRIEF, not a defect in the number, and the correct response is to
+    measure the subject and report which subject you measured.** Note the
+    direction of harm: a brief is the one input with no provenance of its
+    own, so it is exactly where a recollection enters the tree wearing the
+    appearance of a measurement. Re-measurement is not scepticism about the
+    brief; it is the only way to find out which artifact a number is about.
   * DELETE NOTHING that is evidence. When a fix makes an instrument's
     own written claim stale, the instrument was RIGHT and the comment
     was wrong. 32b2c57 kept the false 884,980 in the file, annotated,
