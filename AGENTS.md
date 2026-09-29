@@ -80,7 +80,7 @@ compile. If you can split a step into two smaller ones, split it.
     instrument output, not a claim, and no commit hash is quoted here because
     a number measured on a working tree cannot name the commit that the edit
     producing it will create. As measured 2026-09-28:
-    363 citations, 352 resolved in-tree, **0 out-of-range**, 11 unresolvable
+    364 citations, 353 resolved in-tree, **0 out-of-range**, 11 unresolvable
     (the AV1 spec markdown plus three dav1d decoder internals, which are not
     vendored - check those against the external checkouts by hand). The script
     prints the scanned doc set's size and a content hash WITH every count, so a
@@ -213,9 +213,35 @@ and the intuitive response - regenerate `expected_primitives.txt` - converts
 a reporting bug into a corrupted golden that the real gate then ratifies.
 
 Three other instruments, none of which gate a commit:
-`tools/verify_decode4.ps1` (decoder acceptance + content-1:1, real decoders),
-`tools/coverage.ps1` (the progress metric, below), and
-`tools/cite_check.ps1` (the doc citation audit).
+  `tools/verify_decode4.ps1` (decoder acceptance + content-1:1, real decoders),
+  `tools/coverage.ps1` (the progress metric, below), and
+  `tools/cite_check.ps1` (the doc citation audit). A fourth,
+  `tools/doc_audit.ps1`, audits NUMERIC claims in prose; it is ADVISORY ONLY,
+  always exits 0, and is deliberately wired into nothing. **It has a
+  two-condition blind spot on the gate byte count, recorded here because the
+  tool is not this file's partition and the fix has to be landed once, in
+  one place, by whoever owns it.** Measured at `db83ea2`: the tool reported
+  **0 mismatches over a tree holding four wrong gate figures.** Its byte
+  check requires BOTH conditions on the SAME line - that the line names the
+  gate file (`expected_primitives` and friends), AND that the unit is the
+  abbreviation `B` rather than the word `bytes`. `AGENTS.md:211` satisfied
+  the first and failed the second ("884,980 bytes"); the
+  `docs/decode_conformance.md` line satisfied the second and failed the
+  first (it says "GATE" but never names the file). **No stale site satisfied
+  both, which is precisely why the tree passed.** The required fix is one line
+  in each condition - accept `bytes` as a unit, and accept a `GATE`-mention
+  as naming the file - after which all four would have been candidates. Do
+  not widen the regex blindly: the tool already documents why it was narrowed
+  (a category that flags correct history is worse than none), and
+  `docs/decode_conformance.md` legitimately carries a correct historical
+  884,980 B, so the fix must distinguish a current claim from a scoped past
+  one by wording, not by deleting the check.
+  **THE PATTERN IS THE FINDING, NOT THE FIX: two conditions that each look
+  sufficient and are jointly necessary, observed THREE times in one arc** -
+  `bcf16_modes` colon-vs-space, the `1>` UTF-16 redirect, and this. Treat
+  "two sufficient-looking conditions" as a review question, not a
+  coincidence, and prefer a check that requires the conjunction to a check
+  that reads as if either alone sufficed.
 
 ### Last measured state (2026-09-28, at commit 5ce0224, the CS7 fix)
 
