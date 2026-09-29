@@ -560,16 +560,65 @@ shipped feature set (mono/color intra streams).
   bytes, first at 647**, across exactly four 4x4 UV leaves - leaf 41 (row 5,
   col 1) 8 bytes, leaf 42 (row 5, col 2) 16, leaf 48 (row 6, col 0) 3, leaf
   56 (row 7, col 0) 16. Recomputed from the decoded plane against
-  `ecs44_recon_v`, not read from a commit. **The per-leaf counts are 8, 16,
-  3, 16 - three of the four are PARTIAL, not whole-leaf.** A whole-TU
-  mispredict would give 16 on all four; a partial pattern points at the
-  gather's extent or the Z-order predicate rather than at a whole block being
-  predicted wrong. That is the next diagnostic, and it is NOT yet run.
-  **This is filed as the finding per MUST SAY OUT LOUD #2, not as a caveat and
-  not by rounding the conformance to "3 of 4".** The brief's `1` and `2` for
-  c4 did not follow, and the mechanism is therefore not the whole story at
-  c4 - which is exactly what the brief said would happen, and exactly the
-  case in which the expectation must NOT be adjusted to match.
+    `ecs44_recon_v`, not read from a commit. **The per-leaf counts are 8, 16,
+    3, 16 - three of the four are PARTIAL, not whole-leaf.** A whole-TU
+    mispredict would give 16 on all four; a partial pattern points at the
+    gather's extent or the Z-order predicate rather than at a whole block being
+    predicted wrong. That is the next diagnostic, and it is NOT yet run.
+    **This is filed as the finding per MUST SAY OUT LOUD #2, not as a caveat and
+    not by rounding the conformance to "3 of 4".** The brief's `1` and `2` for
+    c4 did not follow, and the mechanism is therefore not the whole story at
+      c4 - which is exactly what the brief said would happen, and exactly the
+    case in which the expectation must NOT be adjusted to match.
+
+    **THE SHAPE BOUND ON c4's RESIDUAL - a bound on what the mechanism must
+    look like, NOT a mechanism, and deliberately not reconciled with anything
+    yet.** Re-measured 2026-09-28 by decoding
+    `structural_keyframe_color4.obu` and differencing the V plane against
+    `ecs44_recon_v` (43 differing bytes, first at 647):
+
+      leaf 41 (UV r5,c1)   8 of 16 bytes
+      leaf 42 (UV r5,c2)  16 of 16
+      leaf 48 (UV r6,c0)   3 of 16
+      leaf 56 (UV r7,c0)  16 of 16
+
+    The arithmetic bound, and it needs no theory to hold: c4's UV plane is
+    32x32 with `uvB = 32/8 = 4`, so **every leaf is a 4x4 block of 16
+    bytes** (`ecs44_modes` is 192 tokens = 64 leaves at 3 per leaf, grid 8).
+    A whole-block mispredict on all four leaves would therefore be
+    **4 x 16 = 64 bytes**. Measured is **43**, so **at least three of the
+    four leaves are PARTIALLY wrong** and at least one is wholly wrong. That
+    is the whole content of the bound: the residual is not four independently
+    mispredicted blocks.
+
+    WHAT IT CONSTRAINS, stated as constraints and nothing more: whatever
+    accounts for c4's V residual must be capable of affecting a PROPER
+    SUBSET of one 4x4 block's 16 bytes, and of leaving a neighbouring 4x4
+    block wholly correct. A mechanism that predicts a block all-or-nothing
+    cannot produce this shape. That is consistent with a wrong gather EXTENT
+    (wrong pixel count, or the right pixels in the wrong place) or with a
+    wrong Z-order predicate, and it is also consistent with several other
+    causes - which is exactly why this is filed as a bound and not as a
+    mechanism. **The next diagnostic has not been run and no cause is
+    asserted here.**
+
+    **AND ONE RECONCILIATION IS RECORDED AS NOT REPRODUCING, rather than
+    written as fact.** A briefing proposed that this shape is "not
+    reconcilable with the sites the 8 bounded bottom-left literals account
+    for, those being 4x4 and 8x4 chroma in the 4:2:0 walk, with leaf 56's V
+    being 8x8". Against the tree as it stands: **`8x4` is not a size this
+    walk produces** - every UV block in it is square, `uvB = lumaB/2` - and
+    **leaf 56 is a 4x4 block, not 8x8**: it is UV (row 7, col 0) on the 8x8
+    grid, so it holds 16 bytes, and all 16 of them differ. I also could not
+    reproduce a count of 8: at c4 the bounded leaves are 2 (D203 AND
+    below-left available), which is 4 gather sites across the U and V planes
+    and 16 gathered pixels. So the claim is recorded here as UNVERIFIED
+    rather than as the explanation, because the one part of it that the tree
+    does check - leaf 56's geometry - is contradicted. If someone holds the
+    actual derivation, it needs to be re-derived against the tree before it
+    is allowed to explain anything; until then the shape bound stands alone,
+    which is the same discipline as BOUNDED versus INERT: a
+    measurement-derived constraint kept separate from the claim it constrains.
 
 - The chroma bottom-left FIX (SPEC, retained below as the record of what the
   slice was built against). **This entry is the brief. If you are
