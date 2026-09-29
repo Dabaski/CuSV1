@@ -126,7 +126,25 @@ compile. If you can split a step into two smaller ones, split it.
   Legacy non-ASCII already in tracked files is repair-on-touch, not urgent.
 
 
-- Do not write test and implementation in the same edit/commit.
+- **A slice's test and its implementation land in the SAME commit, and the
+  suite is GREEN at commit time. There are no red commits and no
+  test-only commits.** This line replaced "Do not write test and
+  implementation in the same edit/commit", which was the opposite rule and
+  which the practice had already abandoned for a dozen slices. The reason
+  it had to be abandoned rather than obeyed: a test-only commit is a RED
+  tree, and this repo's rule for a commit is that the full suite is green
+  at commit time, so the two rules are jointly unsatisfiable and the
+  practice silently picked one. Keep the sequence, drop the separate
+  commit: write the test, run it and capture the failing output, write the
+  implementation, re-run the FULL suite, then commit both together.
+- **The RED evidence does not live in the tree, it lives in the commit
+  message.** The test, the failing output that motivated the code, the
+  pass after, and the full-suite result are all quoted in the message
+  because the tree at that commit can only ever show the green state. A
+  slice with no RED evidence in its message is incomplete, even if its
+  tree is green. Precedent for why the distinction matters: the frozen
+  `cs7_prefix_baseline.inc` had to record the pre-fix bytes somewhere,
+  because after the fix landed nothing in the repo could show them.
 - Do not write a test you already know will pass -" if it passes on first run
   without new code, you skipped ahead or the test is too weak.
 - Do not write more than one new assertion at a time. If two things need
@@ -277,6 +295,21 @@ Three other instruments, none of which gate a commit:
     corrupts the golden it is meant to verify.
   - the gate byte check above: three jointly necessary conditions, one of
     which made this file's own figure invisible to it.
+  **And a FOURTH, which is the same shape with a destructive edge:** a `rm`
+    aimed at a briefed path that does not exist. `%TEMP%\opencode\dav1d_td4`
+    was the briefed path for the throwaway dav1d tree; the tree is actually at
+    `%TEMP%\dav1d_td4`, one level up. The delete would have removed nothing,
+    returned success, and reported the tree gone - indistinguishable from a
+    real delete by its output. **All four share one property: the failure
+    mode is to look like success.** The `1>` redirect produced a file that
+    could not match and made a passing tree report as failing; the gate regex
+    was narrow enough to make a wrong tree report as clean; the `bcf16`
+    parser mis-read a shape it was not written for; and a wrong-path delete
+    reports a removal that never happened. **Treat "looks like it worked" as
+    the review question, not "looks like it failed"** - a visible failure is
+    the safe case, and the dangerous ones are the ones whose output agrees
+    with what you hoped. The escape is identical in each: measure the SUBJECT,
+    not the exit code.
   Treat "looks a bit narrow" as a REVIEW QUESTION rather than a reassurance,
   and prefer a check whose coverage you can demonstrate - `cite_check.ps1`
   prints the doc-set hash, `coverage.ps1` prints the areas-file hash and the
@@ -477,13 +510,16 @@ are partly right and I re-measured rather than restated them:
   upstream's name, and it is exactly the "instrumented copy" this contract
   forbids.
 - **It diverges on luma from a genuinely independent implementation.** Both
-  decode `structural_keyframe_color16.obu` to YUV; luma only, first 4096 B:
-  the throwaway gives **max 158, mean 83.8**, ffmpeg's `libaom-av1` gives
-  **max 93, mean 24.1**. A 3.5x mean gap on the luma plane of a committed
-  artifact. (The brief's figures - Y max 255, mean 233.5 vs 94/24.0 - do not
-  reproduce; they appear in NO tracked doc, only in SVG path data inside
-  `third_party/SVT-AV1/Docs/img/`. Different artifact or different build, so
-  they are not citable and are not used here.)
+  decode the same artifact to YUV; luma only, first 4096 B, both 4:2:0 so
+  the Y plane is the first 4096 bytes in each: on
+  `structural_keyframe_color4.obu` the throwaway gives **max 160, mean
+  118.1**, ffmpeg's `libaom-av1` gives **max 94, mean 24.0**. A 4.9x mean
+  gap on the luma plane of a committed artifact. (`color16` gives 158/83.8
+  against 93/24.1, the same direction and a 3.5x gap - measured again
+  2026-09-29 and consistent with the first run.) The comparison is
+  apples-to-apples by construction, not by luck: both files are 64x64 4:2:0,
+  so Y occupies bytes 0-4095 in each and the luma plane is the same 4096
+  bytes in both.
 - **It is not in the working directory and cannot be**, being `%TEMP%`, which
   does not survive a reboot - the case-1 failure above, live.
 - **It is not needed.** ffmpeg exposes `libaom-av1` (and `libdav1d`, and

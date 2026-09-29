@@ -1051,19 +1051,34 @@ shipped feature set (mono/color intra streams).
       not this project's own code. **A wrong arbiter that looks like
       evidence is the specific harm** - worse than no arbiter, because it
       produces confident numbers.
-    **THE DELETION IS DEFERRED, not done, and deliberately.** The brief
-    authorised deleting `%TEMP%\opencode\dav1d_td4` and the `rt12_*.diff`
-    artifacts. Two reasons to hold, and the first is a correction:
-    **the path in the brief is wrong** - the tree is at `%TEMP%\dav1d_td4`,
-    NOT under `%TEMP%\opencode\`, so a delete aimed at the briefed path would
-    have removed nothing and reported success. Also, the `rt12_*.diff` files
-    are the ONLY record of the RT10 instrumentation delta, since the tree
-    they describe is `%TEMP%`-resident and non-durable. Deleting them makes
-    the delta unrecoverable rather than merely hard to reach. Retention has
-    no ongoing value - the contract already handles the tree by not citing
-    it - but deletion is the user's call and the correction to the path should
-    land with it. **Ask before deleting, and delete the briefed path only
-    after confirming the corrected one.**
+    **THE DELETION IS NOT PENDING. IT IS DECIDED, AND THE TREE STAYS.**
+    The court has ruled on it: the throwaway is **RETIRED and UNREACHABLE**,
+    and that is the correct end state, not a cleanup still owed. The
+    rt12_*.diff files stay too, because they are the only record of the RT10
+    instrumentation delta and removing them would make that delta
+    unrecoverable rather than merely hard to reach. "Unreachable
+    documentation" is the right description of a %TEMP% tree: it is
+    documentation nobody can rely on, which is why the contract treats it as
+    non-citable, and it is why the arbiter question is settled rather than
+    open. **Do not read this entry as a to-do.**
+
+    **THE BRIEFED PATH WAS WRONG, and that is the finding - the FOURTH
+    instance in this arc of an operation that looks like it worked.** Measured
+    2026-09-29:
+
+      briefed  %TEMP%\opencode\dav1d_td4   DOES NOT EXIST
+      actual   %TEMP%\dav1d_td4             408 files, 15 top-level
+                                            entries, ONE LEVEL UP, with a
+                                            built build_td4\tools\dav1d.exe
+                                            (645,120 B)
+
+    A delete aimed at the briefed path removes nothing, returns success, and
+    reports the tree gone. Same shape as the `1>` redirect: **the command's
+    failure mode is to look like success, and nothing in the output
+    distinguishes the two.** The escape is the same in both cases - do not
+    trust the exit, measure the subject before and after (`Test-Path`, and a
+    file count). A silently-successful destructive operation is worse than a
+    failing one, because it removes the evidence that it never ran.
   - **THIRD-PARTY CHECKOUTS ARE NOT GIT-VENDORED, and that is the evidence
     contract's own case 2, recorded here so the rule is not learned twice.**
     Measured 2026-09-29: `third_party/dav1d/` and `third_party/aom/` are
