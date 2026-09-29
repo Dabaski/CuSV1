@@ -202,23 +202,22 @@ A0. SLICE-LEVEL STATE (the live register)
   step 1 phases (a)/(b)/(c)/(c2) the chroma bottom-left mechanism
   CONFIRMED at BOTH c8 and c4; the full record in
   docs/decode_conformance.md.
-- [ ] **NEXT SLICE - the chroma bottom-left FIX. THE BRIEF IS SECTION 9 OF
-  THIS FILE; read it before slicing, it is the spec.** SLICE 1 IS THE
-  INVARIANCE TEST and it is not optional scaffolding: the per-geometry
-  gather count must be derived mechanically from the zpos map plus the
-  committed gate modes, NEVER hand-transcribed as a leaf count and never
-  64 typed expected values. A literal count is indistinguishable from a
-  correct one, survives later zpos changes by asserting a stale number, and
-  keeps the suite green on a wrong expectation. The fix commit must also
-  state the `y + th >= h` equivalence (with its derivation and its one
-  live-if assumption) even though the diff does not require it, and must
-    report - not adjust - a c4 prediction that fails. Both of those are in
-    section 9, in the same hunk as the constraint, for exactly this reason.
-    The fix also OWES THREE TRACKED-DOC UPDATES, itemised at the end of the
-    section 9 entry (AGENTS.md l6 - DONE, with the rule/call-site/gather
-    distinction now recorded; this file's OPEN -> LANDED flip with the
-    measured numbers; and the decode_conformance.md colour matrix) - a fix
-    committed without them leaves three documents stating something false.
+- [x] **The chroma bottom-left FIX is LANDED (CS7, 5ce0224) and this
+  register said otherwise.** The item below used to read "NEXT SLICE -
+  the chroma bottom-left FIX" as an open `[ ]` while the entry ABOVE it
+  recorded the same fix as LANDED at `5ce0224`. Both statements were in
+  the live register at once, and one of them was false. Closed now: the
+  spec text it pointed at is section 9 of this file, whose own
+  obligation list at the end of the entry is the record of what landed.
+  **Recorded because the failure is the one this arc keeps refusing, not
+  because the item mattered.** A live register that contradicts itself is
+  indistinguishable from a correct one to a reader who does not re-measure
+  it, and this file is the one a future session consults FIRST to decide
+  what to do next - so a stale line here does not merely mislead, it
+  misdirects the next slice. The general rule, and it is cheap: **when a
+  commit lands, the register entry that describes it moves in the SAME
+  commit.** A fix whose registration is deferred is a red register, and
+  the register is the file whose job is to be true.
 - [ ] OPEN (named): the filter-intra DC-deciding fixture (the FI branch is
   predicate-gated but never fires in the committed fixtures).
 - [~] NAMED FOLLOW-UP (FS5d): the 64x64 dual-domain unification - the
