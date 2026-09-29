@@ -870,9 +870,56 @@ shipped feature set (mono/color intra streams).
 - sm_61 target vs sm_86 dev box: the measurement split is documented; no
   perf claims without the harness
 - PROCESS (new, 2026-09-23): untracked files are NEVER strays - deletion
-  requires user/court confirmation; the court commits its authored docs
-  immediately (the todo.md deletion incident)
-- Debug-config /RTC finding (2026-09-24, RESOLVED c462872): av1_l4_intra_tests
+    requires user/court confirmation; the court commits its authored docs
+    immediately (the todo.md deletion incident)
+  - PROCESS - the throwaway dav1d tree, RE-MEASURED 2026-09-28. **This entry
+    is written to survive EITHER outcome of RT14; read the last paragraph
+    before assuming the tree still exists.** The instrument lives at
+    `%TEMP%\dav1d_td4` - a dav1d extract with **no `.git`** (15 top-level
+    entries), so its history is only what the patches record. Building a
+    decoder from an arbiter tree for instrumentation is fine; nothing is
+    extracted into the port, and the tree is NOT a substitute for the
+    `SKIP`/in-repo rule.
+    **WHERE THE BASELINE COPIES LIVE:** `%TEMP%\opencode\dav1d_baseline\`,
+    three files - `ipred_tmpl.c` (871 L), `recon_tmpl.c` (2387 L),
+    `itx_tmpl.c` (311 L). **WHERE THE DIFFS LIVE:** one level UP, in
+    `%TEMP%\opencode\` - `rt12_recon_tmpl.c.diff` (8,898 B) and
+    `rt12_itx_tmpl.c.diff` (5,332 B), plus the `rt12_*.err` / `rt12_c4.yuv`
+    captures alongside them. Both diffs are in **`fc` format**, not unified
+    diff: they begin "Comparing files ...\dav1d_baseline\<f> and
+    ...\dav1d_td4\src\<f>" and use `*****` separators. A `^+`/`^-` line count
+    over them returns ZERO and looks like an empty diff - that is the format,
+    not a missing patch.
+    **WHAT IS ACTUALLY PATCHED, measured by line delta against the baseline:**
+    `itx_tmpl.c` **+55 L** (311 -> 366, 0 -> 15 RT markers) and
+    `recon_tmpl.c` **+104 L** (2387 -> 2491, 4 -> 38 RT markers), both pure
+    additions with 0 lines removed - **+159 L across two files.** And
+    `ipred_tmpl.c` is **delta 0**: it is byte-identical to the baseline copy
+    and already carries 12 RT markers in BOTH. So the TD4/RT10 `ipred` patch
+    is folded into the BASELINE copy rather than carried as a live
+    difference - the baseline is not a pristine upstream, it is upstream plus
+    the earlier patch. Do not read `ipred_tmpl.c delta 0` as "the ipred
+    instrumentation was removed".
+    **The RT10 patches were deliberately LEFT IN PLACE**, per the standing
+    precedent that an instrumented decoder stays instrumented across
+    slices: `recon_tmpl.c` still carries `RT10 step 2 (throwaway
+    instrument): arm the ipred_z3 trace`, `extern int dav1d_rt10_trace`
+    and the `RT10CALL` print. Removing them would mean re-patching before
+    every use, and a tree that must be re-patched is a tree whose state at
+    the moment of measurement is not the state anyone read.
+    **HOW IT ENDS, and this is why the entry is written conditionally.** Two
+    exits, and the second is the better one. (a) RT14 keeps the dav1d
+    route: the tree, the baseline copies and the two diffs stay as they are
+    and the next slice adds its own patch on top, re-diffs against the
+    baseline copies, and updates these figures. (b) RT14 takes the **aom**
+    route - the parse-conformance and divergence work needs a decoder whose
+    source is already VENDORED here (`third_party/aom/av1/decoder/` is a
+    full libaom checkout), which makes the throwaway **unnecessary** and
+    retires this entry outright. If (b) happens, DELETE this entry rather
+    than leaving it to rot: a process note pointing at a directory that no
+    longer matters is the same stale-document failure as a stale number,
+    and the `%TEMP%` tree will not survive a reboot regardless.
+  - Debug-config /RTC finding (2026-09-24, RESOLVED c462872): av1_l4_intra_tests
   in Debug aborted with Run-Time Check Failure #2 (stack around 'buf'
   corrupted). ROOT CAUSE: three test fixtures passed p = buf + 1 to
   upsampleIntraEdge, but the function writes p[-2] (the SVT reference
