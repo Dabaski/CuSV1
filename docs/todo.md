@@ -154,6 +154,39 @@ How to use this file:
     all twelve. A claim whose own evidence requires extra mechanisms and
     then contradicts the mechanism is not a diagnosis; it is a pattern that
     has not been explained yet, and those are different artifacts. Say so.
+  * **A CLAIM WHOSE ONLY INSTRUMENT WAS A REASONING STEP IS ONE
+    REFUTATION AWAY FROM BEING BELIEVED - and the cheapest instrument in
+    the repo is re-reading the line you cited.** The companion to the
+    commit-count lesson above, supplied by RT18, and the contrast is the
+    whole lesson. RT17's premise was an arithmetic slip INSIDE a
+    derivation, over a table it had itself quoted: it read index 0 of
+    `kModeToAngle` where it needed index 3, and it survived two reports
+    because the derivation was internally plausible. Nothing in it was
+    wrong-looking. It was refuted by opening `src/l4_intra/intra.cpp:476`
+    and counting the array - no build, no decode, no gate run. RT18, on
+    the same defect, **flagged its own derivation-vs-measurement boundary
+    unprompted**, saying which of its four items was derived and which
+    was read. **That self-flag is the reason the slice is trustworthy, and
+    the difference between those two reports is the difference between a
+    claim that nearly landed a gate-moving change and one that did not.**
+    The asymmetry is the practical rule: a real decoder would have
+    refuted RT17 immediately and would have told you nothing about WHICH
+    step was wrong. Reading the cited line gives both. So: when a claim
+    rests on reasoning rather than a measurement, re-read the cited line
+    before the reasoning gets any further - it is the instrument that
+    runs while thinking, and it is the one most often skipped precisely
+    because the derivation in front of you feels like work.
+  * **A NEGATIVE RESULT IS A RESULT, and it is the easiest kind to lose.**
+    RT18 eliminated a suspect rather than naming one, and the elimination
+    is the durable artifact: it retires RT17's diagnosis in full, and a
+    report that says "this is not it" saves the next session the work of
+    re-deriving that. Record it in this register, not in the commit that
+    found it. **Declining to name a mechanism is the standard here, not a
+    gap** - three candidate accounts of the same recon can be mutually
+    exclusive, and naming the most plausible one before a test forces it
+    puts a claim in the tree that later work has to disprove rather than
+    merely fail to confirm. A mechanism in the docs ahead of its test is
+    the shape this arc keeps refusing.
   * DELETE NOTHING that is evidence. When a fix makes an instrument's
     own written claim stale, the instrument was RIGHT and the comment
     was wrong. 32b2c57 kept the false 884,980 in the file, annotated,
@@ -218,6 +251,42 @@ A0. SLICE-LEVEL STATE (the live register)
   commit lands, the register entry that describes it moves in the SAME
   commit.** A fix whose registration is deferred is a red register, and
   the register is the file whose job is to be true.
+- [x] **RT18 - the c4 chroma divergence is CHROMA-PATH-SPECIFIC. A NEGATIVE
+  result: this retires RT17's diagnosis in full, and it does not name a
+  replacement.** Recorded here because a negative finding that eliminates
+  a suspect is the easiest kind of result to lose, and the next session
+  would otherwise re-derive the same suspect. **The finding:** luma D45 at
+  c4 is **14 leaves, 14 exact**; chroma D45 is **12 leaves, 2 divergent**
+  (41 and 48). Same mode, same angle 45, same `drZ1`, same host dispatch
+  at `intra.cpp:796`. A fault shared by all 12 chroma leaves would have
+  to be a fault of the shared path, and the two that diverge are the two
+  that do not share it. The earlier report's own discriminator - 12
+  leaves, 2 divergent - already said this and was read as an oddity rather
+  than as a refutation.
+  **The derived half, and the derivation is flagged as a derivation.**
+  `der[45] = 64` (counted from the literal at `intra.cpp:1070`), and
+  `drZ1`'s loop `for (int r = 0, x = dx; ...; x += dx)` with
+  `fracBits = 6` and `baseInc = 1` gives `base = 1 + r` and `shift = 0` at
+  every row, so `pred[r][c] = above[1 + r + c]` with no interpolation,
+  and with `above[] = 255` the prediction is 255 at all 16 positions of
+  both roots. I re-derived that independently and it reproduces. RT18
+  labelled this item as DERIVED rather than read, unprompted; that
+  self-flag is why the slice is trustworthy, and it is the contrast the
+  register entry on reasoning-step claims turns on.
+  **The consequence, which is a result and not a dead end: THREE candidate
+  accounts of the gate's recon at the divergent positions, and no two can
+  hold** - (i) R = +254 with pred = 0, (ii) R = -1 with pred = 255, (iii)
+  both correct and the recon write-back wrong. Not clean mod 256 either:
+  +254 against -1 differ by 255, +3 against -4 by 7. So **the gate's own
+  chroma recon is not reproducible from the gate's own coefficients plus
+  any self-consistent prediction**, and the remaining question is which
+  of the three is being written, not which arithmetic to apply.
+  **NO CAUSE IS RECORDED HERE, deliberately.** RT19 is resolving it with
+  a read of the builder's actual output. Naming a mechanism before that
+  read would put a claim in the tree that later work must disprove rather
+  than merely fail to confirm, and RT16's residual elimination stands on
+  its own arithmetic - the PREDICTION claim does not, and nothing here
+  touches either.
 - [ ] OPEN (named): the filter-intra DC-deciding fixture (the FI branch is
   predicate-gated but never fires in the committed fixtures).
 - [~] NAMED FOLLOW-UP (FS5d): the 64x64 dual-domain unification - the
