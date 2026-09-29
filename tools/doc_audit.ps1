@@ -36,7 +36,8 @@
 param(
     [string] $Root = '.',
     [string] $Docs = '',
-    [int]    $MaxReport = 200
+    [int]    $MaxReport = 200,
+    [switch] $SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -186,8 +187,116 @@ foreach ($doc in $docList) {
 $gateCtx = 'gate|expected_primitives|primitives file|golden-gate|golden gate'
 # N/N immediately followed by "lines". Both halves captured.
 $slashRe = [regex]"(\d{2,4})\s*/\s*(\d{2,4})\s*lines"
-# a large byte count on a line that names the gate file by name
-$gateByteRe = [regex]"(\d{1,3}(?:,\d{3}){2,3}|\d{6,9})\s*B\b"
+# a byte count on a line that names the gate file BY NAME.
+#
+# FIXED HERE, TWO INDEPENDENT CAUSES, and neither was the one the record
+# guessed. The recorded diagnosis was a two-condition conjunction - the line
+# must name the gate file AND the unit must be the abbreviation B - and
+# relaxing the unit alone would have fixed nothing, because the number
+# pattern could not match a six-digit comma-grouped value at all:
+#   {2,3}  required TWO or more ",ddd" groups, so "884,980" (884 + ONE
+#          ",980") never matched. Every gate figure in this project's prose
+#          is written with one comma group, so the branch was dead on
+#          arrival. Now {1,3}.
+#   B\b     requires a word boundary after B, and in "bytes" the B is
+#          followed by "y" - both word characters, so no boundary, no match.
+#          "bytes" is accepted now, as the record recommended.
+#
+# Measured consequence of the fix: the check had NEVER fired, on any file, for
+# any figure - and it reported "0 mismatches" doing so, which is
+# indistinguishable in the output from a clean run. A check that cannot fail
+# is worse than a check that fails narrowly, because it reports success.
+#
+# AND IT FOUND NOTHING WHEN FIXED, WHICH IS THE HONEST RESULT, not a
+# disappointment. I expected the revived check to light up docs/todo.md:540 and
+# AGENTS.md:199, both of which carry 884,953 while I believed the gate to be
+# 884,980. Re-measuring showed the gate IS 884,953 and those two lines are
+# CORRECT: commit 5ce0224 landed the CS7 fix and its regen moved the gate from
+# 884,980 to 884,953, so my 884,980 was the stale figure, not theirs. The
+# near-miss is the whole lesson of this instrument class: a number carried
+# forward from an earlier commit reads exactly like a number measured at this
+# one, and only re-measuring separated them. Recorded here because the false
+# claim was written first and the measurement corrected it, and because "the
+# revived check found 2 defects" would have been a better story than the truth.
+#
+# The self-test below is therefore the real evidence, not the tree scan: it
+# proves the pattern detects what it must, independent of whether the tree
+# currently happens to contain a wrong figure.
+$gateByteRe = [regex]"(\d{1,3}(?:,\d{3}){1,3}|\d{6,9})\s*(?:B\b|bytes?\b)"
+
+function Get-GateByteClaims {
+    # Returns every gate byte claim this pattern detects in a block of lines.
+    # Extracted so -SelfTest exercises the SAME code path the real scan uses,
+    # rather than a copy of the pattern that could drift from it.
+    param([string[]] $Lines, [string] $CtxRe, [regex] $NumRe)
+    $out = @()
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        $t = $Lines[$i]
+        if ($t -notmatch $CtxRe) { continue }
+        foreach ($m in $NumRe.Matches($t)) {
+            $out += [pscustomobject]@{
+                Line = $i + 1
+                Num  = $m.Groups[1].Value.Replace(',', '')
+                Text = $t.Trim()
+            }
+        }
+    }
+    return $out
+}
+
+if ($SelfTest) {
+    # THE RED FOR THE DEAD BYTE CHECK, as a durable self-check rather than a
+    # throwaway: it asserts DETECTION COUNT, not a verdict, because the defect
+    # was that the claim was never detected at all - the tool reported "0
+    # mismatches" over a tree with stale gate figures, which looks exactly
+    # like a clean run.
+    #
+    # Case D is the one that must stay at 0. It is the whole reason condition
+    # (i) stays on the SAME LINE: that line is about out.txt and the UTF-16
+    # redirect, and it names no gate file. Widening the context to the whole
+    # document would light it up, and would also light up AGENTS.md's
+    # historical 884,953 / 884,961 figures and its 1,770,750 B redirect
+    # measurement - five correct claims about the past and about a different
+    # file, which is the cries-wolf failure this instrument is built to avoid.
+    $cases = @(
+        @{ name = 'A  gate file named + word "bytes" + wrong number'
+           lines = @('The committed expected_primitives.txt is 884,961 bytes at this commit.')
+           expect = 1 }
+        @{ name = 'B  gate file named + abbreviation B + wrong number'
+           lines = @('The committed expected_primitives.txt is 884,961 B at this commit.')
+           expect = 1 }
+        @{ name = 'C  gate file named + word "bytes" + correct number'
+           lines = @('The committed expected_primitives.txt is 884,980 bytes at this commit.')
+           expect = 1 }
+        @{ name = 'D  out.txt / UTF-16 redirect, NO gate file named'
+           lines = @('out.txt measures 1,770,750 B against a committed 884,953 B file.')
+           expect = 0 }
+    )
+    $fail = 0
+    Write-Host ''
+    Write-Host 'doc_audit.ps1 -SelfTest: gate byte-claim detection' -ForegroundColor Cyan
+    foreach ($c in $cases) {
+        $got = @(Get-GateByteClaims -Lines $c.lines -CtxRe $gateCtx -NumRe $gateByteRe)
+        $ok = ($got.Count -eq $c.expect)
+        if (-not $ok) { $fail++ }
+        $detail = if ($got.Count) { $got[0].Num } else { '(none)' }
+        Write-Host ('  {0}  expect={1} got={2} [{3}]  {4}' -f
+            $(if ($ok) { 'PASS' } else { 'FAIL' }), $c.expect, $got.Count, $detail, $c.name)
+    }
+    Write-Host ''
+    if ($fail -gt 0) {
+        Write-Host ("SELF-TEST FAILED: {0} of {1} case(s). The gate byte check is not" -f $fail, $cases.Count) -ForegroundColor Red
+        Write-Host 'detecting claims it is supposed to detect. Reported as RED, not fixed here.' -ForegroundColor Red
+        Write-Host ''
+        # still exit 0: this tool is advisory and fails nothing, including
+        # its own self-test. A self-test that can fail a build would be a
+        # gate, and this is deliberately not one.
+        exit 0
+    }
+    Write-Host 'SELF-TEST PASSED.' -ForegroundColor Green
+    Write-Host ''
+    exit 0
+}
 
 foreach ($doc in $docList) {
     if (-not (Test-Path -LiteralPath $doc)) { continue }
@@ -211,13 +320,11 @@ foreach ($doc in $docList) {
                 })
             }
         }
-        if ($text -match '(?i)expected_primitives|primitives file|golden-gate|golden gate') {
-            foreach ($m in $gateByteRe.Matches($text)) {
-                $raw = $m.Groups[1].Value
-                $norm = $raw.Replace(',', '')
-                if ([int64]$norm -ge 100000) {
-                    Add-Finding 'gate' $doc ($i + 1) $text $norm ([string]$gateBytes)
-                }
+        # the byte claims go through the same helper -SelfTest exercises, so
+        # the tested pattern and the running pattern cannot drift apart
+        foreach ($c in (Get-GateByteClaims -Lines @($text) -CtxRe '(?i)expected_primitives|primitives file|golden-gate|golden gate' -NumRe $gateByteRe)) {
+            if ([int64]$c.Num -ge 100000) {
+                Add-Finding 'gate' $doc ($i + 1) $text $c.Num ([string]$gateBytes)
             }
         }
     }
