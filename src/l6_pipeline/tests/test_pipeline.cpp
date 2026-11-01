@@ -4880,6 +4880,14 @@ TEST_CASE("gpu frame auto chroma 16x16 matches host encodeFrameAutoChroma16x16")
 // that can answer "did this leaf's recon move?", because every ecs4S_recon line
 // carries post-fix bytes the moment the gate is regenerated.
 #include "cs7_prefix_baseline.inc"
+// RT21: the chroma ABOVE-RIGHT PRE-FIX baseline, frozen at 69a8a1a and NEVER
+// REGENERATE (the reason is in that .inc's own header, which also records why
+// c8/c16/c32 are absent). Same role as the CS7 file one axis over: the ONLY
+// surface that can answer "did this leaf's recon move?" for the above-right
+// fix, because every ecs4S_recon line carries post-fix bytes the moment the
+// gate is regenerated. The hex decode reuses cs7HexByte below - the helper is
+// generic (two hex characters per byte); only its name is historical.
+#include "rt21_prefix_baseline.inc"
 
 // The Z-order construction, mirrored from pipeline.cpp:1772-1782 (zorderLeaves)
 // and the inverse map at pipeline.cpp:1851-1852. At FILE scope rather than
@@ -5245,6 +5253,113 @@ TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
                         << " zpos=" << bz << " gathering leaves=" << nGather
                         << " prefix bytes=" << prefixBytes << " boundary diff U=" << diffU
                         << " V=" << diffV);
+                REQUIRE(diffU + diffV > 0);
+            }
+        }
+        // ---- RT21: the chroma ABOVE-RIGHT Z-order availability - the
+        // above-right twin of the CS7 block above. The structural gather
+        // (uvHasTop && uCol + 1 < uvGrid) supplies samples whose OWNER leaf
+        // may walk LATER in Z-order than this leaf; the reference declares
+        // above-right unavailable then (enc_intra_prediction.c:146) and the
+        // builder fills the stretch by repeating the last available sample
+        // (:151-152, mirrored at intra.cpp:597-607). Before the fix the walk
+        // gathered anyway and read the zero-initialised recon, so at c4 leaf
+        // 41 the D45 prediction read 0 where the reference reconstructs 255
+        // (the RT20 forensics: quantize(fwd(v_src - pred)) reproduced the
+        // committed leaf-41 V coefficients, eob 16).
+        {
+            int zord[64], zn = 0;
+            ZOrder::leaves(grid, 0, 0, grid, zord, &zn);
+            REQUIRE(zn == nb);
+            int zPos[64];
+            for (int i = 0; i < zn; ++i) zPos[zord[i]] = i;
+            // (a) THE RULE, exhaustive: pipeline::topRightPx - the named rule
+            // the implementation itself runs, the bottomLeftPx mirror at the
+            // top of this TEST_CASE - must equal the rule restated here from
+            // zPos for EVERY leaf, and a non-zero verdict must be the block
+            // size. The rule: the above-right owner is (by-1, bx+1); its
+            // samples are available exactly when its Z-order position
+            // precedes this leaf's own.
+            for (int b = 0; b < nb; ++b) {
+                const int by = b / grid, bx = b % grid;
+                const int fn = pipeline::topRightPx(b, by, bx, grid, zPos, S);
+                const bool derived = (bx + 1 < grid) && (by > 0) &&
+                                     (zPos[(by - 1) * grid + (bx + 1)] < zPos[b]);
+                if (fn != 0) REQUIRE(fn == S);
+                REQUIRE((fn != 0) == derived);
+            }
+            // (b) THE WALK USES IT. The boundary is the FIRST Z-order leaf
+            // where the structural gather supplies samples the rule forbids
+            // AND the committed UV mode reads the gathered stretch. The
+            // builder's USE predicate is needRight = pAngle < 90
+            // (intra.cpp:589 and the dr-path re-derivation at :649);
+            // kModeToAngle's (intra.cpp:476) only entries below 90 are D45
+            // and D67, so the caller-visible predicate is that mode pair,
+            // derived from the cited table rather than transcribed. At c4
+            // this is leaf 41 and nothing else (measured pre-fix: the other
+            // 13 structural-violation leaves decide modes that never read
+            // the stretch; at c8 the two violations decide SMOOTH_H and DC).
+            int boundary = -1;
+            for (int t = 0; t < zn; ++t) {
+                const int b = zord[t], by = b / grid, bx = b % grid;
+                const bool structural = (by > 0) && (bx + 1 < grid);
+                const bool rule = (bx + 1 < grid) && (by > 0) &&
+                                  (zPos[(by - 1) * grid + (bx + 1)] < zPos[b]);
+                const int um = G.modes[3 * b + 1];
+                const bool readsTr = (um == static_cast<int>(intra::UV_D45_PRED)) ||
+                                     (um == static_cast<int>(intra::UV_D67_PRED));
+                if (structural && !rule && readsTr) {
+                    boundary = b;
+                    break;
+                }
+            }
+            if (S == 16 || S == 32) {
+                // the controls: grid <= 2 admits no above-right violation at
+                // all (the owner leaf always precedes its depender in
+                // Z-order there), so a bare zero cannot be read as a
+                // content-dependent zero.
+                REQUIRE(boundary < 0);
+            }
+            if (boundary >= 0) {
+                const int bz = zPos[boundary], bby = boundary / grid, bbx = boundary % grid;
+                // (b)(1) THE PREFIX. Every leaf visited BEFORE the boundary
+                // keeps its pre-fix recon, byte for byte, on BOTH chroma
+                // planes (the CS7 cascade-immunity form). Sound rather than
+                // lucky: post-fix every edge a leaf reads comes from a leaf
+                // with a LOWER visit position, so nothing earlier in Z-order
+                // can be moved by a later leaf's corrected prediction.
+                int prefixBytes = 0, prefixBad = 0;
+                for (int b = 0; b < nb; ++b) {
+                    if (zPos[b] >= bz) continue;
+                    const int by = b / grid, bx = b % grid;
+                    for (int y = 0; y < S; ++y)
+                        for (int x = 0; x < S; ++x) {
+                            const int px = bx * S + x, py = by * S + y, idx = py * 32 + px;
+                            ++prefixBytes;
+                            if (reconU.at(px, py) != cs7HexByte(rt21_recon_u_hex, idx))
+                                ++prefixBad;
+                            if (reconV.at(px, py) != cs7HexByte(rt21_recon_v_hex, idx))
+                                ++prefixBad;
+                        }
+                }
+                INFO("RT21 S=" << S << " boundary leaf=" << boundary << " zpos=" << bz
+                               << " prefix bytes=" << prefixBytes << " prefixBad=" << prefixBad);
+                REQUIRE(prefixBytes > 0);
+                REQUIRE(prefixBad == 0);
+                // (b)(2) THE BOUNDARY LEAF DIFFERS - the slice's evidence. It
+                // FAILS before the fix (the walk matched the frozen baseline
+                // byte for byte, because the baseline IS the pre-fix output)
+                // and PASSES after (the repetition fill replaced the zeros
+                // the structural gather had read from uninitialised recon).
+                int diffU = 0, diffV = 0;
+                for (int y = 0; y < S; ++y)
+                    for (int x = 0; x < S; ++x) {
+                        const int px = bbx * S + x, py = bby * S + y, idx = py * 32 + px;
+                        if (reconU.at(px, py) != cs7HexByte(rt21_recon_u_hex, idx)) ++diffU;
+                        if (reconV.at(px, py) != cs7HexByte(rt21_recon_v_hex, idx)) ++diffV;
+                    }
+                MESSAGE("RT21 S=" << S << " (S is the UV block size) boundary leaf=" << boundary
+                                  << " zpos=" << bz << " diff U=" << diffU << " V=" << diffV);
                 REQUIRE(diffU + diffV > 0);
             }
         }

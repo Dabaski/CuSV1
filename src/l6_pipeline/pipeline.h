@@ -245,6 +245,15 @@ ModeDecision decideBlockModeUv(const std::uint8_t* src, const std::uint8_t* abov
 // test.
 int bottomLeftPx(int bIdx, int by, int bx, int grid, const int* zPos, int blockPx);
 
+// RT21: the ABOVE-RIGHT twin of bottomLeftPx, the same shape with the diagonal
+// on the other corner: the above-right owner is (by-1, bx+1), available exactly
+// when its Z-order position precedes this leaf's own. The structural conjuncts
+// (a right neighbour exists; a row above exists) are the bx/by guards, mirroring
+// bottomLeftPx's bx <= 0 / by + 1 >= grid. Exposed for the same reason: the CS4
+// walk test asserts this function's output for every leaf of every geometry
+// against the rule restated from the Z-order map.
+int topRightPx(int bIdx, int by, int bx, int grid, const int* zPos, int blockPx);
+
 void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                         const pixels::Plane& srcV, pixels::Plane& reconY, pixels::Plane& reconU,
                         pixels::Plane& reconV, std::int32_t* coeffsY, std::int32_t* coeffsU,

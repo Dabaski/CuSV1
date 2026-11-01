@@ -2060,7 +2060,17 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                 const bool uvHasTop = uvY > 0, uvHasLeft = uvX > 0;
                 const int nTopUv = uvHasTop ? uvB : 0;
                 const int nLeftUv = uvHasLeft ? uvB : 0;
-                const int nTrUv = (uvHasTop && uCol + 1 < uvGrid) ? uvB : 0;
+                // RT21: the ABOVE-RIGHT count, previously structural-only
+                // (uvHasTop && uCol + 1 < uvGrid). The owner leaf (by-1, bx+1)
+                // may walk LATER in Z-order than this leaf; gathering its
+                // samples then read the zero-initialised recon, and the D45
+                // leaf 41 (c4) predicted 0 where the reference reconstructs
+                // 255. topRightPx is the SAME named rule the luma bottom-left
+                // call site uses at :1884 - not a second transcription - with
+                // uvB as the block size; the uRow == by / uCol == bx /
+                // uvGrid == grid identity is the CS7 one commented below, so
+                // the (by-1, bx+1) owner index IS the UV-grid owner index.
+                const int nTrUv = topRightPx(bidx, by, bx, grid, zPos, uvB);
                 // CS7: the CHROMA BOTTOM-LEFT extension, previously a literal 0
                 // in the nBottomLeftPx position of the builder call below. The
                 // SAME named rule the luma call site uses at :1884 - not a
@@ -2460,6 +2470,17 @@ int bottomLeftPx(int bIdx, int by, int bx, int grid, const int* zPos, int blockP
     if (bx <= 0 || by + 1 >= grid) return 0;
     const int blIdx = (by + 1) * grid + (bx - 1);
     return zPos[blIdx] < zPos[bIdx] ? blockPx : 0;
+}
+
+// RT21: the above-right twin, the mirror of the rule above. The structural
+// conjuncts live in the guards exactly as in bottomLeftPx; the Z-order
+// comparison is the availability fact the structural-only gather at
+// encodeFrameChromaQ's builder site was missing (the gather read the
+// zero-initialised recon whenever the owner leaf walked later).
+int topRightPx(int bIdx, int by, int bx, int grid, const int* zPos, int blockPx) {
+    if (bx + 1 >= grid || by <= 0) return 0;
+    const int trIdx = (by - 1) * grid + (bx + 1);
+    return zPos[trIdx] < zPos[bIdx] ? blockPx : 0;
 }
 
 }  // namespace pipeline

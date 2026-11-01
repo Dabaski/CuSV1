@@ -6574,6 +6574,26 @@ static int svtd_cs4_uv_q_drive(int S) {
                 const int cbl_bidx = (by + 1) * grid + (bx - 1);
                 const int cNBl =
                     (uvHasLeft && by + 1 < grid && zpos[cbl_bidx] < zpos[bidx]) ? S : 0;
+                // RT21: the ABOVE-RIGHT count for the builder gather below and
+                // for the builder argument that consumes it - the mirror of
+                // cNBl with the diagonal on the other corner. The owner leaf is
+                // (by-1, bx+1), available exactly when its Z-order position
+                // precedes this leaf's own. The structural-only form previously
+                // written twice inline ((uvHasTop && uCol + 1 < uvGrid) ? S : 0
+                // at the gather bound and at the builder argument) read the
+                // zero-initialised recon whenever the owner walked later - c4
+                // leaf 41, where D45 then predicted 0 at every position reading
+                // above[4..7] and the reference reconstructs 255
+                // (enc_intra_prediction.c:146 declares above-right unavailable
+                // at n_topright_px == 0; :151-152 fills by repetition, which
+                // build_intra_predictors already implements keyed on the count
+                // it is given). The gather bound and the builder argument are
+                // ONE fact and must move together: correcting only the bound
+                // would leave the builder reading the memset zeros with a
+                // non-zero count, i.e. the same bug through the back door.
+                const int ctr_bidx = (by - 1) * grid + (bx + 1);
+                const int cNTr =
+                    (uvHasTop && bx + 1 < grid && zpos[ctr_bidx] < zpos[bidx]) ? S : 0;
                 for (int comp = 0; comp < 2; ++comp) {
                     const uint8_t* csrc = comp ? v_src : u_src;
                     uint8_t* crecon = comp ? recon_v : recon_u;
@@ -6590,7 +6610,7 @@ static int svtd_cs4_uv_q_drive(int S) {
                     uint8_t cleft[65] = {0};
                     uint8_t cal = 0;
                     if (uvHasTop)
-                        for (int i = 0; i < S + ((uvHasTop && uCol + 1 < uvGrid) ? S : 0); ++i)
+                        for (int i = 0; i < S + cNTr; ++i)
                             cabove[i] = crecon[(uv_y - 1) * 32 + uv_x + i];
                     if (uvHasLeft)
                         for (int i = 0; i < S; ++i) cleft[i] = crecon[(uv_y + i) * 32 + uv_x - 1];
@@ -6710,8 +6730,8 @@ static int svtd_cs4_uv_q_drive(int S) {
                     // PAIR; the CS2 fixture comparison re-derives V's own
                     // decision, see the V-mode note at the gate line below)
                     svtd_call_builder_tx(cpred, g_uv2y[uvm], 0, FILTER_INTRA_MODES, 0, cabove,
-                                         uvHasTop ? S : 0, (uvHasTop && uCol + 1 < uvGrid) ? S : 0,
-                                         cleft, uvHasLeft ? S : 0, cNBl, cal, utxs);
+                                         uvHasTop ? S : 0, cNTr, cleft, uvHasLeft ? S : 0, cNBl,
+                                         cal, utxs);
                     static int16_t cres[1024];
                     for (int i = 0; i < S * S; ++i) cres[i] = (int16_t)(csrcblk[i] - cpred[i]);
                     static int32_t ccb[1024];
