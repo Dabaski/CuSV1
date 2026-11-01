@@ -288,8 +288,22 @@ A0. SLICE-LEVEL STATE (the live register)
   than merely fail to confirm, and RT16's residual elimination stands on
   its own arithmetic - the PREDICTION claim does not, and nothing here
   touches either.
-- [ ] OPEN (named): the filter-intra DC-deciding fixture (the FI branch is
-  predicate-gated but never fires in the committed fixtures).
+- [x] LANDED (FI1): the filter-intra DC-deciding fixture - the FI=1 emission
+  path now has a committed-fixture test (test_pipeline.cpp:5507, the 8x8
+  4x4-grid fixture at q100). The D2 policy is UNCHANGED (FI stays parked as
+  a candidate, pipeline.h:156): the fixture CONTENT makes FI_D157_PRED
+  measurably win on block 3 (D2 argmin DC_PRED at SAD 75, FI table
+  88/239/143/0/297, next-best 13-candidate 141) and the decision-override
+  layer lives ONLY in the test walk (a block-for-block mirror of the
+  production encodeFrameAuto4x4Q walk), so no committed artifact or gate
+  line moves (GATE re-measured 884,851 B, diff 0). The walk emits
+  [skip][kf][FI][tokens] with writeFilterIntra carrying flag=1 +
+  FILTER_D157_PRED on b3 (11 bytes 90 d7 bd 22 4b e0 aa 79 9e 85 20, eobs
+  0,10,13,0) and the l7 reader round-trips content-exact per block with
+  CDFs equal; both flag branches fire in one walk (b1 flag=0, b3 flag=1).
+  The production call sites still hardcode FILTER_INTRA_MODES - asserted
+  in the same test (Part A). Suite 9/9 (273.77 s); coverage unchanged
+  (20,659/157,718 = 13.1%, tests are not reference lines).
 - [~] NAMED FOLLOW-UP (FS5d): the 64x64 dual-domain unification - the
   emission case runs the compacted 1024-position token domain; the
   legacy/GPU callers keep the 4096-wide facade; unification = a
@@ -710,7 +724,8 @@ shipped feature set (mono/color intra streams).
 - AomReader struct-shape deviation (l7 vs vendored layout - harmless in
   self-consistent use; the TD2 harness crash taught the exchange rule)
 - 4096-facade vs 1024 token domain at 64x64 (FS5d, OPEN)
-- The FI DC-deciding fixture (OPEN)
+- The FI DC-deciding fixture (LANDED, FI1 - test_pipeline.cpp:5507; the D2
+  policy stays parked, the override is test-only, the gate did not move)
 - **LANDED 2026-09-28 at `5ce0224` - the chroma bottom-left FIX. c8 is
   content-1:1 on all three planes; c4 retains a SECOND, V-only defect, and
   that is the finding, not a failed prediction.** Every number below is read

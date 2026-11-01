@@ -5503,3 +5503,341 @@ TEST_CASE("CS4: the chroma-ownership rule - a 4x4 frame codes NO chroma, the (1,
         CHECK(reconWritten);
     }
 }
+// ==== FI1: the FI DC-deciding fixture ====
+TEST_CASE("FI DC-deciding fixture: the FI=1 emission path round-trips content-exact") {
+    // The register item (docs/todo.md): the FI branch is predicate-gated and
+    // never fires in the committed fixtures - every writeFilterIntra call site
+    // (pipeline.cpp:509/:695/:892/:1047/:1366/:2047) hardcodes the
+    // FILTER_INTRA_MODES sentinel, so the flag=1 symbol surface has no
+    // emission-path test. The D2 policy (pipeline.h:151-157) keeps FI parked
+    // as a candidate; adding it would change decisions on committed fixtures
+    // and move the gate. Route chosen: the fixture CONTENT makes FI measurably
+    // win on one block and the override lives ONLY in this test - the walk
+    // below mirrors the production encodeFrameAuto4x4Q walk (pipeline.cpp:
+    // 429-527) block-for-block with one delta: on DC-decided blocks it scores
+    // the 5 FI candidates with the production primitives
+    // (buildIntraPredictors filterIntraMode + motion::sad4x4) and, when the
+    // best beats the DC SAD, emits writeFilterIntra with the real FI mode and
+    // predicts through filterIntraPredictor. No production file changes.
+    //
+    // Fixture: 8x8 frame, 2x2 grid of 4x4 blocks, q100, DCT_DCT.
+    // b0 = 129 flat: the no-edge fills are above 127 / left 129 / corner 128,
+    // so H_PRED predicts 129-flat exactly and wins the D2 at sad 0 (tie with
+    // D157/D203, lowest index). b1 rows 0-2 = 129 with row 3 =
+    // [150,160,170,180]: with only the left edge [129x4] every one of the 13
+    // candidates predicts 129-flat and ties at sad 144 - tie-break DC_PRED;
+    // the FI table ties too (all 144), so no FI win and the flag=0 branch of
+    // writeFilterIntra is exercised in the same walk. b2 is the transpose and
+    // sees a REAL recon top-right (b1's recon row 3 = [149,158,170,179],
+    // q100 noise) - D67_PRED wins there. b3's source is the FILTER_D157_PRED
+    // prediction of the walk's own recon edges (above = b1's recon row 3 =
+    // [149,158,170,179], left = b2's recon col 3 = [143,156,168,176],
+    // above-left = 129), so its FI_D157 SAD is exactly 0 while DC - the D2
+    // argmin at sad 75 (table 75,159,141,262,209,172,161,153,196,151,153,
+    // 152,148; next best 141) - misses by 75. The override fires on b3 only.
+    pixels::Plane plane(8, 8, 4);
+    pixels::Plane recon(8, 8, 4);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) plane.at(x, y) = 129;
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+            plane.at(4 + x, y) = (y == 3) ? (std::uint8_t)(150 + 10 * x) : 129;
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+            plane.at(x, 4 + y) = (x == 3) ? (std::uint8_t)(150 + 10 * y) : 129;
+    static const std::uint8_t b3src[16] = {148, 153, 161, 168, 154, 154, 157, 163,
+                                           163, 159, 159, 161, 170, 166, 164, 163};
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) plane.at(4 + x, 4 + y) = b3src[y * 4 + x];
+
+    transforms::QuantTables qt;
+    transforms::buildQuantTables(100, qt);
+    std::int16_t scan[16];
+    transforms::defaultScan4x4(scan);
+
+    // ---- Part A: the production walk on this fixture - the parked state ----
+    {
+        pixels::Plane reconA(8, 8, 4);
+        std::int32_t coeffs[64] = {0};
+        std::uint8_t modes[4] = {0};
+        entropy::EcFrameContext fc;
+        entropy::AomWriter w{};
+        unsigned char buf[64] = {0};
+        w.ec.buf = buf;
+        entropy::DcSignLevelCoeffNa na;
+        memset(&na, 0xFF, sizeof(na));
+        pipeline::encodeFrameAuto4x4Q(plane, reconA, coeffs, modes, 100,
+                                      transforms::TxType::DCT_DCT, &w, &fc, &na);
+        const std::uint8_t wantModes[4] = {2, 0, 8, 0};
+        bool modesOk = true;
+        for (int i = 0; i < 4; ++i)
+            if (modes[i] != wantModes[i]) modesOk = false;
+        CHECK(modesOk);
+
+        entropy::EcFrameContext fcR;
+        entropy::initDefaultEcFrameContext(&fcR, 100);
+        entropy::AomReader r;
+        REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+        r.allow_update_cdf = 1;
+        entropy::DcSignLevelCoeffNa naR;
+        memset(&naR, 0xFF, sizeof(naR));
+        int modesR[4] = {0, 0, 0, 0};
+        for (int b = 0; b < 4; ++b) {
+            const int bx = b % 2, by = b / 2;
+            const bool hasTop = by > 0, hasLeft = bx > 0;
+            CHECK(entropy::readSkip(&r, &fcR, 0) == 0);
+            const int leftMode = hasLeft ? modesR[by * 2 + bx - 1] : 0;
+            const int aboveMode = hasTop ? modesR[(by - 1) * 2 + bx] : 0;
+            int topCtx = 0, leftCtx = 0;
+            entropy::getKfYModeCtx(hasLeft ? 1 : 0, leftMode, hasTop ? 1 : 0, aboveMode,
+                                   &topCtx, &leftCtx);
+            int delta = 0;
+            modesR[b] = (int)entropy::readKfLumaMode(&r, &fcR, entropy::BLOCK_4X4, topCtx,
+                                                     leftCtx, &delta);
+            CHECK(modesR[b] == (int)wantModes[b]);
+            // the parked production surface: the FI symbol, where allowed,
+            // carries the off sentinel and reads 0
+            if (entropy::filterIntraAllowed(1, entropy::BLOCK_4X4, 0,
+                                            (std::uint32_t)modesR[b])) {
+                entropy::FilterIntraMode f;
+                CHECK(entropy::readFilterIntra(&r, &fcR, entropy::BLOCK_4X4, &f) == 0);
+            }
+            // the token chain keeps the arithmetic decoder aligned
+            std::int32_t qcRead[16] = {0};
+            entropy::readBlockCoeffs(&r, &fcR, &naR, qcRead, scan, entropy::TX_4X4,
+                                     entropy::BLOCK_4X4, by, bx, 1,
+                                     (entropy::PredictionMode)modesR[b],
+                                     entropy::COMPONENT_LUMA);
+        }
+    }
+
+    // ---- Part B: the same walk with the test-only FI override ----
+    entropy::EcFrameContext fc;
+    entropy::AomWriter w{};
+    unsigned char buf[64] = {0};
+    w.ec.buf = buf;
+    entropy::initDefaultEcFrameContext(&fc, 100);
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    entropy::DcSignLevelCoeffNa na;
+    memset(&na, 0xFF, sizeof(na));
+
+    int modes[4] = {0, 0, 0, 0};
+    std::uint16_t eobs[4] = {0, 0, 0, 0};
+    int flags[4] = {0, 0, 0, 0};
+    entropy::FilterIntraMode fis[4] = {};
+    int b3DcSad = -1, b3FiSad = -1;
+    int b3FiTable[5] = {0, 0, 0, 0, 0};
+    bool b3Fires = false;
+
+    auto walkBlock = [&](int bidx, int bx, int by) {
+        const int px = bx * 4, py = by * 4;
+        const bool hasTop = by > 0, hasLeft = bx > 0;
+        const int nTopPx = hasTop ? 4 : 0, nLeftPx = hasLeft ? 4 : 0;
+        // the production top-right rule (pipeline.cpp:437)
+        const int nTopRightPx = (hasTop && bx + 1 < 2) ? 4 : 0;
+        std::uint8_t above[8] = {0}, left[4] = {0};
+        if (hasTop) {
+            for (int i = 0; i < 4 + nTopRightPx; ++i) above[i] = recon.at(px + i, py - 1);
+        }
+        if (hasLeft) {
+            for (int i = 0; i < 4; ++i) left[i] = recon.at(px - 1, py + i);
+        }
+        const std::uint8_t aboveLeft =
+            (hasTop && hasLeft) ? recon.at(px - 1, py - 1) : (std::uint8_t)0;
+        intra::NeighborContext nctx;
+        nctx.aboveMode = hasTop ? (intra::PredictionMode)modes[(by - 1) * 2 + bx]
+                                : intra::DC_PRED;
+        nctx.leftMode = hasLeft ? (intra::PredictionMode)modes[by * 2 + bx - 1]
+                                : intra::DC_PRED;
+        std::uint8_t src[16];
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) src[y * 4 + x] = plane.at(px + x, py + y);
+
+        // the production D2 (13 candidates, real nctx)
+        int best = 1 << 30, bm = 0;
+        for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
+            std::uint8_t p[16] = {0};
+            intra::buildIntraPredictors(p, 4, m, 0, 4, 4, aboveLeft, above, nTopPx,
+                                        nTopRightPx, left, nLeftPx, 0, nctx);
+            const int s = (int)motion::sad4x4(src, 4, p, 4);
+            if (s < best) { best = s; bm = m; }
+        }
+        // the test-only FI layer: score the 5 FI candidates on DC-decided
+        // blocks; fire only when the best beats the DC SAD
+        int fiSads[5] = {0, 0, 0, 0, 0};
+        int fiBest = -1, fiBestSad = 1 << 30;
+        const bool fiAllowed =
+            entropy::filterIntraAllowed(1, entropy::BLOCK_4X4, 0, (std::uint32_t)bm);
+        if (fiAllowed) {
+            for (int f = 0; f < 5; ++f) {
+                std::uint8_t p[16] = {0};
+                intra::buildIntraPredictors(p, 4, intra::DC_PRED, 0, 4, 4, aboveLeft, above,
+                                            nTopPx, nTopRightPx, left, nLeftPx, 0, nctx, f);
+                fiSads[f] = (int)motion::sad4x4(src, 4, p, 4);
+                if (fiSads[f] < fiBestSad) { fiBestSad = fiSads[f]; fiBest = f; }
+            }
+        }
+        const bool fires = fiAllowed && fiBestSad < best;
+        modes[bidx] = bm;
+        if (bidx == 3) {
+            b3DcSad = best;
+            b3FiSad = fiBestSad;
+            for (int f = 0; f < 5; ++f) b3FiTable[f] = fiSads[f];
+            b3Fires = fires;
+        }
+        // prediction: the override routes DC through filterIntraPredictor
+        std::uint8_t pred[16] = {0};
+        intra::buildIntraPredictors(pred, 4, bm, 0, 4, 4, aboveLeft, above, nTopPx,
+                                    nTopRightPx, left, nLeftPx, 0, nctx,
+                                    fires ? fiBest : -1);
+        std::int16_t res[16];
+        for (int i = 0; i < 16; ++i) res[i] = (std::int16_t)(src[i] - pred[i]);
+        std::int32_t cb[16] = {0}, qc[16] = {0}, dq[16] = {0};
+        transforms::fwdTxfm2d4x4(res, cb, 4, transforms::TxType::DCT_DCT);
+        std::uint16_t eob = 0;
+        transforms::quantizeFp4x4(cb, qt, scan, qc, dq, &eob);
+        eobs[bidx] = eob;
+        // emission: [skip][kf][FI iff DC-decided][tokens] per the 4x4Q walk
+        entropy::writeSkip(&w, &fc, 0, 0);
+        int topCtx = 0, leftCtx = 0;
+        entropy::getKfYModeCtx(hasLeft ? 1 : 0, (int)nctx.leftMode, hasTop ? 1 : 0,
+                               (int)nctx.aboveMode, &topCtx, &leftCtx);
+        entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_4X4,
+                                 (entropy::PredictionMode)bm, topCtx, leftCtx, 0);
+        if (fiAllowed) {
+            flags[bidx] = fires ? 1 : 0;
+            fis[bidx] = fires ? (entropy::FilterIntraMode)fiBest : entropy::FILTER_INTRA_MODES;
+            entropy::writeFilterIntra(&w, &fc, entropy::BLOCK_4X4, fis[bidx]);
+        }
+        entropy::writeBlockCoeffs(&w, &fc, &na, qc, scan, entropy::TX_4X4,
+                                  entropy::BLOCK_4X4, eob, by, bx, 1,
+                                  (entropy::PredictionMode)bm, entropy::COMPONENT_LUMA);
+        // recon write-back
+        std::uint8_t blk[16];
+        for (int i = 0; i < 16; ++i) blk[i] = pred[i];
+        transforms::invTxfm2dAdd4x4(dq, blk, 4, transforms::TxType::DCT_DCT);
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) recon.at(px + x, py + y) = blk[y * 4 + x];
+    };
+
+    walkBlock(0, 0, 0);
+    walkBlock(1, 1, 0);
+    walkBlock(2, 0, 1);
+    walkBlock(3, 1, 1);
+    entropy::odEcStopEncode(&w);
+
+    // the D2 decisions are the production ones (the override changes nothing
+    // about the decision - only the prediction and the FI symbol on b3)
+    const int wantModes[4] = {2, 0, 8, 0};
+    bool modesOk = true;
+    for (int i = 0; i < 4; ++i)
+        if (modes[i] != wantModes[i]) modesOk = false;
+    CHECK(modesOk);
+    // the FI-win property, measured: b3's D2 argmin is DC_PRED at sad 75 and
+    // the FI_D157_PRED candidate scores 0
+    CHECK(b3DcSad == 75);
+    CHECK(b3Fires);
+    CHECK(b3FiSad == 0);
+    const int wantFiTable[5] = {88, 239, 143, 0, 297};
+    bool fiOk = true;
+    for (int f = 0; f < 5; ++f)
+        if (b3FiTable[f] != wantFiTable[f]) fiOk = false;
+    CHECK(fiOk);
+    // the flag surface: b1 carries the off symbol, b3 carries FI=1
+    const int wantFlags[4] = {0, 0, 0, 1};
+    bool flagsOk = true;
+    for (int i = 0; i < 4; ++i)
+        if (flags[i] != wantFlags[i]) flagsOk = false;
+    CHECK(flagsOk);
+    CHECK((int)fis[3] == (int)entropy::FILTER_D157_PRED);
+    // b3's FI prediction is exact: the residual is zero and the token chain
+    // codes an all-skip TU
+    CHECK(eobs[3] == 0);
+    const std::uint16_t wantEobs[4] = {0, 10, 13, 0};
+    bool eobsOk = true;
+    for (int i = 0; i < 4; ++i)
+        if (eobs[i] != wantEobs[i]) eobsOk = false;
+    CHECK(eobsOk);
+    // the tile byte stream, measured: 11 bytes for the four-block frame
+    CHECK(w.pos == 11);
+    static const unsigned char wantBytes[11] = {0x90, 0xd7, 0xbd, 0x22, 0x4b, 0xe0,
+                                                0xaa, 0x79, 0x9e, 0x85, 0x20};
+    for (int i = 0; i < 11; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+
+    // ---- reader round-trip: the decoder side of the same surface ----
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR, 100);
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    entropy::DcSignLevelCoeffNa naR;
+    memset(&naR, 0xFF, sizeof(naR));
+    pixels::Plane reconR(8, 8, 4);
+    int modesR[4] = {0, 0, 0, 0};
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const int px = bx * 4, py = by * 4;
+        const bool hasTop = by > 0, hasLeft = bx > 0;
+        const int nTopPx = hasTop ? 4 : 0, nLeftPx = hasLeft ? 4 : 0;
+        const int nTopRightPx = (hasTop && bx + 1 < 2) ? 4 : 0;
+        std::uint8_t above[8] = {0}, left[4] = {0};
+        if (hasTop) {
+            for (int i = 0; i < 4 + nTopRightPx; ++i) above[i] = reconR.at(px + i, py - 1);
+        }
+        if (hasLeft) {
+            for (int i = 0; i < 4; ++i) left[i] = reconR.at(px - 1, py + i);
+        }
+        const std::uint8_t aboveLeft =
+            (hasTop && hasLeft) ? reconR.at(px - 1, py - 1) : (std::uint8_t)0;
+        intra::NeighborContext nctxR;
+        nctxR.aboveMode = hasTop ? (intra::PredictionMode)modesR[(by - 1) * 2 + bx]
+                                 : intra::DC_PRED;
+        nctxR.leftMode = hasLeft ? (intra::PredictionMode)modesR[by * 2 + bx - 1]
+                                 : intra::DC_PRED;
+        CHECK(entropy::readSkip(&r, &fcR, 0) == 0);
+        int topCtx = 0, leftCtx = 0;
+        entropy::getKfYModeCtx(hasLeft ? 1 : 0,
+                               hasLeft ? (int)nctxR.leftMode : 0,
+                               hasTop ? 1 : 0,
+                               hasTop ? (int)nctxR.aboveMode : 0, &topCtx, &leftCtx);
+        int delta = 0;
+        const entropy::PredictionMode m =
+            entropy::readKfLumaMode(&r, &fcR, entropy::BLOCK_4X4, topCtx, leftCtx, &delta);
+        CHECK((int)m == wantModes[b]);
+        modesR[b] = (int)m;
+        entropy::FilterIntraMode f = entropy::FILTER_INTRA_MODES;
+        int flag = 0;
+        if (entropy::filterIntraAllowed(1, entropy::BLOCK_4X4, 0, (std::uint32_t)m)) {
+            flag = entropy::readFilterIntra(&r, &fcR, entropy::BLOCK_4X4, &f);
+        }
+        CHECK(flag == wantFlags[b]);
+        if (flag) CHECK((int)f == (int)entropy::FILTER_D157_PRED);
+        std::int32_t qcRead[16] = {0};
+        const int reob = entropy::readBlockCoeffs(&r, &fcR, &naR, qcRead, scan,
+                                                  entropy::TX_4X4, entropy::BLOCK_4X4,
+                                                  by, bx, 1, m, entropy::COMPONENT_LUMA);
+        CHECK(reob == (int)eobs[b]);
+        // dequant (the quantizeFpN dq rule: qc * dequant[rc != 0]) + predict
+        // + inverse -> the decoder recon must equal the writer's per block
+        std::int32_t dqR[16] = {0};
+        for (int i = 0; i < 16; ++i) dqR[i] = qcRead[i] * qt.dequant[i != 0];
+        std::uint8_t predR[16] = {0};
+        intra::buildIntraPredictors(predR, 4, m, 0, 4, 4, aboveLeft, above, nTopPx,
+                                    nTopRightPx, left, nLeftPx, 0, nctxR,
+                                    flag ? (int)f : -1);
+        std::uint8_t blkR[16];
+        for (int i = 0; i < 16; ++i) blkR[i] = predR[i];
+        transforms::invTxfm2dAdd4x4(dqR, blkR, 4, transforms::TxType::DCT_DCT);
+        bool blkOk = true;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) {
+                reconR.at(px + x, py + y) = blkR[y * 4 + x];
+                if (blkR[y * 4 + x] != recon.at(px + x, py + y)) blkOk = false;
+            }
+        CHECK(blkOk);
+    }
+    // the writer and reader CDF states agree (the full adaptation replayed)
+    CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+}
