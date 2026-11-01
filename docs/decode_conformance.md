@@ -30,18 +30,20 @@ generator's recon line per geometry:
 These establish content equality for the five committed fixtures, not
 every possible encoder input or full SVT encoder behavior.
 Mode-decision/composition remain project-defined policy.
-- **Color (CS-series + CS7): full-plane conformance 3/4, c4 V-only.**
-    color16, color32 and color8 decode with ALL THREE planes content 1:1.
-    color4 decodes with Y exact and U exact and **V carrying 43 divergent
-    bytes of 1024, first at 647, across UV leaves 41/42/48/56** - recorded
-    as a V-only row and NOT as "3 of 4 conform", because the percentage would
-    bury a specific measured defect. Three of those four leaves are PARTIAL
-    (8, 16, 3, 16 bytes), which points at the gather's extent rather than a
-    whole block being mispredicted. The chroma bottom-left fix LANDED in
-    `5ce0224` and took c8 to exact on all three planes and c4's U to exact;
-    the remaining c4 V residual is the FINDING the CS7 brief predicted it
-    would be if the mechanism were not the whole story there, and it is
-    filed as such. Full record and the per-plane matrix below.
+- **Color (CS-series + CS7 + RT21): full-plane conformance CLOSED 4/4.**
+    All four color artifacts decode with ALL THREE planes content 1:1.
+    color16 and color32 were 1:1 from CS5; color8 joined at the CS7 fix
+    (`5ce0224`, the chroma bottom-left Z-order gate); color4 was the last
+    divergent one - **V carrying 43 divergent bytes of 1024, first at 647,
+    across UV leaves 41/42/48/56** - until the RT21 fix (`927e697`) closed
+    it: the chroma above-right gather had no Z-order availability check,
+    and leaf 41's owner block walks one step later (zpos 36 vs 35), so the
+    gather read zeros from the zero-initialised cabove[65] and the decided
+    D45 predicted 0 where the reference reconstructs 255. The RT21 regen
+    moved exactly those 43 bytes, all to 255, plus the b41 V eob 16 -> 0.
+    The V-only row and the partial-leaf analysis that predated the fix are
+    retained below as the record of the defect the RT21 slice closed. Full
+    record and the per-plane matrix below.
 - Our writer <-> aom-entdec roundtrip is EXACT on every TD probe rung
 (adaptation on): the arithmetic, the CDF evolution and the defaults
 are internally consistent with aom's own decoder primitives.
@@ -238,7 +240,8 @@ parse layer is conformant at every SB depth; all four color artifacts
 decode; c4 and c8 luma are now CONTENT 1:1 (0/4096 each) alongside c16
 and c32. Two commits carry the arc: **7fb280d** is the measurement
 (diagnosis only, no fix) and **9649fbc** is the fix. The chroma residual
-at c4/c8 is a SEPARATE open item - see "Next open item" at the end.
+at c4/c8 was a SEPARATE open item, since RESOLVED (CS7 `5ce0224`, then
+RT21 `927e697`) - see the chroma residual section at the end.
 
 **Two falsified hypotheses, recorded so they are not re-run.**
 
@@ -442,24 +445,30 @@ copy; removing the duplication removed the failure mode.
 
 ### Conformance matrix (honest, per-scope - do NOT average these)
 
-Re-measured 2026-09-28 at `5ce0224` (the CS7 fix) with
-`tools/verify_decode4.ps1 -Color N`; the c4 leaf breakdown was recomputed
-independently from the decoded plane against `ecs44_recon_v`.
+Re-measured 2026-11-01 at `927e697` (the RT21 fix); each row's status was
+changed by the commit named in the last column. Instruments: the libdav1d
+route `tools/verify_decode4.ps1 -Color N` (exit 0 on all four) plus the
+explicit both-decoder walk (ffmpeg `-c:v libaom-av1` and `-c:v libdav1d`,
+the decoder flag BEFORE -i) - 0 divergent bytes on all twelve planes,
+re-measured 2026-11-01.
 
-| artifact | Y | U | V | full-plane |
-|---|---|---|---|---|
-| c16 | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** |
-| c32 | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** |
-| c8  | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** |
-| c4  | 1:1 (0/4096) | 1:1 (0/1024) | **43/1024 diverge, first at 647** | **V-only divergent** |
+| artifact | Y | U | V | full-plane | last change |
+|---|---|---|---|---|---|
+| c16 | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** | CS5 (CS5b/CS5c) |
+| c32 | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** | CS5 (CS5b/CS5c) |
+| c8  | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** | CS7 (`5ce0224`) |
+| c4  | 1:1 (0/4096) | 1:1 (0/1024) | 1:1 (0/1024) | **1:1** | RT21 (`927e697`) |
 
-**Full-plane color conformance is 3/4 artifacts, and the fourth is recorded
-V-ONLY on purpose.** c8 went from `U 165/1024, V 205/1024` to exact on all
-three planes. c4 went from `U 244/1024, V 287/1024` to **Y exact and U exact
-with V still carrying 43 divergent bytes** - so the U half of the c4 residual
-was the same defect and is gone, and a second, smaller V-only defect remains.
-**Do NOT report this as "3 of 4 conform": the percentage would bury a
-specific, isolated, measured 43-byte defect behind a rate.** The defect is:
+The five grayscale artifacts are content-1:1 per geometry (the table at
+the top of this file), so the committed artifact set is NINE .obu files,
+all content-1:1 on every plane.
+
+**Full-plane color conformance is 4/4, CLOSED at `927e697`.** c8 went from
+`U 165/1024, V 205/1024` to exact on all three planes at CS7. c4 went from
+`U 244/1024, V 287/1024` to Y and U exact at CS7, and its remaining
+V-only defect - 43 of 1024 bytes, first at 647 - was the chroma
+above-right Z-order gap, closed by RT21. The defect, kept as the record of
+what the RT21 slice closed:
 
     c4 V plane, 43 of 1024 bytes, first differing byte at offset 647,
     across exactly four 4x4 UV leaves:
@@ -468,15 +477,18 @@ specific, isolated, measured 43-byte defect behind a rate.** The defect is:
       leaf 48 (row 6, col 0)   3 bytes
       leaf 56 (row 7, col 0)  16 bytes
 
-**The per-leaf counts are 8, 16, 3, 16 - three of the four are PARTIAL.**
-That is the most diagnostic fact in the row and it is not lost by the
-totals: a whole-TU mispredict would show 16 on all four leaves, so a partial
-pattern points at the gather's EXTENT or at the Z-order predicate rather than
-at a block being predicted wrong outright. That is the next investigation and
-it has not been run. This asymmetry is the FINDING recorded by the CS7 brief -
-c4's predictions did not fully follow, so the bottom-left mechanism is not the
-whole story at c4 - and it is filed as the finding rather than as a caveat,
-and the expectation was NOT adjusted to match it.
+**The per-leaf counts are 8, 16, 3, 16 - three of the four were PARTIAL.**
+That was the most diagnostic fact in the row and it is what pointed at the
+gather's EXTENT or the Z-order predicate rather than at a block being
+predicted wrong outright - and it was the Z-order predicate: the
+above-right gather was structural-only, and leaf 41's owner block walks at
+zpos 36, one step after the leaf's 35, so the gather read zeros from the
+zero-initialised cabove[65] and the decided D45 predicted 0 where the
+reference reconstructs 255. The RT21 regen moved exactly those 43 bytes,
+every one to 255, plus the b41[2] eob 16 -> 0 (b48[2]/b49[2] 1 -> 0
+cascade). While the defect stood it was deliberately NOT rounded to
+"3 of 4 conform"; the same discipline applies to the closed state - the
+commit that changed each row is named in the table, not averaged away.
 
 **The pins held, and held for a derived reason.** ecs416_*, ecs432_*,
 tu_color16 (133 B) and tu_color32 (165 B) are byte-identical. That was never
@@ -484,9 +496,18 @@ a prediction - the bottom-left rule provably does not fire at grid <= 2, so
 those two artifacts could not change. They are the evidence that the gate is
 right rather than merely inert. The CS7 regen moved 13 gate lines and every
 one was chroma-side: `ecs4{4,8}_{bytes,modes,eobs,coeffs,recon_u,recon_v}`,
-with `ecs44_recon_y` and `ecs48_recon_y` changing in **0** lines.
+with `ecs44_recon_y` and `ecs48_recon_y` changing in **0** lines. The RT21
+regen moved 5 gate lines, also all chroma-side, and the luma lines changed
+in **0** lines again - the luma top-right twin is measured live and PARKED
+(docs/todo.md section 9, the RT21 entry), because consuming it would
+change emitted luma content.
 
-### Next open item: the chroma bottom-left (its own slice)
+### The chroma residuals (RESOLVED: CS7 `5ce0224`, then RT21 `927e697`)
+
+The text below is the pre-CS7 record of why the chroma side needed its own
+measurement slice before any fix; both residuals have since landed and
+closed - see the matrix above and the RT19/RT20/RT21 entry in
+docs/todo.md section 9.
 
 c8 U 165/1024 and c4 U 244/1024 remain, and they need their own
 MEASUREMENT slice (the chroma analogue of RT10 step 2) before any fix.

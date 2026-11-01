@@ -220,13 +220,14 @@ A0. SLICE-LEVEL STATE (the live register)
   (687625f) - d4 30B 64/64, d8 30B 64/64, d16 44B 256/256, d32 47B
   1024/1024, d64 441B 4096/4096 (tools/verify_decode4.ps1 -Geometry);
   FS6 docs currency (8edc02d).
-  - [x] CS-series LANDED (CS0-CS5c) + CS7 fix LANDED (5ce0224): the chroma
-    entropy + emission + the color container + the four color artifacts -
-    register entries in section 1.1; full-plane conformance **3/4**
-    (color16/color32/color8 all three planes 1:1; **color4 Y and U exact,
-    V 43/1024 divergent first at 647 over UV leaves 41/42/48/56** - a
-    V-only row, not "3 of 4 conform", because the percentage would bury a
-    specific measured defect).
+  - [x] CS-series LANDED (CS0-CS5c) + CS7 fix LANDED (5ce0224) + RT21 fix
+    LANDED (927e697): the chroma entropy + emission + the color container +
+    the four color artifacts - register entries in section 1.1; full-plane
+    conformance **4/4 CLOSED** (color16/color32 from CS5; color8 joined at
+    the CS7 bottom-left gate; color4 was the last divergent one - V 43/1024
+    first at 647 over UV leaves 41/42/48/56 - until the RT21 chroma
+    above-right Z-order gate closed it; the RT19/RT20/RT21 record is in
+    section 9).
 - [x] RT-series (the chroma/edge conformance chase): RT1 the /RTC
   fixture fix, RT6 the tree-order leaf emission, RT7-a/b the
   cross-decoder instrument + the chroma FI flag surface, RT9 the
@@ -797,6 +798,68 @@ shipped feature set (mono/color intra streams).
     is allowed to explain anything; until then the shape bound stands alone,
     which is the same discipline as BOUNDED versus INERT: a
     measurement-derived constraint kept separate from the claim it constrains.
+
+- **RT19/RT20 + RT21 LANDED at `927e697` - the c4 V 43-byte divergence is
+  ROOT-CAUSED and FIXED, and color conformance is CLOSED 4/4.** RT18's
+  negative result eliminated the shared path without naming a cause; the
+  RT19/RT20 measurement arc named it, and RT21 fixed it. Every number below
+  is read off commit `927e697`'s message and re-measured 2026-11-01, not
+  transcribed from a brief.
+  **RT19/RT20, the measurement arc in its final form.** The c4 V 43-byte
+  divergence was root-caused to the chroma walk's above-right gather having
+  NO Z-order availability check. At c4, leaf 41's owner block walks one
+  step LATER than the leaf itself (zpos 36 vs 35), so the gather read zeros
+  from the zero-initialised `cabove[65]` (composition.c:6609); the builder
+  - verified 1:1 with the reference's repetition fill at intra.cpp:603-607
+  - faithfully predicted 0 from the count it was given. The committed
+  coefficients were proven generated against that zero edge (forward
+  probe, bit-identical, eob 16), and the correctly-fed control encodes to
+  all-zero coefficients (eob 0). ATTRIBUTION: the five-prediction
+  derivation was run by an autoswarm child agent (Judge, glm-5.3-flash);
+  P1-P5 all held.
+  **RT21, the fix (`927e697`).** `topRightPx` - the ABOVE-RIGHT twin of
+  bottomLeftPx, the same shape with the diagonal on the other corner
+  (DECLARED pipeline.h:255 beside bottomLeftPx's pipeline.h:246; DEFINED
+  pipeline.cpp:2480-2484 beside :2469-2473) - wired at the l6 builder site
+  (pipeline.cpp:2073) where ONE count is consumed at BOTH the cAbove
+  gather bound (:2113) and the buildIntraPredictorsUv argument (:2142), so
+  the two cannot disagree; the generator mirror is `cNTr`
+  (composition.c:6595-6596), likewise ONE fact consumed at the gather
+  bound (:6613) and the builder call (:6733) - the two were previously the
+  same structural expression written twice inline, and correcting only one
+  would have re-created the bug through the back door. The chroma D2
+  DECISION site (pipeline.cpp:2001) is deliberately untouched: the judge's
+  scope is the builder's prediction surface.
+  **REGEN (chroma-only).** 421/421 lines, 884,953 -> 884,851 B (0 CR, 0
+  non-ASCII). FIVE moved lines, ALL chroma-side: ecs44_bytes 176 -> 161;
+  ecs44_eobs (3 V triples: b41[2] 16 -> 0 THE fix; b48[2] and b49[2] 1 ->
+  0 cascade); ecs44_coeffs (14 of 6144 values, V-side); ecs44_recon_v (43
+  of 1024 bytes); tu_color4. ecs44_recon_v's moved positions are EXACTLY
+  the 43 divergent V bytes the CS7 entry above records (leaf 41: 8, leaf
+  42: 16, leaf 48: 3, leaf 56: 16) and every moved value goes to 255 -
+  the fix corrects exactly the divergent bytes and nothing else.
+  ecs44_recon_u: 0 bytes. Every ecs48_*/ecs416_*/ecs432_*/ecs2*_* line: 0.
+  All modes lines: 0 (the decision sites are untouched, confirmed by the
+  gate itself). color4 198 -> 183 B; color8 137 B / color16 133 B /
+  color32 165 B byte-identical.
+  **VERIFY, as committed and re-measured.** Suite ctest -C Release 9/9
+  passed, 0 failed (the RT21 fix run 272.42 s; a judge re-run 267.47 s;
+  re-measured 2026-11-01: 9/9, 278.85 s wall). GATE rebuilt and
+  byte-identical to the committed regenerated file (Compare-Object
+  0 lines, 884,851 B). Decoders: all four color artifacts now CONTENT 1:1
+  on Y, U and V via tools/verify_decode4.ps1 (exit 0 each; re-run
+  2026-11-01), with libaom-av1 and libdav1d byte-identical on all four -
+  re-measured 2026-11-01: twelve planes, 0 divergent bytes each.
+  **PARKED FINDING (exactly this name): the luma nTr at
+  composition.c:6264 has the same structural-only gap, measured LIVE but
+  UNCONSUMED.** The luma walk's above-right gather is structural-only
+  (`hasTop && bx + 1 < grid`, :6264) with no Z-order check, and the same
+  violating-leaf class exists there: 8 c4 + 2 c8 leaves. It is UNCONSUMED:
+  no decided luma mode reads the stretch, the committed Y planes are
+  content-1:1, and applying the rule shifts the D2 argmin (SMOOTH -> D45
+  at 10 leaves), moving 13 gate lines. Parked, bounded by measurement,
+  NOT fixed; opening it is a judge decision because it changes emitted
+  luma content.
 
 - The chroma bottom-left FIX (SPEC, retained below as the record of what the
   slice was built against). **This entry is the brief. If you are
