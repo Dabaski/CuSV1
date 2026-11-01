@@ -215,7 +215,7 @@ suite before moving on.
 ```
 cmake -S . -B build
 cmake --build build --config Release
-ctest --test-dir build -C Release              # 9 targets; expect 9/9
+ctest --test-dir build -C Release              # 10 targets; expect 10/10
 ctest --test-dir build -C Release -R l4_intra  # one layer
 ```
 
@@ -336,14 +336,15 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-01, at commit 927e697, the RT21 fix)
+### Last measured state (2026-11-01, the AN1 slice)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 9/9 passed, 0 failed, 278.85 s** (re-measured 2026-11-01;
-  l4_intra is the slow one at ~216 s; `pipeline` ~55 s; `l3_transforms`
-  ~7 s; the rest under 0.5 s. The RT21 fix run itself measured 272.42 s,
-  and a judge re-run of the same tree 267.47 s).
+- **ctest: 10/10 passed, 0 failed, 263.38 s** (re-measured 2026-11-01;
+  l4_intra is the slow one at ~216 s; `pipeline` ~51 s; `l3_transforms`
+  ~7 s; the rest under 0.5 s including the new l9_analysis. The RT21 fix
+  run itself measured 272.42 s at 9/9, and a judge re-run of that same
+  tree 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
   bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-01: rebuilt, and
   byte-identical to the committed file). History, not a figure to chase:
@@ -355,7 +356,9 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
 - **Portable-C coverage: 13.1%** (see the completion metric section;
-  re-measured 2026-11-01, unchanged: 20,659 of 157,718 non-blank lines).
+  re-measured 2026-11-01: 20,677 of 157,718 non-blank lines, +18 from
+  20,659 - the AN1 mean8x8 port; the percentage is unchanged at one
+  decimal).
 - **Committed artifacts: 9** `.obu` files, ALL content-1:1 on every plane
   (color4 was the last divergent one: its V 43/1024 residual was the chroma
   above-right Z-order gap, closed by RT21 at 927e697; color8 closed at CS7,
@@ -573,7 +576,15 @@ are partly right and I re-measured rather than restated them:
   that is patched, mis-arbitrating, and non-durable has no residual value.
   **A wrong arbiter that looks like evidence is the specific harm** - it is
   worse than no arbiter, because it produces confident numbers.
-- l9_analysis - PLANNED, NOT YET BUILT. The campaign is scoped in docs/todo.md (section A0, the AN-series) and the target area is A11 in the coverage metric below. No l9 code exists at HEAD; do not cite it as if it did.
+- l9_analysis - content analysis (AN-series). AN1 LANDED 2026-11-01:
+  analysis::mean8x8 in src/l9_analysis (host-only, CMake mirrors l5_motion,
+  ctest target l9_analysis), the 8x8 port of svt_compute_mean_c
+  (pic_analysis_process.c:194-216, declaration twin compute_mean.h:21 which
+  is A12-classified - both anchors cited, the cross-area question named in
+  coverage_areas.txt), VARIANCE_PRECISION = 16 at pic_analysis_process.c:36.
+  The campaign's 22-slice decomposition (AN0 scout, phases A-D) lives in
+  docs/todo.md section A0; the target area is A11 in the coverage metric
+  below.
 
 
 ## Completion metric (the portable-C coverage number)
@@ -583,8 +594,10 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-09-27: 13.1%** (20,659 of 157,718 non-blank
-lines). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
+**THE NUMBER, as measured 2026-11-01 (AN1): 13.1%** (20,677 of 157,718 non-blank
+lines - the covered count moved +18 from 20,659, svt_compute_mean_c
+pic_analysis_process.c:194-214; the percentage is unchanged at one decimal
+because 18 lines is +0.011 pt). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
 hand-typed percentage, for the same reason a hand-typed line count is not
 allowed.
 
@@ -633,12 +646,12 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 0% | 0 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 0% | 0 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 0% | 18 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 30% | 440 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **20,659** |
+| | **TOTAL** | **254** | **157,718** | | **20,677** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

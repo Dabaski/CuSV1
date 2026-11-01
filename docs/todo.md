@@ -309,6 +309,89 @@ A0. SLICE-LEVEL STATE (the live register)
   legacy/GPU callers keep the 4096-wide facade; unification = a
   1024-position GPU quant kernel + bench protocol.
 - [~] PENDING: Luna's full audit of the FS/TD state at series close.
+- [x] **AN-SERIES decomposition (AN0 scout, accepted by the judge
+  2026-11-01; this section is its DURABLE HOME - the scout's report lived
+  only in %TEMP%, which the evidence contract does not count).** 22
+  ordered slices, Phases A-D, homes in src/l9_analysis (+ per-phase files
+  as noted), tests src/l9_analysis/tests/test_*.cpp (doctest), CMake
+  mirroring l5_motion; [G] marks a later GPU-twin slice. Per-file counts
+  RE-MEASURED 2026-11-01 by the AN1 agent ([IO.File]::ReadAllLines |
+  Where Trim, the coverage metric) - every scout figure reproduced,
+  total 12,028: temporal_filtering.c 3755 / temporal_filtering.h 113 /
+  noise_model.c 2210 / noise_model.h 324 / noise_util.c 361 /
+  noise_util.h 53 / pic_analysis_process.c 1805 /
+  pic_analysis_process.h 26 / pic_analysis_results.c 24 /
+  pic_analysis_results.h 30 / resize.c 1945 / resize.h 62 / fft.c 212 /
+  fft_common.h 806 / firstpass.c 210 / firstpass.h 92. Reference root:
+  third_party/SVT-AV1/Source/Lib/Codec/.
+  Phase A - RDO-feeding primitives (host): AN1 mean8x8
+  (pic_analysis_process.c:194 + compute_mean.h:21) LANDED; AN2
+  meanSquare8x8 (:220 + compute_mean.h:26); AN3 the sub-mean pair
+  (:242/:263 + compute_mean.h:31/:34); AN4 interm_var_four8x8 (:286 +
+  compute_mean.h:40); AN5 calculate_histogram (:170); AN6 downsample_2d
+  (:134); AN7 the b64 variance pyramid (compute_b64_variance :318); AN8
+  the screen-content detectors (:1354, antialiasing-aware :1207); AN9
+  luma-dominant (:1440); AN10 the pad family (:648, :745, :820, :858,
+  :1549); AN11 downsample_filtering_input_picture (:1498). Phase B -
+  FFT + noise model: AN12 fft1d kernels (fft_common.h:114-:330); AN13
+  fft2d/ifft2d (fft.c:51/:108); AN14 noise_util (:20, :70-:104, the
+  OD_DIVU table :114); AN15 the flat block finder (noise_model.c:399-:634);
+  AN16 the noise strength solver (noise_model.c:104-:397); AN17 the
+  noise model init/update (noise_model.c:636-:1147). Phase C -
+  temporal filtering (parkable behind A3/GOP work): AN18 planewise
+  filter primitives (temporal_filtering.c:930, hbd :1105, central :262);
+  AN19 decay factor + expf table (:568-:737); AN20 firstpass pure
+  accumulation (firstpass.c:133/:141). Phase D - resize (parkable):
+  AN21 resize 1D kernels (resize.c:221-:430, 8-bit only); AN22 the
+  resize_frame driver (resize.c:881).
+  Coverage trajectory (the scout's arithmetic, derived not measured):
+  Phase A ~1,185 ref lines -> ~+0.75 pt; Phase B ~2,140 (excl. grain
+  params) -> ~+1.36 pt; Phase C ~600 -> ~+0.38 pt; Phase D ~480 ->
+  ~+0.30 pt; full program excl. parked ~10,720 lines -> ~+6.8 pt; A11
+  trajectory 0 -> ~9.9% after Phase A, ~27.5% after B, ~40% after C,
+  ~44% after D.
+  The three named exclusions (plus one): firstpass IS the rate-control
+  first pass - output_stats (firstpass.c:83) writes into the TWO_PASS
+  stats buffer, so port only AN20's pure accumulation and the rest waits
+  for A9; temporal_filtering.c is GOP-coupled - the per-block planewise
+  filters are portable, the driver is not (the subpel search drives
+  interpolated references, A3 machinery); noise_model
+  get_grain_parameters (noise_model.c:1159) writes AomFilmGrain - an A8
+  bitstream surface, parked (film grain would invite golden-regen
+  temptation for zero RDO value). The scout's fourth: the superres
+  decision (resize.c:1165-:1416, scale refs :1686+) is RC-coupled and
+  not sliced.
+  SCOUT ANCHOR CORRECTIONS (found by the AN1 re-derivation, the table
+  above carries the corrected values): svt_compute_sub_mean_8x8_c
+  :225->:242, svt_aom_compute_sub_mean_squared_values_c :240->:263,
+  svt_compute_interm_var_four8x8_c :264->:286,
+  svt_aom_downsample_filtering_input_picture :1499->:1498. The compute_mean.h
+  A12 cross-area question is named in tools/coverage_areas.txt (both the
+  A11 and A12 rows), not silently resolved.
+- [x] AN1 LANDED (2026-11-01): analysis::mean8x8, the first AN-series
+  slice. New layer src/l9_analysis (CMake mirrors l5_motion: av1_analysis
+  links av1_core; ctest target l9_analysis). 1:1 target svt_compute_mean_c
+  at 8x8 - pic_analysis_process.c:194-216, declaration twin
+  compute_mean.h:21 (A12-classified; both anchors cited), VARIANCE_PRECISION
+  = 16 at pic_analysis_process.c:36. Derivation done BEFORE the test: uint64
+  accumulation of every pixel row-by-row with the stride advance, then
+  (sum << (VARIANCE_PRECISION >> 1)) / (width * height) - shift FIRST,
+  truncating division, no rounding term (:211; contrast the decimation
+  filter's (sum + 2) >> 2 at :157). At 8x8 that is sum * 4 exactly, so no
+  8x8 test can discriminate shift-then-divide from divide-then-shift; the
+  order is settled by the :211 citation, not by a test. RED: the test's
+  compile failure (C1083 'analysis.h') captured before any implementation;
+  GREEN: the port, zero warnings under /W4 /WX. Three assertions, all
+  hand-computed: constant-128 -> 32768; stride-12 ramp 0..63 (sum 2016) ->
+  8064, which discriminates a stride-ignoring implementation by
+  construction; all-255 (sum 16320) -> 65280. The scout's RED sketch
+  expected value ((128ull*64) << 8) / 64 = 32768 CONFIRMED by the
+  derivation - no correction (the function name landed as analysis::mean8x8,
+  not the sketch's computeMean8x8; the brief's name). Suite 9 -> 10
+  targets, all green. GATE re-measured 884,851 B, diff 0. Coverage: A11
+  0.00 -> 0.0015 (18 non-blank ref lines, pic_analysis_process.c:194-214);
+  20,677/157,718 = 13.1% at one decimal - unchanged at printed precision,
+  the movement is in the covered column.
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
