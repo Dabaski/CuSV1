@@ -163,3 +163,51 @@ TEST_CASE("subMeanSquareValues keeps the hardwired << 11 at (4,4)") {
     }
     CHECK(analysis::subMeanSquareValues(src, 12, 4, 4) == 1638400);
 }
+
+TEST_CASE("intermVarFour8x8 fills the four mean/sq pairs left to right along one row origin") {
+    // 1:1 target: svt_compute_interm_var_four8x8_c
+    // (pic_analysis_process.c:286-313, declaration twin compute_mean.h:40).
+    // The function CALLS the AN3 primitives, it does not recompute them: four
+    // pairs of svt_compute_sub_mean_8x8_c +
+    // svt_aom_compute_sub_mean_squared_values_c(src, stride, 8, 8) at
+    // block_index = 0, 8, 16, 24 (:290-:312) - FOUR SIDE-BY-SIDE 8x8 BLOCKS
+    // along ONE row origin, all reading rows {0,2,4,6}. The reference's own
+    // "(0,1)..(0,4)" comments are meaningless labels and a "16x16 quadrants"
+    // reading is NOT the mechanics: the live caller (compute_b64_variance,
+    // pic_analysis_process.c:350-359) passes the frame-strided buffer and
+    // advances blk_offset by 32 per call, so the four blocks are adjacent
+    // along a row (offset 16 on a literal 16x16 tile at stride 16 would read
+    // row 1; no caller does that).
+    //
+    // Fixture: 32-wide strip, stride 32, 8 rows plus a poison 9th row. Block
+    // k (columns 8k..8k+7) is constant v_k = {10, 20, 30, 40} on ALL 8 rows,
+    // so the even-row subsampling cannot shift the values; the poison row 8
+    // (99s) is never read and catches over-reads. Hand-derived from the AN3
+    // primitives: mean[k] = (32 * v_k) << 3 = 256 * v_k and
+    // meanSq[k] = (32 * v_k^2) << 11 = 65536 * v_k^2, i.e. 2560 / 5120 /
+    // 7680 / 10240 and 6553600 / 26214400 / 58982400 / 104857600 - four
+    // DISTINCT values per array, so an offset/order mutation (quadrant
+    // reading, reversed order, same-offset) fails by construction.
+    std::uint8_t src[9 * 32] = {0};
+    for (int y = 0; y < 8; ++y) {
+        for (int k = 0; k < 4; ++k) {
+            for (int x = 0; x < 8; ++x) {
+                src[y * 32 + k * 8 + x] = (std::uint8_t)(10 * (k + 1));
+            }
+        }
+    }
+    for (int x = 0; x < 32; ++x) {
+        src[8 * 32 + x] = 99;
+    }
+    std::uint64_t mean[4] = {0, 0, 0, 0};
+    std::uint64_t meanSq[4] = {0, 0, 0, 0};
+    analysis::intermVarFour8x8(src, 32, mean, meanSq);
+    CHECK(mean[0] == 2560);
+    CHECK(meanSq[0] == 6553600);
+    CHECK(mean[1] == 5120);
+    CHECK(meanSq[1] == 26214400);
+    CHECK(mean[2] == 7680);
+    CHECK(meanSq[2] == 58982400);
+    CHECK(mean[3] == 10240);
+    CHECK(meanSq[3] == 104857600);
+}

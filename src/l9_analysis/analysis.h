@@ -38,4 +38,18 @@ std::uint64_t subMean8x8(const std::uint8_t* src, std::uint16_t srcStride);
 std::uint64_t subMeanSquareValues(const std::uint8_t* src, std::uint32_t srcStride,
                                   std::uint32_t width, std::uint32_t height);
 
+// 1:1 port of svt_compute_interm_var_four8x8_c (third_party/SVT-AV1/Source/
+// Lib/Codec/pic_analysis_process.c:286-313). Declaration twin:
+// Codec/compute_mean.h:40. COMPOSES the AN3 primitives - the reference
+// calls its own sub-mean pair, it does not recompute: four pairs of
+// subMean8x8 + subMeanSquareValues(src, stride, 8, 8) at blockIndex = 0,
+// 8, 16, 24 accumulated +8, i.e. four side-by-side 8x8 blocks along ONE
+// row origin, all reading rows {0,2,4,6}. The reference's own
+// "(0,1)..(0,4)" comments are meaningless labels: the live caller
+// (pic_analysis_process.c:350-359) passes the frame-strided buffer and
+// advances by 32 per call.
+void intermVarFour8x8(const std::uint8_t* src, std::uint16_t srcStride,
+                      std::uint64_t* meanOf8x8Blocks,
+                      std::uint64_t* meanOfSquared8x8Blocks);
+
 }  // namespace analysis

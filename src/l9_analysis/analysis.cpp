@@ -95,4 +95,32 @@ std::uint64_t subMeanSquareValues(const std::uint8_t* src, std::uint32_t srcStri
     return blockMean;
 }
 
+// 1:1 port of svt_compute_interm_var_four8x8_c (pic_analysis_process.c:286-313):
+// the reference CALLS its own sub-mean primitives at block_index = 0, 8, 16,
+// 24 - four side-by-side 8x8 blocks along one row origin, all reading rows
+// {0,2,4,6} - so the port composes subMean8x8 + subMeanSquareValues
+// identically. The unrolled shape, the uint32 blockIndex accumulated +8 and
+// the uint16 stride pass-through are the reference's structure, kept
+// verbatim (the "(0,1)..(0,4)" labels are the reference's own comments).
+void intermVarFour8x8(const std::uint8_t* src, std::uint16_t srcStride,
+                      std::uint64_t* meanOf8x8Blocks,
+                      std::uint64_t* meanOfSquared8x8Blocks) {
+    std::uint32_t blockIndex = 0;
+    // (0,1)
+    meanOf8x8Blocks[0] = subMean8x8(src + blockIndex, srcStride);
+    meanOfSquared8x8Blocks[0] = subMeanSquareValues(src + blockIndex, srcStride, 8, 8);
+    // (0,2)
+    blockIndex = blockIndex + 8;
+    meanOf8x8Blocks[1] = subMean8x8(src + blockIndex, srcStride);
+    meanOfSquared8x8Blocks[1] = subMeanSquareValues(src + blockIndex, srcStride, 8, 8);
+    // (0,3)
+    blockIndex = blockIndex + 8;
+    meanOf8x8Blocks[2] = subMean8x8(src + blockIndex, srcStride);
+    meanOfSquared8x8Blocks[2] = subMeanSquareValues(src + blockIndex, srcStride, 8, 8);
+    // (0,4)
+    blockIndex = blockIndex + 8;
+    meanOf8x8Blocks[3] = subMean8x8(src + blockIndex, srcStride);
+    meanOfSquared8x8Blocks[3] = subMeanSquareValues(src + blockIndex, srcStride, 8, 8);
+}
+
 }  // namespace analysis

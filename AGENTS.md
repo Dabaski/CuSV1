@@ -336,15 +336,16 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-01, the AN1 slice)
+### Last measured state (2026-11-01, the AN4 slice)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 10/10 passed, 0 failed, 272.67 s** (re-measured 2026-11-01 at
-  AN3; l4_intra is the slow one at ~216 s; `pipeline` 53.46 s;
+- **ctest: 10/10 passed, 0 failed, 270.10 s** (re-measured 2026-11-01 at
+  AN4; l4_intra is the slow one at ~216 s; `pipeline` 53.46 s;
   `l3_transforms` ~7 s; the rest under 0.5 s including the new l9_analysis.
-  Earlier runs of the same tree: the AN2 run 272.62 s, the AN1 run
-  263.38 s, the RT21 fix run 272.42 s at 9/9, a judge re-run 267.47 s).
+  Earlier runs of the same tree: the AN3 run 272.67 s, the AN2 run
+  272.62 s, the AN1 run 263.38 s, the RT21 fix run 272.42 s at 9/9, a
+  judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
   bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-01: rebuilt, and
   byte-identical to the committed file). History, not a figure to chase:
@@ -355,11 +356,14 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 13.1%** (see the completion metric section;
-  re-measured 2026-11-01: 20,731 of 157,718 non-blank lines, +54 from
+- **Portable-C coverage: 13.2%** (see the completion metric section;
+  re-measured 2026-11-01: 20,756 of 157,718 non-blank lines, +97 from
   20,659 - the AN1 mean8x8 port, the AN2 meanSquare8x8 port, +18 each,
-  and the AN3 sub-mean pair, +36, all in pic_analysis_process.c; the
-  percentage is unchanged at one decimal).
+  the AN3 sub-mean pair, +36, and the AN4 intermVarFour8x8 port, +25,
+  all in pic_analysis_process.c; the printed percentage MOVED at AN4:
+  20,756/157,718 = 13.1602% crosses the 13.15 rounding boundary that
+  AN1-AN3's 13.1443% sat below, so N1 prints 13.2% where AN1-AN3
+  printed 13.1%).
 - **Committed artifacts: 9** `.obu` files, ALL content-1:1 on every plane
   (color4 was the last divergent one: its V 43/1024 residual was the chroma
   above-right Z-order gap, closed by RT21 at 927e697; color8 closed at CS7,
@@ -597,8 +601,22 @@ are partly right and I re-measured rather than restated them:
   generic w/h) - rows {0,2,4,...} via the skip = vi + vi loop, then
   << 3 / << 11 with NO division; the << 11 is the HALF-area normalization
   confirmed by the SSE2 twins (sub << 11 vs full << 10) and the consumer
-  variance scale, and it is HARDWIRED for every (w,h) (the code, not the
-  comment); register entry in docs/todo.md section A0.
+   variance scale, and it is HARDWIRED for every (w,h) (the code, not the
+   comment); register entry in docs/todo.md section A0.
+   AN4 LANDED 2026-11-01: analysis::intermVarFour8x8, the port of
+   svt_compute_interm_var_four8x8_c (pic_analysis_process.c:286-313,
+   compute_mean.h:40) - the COMPOSITION that CALLS the AN3 pair, never
+   recomputes: four subMean8x8 + subMeanSquareValues(stride, 8, 8) pairs at
+   offsets 0, 8, 16, 24 accumulated +8, i.e. FOUR SIDE-BY-SIDE 8x8 BLOCKS
+   along one row origin, all reading rows {0,2,4,6} (the reference's own
+   "(0,1)..(0,4)" comments are meaningless labels and the brief's
+   "16x16 raster quadrants" reading is NOT the mechanics; the live caller
+   pic_analysis_process.c:350-359 passes the frame-strided buffer and
+   advances blk_offset by 32 per call); register entry in docs/todo.md
+   section A0. AN5 calculate_histogram (:170-188) is next; grep-verified
+   it has NO header declaration twin (file-local to its .c) and its real
+   name is calculate_histogram, not the brief's
+   svt_aom_calculate_histogram; host only, no GPU twin per the brief.
 
 
 ## Completion metric (the portable-C coverage number)
@@ -608,12 +626,14 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-01 (AN3): 13.1%** (20,731 of 157,718 non-blank
-lines - the covered count moved +54 from 20,659: the AN1 mean8x8 port, the
-AN2 meanSquare8x8 port, +18 each, and the AN3 sub-mean pair, +36, all in
-pic_analysis_process.c (:194-214, :220-240, :242-261, :263-284);
-the percentage is unchanged at one decimal
-because 54 lines is +0.034 pt). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
+**THE NUMBER, as measured 2026-11-01 (AN4): 13.2%** (20,756 of 157,718 non-blank
+lines - the covered count moved +97 from 20,659: the AN1 mean8x8 port, the
+AN2 meanSquare8x8 port, +18 each, the AN3 sub-mean pair, +36, and the
+AN4 intermVarFour8x8 port, +25, all in
+pic_analysis_process.c (:194-214, :220-240, :242-261, :263-284, :286-313);
+the printed percentage MOVED at AN4: 20,756/157,718 = 13.1602%
+crosses the 13.15 rounding boundary that AN1-AN3's 13.1443% sat below,
+so N1 prints 13.2% where AN1-AN3 printed 13.1%). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
 hand-typed percentage, for the same reason a hand-typed line count is not
 allowed.
 
@@ -662,12 +682,12 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 0% | 0 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 1% | 72 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 1% | 97 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 30% | 440 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **20,731** |
+| | **TOTAL** | **254** | **157,718** | | **20,756** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

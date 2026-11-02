@@ -327,8 +327,8 @@ A0. SLICE-LEVEL STATE (the live register)
   Phase A - RDO-feeding primitives (host): AN1 mean8x8
    (pic_analysis_process.c:194 + compute_mean.h:21) LANDED; AN2
    meanSquare8x8 (:220 + compute_mean.h:26) LANDED; AN3 the sub-mean pair
-   (:242/:263 + compute_mean.h:31/:34) LANDED; AN4 interm_var_four8x8 (:286 +
-  compute_mean.h:40); AN5 calculate_histogram (:170); AN6 downsample_2d
+   (:242/:263 + compute_mean.h:31/:34) LANDED; AN4 interm_var_four8x8
+   (:286/:313 + compute_mean.h:40) LANDED; AN5 calculate_histogram (:170); AN6 downsample_2d
   (:134); AN7 the b64 variance pyramid (compute_b64_variance :318); AN8
   the screen-content detectors (:1354, antialiasing-aware :1207); AN9
   luma-dominant (:1440); AN10 the pad family (:648, :745, :820, :858,
@@ -480,6 +480,53 @@ A0. SLICE-LEVEL STATE (the live register)
   :263-284, measured with the coverage counter), total 20,695 -> 20,731
   of 157,718 = 13.1% at one decimal, unchanged at printed precision; the
   paired conformance count unchanged (9 artifacts, all content-1:1).
+- [x] AN4 LANDED (2026-11-01): analysis::intermVarFour8x8, the port of
+  svt_compute_interm_var_four8x8_c - pic_analysis_process.c:286-313,
+  declaration twin compute_mean.h:40. Derivation BEFORE the test: the
+  function CALLS the AN3 primitives, it does not recompute them - four
+  pairs of svt_compute_sub_mean_8x8_c +
+  svt_aom_compute_sub_mean_squared_values_c(src, stride, 8, 8) at
+  block_index = 0, 8, 16, 24 (:290-:312) - so the port composes
+  analysis::subMean8x8 + analysis::subMeanSquareValues, the reference's
+  unrolled +8 accumulation kept verbatim (uint32 blockIndex, uint16
+  stride pass-through). BRIEF CORRECTION recorded: the assignment said
+  "one 16x16 input -> 4 raster quadrants"; the reference's mechanics are
+  FOUR SIDE-BY-SIDE 8x8 BLOCKS along one row origin - its own
+  "(0,1)..(0,4)" comments are meaningless labels, and the live caller
+  (compute_b64_variance, pic_analysis_process.c:350-359) passes the
+  frame-strided buffer and advances blk_offset by 32 per call (offset 16
+  on a literal 16x16 tile at stride 16 would read row 1; no caller does
+  that). The port mirrors the reference, not the brief.
+  RED (captured): test_variance.cpp(204,15): error C2039
+  'intermVarFour8x8': is not a member of 'analysis' (+ C3861 identifier
+  not found). GREEN: the composition, zero warnings under /W4 /WX.
+  Fixture: 32-wide strip, stride 32, blocks constant {10, 20, 30, 40} on
+  all 8 rows + a poison 9th row (99s, never read); hand-derived
+  mean[k] = (32*v_k) << 3 = 256*v_k -> 2560/5120/7680/10240 and
+  meanSq[k] = (32*v_k^2) << 11 = 65536*v_k^2 -> 6553600/26214400/
+  58982400/104857600 - four DISTINCT values per array, so offset/order
+  mutations fail by construction. MUTATION (captured): the (0,2) step
+  +8 -> +16 gives steps 0,16,24,32 and kills 6 of the 8 assertions -
+  mean[1] 7680 != 5120, meanSq[1] 58982400 != 26214400, mean[2] 10240 !=
+  7680, meanSq[2] 104857600 != 58982400, mean[3] 2560 != 10240 and the
+  meanSq[3] ERROR (its values line beyond the captured excerpt) - while
+  block 0 stays green: per-block offset discrimination proven.
+  INSTRUMENT INCIDENT, fixed in-session: a PowerShell Set-Content
+  mutation attempt wrote a UTF-8 BOM into analysis.cpp (EF BB BF) - the
+  -replace pattern used CRLF against the LF-only file, silently no-oped,
+  and Set-Content still rewrote the file. Caught by a post-write byte
+  check (the mojibake class AGENTS.md names), stripped with
+  [IO.File]::WriteAllBytes, the mutation re-applied with the Edit tool.
+  The tree is 0-CR again (verified after the strip).
+  MEASURED (2026-11-01): suite 10/10 passed, 0 failed, 270.10 s; GATE
+  re-measured 884,851 B, byte-identical, diff 0; coverage A11 72 -> 97
+  covered (the 25 non-blank ref lines of :286-313, measured with the
+  coverage metric's own counter), total 20,731 -> 20,756 of 157,718;
+  the printed percentage MOVED for the first time in the AN series:
+  20,756/157,718 = 13.1602% crosses the 13.15 rounding boundary that
+  AN1-AN3's 13.1443% sat below, so coverage.ps1 now prints 13.2%
+  (AN1-AN3 printed 13.1%); the paired conformance count unchanged
+  (9 artifacts, all content-1:1).
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
