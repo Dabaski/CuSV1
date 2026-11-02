@@ -232,7 +232,7 @@ cmake --build build --config Release --target golden_primitives
 $o = & "build\tools\golden_gen\Release\golden_primitives.exe" 2>$null
 [IO.File]::WriteAllText("out.txt", (($o | Out-String) -replace "`r",""),
                         (New-Object Text.UTF8Encoding $false))
-# out.txt must now be 884,953 B and byte-identical to expected_primitives.txt
+# out.txt must now be 884,851 B and byte-identical to expected_primitives.txt
 Compare-Object (Get-Content tools\golden_gen\expected_primitives.txt) `
                   (Get-Content out.txt)     # must print nothing
 ```
