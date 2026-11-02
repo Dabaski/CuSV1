@@ -1,5 +1,6 @@
 #include "analysis.h"
 
+#include <cassert>
 #include <cstring>
 
 namespace analysis {
@@ -646,6 +647,483 @@ ScClasses isScreenContentAaAware(const std::uint8_t* y, std::uint32_t yStride,
         ((countPalette8 * blkArea8 * 10 > area) && (countIntrabc8 * blkArea8 * 23 > area));
 
     return classes;
+}
+
+// 1:1 port of svt_aom_generate_padding (pic_operators.c:266-301). The
+// svt_memset/svt_memcpy substitutes are std::memset-style loops (named:
+// svt_memset -> the byte-assignment loop, svt_memcpy -> the byte loop of
+// equal length; both are plain byte ops here).
+void generatePadding(std::uint8_t* srcPic, std::uint32_t srcStride,
+                     std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                     std::uint32_t paddingWidth, std::uint32_t paddingHeight) {
+    if (!srcPic) {
+        return;
+    }
+
+    const std::uint32_t rowBytes = srcStride;
+
+    // Horizontal padding: extend each active row left and right (:277-286)
+    std::uint8_t* row = srcPic;
+    for (std::uint32_t y = 0; y < originalSrcHeight; ++y) {
+        const std::uint8_t leftPixel = row[0];
+        const std::uint8_t rightPixel = row[originalSrcWidth - 1];
+
+        std::uint8_t* leftDst = row - paddingWidth;
+        for (std::uint32_t i = 0; i < paddingWidth; ++i) {
+            leftDst[i] = leftPixel;
+        }
+        for (std::uint32_t i = 0; i < paddingWidth; ++i) {
+            row[originalSrcWidth + i] = rightPixel;
+        }
+
+        row += srcStride;
+    }
+
+    // Vertical padding: replicate the fully padded first and last rows
+    // (:288-300), row_bytes = src_stride bytes per copy.
+    std::uint8_t* const topSrcRow = srcPic - paddingWidth;
+    std::uint8_t* const bottomSrcRow = srcPic - paddingWidth + (originalSrcHeight - 1) * srcStride;
+
+    std::uint8_t* topDstRow = topSrcRow;
+    std::uint8_t* bottomDstRow = bottomSrcRow;
+
+    for (std::uint32_t y = 0; y < paddingHeight; ++y) {
+        topDstRow -= srcStride;
+        bottomDstRow += srcStride;
+
+        for (std::uint32_t i = 0; i < rowBytes; ++i) {
+            topDstRow[i] = topSrcRow[i];
+        }
+        for (std::uint32_t i = 0; i < rowBytes; ++i) {
+            bottomDstRow[i] = bottomSrcRow[i];
+        }
+    }
+}
+
+// 1:1 port of svt_aom_generate_padding_compressed_10bit
+// (pic_operators.c:303-342). EB_MEMSET -> the byte-assignment loop (named
+// substitution); svt_memcpy -> the byte loop.
+void generatePaddingCompressed10bit(std::uint8_t* srcPic, std::uint32_t srcStride,
+                                    std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                                    std::uint32_t paddingWidth, std::uint32_t paddingHeight) {
+    if (!srcPic) {
+        return;
+    }
+
+    std::uint8_t* row = srcPic;
+
+    for (std::uint32_t r = 0; r < originalSrcHeight; ++r) {
+        const std::uint8_t leftPixel = (row[0] >> 6) & 0x03;
+        const std::uint8_t rightPixel = row[originalSrcWidth / 4 - 1] & 0x03;
+
+        std::uint8_t* leftDst = row - paddingWidth / 4;
+        for (std::uint32_t i = 0; i < paddingWidth / 4; ++i) {
+            leftDst[i] = static_cast<std::uint8_t>(leftPixel * 0b01010101);
+        }
+        std::uint8_t* rightDst = row + originalSrcWidth / 4;
+        for (std::uint32_t i = 0; i < paddingWidth / 4; ++i) {
+            rightDst[i] = static_cast<std::uint8_t>(rightPixel * 0b01010101);
+        }
+
+        row += srcStride;
+    }
+
+    // vertical padding (:335-341)
+    std::uint8_t* topSrcRow = srcPic - (paddingWidth / 4);
+    std::uint8_t* bottomSrcRow = srcPic - (paddingWidth / 4) + (originalSrcHeight - 1) * srcStride;
+    std::uint8_t* topDstRow = topSrcRow;
+    std::uint8_t* bottomDstRow = bottomSrcRow;
+
+    std::uint32_t verticalIdx = paddingHeight;
+    while (verticalIdx) {
+        // top part data copy
+        topDstRow -= srcStride;
+        for (std::uint32_t i = 0; i < srcStride; ++i) {
+            topDstRow[i] = topSrcRow[i];
+        }
+        // bottom part data copy
+        bottomDstRow += srcStride;
+        for (std::uint32_t i = 0; i < srcStride; ++i) {
+            bottomDstRow[i] = bottomSrcRow[i];
+        }
+        --verticalIdx;
+    }
+}
+
+// 1:1 port of pad_input_picture (pic_operators.c:393-436). svt_memset ->
+// the byte-assignment loop, svt_memcpy -> the byte loop (named
+// substitutions).
+void padInputPicture(std::uint8_t* srcPic, std::uint32_t srcStride,
+                     std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                     std::uint32_t padRight, std::uint32_t padBottom) {
+    if (!srcPic) {
+        return;
+    }
+
+    if (padRight) {
+        // Add padding @ the right (:409-419)
+        std::uint32_t verticalIdx = originalSrcHeight;
+        std::uint8_t* row = srcPic;
+
+        while (verticalIdx) {
+            const std::uint8_t lastPixel = row[originalSrcWidth - 1];
+            for (std::uint32_t i = 0; i < padRight; ++i) {
+                row[originalSrcWidth + i] = lastPixel;
+            }
+            row += srcStride;
+            --verticalIdx;
+        }
+    }
+
+    if (padBottom) {
+        // Add padding @ the bottom (:420-435)
+        std::uint32_t verticalIdx = padBottom;
+        std::uint8_t* lastRow = srcPic + (originalSrcHeight - 1) * srcStride;
+        std::uint8_t* dstRow = lastRow;
+
+        while (verticalIdx) {
+            dstRow += srcStride;
+            for (std::uint32_t i = 0; i < originalSrcWidth + padRight; ++i) {
+                dstRow[i] = lastRow[i];
+            }
+            --verticalIdx;
+        }
+    }
+}
+
+// 1:1 port of svt_aom_pad_input_picture_16bit (pic_operators.c:441-479).
+// memset16bit (pic_operators.h:39-45) -> the same element loop (named
+// substitution); svt_memcpy -> the element loop.
+void padInputPicture16bit(std::uint16_t* srcPic, std::uint32_t srcStride,
+                          std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                          std::uint32_t padRight, std::uint32_t padBottom) {
+    if (padRight) {
+        // Add padding @ the right (:453-463)
+        std::uint32_t verticalIdx = originalSrcHeight;
+        std::uint16_t* row = srcPic;
+
+        while (verticalIdx) {
+            const std::uint16_t lastPixel = row[originalSrcWidth - 1];
+            for (std::uint32_t i = 0; i < padRight; ++i) {
+                row[originalSrcWidth + i] = lastPixel;
+            }
+            row += srcStride;
+            --verticalIdx;
+        }
+    }
+
+    if (padBottom) {
+        // Add padding @ the bottom (:464-478)
+        std::uint32_t verticalIdx = padBottom;
+        std::uint16_t* lastRow = srcPic + (originalSrcHeight - 1) * srcStride;
+        std::uint16_t* dstRow = lastRow;
+
+        while (verticalIdx) {
+            dstRow += srcStride;
+            for (std::uint32_t i = 0; i < originalSrcWidth + padRight; ++i) {
+                dstRow[i] = lastRow[i];
+            }
+            --verticalIdx;
+        }
+    }
+}
+
+// 1:1 port of pad_2b_compressed_input_picture (pic_analysis_process.c:
+// 648-739). svt_memcpy -> the byte loop (named substitution).
+void pad2bCompressedInputPicture(std::uint8_t* srcPic, std::uint32_t srcStride,
+                                 std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                                 std::uint32_t padRight, std::uint32_t padBottom) {
+    // The bottom pass lands with its own test slice; padBottom is consumed
+    // there (the reference's :731-738 block).
+    (void)padBottom;
+    if (padRight > 0) {
+        const std::uint32_t wM4 = (originalSrcWidth / 4) * 4;
+        const std::uint32_t lastCol = wM4 / 4;
+
+        if (padRight == 1) {
+            for (std::uint32_t row = 0; row < originalSrcHeight; ++row) {
+                std::uint8_t lastByte = srcPic[lastCol + row * srcStride];
+                lastByte &= 0xfc;
+                const std::uint8_t lastPixel = (lastByte >> 2) & 0x03;
+
+                const std::uint8_t newByte = static_cast<std::uint8_t>(lastByte | lastPixel);
+                srcPic[lastCol + row * srcStride] = newByte;
+            }
+        } else if (padRight == 2) {
+            for (std::uint32_t row = 0; row < originalSrcHeight; ++row) {
+                std::uint8_t lastByte = srcPic[lastCol + row * srcStride];
+                lastByte &= 0xf0;
+                const std::uint8_t lastPixel = (lastByte >> 4) & 0x03;
+
+                const std::uint8_t newByte =
+                    static_cast<std::uint8_t>(lastByte | (lastPixel << 2) | lastPixel);
+                srcPic[lastCol + row * srcStride] = newByte;
+            }
+        } else if (padRight == 3) {
+            for (std::uint32_t row = 0; row < originalSrcHeight; ++row) {
+                std::uint8_t lastByte = srcPic[lastCol + row * srcStride];
+                lastByte &= 0xc0;
+                const std::uint8_t lastPixel = (lastByte >> 6) & 0x03;
+
+                const std::uint8_t newByte = static_cast<std::uint8_t>(
+                    lastByte | (lastPixel << 4) | (lastPixel << 2) | lastPixel);
+                srcPic[lastCol + row * srcStride] = newByte;
+            }
+        } else if (padRight == 4) {
+            for (std::uint32_t row = 0; row < originalSrcHeight; ++row) {
+                const std::uint8_t lastByte = srcPic[lastCol - 1 + row * srcStride];
+                const std::uint8_t lastPixel = static_cast<std::uint8_t>(lastByte & 0x03);
+
+                const std::uint8_t newByte = static_cast<std::uint8_t>(
+                    (lastPixel << 6) | (lastPixel << 4) | (lastPixel << 2) | lastPixel);
+                srcPic[lastCol + row * srcStride] = newByte;
+            }
+        } else if (padRight == 5) {
+            for (std::uint32_t row = 0; row < originalSrcHeight; ++row) {
+                std::uint8_t lastByte = srcPic[lastCol + row * srcStride];
+                lastByte &= 0xfc;
+                const std::uint8_t lastPixel = (lastByte >> 2) & 0x03;
+
+                const std::uint8_t newByte = static_cast<std::uint8_t>(lastByte | lastPixel);
+                srcPic[lastCol + row * srcStride] = newByte;
+
+                const std::uint8_t newByte2 = static_cast<std::uint8_t>(
+                    (lastPixel << 6) | (lastPixel << 4) | (lastPixel << 2) | lastPixel);
+                srcPic[lastCol + 1 + row * srcStride] = newByte2;
+            }
+        } else if (padRight == 6) {
+            for (std::uint32_t row = 0; row < originalSrcHeight; ++row) {
+                std::uint8_t lastByte = srcPic[lastCol + row * srcStride];
+                lastByte &= 0xf0;
+                const std::uint8_t lastPixel = (lastByte >> 4) & 0x03;
+
+                const std::uint8_t newByte =
+                    static_cast<std::uint8_t>(lastByte | (lastPixel << 2) | lastPixel);
+                srcPic[lastCol + row * srcStride] = newByte;
+
+                const std::uint8_t newByte2 = static_cast<std::uint8_t>(
+                    (lastPixel << 6) | (lastPixel << 4) | (lastPixel << 2) | lastPixel);
+                srcPic[lastCol + 1 + row * srcStride] = newByte2;
+            }
+        } else if (padRight == 7) {
+            for (std::uint32_t row = 0; row < originalSrcHeight; ++row) {
+                std::uint8_t lastByte = srcPic[lastCol + row * srcStride];
+                lastByte &= 0xc0;
+                const std::uint8_t lastPixel = (lastByte >> 6) & 0x03;
+
+                const std::uint8_t newByte = static_cast<std::uint8_t>(
+                    lastByte | (lastPixel << 4) | (lastPixel << 2) | lastPixel);
+                srcPic[lastCol + row * srcStride] = newByte;
+
+                const std::uint8_t newByte2 = static_cast<std::uint8_t>(
+                    (lastPixel << 6) | (lastPixel << 4) | (lastPixel << 2) | lastPixel);
+                srcPic[lastCol + 1 + row * srcStride] = newByte2;
+            }
+        } else {
+            assert(0 && "wrong pad value");
+        }
+    }
+
+    if (padBottom) {
+        std::uint8_t* lastRow = srcPic + (originalSrcHeight - 1) * srcStride;
+        for (std::uint32_t row = 0; row < padBottom; ++row) {
+            std::uint8_t* dstRow = lastRow + (row + 1) * srcStride;
+            const std::uint32_t count = (originalSrcWidth + padRight) / 4;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                dstRow[i] = lastRow[i];
+            }
+        }
+    }
+}
+
+// 1:1 port of svt_aom_pad_picture_to_multiple_of_min_blk_size_dimensions
+// (pic_analysis_process.c:745-813). The subsampling derivation is the
+// reference's 8-bit form (:750-751); the comp strides are computed here, as
+// in the reference (:780-782).
+void padToMinBlkSizeDimensions(std::uint8_t* yBuffer, std::uint32_t yStride,
+                               std::uint8_t* uBuffer, std::uint32_t uStride,
+                               std::uint8_t* vBuffer, std::uint32_t vStride,
+                               std::uint8_t* yBufferBitInc, std::uint8_t* uBufferBitInc,
+                               std::uint8_t* vBufferBitInc,
+                               std::uint32_t width, std::uint32_t height,
+                               std::uint32_t padRight, std::uint32_t padBottom,
+                               bool is16BitInput, ColorFormat colorFormat) {
+    const std::uint16_t subsamplingX = (colorFormat == ColorFormat::Yuv444) ? 0 : 1;
+    const std::uint16_t subsamplingY = (colorFormat >= ColorFormat::Yuv422) ? 0 : 1;
+
+    // Input Picture Padding (:754-759)
+    padInputPicture(yBuffer,
+                    yStride,
+                    width - padRight,
+                    height - padBottom,
+                    padRight,
+                    padBottom);
+
+    if (uBuffer) {
+        padInputPicture(uBuffer,
+                        uStride,
+                        (width + subsamplingX - padRight) >> subsamplingX,
+                        (height + subsamplingY - padBottom) >> subsamplingY,
+                        padRight >> subsamplingX,
+                        padBottom >> subsamplingY);
+    }
+
+    if (vBuffer) {
+        padInputPicture(vBuffer,
+                        vStride,
+                        (width + subsamplingX - padRight) >> subsamplingX,
+                        (height + subsamplingY - padBottom) >> subsamplingY,
+                        padRight >> subsamplingX,
+                        padBottom >> subsamplingY);
+    }
+
+    if (is16BitInput) {
+        const std::uint32_t compStrideY = yStride / 4;
+        const std::uint32_t compStrideUv = uStride / 4;
+
+        if (yBufferBitInc) {
+            pad2bCompressedInputPicture(yBufferBitInc,
+                                        compStrideY,
+                                        width - padRight,
+                                        height - padBottom,
+                                        padRight,
+                                        padBottom);
+        }
+
+        if (uBufferBitInc) {
+            pad2bCompressedInputPicture(uBufferBitInc,
+                                        compStrideUv,
+                                        (width + subsamplingX - padRight) >> subsamplingX,
+                                        (height + subsamplingY - padBottom) >> subsamplingY,
+                                        padRight >> subsamplingX,
+                                        padBottom >> subsamplingY);
+        }
+
+        if (vBufferBitInc) {
+            pad2bCompressedInputPicture(vBufferBitInc,
+                                        compStrideUv,
+                                        (width + subsamplingX - padRight) >> subsamplingX,
+                                        (height + subsamplingY - padBottom) >> subsamplingY,
+                                        padRight >> subsamplingX,
+                                        padBottom >> subsamplingY);
+        }
+    }
+}
+
+// 1:1 port of svt_aom_pad_picture_to_multiple_of_min_blk_size_dimensions_16bit
+// (pic_analysis_process.c:820-852). The subsampling derivation mirrors the
+// 16-bit driver's own textual form (:825-826), NOT the 8-bit one - the two
+// are provably equivalent for all four EbColorFormat members, and the port
+// keeps the reference's divergence instead of unifying it.
+void padToMinBlkSizeDimensions16bit(std::uint16_t* yBuffer, std::uint32_t yStride,
+                                    std::uint16_t* uBuffer, std::uint32_t uStride,
+                                    std::uint16_t* vBuffer, std::uint32_t vStride,
+                                    std::uint32_t width, std::uint32_t height,
+                                    std::uint32_t padRight, std::uint32_t padBottom,
+                                    ColorFormat colorFormat) {
+    const std::uint8_t subsamplingX = (colorFormat == ColorFormat::Yuv444) ? 0 : 1;
+    const std::uint8_t subsamplingY =
+        ((colorFormat == ColorFormat::Yuv444 || colorFormat == ColorFormat::Yuv422) ? 0 : 1);
+
+    // Input Picture Padding (:829-834)
+    padInputPicture16bit(yBuffer,
+                         yStride,
+                         width - padRight,
+                         height - padBottom,
+                         padRight,
+                         padBottom);
+
+    // Input Picture Padding for U and V planes (:836-851)
+    padInputPicture16bit(uBuffer,
+                         uStride,
+                         (width + subsamplingX - padRight) >> subsamplingX,
+                         (height + subsamplingY - padBottom) >> subsamplingY,
+                         padRight >> subsamplingX,
+                         padBottom >> subsamplingY);
+
+    padInputPicture16bit(vBuffer,
+                         vStride,
+                         (width + subsamplingX - padRight) >> subsamplingX,
+                         (height + subsamplingY - padBottom) >> subsamplingY,
+                         padRight >> subsamplingX,
+                         padBottom >> subsamplingY);
+}
+
+// 1:1 port of svt_aom_pad_picture_to_multiple_of_sb_dimensions
+// (pic_analysis_process.c:858-866).
+void padToSbDimensions(std::uint8_t* yBuffer, std::uint32_t yStride,
+                       std::uint32_t width, std::uint32_t height,
+                       std::uint32_t border) {
+    // Generate Padding (:861-865)
+    generatePadding(yBuffer,
+                    yStride,
+                    width,
+                    height,
+                    border,
+                    border);
+}
+
+// 1:1 port of svt_aom_pad_input_pictures (pic_analysis_process.c:1549-1615).
+// The order - edge pad, then border pad - is the contract the tests pin.
+void padInputPictures(std::uint8_t* yBuffer, std::uint32_t yStride,
+                      std::uint8_t* uBuffer, std::uint32_t uStride,
+                      std::uint8_t* vBuffer, std::uint32_t vStride,
+                      std::uint8_t* yBufferBitInc, std::uint8_t* uBufferBitInc,
+                      std::uint8_t* vBufferBitInc,
+                      std::uint32_t width, std::uint32_t height,
+                      std::uint32_t padRight, std::uint32_t padBottom,
+                      std::uint32_t border,
+                      std::uint16_t subsamplingX, std::uint16_t subsamplingY,
+                      bool is16BitInput, ColorFormat colorFormat) {
+    // Pad pictures to multiple min cu size (:1551-1552). The reference
+    // derives the min-blk pass's subsampling from input_pic->color_format,
+    // NOT from the scs->subsampling_x/y the border passes read - two
+    // different sources, threaded as such.
+    padToMinBlkSizeDimensions(yBuffer, yStride, uBuffer, uStride, vBuffer, vStride,
+                              yBufferBitInc, uBufferBitInc, vBufferBitInc,
+                              width, height, padRight, padBottom, is16BitInput,
+                              colorFormat);
+
+    // Y samples (:1554-1559)
+    generatePadding(yBuffer, yStride, width, height, border, border);
+
+    const std::uint32_t compStrideY = yStride / 4;
+    const std::uint32_t compStrideUv = uStride / 4;
+
+    if (is16BitInput) {
+        if (yBufferBitInc) {
+            generatePaddingCompressed10bit(yBufferBitInc, compStrideY, width, height,
+                                           border, border);
+        }
+    }
+
+    // Safe to divide by 2 (input_pic->width >> scs->subsampling_x), with no
+    // risk of off-of-one issues from chroma subsampling as picture is
+    // already 8px aligned (:1575-1576)
+    if (uBuffer) {
+        generatePadding(uBuffer, uStride, width >> subsamplingX, height >> subsamplingY,
+                        border >> subsamplingX, border >> subsamplingY);
+    }
+
+    if (vBuffer) {
+        generatePadding(vBuffer, vStride, width >> subsamplingX, height >> subsamplingY,
+                        border >> subsamplingX, border >> subsamplingY);
+    }
+
+    // PAD the bit inc buffer in 10bit (:1594-1614)
+    if (is16BitInput) {
+        if (uBufferBitInc) {
+            generatePaddingCompressed10bit(uBufferBitInc, compStrideUv,
+                                           width >> subsamplingX, height >> subsamplingY,
+                                           border >> subsamplingX, border >> subsamplingY);
+        }
+
+        if (vBufferBitInc) {
+            generatePaddingCompressed10bit(vBufferBitInc, compStrideUv,
+                                           width >> subsamplingX, height >> subsamplingY,
+                                           border >> subsamplingX, border >> subsamplingY);
+        }
+    }
 }
 
 // 1:1 port of svt_aom_is_input_luma_dominant (pic_analysis_process.c:

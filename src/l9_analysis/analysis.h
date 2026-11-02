@@ -4,6 +4,10 @@
 
 namespace analysis {
 
+// EbColorFormat (third_party/SVT-AV1/Source/API/EbSvtAv1Formats.h:110):
+// typedef enum EbColorFormat { EB_YUV400, EB_YUV420, EB_YUV422, EB_YUV444 }.
+enum class ColorFormat : std::uint8_t { Yuv400 = 0, Yuv420 = 1, Yuv422 = 2, Yuv444 = 3 };
+
 // 1:1 port of svt_compute_mean_c (third_party/SVT-AV1/Source/Lib/Codec/
 // pic_analysis_process.c:194-216) at 8x8, the per-size wrapper pattern of
 // l5_motion. Declaration twin: Codec/compute_mean.h:21 (classified A12 in
@@ -261,5 +265,148 @@ void b64Variance(const std::uint8_t* y, std::uint16_t yStride, BlockMeanPrec pre
                  std::uint64_t* meanOf32x32SquaredValuesBlocks,
                  std::uint64_t* meanOf64x64Block,
                  std::uint64_t* meanOf64x64SquaredValuesBlock);
+
+// 1:1 port of svt_aom_generate_padding (third_party/SVT-AV1/Source/Lib/
+// Codec/pic_operators.c:266-301). src_pic points AT the first content pixel;
+// the left pad is written at src_pic - padding_width. Horizontal pass first
+// (replicate row[0] left and row[original_src_width - 1] right), then the
+// vertical pass replicates the fully padded first/last rows over the FULL
+// src_stride (row_bytes = src_stride, :275) - overhang included. The
+// SVT_ERROR null guard (:268-271) becomes a silent return.
+void generatePadding(std::uint8_t* srcPic, std::uint32_t srcStride,
+                     std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                     std::uint32_t paddingWidth, std::uint32_t paddingHeight);
+
+// 1:1 port of svt_aom_generate_padding_compressed_10bit (third_party/
+// SVT-AV1/Source/Lib/Codec/pic_operators.c:303-342) over the 2-bit-compressed
+// plane: 4 pixels per byte, MSB first. The horizontal pad bytes are
+// left_pixel * 0b01010101 (= the 2-bit value replicated into all four
+// positions, :333) with left_pixel = (row[0] >> 6) & 3 and right_pixel =
+// row[original_src_width / 4 - 1] & 3 (:330-331); the vertical pass copies
+// src_stride bytes per row. The SVT_ERROR null guard (:311-314) becomes a
+// silent return.
+void generatePaddingCompressed10bit(std::uint8_t* srcPic, std::uint32_t srcStride,
+                                    std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                                    std::uint32_t paddingWidth, std::uint32_t paddingHeight);
+
+// 1:1 port of pad_input_picture (third_party/SVT-AV1/Source/Lib/Codec/
+// pic_operators.c:393-436): right pad replicates the last content pixel
+// per row (first), then the bottom pad copies (original_src_width +
+// pad_right) bytes of the last padded row. The SVT_ERROR null guard
+// (:404-407) becomes a silent return.
+void padInputPicture(std::uint8_t* srcPic, std::uint32_t srcStride,
+                     std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                     std::uint32_t padRight, std::uint32_t padBottom);
+
+// 1:1 port of svt_aom_pad_input_picture_16bit (third_party/SVT-AV1/Source/
+// Lib/Codec/pic_operators.c:441-479) at uint16: same right-then-bottom
+// shape, memset16bit (pic_operators.h:39-45) substituted with the same
+// element loop, the bottom copy sizeof(uint16_t) * (width + pad_right)
+// elements. The reference has NO null guard here - none added.
+void padInputPicture16bit(std::uint16_t* srcPic, std::uint32_t srcStride,
+                          std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                          std::uint32_t padRight, std::uint32_t padBottom);
+
+// 1:1 port of pad_2b_compressed_input_picture (third_party/SVT-AV1/Source/
+// Lib/Codec/pic_analysis_process.c:648-739, static). The 2-bit plane: 4
+// pixels per byte, MSB first. pad_right comes from the 8-alignment
+// (resource_coordination_process.c:717-718): pad_right = 8 - (width % 8),
+// so pad_right == 4 iff width % 4 == 0 and width % 4 != 0 for every other
+// nonzero pad_right. last_col = width / 4. For width % 4 != 0,
+// src[last_col] is the last PARTIAL content byte (its top bits hold the
+// trailing real pixels; the branch masks to keep exactly those and OR-fills
+// the pad slots, plus one fully replicated byte at last_col + 1 for
+// pad_right >= 5). For pad_right == 4, src[last_col] is the first pure-pad
+// byte - the branch alone reads src[last_col - 1], takes its lowest 2 bits
+// (the last real pixel) and writes the replicated byte at src[last_col].
+// The bottom pass copies (width + pad_right) / 4 bytes per pad row (the
+// padded row's exact byte count: width + pad_right is a multiple of 8).
+// The :728 svt_aom_assert_err becomes assert() (the l8_bitstream pattern).
+void pad2bCompressedInputPicture(std::uint8_t* srcPic, std::uint32_t srcStride,
+                                 std::uint32_t originalSrcWidth, std::uint32_t originalSrcHeight,
+                                 std::uint32_t padRight, std::uint32_t padBottom);
+
+// 1:1 port of svt_aom_pad_picture_to_multiple_of_min_blk_size_dimensions
+// (third_party/SVT-AV1/Source/Lib/Codec/pic_analysis_process.c:745-813).
+// THE CONTRACT: the reference receives scs + input_pic where input_pic->
+// width is ALREADY the padded width (resource_coordination_process.c:717-719
+// updates max_input_luma_width in place) and scs->pad_right is the padding
+// amount, so the content width is width - pad_right (:756). The port
+// threads the same (padded width, padRight) pair and derives the content
+// internally - do NOT pass the content width here. Parameters thread the
+// raw values the reference consumes (scs/input_pic dropped, the b64Variance
+// deviation pattern); any of the six buffers may be null (the reference's
+// guards :761/:770 and :784/:793/:802). The subsampling is derived from
+// colorFormat INSIDE, with the 8-bit driver's own textual form (:750-751):
+// ss_x = (cf == Yuv444 ? 0 : 1), ss_y = (cf >= Yuv422 ? 0 : 1).
+// is16BitInput threads the reference's
+// SVT_EFFECTIVE_BIT_DEPTH(encoder_bit_depth) > EB_EIGHT_BIT; the comp
+// strides are computed INTERNALLY as y_stride/4 and u_stride/4 (:780-782),
+// not threaded. The 16-bit driver's own textual subsampling form (:825-826)
+// is provably identical to this one for all four EbColorFormat members.
+void padToMinBlkSizeDimensions(std::uint8_t* yBuffer, std::uint32_t yStride,
+                               std::uint8_t* uBuffer, std::uint32_t uStride,
+                               std::uint8_t* vBuffer, std::uint32_t vStride,
+                               std::uint8_t* yBufferBitInc, std::uint8_t* uBufferBitInc,
+                               std::uint8_t* vBufferBitInc,
+                               std::uint32_t width, std::uint32_t height,
+                               std::uint32_t padRight, std::uint32_t padBottom,
+                               bool is16BitInput, ColorFormat colorFormat);
+
+// 1:1 port of svt_aom_pad_picture_to_multiple_of_min_blk_size_dimensions_16bit
+// (third_party/SVT-AV1/Source/Lib/Codec/pic_analysis_process.c:820-852):
+// the uint16 plane driver over padInputPicture16bit. The subsampling is
+// derived with the 16-bit driver's own textual form (:825-826): ss_x =
+// (cf == Yuv444 ? 0 : 1), ss_y = ((cf == Yuv444 || cf == Yuv422) ? 0 : 1) -
+// provably identical to the 8-bit driver's form for all four enum members
+// (x: both give 0 iff cf == 3; y: both give 0 iff cf in {2, 3}). The
+// reference's assert(encoder_bit_depth > EB_EIGHT_BIT) drops with the scs
+// indirection; the reference casts the uint8_t* desc fields to uint16_t*,
+// the port takes uint16_t* directly (named deviation). No bit-inc, no
+// is16BitInput here - the reference has none.
+void padToMinBlkSizeDimensions16bit(std::uint16_t* yBuffer, std::uint32_t yStride,
+                                    std::uint16_t* uBuffer, std::uint32_t uStride,
+                                    std::uint16_t* vBuffer, std::uint32_t vStride,
+                                    std::uint32_t width, std::uint32_t height,
+                                    std::uint32_t padRight, std::uint32_t padBottom,
+                                    ColorFormat colorFormat);
+
+// 1:1 port of svt_aom_pad_picture_to_multiple_of_sb_dimensions (third_party/
+// SVT-AV1/Source/Lib/Codec/pic_analysis_process.c:858-866): the thin Y-only
+// wrapper over generatePadding with padding_width = padding_height = border.
+void padToSbDimensions(std::uint8_t* yBuffer, std::uint32_t yStride,
+                       std::uint32_t width, std::uint32_t height,
+                       std::uint32_t border);
+
+// 1:1 port of svt_aom_pad_input_pictures (third_party/SVT-AV1/Source/Lib/
+// Codec/pic_analysis_process.c:1549-1615), the full driver. ORDER IS THE
+// CONTRACT: the min-blk edge pad runs FIRST (padRight/padBottom - the
+// scs->pad_right/pad_bottom quantities), then generate_padding around the
+// PADDED extent (width/height + border - the input_pic->border quantity, a
+// DIFFERENT source from padRight), then the 10-bit comp border passes.
+// Unlike the drivers above, the reference does NOT derive subsampling here
+// - it reads scs->subsampling_x/y (:1580-1582) - so the port threads
+// subsamplingX/subsamplingY explicitly, mirroring the reference's own
+// divergence. is16BitInput gates the comp passes; compStrideY/Uv are
+// computed internally (y_stride/4, u_stride/4, :1556-1557). The chroma
+// border passes use width/height/border >> subsampling; the luma comp
+// border pass uses the FULL border (the reference passes input_pic->border
+// in pixels with the packed byte stride - the /4 inside the comp function
+// is the reference's own arithmetic). colorFormat feeds ONLY the min-blk
+// driver call (the reference derives that pass's subsampling from
+// input_pic->color_format) while the border passes read the explicit
+// subsamplingX/subsamplingY (the reference's scs->subsampling_x/y) - two
+// different sources in the reference, threaded as such. Any buffer may be
+// null (the reference's guards :1565/:1577/:1586/:1597/:1606).
+void padInputPictures(std::uint8_t* yBuffer, std::uint32_t yStride,
+                      std::uint8_t* uBuffer, std::uint32_t uStride,
+                      std::uint8_t* vBuffer, std::uint32_t vStride,
+                      std::uint8_t* yBufferBitInc, std::uint8_t* uBufferBitInc,
+                      std::uint8_t* vBufferBitInc,
+                      std::uint32_t width, std::uint32_t height,
+                      std::uint32_t padRight, std::uint32_t padBottom,
+                      std::uint32_t border,
+                      std::uint16_t subsamplingX, std::uint16_t subsamplingY,
+                      bool is16BitInput, ColorFormat colorFormat);
 
 }  // namespace analysis

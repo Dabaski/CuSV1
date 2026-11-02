@@ -873,6 +873,124 @@ A0. SLICE-LEVEL STATE (the live register)
    13.5689% crosses the 13.55 boundary the AN8 13.5357% sat below);
    the paired conformance count unchanged (9 artifacts, all
    content-1:1).
+ - [x] AN10 LANDED (2026-11-02): the pad family, ELEVEN functions
+   across two reference files, the last Phase-A slice. Helper
+   kernels from Codec/pic_operators.c (A6-classified, the lines
+   charge to A6's rationale): analysis::generatePadding
+   (svt_aom_generate_padding, pic_operators.c:266-301),
+   analysis::generatePaddingCompressed10bit
+   (svt_aom_generate_padding_compressed_10bit, :303-342),
+   analysis::padInputPicture (pad_input_picture, :393-436),
+   analysis::padInputPicture16bit (svt_aom_pad_input_picture_16bit,
+   :441-479) and memset16bit (pic_operators.h:39-45) substituted
+   with the same element loop inside padInputPicture16bit. Drivers
+   from Codec/pic_analysis_process.c (A11): analysis::
+   pad2bCompressedInputPicture (pad_2b_compressed_input_picture,
+   :648-739, static), analysis::padToMinBlkSizeDimensions
+   (svt_aom_pad_picture_to_multiple_of_min_blk_size_dimensions,
+   :745-813), analysis::padToMinBlkSizeDimensions16bit (..._16bit,
+   :820-852), analysis::padToSbDimensions
+   (svt_aom_pad_picture_to_multiple_of_sb_dimensions, :858-866) and
+   analysis::padInputPictures (svt_aom_pad_input_pictures,
+   :1549-1615, the full driver). NAMED EXCLUSION, grep-verified:
+   svt_aom_generate_padding16_bit (pic_operators.c:348-388) is NOT
+   ported - its callers are enc_dec_process.c:1120/1128/1136/
+   1183/1191/1199 (reference-picture border padding) and
+   resize.c:1068/1072/1080, none inside the pad family's call
+   graph. THE CONTRACT (derived from
+   resource_coordination_process.c:717-728 and pinned by the
+   odd-content fixture): pad_right = MIN_BLOCK_SIZE - (width %
+   MIN_BLOCK_SIZE) with MIN_BLOCK_SIZE 8 (definitions.h:2018-2019)
+   and max_input_luma_width UPDATED IN PLACE (:719), so every
+   driver receives the PADDED width and the padding amount; the
+   content width is width - pad_right (pic_analysis_process.c:756).
+   The chroma content is (width + ss_x - pad_right) >> ss_x (:764)
+   = ceil(content/2) at 4:2:0 and the chroma pad is pad_right >>
+   ss_x (:766) = FLOOR(pad/2), NOT ceil - the pair is consistent
+   because pad_right = (-content) mod 8 has the parity of content,
+   so content/2-ceiling + pad/2-floor = the chroma plane width
+   exactly (the brief's "ceil(pad/2)" parenthetical was wrong; its
+   own numbers, chroma content 5 pad 3 at content 9 pad 7, are the
+   floor ones). THE 2-BIT CORRESPONDENCE (stated as a derivation in
+   the commit message): pad_right == 4 iff width % 4 == 0; for
+   every other nonzero pad_right width % 4 != 0, so src[last_col]
+   (= width/4) is the last PARTIAL content byte whose top bits hold
+   the trailing real pixels - each branch masks to keep exactly
+   those (0xc0 one pixel, 0xf0 two, 0xfc three) and OR-fills the
+   pad slots, plus one fully replicated byte at last_col + 1 for
+   pad_right >= 5; the ==4 branch ALONE reads src[last_col - 1]
+   (the last full content byte) because src[last_col] there is the
+   first pure-pad byte. The subsampling THREE-SOURCE check: the
+   8-bit driver derives from color_format (:750-751), the 16-bit
+   driver uses a different textual form (:825-826), padInputPictures
+   reads scs->subsampling_x/y (:1580-1582); with EbColorFormat =
+   {EB_YUV400, EB_YUV420, EB_YUV422, EB_YUV444} = {0,1,2,3}
+   (API/EbSvtAv1Formats.h:110) the two DERIVATION forms are
+   PROVABLY equivalent for all four members (x: 0 iff cf == 3 in
+   both; y: 0 iff cf in {2,3} in both - ">=" over {2,3} and the
+   explicit {444, 422} pair are the same set); the port mirrors the
+   divergence instead of unifying it, and padInputPictures threads
+   BOTH sources (colorFormat feeds only the min-blk driver call,
+   the explicit subsampling only the border passes). NAMED
+   DEVIATIONS (the b64Variance pattern): scs/EbPictureBufferDesc
+   dropped, the raw parameters threaded; the comp strides stay
+   internal (y_stride/4, u_stride/4, :780-782/:1556-1557);
+   SVT_ERROR null guards (:268-271/:311-314/:404-407) become silent
+   returns; the :761/:770/:784/:793/:802/:1565/:1577/:1586/:1597/
+   :1606 buffer guards become null-pointer checks; the :728
+   svt_aom_assert_err becomes assert() (<cassert>, the l8_bitstream
+   pattern); the 16-bit driver's assert drops with the scs
+   indirection; the reference casts the uint8_t* desc fields to
+   uint16_t*, the port takes uint16_t* directly. Host only, no GPU
+   twin (parked, named).
+   RED (captured): compile errors C2039 for generatePadding
+   (test_pad.cpp:43), generatePaddingCompressed10bit (:161),
+   padInputPicture (:203), padInputPicture16bit (:299),
+   pad2bCompressedInputPicture (:334), padToMinBlkSizeDimensions
+   (:549), padToMinBlkSizeDimensions16bit (the 16-arg call site),
+   padToSbDimensions, padInputPictures (:805); behavioral REDs: the
+   generatePadding vertical pass (10 failed assertions), each 2b
+   branch as it landed (2-4 failed assertions per pad_right), the
+   bottom copy count (4), the 16bit chroma (4). THREE fixture bugs
+   of mine caught by the loop, all fixed in the TESTS (the ports
+   were right): padding_height 2 needs TWO pad rows each side (the
+   first vertical fixtures under-allocated and the /GS cookie fired
+   0xC0000409 AFTER correct output - diagnosed with an instrumented
+   standalone repro), the padToSbDimensions fixture same shape, and
+   the padInputPictures/comp fixtures must pass the CONTENT ORIGIN
+   (src + border offset), not the array base - passing the base
+   made the min-blk pass read poison as the last content pixel.
+   GREEN: 28 test cases / 373 assertions in tests/test_pad.cpp (75
+   cases + 685 assertions total with test_variance.cpp), CMakeLists
+   gains tests/test_pad.cpp.
+   MUTATIONS (all captured, all reverted; the Copy-Item restore
+   preserves the file timestamp so MSBuild skips recompile - touch
+   the file after every restore, the stale-binary lesson in a new
+   costume, hit and identified at the M0 revert): M0a generatePadding
+   row_bytes -> origWidth + 2*pad -> 4 fails (the overhang sentinel
+   must be carried); M1 the ==7 branch mask 0xc0 -> 0xf0 -> 2 fails;
+   M2 the ==4 branch read [last_col] instead of [last_col - 1] ->
+   2 fails; M3 the ==1 branch mask 0xfc -> 0xf8 -> 2 fails (this
+   one SURVIVED before the fixture strengthening - the original
+   fixtures gave the last real pixel a value with a zero low bit,
+   invisible to mask-widening; every fixture's last real pixel is
+   now value 1 = 0b01 so masks are caught in BOTH directions); M4
+   the ==3 branch mask 0xc0 -> 0x80 -> 2 fails; M5a the
+   padToMinBlkSizeDimensions uBuffer guard neutralized -> NO fail
+   (an EQUIVALENT mutant: pad_input_picture's own SVT_ERROR guard
+   :404-407 makes the driver guard behavior-redundant in the
+   reference too - named, not counted); M5b BOTH guards neutralized
+   -> the monochrome test crashes (exit 1, 0 assertions run) ->
+   killed.
+   MEASURED (2026-11-02): suite 10/10 passed, 0 failed, 261.64 s;
+   GATE unchanged 884,851 B byte-identical, 421 lines, diff 0 (no
+   generator input); coverage A6 1,393 -> 1,535 (+142: the four
+   pic_operators helpers 28 + 36 + 38 + 34 + memset16bit 6), A11
+   718 -> 954 (+236: 79 + 59 + 29 + 9 + 60 for the five driver
+   spans), total 21,400 -> 21,778 of 157,718; the printed percentage
+   MOVED: 13.6% -> 13.8% (21,778/157,718 = 13.8069%); the paired
+   conformance count unchanged (9 artifacts, all content-1:1 - the
+   pad family is encoder-input prep and emits no bitstream).
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
