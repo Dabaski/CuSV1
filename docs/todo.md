@@ -634,7 +634,7 @@ A0. SLICE-LEVEL STATE (the live register)
   re-measured 884,851 B, byte-identical, diff 0; coverage A11 115 ->
   144 (the 29 non-blank ref lines of :134-164, measured with the
   coverage metric's own counter), total 20,774 -> 20,803 of 157,718;
-  printed percentage stays 13.2% (20,803/157,718 = 13.1901%); the
+  printed percentage stays 13.2% (20,803/157,718 = 13.1900%); the
   paired conformance count unchanged (9 artifacts, all content-1:1).
   DOC FIX in the same commit: the A11 row's prose cited the mean span
   as :194-216 - the AN1 register measured :194-214 (18 lines, the
@@ -728,11 +728,11 @@ A0. SLICE-LEVEL STATE (the live register)
   144 -> 259 (the 115 non-blank ref lines of :318-442, measured with
   the coverage metric's own counter), total 20,803 -> 20,918 of
   157,718; the printed percentage MOVED: 13.2% -> 13.3%
-  (20,918/157,718 = 13.2631% crosses the 13.25 rounding boundary the
-  AN6 13.1901% sat below); the paired conformance count unchanged
+  (20,918/157,718 = 13.2629% crosses the 13.25 rounding boundary the
+  AN6 13.1900% sat below); the paired conformance count unchanged
   (9 artifacts, all content-1:1). The brief's ~+0.15 pt estimate for
   the two slices measured +0.073 pt (AN7's 115 lines) + 0.018 pt
-  (AN6's 29 lines) = +0.092 pt total (13.1716% -> 13.2631%) - the
+  (AN6's 29 lines) = +0.092 pt total (13.1716% -> 13.2629%) - the
   estimate was optimistic, the measured values stand.
  - [x] AN8 LANDED (2026-11-01): the screen-content detector pair, TEN new
    primitives in src/l9_analysis: analysis::countColorsWithThreshold
@@ -813,8 +813,8 @@ A0. SLICE-LEVEL STATE (the live register)
    input); coverage A11 259 -> 665 (+406: the nine :911-1429 spans
    above), A14 440 -> 463 (+23: variance.c :141-158 + :183-190),
    total 20,918 -> 21,347 of 157,718; the printed percentage MOVED:
-    13.3% -> 13.5% (21,347/157,718 = 13.5357% crosses the 13.45
-    boundary the AN7 13.2631% sat below); the paired conformance count
+    13.3% -> 13.5% (21,347/157,718 = 13.5349% crosses the 13.45
+    boundary the AN7 13.2629% sat below); the paired conformance count
     unchanged (9 artifacts, all content-1:1).
  - [x] AN9 LANDED (2026-11-01): analysis::isInputLumaDominant, the port
    of svt_aom_is_input_luma_dominant (pic_analysis_process.c:1440-1493)
@@ -872,7 +872,7 @@ A0. SLICE-LEVEL STATE (the live register)
    input); coverage A11 665 -> 718 (+53: the :1431-1493 span, 45
    function + 8 defines), total 21,347 -> 21,400 of 157,718; the
    printed percentage MOVED: 13.5% -> 13.6% (21,400/157,718 =
-   13.5689% crosses the 13.55 boundary the AN8 13.5357% sat below);
+   13.5685% crosses the 13.55 boundary the AN8 13.5349% sat below);
    the paired conformance count unchanged (9 artifacts, all
    content-1:1).
  - [x] AN10 LANDED (2026-11-02): the pad family, ELEVEN functions
@@ -990,7 +990,7 @@ A0. SLICE-LEVEL STATE (the live register)
    pic_operators helpers 28 + 36 + 38 + 34 + memset16bit 6), A11
    718 -> 954 (+236: 79 + 59 + 29 + 9 + 60 for the five driver
    spans), total 21,400 -> 21,778 of 157,718; the printed percentage
-   MOVED: 13.6% -> 13.8% (21,778/157,718 = 13.8069%); the paired
+   MOVED: 13.6% -> 13.8% (21,778/157,718 = 13.8082%); the paired
     conformance count unchanged (9 artifacts, all content-1:1 - the
     pad family is encoder-input prep and emits no bitstream).
  - [x] AN11 LANDED (2026-11-02): analysis::downsampleFilteringInputPicture
@@ -1082,7 +1082,7 @@ A0. SLICE-LEVEL STATE (the live register)
     generator input); coverage A11 954 -> 1002 (+48: the :1498-1547
     span, 50 physical / 48 non-blank), total 21,778 -> 21,826 of
     157,718; the printed percentage does NOT move: 21,826/157,718 =
-    13.8380% stays below the 13.85 boundary, so 13.8% prints again; the
+    13.8386% stays below the 13.85 boundary, so 13.8% prints again; the
     paired conformance count unchanged (9 artifacts, all content-1:1 -
     the HME driver is encoder-input prep and emits no bitstream).
     Host only, no GPU twin (parked, named).
@@ -1233,7 +1233,7 @@ last and label it as table transcription, not encoder progress.
     color4: Y and U exact, **V 43/1024 divergent** - the CS7 V-only finding,
     the one open conformance item)
   [x] Infrastructure: tools/golden_gen (committed gate, 421 lines,
-      884,953 B), tools/coverage.ps1 + coverage_areas.txt +
+      884,851 B), tools/coverage.ps1 + coverage_areas.txt +
       coverage_baseline.txt (the progress metric), tools/cite_check.ps1
       (the doc citation audit), tools/doc_audit.ps1 (advisory numeric-claim
       audit), tools/td0_ladder.ps1 (7/7),
