@@ -336,20 +336,21 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-01, the AN9 slice)
+### Last measured state (2026-11-02, the AN10 slice)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 10/10 passed, 0 failed, [an9_ctest] s** (re-measured 2026-11-01 at
-  AN9; l4_intra is the slow one at ~216 s; `pipeline` ~53 s;
+- **ctest: 10/10 passed, 0 failed, 266.17 s** (re-measured 2026-11-02 at
+  AN10; l4_intra is the slow one at ~206 s; `pipeline` ~52 s;
   `l3_transforms` ~7 s; the rest under 0.5 s including l9_analysis.
-  Earlier runs of the same tree: the AN8 run 261.66 s, the AN7 run
+  Earlier runs of the same tree: the AN10 run 266.17 s, the AN8 run
+  261.66 s, the AN7 run
   263.08 s, the AN6 run
   261.59 s, the AN5 run 268.30 s, the AN4 run 270.10 s, the AN3 run
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
-  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-01: rebuilt, and
+  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-02: rebuilt, and
   byte-identical to the committed file). History, not a figure to chase:
   884,980 B was the value from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
@@ -358,13 +359,14 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 13.6%** (see the completion metric section;
-  re-measured 2026-11-01: 21,400 of 157,718 non-blank lines, +53 from
-  21,347 - the AN9 luma-dominant port: +53 in A11 (pic_analysis_process.c
-  :1431-1493, the is_input_luma_dominant span + its defines); the printed
-  percentage MOVED at AN9: 13.5% -> 13.6% (21,400/157,718 = 13.5689%
-  crosses the 13.55 rounding boundary the AN8 13.5357% sat below).
-  Earlier history of the same metric: the AN8 run measured
+- **Portable-C coverage: 13.8%** (see the completion metric section;
+  re-measured 2026-11-02: 21,778 of 157,718 non-blank lines, +378 from
+  21,400 - the AN10 pad-family port: +142 in A6 (the pic_operators.c
+  pad spans) and +236 in A11 (the pic_analysis_process.c pad spans);
+  the printed percentage MOVED at AN10: 13.6% -> 13.8%
+  (21,778/157,718 = 13.8079% crosses the 13.75 rounding boundary the
+  AN9 13.5689% sat below). Earlier history of the same metric: the AN9
+  run measured 21,400/157,718 = 13.5689%; the AN8 run measured
   21,347/157,718 = 13.5357%; the AN7 run measured
   20,918/157,718 = 13.2631%; the AN6 run measured 20,803/157,718 =
   13.1901%; the AN5 run 20,774/157,718 = 13.1716%; the printed
@@ -728,11 +730,12 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-01 (AN9): 13.6%** (21,400 of 157,718 non-blank
-lines - the covered count moved +53 from 21,347: the AN9 luma-dominant
-port, +53 in A11 (pic_analysis_process.c :1431-1493, the
-is_input_luma_dominant span + its defines). Earlier history of the same
-metric: the AN8 run measured 21,347 = +429 from 20,918: the AN8
+**THE NUMBER, as measured 2026-11-02 (AN10): 13.8%** (21,778 of 157,718 non-blank
+lines - the covered count moved +378 from 21,400: the AN10 pad-family
+port, +142 in A6 (the pic_operators.c pad spans) and +236 in A11
+(the pic_analysis_process.c pad spans). Earlier history of the same
+metric: the AN9 run measured 21,400/157,718 = 13.5689%; the AN8 run
+measured 21,347 = +429 from 20,918: the AN8
 screen-content port, +406 in A11 (pic_analysis_process.c :911-1429, the
 nine detector/helper spans) and +23 in A14 (variance.c :141-158 +
 :183-190, the variance_c + VAR macro);
@@ -745,7 +748,10 @@ calculateHistogram port, +18, all
 in pic_analysis_process.c (:170-188, :194-214, :220-240, :242-261,
 :263-284, :286-313); the printed percentage MOVED at AN9:
 21,400/157,718 = 13.5689% crosses the 13.55 rounding boundary the AN8
-13.5357% sat below, so N1 prints 13.6% where AN8 printed 13.5%; the earlier
+13.5357% sat below, so N1 prints 13.6% where AN8 printed 13.5%; the
+printed percentage MOVED again at AN10: 21,778/157,718 = 13.8079%
+crosses the 13.75 rounding boundary the AN9 13.5689% sat below, so N1
+prints 13.8% where AN9 printed 13.6%; the earlier
 move: AN8 crossed the 13.45 boundary that AN7's 13.2631% sat below, and
 AN4 crossed the 13.15 boundary that AN1-AN3's 13.1443% sat
 below). Regenerate with `powershell -File tools\coverage.ps1`; never quote a

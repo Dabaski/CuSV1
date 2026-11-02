@@ -991,6 +991,11 @@ A0. SLICE-LEVEL STATE (the live register)
    MOVED: 13.6% -> 13.8% (21,778/157,718 = 13.8069%); the paired
    conformance count unchanged (9 artifacts, all content-1:1 - the
    pad family is encoder-input prep and emits no bitstream).
+   FOLLOW-UP CLOSED (2026-11-02, this entry's flagged gap): the
+   AN10 report's stale last-measured block in AGENTS.md was
+   refreshed by the doc-currency commit that closes it - ctest
+   re-measured 10/10 at 266.17 s, GATE re-measured unchanged, and
+   the coverage headline carries the AN10 numbers above.
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
