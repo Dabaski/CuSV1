@@ -212,6 +212,104 @@ TEST_CASE("intermVarFour8x8 fills the four mean/sq pairs left to right along one
     CHECK(meanSq[3] == 104857600);
 }
 
+TEST_CASE("downsample2d of a uniform 4x4 at step 2 decimates to 2x2") {
+    // 1:1 target: svt_aom_downsample_2d_c (pic_analysis_process.c:134-164,
+    // declaration twin Codec/motion_estimation.h:33-35). Derived mechanics:
+    // input_stripe_stride = stride * decim_step (:144); half_decim_step =
+    // decim_step >> 1 (:146); the input pointer is PRE-ADVANCED by
+    // half_decim_step rows (:148) and prev_input_line is one row ABOVE the
+    // current pointer (:151), so the summed 2x2 window is rows
+    // {half-1, half} x cols {half-1, half} of each decim_step cell - at
+    // step 2 that is the cell's own top-left 2x2 (0-phase); output =
+    // (sum + 2) >> 2 (:157). Uniform 10s: sum = 40, (40 + 2) >> 2 = 10.
+    std::uint8_t src[4 * 8];
+    for (int i = 0; i < 4 * 8; ++i) {
+        src[i] = 10;
+    }
+    std::uint8_t dst[2 * 2] = {0, 0, 0, 0};
+    analysis::downsample2d(src, 8, 4, 4, dst, 2, 2);
+    CHECK(dst[0] == 10);
+    CHECK(dst[1] == 10);
+    CHECK(dst[2] == 10);
+    CHECK(dst[3] == 10);
+}
+
+TEST_CASE("downsample2d sums the 2x2 window with (+2)>>2 rounding") {
+    // Hand-derived from :154-157: rows of the 4x4 hold the ramp
+    // {0,4,8,12} / {1,5,9,13} / {2,6,10,14} / {3,7,11,15} at stride 8
+    // (poison 99s in cols 4-7 are never read: the window reads cols
+    // {half-1, half} = {0,1} then {2,3}). Every 2x2 sum is congruent 2
+    // mod 4, so the +2 rounding term is DISCRIMINATED: out[0][0] =
+    // (0+4+1+5+2)>>2 = 3 (a +2-less mutant gives 2); out[0][1] = 44>>2 = 11;
+    // out[1][0] = 20>>2 = 5; out[1][1] = 52>>2 = 13. Non-uniform rows AND
+    // columns, so a window mispairing (prev vs cur, hi-1 vs hi) fails.
+    std::uint8_t src[4 * 8];
+    static const std::uint8_t kRows[4][4] = {{0, 4, 8, 12}, {1, 5, 9, 13}, {2, 6, 10, 14}, {3, 7, 11, 15}};
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            src[y * 8 + x] = kRows[y][x];
+        }
+        for (int x = 4; x < 8; ++x) {
+            src[y * 8 + x] = 99;
+        }
+    }
+    std::uint8_t dst[2 * 2] = {0, 0, 0, 0};
+    analysis::downsample2d(src, 8, 4, 4, dst, 2, 2);
+    CHECK(dst[0] == 3);
+    CHECK(dst[1] == 11);
+    CHECK(dst[2] == 5);
+    CHECK(dst[3] == 13);
+}
+
+TEST_CASE("downsample2d at step 4 takes the MIDDLE 2x2 of each cell") {
+    // The reference is generic over decim_step and the live sixteenth
+    // caller passes 4 (pic_analysis_process.c:1530-1536). At step 4:
+    // half_decim_step = 2, vi in {2,6}, hi in {2,6}, so the window rows are
+    // {1,2} (prev = vi-1) and cols {1,2} WITHIN each 4x4 cell - NOT the
+    // cell origin. Fixture src[y][x] = 8y + x at stride 8: out[0][0] =
+    // (9+10+17+18+2)>>2 = 56>>2 = 14; out[0][1] = (13+14+21+22+2)>>2 = 18;
+    // out[1][0] = (41+42+49+50+2)>>2 = 184>>2 = 46; out[1][1] =
+    // (45+46+53+54+2)>>2 = 200>>2 = 50. A cell-origin mutant
+    // (window at rows/cols {0,1}) gives out[0][0] = 20>>2 = 5 - killed.
+    std::uint8_t src[8 * 8];
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            src[y * 8 + x] = (std::uint8_t)(y * 8 + x);
+        }
+    }
+    std::uint8_t dst[2 * 2] = {0, 0, 0, 0};
+    analysis::downsample2d(src, 8, 8, 8, dst, 2, 4);
+    CHECK(dst[0] == 14);
+    CHECK(dst[1] == 18);
+    CHECK(dst[2] == 46);
+    CHECK(dst[3] == 50);
+}
+
+TEST_CASE("downsample2d honors an independent stride") {
+    // The per-row advances use input_stride / decim_stride as INDEPENDENT
+    // parameters (:144, :159-160). Fixture: the same ramp as the rounding
+    // case laid out at stride 12 with 99s in cols 4-11 (never read by the
+    // faithful port), so the expected 2x2 is the same {3, 11, 5, 13}. A
+    // stride-ignoring mutant (advance areaWidth * decimStep = 8 bytes per
+    // row instead of 12) lands mid-row on the poison band: out differs.
+    std::uint8_t src[4 * 12];
+    static const std::uint8_t kRows[4][4] = {{0, 4, 8, 12}, {1, 5, 9, 13}, {2, 6, 10, 14}, {3, 7, 11, 15}};
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            src[y * 12 + x] = kRows[y][x];
+        }
+        for (int x = 4; x < 12; ++x) {
+            src[y * 12 + x] = 99;
+        }
+    }
+    std::uint8_t dst[2 * 2] = {0, 0, 0, 0};
+    analysis::downsample2d(src, 12, 4, 4, dst, 2, 2);
+    CHECK(dst[0] == 3);
+    CHECK(dst[1] == 11);
+    CHECK(dst[2] == 5);
+    CHECK(dst[3] == 13);
+}
+
 TEST_CASE("calculateHistogram counts one pixel per bin on a 0..255 ramp") {
     // 1:1 target: calculate_histogram (pic_analysis_process.c:170-188). The
     // real name is calculate_histogram - NOT the brief's

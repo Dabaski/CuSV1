@@ -145,4 +145,37 @@ void calculateHistogram(const std::uint8_t* src, std::uint32_t width,
     }
 }
 
+// 1:1 port of svt_aom_downsample_2d_c (pic_analysis_process.c:134-164).
+// The reference's own pointer arithmetic is kept verbatim: the input
+// pointer pre-advanced by half_decim_step rows (:148), prev_input_line
+// derived per row as one stride above it (:151), the horizontal loop
+// stepping both the input column by decim_step and the output index by 1
+// (:152-153), the four-pixel sum and (sum + 2) >> 2 (:154-157), and the
+// per-row advances input_samples += input_stripe_stride /
+// decim_samples += decim_stride (:159-160). Const on the input is this
+// port's only deviation (the reference takes uint8_t* and never writes it).
+void downsample2d(const std::uint8_t* src, std::uint32_t srcStride,
+                  std::uint32_t areaWidth, std::uint32_t areaHeight,
+                  std::uint8_t* dst, std::uint32_t dstStride,
+                  std::uint32_t decimStep) {
+    const std::uint32_t inputStripeStride = srcStride * decimStep;
+    const std::uint32_t halfDecimStep = decimStep >> 1;
+
+    const std::uint8_t* curLine = src + halfDecimStep * srcStride;
+    for (std::uint32_t vi = halfDecimStep; vi < areaHeight; vi += decimStep) {
+        const std::uint8_t* prevLine = curLine - srcStride;
+        std::uint32_t decimHorizontalIndex = 0;
+        for (std::uint32_t hi = halfDecimStep; hi < areaWidth;
+             hi += decimStep, ++decimHorizontalIndex) {
+            const std::uint32_t sum = static_cast<std::uint32_t>(prevLine[hi - 1]) +
+                static_cast<std::uint32_t>(prevLine[hi]) +
+                static_cast<std::uint32_t>(curLine[hi - 1]) +
+                static_cast<std::uint32_t>(curLine[hi]);
+            dst[decimHorizontalIndex] = static_cast<std::uint8_t>((sum + 2) >> 2);
+        }
+        curLine += inputStripeStride;
+        dst += dstStride;
+    }
+}
+
 }  // namespace analysis

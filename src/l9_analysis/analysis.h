@@ -67,4 +67,18 @@ void calculateHistogram(const std::uint8_t* src, std::uint32_t width,
                         std::uint8_t decimStep, std::uint32_t* histogram,
                         std::uint64_t* sum);
 
+// 1:1 port of svt_aom_downsample_2d_c (third_party/SVT-AV1/Source/Lib/Codec/
+// pic_analysis_process.c:134-164). Declaration twin: Codec/motion_estimation.h:33-35.
+// 2x2, 0-phase decimation generic over decim_step: the input pointer is
+// PRE-ADVANCED by half_decim_step rows (:148) and prev_input_line is one row
+// above it (:151), so the summed 2x2 window sits at rows/cols
+// {half-1, half} WITHIN each decim_step cell (the cell's top-left 2x2 at
+// step 2, its middle 2x2 at step 4); each output is (sum + 2) >> 2 (:157).
+// Live callers pass decim_step 2 (quarter, :1504-1510) and 4 (sixteenth,
+// :1530-1536). Host only: the GPU twin is parked, not built.
+void downsample2d(const std::uint8_t* src, std::uint32_t srcStride,
+                  std::uint32_t areaWidth, std::uint32_t areaHeight,
+                  std::uint8_t* dst, std::uint32_t dstStride,
+                  std::uint32_t decimStep);
+
 }  // namespace analysis

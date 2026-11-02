@@ -579,6 +579,67 @@ A0. SLICE-LEVEL STATE (the live register)
   coverage metric's own counter), total 20,756 -> 20,774 of 157,718;
   printed percentage stays 13.2% (20,774/157,718 = 13.1716%); the
   paired conformance count unchanged (9 artifacts, all content-1:1).
+- [x] AN6 LANDED (2026-11-01): analysis::downsample2d, the port of
+  svt_aom_downsample_2d_c - pic_analysis_process.c:134-164, declaration
+  twin Codec/motion_estimation.h:33-35 (grep-verified: that header is the
+  function's only declaration; the downsample_2d call sites at
+  :1504/:1522/:1530 go through the rtcd pointer, not the _c symbol).
+  Derivation BEFORE the test: input_stripe_stride = stride * decim_step
+  (:144); half_decim_step = decim_step >> 1 (:146); the input pointer is
+  PRE-ADVANCED by half_decim_step rows (:148) and prev_input_line is one
+  stride above it (:151), so the summed 2x2 window sits at rows/cols
+  {half-1, half} WITHIN each decim_step cell - the cell's own top-left
+  2x2 at step 2, its MIDDLE 2x2 at step 4 (vi/hi step half -> half-1
+  anchor); sum of the four pixels prev[hi-1] + prev[hi] + cur[hi-1] +
+  cur[hi] (:154-156), output (sum + 2) >> 2 (:157); per-row advances
+  input_samples += input_stripe_stride / decim_samples += decim_stride
+  (:159-160). Live callers: decim_step 2 (quarter, :1504-1510) and 4
+  (sixteenth, :1530-1536) - the generic step is the reference's own
+  surface, not a generalization. Const on the input is the port's only
+  deviation (the reference takes uint8_t* and never writes it). Host
+  only, NO GPU twin (the scout's [G] stays parked, not built).
+  RED (captured): test_variance.cpp(230,15) / (257,15) / (281,15):
+  error C2039 'downsample2d': is not a member of 'analysis' (+ C3861
+  identifier not found) - all three TEST_CASEs fail to compile. GREEN:
+  the port, zero warnings under /W4 /WX. Four TEST_CASEs, all
+  hand-derived: uniform 4x4 step 2 (all 10s -> all 10, the (40+2)>>2 =
+  10 sanity case, NOT rounding-discriminating since 40>>2 is also 10);
+  the ramp {0,4,8,12}/{1,5,9,13}/{2,6,10,14}/{3,7,11,15} at stride 8
+  with 99s in cols 4-7 -> out {3,11,5,13} - every 2x2 sum is congruent
+  2 mod 4, so the +2 IS discriminated (a +2-less mutant gives
+  {2,10,4,12}), and rows AND cols are non-uniform so window mispairing
+  fails; step 4 on an 8x8 ramp (src[y][x] = 8y+x) -> out
+  {14,18,46,50}, the middle-2x2 phase (a cell-origin mutant gives
+  out[0][0] = 20>>2 = 5); stride 12 ramp with 99s in cols 4-11 -> the
+  same {3,11,5,13}, poison never read by the faithful port.
+  MUTATIONS (all captured, all reverted): M1 the +2 dropped kills the
+  ramp case (dst {2,10,4,12} vs {3,11,5,13}) and the step-4 case
+  ({13,17,45,49} vs {14,18,46,50}) - the uniform case passes as
+  derived; M2 the window anchored at the cell origin
+  (hi - halfDecimStep .. +1) kills ONLY the step-4 case (all four
+  outputs wrong; step 2 is unaffected because half-1 = hi-half there) -
+  the phase discrimination is exactly the brief's 0-phase reading;
+  M3 the stride-ignoring row advance (curLine += areaWidth * decimStep,
+  with a behavior-neutral (void)inputStripeStride for /W4 /WX) kills
+  the SECOND output row of both the ramp case (dst[2] 4 != 5, dst[3]
+  12 != 13 - the faithful advance is stride*decim_step = 16, the
+  mutant's 8 lands one row early) and the stride-12 case (dst[2]/
+  dst[3] read the poison band). STALE-BINARY INCIDENT (the AN5 lesson
+  live, caught in-session): the M3 revert ran ctest without rebuilding
+  and read the mutant binary as a failure; rebuilt, the reverted tree
+  is green again.
+  MEASURED (2026-11-01): suite 10/10 passed, 0 failed, 261.59 s; GATE
+  re-measured 884,851 B, byte-identical, diff 0; coverage A11 115 ->
+  144 (the 29 non-blank ref lines of :134-164, measured with the
+  coverage metric's own counter), total 20,774 -> 20,803 of 157,718;
+  printed percentage stays 13.2% (20,803/157,718 = 13.1901%); the
+  paired conformance count unchanged (9 artifacts, all content-1:1).
+  DOC FIX in the same commit: the A11 row's prose cited the mean span
+  as :194-216 - the AN1 register measured :194-214 (18 lines, the
+  function ends at the :214 closing brace; :215 is blank and :216 is
+  the NEXT function's comment opener). The 115 total was consistent
+  with :194-214 all along; the prose span is corrected here, no
+  counted number moves.
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
