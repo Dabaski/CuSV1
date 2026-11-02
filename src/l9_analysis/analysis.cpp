@@ -1230,6 +1230,46 @@ void downsample2d(const std::uint8_t* src, std::uint32_t srcStride,
     }
 }
 
+// 1:1 port of svt_aom_downsample_filtering_input_picture
+// (pic_analysis_process.c:1498-1547). The contract comment lives on the
+// declaration (analysis.h); the definition mirrors the reference's branch
+// text: outer gate :1502, the level1 branch :1503-1517 (downsample_2d
+// :1504-1510, generate_padding :1511-1516), the level0 branch :1519-1545
+// (the level1-dependent source :1521-1537, generate_padding :1539-1544).
+// resize.c:139 is a DECLARATION (semicolon at :141, no body) - this is the
+// reference's only definition, ported once.
+void downsampleFilteringInputPicture(
+    const std::uint8_t* inputPaddedY, std::uint32_t inputPaddedYStride,
+    std::uint32_t inputPaddedWidth, std::uint32_t inputPaddedHeight,
+    std::uint8_t* quarterY, std::uint32_t quarterYStride,
+    std::uint32_t quarterWidth, std::uint32_t quarterHeight,
+    std::uint32_t quarterBorder,
+    std::uint8_t* sixteenthY, std::uint32_t sixteenthYStride,
+    std::uint32_t sixteenthWidth, std::uint32_t sixteenthHeight,
+    std::uint32_t sixteenthBorder,
+    bool hmeEnabled, bool tfHmeEnabled, bool level1Enabled,
+    bool tfLevel1Enabled, bool level0Enabled, bool tfLevel0Enabled) {
+    if (hmeEnabled || tfHmeEnabled) {
+        if (level1Enabled || tfLevel1Enabled) {
+            downsample2d(inputPaddedY, inputPaddedYStride, inputPaddedWidth,
+                         inputPaddedHeight, quarterY, quarterYStride, 2);
+            generatePadding(quarterY, quarterYStride, quarterWidth, quarterHeight,
+                            quarterBorder, quarterBorder);
+        }
+        if (level0Enabled || tfLevel0Enabled) {
+            if (level1Enabled || tfLevel1Enabled) {
+                downsample2d(quarterY, quarterYStride, quarterWidth,
+                             quarterHeight, sixteenthY, sixteenthYStride, 2);
+            } else {
+                downsample2d(inputPaddedY, inputPaddedYStride, inputPaddedWidth,
+                             inputPaddedHeight, sixteenthY, sixteenthYStride, 4);
+            }
+            generatePadding(sixteenthY, sixteenthYStride, sixteenthWidth,
+                            sixteenthHeight, sixteenthBorder, sixteenthBorder);
+        }
+    }
+}
+
 // 1:1 port of compute_b64_variance (pic_analysis_process.c:318-442). The
 // reference's stack arrays become the out-params; the loops and index
 // arithmetic are the reference's own, kept verbatim. The EbMeTierZeroPu

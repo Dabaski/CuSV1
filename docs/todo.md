@@ -333,7 +333,9 @@ A0. SLICE-LEVEL STATE (the live register)
   (:134); AN7 the b64 variance pyramid (compute_b64_variance :318); AN8
   the screen-content detectors (:1354, antialiasing-aware :1207); AN9
   luma-dominant (:1440); AN10 the pad family (:648, :745, :820, :858,
-  :1549); AN11 downsample_filtering_input_picture (:1498). Phase B -
+  :1549); AN11 downsample_filtering_input_picture (:1498) LANDED -
+  PHASE A COMPLETE (all eleven slices, measured trajectory in the AN11
+  register entry below). Phase B -
   FFT + noise model: AN12 fft1d kernels (fft_common.h:114-:330); AN13
   fft2d/ifft2d (fft.c:51/:108); AN14 noise_util (:20, :70-:104, the
   OD_DIVU table :114); AN15 the flat block finder (noise_model.c:399-:634);
@@ -874,7 +876,7 @@ A0. SLICE-LEVEL STATE (the live register)
    the paired conformance count unchanged (9 artifacts, all
    content-1:1).
  - [x] AN10 LANDED (2026-11-02): the pad family, ELEVEN functions
-   across two reference files, the last Phase-A slice. Helper
+    across two reference files. Helper
    kernels from Codec/pic_operators.c (A6-classified, the lines
    charge to A6's rationale): analysis::generatePadding
    (svt_aom_generate_padding, pic_operators.c:266-301),
@@ -989,8 +991,106 @@ A0. SLICE-LEVEL STATE (the live register)
    718 -> 954 (+236: 79 + 59 + 29 + 9 + 60 for the five driver
    spans), total 21,400 -> 21,778 of 157,718; the printed percentage
    MOVED: 13.6% -> 13.8% (21,778/157,718 = 13.8069%); the paired
-   conformance count unchanged (9 artifacts, all content-1:1 - the
-   pad family is encoder-input prep and emits no bitstream).
+    conformance count unchanged (9 artifacts, all content-1:1 - the
+    pad family is encoder-input prep and emits no bitstream).
+ - [x] AN11 LANDED (2026-11-02): analysis::downsampleFilteringInputPicture
+    (svt_aom_downsample_filtering_input_picture, pic_analysis_process.c:
+    :1498-1547), the HME input-picture downsampling driver - the LAST
+    Phase-A slice, and the simplest: a 50-line branch structure that
+    COMPOSES two already-landed l9 primitives, downsample2d (AN6) and
+    generatePadding (AN10). Declaration twin pic_analysis_process.h:28
+    (same file set as the body - no cross-area question). resize.c:139
+    carries the same signature and is a DECLARATION (semicolon at :141,
+    no body) - grep-verified and stated in the port comment; the
+    reference's only definition is :1498. THE CONTRACT: outer gate
+    enable_hme || tf_enable_hme (:1502); the level1 branch (:1503-1517)
+    runs downsample_2d input->quarter at step 2 (:1504-1510) then
+    generate_padding with the QUARTER's own dims and border (:1511-1516);
+    the level0 branch (:1519-1545) selects the sixteenth SOURCE off the
+    level1 pair read a SECOND time - step 2 from the QUARTER buffer when
+    on (:1522-1528), step 4 from the INPUT when off (:1530-1536) - then
+    generate_padding with the SIXTEENTH's own dims and border
+    (:1539-1544). The six pcs booleans are threaded raw with the ORs
+    inside (the b64Variance interface-flattening pattern); the reference
+    has NO null guards - the branch structure IS the guard, none added.
+    Callers (grep-verified): pd_process.c:3555 and
+    pic_analysis_process.c:1992 (gated on !scs->allintra) are LIVE;
+    resize.c:1665/:1726 (Phase D) and temporal_filtering.c:3770 (Phase C)
+    are parked; all pass the same three-buffer shape, the flags live
+    inside pcs. ITEM-2 FINDING (the brief's order question, answered):
+    the sixteenth-from-quarter pass reads NO quarter pad rows -
+    downsample2d's window sits at rows/cols {half-1, half} WITHIN each
+    cell over the quarter CONTENT dims (the pre-advance curLine = src +
+    half*stride; prevLine = curLine - stride = content row 0 at the
+    first cell), so every touched row/col is content; the padding ORDER
+    (quarter pad BEFORE the sixteenth pass, :1511 before :1522) is
+    therefore pinned by the reference TEXT, not by any observable test -
+    swapping the two statements changes no output. Recorded in the port
+    comment as text-pinned-not-test-pinned.
+    RED (captured): compile error C2039 at test_downsample_filtering.cpp
+    :146 (the missing declaration), then behavioral REDs per branch: T2
+    quarter byte 66 actual 238 (poison) vs expected 3 (the first left-pad
+    cell of the top pad row), T3 sixteenth byte 63 actual 238 vs
+    expected 8, T4 sixteenth byte 63 actual 238 vs expected 8 (the
+    decim4 first cell = 8, by the reference's own middle-window formula).
+    GREEN: 8 test cases / 5704 assertions in tests/test_downsample_
+    filtering.cpp (CMakeLists gains the file): T1 all-flags-off no-op,
+    T2 hme+level1 (quarter written+padded, sixteenth untouched), T3 the
+    full chain (sixteenth = step-2 of the QUARTER content, own border),
+    T4 level0 with level1 OFF (sixteenth = step-4 of INPUT, the quarter
+    buffer poisoned AND unread), T5 both hme flags off with all levels
+    on (writes nothing), T2b/T4b the tf-side twins of T2/T4, and T6
+    level1-via-TF-only (level0 on via hme): BOTH level1 reads (:1503 and
+    :1521) must see it - the quarter pass runs AND the sixteenth takes
+    the step-2-from-QUARTER source. Full-buffer compares against
+    constructed expected planes (poison outside the padded extent), the
+    quarter fixture sized with border slack so a wrong-border mutant
+    writes INSIDE the buffer instead of off its end.
+    MUTATIONS (all captured, all reverted, every run on a build VERIFIED
+    error-free): M1 sixteenth source input-step-2 when level1 on -> 2
+    fail (T3, T6); M2 sixteenth source quarter-step-4 when level1 off ->
+    2 fail (T4, T4b); M3 quarter padding dropped -> 4 fail (T2, T2b, T3,
+    T6); M4 sixteenth padding dropped -> 4 fail (T3, T4, T4b, T6); M5
+    sixteenth padding given the quarter border -> 4 fail (T3, T4, T4b,
+    T6); M7 the hme gate dropped -> 1 fail (T5, 720 failed assertions);
+    M8 the tf side of the outer gate dropped -> 2 fail (T2b, T4b);
+    M9-outer the tf side of the OUTER level1 OR dropped -> 2 fail (T2b,
+    T6); M9-inner the tf side of the INNER source OR dropped -> 1 fail
+    (T6); M10 the tf side of the level0 OR dropped -> 1 fail (T4b); M11
+    the inner source gate swapped to the level0 pair -> 2 fail (T4,
+    T4b). THREE instrument lessons, each a known pattern in a new
+    costume: (1) STALE MUTANT BINARY - commenting out a padding call
+    makes its params unreferenced, the /WX build FAILS, and the previous
+    binary remains in place, so the run LOOKS like a capture while
+    measuring nothing (the AN10 Copy-Item timestamp lesson one level
+    up); fixed by verified builds + a rebuild-verify after every revert.
+    (2) The Edit tool matched on CONTENT ignoring indentation: an
+    8-space oldString landed on the 12-space INNER gate instead of the
+    8-space outer one (both read `if (level1Enabled || tfLevel1Enabled)
+    {`), so the mutation ran against the wrong gate - the surviving T2b
+    run was the tell; context-pinned edits (neighbour line included)
+    from then on. (3) LINEAR FIXTURE BLINDNESS - the AN10 mask lesson
+    again: the first input fixture (x + 4y) made the two-stage
+    step-2-of-quarter decimation BIT-IDENTICAL to the one-stage step-4
+    middle-window decimation at every cell (a linear field averages
+    exactly), so T6 could not tell the two sixteenth sources apart and
+    M9-inner SURVIVED it; the input is now non-linear (x*37 + y*11 +
+    ((x*y) & 0x1F)) and every mutation above is re-run against the FINAL
+    fixture.
+    MEASURED (2026-11-02): suite 10/10 passed, 0 failed, 263.27 s;
+    GATE unchanged 884,851 B byte-identical, 421 lines, diff 0 (no
+    generator input); coverage A11 954 -> 1002 (+48: the :1498-1547
+    span, 50 physical / 48 non-blank), total 21,778 -> 21,826 of
+    157,718; the printed percentage does NOT move: 21,826/157,718 =
+    13.8380% stays below the 13.85 boundary, so 13.8% prints again; the
+    paired conformance count unchanged (9 artifacts, all content-1:1 -
+    the HME driver is encoder-input prep and emits no bitstream).
+    Host only, no GPU twin (parked, named).
+    PHASE A COMPLETE: the scout priced Phase A at ~1,185 ref lines ->
+    ~+0.75 pt from the 13.1% baseline (20,659); the measured Phase-A sum
+    is 21,826 - 20,659 = 1,167 lines = +0.738 pt - the arithmetic HELD
+    (the 0.012 gap is the scout's own rounding). Derived from the
+    measured runs above, not promised.
    FOLLOW-UP CLOSED (2026-11-02, this entry's flagged gap): the
    AN10 report's stale last-measured block in AGENTS.md was
    refreshed by the doc-currency commit that closes it - ctest

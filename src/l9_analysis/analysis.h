@@ -409,4 +409,41 @@ void padInputPictures(std::uint8_t* yBuffer, std::uint32_t yStride,
                       std::uint16_t subsamplingX, std::uint16_t subsamplingY,
                       bool is16BitInput, ColorFormat colorFormat);
 
+// 1:1 port of svt_aom_downsample_filtering_input_picture (third_party/
+// SVT-AV1/Source/Lib/Codec/pic_analysis_process.c:1498-1547), the HME
+// input-picture downsampling driver: it COMPOSES downsample2d (AN6) and
+// generatePadding (AN10), so the port is branch structure and call order.
+// Declaration twin: pic_analysis_process.h:28. resize.c:139 carries the
+// same signature and is a DECLARATION (semicolon at resize.c:141, no body)
+// - the reference's only definition is pic_analysis_process.c:1498. The
+// reference reads six pcs booleans ORed in pairs (:1502 outer gate
+// enable_hme/tf_enable_hme, :1503/:1521 the level1 pair read TWICE,
+// :1519 the level0 pair); the port threads the six raw values and does the
+// ORs inside, mirroring the reference's reads. Each generate_padding call
+// uses its OWN buffer's dims and border (:1511-1516 quarter, :1539-1544
+// sixteenth). The sixteenth SOURCE depends on level1: step 2 from the
+// quarter buffer when the level1 pair is on (:1522-1528), step 4 from the
+// input when off (:1530-1536). ORDER: the quarter padding runs INSIDE the
+// level1 branch, before the sixteenth pass (:1511 before :1522) - text
+// pinned, not test pinned: downsample2d's window sits at rows {half-1,
+// half} WITHIN each cell over the quarter CONTENT dims, so the
+// sixteenth-from-quarter pass reads NO quarter pad rows and swapping the
+// two statements changes no output. The reference has NO null guards - the
+// branch structure IS the guard; none added. Callers (grep-verified):
+// pd_process.c:3555 and pic_analysis_process.c:1992 (the latter gated on
+// !scs->allintra) are live; resize.c:1665/:1726 (Phase D) and
+// temporal_filtering.c:3770 (Phase C) are parked. All pass the same
+// three-buffer shape. Only the Y plane is touched.
+void downsampleFilteringInputPicture(
+    const std::uint8_t* inputPaddedY, std::uint32_t inputPaddedYStride,
+    std::uint32_t inputPaddedWidth, std::uint32_t inputPaddedHeight,
+    std::uint8_t* quarterY, std::uint32_t quarterYStride,
+    std::uint32_t quarterWidth, std::uint32_t quarterHeight,
+    std::uint32_t quarterBorder,
+    std::uint8_t* sixteenthY, std::uint32_t sixteenthYStride,
+    std::uint32_t sixteenthWidth, std::uint32_t sixteenthHeight,
+    std::uint32_t sixteenthBorder,
+    bool hmeEnabled, bool tfHmeEnabled, bool level1Enabled,
+    bool tfLevel1Enabled, bool level0Enabled, bool tfLevel0Enabled);
+
 }  // namespace analysis
