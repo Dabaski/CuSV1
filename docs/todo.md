@@ -732,6 +732,88 @@ A0. SLICE-LEVEL STATE (the live register)
   the two slices measured +0.073 pt (AN7's 115 lines) + 0.018 pt
   (AN6's 29 lines) = +0.092 pt total (13.1716% -> 13.2631%) - the
   estimate was optimistic, the measured values stand.
+ - [x] AN8 LANDED (2026-11-01): the screen-content detector pair, TEN new
+   primitives in src/l9_analysis: analysis::countColorsWithThreshold
+   (svt_av1_count_colors_with_threshold, pic_analysis_process.c:911-930),
+   analysis::isValidPaletteNbColors (is_valid_palette_nb_colors,
+   :956-978, static), analysis::findDominantValue
+   (svt_av1_find_dominant_value, :984-1003), analysis::dilateBlock
+   (svt_av1_dilate_block, :1024-1076), analysis::variance16x16 /
+   analysis::variance8x8 (the VAR(W,H) macro instances
+   svt_aom_variance16x16_c / 8x8_c, C_DEFAULT/variance.c:141-190, called
+   the way the detectors call them - b = svt_aom_eb_av1_var_offs
+   :936-942, constant 128, at ref_stride 0, so the 128 cancels and the
+   return is the population-variance SUM; :189's (int64_t) cast and
+   TRUNCATING division kept), analysis::getSbyPerpixelVariance16x16/8x8
+   (svt_av1_get_sby_perpixel_variance, :944-952:
+   ROUND_POWER_OF_TWO(var, eb_num_pels_log2_lookup[bs]),
+   definitions.h:457, common_utils.c:39 -> BLOCK_16X16 = 8, BLOCK_8X8 =
+   6; the fn_ptr/BlockSize dispatch replaced by one wrapper per size,
+   the l5 per-size pattern), the ScAaCounts carrier (Sc_AA_Counts,
+   :1078-1086), analysis::scAaCollectCounts
+   (svt_aom_sc_AA_collect_counts, :1088-1190, static: multiplier 2 +
+   checkerboard initial_col + 2*blk_w step under fast_detection,
+   :1096-1104; region_id = ((r >= h2)?2:0) + ((c >= w2)?1:0),
+   :1106-1108; the complex branch dilates and re-counts against
+   complex_final_color_thresh; the x2 fast counts :1177-1187),
+   analysis::isScreenContent (svt_aom_is_screen_content, :1354-1429:
+   16x16 pass color_thresh 4 / var_thresh 0 feeding sc_class0..3
+   :1386-1398, then 8x8 pass var_thresh 16 feeding sc_class4 :1427-1428)
+   and analysis::isScreenContentAaAware
+   (svt_aom_is_screen_content_antialiasing_aware, :1207-1350: 16x16
+   collect final 6 / var 5, 8x8 collect final 8 / var 50
+   (:1276-1278), the six class formulas :1297-1321). pcs->enhanced_pic
+   and the pcs->scs fast flag are threaded as parameters (the b64Variance
+   deviation pattern); sc_class5 is NOT written by is_screen_content
+   (grep-verified :1386-1428) - the port's zero-init false is named.
+   BRIEF CORRECTION, checked against the reference's actual inputs: the
+   detectors consume NONE of the AN1-AN7 primitives - the spans call
+   their own count/palette/dominant/dilate/variance helpers; AN5's
+   histogram (caller :560) and AN7's b64Variance (caller :610) are
+   disjoint from :911-1429. The A14 row gained variance.c's variance_c +
+   VAR macro (23 lines, 0.30 -> 0.316). Caller context measured:
+   pd_process.c:4795-4822 (mode 2 -> is_screen_content only at
+   <= 1080p; mode 3 -> AA-aware; the luma-dominant call at :4813 reads
+   pcs->chroma_downsampled_pic, NOT enhanced_pic).
+   RED (captured): compile errors C2039 'countColorsWithThreshold' /
+   'isValidPaletteNbColors' / 'ScClasses'+'isScreenContent' /
+   'ScAaCounts'+'scAaCollectCounts' / 'isScreenContentAaAware': is not
+   a member of 'analysis' (test_variance.cpp:597/630/826/930-931/
+   1008+1030); the fast-detection case RED'd behaviorally (3 failing
+   region assertions on first run - MY hand-derivation was wrong, not
+   the port: the fast checkerboard visits regions 2/3 TWICE each, so
+   the pre-multiplier region palette is {1,1,2,2} not {2,2,2,2}; the
+   test's expectations were fixed, the implementation untouched).
+   GREEN: the ten primitives + the two detector tests + the mixed
+   scAaCollectCounts fixture (checkerboard / dilate-complex / photo /
+   solid-ignored blocks, region ids, fast x2). One stale-binary trap
+   hit and caught: slice 3's build failed on a missing <cstring>
+   (memset) and the run output read the OLD exe - the run was
+   discarded, the include fixed, green re-measured.
+   MUTATIONS (all captured, all reverted): M1 countColors early exit
+   disabled -> 2 fails; M2 palette solid gate (<= 1) disabled -> 1
+   fail; M3 palette early exit disabled -> 1 fail (load-bearing for
+   the boolean: without it a 5-color block falls through the <= 1 gate
+   to TRUE); M4 findDominant > -> >= -> 1 fail; M5 dilate corner
+   dilates: removing ONE corner SURVIVED (the other three still reach
+   the target) -> the mutant was strengthened to all four corners (the
+   true 4-direction-only mutant) -> 1 fail - the fixture's target cell
+   has all four 4-adjacent neighbours non-dominant and only its
+   diagonals dominant; M6 variance16x16 truncating division -> ceil ->
+   1 fail; M7 sby8 rounding term +32 dropped -> 1 fail; M8 isScreen-
+   Content 16x16 palette gate hardwired true -> 4 fails (the smooth
+   ramp's negative path); M9 AA region-pass multiplier *10 -> *1 -> 2
+   fails (the checkerboard's 16-per-region count sits exactly at the
+   boundary); M10 isScreenContent class0 multiplier *10 -> *1 -> 2
+   fails (4096 > 4096 is false - strict inequality pinned).
+   MEASURED (2026-11-01): suite 10/10 passed, 0 failed, 261.66 s;
+   GATE unchanged 884,851 B byte-identical, diff 0 (no generator
+   input); coverage A11 259 -> 665 (+406: the nine :911-1429 spans
+   above), A14 440 -> 463 (+23: variance.c :141-158 + :183-190),
+   total 20,918 -> 21,347 of 157,718; the printed percentage MOVED:
+   13.3% -> 13.5% (21,347/157,718 = 13.5357% crosses the 13.45
+   boundary the AN7 13.2631% sat below); the paired conformance count
+   unchanged (9 artifacts, all content-1:1).
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)

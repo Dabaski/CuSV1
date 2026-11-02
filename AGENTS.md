@@ -340,13 +340,13 @@ Three other instruments, none of which gate a commit:
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 10/10 passed, 0 failed, 263.08 s** (re-measured 2026-11-01 at
-  AN7; l4_intra is the slow one at ~216 s; `pipeline` 53.46 s;
-  `l3_transforms` ~7 s; the rest under 0.5 s including the new l9_analysis.
-  Earlier runs of the same tree: the AN6 run 261.59 s, the AN5 run
-  268.30 s, the AN4 run 270.10 s, the AN3 run 272.67 s, the AN2 run
-  272.62 s, the AN1 run 263.38 s, the RT21 fix run 272.42 s at 9/9, a
-  judge re-run 267.47 s).
+- **ctest: 10/10 passed, 0 failed, 261.66 s** (re-measured 2026-11-01 at
+  AN8; l4_intra is the slow one at ~216 s; `pipeline` ~53 s;
+  `l3_transforms` ~7 s; the rest under 0.5 s including l9_analysis.
+  Earlier runs of the same tree: the AN7 run 263.08 s, the AN6 run
+  261.59 s, the AN5 run 268.30 s, the AN4 run 270.10 s, the AN3 run
+  272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
+  run 272.42 s at 9/9, a judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
   bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-01: rebuilt, and
   byte-identical to the committed file). History, not a figure to chase:
@@ -357,17 +357,19 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 13.3%** (see the completion metric section;
-  re-measured 2026-11-01: 20,918 of 157,718 non-blank lines, +115 from
-  20,803 - the AN7 b64Variance port in pic_analysis_process.c
-  (:318-442); the printed percentage MOVED at AN7: 13.2% -> 13.3%
-  (20,918/157,718 = 13.2631% crosses the 13.25 rounding boundary the
-  AN6 13.1901% sat below). Earlier history of the same metric: the
-  AN6 run measured 20,803/157,718 = 13.1901%; the AN5 run
-  20,774/157,718 = 13.1716%; the printed percentage MOVED at AN4:
-  20,756/157,718 = 13.1602% crosses the 13.15 rounding boundary that
-  AN1-AN3's 13.1443% sat below, so N1 prints 13.2% where AN1-AN3
-  printed 13.1%).
+- **Portable-C coverage: 13.5%** (see the completion metric section;
+  re-measured 2026-11-01: 21,347 of 157,718 non-blank lines, +429 from
+  20,918 - the AN8 screen-content port: +406 in A11 (pic_analysis_process.c
+  :911-1429, the nine detector/helper spans) and +23 in A14 (variance.c
+  :141-158 + :183-190, the variance_c + VAR macro); the printed
+  percentage MOVED at AN8: 13.3% -> 13.5% (21,347/157,718 = 13.5357%
+  crosses the 13.45 rounding boundary the AN7 13.2631% sat below).
+  Earlier history of the same metric: the AN7 run measured
+  20,918/157,718 = 13.2631%; the AN6 run measured 20,803/157,718 =
+  13.1901%; the AN5 run 20,774/157,718 = 13.1716%; the printed
+  percentage MOVED at AN4: 20,756/157,718 = 13.1602% crosses the 13.15
+  rounding boundary that AN1-AN3's 13.1443% sat below, so N1 prints
+  13.2% where AN1-AN3 printed 13.1%).
 - **Committed artifacts: 9** `.obu` files, ALL content-1:1 on every plane
   (color4 was the last divergent one: its V 43/1024 residual was the chroma
   above-right Z-order gap, closed by RT21 at 927e697; color8 closed at CS7,
@@ -659,6 +661,44 @@ are partly right and I re-measured rather than restated them:
     origin, sbVar ONE flat row), the stack arrays exposed as
     out-params, the :412 gate and the prec selector threaded as
     parameters; host only, no GPU twin (parked, named).
+  AN8 LANDED 2026-11-01: the screen-content detector pair - TEN new
+  primitives: countColorsWithThreshold (svt_av1_count_colors_with_
+  threshold, pic_analysis_process.c:911-930), isValidPaletteNbColors
+  (is_valid_palette_nb_colors, :956-978, static, the nb_colors <= 1
+  palette gate its caller relies on), findDominantValue
+  (svt_av1_find_dominant_value, :984-1003, strictly-greater update =
+  first max wins ties), dilateBlock (svt_av1_dilate_block,
+  :1024-1076), variance16x16/variance8x8 (the VAR(W,H) macro
+  instances, C_DEFAULT/variance.c:141-190 - A14's first new lines
+  since the row was written; the detectors call vf(src, stride,
+  svt_aom_eb_av1_var_offs, 0, &sse) with the offs constant 128 at
+  ref_stride 0 :936-942, so the 128 cancels: the return is the
+  population-variance SUM, :189's (int64_t) cast + truncating division
+  kept) and getSbyPerpixelVariance16x16/8x8 (svt_av1_get_sby_perpixel_
+  variance, :944-952: ROUND_POWER_OF_TWO(var, eb_num_pels_log2_
+  lookup[bs]), definitions.h:457 + common_utils.c:39 -> 8/6; the
+  fn_ptr dispatch replaced by per-size wrappers), ScAaCounts
+  (Sc_AA_Counts :1078-1086), scAaCollectCounts
+  (svt_aom_sc_AA_collect_counts, :1088-1190: multiplier 2 + the
+  checkerboard initial_col + 2*blk_w step under fast_detection
+  :1096-1104, region_id = ((r>=h2)?2:0)+((c>=w2)?1:0) :1106-1108, the
+  complex branch dilates and re-counts, the x2 fast counts
+  :1177-1187), isScreenContent (svt_aom_is_screen_content, :1354-1429:
+  16x16 pass thresh 4/var 0 -> sc_class0..3 :1386-1398, 8x8 pass
+  var 16 -> sc_class4 :1427-1428) and isScreenContentAaAware
+  (svt_aom_is_screen_content_antialiasing_aware, :1207-1350: 16x16
+  collect final 6/var 5, 8x8 collect final 8/var 50, six class
+  formulas :1297-1321). pcs->enhanced_pic + the scs fast flag threaded
+  as parameters (b64Variance deviation pattern); sc_class5 is NEVER
+  written by is_screen_content (grep-verified) - zero-init false named.
+  BRIEF CORRECTION (measured against the reference's actual inputs):
+  the detectors consume NONE of the AN1-AN7 primitives - AN5's
+  histogram (caller :560) and AN7's b64Variance (caller :610) are
+  disjoint from :911-1429; the spans call their own helpers. Caller
+  context: pd_process.c:4795-4822 (mode 2 gates is_screen_content to
+  <= 1080p; mode 3 = AA-aware; is_input_luma_dominant at :4813 reads
+  pcs->chroma_downsampled_pic, NOT enhanced_pic). Host only, no GPU
+  twin (parked, named).
 
 
 ## Completion metric (the portable-C coverage number)
@@ -668,18 +708,22 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-01 (AN7): 13.3%** (20,918 of 157,718 non-blank
-lines - the covered count moved +115 from 20,803: the AN7 b64Variance port
-in pic_analysis_process.c (:318-442). Earlier history of the same metric:
-the AN6 run measured 20,803 = +29 from 20,774: the AN6 downsample2d port
+**THE NUMBER, as measured 2026-11-01 (AN8): 13.5%** (21,347 of 157,718 non-blank
+lines - the covered count moved +429 from 20,918: the AN8 screen-content port,
++406 in A11 (pic_analysis_process.c :911-1429, the nine detector/helper
+spans) and +23 in A14 (variance.c :141-158 + :183-190, the variance_c +
+VAR macro). Earlier history of the same metric:
+the AN7 run measured 20,918 = +115 from 20,803: the AN7 b64Variance port
+(:318-442); the AN6 run measured 20,803 = +29 from 20,774: the AN6 downsample2d port
 (:134-164); the AN5 run measured 20,774 = +115 from 20,659: the AN1
 mean8x8 port, the AN2 meanSquare8x8 port, +18 each, the AN3 sub-mean
 pair, +36, the AN4 intermVarFour8x8 port, +25, and the AN5
 calculateHistogram port, +18, all
 in pic_analysis_process.c (:170-188, :194-214, :220-240, :242-261,
-:263-284, :286-313); the printed percentage MOVED at AN7: 20,918/157,718
-= 13.2631% crosses the 13.25 rounding boundary the AN6 13.1901% sat
-below, so N1 prints 13.3% where AN5-AN6 printed 13.2%; the earlier
+:263-284, :286-313); the printed percentage MOVED at AN8:
+21,347/157,718 = 13.5357% crosses the 13.45 rounding boundary the AN7
+13.2631% sat below, so N1 prints 13.5% where AN5-AN7 printed 13.2-13.3%;
+the earlier
 move: AN4 crossed the 13.15 boundary that AN1-AN3's 13.1443% sat
 below). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
 hand-typed percentage, for the same reason a hand-typed line count is not
@@ -730,12 +774,12 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 0% | 0 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 2% | 259 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 6% | 665 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
-| A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 30% | 440 |
+| A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 32% | 463 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **20,918** |
+| | **TOTAL** | **254** | **157,718** | | **21,347** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

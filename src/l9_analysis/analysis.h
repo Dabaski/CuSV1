@@ -67,6 +67,134 @@ void calculateHistogram(const std::uint8_t* src, std::uint32_t width,
                         std::uint8_t decimStep, std::uint32_t* histogram,
                         std::uint64_t* sum);
 
+// 1:1 port of svt_av1_count_colors_with_threshold (third_party/SVT-AV1/
+// Source/Lib/Codec/pic_analysis_process.c:911-930): a 256-entry has_color
+// flag array, one flag per distinct pixel value; the scan returns FALSE as
+// soon as the running count exceeds num_colors_threshold (the early exit
+// is part of the contract - *num_colors reads threshold + 1 on that path).
+// The "> 1 colors" requirement lives at the AA-aware caller (:1118-1124),
+// not here.
+bool countColorsWithThreshold(const std::uint8_t* src, int stride, int rows,
+                              int cols, int numColorsThreshold, int* numColors);
+
+// 1:1 port of is_valid_palette_nb_colors (third_party/SVT-AV1/Source/Lib/
+// Codec/pic_analysis_process.c:956-978, static): the has_color[] scan with
+// the early-exit false at count > nb_colors_threshold, PLUS the palette
+// gate its one caller (is_screen_content, :1374/:1415) relies on - a solid
+// block (nb_colors <= 1) is NOT a valid palette (:973-975).
+bool isValidPaletteNbColors(const std::uint8_t* src, int stride, int rows,
+                            int cols, int nbColorsThreshold);
+
+// 1:1 port of svt_av1_find_dominant_value (third_party/SVT-AV1/Source/Lib/
+// Codec/pic_analysis_process.c:984-1003): the 256-bin count, argmax with a
+// STRICTLY-greater update so the FIRST maximum wins ties.
+std::uint8_t findDominantValue(const std::uint8_t* src, int stride, int rows, int cols);
+
+// 1:1 port of svt_av1_dilate_block (third_party/SVT-AV1/Source/Lib/Codec/
+// pic_analysis_process.c:1024-1076): copy src into dilated, then every
+// pixel equal to the dominant value writes the dominant value into all
+// eight of its neighbours (each bound-gated), one pass, no chaining.
+void dilateBlock(const std::uint8_t* src, int srcStride, std::uint8_t* dilated,
+                 int dilatedStride, int rows, int cols);
+
+// 1:1 port of the VAR(W,H) macro instance svt_aom_variance16x16_c
+// (third_party/SVT-AV1/Source/Lib/C_DEFAULT/variance.c:184-190, via
+// variance_c :141-158), called the way the screen-content detectors call it
+// (pic_analysis_process.c:950/:1129/:1150/:1376/:1417): b is
+// svt_aom_eb_av1_var_offs (pic_analysis_process.c:936-942, constant 128) at
+// ref_stride 0, folded here into the constant. diff = src[j] - 128 summed
+// as int, squared as uint32; the return is
+// sse - (uint32_t)(((int64_t)sum * sum) / 256) with the division
+// truncating. The 128 offset cancels algebraically: the return is the
+// population variance SUM of the block.
+std::uint32_t variance16x16(const std::uint8_t* src, int srcStride, std::uint32_t* sse);
+
+// 1:1 port of the VAR(W,H) instance svt_aom_variance8x8_c (C_DEFAULT/
+// variance.c:184-190) at W*H = 64, same const-128 offs call shape
+// (pic_analysis_process.c:1417).
+std::uint32_t variance8x8(const std::uint8_t* src, int srcStride, std::uint32_t* sse);
+
+// 1:1 ports of svt_av1_get_sby_perpixel_variance (third_party/SVT-AV1/
+// Source/Lib/Codec/pic_analysis_process.c:944-952) at the two sizes the
+// screen-content detectors use: var = the VAR kernel above against the
+// constant-128 offs, returned as
+// ROUND_POWER_OF_TWO(var, eb_num_pels_log2_lookup[bs])
+// (definitions.h:457; common_utils.c:39 -> BLOCK_16X16 = 8, BLOCK_8X8 = 6),
+// i.e. (var + 128) >> 8 and (var + 32) >> 6. The fn_ptr/BlockSize
+// dispatch of the reference is replaced by one wrapper per size - the
+// per-size wrapper pattern of l5_motion.
+std::uint32_t getSbyPerpixelVariance16x16(const std::uint8_t* src, int stride);
+std::uint32_t getSbyPerpixelVariance8x8(const std::uint8_t* src, int stride);
+
+// The detector outputs: the pcs->sc_class0..5 fields (Codec/pcs.h:972-980,
+// uint8_t each, assigned 0/1 by the detectors). bool in the port - the
+// assigned values are identical.
+struct ScClasses {
+    bool scClass0;
+    bool scClass1;
+    bool scClass2;
+    bool scClass3;
+    bool scClass4;
+    bool scClass5;
+};
+
+// 1:1 port of svt_aom_is_screen_content (third_party/SVT-AV1/Source/Lib/
+// Codec/pic_analysis_process.c:1354-1429). The reference consumes
+// pcs->enhanced_pic (the full-res luma plane); the port threads the y
+// buffer + stride + dims (pcs/scs dropped, the b64Variance deviation
+// pattern). Two passes: 16x16 with color_thresh 4 / var_thresh 0 feeding
+// sc_class0..3 (:1386-1398), then 8x8 with color_thresh 4 / var_thresh 16
+// feeding sc_class4 (:1427-1428). sc_class5 is NEVER written by this
+// function (grep-verified :1386-1428) - the zero-init false is the port's
+// initialization, not a reference value. The reference's
+// is_valid_palette_nb_colors call passes blk_w into the rows parameter
+// (:1374/:1415); moot at the square sizes the callers use - the port
+// passes rows = block height, cols = block width.
+ScClasses isScreenContent(const std::uint8_t* y, std::uint32_t yStride,
+                          std::uint32_t width, std::uint32_t height);
+
+// The Sc_AA_Counts carrier (pic_analysis_process.c:1078-1086, int64_t
+// counts, int region counters).
+struct ScAaCounts {
+    std::int64_t countPhoto;
+    std::int64_t countPalette;
+    std::int64_t countIntrabc;
+    std::int32_t regionPalette[4];
+    std::int32_t regionIntrabc[4];
+    std::int32_t regionPhoto[4];
+};
+
+// 1:1 port of svt_aom_sc_AA_collect_counts (third_party/SVT-AV1/Source/Lib/
+// Codec/pic_analysis_process.c:1088-1190, static). The per-block classify
+// chain, the fast-detection checkerboard skip (initial_col + 2*blk_w step,
+// :1102-1104) and the x2 count multiplier (:1177-1187) are the reference's
+// own. The fn_ptr/blk_size pair of the reference is replaced by the
+// (blkW, blkH) already threaded here - the variance goes through the
+// matching getSbyPerpixelVariance wrapper (BLOCK_16X16 / BLOCK_8X8 are the
+// only two call shapes, :1261-1290). dilatedBlk is the caller-owned
+// scratch the reference declares on its stack (:1255-1256), used only when
+// a block takes the complex (dilate) branch.
+ScAaCounts scAaCollectCounts(const std::uint8_t* y, std::uint32_t yStride,
+                             std::uint32_t width, std::uint32_t height,
+                             int blkW, int blkH,
+                             int complexInitialColorThresh, int simpleColorThresh,
+                             int complexFinalColorThresh, int varThresh,
+                             bool fastDetection, std::uint8_t* dilatedBlk);
+
+// 1:1 port of svt_aom_is_screen_content_antialiasing_aware (third_party/
+// SVT-AV1/Source/Lib/Codec/pic_analysis_process.c:1207-1350). The
+// reference consumes pcs->enhanced_pic and pcs->scs->
+// fast_aa_aware_screen_detection_mode; the port threads the y buffer +
+// stride + dims + the fast flag (pcs/scs dropped, the b64Variance
+// deviation pattern). The two collect calls (16x16: final 6 / var 5;
+// 8x8: final 8 / var 50) and all six class formulas (:1297-1321) are the
+// reference's own; the caller zero-fills the sc classes for modes 0/1
+// (pd_process.c:4796-4799) - NOT ported here (the detector writes all
+// six unconditionally, as the reference does).
+ScClasses isScreenContentAaAware(const std::uint8_t* y, std::uint32_t yStride,
+                                 std::uint32_t width, std::uint32_t height,
+                                 bool fastDetection);
+
 // 1:1 port of svt_aom_downsample_2d_c (third_party/SVT-AV1/Source/Lib/Codec/
 // pic_analysis_process.c:134-164). Declaration twin: Codec/motion_estimation.h:33-35.
 // 2x2, 0-phase decimation generic over decim_step: the input pointer is

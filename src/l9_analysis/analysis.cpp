@@ -1,5 +1,7 @@
 #include "analysis.h"
 
+#include <cstring>
+
 namespace analysis {
 
 // pic_analysis_process.c:36
@@ -143,6 +145,507 @@ void calculateHistogram(const std::uint8_t* src, std::uint32_t width,
         }
         src += stride * decimStep;
     }
+}
+
+// 1:1 port of svt_av1_count_colors_with_threshold (pic_analysis_process.c:
+// 911-930). The flag array, the per-pixel check and the early-exit false at
+// count > threshold are the reference's own; *num_colors is written even on
+// the early-exit path (threshold + 1 there).
+bool countColorsWithThreshold(const std::uint8_t* src, int stride, int rows,
+                              int cols, int numColorsThreshold, int* numColors) {
+    bool hasColor[1 << 8] = {false};
+    *numColors = 0;
+
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            const int thisVal = src[r * stride + c];
+            if (!hasColor[thisVal]) {
+                hasColor[thisVal] = true;
+                (*numColors)++;
+                if (*numColors > numColorsThreshold) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// 1:1 port of is_valid_palette_nb_colors (pic_analysis_process.c:956-978).
+// The scan and both exits are the reference's own: the early exit at
+// count > threshold and the nb_colors <= 1 palette gate (:973-975).
+bool isValidPaletteNbColors(const std::uint8_t* src, int stride, int rows,
+                            int cols, int nbColorsThreshold) {
+    bool hasColor[1 << 8];
+    memset(hasColor, 0, (1 << 8) * sizeof(*hasColor));
+    int nbColors = 0;
+
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            const int thisVal = src[r * stride + c];
+            if (hasColor[thisVal] == 0) {
+                hasColor[thisVal] = 1;
+                nbColors++;
+                if (nbColors > nbColorsThreshold) {
+                    return false;
+                }
+            }
+        }
+    }
+    if (nbColors <= 1) {
+        return false;
+    }
+
+    return true;
+}
+
+// 1:1 port of svt_av1_find_dominant_value (pic_analysis_process.c:984-1003):
+// 256-bin pixel-value histogram, the dominant value updated on a STRICTLY
+// greater count so the first maximum in scan order wins ties.
+std::uint8_t findDominantValue(const std::uint8_t* src, int stride, int rows, int cols) {
+    std::uint32_t valueCount[1 << 8] = {0};
+    std::uint32_t dominantValueCount = 0;
+    std::uint8_t dominantValue = 0;
+
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            const std::uint8_t value = src[r * (ptrdiff_t)stride + c];
+
+            valueCount[value]++;
+
+            if (valueCount[value] > dominantValueCount) {
+                dominantValue = value;
+                dominantValueCount = valueCount[value];
+            }
+        }
+    }
+
+    return dominantValue;
+}
+
+// 1:1 port of svt_aom_dilate_block (pic_analysis_process.c:1024-1076): the
+// full copy first, then one pass writing the dominant value into the eight
+// neighbours of every dominant pixel, each direction bound-gated. No
+// chaining: the source is read, never the dilated buffer.
+void dilateBlock(const std::uint8_t* src, int srcStride, std::uint8_t* dilated,
+                 int dilatedStride, int rows, int cols) {
+    const std::uint8_t dominantValue = findDominantValue(src, srcStride, rows, cols);
+
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            const std::uint8_t value = src[r * (ptrdiff_t)srcStride + c];
+
+            dilated[r * (ptrdiff_t)dilatedStride + c] = value;
+        }
+    }
+
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            const std::uint8_t value = src[r * (ptrdiff_t)srcStride + c];
+
+            if (value == dominantValue) {
+                // Dilate up
+                if (r != 0) {
+                    dilated[(r - 1) * (ptrdiff_t)dilatedStride + c] = value;
+                }
+                // Dilate down
+                if (r != rows - 1) {
+                    dilated[(r + 1) * (ptrdiff_t)dilatedStride + c] = value;
+                }
+                // Dilate left
+                if (c != 0) {
+                    dilated[r * (ptrdiff_t)dilatedStride + (c - 1)] = value;
+                }
+                // Dilate right
+                if (c != cols - 1) {
+                    dilated[r * (ptrdiff_t)dilatedStride + (c + 1)] = value;
+                }
+                // Dilate upper-left corner
+                if (r != 0 && c != 0) {
+                    dilated[(r - 1) * (ptrdiff_t)dilatedStride + (c - 1)] = value;
+                }
+                // Dilate upper-right corner
+                if (r != 0 && c != cols - 1) {
+                    dilated[(r - 1) * (ptrdiff_t)dilatedStride + (c + 1)] = value;
+                }
+                // Dilate lower-left corner
+                if (r != rows - 1 && c != 0) {
+                    dilated[(r + 1) * (ptrdiff_t)dilatedStride + (c - 1)] = value;
+                }
+                // Dilate lower-right corner
+                if (r != rows - 1 && c != cols - 1) {
+                    dilated[(r + 1) * (ptrdiff_t)dilatedStride + (c + 1)] = value;
+                }
+            }
+        }
+    }
+}
+
+// 1:1 port of svt_aom_variance16x16_c (C_DEFAULT/variance.c:184-190 via
+// variance_c :141-158) at ref_stride 0 over the constant-128 offs
+// (pic_analysis_process.c:936-942, folded). The (int64_t) cast on sum*sum
+// and the truncating division are the macro's own (:189).
+std::uint32_t variance16x16(const std::uint8_t* src, int srcStride, std::uint32_t* sse) {
+    int sum = 0;
+    *sse = 0;
+
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 16; ++j) {
+            const int diff = src[j] - 128;
+            sum += diff;
+            *sse += static_cast<std::uint32_t>(diff * diff);
+        }
+
+        src += srcStride;
+    }
+
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (16 * 16));
+}
+
+// 1:1 port of svt_aom_variance8x8_c (C_DEFAULT/variance.c:184-190) at
+// W*H = 64, same const-128 offs shape.
+std::uint32_t variance8x8(const std::uint8_t* src, int srcStride, std::uint32_t* sse) {
+    int sum = 0;
+    *sse = 0;
+
+    for (int i = 0; i < 8; ++i) {
+        for (int j = 0; j < 8; ++j) {
+            const int diff = src[j] - 128;
+            sum += diff;
+            *sse += static_cast<std::uint32_t>(diff * diff);
+        }
+
+        src += srcStride;
+    }
+
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (8 * 8));
+}
+
+// 1:1 ports of svt_av1_get_sby_perpixel_variance (pic_analysis_process.c:
+// 944-952) at the two sizes the detectors use: the VAR kernel above, then
+// ROUND_POWER_OF_TWO(var, 8) / ROUND_POWER_OF_TWO(var, 6)
+// (definitions.h:457; eb_num_pels_log2_lookup common_utils.c:39).
+std::uint32_t getSbyPerpixelVariance16x16(const std::uint8_t* src, int stride) {
+    std::uint32_t sse = 0;
+    const std::uint32_t var = variance16x16(src, stride, &sse);
+    return (var + 128) >> 8;
+}
+
+std::uint32_t getSbyPerpixelVariance8x8(const std::uint8_t* src, int stride) {
+    std::uint32_t sse = 0;
+    const std::uint32_t var = variance8x8(src, stride, &sse);
+    return (var + 32) >> 6;
+}
+
+// 1:1 port of svt_aom_is_screen_content (pic_analysis_process.c:1354-1429).
+// Both passes, both thresholds, all five class formulas and the int
+// arithmetic of the reference's comparisons are kept verbatim; the
+// pcs->enhanced_pic indirection is threaded as the y/stride/dims params
+// and the six sc_class fields become the returned struct (scClass5 stays
+// zero-init: the reference never writes it here).
+ScClasses isScreenContent(const std::uint8_t* y, std::uint32_t yStride,
+                          std::uint32_t width, std::uint32_t height) {
+    ScClasses classes = {};
+    int blkW = 16;
+    int blkH = 16;
+    // These threshold values are selected experimentally. (:1357-1359)
+    int colorThresh = 4;
+    int varThresh = 0;
+    // Counts of blocks with no more than color_thresh colors. (:1360-1361)
+    int counts1 = 0;
+    // Counts of blocks with no more than color_thresh colors and variance
+    // larger than var_thresh. (:1362-1364)
+    int counts2 = 0;
+
+    for (int r = 0; r + blkH <= static_cast<int>(height); r += blkH) {
+        for (int c = 0; c + blkW <= static_cast<int>(width); c += blkW) {
+            {
+                const std::uint8_t* src = y + r * static_cast<int>(yStride) + c;
+
+                if (isValidPaletteNbColors(src, static_cast<int>(yStride), blkH, blkW, colorThresh)) {
+                    ++counts1;
+                    const int var = static_cast<int>(getSbyPerpixelVariance16x16(src, static_cast<int>(yStride)));
+                    if (var > varThresh) {
+                        ++counts2;
+                    }
+                }
+            }
+        }
+    }
+
+    // The threshold values are selected experimentally. (:1385)
+    classes.scClass0 = counts1 * blkH * blkW * 10 > static_cast<int>(width * height);
+
+    // IntraBC would force loop filters off, so we use more strict rules
+    // that also requires that the block has high variance. (:1388-1389)
+    classes.scClass1 = classes.scClass0 &&
+        (counts2 * blkH * blkW * 12 > static_cast<int>(width * height));
+
+    classes.scClass2 = classes.scClass1 ||
+        (counts1 * blkH * blkW * 10 > static_cast<int>(width * height) * 4 &&
+         counts2 * blkH * blkW * 30 > static_cast<int>(width * height));
+
+    classes.scClass3 = classes.scClass1 ||
+        (counts1 * blkH * blkW * 8 > static_cast<int>(width * height) &&
+         counts2 * blkH * blkW * 50 > static_cast<int>(width * height));
+
+    blkW = 8;
+    blkH = 8;
+    // These threshold values are selected experimentally. (:1402-1404)
+    colorThresh = 4;
+    varThresh = 16;
+    counts1 = 0;
+    counts2 = 0;
+    for (int r = 0; r + blkH <= static_cast<int>(height); r += blkH) {
+        for (int c = 0; c + blkW <= static_cast<int>(width); c += blkW) {
+            {
+                const std::uint8_t* src = y + r * static_cast<int>(yStride) + c;
+
+                if (isValidPaletteNbColors(src, static_cast<int>(yStride), blkH, blkW, colorThresh)) {
+                    ++counts1;
+                    const int var = static_cast<int>(getSbyPerpixelVariance8x8(src, static_cast<int>(yStride)));
+                    if (var > varThresh) {
+                        ++counts2;
+                    }
+                }
+            }
+        }
+    }
+    classes.scClass4 = (counts1 * blkH * blkW * 18 > static_cast<int>(width * height)) &&
+        (counts2 * blkH * blkW * 20 > static_cast<int>(width * height));
+
+    return classes;
+}
+
+// 1:1 port of svt_aom_sc_AA_collect_counts (pic_analysis_process.c:1088-1190).
+// The multiplier, the checkerboard skip, the per-block classify chain and
+// the x2 fast counts are the reference's own, kept verbatim.
+ScAaCounts scAaCollectCounts(const std::uint8_t* y, std::uint32_t yStride,
+                             std::uint32_t width, std::uint32_t height,
+                             int blkW, int blkH,
+                             int complexInitialColorThresh, int simpleColorThresh,
+                             int complexFinalColorThresh, int varThresh,
+                             bool fastDetection, std::uint8_t* dilatedBlk) {
+    ScAaCounts outputCounts = {};
+
+    // Skip every other block and weigh each block twice as much when
+    // performing fast detection (:1096-1098)
+    const int multiplier = fastDetection ? 2 : 1;
+
+    for (int r = 0; r + blkH <= static_cast<int>(height); r += blkH) {
+        // Alternate skipping in a "checkerboard" pattern when performing
+        // fast detection (:1101-1102)
+        const int initialCol = (fastDetection && (r / blkH) % 2) ? blkW : 0;
+
+        for (int c = initialCol; c + blkW <= static_cast<int>(width); c += blkW * multiplier) {
+            // Identify quadrant for this block (2x2 regions) (:1105-1108)
+            const int w2 = static_cast<int>(width) >> 1;
+            const int h2 = static_cast<int>(height) >> 1;
+            const int regionId = ((r >= h2) ? 2 : 0) + ((c >= w2) ? 1 : 0);
+
+            const std::uint8_t* src = y + r * static_cast<int>(yStride) + c;
+
+            int numberOfColors = 0;
+            bool isPalette = false;
+            bool isPhoto = false;
+            bool isIntrabc = false;
+
+            // First, find if the block could be palletized (:1117-1124)
+            if (countColorsWithThreshold(src,
+                                         static_cast<int>(yStride),
+                                         blkH,
+                                         blkW,
+                                         complexInitialColorThresh,
+                                         &numberOfColors) &&
+                numberOfColors > 1) {
+                if (numberOfColors <= simpleColorThresh) {
+                    // Simple block detected, add to block count with no
+                    // further processing required (:1125-1132)
+                    isPalette = true;
+
+                    const int var = static_cast<int>(blkH == 16
+                        ? getSbyPerpixelVariance16x16(src, static_cast<int>(yStride))
+                        : getSbyPerpixelVariance8x8(src, static_cast<int>(yStride)));
+                    if (var > varThresh) {
+                        isIntrabc = true;
+                    }
+
+                } else {
+                    // Complex block detected, try to find if it's
+                    // palettizable - dilate block with dominant color, to
+                    // exclude anti-aliased pixels from final palette count
+                    // (:1134-1142)
+                    dilateBlock(src,
+                                static_cast<int>(yStride),
+                                dilatedBlk,
+                                blkW,
+                                blkH,
+                                blkW);
+
+                    if (countColorsWithThreshold(dilatedBlk,
+                                                 blkW,
+                                                 blkH,
+                                                 blkW,
+                                                 complexFinalColorThresh,
+                                                 &numberOfColors)) {
+                        const int var = static_cast<int>(blkH == 16
+                            ? getSbyPerpixelVariance16x16(src, static_cast<int>(yStride))
+                            : getSbyPerpixelVariance8x8(src, static_cast<int>(yStride)));
+                        if (var > varThresh) {
+                            isPalette = true;
+                            isIntrabc = true;
+                        }
+                    }
+                }
+            } else {
+                if (numberOfColors > complexInitialColorThresh) {
+                    isPhoto = true;
+                }
+            }
+
+            if (isPalette) {
+                ++outputCounts.countPalette;
+                ++outputCounts.regionPalette[regionId];
+            }
+            if (isIntrabc) {
+                ++outputCounts.countIntrabc;
+                ++outputCounts.regionIntrabc[regionId];
+            }
+            if (isPhoto) {
+                ++outputCounts.countPhoto;
+                ++outputCounts.regionPhoto[regionId];
+            }
+        }
+    }
+    if (fastDetection) {
+        outputCounts.countPhoto *= multiplier;
+        outputCounts.countPalette *= multiplier;
+        outputCounts.countIntrabc *= multiplier;
+
+        for (int i = 0; i < 4; ++i) {
+            outputCounts.regionPhoto[i] *= multiplier;
+            outputCounts.regionPalette[i] *= multiplier;
+            outputCounts.regionIntrabc[i] *= multiplier;
+        }
+    }
+
+    return outputCounts;
+}
+
+// 1:1 port of svt_aom_is_screen_content_antialiasing_aware
+// (pic_analysis_process.c:1207-1350). The threshold constants, the two
+// collect calls, the region pass loop and all six class formulas are the
+// reference's own; blk_area16/8 are the :1208-1215 enum values. The DEBUG
+//_AA_SCM stats-file block (:1236-1251, :1322-1349) is a debug-only sink,
+// not ported.
+ScClasses isScreenContentAaAware(const std::uint8_t* y, std::uint32_t yStride,
+                                 std::uint32_t width, std::uint32_t height,
+                                 bool fastDetection) {
+    ScClasses classes = {};
+    enum {
+        blkW16 = 16,
+        blkH16 = 16,
+        blkArea16 = 16 * 16,
+        blkW8 = 8,
+        blkH8 = 8,
+        blkArea8 = 8 * 8,
+    };
+
+    // These threshold values are selected experimentally. (:1218-1226)
+    // Detects text and glyphs without anti-aliasing, and graphics with a
+    // 4-color palette
+    const int simpleColorThresh = 4;
+    // Detects potential text and glyphs with anti-aliasing, and graphics
+    // with a more extended color palette
+    const int complexInitialColorThresh = 40;
+    // Detects text and glyphs with anti-aliasing, and graphics with a more
+    // extended color palette
+    const int complexFinalColorThresh = 6;
+    // Counts of blocks with no more than final_color_thresh colors
+    const int varThresh = 5;
+    // Counts of blocks that are candidates for using palette mode
+    std::int64_t countPalette16 = 0;
+    std::int64_t countPalette8 = 0;
+    // Count of blocks that are candidates for using IntraBC than var_thresh
+    std::int64_t countIntrabc16 = 0;
+    std::int64_t countIntrabc8 = 0;
+    // Count of "photo-like" blocks (i.e. can't use palette mode or IntraBC)
+    std::int64_t countPhoto16 = 0;
+
+    std::uint8_t dilatedBlk16[blkArea16];
+    std::uint8_t dilatedBlk8[blkArea8];
+
+    const std::int64_t area = static_cast<std::int64_t>(width) * height;
+
+    const ScAaCounts counts16 = scAaCollectCounts(y,
+                                                  yStride,
+                                                  width,
+                                                  height,
+                                                  blkW16,
+                                                  blkH16,
+                                                  complexInitialColorThresh,
+                                                  simpleColorThresh,
+                                                  complexFinalColorThresh,
+                                                  varThresh,
+                                                  fastDetection,
+                                                  dilatedBlk16);
+    countPhoto16 = counts16.countPhoto;
+    countPalette16 = counts16.countPalette;
+    countIntrabc16 = counts16.countIntrabc;
+
+    // SC_class4, SC_class5 (:1276-1278)
+    const int complexFinalColorThresh8 = 8;
+    const int varThresh8 = 50;
+
+    const ScAaCounts counts8 = scAaCollectCounts(y,
+                                                 yStride,
+                                                 width,
+                                                 height,
+                                                 blkW8,
+                                                 blkH8,
+                                                 complexInitialColorThresh,
+                                                 simpleColorThresh,
+                                                 complexFinalColorThresh8,
+                                                 varThresh8,
+                                                 fastDetection,
+                                                 dilatedBlk8);
+
+    countPalette8 = counts8.countPalette;
+    countIntrabc8 = counts8.countIntrabc;
+
+    // The threshold values are selected experimentally. (:1295-1297)
+    // Penalize presence of photo-like blocks (1/16th the weight of a
+    // palettizable block)
+    classes.scClass0 =
+        ((countPalette16 - countPhoto16 / 16) * blkArea16 * 10 > area);
+
+    // IntraBC would force loop filters off, so we use more strict rules
+    // that also requires that the block has high variance. (:1299-1302)
+    // Penalize presence of photo-like blocks (1/16th the weight of a
+    // palettizable block)
+    classes.scClass1 = classes.scClass0 &&
+        ((countIntrabc16 - countPhoto16 / 16) * blkArea16 * 12 > area);
+
+    classes.scClass2 = classes.scClass1 ||
+        (countPalette16 * blkArea16 * 15 > area * 4 && countIntrabc16 * blkArea16 * 30 > area);
+
+    classes.scClass3 = classes.scClass1 ||
+        (countPalette16 * blkArea16 * 8 > area && countIntrabc16 * blkArea16 * 50 > area);
+
+    const std::int64_t regionArea = area >> 2;  // area/4 for 2x2 regions
+    int pass = 0;
+
+    for (int i = 0; i < 4; ++i) {
+        if ((counts8.regionPalette[i] * blkArea8 * 10 > regionArea) &&
+            (counts8.regionIntrabc[i] * blkArea8 * 25 > regionArea)) {
+            pass++;
+        }
+    }
+    classes.scClass4 = (pass >= 3) && (countPalette8 * blkArea8 * 5 > area);
+    classes.scClass5 = (pass >= 3) &&
+        ((countPalette8 * blkArea8 * 10 > area) && (countIntrabc8 * blkArea8 * 23 > area));
+
+    return classes;
 }
 
 // 1:1 port of svt_aom_downsample_2d_c (pic_analysis_process.c:134-164).

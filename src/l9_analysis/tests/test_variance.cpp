@@ -581,6 +581,461 @@ TEST_CASE("calculateHistogram honors stride != width") {
     CHECK(sum == 120);
 }
 
+TEST_CASE("countColorsWithThreshold passes a solid block with the count 1") {
+    // 1:1 target: svt_av1_count_colors_with_threshold
+    // (third_party/SVT-AV1/Source/Lib/Codec/pic_analysis_process.c:911-930):
+    // a 256-entry has_color[] flag array, one bit per distinct pixel value,
+    // early-exit FALSE once the count exceeds num_colors_threshold. A solid
+    // block has one distinct value: the function returns true and reports
+    // num_colors = 1 (the AA-aware caller additionally requires > 1,
+    // :1118-1124 - that check lives at the caller, not here).
+    std::uint8_t src[8 * 8];
+    for (int i = 0; i < 8 * 8; ++i) {
+        src[i] = 10;
+    }
+    int numColors = -1;
+    CHECK(analysis::countColorsWithThreshold(src, 8, 8, 8, 4, &numColors));
+}
+
+TEST_CASE("countColorsWithThreshold exits early with the count at threshold + 1") {
+    // The early exit is part of the contract (:922-925): the scan returns
+    // false the moment the count exceeds the threshold, so a distinct value
+    // planted LATER in scan order must never be counted. Fixture: row-major
+    // order plants 20/30/40 at (0,1..3) and the 5th distinct value 50 at
+    // (0,4) with threshold 4 - the faithful port stops there (count 5,
+    // false); a mutant that scans on counts the 99 at (0,7) as a 6th color.
+    std::uint8_t src[8 * 8];
+    for (int i = 0; i < 8 * 8; ++i) {
+        src[i] = 10;
+    }
+    src[1] = 20;
+    src[2] = 30;
+    src[3] = 40;
+    src[4] = 50;
+    src[7] = 99;
+    int numColors = -1;
+    const bool ok = analysis::countColorsWithThreshold(src, 8, 8, 8, 4, &numColors);
+    CHECK_FALSE(ok);
+    CHECK(numColors == 5);
+}
+
+TEST_CASE("isValidPaletteNbColors accepts a two-color block at threshold 4") {
+    // 1:1 target: is_valid_palette_nb_colors
+    // (pic_analysis_process.c:956-978, static): the same has_color[] scan as
+    // count_colors_with_threshold PLUS the palette gate the caller relies
+    // on: nb_colors <= 1 is NOT a valid palette (:973-975) - a valid
+    // palette block has between 2 and nb_colors_threshold distinct colors.
+    // Fixture: a 2x2 checkerboard of 10/20, 2 colors <= 4 -> true.
+    std::uint8_t src[2 * 2] = {10, 20, 10, 20};
+    CHECK(analysis::isValidPaletteNbColors(src, 2, 2, 2, 4));
+}
+
+TEST_CASE("isValidPaletteNbColors rejects a solid block (nb_colors <= 1)") {
+    // The :973-975 palette gate: a one-color block is NOT a valid palette
+    // even though it never trips the threshold. This pins the gate the
+    // count_colors_with_threshold twin does NOT have (that one returns true
+    // on a solid block - asserted in its own test above).
+    std::uint8_t src[4 * 4];
+    for (int i = 0; i < 4 * 4; ++i) {
+        src[i] = 77;
+    }
+    CHECK_FALSE(analysis::isValidPaletteNbColors(src, 4, 4, 4, 4));
+}
+
+TEST_CASE("isValidPaletteNbColors rejects more colors than the threshold") {
+    // The early exit (:967-969) is LOAD-BEARING for the boolean here: the
+    // final gate is only nb_colors <= 1 (:973-975), so without the early
+    // exit a 5-color block at threshold 4 would fall through to TRUE.
+    // Fixture: a 2-color checkerboard (10/20) plus three planted values
+    // 30/40/50 spread over the block - 5 distinct at threshold 4 -> false.
+    std::uint8_t src[4 * 4];
+    for (int i = 0; i < 4 * 4; ++i) {
+        src[i] = ((i & 1) == 0) ? 10 : 20;
+    }
+    src[0] = 30;
+    src[5] = 40;
+    src[10] = 50;
+    CHECK_FALSE(analysis::isValidPaletteNbColors(src, 4, 4, 4, 4));
+}
+
+TEST_CASE("findDominantValue breaks count ties toward the FIRST maximum") {
+    // 1:1 target: svt_av1_find_dominant_value
+    // (pic_analysis_process.c:984-1003): the update is STRICTLY greater
+    // (:995), so on a count tie the value whose maximum count was reached
+    // FIRST in scan order wins. The implementation landed alongside slice
+    // 3's GREEN edit (over-written), so this case's RED evidence is its
+    // mutation: >= in the update flips the winner here. Fixture (4x4,
+    // row-major): 5 x5 (last at (3,1)), 9 x5 (last at (3,2)), 7 x4,
+    // 3 x2 - counts tie at 5 and 5's maximum is reached first, so the
+    // dominant is 5; a >= mutant updates to 9 at (3,2).
+    std::uint8_t src[4 * 4] = {5, 5, 5, 9, 9, 9, 9, 5, 3, 3, 7, 7, 7, 5, 9, 7};
+    CHECK(analysis::findDominantValue(src, 4, 4, 4) == 5);
+}
+
+TEST_CASE("dilateBlock overwrites through DIAGONALS and stays inside the block") {
+    // 1:1 target: svt_av1_dilate_block (pic_analysis_process.c:1024-1076):
+    // copy, then every dominant pixel writes the dominant value into all
+    // EIGHT neighbours, each bound-gated, one pass (the source is read,
+    // never the dilated buffer). The implementation landed alongside slice
+    // 3's GREEN edit (over-written), so this case's RED evidence is its
+    // mutation. Fixture 4x4 (D = 3 dominant at 11 px, n = 8): the target
+    // (1,1) has ALL FOUR 4-adjacent neighbours non-dominant and only its
+    // four diagonals dominant, so a faithful port overwrites it via the
+    // corner dilates while a 4-direction-only mutant (or a no-dilation
+    // copy) leaves it 8. Poison 99s fill src cols 4-7 (stride 8) and the
+    // dilated buffer is 4x8 zero-initialised with dilated_stride 8: the
+    // reference only ever writes rows/cols of the block, so cols 4-7 must
+    // stay 0 (the detector passes dilated_stride = blk_w, :1140).
+    std::uint8_t src[4 * 8] = {0};
+    static const std::uint8_t kBlock[4][4] = {{3, 8, 3, 3}, {8, 8, 8, 3}, {3, 8, 3, 3}, {3, 3, 3, 3}};
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            src[y * 8 + x] = kBlock[y][x];
+        }
+        for (int x = 4; x < 8; ++x) {
+            src[y * 8 + x] = 99;
+        }
+    }
+    std::uint8_t dilated[4 * 8] = {0};
+    analysis::dilateBlock(src, 8, dilated, 8, 4, 4);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            CHECK(dilated[y * 8 + x] == 3);
+        }
+        for (int x = 4; x < 8; ++x) {
+            CHECK(dilated[y * 8 + x] == 0);
+        }
+    }
+}
+
+TEST_CASE("variance16x16 of a constant 200 block is 0 with sse 1327104") {
+    // 1:1 targets: the VAR(W,H) macro instance svt_aom_variance16x16_c
+    // (third_party/SVT-AV1/Source/Lib/C_DEFAULT/variance.c:184-190, via
+    // variance_c :141-158) called the way the detectors call it
+    // (pic_analysis_process.c:950/:1129/:1150/:1376/:1417): b =
+    // svt_aom_eb_av1_var_offs (pic_analysis_process.c:936-942, constant
+    // 128) at ref_stride 0. variance_c: diff = a[j] - 128, sum += diff
+    // (int), sse += diff*diff (uint32); the macro returns
+    // sse - (uint32_t)(((int64_t)sum*sum) / 256). With b = const 128 the
+    // offset cancels: var = sum((a-mean)^2) - the population variance sum.
+    // Fixture: all 200 -> diff 72 each, sum = 18432, sse = 256*5184 =
+    // 1327104, sum^2/256 = 1327104 exact, var = 0.
+    std::uint8_t src[16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        src[i] = 200;
+    }
+    std::uint32_t sse = 0;
+    const std::uint32_t var = analysis::variance16x16(src, 16, &sse);
+    CHECK(var == 0);
+    CHECK(sse == 1327104);
+}
+
+TEST_CASE("variance16x16 truncates the sum-squared division") {
+    // The :189 division ((int64_t)sum*sum) / 256 is INTEGER division. The
+    // implementation landed in slice 8's GREEN edit (over-written), so this
+    // case's RED evidence is its mutation (the division rounded instead of
+    // truncated). Fixture: 100 px at 129 (+1) and 156 px at 127 (-1):
+    // sum = -56, sum^2 = 3136, 3136/256 = 12.25 -> 12 truncated (a ceil
+    // mutant uses 13), sse = 256, var = 256 - 12 = 244.
+    std::uint8_t src[16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        src[i] = 127;
+    }
+    for (int i = 0; i < 100; ++i) {
+        src[i] = 129;
+    }
+    std::uint32_t sse = 0;
+    const std::uint32_t var = analysis::variance16x16(src, 16, &sse);
+    CHECK(var == 244);
+    CHECK(sse == 256);
+}
+
+TEST_CASE("variance8x8 of a mixed block applies the same VAR arithmetic at 64 pels") {
+    // 1:1 target: the VAR(W,H) instance svt_aom_variance8x8_c
+    // (C_DEFAULT/variance.c:184-190) at W*H = 64, same const-128 offs call
+    // (pic_analysis_process.c:1417). Fixture: 32 px at 130 (+2), 32 px at
+    // 126 (-2): sum = 0, sse = 64*4 = 256, sum^2/64 = 0, var = 256.
+    std::uint8_t src[8 * 8];
+    for (int i = 0; i < 8 * 8; ++i) {
+        src[i] = (i < 32) ? 130 : 126;
+    }
+    std::uint32_t sse = 0;
+    const std::uint32_t var = analysis::variance8x8(src, 8, &sse);
+    CHECK(var == 256);
+    CHECK(sse == 256);
+}
+
+TEST_CASE("getSbyPerpixelVariance16x16 rounds with +128 before >> 8") {
+    // 1:1 target: svt_av1_get_sby_perpixel_variance
+    // (pic_analysis_process.c:944-952) at BLOCK_16X16:
+    // ROUND_POWER_OF_TWO(var, eb_num_pels_log2_lookup[BLOCK_16X16])
+    // (definitions.h:457, common_utils.c:39 -> 8): (var + 128) >> 8. The
+    // fixture pins the ROUNDING TERM exactly: 16 px at 130 (+2) and 16 px
+    // at 126 (-2), the rest 128 -> sum = 0, sse = 32*4 = 128, var = 128;
+    // (128 + 128) >> 8 = 1 while a bare >> 8 (no +128) gives 0.
+    std::uint8_t src[16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        src[i] = (i < 32) ? ((i < 16) ? 130 : 126) : 128;
+    }
+    CHECK(analysis::getSbyPerpixelVariance16x16(src, 16) == 1);
+}
+
+TEST_CASE("getSbyPerpixelVariance8x8 rounds with +32 before >> 6") {
+    // Same :944-952 target at BLOCK_8X8: eb_num_pels_log2_lookup -> 6
+    // (common_utils.c:39), ROUND_POWER_OF_TWO -> (var + 32) >> 6. The
+    // implementation landed in slice 10's GREEN edit (over-written), so
+    // this case's RED evidence is its mutation (the rounding term). The
+    // fixture pins it: 4 px at 130 (+2) and 4 px at 126 (-2), the rest 128
+    // -> sum = 0, sse = 8*4 = 32, var = 32; (32 + 32) >> 6 = 1 while a
+    // bare >> 6 gives 0.
+    std::uint8_t src[8 * 8];
+    for (int i = 0; i < 8 * 8; ++i) {
+        src[i] = (i < 8) ? ((i < 4) ? 130 : 126) : 128;
+    }
+    CHECK(analysis::getSbyPerpixelVariance8x8(src, 8) == 1);
+}
+
+TEST_CASE("isScreenContent classes a checkerboard frame screen at every class") {
+    // 1:1 target: svt_aom_is_screen_content (pic_analysis_process.c:1354-1429).
+    // TWO passes: 16x16 (color_thresh 4, var_thresh 0) feeding sc_class0..3
+    // (:1386-1398), then 8x8 (color_thresh 4, var_thresh 16) feeding
+    // sc_class4 (:1427-1428, the 18/20 multipliers). sc_class5 is NOT
+    // written by this function (grep-verified :1386-1428); the port's
+    // zero-init false there is named. Reference outputs are the
+    // pcs->sc_class0..5 uint8_t fields (pcs.h:972-980); the port returns a
+    // struct of bool (the assigned values are 0/1 either way).
+    //
+    // Synthetic (edge-dense, the verdict-flipping frame): 64x64 at stride
+    // 64, checkerboard (x+y)&1 ? 255 : 0. Every 16x16 block: 2 colors ->
+    // valid palette; variance: diffs from 128 are -128/+127, sum = -128,
+    // sse = 128*16384 + 128*16129 = 4161664, sum^2/256 = 64, var = 4161600,
+    // per-pixel (4161600+128)>>8 = 16256 > 0 -> counts_2. counts_1 =
+    // counts_2 = 16 of 16 blocks. W*H = 4096:
+    //   class0: 16*256*10 = 40960 > 4096; class1: class0 && 16*256*12 =
+    //   49152 > 4096; class2/class3 via class1. 8x8 pass: every 8x8 block
+    //   2 colors, var = (1040400+32)>>6 = 16256 > 16 -> counts_2 = 64;
+    //   class4: 64*64*18 = 73728 > 4096 && 64*64*20 = 81920 > 4096.
+    // Every class reads true. The smooth-frame counterpart is the next
+    // case.
+    std::uint8_t src[64 * 64];
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            src[y * 64 + x] = (std::uint8_t)(((x + y) & 1) ? 255 : 0);
+        }
+    }
+    const analysis::ScClasses classes = analysis::isScreenContent(src, 64, 64, 64);
+    CHECK(classes.scClass0);
+    CHECK(classes.scClass1);
+    CHECK(classes.scClass2);
+    CHECK(classes.scClass3);
+    CHECK(classes.scClass4);
+}
+
+TEST_CASE("isScreenContent classes a smooth ramp frame not screen at every class") {
+    // The negative counterpart: 64x64 ramp src[y][x] = (y*16 + x) & 255.
+    // Every 16x16 block holds 256 DISTINCT values (y*16+x is injective over
+    // [0,15]^2 and the block offset only shifts the multiset mod 256), so
+    // is_valid_palette_nb_colors exits at the 5th color -> counts_1 = 0;
+    // every 8x8 block holds 64 distinct values (8 disjoint runs of 8, the
+    // mod-256 wrap cannot collide: consecutive runs start 16 apart) ->
+    // counts_1 = 0 there too. Every class formula gets 0 counts: all five
+    // read false. This case's RED evidence is its mutation (the palette
+    // test inside the 16x16 pass hardwired true): a mutant that skips the
+    // palette gate fills counts_1 = 16 on the ramp and class0 flips true.
+    std::uint8_t src[64 * 64];
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            src[y * 64 + x] = (std::uint8_t)((y * 16 + x) & 255);
+        }
+    }
+    const analysis::ScClasses classes = analysis::isScreenContent(src, 64, 64, 64);
+    CHECK_FALSE(classes.scClass0);
+    CHECK_FALSE(classes.scClass1);
+    CHECK_FALSE(classes.scClass2);
+    CHECK_FALSE(classes.scClass3);
+    CHECK_FALSE(classes.scClass4);
+    CHECK_FALSE(classes.scClass5);
+}
+
+// AN8 AA-aware fixture: 64x64 at stride 72 (poison 99s fill cols 64-71 and
+// rows 64-71 - the collect scan must never read them). 16x16 block grid:
+// (0,0) + every block except the three named ones = checkerboard
+// ((x+y)&1 ? 255 : 0); block (0,1) = the dilate fixture (all 10s except
+// 20/30/40/50 at (0,1)/(0,2)/(1,0)/(1,2) of the block, each 8-adjacent to
+// a 10); block (0,2) = the ramp (y*16+x) photo block; block (1,1) = solid
+// 10s (neither palette nor photo - the n > 1 caller gate, :1124/:1158).
+static void buildAaFixture(std::uint8_t* src) {
+    for (int y = 0; y < 71; ++y) {
+        for (int x = 0; x < 72; ++x) {
+            src[y * 72 + x] = 99;
+        }
+    }
+    for (int by = 0; by < 4; ++by) {
+        for (int bx = 0; bx < 4; ++bx) {
+            for (int y = 0; y < 16; ++y) {
+                for (int x = 0; x < 16; ++x) {
+                    const int gy = by * 16 + y;
+                    const int gx = bx * 16 + x;
+                    std::uint8_t v = (std::uint8_t)(((gx + gy) & 1) ? 255 : 0);
+                    if (by == 0 && bx == 1) {
+                        // dilate fixture: 252 x 10 + four rare values
+                        v = 10;
+                        if (y == 0 && x == 1) {
+                            v = 20;
+                        }
+                        if (y == 0 && x == 2) {
+                            v = 30;
+                        }
+                        if (y == 1 && x == 0) {
+                            v = 40;
+                        }
+                        if (y == 1 && x == 2) {
+                            v = 50;
+                        }
+                    } else if (by == 0 && bx == 2) {
+                        v = (std::uint8_t)((gy * 16 + gx) & 255);
+                    } else if (by == 1 && bx == 1) {
+                        v = 10;
+                    }
+                    src[gy * 72 + gx] = v;
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("scAaCollectCounts classifies the mixed fixture with regions and no fast skip") {
+    // 1:1 target: svt_aom_sc_AA_collect_counts
+    // (pic_analysis_process.c:1088-1190, static) as called for the 16x16
+    // pass (:1261-1271: thresh 40/4/6, var_thresh 5, fast false). Per
+    // block: count_colors_with_threshold(40) && n > 1 -> simple (n <= 4:
+    // palette, +intrabc when var > 5) or complex (dilate with the dominant
+    // value, then <= 6 colors && var > 5: palette + intrabc); otherwise
+    // photo iff n > 40 (:1157-1161). region_id = ((r >= h2)?2:0) +
+    // ((c >= w2)?1:0), w2 = h2 = 32 (:1106-1108).
+    //
+    // Hand-derived: checkerboard blocks (14 of 16) -> palette + intrabc
+    // (2 colors <= 4, var 16256 > 5); the dilate block -> initial n = 5
+    // (10/20/30/40/50) -> complex -> dilated to all 10s -> n = 1 <= 6 and
+    // var: sum = -30108, sse = 3543596, sum^2/256 = 3540983, var = 2613,
+    // per-pixel (2613+128)>>8 = 10 > 5 -> palette + intrabc; the ramp
+    // block -> n = 41 > 40 -> photo; the solid block -> n = 1, not > 1,
+    // not > 40 -> NOTHING. counts: palette = intrabc = 14, photo = 1.
+    // Regions (block grid 4x4): region 0 holds (0,0) cb, (0,1) dilate,
+    // (16,0) cb, (1,1) solid -> palette 3; region 1 holds the photo block
+    // (0,2) -> palette 3, photo 1; regions 2/3 all cb -> palette 4 each.
+    std::uint8_t src[71 * 72];
+    buildAaFixture(src);
+    std::uint8_t dilated[16 * 16];
+    const analysis::ScAaCounts counts =
+        analysis::scAaCollectCounts(src, 72, 64, 64, 16, 16, 40, 4, 6, 5, false, dilated);
+    CHECK(counts.countPalette == 14);
+    CHECK(counts.countIntrabc == 14);
+    CHECK(counts.countPhoto == 1);
+    CHECK(counts.regionPalette[0] == 3);
+    CHECK(counts.regionPalette[1] == 3);
+    CHECK(counts.regionPalette[2] == 4);
+    CHECK(counts.regionPalette[3] == 4);
+    CHECK(counts.regionPhoto[0] == 0);
+    CHECK(counts.regionPhoto[1] == 1);
+    CHECK(counts.regionPhoto[2] == 0);
+    CHECK(counts.regionPhoto[3] == 0);
+    CHECK(counts.regionIntrabc[0] == 3);
+    CHECK(counts.regionIntrabc[1] == 3);
+    CHECK(counts.regionIntrabc[2] == 4);
+    CHECK(counts.regionIntrabc[3] == 4);
+}
+
+TEST_CASE("scAaCollectCounts fast detection halves the visits and doubles the counts") {
+    // The fast-detection mechanics (:1096-1104, :1177-1187): multiplier 2;
+    // odd block rows start at column blk_w and BOTH loops step 2*blk_w -
+    // a checkerboard of visits (r=0: c {0,32}; r=16: c {16,48}; ...); the
+    // counts then multiply by 2 (regions too, :1182-1186). Hand-derived on
+    // the same fixture: visited = (0,0) cb, (0,32) photo, (16,16) solid,
+    // (16,48) cb, (32,0) cb, (32,32) cb, (48,16) cb, (48,48) cb ->
+    // palette = intrabc = 6, photo = 1; regions pre-multiplier: palette
+    // {1,1,2,2} (regions 2/3 hold TWO visited cb blocks each - (32,0)/
+    // (48,16) and (32,32)/(48,48)), photo {0,1,0,0} - after x2: palette/
+    // intrabc 12, photo 2, regions {2,2,4,4} / {0,2,0,0}. (The first
+    // write of this case asserted {4,4,4,4}/{0,2,0,2} - a hand-derivation
+    // error caught by the run; the implementation was not touched.)
+    std::uint8_t src[71 * 72];
+    buildAaFixture(src);
+    std::uint8_t dilated[16 * 16];
+    const analysis::ScAaCounts counts =
+        analysis::scAaCollectCounts(src, 72, 64, 64, 16, 16, 40, 4, 6, 5, true, dilated);
+    CHECK(counts.countPalette == 12);
+    CHECK(counts.countIntrabc == 12);
+    CHECK(counts.countPhoto == 2);
+    CHECK(counts.regionPalette[0] == 2);
+    CHECK(counts.regionPalette[1] == 2);
+    CHECK(counts.regionPalette[2] == 4);
+    CHECK(counts.regionPalette[3] == 4);
+    CHECK(counts.regionPhoto[1] == 2);
+    CHECK(counts.regionPhoto[3] == 0);
+}
+
+TEST_CASE("isScreenContentAaAware classes the checkerboard frame screen at every class") {
+    // 1:1 target: svt_aom_is_screen_content_antialiasing_aware
+    // (pic_analysis_process.c:1207-1350): two sc_AA_collect_counts calls -
+    // 16x16 with complex_final 6 / var_thresh 5 (:1261-1271) and 8x8 with
+    // complex_final_8 = 8 / var_thresh_8 = 50 (:1277-1290) - then the
+    // class formulas (:1297-1321): class0 = (palette16 - photo16/16)*256*10
+    // > area; class1 = class0 && (intrabc16 - photo16/16)*256*12 > area;
+    // class2 = class1 || (palette16*256*15 > 4*area && intrabc16*256*30 >
+    // area); class3 = class1 || (palette16*256*8 > area &&
+    // intrabc16*256*50 > area); region_area = area >> 2; a region passes
+    // when regionPalette*64*10 > regionArea && regionIntrabc*64*25 >
+    // regionArea; class4 = pass >= 3 && palette8*64*5 > area; class5 =
+    // pass >= 3 && palette8*64*10 > area && intrabc8*64*23 > area.
+    // blk_area16/8 are the :1208-1215 enum values 256/64.
+    //
+    // Checkerboard 64x64 (fast_detection false): every 16x16 block simple
+    // palette + intrabc (2 colors <= 4, var 16256 > 5) -> palette16 =
+    // intrabc16 = 16, photo16 = 0; every 8x8 the same at var_thresh 50 ->
+    // palette8 = intrabc8 = 64, all four regions hold 16 palette + 16
+    // intrabc 8x8 blocks -> 16*640 = 10240 > 1024 and 16*1600 = 25600 >
+    // 1024 -> pass = 4. class0: 16*2560 = 40960 > 4096; class1: 16*3072 =
+    // 49152 > 4096; class2/3 via class1; class4: 4 >= 3 && 64*320 = 20480
+    // > 4096; class5: 4 >= 3 && 40960 > 4096 && 64*1472 = 94208 > 4096.
+    // ALL SIX true.
+    std::uint8_t src[64 * 64];
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            src[y * 64 + x] = (std::uint8_t)(((x + y) & 1) ? 255 : 0);
+        }
+    }
+    const analysis::ScClasses classes = analysis::isScreenContentAaAware(src, 64, 64, 64, false);
+    CHECK(classes.scClass0);
+    CHECK(classes.scClass1);
+    CHECK(classes.scClass2);
+    CHECK(classes.scClass3);
+    CHECK(classes.scClass4);
+    CHECK(classes.scClass5);
+}
+
+TEST_CASE("isScreenContentAaAware classes the smooth ramp frame not screen") {
+    // The negative counterpart on the ramp (256 distinct values per 16x16
+    // block, 64 per 8x8): every block is PHOTO (count_colors_with_threshold
+    // exits at 41 > 40, :1157-1161) -> palette16 = intrabc16 = 0,
+    // photo16 = 16; palette8 = intrabc8 = 0. class0 = (0 - 16/16)*2560 =
+    // -2560 > 4096 FALSE; class1/2/3 false; the 8x8 regions hold 0 palette
+    // -> pass = 0 -> class4/class5 false. ALL SIX false.
+    std::uint8_t src[64 * 64];
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            src[y * 64 + x] = (std::uint8_t)((y * 16 + x) & 255);
+        }
+    }
+    const analysis::ScClasses classes = analysis::isScreenContentAaAware(src, 64, 64, 64, false);
+    CHECK_FALSE(classes.scClass0);
+    CHECK_FALSE(classes.scClass1);
+    CHECK_FALSE(classes.scClass2);
+    CHECK_FALSE(classes.scClass3);
+    CHECK_FALSE(classes.scClass4);
+    CHECK_FALSE(classes.scClass5);
+}
+
 TEST_CASE("calculateHistogram decimates rows and columns by decim_step") {
     // Both loops step by decim_step (:179-:180): at step 2 on a 4x4 the
     // sampled pixels are (0,0), (0,2), (2,0), (2,2). Fixture src[y][x] =
