@@ -340,11 +340,11 @@ Three other instruments, none of which gate a commit:
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 10/10 passed, 0 failed, 263.38 s** (re-measured 2026-11-01;
-  l4_intra is the slow one at ~216 s; `pipeline` ~51 s; `l3_transforms`
-  ~7 s; the rest under 0.5 s including the new l9_analysis. The RT21 fix
-  run itself measured 272.42 s at 9/9, and a judge re-run of that same
-  tree 267.47 s).
+- **ctest: 10/10 passed, 0 failed, 272.62 s** (re-measured 2026-11-01 at
+  AN2; l4_intra is the slow one at ~216 s; `pipeline` 53.46 s this run;
+  `l3_transforms` ~7 s; the rest under 0.5 s including the new l9_analysis.
+  Earlier runs of the same tree: the AN1 run 263.38 s, the RT21 fix run
+  272.42 s at 9/9, a judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
   bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-01: rebuilt, and
   byte-identical to the committed file). History, not a figure to chase:
@@ -356,8 +356,9 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
 - **Portable-C coverage: 13.1%** (see the completion metric section;
-  re-measured 2026-11-01: 20,677 of 157,718 non-blank lines, +18 from
-  20,659 - the AN1 mean8x8 port; the percentage is unchanged at one
+  re-measured 2026-11-01: 20,695 of 157,718 non-blank lines, +36 from
+  20,659 - the AN1 mean8x8 port and the AN2 meanSquare8x8 port, +18 each
+  in pic_analysis_process.c; the percentage is unchanged at one
   decimal).
 - **Committed artifacts: 9** `.obu` files, ALL content-1:1 on every plane
   (color4 was the last divergent one: its V 43/1024 residual was the chroma
@@ -584,7 +585,11 @@ are partly right and I re-measured rather than restated them:
   coverage_areas.txt), VARIANCE_PRECISION = 16 at pic_analysis_process.c:36.
   The campaign's 22-slice decomposition (AN0 scout, phases A-D) lives in
   docs/todo.md section A0; the target area is A11 in the coverage metric
-  below.
+  below. AN2 LANDED 2026-11-01: analysis::meanSquare8x8, the 8x8 port of
+  svt_compute_mean_squared_values_c (pic_analysis_process.c:220-240,
+  declaration twin compute_mean.h:26), same layer, same test file
+  (src/l9_analysis/tests/test_variance.cpp); the SSE2 twin cross-check and
+  the consumer-scale cross-check are recorded in the AN2 register entry.
 
 
 ## Completion metric (the portable-C coverage number)
@@ -594,10 +599,12 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-01 (AN1): 13.1%** (20,677 of 157,718 non-blank
-lines - the covered count moved +18 from 20,659, svt_compute_mean_c
-pic_analysis_process.c:194-214; the percentage is unchanged at one decimal
-because 18 lines is +0.011 pt). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
+**THE NUMBER, as measured 2026-11-01 (AN2): 13.1%** (20,695 of 157,718 non-blank
+lines - the covered count moved +36 from 20,659: the AN1 mean8x8 port and the
+AN2 meanSquare8x8 port, +18 each, svt_compute_mean_c
+pic_analysis_process.c:194-214 and svt_compute_mean_squared_values_c :220-240;
+the percentage is unchanged at one decimal
+because 36 lines is +0.023 pt). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
 hand-typed percentage, for the same reason a hand-typed line count is not
 allowed.
 
@@ -646,12 +653,12 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 0% | 0 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 0% | 18 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 0% | 36 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 30% | 440 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **20,677** |
+| | **TOTAL** | **254** | **157,718** | | **20,695** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

@@ -325,8 +325,8 @@ A0. SLICE-LEVEL STATE (the live register)
   fft_common.h 806 / firstpass.c 210 / firstpass.h 92. Reference root:
   third_party/SVT-AV1/Source/Lib/Codec/.
   Phase A - RDO-feeding primitives (host): AN1 mean8x8
-  (pic_analysis_process.c:194 + compute_mean.h:21) LANDED; AN2
-  meanSquare8x8 (:220 + compute_mean.h:26); AN3 the sub-mean pair
+   (pic_analysis_process.c:194 + compute_mean.h:21) LANDED; AN2
+   meanSquare8x8 (:220 + compute_mean.h:26) LANDED; AN3 the sub-mean pair
   (:242/:263 + compute_mean.h:31/:34); AN4 interm_var_four8x8 (:286 +
   compute_mean.h:40); AN5 calculate_histogram (:170); AN6 downsample_2d
   (:134); AN7 the b64 variance pyramid (compute_b64_variance :318); AN8
@@ -392,6 +392,45 @@ A0. SLICE-LEVEL STATE (the live register)
   0.00 -> 0.0015 (18 non-blank ref lines, pic_analysis_process.c:194-214);
   20,677/157,718 = 13.1% at one decimal - unchanged at printed precision,
   the movement is in the covered column.
+- [x] AN2 LANDED (2026-11-01): analysis::meanSquare8x8, the 8x8 port of
+  svt_compute_mean_squared_values_c - pic_analysis_process.c:220-240,
+  declaration twin compute_mean.h:26, VARIANCE_PRECISION = 16 at :36.
+  Derivation BEFORE the test: uint64 accumulation of src[hi]*src[hi]
+  (uint8 promotes to int, 255*255 = 65025; 64 terms max 4,161,600), then
+  (sumSq << 16) / (w*h) - shift FIRST, truncating division, no rounding
+  term (:237). At 8x8 the division is exact for every sumSq (64 = 2^6
+  divides 2^16) = sumSq * 1024, so no 8x8 test can discriminate
+  shift-then-divide from divide-then-shift; the order is settled by the
+  :237 citation. Cross-checks: the SSE2 twin
+  svt_compute_mean_of_squared_values8x8_sse2_intrin
+  (ASM_SSE2/compute_mean_intrin_sse2.c:76-114) sums all 8 rows and
+  returns sumSq << 10 - consistent; the consumer variance formula
+  (meanSq - mean*mean) >> VARIANCE_PRECISION (:415-417) needs meanSq on a
+  << 16 scale, which sumSq << 10 on the 64-pixel sum delivers.
+  SKETCH VERDICT: the scout's "9<<16 scaled" for a constant-3 block is
+  CONFIRMED by the derivation: sumSq = 576, (576 << 16)/64 = 589824 =
+  9 << 16.
+  RED (captured): test_variance.cpp(52,5): error C2039: 'meanSquare8x8':
+  is not a member of 'analysis'.
+  GREEN: the 8x8 port, zero warnings under /W4 /WX. Three assertions:
+  constant-3 -> 589824 (the square-vs-mean discriminator; NOT
+  accumulator-discriminating, 576 << 16 fits uint32); stride-12 ramp
+  0..63 (sumSq 85344 = 63*64*127/6) -> 87392256; all-255 (sumSq 4161600)
+  -> 4261478400, which discriminates the uint64 accumulator (a uint32
+  accumulator wraps at the << 16). Assertions 2 and 3 passed on first
+  build and were proven discriminating by mutation checks (failing
+  values in the commit message): stride-advance-removed -> 1146880;
+  uint32 accumulator -> 20283392 / 33619968. The first mutation attempt
+  was INVALID (the mutant failed to compile, C4100 unreferenced parameter
+  under /W4 /WX, and the swallowed build output made the stale binary
+  report 6/6 PASS) - recorded because a non-compiling mutation looks
+  like a pass unless the build output is inspected.
+  MEASURED (2026-11-01): suite 10/10 passed, 0 failed, 272.62 s; GATE
+  re-measured 884,851 B, 0 CR, 0 non-ASCII, diff 0; coverage A11 18 ->
+  36 covered (the 18 non-blank ref lines of :220-240, measured with the
+  coverage metric's own counter), total 20,677 -> 20,695 of 157,718 =
+  13.1% at one decimal, unchanged at printed precision; the paired
+  conformance count unchanged (9 artifacts, all content-1:1).
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
