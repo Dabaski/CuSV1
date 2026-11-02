@@ -86,3 +86,80 @@ TEST_CASE("meanSquare8x8 of an all-255 block is 4261478400") {
     }
     CHECK(analysis::meanSquare8x8(src, 8) == 4261478400);
 }
+
+TEST_CASE("subMean8x8 subsamples rows where the sub-mean differs from the full mean") {
+    // 1:1 target: svt_compute_sub_mean_8x8_c (pic_analysis_process.c:242-261,
+    // declaration twin compute_mean.h:31). Loop trace of
+    // for (vi = 0; skip < 8; skip = vi + vi) with skip = 0 pre-set: rows
+    // {0,2,4,6} of the full 8-wide row = 32 px, then block_mean << 3 with NO
+    // division (:257). Fixture: even rows 10, odd rows 200, stride 12 - the
+    // sub-sum is 32*10 = 320 -> 2560, while the FULL mean8x8 of the same
+    // block would be 26880 (a column-subsample port gives 26880 too), so the
+    // assertion discriminates row-subsample from both.
+    std::uint8_t src[9 * 12] = {0};
+    for (int y = 0; y < 9; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            src[y * 12 + x] = (std::uint8_t)((y % 2 == 0) ? 10 : 200);
+        }
+    }
+    CHECK(analysis::subMean8x8(src, 12) == 2560);
+}
+
+TEST_CASE("subMeanSquareValues at (8,8) normalizes by the HALF area") {
+    // 1:1 target: svt_aom_compute_sub_mean_squared_values_c
+    // (pic_analysis_process.c:263-284, declaration twin compute_mean.h:34).
+    // Same skip mechanics gated on input_area_height: rows {0,2,4,6} of
+    // squares = 32 px, then block_mean << 11 with NO division (:281). The
+    // comment there drops the /2 - (sumSq << 16)/(w*h) at 8x8 would be
+    // sumSq << 10 - but the LIVE code shifts 11 = (sumSq << 16)/(w*h/2):
+    // 32 = 2^5 divides 2^16 exactly, 16 - 5 = 11. Anchors for << 11: the
+    // SSE2 twin svt_aom_compute_subd_mean_of_squared_values8x8_sse2_intrin
+    // (ASM_SSE2/compute_mean_intrin_sse2.c:15-51) returns << 11 at :50;
+    // the FULL-square twin returns << 10 at :113 - the 2x ratio IS the
+    // half-area normalization; and the consumer variance formula
+    // (meanSq - mean*mean) >> 16 (:415-441) is fed by BOTH paths of
+    // compute_b64_variance, so the scales must agree. Fixture: sumSq =
+    // 32*100 = 3200 -> 3200 << 11 = 6553600; the full meanSquare8x8 of the
+    // same block would be 1313996800.
+    std::uint8_t src[9 * 12] = {0};
+    for (int y = 0; y < 9; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            src[y * 12 + x] = (std::uint8_t)((y % 2 == 0) ? 10 : 200);
+        }
+    }
+    CHECK(analysis::subMeanSquareValues(src, 12, 8, 8) == 6553600);
+}
+
+TEST_CASE("subMeanSquareValues at odd height sums ceil(height/2) rows") {
+    // The generic loop's condition is skip < input_area_height with skip
+    // stepping 0,2,4,... - at height 9 the summed rows are {0,2,4,6,8},
+    // i.e. ceil(height/2) = 5 rows (skip reaches 8 < 9 and 10 >= 9). On the
+    // fixture row 8 is an even row of 10s: sumSq = 5*8*100 = 4000 ->
+    // 4000 << 11 = 8192000. Pins the loop mechanics the (8,8)-only
+    // assertion cannot see (the only live reference caller is (8,8),
+    // pic_analysis_process.c:293-294; this exercises the admitted range).
+    std::uint8_t src[9 * 12] = {0};
+    for (int y = 0; y < 9; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            src[y * 12 + x] = (std::uint8_t)((y % 2 == 0) ? 10 : 200);
+        }
+    }
+    CHECK(analysis::subMeanSquareValues(src, 12, 8, 9) == 8192000);
+}
+
+TEST_CASE("subMeanSquareValues keeps the hardwired << 11 at (4,4)") {
+    // The reference shifts 11 UNCONDITIONALLY (pic_analysis_process.c:281) -
+    // it does not derive the shift from (w,h). At (4,4) a comment-faithful
+    // port ((sumSq << 16) / (w*h/2) = sumSq << 13) would differ, so this
+    // assertion pins the code's behavior, not the comment's intent. On the
+    // fixture rows {0,2} are even rows of 10s, 4 px wide: sumSq = 8*100 =
+    // 800 -> 800 << 11 = 1638400 (the comment-faithful value would be
+    // 6553600).
+    std::uint8_t src[9 * 12] = {0};
+    for (int y = 0; y < 9; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            src[y * 12 + x] = (std::uint8_t)((y % 2 == 0) ? 10 : 200);
+        }
+    }
+    CHECK(analysis::subMeanSquareValues(src, 12, 4, 4) == 1638400);
+}

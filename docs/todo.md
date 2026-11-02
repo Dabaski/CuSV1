@@ -327,7 +327,7 @@ A0. SLICE-LEVEL STATE (the live register)
   Phase A - RDO-feeding primitives (host): AN1 mean8x8
    (pic_analysis_process.c:194 + compute_mean.h:21) LANDED; AN2
    meanSquare8x8 (:220 + compute_mean.h:26) LANDED; AN3 the sub-mean pair
-  (:242/:263 + compute_mean.h:31/:34); AN4 interm_var_four8x8 (:286 +
+   (:242/:263 + compute_mean.h:31/:34) LANDED; AN4 interm_var_four8x8 (:286 +
   compute_mean.h:40); AN5 calculate_histogram (:170); AN6 downsample_2d
   (:134); AN7 the b64 variance pyramid (compute_b64_variance :318); AN8
   the screen-content detectors (:1354, antialiasing-aware :1207); AN9
@@ -431,6 +431,55 @@ A0. SLICE-LEVEL STATE (the live register)
   coverage metric's own counter), total 20,677 -> 20,695 of 157,718 =
   13.1% at one decimal, unchanged at printed precision; the paired
   conformance count unchanged (9 artifacts, all content-1:1).
+- [x] AN3 LANDED (2026-11-01): the sub-mean pair, TWO functions one slice:
+  analysis::subMean8x8 = svt_compute_sub_mean_8x8_c
+  (pic_analysis_process.c:242-261, declaration twin compute_mean.h:31,
+  uint16 stride mirror) and analysis::subMeanSquareValues =
+  svt_aom_compute_sub_mean_squared_values_c (:263-284, declaration twin
+  compute_mean.h:34, generic w/h). Derivations BEFORE any test:
+  subMean8x8's skip = vi + vi loop ASSIGNS skip in the for-update (never
+  increments), so the summed rows are {0,2,4,6} - 32 px of the full
+  8-wide row - then sum << 3 with NO division (:257); the commented-out
+  formula (sum << 8)/(w*h/2) equals sum << 3 exactly (32 = 2^5 divides
+  2^8), so nothing is lost. subMeanSquareValues: same mechanics gated on
+  input_area_height, rows of SQUARES, then sumSq << 11 with NO division
+  (:281) - the comment there drops the /2 and would give sumSq << 10 at
+  8x8, but the LIVE code shifts 11 = (sumSq << 16)/(w*h/2), the HALF-area
+  normalization; THREE anchors: the SSE2 twin
+  svt_aom_compute_subd_mean_of_squared_values8x8_sse2_intrin
+  (ASM_SSE2/compute_mean_intrin_sse2.c:15-51) returns << 11 at :50, the
+  FULL-square twin returns << 10 at :113 (the 2x ratio IS the half-area),
+  and the consumer variance formula (meanSq - mean*mean) >> 16
+  (:415-441) is fed by BOTH branches of compute_b64_variance, so the
+  scales must agree. 1:1 rule: port the CODE (<< 11 unconditionally), not
+  the comment.
+  RED (captured, one fixture both functions): test_variance.cpp(105,5)
+  error C2039 'subMean8x8': is not a member of 'analysis' and
+  test_variance.cpp(130,5) error C2039 'subMeanSquareValues': is not a
+  member of 'analysis'. The brief's discriminator fixture: even rows 10,
+  odd rows 200, stride 12 - the sub-mean (2560) differs from the full
+  mean8x8 (26880) of the same block BY CONSTRUCTION, so a uniform fixture
+  could not have passed trivially and none was used.
+  GREEN: both functions, zero warnings under /W4 /WX. Four assertions:
+  subMean8x8 -> 2560 (rows {0,2,4,6} sum 320 << 3; also
+  stride-discriminating - a stride-ignoring mutant would read 4240 from
+  bytes 0..63); subMeanSquareValues (8,8) -> 6553600 (sumSq 3200 << 11;
+  the full meanSquare8x8 of the same block is 1313996800); (8,9) ->
+  8192000 (rows {0,2,4,6,8} = ceil(9/2) rows, sumSq 4000 - pins the
+  generic loop's odd-height mechanics the only live caller (8,8) cannot
+  see); (4,4) -> 1638400 (sumSq 800 << 11 - pins the HARDWIRED shift: a
+  comment-faithful (w,h)-derived shift would be 13 at (4,4), i.e.
+  6553600). Assertions 3 and 4 passed on first build and were proven
+  discriminating by mutation checks (captured values in the commit
+  message): skip < height-1 -> 6553600 != 8192000 (only the odd-height
+  assertion failed); comment-faithful shift -> 6553600 != 1638400 (only
+  the (4,4) assertion failed).
+  MEASURED (2026-11-01): suite 10/10 passed, 0 failed, 272.67 s; GATE
+  re-measured 884,851 B, 0 CR, 0 non-ASCII, diff 0; coverage A11 36 ->
+  72 covered (the 17 non-blank ref lines of :242-261 + the 19 of
+  :263-284, measured with the coverage counter), total 20,695 -> 20,731
+  of 157,718 = 13.1% at one decimal, unchanged at printed precision; the
+  paired conformance count unchanged (9 artifacts, all content-1:1).
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
