@@ -81,4 +81,41 @@ void downsample2d(const std::uint8_t* src, std::uint32_t srcStride,
                   std::uint8_t* dst, std::uint32_t dstStride,
                   std::uint32_t decimStep);
 
+// The reference's block_mean_calc_prec selector: #define BLOCK_MEAN_PREC_FULL
+// 0 / BLOCK_MEAN_PREC_SUB 1 (definitions.h:2043-2044). The live reference
+// always selects Sub (Globals/enc_handle.c:4339, unconditional assignment);
+// the Full branch is ported because the reference carries it.
+enum class BlockMeanPrec : std::uint8_t { Full = 0, Sub = 1 };
+
+// 1:1 port of compute_b64_variance (third_party/SVT-AV1/Source/Lib/Codec/
+// pic_analysis_process.c:318-442) - static there, single caller :610; this
+// is the RDO-input chain's capstone, composing the landed AN primitives:
+// the Sub branch is sixteen intermVarFour8x8 calls (:347-361, blk_8x8_idx =
+// 8*row + 4*colGroup, blk_offset +32 per call), the Full branch is 64
+// mean8x8 + meanSquare8x8 pairs (:335-346); the 16x16 fold averages the
+// four 8x8 blocks at 16R + 2C {+0,+1,+8,+9} >> 2 (:364-380), the 32x32
+// fold the four 16x16 blocks at 8P + 2Q {+0,+1,+4,+5} >> 2 (:383-399) and
+// the 64x64 fold the four 32x32 blocks >> 2 (:402-409) - each array level
+// folds from the level below, nothing recomputes from pixels. Variance =
+// (sq - mean*mean) >> 16 (:415-417/:423-426/:432-435/:439-441), cast
+// uint16. Named deviations from the reference signature: scs/pcs/
+// b64_idx/input_luma_origin_index are dropped - y points AT the block
+// origin and sbVar is ONE flat variance row (the reference writes
+// pcs->variance[b64_idx], max 209 entries, me_sb_results.h:22); the
+// sbVar layout is the EbMeTierZeroPu bases (me_context.h:47/:48/:52/:68):
+// 64x64 at 0, 32x32 at 1, 16x16 at 5, 8x8 at 21, and ONLY 0..84 are ever
+// written (85..208 untouched). The intermediate arrays the reference keeps
+// on its stack are exposed as out-params for the tests (deviation, named).
+// subBlockVariances threads the :412 gate (scs->allintra || aq_mode == 1
+// || variance_octile): when false only the 64x64 entry is written. Host
+// only: the GPU twin is parked, not built.
+void b64Variance(const std::uint8_t* y, std::uint16_t yStride, BlockMeanPrec prec,
+                 bool subBlockVariances, std::uint16_t* sbVar,
+                 std::uint64_t* meanOf16x16Blocks,
+                 std::uint64_t* meanOf16x16SquaredValuesBlocks,
+                 std::uint64_t* meanOf32x32Blocks,
+                 std::uint64_t* meanOf32x32SquaredValuesBlocks,
+                 std::uint64_t* meanOf64x64Block,
+                 std::uint64_t* meanOf64x64SquaredValuesBlock);
+
 }  // namespace analysis

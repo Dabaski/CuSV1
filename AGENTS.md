@@ -336,16 +336,17 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-01, the AN6 slice)
+### Last measured state (2026-11-01, the AN7 slice)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 10/10 passed, 0 failed, 261.59 s** (re-measured 2026-11-01 at
-  AN6; l4_intra is the slow one at ~216 s; `pipeline` 53.46 s;
+- **ctest: 10/10 passed, 0 failed, 263.08 s** (re-measured 2026-11-01 at
+  AN7; l4_intra is the slow one at ~216 s; `pipeline` 53.46 s;
   `l3_transforms` ~7 s; the rest under 0.5 s including the new l9_analysis.
-  Earlier runs of the same tree: the AN5 run 268.30 s, the AN4 run 270.10 s,
-  the AN3 run 272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the
-  RT21 fix run 272.42 s at 9/9, a judge re-run 267.47 s).
+  Earlier runs of the same tree: the AN6 run 261.59 s, the AN5 run
+  268.30 s, the AN4 run 270.10 s, the AN3 run 272.67 s, the AN2 run
+  272.62 s, the AN1 run 263.38 s, the RT21 fix run 272.42 s at 9/9, a
+  judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
   bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-01: rebuilt, and
   byte-identical to the committed file). History, not a figure to chase:
@@ -356,11 +357,13 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 13.2%** (see the completion metric section;
-  re-measured 2026-11-01: 20,803 of 157,718 non-blank lines, +29 from
-  20,774 - the AN6 downsample2d port in pic_analysis_process.c
-  (:134-164); the printed percentage STAYS 13.2% (20,803/157,718 =
-  13.1901%). Earlier history of the same metric: the AN5 run measured
+- **Portable-C coverage: 13.3%** (see the completion metric section;
+  re-measured 2026-11-01: 20,918 of 157,718 non-blank lines, +115 from
+  20,803 - the AN7 b64Variance port in pic_analysis_process.c
+  (:318-442); the printed percentage MOVED at AN7: 13.2% -> 13.3%
+  (20,918/157,718 = 13.2631% crosses the 13.25 rounding boundary the
+  AN6 13.1901% sat below). Earlier history of the same metric: the
+  AN6 run measured 20,803/157,718 = 13.1901%; the AN5 run
   20,774/157,718 = 13.1716%; the printed percentage MOVED at AN4:
   20,756/157,718 = 13.1602% crosses the 13.15 rounding boundary that
   AN1-AN3's 13.1443% sat below, so N1 prints 13.2% where AN1-AN3
@@ -634,7 +637,28 @@ are partly right and I re-measured rather than restated them:
     decim_step cell (the cell's top-left 2x2 at step 2, its MIDDLE 2x2
     at step 4 - the live callers pass 2 at :1504-1510 and 4 at
     :1530-1536); each output is (sum + 2) >> 2 (:157); host only, no
-    GPU twin (parked per the brief).
+    GPU twin (parked per the brief). AN7 LANDED 2026-11-01:
+    analysis::b64Variance, the port of compute_b64_variance
+    (pic_analysis_process.c:318-442, static, single caller :610, NO
+    header declaration twin - grep-verified file-local to its .c), the
+    RDO-input chain's capstone composing the landed AN primitives:
+    sixteen intermVarFour8x8 calls in the live BLOCK_MEAN_PREC_SUB
+    branch (:347-361, blk_8x8_idx = 8*row + 4*colGroup, blk_offset +32
+    per call) or 64 mean8x8 + meanSquare8x8 pairs in the FULL branch
+    (:335-346, ported because the reference carries it; the live
+    reference always selects Sub, enc_handle.c:4339), then the
+    16x16/32x32/64x64 folds each >>2 over {+0,+1,+8,+9} at 16R + 2C
+    and {+0,+1,+4,+5} at 8P + 2Q - every fold independent PER ARRAY
+    (means from means, squared-means from squared-means), no level
+    recomputes from pixels; variance = (sq - mean*mean) >> 16 with the
+    sub-block loops gated on allintra || aq_mode == 1 ||
+    variance_octile (:412) and the 64x64 entry unconditional
+    (:438-441); the sbVar layout is the EbMeTierZeroPu bases
+    (me_context.h:47/:48/:52/:68: 0/1/5/21), only 0..84 ever written;
+    named deviations: scs/pcs/b64_idx/origin dropped (y at the block
+    origin, sbVar ONE flat row), the stack arrays exposed as
+    out-params, the :412 gate and the prec selector threaded as
+    parameters; host only, no GPU twin (parked, named).
 
 
 ## Completion metric (the portable-C coverage number)
@@ -644,17 +668,20 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-01 (AN6): 13.2%** (20,803 of 157,718 non-blank
-lines - the covered count moved +29 from 20,774: the AN6 downsample2d port
-in pic_analysis_process.c (:134-164). Earlier history of the same metric:
-the AN5 run measured 20,774 = +115 from 20,659: the AN1 mean8x8 port, the
-AN2 meanSquare8x8 port, +18 each, the AN3 sub-mean pair, +36, the AN4
-intermVarFour8x8 port, +25, and the AN5 calculateHistogram port, +18, all
+**THE NUMBER, as measured 2026-11-01 (AN7): 13.3%** (20,918 of 157,718 non-blank
+lines - the covered count moved +115 from 20,803: the AN7 b64Variance port
+in pic_analysis_process.c (:318-442). Earlier history of the same metric:
+the AN6 run measured 20,803 = +29 from 20,774: the AN6 downsample2d port
+(:134-164); the AN5 run measured 20,774 = +115 from 20,659: the AN1
+mean8x8 port, the AN2 meanSquare8x8 port, +18 each, the AN3 sub-mean
+pair, +36, the AN4 intermVarFour8x8 port, +25, and the AN5
+calculateHistogram port, +18, all
 in pic_analysis_process.c (:170-188, :194-214, :220-240, :242-261,
-:263-284, :286-313); the printed percentage MOVED at AN4: 20,756/157,718
-= 13.1602% crosses the 13.15 rounding boundary that AN1-AN3's 13.1443%
-sat below, so N1 prints 13.2% where AN1-AN3 printed 13.1%; AN5 and AN6
-stay 13.2%, 20,803/157,718 = 13.1901%). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
+:263-284, :286-313); the printed percentage MOVED at AN7: 20,918/157,718
+= 13.2631% crosses the 13.25 rounding boundary the AN6 13.1901% sat
+below, so N1 prints 13.3% where AN5-AN6 printed 13.2%; the earlier
+move: AN4 crossed the 13.15 boundary that AN1-AN3's 13.1443% sat
+below). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
 hand-typed percentage, for the same reason a hand-typed line count is not
 allowed.
 
@@ -703,12 +730,12 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 0% | 0 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 1% | 144 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 2% | 259 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 30% | 440 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **20,803** |
+| | **TOTAL** | **254** | **157,718** | | **20,918** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

@@ -310,6 +310,207 @@ TEST_CASE("downsample2d honors an independent stride") {
     CHECK(dst[3] == 13);
 }
 
+// AN7 fixture builder: a 64x64 block at stride 72 (poison 99s in cols
+// 64-71 and in row 64 - the port must never read them). Block k = 8r+c:
+// k == 0 is NON-UNIFORM (even block rows 10, odd block rows 20 - the
+// sub-sampled rows the AN4 path reads are all 10s while the FULL path
+// averages 10 and 20); every other block is uniform v = k+1.
+static void buildB64Fixture(std::uint8_t* src) {
+    for (int y = 0; y < 65; ++y) {
+        for (int x = 0; x < 72; ++x) {
+            src[y * 72 + x] = 99;
+        }
+    }
+    for (int r = 0; r < 8; ++r) {
+        for (int c = 0; c < 8; ++c) {
+            const int k = 8 * r + c;
+            for (int y = 0; y < 8; ++y) {
+                for (int x = 0; x < 8; ++x) {
+                    src[(r * 8 + y) * 72 + c * 8 + x] =
+                        (k == 0) ? (std::uint8_t)((y % 2 == 0) ? 10 : 20)
+                                 : (std::uint8_t)(k + 1);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("b64Variance SUB path: the fold pyramid on a fixture with one non-uniform 8x8") {
+    // 1:1 target: compute_b64_variance (third_party/SVT-AV1/Source/Lib/Codec/
+    // pic_analysis_process.c:318-442), static, single caller :610. The port
+    // composes the landed AN primitives exactly as the reference composes
+    // its own: the BLOCK_MEAN_PREC_SUB branch (:347-361) is SIXTEEN
+    // intermVarFour8x8 calls (AN4), each filling FOUR consecutive 8x8
+    // entries at blk_8x8_idx = 8*row + 4*colGroup, blk_offset advancing 32
+    // per call; the 16x16 fold (:364-380) averages the four 8x8 blocks at
+    // first_8x8_blk_idx = 16R + 2C {+0, +1, +8, +9} >> 2; the 32x32 fold
+    // (:383-399) averages the four 16x16 blocks at first_16x16_blk_idx =
+    // 8P + 2Q {+0, +1, +4, +5} >> 2; the 64x64 fold (:402-409) averages
+    // the four 32x32 blocks >> 2. Every fold is independent per array
+    // (means fold from means, squared-means from squared-means) - no level
+    // recomputes from pixels. Variance = (sq - mean*mean) >> 16
+    // (VARIANCE_PRECISION, :415-417/:423-426/:432-435/:439-441), uint16.
+    //
+    // sbVar layout: the reference writes pcs->variance[b64_idx] through the
+    // EbMeTierZeroPu bases (me_context.h:47/:48/:52/:68) - 8x8 at 21+i,
+    // 16x16 at 5+i, 32x32 at 1+i, 64x64 at 0 - so the fixture poisons a
+    // 96-entry array and checks the placement, including that 85..95 stay
+    // untouched (the reference writes 0..84 at most; MAX_ME_PU_COUNT 209,
+    // me_sb_results.h:22).
+    //
+    // Fixture arithmetic (hand-derived, machine-checked against the
+    // derivation script): block 0 samples 10s -> mean8[0] = 2560,
+    // sq8[0] = 6553600; blocks k>=1 are uniform v=k+1 -> mean8[k] =
+    // 256(k+1), sq8[k] = 65536(k+1)^2. The folds give
+    // mean16[0] = (2560+512+2304+2560)>>2 = 1984 and for i>0
+    // mean16[i] = 256*k1(i) + 1408 with k1(i) = 16R + 2C (the v-sum of any
+    // 16x16 quadrant is 4*k1 + 22); sq16[0] = 65536*(100+4+81+100)>>2 =
+    // 4669440 and sq16[i>0] = 16384*(4k1^2 + 44k1 + 186). Every variance
+    // value below is (sq - mean^2) >> 16 with the truncations shown:
+    // var16[0] = (4669440 - 1984^2)>>16 = 733184>>16 = 11 (11.1875);
+    // var16[i>0] = 1064960>>16 = 16 (16.25, constant because every
+    // quadrant's value multiset is {k+1, k+2, k+9, k+10}); var32[0] =
+    // (19509248 - 3856^2)>>16 = 4640512>>16 = 70 (70.8125) while
+    // var32[1..3] = 5324800>>16 = 81 (81.25); var64 = (91687936 -
+    // 8356^2)>>16 = 21865200>>16 = 333 (333.66); all 64 var8 are 0
+    // (block 0 samples a constant 10-half, the rest are uniform).
+    std::uint8_t src[65 * 72];
+    buildB64Fixture(src);
+    std::uint64_t mean16[16];
+    std::uint64_t sq16[16];
+    std::uint64_t mean32[4];
+    std::uint64_t sq32[4];
+    std::uint64_t mean64 = 0;
+    std::uint64_t sq64 = 0;
+    std::uint16_t sbVar[96];
+    for (int i = 0; i < 96; ++i) {
+        sbVar[i] = 0xBEEF;
+    }
+    analysis::b64Variance(src, 72, analysis::BlockMeanPrec::Sub, true, sbVar,
+                          mean16, sq16, mean32, sq32, &mean64, &sq64);
+
+    static const std::uint64_t kMean16[16] = {1984, 1920, 2432, 2944, 5504, 6016,
+                                              6528, 7040, 9600, 10112, 10624, 11136,
+                                              13696, 14208, 14720, 15232};
+    static const std::uint64_t kSq16[16] = {4669440, 4751360, 6979584, 9732096,
+                                            31358976, 37257216, 43679744, 50626560,
+                                            93224960, 103317504, 113934336, 125075456,
+                                            188645376, 202932224, 217743360, 233078784};
+    static const std::uint64_t kMean32[4] = {3856, 4736, 11904, 12928};
+    static const std::uint64_t kSq32[4] = {19509248, 27754496, 147030016, 172457984};
+    for (int i = 0; i < 16; ++i) {
+        CHECK(mean16[i] == kMean16[i]);
+        CHECK(sq16[i] == kSq16[i]);
+    }
+    for (int j = 0; j < 4; ++j) {
+        CHECK(mean32[j] == kMean32[j]);
+        CHECK(sq32[j] == kSq32[j]);
+    }
+    CHECK(mean64 == 8356);
+    CHECK(sq64 == 91687936);
+
+    // Variance placement: the EbMeTierZeroPu bases (me_context.h:47/:48/:52/:68).
+    CHECK(sbVar[0] == 333);                                  // 64x64
+    CHECK(sbVar[1] == 70);                                   // 32x32_0
+    CHECK(sbVar[2] == 81);                                   // 32x32_1
+    CHECK(sbVar[3] == 81);                                   // 32x32_2
+    CHECK(sbVar[4] == 81);                                   // 32x32_3
+    CHECK(sbVar[5] == 11);                                   // 16x16_0
+    for (int i = 1; i < 16; ++i) {                           // 16x16_1..15
+        CHECK(sbVar[5 + i] == 16);
+    }
+    for (int i = 0; i < 64; ++i) {                           // 8x8_0..63
+        CHECK(sbVar[21 + i] == 0);
+    }
+    for (int i = 85; i < 96; ++i) {                          // untouched tail
+        CHECK(sbVar[i] == 0xBEEF);
+    }
+}
+
+TEST_CASE("b64Variance FULL path diverges exactly where block 0 is non-uniform") {
+    // The BLOCK_MEAN_PREC_FULL branch (:335-346) computes every 8x8 with
+    // svt_compute_mean_8x8 + svt_compute_mean_square_values_8x8 (the AN1/AN2
+    // ports). Block 0's full 64 px are half 10s half 20s: mean8[0] =
+    // (32*10 + 32*20)<<8/64 = 960*4 = 3840 and sq8[0] = (32*100 + 32*400)
+    // <<16/64 = 16000*1024 = 16384000 - DIFFERENT from the SUB values
+    // (2560 / 6553600) exactly because block 0 is non-uniform (uniform
+    // blocks give identical values on both paths, derived). Downstream:
+    // mean16[0] = (3840+512+2304+2560)>>2 = 2304, sq16[0] =
+    // (16384000+262144+5308416+6553600)>>2 = 7127040, var16[0] =
+    // (7127040 - 2304^2)>>16 = 1818624>>16 = 27 (27.75); mean32[0] =
+    // (2304+1920+5504+6016)>>2 = 3936, sq32[0] = (7127040+4751360+
+    // 31358976+37257216)>>2 = 20123648; mean64 = (3936+4736+11904+12928)>>2
+    // = 8376, sq64 = (20123648+27754496+147030016+172457984)>>2 =
+    // 91841536, var64 = (91841536 - 8376^2)>>16 = 21684160>>16 = 330
+    // (330.75); var8[0] = (16384000 - 3840^2)>>16 = 1638400>>16 = 25 while
+    // every other var8 stays 0 (sbVar[22] == 0 vs sbVar[21] == 25 pins
+    // that the divergence is exactly block 0). All quartets NOT containing
+    // block 0 are identical to the SUB path (mean16[1], sq16[15],
+    // mean32[3], sbVar[20], sbVar[4] re-asserted unchanged).
+    std::uint8_t src[65 * 72];
+    buildB64Fixture(src);
+    std::uint64_t mean16[16];
+    std::uint64_t sq16[16];
+    std::uint64_t mean32[4];
+    std::uint64_t sq32[4];
+    std::uint64_t mean64 = 0;
+    std::uint64_t sq64 = 0;
+    std::uint16_t sbVar[96];
+    for (int i = 0; i < 96; ++i) {
+        sbVar[i] = 0xBEEF;
+    }
+    analysis::b64Variance(src, 72, analysis::BlockMeanPrec::Full, true, sbVar,
+                          mean16, sq16, mean32, sq32, &mean64, &sq64);
+    CHECK(mean16[0] == 2304);
+    CHECK(sq16[0] == 7127040);
+    CHECK(mean32[0] == 3936);
+    CHECK(sq32[0] == 20123648);
+    CHECK(mean64 == 8376);
+    CHECK(sq64 == 91841536);
+    CHECK(sbVar[0] == 330);
+    CHECK(sbVar[5] == 27);
+    CHECK(sbVar[21] == 25);
+    CHECK(sbVar[22] == 0);
+    CHECK(mean16[1] == 1920);
+    CHECK(sq16[15] == 233078784);
+    CHECK(mean32[3] == 12928);
+    CHECK(sbVar[20] == 16);
+    CHECK(sbVar[4] == 81);
+}
+
+TEST_CASE("b64Variance with subBlockVariances=false writes only the 64x64 entry") {
+    // The reference gates the 8x8/16x16/32x32 variance loops on
+    // scs->allintra || scs->static_config.aq_mode == 1 ||
+    // scs->static_config.variance_octile (:412) and ALWAYS writes the 64x64
+    // entry (:438-441). With the gate off the port must leave every
+    // sub-block slot untouched (the reference's pcs->variance row keeps
+    // whatever it held): the fixture poisons all 96 entries and only
+    // sbVar[0] may move.
+    std::uint8_t src[65 * 72];
+    buildB64Fixture(src);
+    std::uint64_t mean16[16];
+    std::uint64_t sq16[16];
+    std::uint64_t mean32[4];
+    std::uint64_t sq32[4];
+    std::uint64_t mean64 = 0;
+    std::uint64_t sq64 = 0;
+    std::uint16_t sbVar[96];
+    for (int i = 0; i < 96; ++i) {
+        sbVar[i] = 0xBEEF;
+    }
+    analysis::b64Variance(src, 72, analysis::BlockMeanPrec::Sub, false, sbVar,
+                          mean16, sq16, mean32, sq32, &mean64, &sq64);
+    CHECK(sbVar[0] == 333);
+    CHECK(sbVar[1] == 0xBEEF);
+    CHECK(sbVar[4] == 0xBEEF);
+    CHECK(sbVar[5] == 0xBEEF);
+    CHECK(sbVar[20] == 0xBEEF);
+    CHECK(sbVar[21] == 0xBEEF);
+    CHECK(sbVar[84] == 0xBEEF);
+    CHECK(mean64 == 8356);
+    CHECK(sq64 == 91687936);
+}
+
 TEST_CASE("calculateHistogram counts one pixel per bin on a 0..255 ramp") {
     // 1:1 target: calculate_histogram (pic_analysis_process.c:170-188). The
     // real name is calculate_histogram - NOT the brief's

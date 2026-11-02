@@ -640,6 +640,98 @@ A0. SLICE-LEVEL STATE (the live register)
   the NEXT function's comment opener). The 115 total was consistent
   with :194-214 all along; the prose span is corrected here, no
   counted number moves.
+- [x] AN7 LANDED (2026-11-01): analysis::b64Variance, the port of
+  compute_b64_variance - pic_analysis_process.c:318-442, static,
+  single caller :610, NO header declaration twin (grep-verified
+  file-local to its .c: the only occurrences are the :315-317 comment,
+  the :318 definition and the :610 caller). The RDO-input chain's
+  capstone: it composes the landed AN primitives exactly as the
+  reference composes its own. Derivation BEFORE the test: the
+  BLOCK_MEAN_PREC_SUB branch (:347-361) is SIXTEEN intermVarFour8x8
+  calls (AN4), each filling FOUR consecutive 8x8 entries at
+  blk_8x8_idx = 8*row + 4*colGroup, blk_offset advancing 32 per call;
+  the BLOCK_MEAN_PREC_FULL branch (:335-346) is 64 mean8x8 +
+  meanSquare8x8 pairs (AN1 + AN2); the 16x16 fold (:364-380) averages
+  the four 8x8 blocks at first_8x8_blk_idx = 16R + 2C {+0, +1, +8, +9}
+  >> 2; the 32x32 fold (:383-399) the four 16x16 blocks at
+  first_16x16_blk_idx = 8P + 2Q {+0, +1, +4, +5} >> 2; the 64x64 fold
+  (:402-409) the four 32x32 blocks >> 2 - every fold is independent
+  PER ARRAY (means fold from means, squared-means from squared-means),
+  no level recomputes from pixels; variance = (sq - mean*mean) >>
+  VARIANCE_PRECISION (:415-417/:423-426/:432-435/:439-441), uint16,
+  with the sub-block loops gated on scs->allintra ||
+  static_config.aq_mode == 1 || static_config.variance_octile (:412)
+  and the 64x64 entry written UNCONDITIONALLY (:438-441). The sbVar
+  layout is the EbMeTierZeroPu bases (me_context.h:47/:48/:52/:68):
+  64x64 at 0, 32x32 at 1, 16x16 at 5, 8x8 at 21 - only 0..84 are ever
+  written (MAX_ME_PU_COUNT 209, me_sb_results.h:22; entries 85..208
+  stay whatever the caller held). Prec selector:
+  definitions.h:2043-2044 (#define BLOCK_MEAN_PREC_FULL 0 /
+  BLOCK_MEAN_PREC_SUB 1); the live reference ALWAYS selects Sub
+  (Globals/enc_handle.c:4339, unconditional assignment) - the Full
+  branch is ported because the reference carries it. No-underflow
+  note (derived, both paths): Cauchy-Schwarz over the block keeps
+  sq >= mean^2 at every level, so the uint64 subtraction cannot wrap.
+  Fixture arithmetic machine-checked BEFORE the tests (the an67
+  derivation script in the session temp dir, NOT the port): block 0
+  samples 10s -> mean8[0] = 2560, sq8[0] = 6553600; blocks k>=1
+  uniform v=k+1 -> mean8[k] = 256(k+1), sq8[k] = 65536(k+1)^2;
+  mean16[0] = (2560+512+2304+2560)>>2 = 1984 and mean16[i>0] =
+  256*k1(i) + 1408 with k1(i) = 16R + 2C (the v-sum of any 16x16
+  quadrant is 4*k1 + 22); sq16[0] = 65536*(100+4+81+100)>>2 = 4669440
+  and sq16[i>0] = 16384*(4k1^2 + 44k1 + 186); var16[0] = 733184>>16 =
+  11 (11.1875) while var16[i>0] = 1064960>>16 = 16 (16.25, CONSTANT
+  because every quadrant's value multiset is {k+1, k+2, k+9, k+10});
+  var32[0] = 4640512>>16 = 70 (70.8125), var32[1..3] = 5324800>>16 =
+  81 (81.25); var64 = 21865200>>16 = 333 (333.66); all 64 var8 are 0
+  (block 0 samples a constant 10-half, the rest are uniform). The
+  FULL path diverges EXACTLY where block 0 is non-uniform (uniform
+  blocks give identical values on both paths, derived): mean8[0] =
+  3840, sq8[0] = 16384000, var8[0] = 25, mean16[0] = 2304, sq16[0] =
+  7127040, var16[0] = 27 (27.75), mean32[0] = 3936, sq32[0] =
+  20123648, mean64 = 8376, sq64 = 91841536, var64 = 330 (330.75).
+  NAMED DEVIATIONS (all in the header comment): scs/pcs/b64_idx/
+  input_luma_origin_index dropped - y points AT the block origin and
+  sbVar is ONE flat variance row; the intermediate arrays the
+  reference keeps on its stack (mean16/sq16/mean32/sq32/mean64/sq64)
+  are exposed as out-params for the tests; the :412 gate threaded as
+  the bool subBlockVariances; the prec selector threaded as the
+  BlockMeanPrec enum (Full = 0, Sub = 1). Host only, NO GPU twin
+  (parked, named).
+  RED (captured): test_variance.cpp(389,15)/(462,15)/(501,15): error
+  C2039 'b64Variance': is not a member of 'analysis' (+ C3083
+  'BlockMeanPrec', C2065 'Sub', C3861 identifier not found) - all
+  three TEST_CASEs fail to compile. GREEN: the port, zero warnings
+  under /W4 /WX. Three TEST_CASEs: the SUB pyramid asserting ALL 16
+  mean16 + ALL 16 sq16 + all 4 mean32/sq32 + mean64/sq64 against the
+  hand-derived literals plus the full sbVar placement (0/1..4/5..20/
+  21..84 and the untouched 85..95 tail poisoned 0xBEEF); the FULL
+  divergence (the nine block-0-carrying values above, with
+  sbVar[22] == 0 vs sbVar[21] == 25 pinning the divergence to block
+  0, and the block-0-free quartets re-asserted unchanged); the gate
+  (only sbVar[0] may move, six sub-block slots re-checked as 0xBEEF,
+  mean64/sq64 still produced). MUTATIONS (all captured, all
+  reverted): M1 the 16x16 fold's +8 -> +4 (the row-half confusion)
+  kills ALL THREE cases; M2 the :412 gate dropped kills ONLY the gate
+  case (six 0xBEEF slots written) - its first build was INVALID under
+  /W4 /WX (C4100 unreferenced parameter, the AN2/AN5 lesson live) and
+  the ctest run between the invalid build and the fix read the stale
+  M1 binary, caught by inspecting the build errors before trusting
+  the run output; the valid mutant uses the AN5 behavior-neutral
+  (void)subBlockVariances pattern; M3 the 8x8 base 21 -> 20 kills
+  the SUB case's last 8x8 slot (sbVar[84] = 0xBEEF != 0) and the
+  FULL case's sbVar[21] == 25.
+  MEASURED (2026-11-01): suite 10/10 passed, 0 failed, 263.08 s;
+  GATE re-measured 884,851 B, byte-identical, diff 0; coverage A11
+  144 -> 259 (the 115 non-blank ref lines of :318-442, measured with
+  the coverage metric's own counter), total 20,803 -> 20,918 of
+  157,718; the printed percentage MOVED: 13.2% -> 13.3%
+  (20,918/157,718 = 13.2631% crosses the 13.25 rounding boundary the
+  AN6 13.1901% sat below); the paired conformance count unchanged
+  (9 artifacts, all content-1:1). The brief's ~+0.15 pt estimate for
+  the two slices measured +0.073 pt (AN7's 115 lines) + 0.018 pt
+  (AN6's 29 lines) = +0.092 pt total (13.1716% -> 13.2631%) - the
+  estimate was optimistic, the measured values stand.
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)

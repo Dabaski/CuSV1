@@ -178,4 +178,121 @@ void downsample2d(const std::uint8_t* src, std::uint32_t srcStride,
     }
 }
 
+// 1:1 port of compute_b64_variance (pic_analysis_process.c:318-442). The
+// reference's stack arrays become the out-params; the loops and index
+// arithmetic are the reference's own, kept verbatim. The EbMeTierZeroPu
+// bases are me_context.h:47/:48/:52/:68.
+void b64Variance(const std::uint8_t* y, std::uint16_t yStride, BlockMeanPrec prec,
+                 bool subBlockVariances, std::uint16_t* sbVar,
+                 std::uint64_t* meanOf16x16Blocks,
+                 std::uint64_t* meanOf16x16SquaredValuesBlocks,
+                 std::uint64_t* meanOf32x32Blocks,
+                 std::uint64_t* meanOf32x32SquaredValuesBlocks,
+                 std::uint64_t* meanOf64x64Block,
+                 std::uint64_t* meanOf64x64SquaredValuesBlock) {
+    std::uint64_t meanOf8x8Blocks[64];
+    std::uint64_t meanOf8x8SquaredValuesBlocks[64];
+
+    if (prec == BlockMeanPrec::Full) {
+        // :335-346 - every 8x8 with the AN1/AN2 primitives.
+        for (int blk8x8Row = 0; blk8x8Row < 8; ++blk8x8Row) {
+            int blkOffset = 8 * yStride * blk8x8Row;
+            for (int blk8x8Col = 0; blk8x8Col < 8; ++blk8x8Col) {
+                const int blk8x8Idx = 8 * blk8x8Row + blk8x8Col;
+                meanOf8x8Blocks[blk8x8Idx] = mean8x8(y + blkOffset, yStride);
+                meanOf8x8SquaredValuesBlocks[blk8x8Idx] = meanSquare8x8(y + blkOffset, yStride);
+                blkOffset += 8;
+            }
+        }
+    } else {
+        // :347-361 - sixteen AN4 calls, four 8x8 blocks each, +32 per call.
+        for (int blk8x8Row = 0; blk8x8Row < 8; ++blk8x8Row) {
+            int blkOffset = 8 * yStride * blk8x8Row;
+            for (int blk8x8Col = 0; blk8x8Col < 2; ++blk8x8Col) {
+                const int blk8x8Idx = 8 * blk8x8Row + 4 * blk8x8Col;
+                intermVarFour8x8(y + blkOffset, yStride,
+                                 &meanOf8x8Blocks[blk8x8Idx],
+                                 &meanOf8x8SquaredValuesBlocks[blk8x8Idx]);
+                blkOffset += 32;  // 4 * 8x8 blocks
+            }
+        }
+    }
+
+    // 16x16 :364-380
+    for (int blk16x16Row = 0; blk16x16Row < 4; ++blk16x16Row) {
+        for (int blk16x16Col = 0; blk16x16Col < 4; ++blk16x16Col) {
+            const int blk16x16Idx = 4 * blk16x16Row + blk16x16Col;
+            const int first8x8BlkIdx = 16 * blk16x16Row + 2 * blk16x16Col;
+            meanOf16x16Blocks[blk16x16Idx] = (meanOf8x8Blocks[first8x8BlkIdx] +
+                                             meanOf8x8Blocks[first8x8BlkIdx + 1] +
+                                             meanOf8x8Blocks[first8x8BlkIdx + 8] +
+                                             meanOf8x8Blocks[first8x8BlkIdx + 9]) >>
+                2;
+            meanOf16x16SquaredValuesBlocks[blk16x16Idx] =
+                (meanOf8x8SquaredValuesBlocks[first8x8BlkIdx] +
+                 meanOf8x8SquaredValuesBlocks[first8x8BlkIdx + 1] +
+                 meanOf8x8SquaredValuesBlocks[first8x8BlkIdx + 8] +
+                 meanOf8x8SquaredValuesBlocks[first8x8BlkIdx + 9]) >>
+                2;
+        }
+    }
+
+    // 32x32 :383-399
+    for (int blk32x32Row = 0; blk32x32Row < 2; ++blk32x32Row) {
+        for (int blk32x32Col = 0; blk32x32Col < 2; ++blk32x32Col) {
+            const int blk32x32Idx = 2 * blk32x32Row + blk32x32Col;
+            const int first16x16BlkIdx = 8 * blk32x32Row + 2 * blk32x32Col;
+            meanOf32x32Blocks[blk32x32Idx] = (meanOf16x16Blocks[first16x16BlkIdx] +
+                                             meanOf16x16Blocks[first16x16BlkIdx + 1] +
+                                             meanOf16x16Blocks[first16x16BlkIdx + 4] +
+                                             meanOf16x16Blocks[first16x16BlkIdx + 5]) >>
+                2;
+            meanOf32x32SquaredValuesBlocks[blk32x32Idx] =
+                (meanOf16x16SquaredValuesBlocks[first16x16BlkIdx] +
+                 meanOf16x16SquaredValuesBlocks[first16x16BlkIdx + 1] +
+                 meanOf16x16SquaredValuesBlocks[first16x16BlkIdx + 4] +
+                 meanOf16x16SquaredValuesBlocks[first16x16BlkIdx + 5]) >>
+                2;
+        }
+    }
+
+    // 64x64 :402-409
+    *meanOf64x64Block = (meanOf32x32Blocks[0] + meanOf32x32Blocks[1] +
+                         meanOf32x32Blocks[2] + meanOf32x32Blocks[3]) >>
+        2;
+    *meanOf64x64SquaredValuesBlock =
+        (meanOf32x32SquaredValuesBlocks[0] + meanOf32x32SquaredValuesBlocks[1] +
+         meanOf32x32SquaredValuesBlocks[2] +
+         meanOf32x32SquaredValuesBlocks[3]) >>
+        2;
+
+    // :412-437 - the scs->allintra || aq_mode == 1 || variance_octile gate,
+    // threaded as subBlockVariances.
+    if (subBlockVariances) {
+        for (int blk8x8Idx = 0, mePuIdx = 21; blk8x8Idx < 64; ++blk8x8Idx, ++mePuIdx) {
+            sbVar[mePuIdx] = static_cast<std::uint16_t>(
+                (meanOf8x8SquaredValuesBlocks[blk8x8Idx] -
+                 (meanOf8x8Blocks[blk8x8Idx] * meanOf8x8Blocks[blk8x8Idx])) >>
+                kVariancePrecision);
+        }
+        for (int blk16x16Idx = 0, mePuIdx = 5; blk16x16Idx < 16; ++blk16x16Idx, ++mePuIdx) {
+            sbVar[mePuIdx] = static_cast<std::uint16_t>(
+                (meanOf16x16SquaredValuesBlocks[blk16x16Idx] -
+                 (meanOf16x16Blocks[blk16x16Idx] * meanOf16x16Blocks[blk16x16Idx])) >>
+                kVariancePrecision);
+        }
+        for (int blk32x32Idx = 0, mePuIdx = 1; blk32x32Idx < 4; ++blk32x32Idx, ++mePuIdx) {
+            sbVar[mePuIdx] = static_cast<std::uint16_t>(
+                (meanOf32x32SquaredValuesBlocks[blk32x32Idx] -
+                 (meanOf32x32Blocks[blk32x32Idx] * meanOf32x32Blocks[blk32x32Idx])) >>
+                kVariancePrecision);
+        }
+    }
+    // :438-441 - the 64x64 entry, unconditional.
+    sbVar[0] = static_cast<std::uint16_t>(
+        (*meanOf64x64SquaredValuesBlock -
+         (*meanOf64x64Block * *meanOf64x64Block)) >>
+        kVariancePrecision);
+}
+
 }  // namespace analysis
