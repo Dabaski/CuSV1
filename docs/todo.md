@@ -811,9 +811,68 @@ A0. SLICE-LEVEL STATE (the live register)
    input); coverage A11 259 -> 665 (+406: the nine :911-1429 spans
    above), A14 440 -> 463 (+23: variance.c :141-158 + :183-190),
    total 20,918 -> 21,347 of 157,718; the printed percentage MOVED:
-   13.3% -> 13.5% (21,347/157,718 = 13.5357% crosses the 13.45
-   boundary the AN7 13.2631% sat below); the paired conformance count
-   unchanged (9 artifacts, all content-1:1).
+    13.3% -> 13.5% (21,347/157,718 = 13.5357% crosses the 13.45
+    boundary the AN7 13.2631% sat below); the paired conformance count
+    unchanged (9 artifacts, all content-1:1).
+ - [x] AN9 LANDED (2026-11-01): analysis::isInputLumaDominant, the port
+   of svt_aom_is_input_luma_dominant (pic_analysis_process.c:1440-1493)
+   with its eight FRAME_LUMA_DOMINANT_* defines (:1431-1438: SAMPLE_STEP
+   8, CORE_THR 16, TAIL_THR 18, MIN_CORE_PCT 85, MIN_TAIL_PCT 95,
+   NEUTRAL_THR 6, UV_DIFF_THR 4, MIN_NEUTRAL_PCT 75). The detector is
+   SELF-CONTAINED (no AN1-AN8 helper calls): it samples every 8th pixel
+   of the CHROMA planes over (width>>1) x (height>>1), counts per sample
+   chroma_mag_sq = du*du + dv*dv (du = u-128, dv = v-128, uv = u-v,
+   uint32 mag) against the core/tail thresholds (<= 256 / <= 324) and
+   the neutral box (|du| <= 6 && |dv| <= 6 && |uv| <= 4), then returns
+   sample_cnt && core*100 >= sample*85 && (tail*100 >= sample*95 ||
+   neutral*100 >= sample*75) (:1490-1492) - a MEAN-COMPARISON-FREE
+   percentage test on three nested classes (neutral -> core -> tail:
+   the neutral box implies mag <= 72 < 256 <= 324). Caller context
+   (read, cited): pd_process.c:4813 passes pcs->chroma_downsampled_pic,
+   NOT enhanced_pic, gated on scs->detect_luma_dominant_input
+   (:4812); chroma_downsampled_pic is a 4:2:0 buffer desc carrying the
+   LUMA dims (pcs.c:1192-1199), which is why the function derives
+   uv_w/uv_h by >>1. NAMED DEVIATIONS: the !input_pic ||
+   color_format == EB_YUV400 || !u_buffer || !v_buffer guard
+   (:1441-1443) is threaded as the monochrome flag (the port cannot
+   receive a null buffer; the u/v pointers are parameters); the
+   uv_w/uv_h == 0 guard (:1448-1450) is kept but is behavior-redundant
+   with the sample_cnt conjunct (dropping it is not observable - the
+   empty loop also returns false; the test pins the OBSERVABLE
+   behavior). Host only, no GPU twin (parked, named).
+   RED (captured): compile error C2039 'isInputLumaDominant': is not a
+   member of 'analysis' (test_variance.cpp:1067). GREEN: the port plus
+   six test cases: the neutral (luma-heavy) frame TRUE, the
+   chroma-heavy frame FALSE, and three 20-sample boundary fixtures at
+   80x64 - A: core 17/20 (85%, INCLUSIVE) with tail 18 (90%) and
+   neutral 14 (70%) -> FALSE; B: core 17/20 with neutral 15/20 (75%,
+   INCLUSIVE) -> TRUE via the neutral branch; C: core 16/20 (80%,
+   FAILS) with tail 20/20 PASSING -> FALSE (the core conjunct is
+   NECESSARY, not another alternative) - plus the monochrome guard and
+   the width-1 case. Fixture construction: per-sample classes via
+   u = 140 (du 12, mag 144: core not neutral), u = 145 (du 17, mag
+   289: tail not core), u = 200/v = 100 (mag 5968: outside tail);
+   classes nest neutral -> core -> tail.
+   MUTATIONS (all captured, all reverted): M1 the core/tail
+   classification made unconditional (|| true, the /W4 /WX-safe form
+   after the first build was INVALID - unused-variable C2220, the
+   AN7 stale-binary lesson: the run after an invalid build reads the
+   OLD exe) -> 1 fail (the chroma-heavy frame must stay false); M2
+   the neutral threshold 75 -> 65 -> 1 fail (fixture A flips TRUE);
+   M3 the >= comparisons -> > -> 1 fail (fixture B flips FALSE at
+   EITHER inclusive boundary); M4 the core conjunct neutralized
+   (|| true, the /W4 /WX-safe form after the first drop was INVALID
+   for the same unused-symbol reason) -> 1 fail (fixture C flips
+   TRUE); M5 the monochrome guard neutralized -> 1 fail (the
+   neutral-chroma monochrome case must not fall through to sampling).
+   MEASURED (2026-11-01): suite 10/10 passed, 0 failed, 262.05 s;
+   GATE unchanged 884,851 B byte-identical, diff 0 (no generator
+   input); coverage A11 665 -> 718 (+53: the :1431-1493 span, 45
+   function + 8 defines), total 21,347 -> 21,400 of 157,718; the
+   printed percentage MOVED: 13.5% -> 13.6% (21,400/157,718 =
+   13.5689% crosses the 13.55 boundary the AN8 13.5357% sat below);
+   the paired conformance count unchanged (9 artifacts, all
+   content-1:1).
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)

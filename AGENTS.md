@@ -336,14 +336,15 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-01, the AN7 slice)
+### Last measured state (2026-11-01, the AN9 slice)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 10/10 passed, 0 failed, 261.66 s** (re-measured 2026-11-01 at
-  AN8; l4_intra is the slow one at ~216 s; `pipeline` ~53 s;
+- **ctest: 10/10 passed, 0 failed, [an9_ctest] s** (re-measured 2026-11-01 at
+  AN9; l4_intra is the slow one at ~216 s; `pipeline` ~53 s;
   `l3_transforms` ~7 s; the rest under 0.5 s including l9_analysis.
-  Earlier runs of the same tree: the AN7 run 263.08 s, the AN6 run
+  Earlier runs of the same tree: the AN8 run 261.66 s, the AN7 run
+  263.08 s, the AN6 run
   261.59 s, the AN5 run 268.30 s, the AN4 run 270.10 s, the AN3 run
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
@@ -357,14 +358,14 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 13.5%** (see the completion metric section;
-  re-measured 2026-11-01: 21,347 of 157,718 non-blank lines, +429 from
-  20,918 - the AN8 screen-content port: +406 in A11 (pic_analysis_process.c
-  :911-1429, the nine detector/helper spans) and +23 in A14 (variance.c
-  :141-158 + :183-190, the variance_c + VAR macro); the printed
-  percentage MOVED at AN8: 13.3% -> 13.5% (21,347/157,718 = 13.5357%
-  crosses the 13.45 rounding boundary the AN7 13.2631% sat below).
-  Earlier history of the same metric: the AN7 run measured
+- **Portable-C coverage: 13.6%** (see the completion metric section;
+  re-measured 2026-11-01: 21,400 of 157,718 non-blank lines, +53 from
+  21,347 - the AN9 luma-dominant port: +53 in A11 (pic_analysis_process.c
+  :1431-1493, the is_input_luma_dominant span + its defines); the printed
+  percentage MOVED at AN9: 13.5% -> 13.6% (21,400/157,718 = 13.5689%
+  crosses the 13.55 rounding boundary the AN8 13.5357% sat below).
+  Earlier history of the same metric: the AN8 run measured
+  21,347/157,718 = 13.5357%; the AN7 run measured
   20,918/157,718 = 13.2631%; the AN6 run measured 20,803/157,718 =
   13.1901%; the AN5 run 20,774/157,718 = 13.1716%; the printed
   percentage MOVED at AN4: 20,756/157,718 = 13.1602% crosses the 13.15
@@ -699,6 +700,25 @@ are partly right and I re-measured rather than restated them:
   <= 1080p; mode 3 = AA-aware; is_input_luma_dominant at :4813 reads
   pcs->chroma_downsampled_pic, NOT enhanced_pic). Host only, no GPU
   twin (parked, named).
+  AN9 LANDED 2026-11-01: analysis::isInputLumaDominant, the port of
+  svt_aom_is_input_luma_dominant (pic_analysis_process.c:1440-1493)
+  with its eight FRAME_LUMA_DOMINANT_* defines (:1431-1438: SAMPLE_STEP
+  8, CORE_THR 16, TAIL_THR 18, MIN_CORE_PCT 85, MIN_TAIL_PCT 95,
+  NEUTRAL_THR 6, UV_DIFF_THR 4, MIN_NEUTRAL_PCT 75). SELF-CONTAINED
+  (no AN1-AN8 helper calls): samples every 8th CHROMA pixel over
+  (width>>1) x (height>>1), counts chroma_mag_sq = du*du + dv*dv
+  against core <= 256 / tail <= 324 and the neutral box
+  (|du| <= 6 && |dv| <= 6 && |uv| <= 4), returns sample_cnt &&
+  core*100 >= sample*85 && (tail*100 >= sample*95 ||
+  neutral*100 >= sample*75) (:1490-1492) - three nested classes
+  (neutral -> core -> tail). Caller: pd_process.c:4813 passes
+  pcs->chroma_downsampled_pic gated on scs->detect_luma_dominant_input
+  (:4812); chroma_downsampled_pic is a 4:2:0 buffer desc carrying the
+  LUMA dims (pcs.c:1192-1199) - why the >>1. Named deviations: the
+  null/EB_YUV400 guard (:1441-1443) threaded as the monochrome flag;
+  the uv_w/uv_h == 0 guard (:1448-1450) kept but behavior-redundant
+  with the sample_cnt conjunct (dropping it is not observable). Host
+  only, no GPU twin (parked, named).
 
 
 ## Completion metric (the portable-C coverage number)
@@ -708,11 +728,14 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-01 (AN8): 13.5%** (21,347 of 157,718 non-blank
-lines - the covered count moved +429 from 20,918: the AN8 screen-content port,
-+406 in A11 (pic_analysis_process.c :911-1429, the nine detector/helper
-spans) and +23 in A14 (variance.c :141-158 + :183-190, the variance_c +
-VAR macro). Earlier history of the same metric:
+**THE NUMBER, as measured 2026-11-01 (AN9): 13.6%** (21,400 of 157,718 non-blank
+lines - the covered count moved +53 from 21,347: the AN9 luma-dominant
+port, +53 in A11 (pic_analysis_process.c :1431-1493, the
+is_input_luma_dominant span + its defines). Earlier history of the same
+metric: the AN8 run measured 21,347 = +429 from 20,918: the AN8
+screen-content port, +406 in A11 (pic_analysis_process.c :911-1429, the
+nine detector/helper spans) and +23 in A14 (variance.c :141-158 +
+:183-190, the variance_c + VAR macro);
 the AN7 run measured 20,918 = +115 from 20,803: the AN7 b64Variance port
 (:318-442); the AN6 run measured 20,803 = +29 from 20,774: the AN6 downsample2d port
 (:134-164); the AN5 run measured 20,774 = +115 from 20,659: the AN1
@@ -720,11 +743,11 @@ mean8x8 port, the AN2 meanSquare8x8 port, +18 each, the AN3 sub-mean
 pair, +36, the AN4 intermVarFour8x8 port, +25, and the AN5
 calculateHistogram port, +18, all
 in pic_analysis_process.c (:170-188, :194-214, :220-240, :242-261,
-:263-284, :286-313); the printed percentage MOVED at AN8:
-21,347/157,718 = 13.5357% crosses the 13.45 rounding boundary the AN7
-13.2631% sat below, so N1 prints 13.5% where AN5-AN7 printed 13.2-13.3%;
-the earlier
-move: AN4 crossed the 13.15 boundary that AN1-AN3's 13.1443% sat
+:263-284, :286-313); the printed percentage MOVED at AN9:
+21,400/157,718 = 13.5689% crosses the 13.55 rounding boundary the AN8
+13.5357% sat below, so N1 prints 13.6% where AN8 printed 13.5%; the earlier
+move: AN8 crossed the 13.45 boundary that AN7's 13.2631% sat below, and
+AN4 crossed the 13.15 boundary that AN1-AN3's 13.1443% sat
 below). Regenerate with `powershell -File tools\coverage.ps1`; never quote a
 hand-typed percentage, for the same reason a hand-typed line count is not
 allowed.
@@ -774,12 +797,12 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 0% | 0 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 6% | 665 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 6% | 718 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 32% | 463 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **21,347** |
+| | **TOTAL** | **254** | **157,718** | | **21,400** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

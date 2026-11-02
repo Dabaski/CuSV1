@@ -195,6 +195,22 @@ ScClasses isScreenContentAaAware(const std::uint8_t* y, std::uint32_t yStride,
                                  std::uint32_t width, std::uint32_t height,
                                  bool fastDetection);
 
+// 1:1 port of svt_aom_is_input_luma_dominant (third_party/SVT-AV1/Source/
+// Lib/Codec/pic_analysis_process.c:1440-1493) with the
+// FRAME_LUMA_DOMINANT_* constants (:1431-1438): SAMPLE_STEP 8, CORE_THR 16,
+// TAIL_THR 18, MIN_CORE_PCT 85, MIN_TAIL_PCT 95, NEUTRAL_THR 6,
+// UV_DIFF_THR 4, MIN_NEUTRAL_PCT 75. The live caller passes pcs->
+// chroma_downsampled_pic (pd_process.c:4813); the port threads the chroma
+// planes + strides + the picture width/height the reference reads
+// (uv_w = width >> 1, uv_h = height >> 1). The reference's
+// !input_pic || color_format == EB_YUV400 || !u_buffer || !v_buffer guard
+// (:1441-1443) becomes the monochrome flag - the port cannot receive a
+// null buffer; the uv_w/uv_h == 0 guard (:1448-1450) is kept.
+bool isInputLumaDominant(const std::uint8_t* u, const std::uint8_t* v,
+                         std::uint32_t uStride, std::uint32_t vStride,
+                         std::uint32_t width, std::uint32_t height,
+                         bool monochrome);
+
 // 1:1 port of svt_aom_downsample_2d_c (third_party/SVT-AV1/Source/Lib/Codec/
 // pic_analysis_process.c:134-164). Declaration twin: Codec/motion_estimation.h:33-35.
 // 2x2, 0-phase decimation generic over decim_step: the input pointer is

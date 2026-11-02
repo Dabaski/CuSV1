@@ -648,6 +648,77 @@ ScClasses isScreenContentAaAware(const std::uint8_t* y, std::uint32_t yStride,
     return classes;
 }
 
+// 1:1 port of svt_aom_is_input_luma_dominant (pic_analysis_process.c:
+// 1440-1493) with the FRAME_LUMA_DOMINANT_* constants (:1431-1438). The
+// sampling loop, the three per-sample counters, the uint32 chroma_mag_sq
+// and the exact return expression are the reference's own; the null /
+// EB_YUV400 guard is threaded as the monochrome flag (named deviation).
+bool isInputLumaDominant(const std::uint8_t* u, const std::uint8_t* v,
+                         std::uint32_t uStride, std::uint32_t vStride,
+                         std::uint32_t width, std::uint32_t height,
+                         bool monochrome) {
+    if (monochrome) {
+        return false;
+    }
+
+    const std::uint32_t uvW = width >> 1;
+    const std::uint32_t uvH = height >> 1;
+
+    if (!uvW || !uvH) {
+        return false;
+    }
+
+    std::uint32_t sampleCnt = 0;
+    std::uint32_t coreCnt = 0;
+    std::uint32_t tailCnt = 0;
+    std::uint32_t neutralCnt = 0;
+
+    constexpr std::uint32_t sampleStep = 8;      // FRAME_LUMA_DOMINANT_SAMPLE_STEP
+    constexpr std::uint32_t coreThrSq = 16 * 16; // FRAME_LUMA_DOMINANT_CORE_THR
+    constexpr std::uint32_t tailThrSq = 18 * 18; // FRAME_LUMA_DOMINANT_TAIL_THR
+    constexpr std::uint32_t minCorePct = 85;     // FRAME_LUMA_DOMINANT_MIN_CORE_PCT
+    constexpr std::uint32_t minTailPct = 95;     // FRAME_LUMA_DOMINANT_MIN_TAIL_PCT
+    constexpr std::uint32_t neutralThr = 6;      // FRAME_LUMA_DOMINANT_NEUTRAL_THR
+    constexpr std::uint32_t uvDiffThr = 4;       // FRAME_LUMA_DOMINANT_UV_DIFF_THR
+    constexpr std::uint32_t minNeutralPct = 75;  // FRAME_LUMA_DOMINANT_MIN_NEUTRAL_PCT
+
+    for (std::uint32_t y = 0; y < uvH; y += sampleStep) {
+        const std::uint8_t* ub = u + y * uStride;
+        const std::uint8_t* vb = v + y * vStride;
+
+        for (std::uint32_t x = 0; x < uvW; x += sampleStep) {
+            const std::int32_t du = static_cast<std::int32_t>(ub[x]) - 128;
+            const std::int32_t dv = static_cast<std::int32_t>(vb[x]) - 128;
+            const std::int32_t uv = static_cast<std::int32_t>(ub[x]) - static_cast<std::int32_t>(vb[x]);
+            const std::uint32_t chromaMagSq = static_cast<std::uint32_t>(du * du + dv * dv);
+            const std::int32_t absDu = du < 0 ? -du : du;
+            const std::int32_t absDv = dv < 0 ? -dv : dv;
+            const std::int32_t absUv = uv < 0 ? -uv : uv;
+
+            // Most samples must stay inside a tight near-neutral chroma
+            // region, and almost all samples must stay inside a slightly
+            // looser region. (:1473-1474)
+            if (chromaMagSq <= coreThrSq) {
+                coreCnt++;
+            }
+            if (chromaMagSq <= tailThrSq) {
+                tailCnt++;
+            }
+            if (absDu <= static_cast<std::int32_t>(neutralThr) &&
+                absDv <= static_cast<std::int32_t>(neutralThr) &&
+                absUv <= static_cast<std::int32_t>(uvDiffThr)) {
+                neutralCnt++;
+            }
+
+            sampleCnt++;
+        }
+    }
+
+    return sampleCnt && coreCnt * 100 >= sampleCnt * minCorePct &&
+        (tailCnt * 100 >= sampleCnt * minTailPct ||
+         neutralCnt * 100 >= sampleCnt * minNeutralPct);
+}
+
 // 1:1 port of svt_aom_downsample_2d_c (pic_analysis_process.c:134-164).
 // The reference's own pointer arithmetic is kept verbatim: the input
 // pointer pre-advanced by half_decim_step rows (:148), prev_input_line

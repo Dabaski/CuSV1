@@ -1036,6 +1036,165 @@ TEST_CASE("isScreenContentAaAware classes the smooth ramp frame not screen") {
     CHECK_FALSE(classes.scClass5);
 }
 
+TEST_CASE("isInputLumaDominant accepts a fully neutral chroma frame") {
+    // 1:1 target: svt_aom_is_input_luma_dominant
+    // (third_party/SVT-AV1/Source/Lib/Codec/pic_analysis_process.c:1440-1493)
+    // with the constants :1431-1438: FRAME_LUMA_DOMINANT_SAMPLE_STEP 8,
+    // CORE_THR 16 (core_thr_sq 256), TAIL_THR 18 (324), MIN_CORE_PCT 85,
+    // MIN_TAIL_PCT 95, NEUTRAL_THR 6, UV_DIFF_THR 4, MIN_NEUTRAL_PCT 75.
+    // The live caller (pd_process.c:4813) passes pcs->
+    // chroma_downsampled_pic; the port threads the chroma planes it needs
+    // (u/v pointers + strides + the picture width/height the reference
+    // reads). The reference's null/EB_YUV400/u_buffer/v_buffer guard
+    // (:1441-1443) becomes the monochrome flag - the port cannot receive
+    // a null buffer. Sampling: every 8th chroma pixel over
+    // (width>>1) x (height>>1), du = u-128, dv = v-128, uv = u-v;
+    // chroma_mag_sq = du*du + dv*dv (uint32); core when <= 256, tail when
+    // <= 324, neutral when |du| <= 6 && |dv| <= 6 && |uv| <= 4; return
+    // sample_cnt && core*100 >= sample*85 && (tail*100 >= sample*95 ||
+    // neutral*100 >= sample*75) (:1490-1492).
+    //
+    // Luma-heavy fixture: u = v = 128 everywhere -> every sample neutral
+    // (and core, and tail): 80x64 -> uv grid 40x32, samples at
+    // {0,8,16,24,32} x {0,8,16,24} = 20; core = tail = neutral = 20:
+    // core 2000 >= 1700, tail 2000 >= 1900 -> true.
+    std::uint8_t u[32 * 48];
+    std::uint8_t v[32 * 48];
+    for (int i = 0; i < 32 * 48; ++i) {
+        u[i] = 128;
+        v[i] = 128;
+    }
+    CHECK(analysis::isInputLumaDominant(u, v, 48, 48, 80, 64, false));
+}
+
+TEST_CASE("isInputLumaDominant rejects a chroma-heavy frame") {
+    // The negative counterpart: u = 200, v = 60 everywhere -> du = 72,
+    // dv = -68, uv = 140: chroma_mag_sq = 5184 + 4624 = 9808 > 324, so
+    // core = tail = neutral = 0 of 20 samples -> every gate fails. The
+    // implementation is complete (slice 1's GREEN wrote the full 1:1
+    // function), so this case's RED evidence is its mutation (the
+    // >= comparisons flipped to >).
+    std::uint8_t u[32 * 48];
+    std::uint8_t v[32 * 48];
+    for (int i = 0; i < 32 * 48; ++i) {
+        u[i] = 200;
+        v[i] = 60;
+    }
+    CHECK_FALSE(analysis::isInputLumaDominant(u, v, 48, 48, 80, 64, false));
+}
+
+// AN9 boundary fixture helper: an 80x64 picture -> uv grid 40x32, samples
+// at (8i, 8j) for i in 0..4, j in 0..3 = 20 samples. Per-sample classes:
+// neutral u=v=128 (mag 0); core-only u=140,v=128 (du 12, mag 144 <= 256,
+// |du| > 6 so NOT neutral); tail-only u=145,v=128 (du 17, mag 289 in
+// (256, 324]); outside u=200,v=100 (mag 5968 > 324). The classes nest:
+// neutral -> core -> tail.
+static void buildLumaDominantFixture(std::uint8_t* u, std::uint8_t* v, int uStride, int vStride,
+                                     const int* coreOnly, int coreOnlyN,
+                                     const int* tailOnly, int tailOnlyN,
+                                     const int* outside, int outsideN) {
+    for (int y = 0; y < 32; ++y) {
+        for (int x = 0; x < 48; ++x) {
+            u[y * uStride + x] = 128;
+            v[y * vStride + x] = 128;
+        }
+    }
+    for (int i = 0; i < coreOnlyN; ++i) {
+        const int sx = (coreOnly[i] % 5) * 8;
+        const int sy = (coreOnly[i] / 5) * 8;
+        u[sy * uStride + sx] = 140;
+    }
+    for (int i = 0; i < tailOnlyN; ++i) {
+        const int sx = (tailOnly[i] % 5) * 8;
+        const int sy = (tailOnly[i] / 5) * 8;
+        u[sy * uStride + sx] = 145;
+    }
+    for (int i = 0; i < outsideN; ++i) {
+        const int sx = (outside[i] % 5) * 8;
+        const int sy = (outside[i] / 5) * 8;
+        u[sy * uStride + sx] = 200;
+        v[sy * vStride + sx] = 100;
+    }
+}
+
+TEST_CASE("isInputLumaDominant: core at exactly 85 pct with tail and neutral short is FALSE") {
+    // Boundary fixture A (the implementation is complete; this case's RED
+    // evidence is its mutation - the neutral threshold lowered to 65 makes
+    // this TRUE). 14 neutral + 3 core-only + 1 tail-only + 2 outside:
+    // core = 17 of 20 -> 17*100 = 1700 >= 20*85 = 1700 (the boundary is
+    // INCLUSIVE, :1490); tail = 18 -> 1800 >= 1900 FALSE (90% < 95%);
+    // neutral = 14 -> 1400 >= 1500 FALSE (70% < 75%). Verdict FALSE: a
+    // mutant dropping the tail-or-neutral requirement (or loosening
+    // either threshold) flips this to TRUE.
+    std::uint8_t u[32 * 48];
+    std::uint8_t v[32 * 48];
+    static const int kCoreOnly[3] = {0, 1, 2};
+    static const int kTailOnly[1] = {3};
+    static const int kOutside[2] = {4, 5};
+    buildLumaDominantFixture(u, v, 48, 48, kCoreOnly, 3, kTailOnly, 1, kOutside, 2);
+    CHECK_FALSE(analysis::isInputLumaDominant(u, v, 48, 48, 80, 64, false));
+}
+
+TEST_CASE("isInputLumaDominant: neutral at exactly 75 pct with core at exactly 85 pct is TRUE") {
+    // Boundary fixture B: 15 neutral + 2 core-only + 1 tail-only + 2
+    // outside -> core = 17 of 20 (85%, INCLUSIVE: 1700 >= 1700), tail =
+    // 18 (90%, fails), neutral = 15 (75%, INCLUSIVE: 1500 >= 1500) ->
+    // TRUE via the :1491-1492 neutral branch. Both inclusive boundaries
+    // are load-bearing here: this case's mutation (>= -> > in the return)
+    // flips it to FALSE at EITHER boundary.
+    std::uint8_t u[32 * 48];
+    std::uint8_t v[32 * 48];
+    static const int kCoreOnly[2] = {0, 1};
+    static const int kTailOnly[1] = {2};
+    static const int kOutside[2] = {3, 4};
+    buildLumaDominantFixture(u, v, 48, 48, kCoreOnly, 2, kTailOnly, 1, kOutside, 2);
+    CHECK(analysis::isInputLumaDominant(u, v, 48, 48, 80, 64, false));
+}
+
+TEST_CASE("isInputLumaDominant: the core gate is necessary even with a passing tail") {
+    // Boundary fixture C: 14 neutral + 2 core-only + 4 tail-only + 0
+    // outside -> core = 16 of 20 (80% < 85%: the :1490 core gate FAILS),
+    // tail = 20 of 20 (100% >= 95%: the tail branch PASSES). The verdict
+    // must still be FALSE - the core gate is a NECESSARY conjunct, not
+    // another alternative. This case's mutation: the core conjunct
+    // dropped -> TRUE.
+    std::uint8_t u[32 * 48];
+    std::uint8_t v[32 * 48];
+    static const int kCoreOnly[2] = {0, 1};
+    static const int kTailOnly[4] = {2, 3, 4, 5};
+    buildLumaDominantFixture(u, v, 48, 48, kCoreOnly, 2, kTailOnly, 4, nullptr, 0);
+    CHECK_FALSE(analysis::isInputLumaDominant(u, v, 48, 48, 80, 64, false));
+}
+
+TEST_CASE("isInputLumaDominant: the EB_YUV400 guard returns false without sampling") {
+    // The reference's :1441-1443 guard: color_format == EB_YUV400 ->
+    // false BEFORE any sampling (threaded here as the monochrome flag).
+    // On the fully-neutral chroma planes the sampler itself would return
+    // true, so this case's mutation (the guard neutralized) is caught:
+    // the port must not fall through to the sampling.
+    std::uint8_t u[32 * 48];
+    std::uint8_t v[32 * 48];
+    for (int i = 0; i < 32 * 48; ++i) {
+        u[i] = 128;
+        v[i] = 128;
+    }
+    CHECK_FALSE(analysis::isInputLumaDominant(u, v, 48, 48, 80, 64, true));
+}
+
+TEST_CASE("isInputLumaDominant: a one-pixel-wide picture has no chroma samples") {
+    // The :1448-1450 guard: uv_w = width >> 1 == 0 -> false. (Removing
+    // the guard is behavior-preserving here - the empty sample loop also
+    // yields false via the sample_cnt conjunct - so this case pins the
+    // observable behavior, not the guard's existence.)
+    std::uint8_t u[8 * 8];
+    std::uint8_t v[8 * 8];
+    for (int i = 0; i < 8 * 8; ++i) {
+        u[i] = 200;
+        v[i] = 60;
+    }
+    CHECK_FALSE(analysis::isInputLumaDominant(u, v, 8, 8, 1, 64, false));
+}
+
 TEST_CASE("calculateHistogram decimates rows and columns by decim_step") {
     // Both loops step by decim_step (:179-:180): at step 2 on a 4x4 the
     // sampled pixels are (0,0), (0,2), (2,0), (2,2). Fixture src[y][x] =
