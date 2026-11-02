@@ -446,4 +446,37 @@ void downsampleFilteringInputPicture(
     bool hmeEnabled, bool tfHmeEnabled, bool level1Enabled,
     bool tfLevel1Enabled, bool level0Enabled, bool tfLevel0Enabled);
 
+// 1:1 ports of the SVT-AV1 1D FFT kernels
+// (third_party/SVT-AV1/Source/Lib/Codec/fft_common.h:113-414, macro
+// GEN_FFT_2/4/8/16/32 with the float suffix). The macros expand verbatim
+// to the five functions below; the float suffix is the only instantiation
+// used by the live consumer (fft.c:82-86). The first float slice in the
+// layer - all preceding primitives are fixed-point, these carry no rounding
+// mode choice of their own: the kernel arithmetic is exactly the reference
+// float expression graph, evaluated under the same IEEE-754 single
+// precision.
+// Declaration twin: fft_common.h:49-52 (svt_aom_fft1d_4/8/16/32_float;
+// svt_aom_fft1d_2_float is instantiated by the macro with no separate
+// forward declaration in the reference - the GEN_FFT_2 macro expansion
+// itself is the source of truth).
+// Real-input transform: n floats in, n floats out packed as
+// [r_0..r_{n/2}, i_1..i_{n/2-1}] (fft_common.h:24-27).
+void fft1d2(const float* input, float* output, std::int32_t stride);
+void fft1d4(const float* input, float* output, std::int32_t stride);
+void fft1d8(const float* input, float* output, std::int32_t stride);
+void fft1d16(const float* input, float* output, std::int32_t stride);
+void fft1d32(const float* input, float* output, std::int32_t stride);
+
+// 1:1 ports of the SVT-AV1 1D INVERSE FFT kernels (fft_common.h:416-823,
+// macro GEN_IFFT_2/4/8/16/32 with the float suffix; declaration twin:
+// none - the reference declares no ifft1d prototypes in fft_common.h, the
+// macro expansions at fft.c:173-177 are the source of truth; grep-verified).
+// The input is the same packed conjugate-symmetric spectrum, the output is
+// the UNNORMALIZED real inverse (n * the forward's input signal).
+void ifft1d2(const float* input, float* output, std::int32_t stride);
+void ifft1d4(const float* input, float* output, std::int32_t stride);
+void ifft1d8(const float* input, float* output, std::int32_t stride);
+void ifft1d16(const float* input, float* output, std::int32_t stride);
+void ifft1d32(const float* input, float* output, std::int32_t stride);
+
 }  // namespace analysis

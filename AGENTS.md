@@ -336,14 +336,15 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-02, the AN11 slice)
+### Last measured state (2026-11-02, the AN12 slice)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 10/10 passed, 0 failed, 264.78 s** (re-measured 2026-11-02 at
-  AN11; l4_intra is the slow one at 205.61 s; `pipeline` 51.38 s;
-  `l3_transforms` 6.83 s; the rest under 0.5 s including l9_analysis.
-  Earlier runs of the same tree: a second AN11 run 264.07 s, the AN10
+- **ctest: 10/10 passed, 0 failed, 275.59 s** (re-measured 2026-11-02 at
+  AN12; l4_intra is the slow one at 213.58 s; `pipeline` 53.74 s;
+  `l3_transforms` 7.24 s; the rest under 0.5 s including l9_analysis.
+  Earlier runs of the same tree: a first AN12 run 269.63 s, the AN11
+  run 264.78 s, a second AN11 run 264.07 s, the AN10
   run 266.17 s, the AN9
   run 262.05 s, the AN8 run
   261.66 s, the AN7 run
@@ -352,7 +353,7 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
-  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-02 at AN11: rebuilt, and
+  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-02 at AN12: rebuilt, and
   byte-identical to the committed file). History, not a figure to chase:
   884,980 B was the value from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
@@ -361,12 +362,14 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 13.8%** (see the completion metric section;
-  re-measured 2026-11-02: 21,826 of 157,718 non-blank lines, +48 from
-  21,778 - the AN11 HME downsampling driver port: +48 in A11 (the
-  pic_analysis_process.c :1498-1547 span); the printed percentage does
-  NOT move at AN11: 21,826/157,718 = 13.8386% stays below the 13.85
-  rounding boundary, so 13.8% prints again; it last MOVED at AN10:
+- **Portable-C coverage: 14.3%** (see the completion metric section;
+  re-measured 2026-11-02: 22,530 of 157,718 non-blank lines, +704 from
+  21,826 - the AN12 FFT port: +704 in A11 (the fft_common.h GEN_FFT_2..
+  GEN_FFT_32 macro bodies :113-414, 298 non-blank, and the
+  GEN_IFFT_2..GEN_IFFT_32 macro bodies :416-823, 406 non-blank); the
+  printed percentage MOVED at AN12: 22,530/157,718 = 14.2841% crosses
+  the 14.25 rounding boundary, so 14.3% prints where AN10/AN11 printed
+  13.8%; it last MOVED before that at AN10:
   13.6% -> 13.8% (21,778/157,718 = 13.8082% crosses the 13.75 rounding
   boundary the AN9 13.5685% sat below). Earlier history of the same
   metric: the AN9 run measured 21,400/157,718 = 13.5685%; the AN8 run
@@ -724,6 +727,34 @@ are partly right and I re-measured rather than restated them:
   the uv_w/uv_h == 0 guard (:1448-1450) kept but behavior-redundant
   with the sample_cnt conjunct (dropping it is not observable). Host
   only, no GPU twin (parked, named).
+  AN12 LANDED 2026-11-02: the 1D FFT kernels - BOTH families, the first
+  FLOAT slice in the layer (every preceding primitive is fixed-point).
+  analysis::fft1d2/4/8/16/32 = GEN_FFT_2..GEN_FFT_32
+  (fft_common.h:113-414, 298 non-blank) and analysis::ifft1d2/4/8/16/32
+  = GEN_IFFT_2..GEN_IFFT_32 (:416-823, 406 non-blank), transcribed
+  verbatim as scalar float (T_VEC = float, load/store = point
+  read/write, add/sub/mul = the float operators - the macros' own
+  scalar instantiation, fft.c:82-86 fwd / :173-177 inv). N-set
+  {2,4,8,16,32} for both families; no other N exists in the reference.
+  The 2D drivers fft_2d_gen/ifft_2d_gen (fft.c:51/:108) are AN13, NOT
+  here. TOLERANCE (the first float decision, test-header documented,
+  inherited by AN13-AN15): EPSILON = 1e-4 ABSOLUTE for per-transform
+  assertions - the kernels are pure float graphs with NO libm in
+  :113-823, but the twiddles are 6-decimal truncations (<= 4.7e-7 each;
+  measured worst port-vs-definition delta 1.01e-5 at N=16 r_1); ONE
+  derived exception: the fft->ifft round-trip fixture uses n * 1e-4
+  (the inverse re-sums the forward's truncation noise across n terms;
+  measured deltas 0 / 0 / 9.5e-6 / 1.5e-4 / 2.4e-4 at N = 2/4/8/16/32).
+  Fixture discipline: impulse (all-ones -> DC only), sinusoid at bin 1
+  (energy in exactly one packed slot; N=16 r_1 = 8, N=32 r_1 = 16),
+  generic non-symmetric instrument-derived vectors, ifft DC-impulse +
+  hand-chosen non-symmetric spectra + the round-trip composition, plus
+  stride fixtures. Six mutations captured against the FINAL fixture set
+  (twiddle corrupt x2, re/im swap x1, dropped mul x1, ifft asymmetry x1,
+  w16 half swap x1), all killed by named fixtures. The register's
+  corrected scout errors: the anchor is fft_common.h:113-414/:416-823,
+  NOT :114-330, and the "cos/sin tables" are inline literals, no tables
+  exist. Host only, no GPU twin (parked, named - scout marked [G]).
 
 
 ## Completion metric (the portable-C coverage number)
@@ -733,11 +764,15 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-02 (AN11): 13.8%** (21,826 of 157,718 non-blank
-lines - the covered count moved +48 from 21,778: the AN11 HME
-downsampling driver port, +48 in A11 (the pic_analysis_process.c
-:1498-1547 span). Earlier history of the same
-metric: the AN10 run measured 21,778 = +378 from 21,400: the AN10
+**THE NUMBER, as measured 2026-11-02 (AN12): 14.3%** (22,530 of 157,718 non-blank
+lines - the covered count moved +704 from 21,826: the AN12 FFT port,
++704 in A11 (the fft_common.h GEN_FFT_2..GEN_FFT_32 macro bodies :113-414,
+298 non-blank, and the GEN_IFFT_2..GEN_IFFT_32 macro bodies :416-823,
+406 non-blank; the 10 fft.c entry-point instantiation lines are NOT
+counted - our analysis:: names have no instantiation shell). Earlier
+history of the same
+metric: the AN11 run measured 21,826 = +48 from 21,778 (the AN11 HME
+downsampling driver port); the AN10 run measured 21,778 = +378 from 21,400: the AN10
 pad-family port, +142 in A6 (the pic_operators.c pad spans) and +236
 in A11 (the pic_analysis_process.c pad spans); the AN9 run measured
 21,400/157,718 = 13.5685%; the AN8 run
@@ -752,7 +787,9 @@ mean8x8 port, the AN2 meanSquare8x8 port, +18 each, the AN3 sub-mean
 pair, +36, the AN4 intermVarFour8x8 port, +25, and the AN5
 calculateHistogram port, +18, all
 in pic_analysis_process.c (:170-188, :194-214, :220-240, :242-261,
-:263-284, :286-313); the printed percentage does NOT move at AN11:
+:263-284, :286-313); the printed percentage MOVED at AN12: 22,530/157,718 =
+14.2841% crosses the 14.25 rounding boundary, so N1 prints 14.3% where
+AN10/AN11 printed 13.8%; the printed percentage did NOT move at AN11:
 21,826/157,718 = 13.8386% stays below the 13.85 boundary, so N1 prints
 13.8% again where AN10 printed 13.8%; the printed percentage MOVED at
 AN10: 21,778/157,718 = 13.8082% crosses the 13.75 rounding boundary the
@@ -811,12 +848,12 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 0% | 0 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 8% | 1,002 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 14% | 1,706 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 32% | 463 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **21,826** |
+| | **TOTAL** | **254** | **157,718** | | **22,530** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

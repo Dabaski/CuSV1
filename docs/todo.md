@@ -1097,6 +1097,82 @@ A0. SLICE-LEVEL STATE (the live register)
    re-measured 10/10 at 266.17 s, GATE re-measured unchanged, and
    the coverage headline carries the AN10 numbers above.
 
+ - [x] AN12 LANDED (2026-11-02): analysis::fft1d2, fft1d4, fft1d8,
+    fft1d16, fft1d32 + ifft1d2, ifft1d4, ifft1d8, ifft1d16, ifft1d32
+    (svt_aom_fft1d_2/4/8/16/32_float at fft_common.h:113-414 and
+    svt_aom_ifft1d_2/4/8/16/32_float at fft_common.h:416-823, macros
+    GEN_FFT_2..GEN_FFT_32 and GEN_IFFT_2..GEN_IFFT_32; the entry-point
+    instantiations are fft.c:82-86 (fwd) and fft.c:173-177 (inv); the
+    fwd declarations fft_common.h:49-52 are the only header twins, the
+    ifft family declares none - grep-verified). Phase B opens, the first
+    FLOAT slice in the layer: every preceding primitive is fixed-point;
+    these are IEEE-754 single-precision host math with no rounding mode
+    of their own and the port mirrors the reference expression graph
+    exactly (the macros' scalar float path: T_VEC = float, load = point
+    read, store = point write, add/sub/mul = the float operators).
+    N-SET FOUND: {2, 4, 8, 16, 32} for BOTH families; no other N exists
+    in the reference. The brief's anchor fft_common.h:114-330 was a
+    scout error - the GEN_FFT_32 macro alone spans :246-414; corrected
+    here. The brief's "cos/sin tables" do not exist as tables: the
+    twiddles are inline 6-decimal float literals (k_weight2..k_weight8).
+    TOLERANCE DISCIPLINE (the first float decision, documented in the
+    test header and inherited by AN13-AN15): EPSILON = 1e-4 ABSOLUTE,
+    not bit-equality. WHY: the kernels are pure float expression graphs
+    with no libm call anywhere in :113-823 (structural check), but the
+    twiddle constants are 6-decimal truncations (<= 4.7e-7 error each)
+    that accumulate over butterfly depth; the fixtures assert the port
+    against full-precision DFT-definition values, so bit-equality is
+    impossible by construction. 1e-4 covers the truncation amplitude at
+    the fixture magnitudes (O(1)..O(32); measured worst port-vs-
+    definition delta 1.01e-5 at N=16 r_1, 10x margin). Held for every
+    per-transform assertion; NO per-test variation. ONE DERIVED
+    exception, documented in the test: the fft->ifft ROUND-TRIP fixture
+    re-sums the forward's truncation noise across n terms in the inverse
+    butterfly, so its bound is n * kEpsilon (measured deltas 0 / 0 /
+    9.5e-6 / 1.5e-4 / 2.4e-4 at N = 2/4/8/16/32; the N=16/32 deltas
+    EXCEED 1e-4 exactly as derived, every delta >= 10x below n * 1e-4).
+    RED (captured): fwd - the three generic fixtures' FIRST hand-derived
+    expected vectors were WRONG (incomplete derivations) and the suite
+    fired on them - a finding, not papered over; the falsifier caught
+    THREE fixture bugs while the port was right (verified against an
+    independent full-precision DFT instrument: worst delta 1.01e-5).
+    The corrected fixtures are instrument-derived, documented as such.
+    inv - the missing-definition RED: all five ifft1dN definitions
+    renamed, rebuild fails to resolve the symbols, then implementation
+    landed. Round-trip - the N=16/32 round-trip fixtures FAILED with
+    deltas 1.5e-4 / 2.4e-4, measured, diagnosed as the derived n*kEpsilon
+    bound (above), fixture tolerance corrected to the DERIVED bound.
+    GREEN: 108 test cases / 6422 assertions, 0 failed, in tests/
+    test_fft1d.cpp (CMakeLists gains the file): per N in {2,4,8,16,32} -
+    impulse (all ones -> DC only), sinusoid at bin 1 (energy in exactly
+    one packed slot; N=16 r_1 = 8, N=32 r_1 = 16), generic non-symmetric
+    (every slot differs, instrument-derived), plus stride fixtures at
+    N=2, the ifft DC-impulse family (packed [N,0..] -> N everywhere),
+    the ifft definition-derived generic spectra (hand-chosen packed
+    vectors NOT the forward of any signal), and the round-trip
+    composition per N. 1e-4 standing, n*1e-4 round-trip only.
+    MUTATIONS (all captured, all reverted, all against the FINAL fixture
+    set, every rebuild verified error-free): M1 fft1d8 twiddle
+    0.707107f -> 0.707f -> 3 fail (:159 generic, :179 sinusoid, :477
+    round-trip N=8); M2 fft1d4 re/im swap output[1]<->output[3] -> 3
+    fail (:113 sinusoid, :126 generic, :470 round-trip N=4); M3 fft1d8
+    slot-1 twiddle mul dropped -> 3 fail (:159 :179 :477); M4 ifft1d8
+    store-7 add->sub -> 2 fail (:402 ifft generic, :477 round-trip);
+    M5 fft1d32 twiddle 0.980785f -> 0.9807f -> 3 fail (:297 :336 :501);
+    M6 fft1d16 store-9 w16[1] -> w16[0] -> 3 fail (:230 :320 :487).
+    Every mutation caught by at least one named fixture; none survives.
+    MEASURED (2026-11-02): suite 10/10 passed, 0 failed, 275.59 s (an
+    earlier run of the same tree measured 269.63 s);
+    GATE unchanged 884,851 B, 421 lines, byte-identical, diff 0 (no
+    generator input); coverage A11 fraction 0.0833 -> 0.1418 (+704
+    non-blank ref lines: the 298 GEN_FFT_* + 406 GEN_IFFT_* macro
+    bodies; the 10 fft.c entry-point instantiation lines are noted in
+    the rationale but not counted - our names differ), total
+    21,826 -> 22,530 of 157,718; the printed percentage MOVED: 13.8%
+    -> 14.3% (22,530/157,718 = 14.2841% crosses the 14.25 boundary);
+    the paired conformance count unchanged (9 artifacts, all
+    content-1:1 - the FFT kernels emit no bitstream). Host only, no GPU
+    twin (parked, named - the scout marked [G] possible).
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
