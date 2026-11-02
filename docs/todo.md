@@ -328,7 +328,8 @@ A0. SLICE-LEVEL STATE (the live register)
    (pic_analysis_process.c:194 + compute_mean.h:21) LANDED; AN2
    meanSquare8x8 (:220 + compute_mean.h:26) LANDED; AN3 the sub-mean pair
    (:242/:263 + compute_mean.h:31/:34) LANDED; AN4 interm_var_four8x8
-   (:286/:313 + compute_mean.h:40) LANDED; AN5 calculate_histogram (:170); AN6 downsample_2d
+   (:286/:313 + compute_mean.h:40) LANDED; AN5 calculate_histogram
+   (:170/:188) LANDED; AN6 downsample_2d
   (:134); AN7 the b64 variance pyramid (compute_b64_variance :318); AN8
   the screen-content detectors (:1354, antialiasing-aware :1207); AN9
   luma-dominant (:1440); AN10 the pad family (:648, :745, :820, :858,
@@ -527,6 +528,57 @@ A0. SLICE-LEVEL STATE (the live register)
   AN1-AN3's 13.1443% sat below, so coverage.ps1 now prints 13.2%
   (AN1-AN3 printed 13.1%); the paired conformance count unchanged
   (9 artifacts, all content-1:1).
+- [x] AN5 LANDED (2026-11-01): analysis::calculateHistogram, the port
+  of calculate_histogram - pic_analysis_process.c:170-188. BRIEF
+  CORRECTIONS (both grep-verified): the function's real name is
+  calculate_histogram, NOT the brief's svt_aom_calculate_histogram
+  (the only Codec occurrences are the :167 comment, the :170 definition
+  and the :560 caller), and it has NO header declaration twin - the
+  function is file-local to its .c, so the definition is the only
+  anchor (the brief's "read its header decl" has no target).
+  Derivation BEFORE the test: the outer loop steps its counter by
+  decim_step but selects the row by POINTER advance
+  (src += stride * decim_step, :184); the inner loop steps the column
+  by decim_step; the PIXEL VALUE is the bin index into the 256-bin
+  uint32 histogram; sum (uint64) accumulates the SAMPLED pixels only
+  (:182) - the caller rescales by decim_step^2 (:569) and
+  pre-initializes the bins to 1 (:545-547), so the port only ADDS on
+  top and mirrors the reference's two-read shape. Host only, NO GPU
+  twin (the brief's "optional later" stays parked, not built).
+  RED (captured): test_variance.cpp(242,15): error C2039
+  'calculateHistogram': is not a member of 'analysis' (+ C3861
+  identifier not found). GREEN: the port, zero warnings under /W4 /WX.
+  Three TEST_CASEs, all hand-derived: the brief's ramp (16x16 stride 16
+  step 1, src[i] = i: every bin 1, sum of bins 256 = the counted
+  pixels, histogram[0] = histogram[255] = 1, *sum = 0+1+...+255 =
+  32640); stride != width (4x4 at stride 8, cols 4-7 poison 99s:
+  bins 0..15 = 1, histogram[99] = 0, *sum = 120, bin sum 16);
+  decim_step (4x4 step 2, src[y][x] = 10y+x: sampled (0,0)=0 (0,2)=2
+  (2,0)=20 (2,2)=22, bin sum 4, *sum = 44, odd bins 1/3/21/23 stay 0).
+  MUTATIONS (all captured, all reverted): M1 bin-index
+  histogram[src[hi]] -> histogram[hi] kills 3 cases - ramp:
+  histogram[0] 16 != 1 and histogram[255] 0 != 1 while binSum 256 and
+  *sum 32640 still pass (the two specific-bin assertions carry the
+  bin-index discrimination exactly as the brief predicted); stride:
+  histogram[15] 0 != 1; decim: histogram[2] 2 != 1, histogram[20]
+  0 != 1, histogram[22] 0 != 1. M2 inner step hi += decimStep ->
+  hi += 1 kills only the decim case (binSum 8 != 4, histogram[1]
+  1 != 0, sum 92 != 44). M3 stride-ignoring row advance
+  src += width * decimStep (+ a behavior-neutral (void)stride to
+  satisfy /W4 /WX - the bare stride-dropping mutant is INVALID under
+  /W4 /WX: C4100 unreferenced parameter, the AN2 lesson live) kills
+  only the stride case (histogram[15] 0 != 1, histogram[99] 8 != 0,
+  sum 820 != 120). M3's first attempt ALSO tripped the AN2
+  stale-binary trap: the Edit left a non-compiling tree (C2143 from a
+  partial match) and the run executed the stale M2 binary; caught
+  because the build errors were inspected before trusting the run
+  output.
+  MEASURED (2026-11-01): suite 10/10 passed, 0 failed, 268.30 s; GATE
+  re-measured 884,851 B, byte-identical, diff 0; coverage A11 97 ->
+  115 (the 18 non-blank ref lines of :170-188, measured with the
+  coverage metric's own counter), total 20,756 -> 20,774 of 157,718;
+  printed percentage stays 13.2% (20,774/157,718 = 13.1716%); the
+  paired conformance count unchanged (9 artifacts, all content-1:1).
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)

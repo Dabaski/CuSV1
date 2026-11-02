@@ -211,3 +211,103 @@ TEST_CASE("intermVarFour8x8 fills the four mean/sq pairs left to right along one
     CHECK(mean[3] == 10240);
     CHECK(meanSq[3] == 104857600);
 }
+
+TEST_CASE("calculateHistogram counts one pixel per bin on a 0..255 ramp") {
+    // 1:1 target: calculate_histogram (pic_analysis_process.c:170-188). The
+    // real name is calculate_histogram - NOT the brief's
+    // svt_aom_calculate_histogram - and it has NO header declaration twin
+    // (grep-verified: the only Codec occurrences are the :167 comment, the
+    // :170 definition and the :560 caller; the function is file-local to
+    // its .c). Mechanics: the outer loop steps vertical_index by decim_step
+    // but selects the row by POINTER advance (src += stride * decim_step);
+    // the inner loop steps the column by decim_step; the PIXEL VALUE is the
+    // bin index (256 bins, uint32_t); sum accumulates the SAMPLED pixels
+    // only (the caller rescales by decim_step^2 at :569 and pre-initializes
+    // the bins to 1 at :545-547 - the function only ADDS on top, so the
+    // test as caller initializes the bins to 0).
+    //
+    // Fixture (the brief's ramp): 16x16, stride 16, step 1, src[i] = i, so
+    // every value 0..255 appears EXACTLY once. Hand-derived: every bin = 1;
+    // sum of bins = 256 = the counted pixels; histogram[0] = histogram[255]
+    // = 1; *sum = 0+1+...+255 = 255*256/2 = 32640. The two specific-bin
+    // assertions carry the bin-index discrimination: a mutant that bins by
+    // COLUMN index (histogram[hi]) would leave the bin sum at 256 and *sum
+    // correct while histogram[0] reads 16 and histogram[255] reads 0.
+    std::uint8_t src[16 * 16] = {0};
+    for (int i = 0; i < 16 * 16; ++i) {
+        src[i] = (std::uint8_t)i;
+    }
+    std::uint32_t histogram[256] = {0};
+    std::uint64_t sum = 0;
+    analysis::calculateHistogram(src, 16, 16, 16, 1, histogram, &sum);
+    std::uint32_t binSum = 0;
+    for (int b = 0; b < 256; ++b) {
+        binSum += histogram[b];
+    }
+    CHECK(binSum == 256);
+    CHECK(histogram[0] == 1);
+    CHECK(histogram[255] == 1);
+    CHECK(sum == 32640);
+}
+
+TEST_CASE("calculateHistogram honors stride != width") {
+    // The row advance is src += stride * decim_step (:184) with stride an
+    // INDEPENDENT parameter - a stride-ignoring mutant (src += width) reads
+    // the wrong rows. Fixture: width 4, height 4, stride 8, step 1; rows
+    // hold 0..15 in cols 0-3 and poison 99s in cols 4-7, so the mutant's
+    // row 1 lands on the poison half-row: hand-derived for the faithful
+    // port, bins 0..15 = 1 and every other bin 0, *sum = 0+1+...+15 = 120,
+    // sum of bins = 16; for the mutant, histogram[99] = 4 and bins 8..15
+    // stay 0, so the histogram[99] == 0 and histogram[15] == 1 assertions
+    // kill it.
+    std::uint8_t src[4 * 8] = {0};
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            src[y * 8 + x] = (std::uint8_t)(y * 4 + x);
+        }
+        for (int x = 4; x < 8; ++x) {
+            src[y * 8 + x] = 99;
+        }
+    }
+    std::uint32_t histogram[256] = {0};
+    std::uint64_t sum = 0;
+    analysis::calculateHistogram(src, 4, 4, 8, 1, histogram, &sum);
+    std::uint32_t binSum = 0;
+    for (int b = 0; b < 256; ++b) {
+        binSum += histogram[b];
+    }
+    CHECK(binSum == 16);
+    CHECK(histogram[15] == 1);
+    CHECK(histogram[99] == 0);
+    CHECK(sum == 120);
+}
+
+TEST_CASE("calculateHistogram decimates rows and columns by decim_step") {
+    // Both loops step by decim_step (:179-:180): at step 2 on a 4x4 the
+    // sampled pixels are (0,0), (0,2), (2,0), (2,2). Fixture src[y][x] =
+    // 10y + x, stride 4: sampled values 0, 2, 20, 22 - hand-derived:
+    // sum of bins = 4, histogram[2] = histogram[20] = histogram[22] = 1,
+    // the odd columns' bins (1, 3, 21, 23) stay 0, *sum = 0+2+20+22 = 44.
+    // An inner-loop mutant that ignores the decimation (hi += 1) samples 8
+    // pixels with *sum = 92 and fills bins 0..3 and 20..23, so the binSum,
+    // histogram[22] and *sum assertions all kill it.
+    std::uint8_t src[4 * 4] = {0};
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            src[y * 4 + x] = (std::uint8_t)(y * 10 + x);
+        }
+    }
+    std::uint32_t histogram[256] = {0};
+    std::uint64_t sum = 0;
+    analysis::calculateHistogram(src, 4, 4, 4, 2, histogram, &sum);
+    std::uint32_t binSum = 0;
+    for (int b = 0; b < 256; ++b) {
+        binSum += histogram[b];
+    }
+    CHECK(binSum == 4);
+    CHECK(histogram[2] == 1);
+    CHECK(histogram[20] == 1);
+    CHECK(histogram[22] == 1);
+    CHECK(histogram[1] == 0);
+    CHECK(sum == 44);
+}

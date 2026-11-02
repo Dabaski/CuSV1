@@ -52,4 +52,19 @@ void intermVarFour8x8(const std::uint8_t* src, std::uint16_t srcStride,
                       std::uint64_t* meanOf8x8Blocks,
                       std::uint64_t* meanOfSquared8x8Blocks);
 
+// 1:1 port of calculate_histogram (third_party/SVT-AV1/Source/Lib/Codec/
+// pic_analysis_process.c:170-188). NO header declaration twin exists:
+// grep-verified, the function is file-local to its .c (the only Codec
+// occurrences are the :167 comment, the :170 definition and the :560
+// caller). Mechanics: the outer loop steps vertical_index by decim_step
+// but selects the row by POINTER advance (src += stride * decim_step);
+// the inner loop steps the column by decim_step; the PIXEL VALUE is the
+// bin index into the 256-bin uint32 histogram; sum accumulates the
+// SAMPLED pixels only (the caller rescales by decim_step^2 at :569 and
+// pre-initializes the bins to 1 at :545-547 - the function only ADDS).
+void calculateHistogram(const std::uint8_t* src, std::uint32_t width,
+                        std::uint32_t height, std::uint32_t stride,
+                        std::uint8_t decimStep, std::uint32_t* histogram,
+                        std::uint64_t* sum);
+
 }  // namespace analysis

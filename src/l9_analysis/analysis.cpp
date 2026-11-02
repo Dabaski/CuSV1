@@ -123,4 +123,26 @@ void intermVarFour8x8(const std::uint8_t* src, std::uint16_t srcStride,
     meanOfSquared8x8Blocks[3] = subMeanSquareValues(src + blockIndex, srcStride, 8, 8);
 }
 
+// 1:1 port of calculate_histogram (pic_analysis_process.c:170-188): the
+// PIXEL VALUE is the bin index; the outer loop steps its counter by
+// decim_step but selects the row by POINTER advance
+// (src += stride * decim_step, :184), the inner loop steps the column by
+// decim_step; sum accumulates the SAMPLED pixels only (:182) - the caller
+// rescales by decim_step^2 (:569) and pre-initializes the bins to 1
+// (:545-547), so the port only ADDS on top. Mirrors the reference's
+// two-read shape (the ++histogram line and the sum line each index
+// src[hi]) rather than caching a local.
+void calculateHistogram(const std::uint8_t* src, std::uint32_t width,
+                        std::uint32_t height, std::uint32_t stride,
+                        std::uint8_t decimStep, std::uint32_t* histogram,
+                        std::uint64_t* sum) {
+    for (std::uint32_t vi = 0; vi < height; vi += decimStep) {
+        for (std::uint32_t hi = 0; hi < width; hi += decimStep) {
+            ++(histogram[src[hi]]);
+            *sum += src[hi];
+        }
+        src += stride * decimStep;
+    }
+}
+
 }  // namespace analysis
