@@ -479,4 +479,39 @@ void ifft1d8(const float* input, float* output, std::int32_t stride);
 void ifft1d16(const float* input, float* output, std::int32_t stride);
 void ifft1d32(const float* input, float* output, std::int32_t stride);
 
+// AN13: the 2D FFT drivers (third_party/SVT-AV1/Source/Lib/Codec/fft.c),
+// composing the landed AN12 1D kernels - the port never re-implements a
+// 1D butterfly. COMPOSITION (fft_2d_gen, fft.c:51-64): five passes -
+// fft1dN(input + x, output + x, n) per column x, simple_transpose,
+// fft1dN(temp + x, output + x, n) per second-axis row, simple_transpose,
+// then unpack_2d_output. NO scaling in any pass (fft.c has zero arithmetic
+// divisions - verified).
+//
+// THE UNPACK CONTRACT (fft.c:23-49): output is 2*n*n floats holding
+// n*(n/2+1) complex values interleaved as output[2*(y*n+x)] = Re F(y,x),
+// output[2*(y*n+x)+1] = Im F(y,x) for ALL y but ONLY x in 0..n/2; the tail
+// of the output buffer is NEVER written by the port (the caller zeroes it,
+// noise_util.c:65). simple_transpose and unpack_2d_output are file-local
+// helpers in fft2d.cpp (the reference keeps them static INLINE in fft.c).
+// vec_size is 1 at every reference _c entry point (fft.c:89-105 /
+// :180-236); the port folds it - named deviation, noted per function.
+//
+// NORMALIZATION FINDING (verified fft.c:1-237): no scaling anywhere; the
+// caller divides (noise_util.c:96-102 does ifft then data[i] /= n). So
+// ifft2d(fft2d(f)) == n*n * f.
+// Entry-point names mirror the reference's per-size wrappers
+// svt_aom_fft2x2_float_c ... svt_aom_fft32x32_float_c (fft.c:88-106) and
+// svt_aom_ifft2x2_float_c ... svt_aom_ifft32x32_float_c (fft.c:179-237).
+void fft2d2(const float* input, float* temp, float* output);
+void fft2d4(const float* input, float* temp, float* output);
+void fft2d8(const float* input, float* temp, float* output);
+void fft2d16(const float* input, float* temp, float* output);
+void fft2d32(const float* input, float* temp, float* output);
+
+void ifft2d2(const float* input, float* temp, float* output);
+void ifft2d4(const float* input, float* temp, float* output);
+void ifft2d8(const float* input, float* temp, float* output);
+void ifft2d16(const float* input, float* temp, float* output);
+void ifft2d32(const float* input, float* temp, float* output);
+
 }  // namespace analysis

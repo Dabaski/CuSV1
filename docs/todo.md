@@ -1174,6 +1174,67 @@ A0. SLICE-LEVEL STATE (the live register)
     content-1:1 - the FFT kernels emit no bitstream). Host only, no GPU
     twin (parked, named - the scout marked [G] possible).
 
+  - [x] AN13 LANDED (2026-11-03, PERRY): analysis::fft2d2, fft2d4, fft2d8,
+    fft2d16, fft2d32 + ifft2d2, ifft2d4, ifft2d8, ifft2d16, ifft2d32 in
+    src/l9_analysis/fft2d.cpp, composing the LANDED AN12 1D kernels - the
+    port never re-implements a 1D butterfly. Reference:
+    third_party/SVT-AV1/Source/Lib/Codec/fft.c (189 nb / 237 phys):
+    simple_transpose :15-21, unpack_2d_output :33-49 (the 10-line contract
+    comment :23-32), svt_aom_fft_2d_gen :51-64 (the fwd driver), the five
+    GEN_FFT instantiations :66-86 + five fwd entries :88-106,
+    svt_aom_ifft_2d_gen :108-171 (the inv driver - a REAL/IMAG
+    split-and-pack rearrangement, NOT a 5-pass mirror; the brief's
+    five-pass inverse reading was wrong and is corrected here), the five
+    GEN_IFFT instantiations :173-177 + five inv entries :179-237. The
+    fwd driver IS the five-pass composition: column tform (stride n),
+    simple_transpose, second-axis tform, simple_transpose, unpack.
+    NORMALIZATION FINDING: fft.c carries zero arithmetic divisions
+    (grep-verified: the only '/' hits are n/2 index halvings and comment
+    text); noise_util.c:96-102 noise_tx_inverse does ifft(...) THEN
+    data[i] /= n - the normalization lives at the CALLER, the port stays
+    1:1 unnormalized, and the 2D roundtrip ifft2d(fft2d(f)) = n*n*f is
+    pinned by fixtures at tolerance n*n*kEpsilon (the AN12 roundtrip
+    discipline inherited). THE UNPACK CONTRACT: output[2*(y*n+x)] =
+    Re F(y,x), output[2*(y*n+x)+1] = Im F(y,x) for ALL y but ONLY x in
+    0..n/2 - n*(n/2+1) complex values in a 2*n*n float buffer whose tail
+    is never written (noise_util.c:65 caller zeroes it). POISON DERIVATION
+    (fixture-relevant): the working passes (pass 1/3 write the full n*n
+    floats of output) clobber the first n*n floats, so the slots assertable
+    as never-written poison are exactly the unpack-unwritten pairs
+    (y,x) with 2*(y*n+x) >= n*n; at n=4 those are {22,23,30,31} (the
+    fixture first asserted {6,7,14,15} too and RED fired - corrected).
+    vec_size = 1 at every reference _c entry; fft_single == fft_multi at
+    vec_size 1 (fft.c:136-138 loop is empty) - both folded with named
+    notes. RED (captured): fwd - LNK2019 unresolved analysis::fft2d2
+    (skeleton test, no definitions); then two fixture defects the suite
+    caught (AN12 lesson): the unpack-tail poison set was over-broad
+    ({6,7,14,15} are pass-3-written) and the rank-1 expected vector
+    missed the y_extra mirror slot F(3,1)=4 at index 26. GREEN: 115
+    test cases / 6436 assertions, 0 failed, in tests/test_fft2d.cpp
+    (CMakeLists gains fft2d.cpp + the file): per N in {2,4,8,16,32} -
+    impulse all-ones (DC only, poison-checked tail), the n=4 rank-1
+    separability fixture (outer product -> F(1,1)=4 AND mirror F(3,1)=4),
+    the roundtrip n*n*f at every N. MUTATIONS (all captured, all
+    reverted, all against the FINAL fixture set): M1 swap the two
+    simpleTranspose calls -> 8 named fixtures fail; M2 drop the unpack
+    cross terms -> 8 + warning C4189 for the dead xExtra; M3 wrong
+    stride in the first tform pass (1 instead of n) -> 8; M4 normalize
+    in the wrong place (fwd driver, before the unpack) -> rank-1 +
+    poison checks. Every mutation caught by at least one named fixture;
+    none survives. MEASURED (2026-11-03): GATE unchanged 884,851 B,
+    421 lines, byte-identical, diff 0 (analysis-only code, no generator
+    input); coverage A11 fraction 0.1418 -> 0.1576 (+190 non-blank ref
+    lines, recount done by direct non-blank measurement 2026-11-03 - the
+    scout's 189 estimate is corrected: the fft.c 2D span :15-171 minus the
+    10 macro-instantiation lines :82-86/:173-177, PLUS the five inv entry
+    wrappers :179-237 (55 nb, the reference lists its six function-pointer
+    args over eleven lines each) = :15-65 45 + :66-81 12 + :87-106 15 +
+    :108-171 63 + :179-237 55 = 190; :82-86 and :173-177 stay NOT counted
+    per the AN12 ruling - our per-size names have no instantiation shell).
+    Host only, no GPU twin (parked,
+    named - the 2D driver composes host kernels; a GPU twin would need
+    the 1D GPU kernels that AN12 also parked).
+
   - [x] **A8-CAMPAIGN OPENED (2026-11-03, PERRY-A8/DF1): the deblocking
     kernel family is ported in src/l10_filters (l10_filters:: namespace,
     ctest target l10_filters - the suite went 10 -> 11 targets).** The
