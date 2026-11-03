@@ -2,6 +2,9 @@
 
 #include <cstdint>
 
+#include <array>
+#include <vector>
+
 namespace analysis {
 
 // EbColorFormat (third_party/SVT-AV1/Source/API/EbSvtAv1Formats.h:110):
@@ -513,5 +516,164 @@ void ifft2d4(const float* input, float* temp, float* output);
 void ifft2d8(const float* input, float* temp, float* output);
 void ifft2d16(const float* input, float* temp, float* output);
 void ifft2d32(const float* input, float* temp, float* output);
+
+// AN16: the noise strength solver (third_party/SVT-AV1/Source/Lib/Codec/
+// noise_model.c:104-397). linsolve is the port's own private copy of the
+// dependency at Codec/mathutils.h:22-65 (A13-classified header; the
+// reference keeps it static INLINE so every includer carries a copy - the
+// port carries one copy in the l9 TU and exposes it here for the tests,
+// named deviation). Verbatim dense Gaussian elimination with partial
+// pivoting, tiny_near_zero 1e-16; returns 0 on a singular system.
+int32_t linsolve(int32_t n, double* a, int32_t stride, double* b, double* x);
+
+// AomNoiseShape (noise_model.h:150): DIAMOND = 0, SQUARE = 1.
+enum class AomNoiseShape : std::int32_t { Diamond = 0, Square = 1 };
+
+// AomNoiseModelParams (noise_model.h:154-160): shape, lag, bit depth, and
+// the uint8/uint16 input selector - pure data, POD in the port.
+struct AomNoiseModelParams {
+    AomNoiseShape shape;
+    std::int32_t lag;
+    std::int32_t bitDepth;
+    std::int32_t useHighbd;
+};
+
+// 1:1 port of num_coeffs (noise_model.c:181-190): the AR-model basis is
+// 2*lag+1 wide; DIAMOND keeps lag*(lag+1) coefficients, SQUARE (n*n)/2 with
+// the reference's own INTEGER division (lag 1 -> 4, lag 2 -> 12).
+int32_t numCoeffs(const AomNoiseModelParams params);
+
+// AomEquationSystem (noise_model.h:30-35): the dense double system A x = b.
+// The reference's malloc'd A/b/x pointers become std::vector (named
+// deviation: allocation cannot fail, so equation_system_free's failure
+// branches are dead and free() becomes a vector reset).
+struct AomEquationSystem {
+    std::vector<double> a;
+    std::vector<double> b;
+    std::vector<double> x;
+    std::int32_t n = 0;
+};
+
+// AomNoiseStrengthSolver (noise_model.h:69-76): the piecewise-linear noise
+// strength model over num_bins bins covering
+// [min_intensity, max_intensity].
+struct AomNoiseStrengthSolver {
+    AomEquationSystem eqns;
+    double minIntensity = 0;
+    double maxIntensity = 0;
+    std::int32_t numBins = 0;
+    std::int32_t numEquations = 0;
+    double total = 0;
+};
+
+// 1:1 port of svt_aom_noise_strength_solver_init (noise_model.c:305-316):
+// zero-fills the solver, sets num_bins, min_intensity 0,
+// max_intensity (1 << bit_depth) - 1, and inits the num_bins x num_bins
+// equation system (zeroed A/b/x, n = num_bins).
+int32_t noiseStrengthSolverInit(AomNoiseStrengthSolver* solver, int32_t numBins,
+                                int32_t bitDepth);
+
+// 1:1 port of svt_aom_noise_strength_solver_get_center (noise_model.c:
+// 318-322): the x coordinate of bin i, i/(n-1)*range + min_intensity.
+double noiseStrengthSolverGetCenter(const AomNoiseStrengthSolver* solver, int32_t i);
+
+// 1:1 port of noise_strength_solver_get_bin_index (noise_model.c:236-240):
+// fclamp (definitions.h:696-698) into [min_intensity, max_intensity], then
+// the linear map (n-1)*(val - min)/range. Static in the reference; exposed
+// for the tests (named deviation, the AN8 detector pattern).
+double noiseStrengthSolverGetBinIndex(const AomNoiseStrengthSolver* solver, double value);
+
+// 1:1 port of noise_strength_solver_get_value (noise_model.c:242-248):
+// the linear interpolation (1-a)*x[i0] + a*x[i1] between the neighbouring
+// bin values, i1 clamped by AOMMIN. Static in the reference; exposed for
+// the tests (named deviation, the AN8 detector pattern).
+double noiseStrengthSolverGetValue(const AomNoiseStrengthSolver* solver, double x);
+
+// 1:1 port of svt_aom_noise_strength_solver_add_measurement (noise_model.c:
+// 250-265): one observation (block_mean, noise_std) becomes the 2x2
+// weighted normal-equation accumulation across the two neighbouring bins
+// (weights (1-a)^2, a(1-a), a(1-a), a^2 into A; (1-a)*std, a*std into b),
+// plus total += std and num_equations++.
+void noiseStrengthSolverAddMeasurement(AomNoiseStrengthSolver* solver, double blockMean,
+                                       double noiseStd);
+
+// 1:1 port of equation_system_solve (noise_model.c:145-166): copies A and
+// b into temporaries, runs linsolve(n, A, n, b, x) writing x, returns 0 on
+// a singular system. A and b are left unchanged (non-destructive).
+int32_t equationSystemSolve(AomEquationSystem* eqns);
+
+// 1:1 port of svt_aom_noise_strength_solver_solve (noise_model.c:267-303):
+// the k_alpha = 2*num_equations/n Laplacian regularization (i_lo and i_hi
+// -= k_alpha, diagonal += 2*k_alpha, boundary rows folding onto the
+// diagonal), then the +1/8192 diagonal and the +mean/8192 b smoothing.
+// NAMED QUIRK, ported as-is: the b write is PERSISTENT on solver->eqns.b
+// (the reference modifies b in place, outside the copied-A protection), so
+// solve() called twice accumulates mean/8192 twice. The reference's
+// A-pointer swap dance becomes a local vector copy + assign + restore
+// (named deviation, same semantics).
+int32_t noiseStrengthSolverSolve(AomNoiseStrengthSolver* solver);
+
+// AomNoiseStrengthLut (noise_model.h:41-44): the piecewise-linear curve as
+// (x, y) points. The reference's double(*)[2] malloc block becomes a
+// vector of pairs (named deviation); the fit's memmove becomes erase.
+struct AomNoiseStrengthLut {
+    std::vector<std::array<double, 2>> points;
+    std::int32_t numPoints = 0;
+};
+
+// 1:1 port of svt_aom_noise_strength_lut_init (noise_model.c:214-225):
+// num_points zero-filled (x, y) pairs; returns 0 for a null lut.
+int32_t noiseStrengthLutInit(AomNoiseStrengthLut* lut, int32_t numPoints);
+
+// 1:1 port of svt_aom_noise_strength_lut_free (noise_model.c:227-234):
+// releases the points and zeroes the count (a vector reset here).
+void noiseStrengthLutFree(AomNoiseStrengthLut* lut);
+
+// 1:1 port of svt_aom_noise_strength_solver_fit_piecewise (noise_model.c:
+// 353-397): the tolerance is max_intensity*0.00625/255; the lut starts as
+// all num_bins solver points and interior points are greedily removed
+// smallest-residual-first while num_points > 2, stopping when
+// num_points <= max_output_points AND the smallest avg residual exceeds
+// the tolerance. Endpoints are never removed. The residual around a
+// removed index is the ONLY thing recomputed (update_piecewise_linear_
+// residual, :327-351, dx = 255./num_bins HARDCODED - not max_intensity;
+// a 10-bit fixture pins the difference); stale residual entries beyond
+// the recomputed window are kept and re-read, exactly as the reference
+// leaves them.
+int32_t noiseStrengthSolverFitPiecewise(const AomNoiseStrengthSolver* solver,
+                                        int32_t maxOutputPoints, AomNoiseStrengthLut* lut);
+
+// 1:1 ports of the equation-system memory family (noise_model.c:104-129):
+// free releases the storage (a vector reset here), clear zeroes A/b/x in
+// place, copy duplicates A/b/x (dst sized as src), init sizes and zeroes.
+void equationSystemFree(AomEquationSystem* eqns);
+void equationSystemClear(AomEquationSystem* eqns);
+void equationSystemCopy(AomEquationSystem* dst, const AomEquationSystem* src);
+
+// 1:1 ports of noise_strength_solver_clear/copy (noise_model.c:168-178):
+// clear zeroes the equations and the measurement counters (geometry
+// untouched); copy duplicates equations + counters.
+void noiseStrengthSolverClear(AomNoiseStrengthSolver* solver);
+void noiseStrengthSolverCopy(AomNoiseStrengthSolver* dest, const AomNoiseStrengthSolver* src);
+
+// AomNoiseState (noise_model.h:166-174): the per-channel noise-model state
+// - the AR equation system plus the strength solver.
+struct AomNoiseState {
+    AomEquationSystem eqns;
+    AomNoiseStrengthSolver strengthSolver;
+    std::int32_t numObservations = 0;
+    double arGain = 0;
+};
+
+// 1:1 port of noise_state_init (noise_model.c:192-201): k_num_bins = 20,
+// ar_gain = 1.0, num_observations = 0, and the strength solver over 20
+// bins at the given bit depth. Returns 0 only if the caller passed a
+// broken n (the reference's allocation-failure branch is dead here).
+int32_t noiseStateInit(AomNoiseState* state, int32_t n, int32_t bitDepth);
+
+// 1:1 port of set_chroma_coefficient_fallback_soln (noise_model.c:203-212):
+// zeroes every solution entry, then solves ONLY the last diagonal for the
+// luma-correlation fallback when |A[last][last]| > 1e-6.
+void setChromaCoefficientFallbackSoln(AomEquationSystem* eqns);
 
 }  // namespace analysis

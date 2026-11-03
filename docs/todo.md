@@ -1231,9 +1231,78 @@ A0. SLICE-LEVEL STATE (the live register)
     args over eleven lines each) = :15-65 45 + :66-81 12 + :87-106 15 +
     :108-171 63 + :179-237 55 = 190; :82-86 and :173-177 stay NOT counted
     per the AN12 ruling - our per-size names have no instantiation shell).
-    Host only, no GPU twin (parked,
-    named - the 2D driver composes host kernels; a GPU twin would need
-    the 1D GPU kernels that AN12 also parked).
+
+  - [x] AN16 LANDED (2026-11-03, PERRY): the noise strength solver - the
+    WHOLE noise_model.c:104-397 block (267 nb, measured) ported into
+    src/l9_analysis/noise_model.cpp + the struct/enum surface in
+    analysis.h: equation_system_free/clear/copy/init/solve (:104-166),
+    noise_strength_solver_clear/copy (:168-178), num_coeffs (:181-190,
+    DIAMOND lag*(lag+1) / SQUARE (n*n)/2 with the reference's INTEGER
+    division), noise_state_init (:192-201, k_num_bins 20, ar_gain 1.0),
+    set_chroma_coefficient_fallback_soln (:203-212), the lut init/free
+    pair (:214-234), get_bin_index (:236-240), get_value (:242-248),
+    add_measurement (:250-265), solver_solve (:267-303), solver_init/
+    get_center (:305-322), update_piecewise_linear_residual (:327-351)
+    and fit_piecewise (:353-397). The linsolve DEPENDENCY (Scout B3):
+    mathutils.h:22-65 (43 nb, A13-classified) ported as the port's own
+    copy in the l9 TU, exposed in the analysis namespace for the tests
+    (named deviation - the reference keeps it static INLINE per-includer);
+    fclamp (definitions.h:696-698, 3 nb) private in the TU. STRUCTS: the
+    four POD carriers (AomEquationSystem/AomNoiseStrengthLut/
+    AomNoiseStrengthSolver/AomNoiseState, noise_model.h:30-35/:41-44/
+    :69-76/:166-174) with the malloc/free pointers as std::vector (named
+    deviation; allocation cannot fail so the init/free failure branches
+    are dead) - the solve()'s A-POINTER SWAP dance (:275-:299) becomes a
+    local vector copy + assign + restore, and fit's memmove becomes
+    vector::erase, both named. TOLERANCE: doubles throughout, harness
+    tolerance 1e-12 RELATIVE documented in the test header (the
+    AN12/AN13 discipline); every expected value is a hand-derived closed
+    form over the reference's own equations, never port output. THE
+    REGULARIZATION MATH (fixture-load-bearing): the k_alpha Laplacian has
+    row sums zero at EVERY row (boundary rows fold i_lo/i_hi onto the
+    diagonal), so CONSTANT strength curves are in its kernel and the
+    +1/8192 diagonal cancels against the +mean/8192 b term - T8 recovers
+    a constant 7.0 EXACTLY through the full solve. RED/TEST FINDINGS:
+    (1) T9's first design (symmetric two-endpoint, stds 2/4) is EXACTLY
+    k_alpha-INVARIANT - the closed-form derivative (1+e)[e(s0+s2) - 2t]/
+    det^2 with t = mean*e = (s0+s2)/2*e vanishes identically; MEASURED:
+    T9 PASSED under k_alpha 2.0 -> 3.0. Redone ASYMMETRIC (std 2 once at
+    bin 0, std 8 thrice at bin 2, d2 = 3, mean = 6.5; general Cramer form
+    x1 = (PSt + Pk(s2+t) + kS(s0+t))/det) - the mutation now fires.
+    (2) The survival condition is avg = r*(255/num_bins)/
+    (points[min+1][0] - points[min-1][0]) - the residual's dx (255/
+    num_bins, HARDCODED 255, NOT max_intensity) and the lut-span dx are
+    DIFFERENT factors; the brief's r-threshold estimates had to be
+    re-derived through both. (3) T17's first fixture carried a
+    hand-arithmetic defect (b = [7,5] for x = [3,1] under A = [[2,1],
+    [1,3]]; the correct b is [7,6]) - the suite caught it, the port was
+    right. (4) A tail-anchored edit adding clear/copy silently DELETED
+    updatePiecewiseLinearResidual + fitPiecewise (LNK2019 caught it;
+    restored verbatim). GREEN: 140 test cases / 7015 assertions,
+    0 failed, in tests/test_noise_strength.cpp. Named quirks pinned:
+    solve() restores A bit-for-bit but LEAVES the +mean/8192 b write in
+    place (the reference modifies solver->eqns.b outside the copied-A
+    protection - a second solve accumulates again; T18); the stale
+    residual entries beyond the recomputed window are kept and re-read
+    exactly as the reference leaves them (structure ported; T19 pins the
+    smallest-residual-first order and the windowed recompute). MUTATIONS
+    (14, all against the FINAL fixture set, all reverted, all killed by
+    named fixtures): kAlpha 2->3 -> T9; diag 1/8192 dropped -> T8b+T9;
+    b mean/8192 dropped -> T9; num_coeffs formulas swapped -> T4a/T4b;
+    get_value interp swap -> T7; fclamp dropped -> T6; add_measurement
+    b-weight swap -> T13; tol x2 -> T11b; tol /2 -> T11c; dx
+    255->max_intensity -> T12 (10-bit, the brief's named killer); largest-
+    first removal order -> T19; recompute-after-removal skipped -> T19;
+    singular guard disabled -> T2; pivoting disabled -> T3. MEASURED
+    (2026-11-03): GATE unchanged 884,851 B, 421 lines, byte-identical,
+    diff 0 (analysis-only code, no generator input); coverage A11
+    fraction 0.1576 -> 0.1798 (+267 nb = the whole span) and A13
+    0.05 -> 0.0586 (+46 nb: linsolve 43 + fclamp 3); total
+    14.5% -> 14.7% (23,248 / 157,718; the committed pre-AN16 state
+    already carried A8's DF1 +215, so the AN16-attributable delta is
+    +313). Host only, no GPU twin (parked, named - a 20-bin dense double
+    least-squares solve is a poor GPU fit and the AN12/AN13 GPU parking
+    covers the family).
 
   - [x] **A8-CAMPAIGN OPENED (2026-11-03, PERRY-A8/DF1): the deblocking
     kernel family is ported in src/l10_filters (l10_filters:: namespace,
