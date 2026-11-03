@@ -215,7 +215,7 @@ suite before moving on.
 ```
 cmake -S . -B build
 cmake --build build --config Release
-ctest --test-dir build -C Release              # 10 targets; expect 10/10
+ctest --test-dir build -C Release              # 11 targets; expect 11/11
 ctest --test-dir build -C Release -R l4_intra  # one layer
 ```
 
@@ -755,6 +755,17 @@ are partly right and I re-measured rather than restated them:
   corrected scout errors: the anchor is fft_common.h:113-414/:416-823,
   NOT :114-330, and the "cos/sin tables" are inline literals, no tables
   exist. Host only, no GPU twin (parked, named - scout marked [G]).
+- l10_filters - the 8-bit deblocking kernel family (A8 campaign, DF1).
+  Ported 1:1 from the pinned deblocking_common.c: the mask/flat/hev gates
+  (filterMask2/filterMask/filterMask3Chroma/flatMask3Chroma/flatMask4/
+  hevMask :152-:223), the filter4/6/8 cores (:225-:317), the
+  lpfHorizontal/Vertical 4/6/8 entry points (:253-:386, blimit/limit/
+  thresh flattened from the SIMD_WIDTH element-[0] reads to scalars) and
+  updateSharpness (:568-:589, hev_thr excluded - set by the
+  loop_filter_frame_init wall, not in DF1); highbd_* and
+  signed_char_clamp_high are PARKED. Host only, no GPU twin. COVERAGE-ONLY
+  slice: moves no conformance count, touches no bitstream (the filter
+  enable bits stay literal 0); DF2 = the 14-tap family.
 
 
 ## Completion metric (the portable-C coverage number)

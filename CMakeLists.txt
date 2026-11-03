@@ -29,6 +29,7 @@ if(BUILD_TESTING)
   add_subdirectory(src/l8_bitstream)
   add_subdirectory(src/l6_pipeline)
   add_subdirectory(src/l9_analysis)
+  add_subdirectory(src/l10_filters)
 endif()
 
 # benchmark tool: own target, not a ctest (tools/bench/README notes inside
