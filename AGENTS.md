@@ -336,14 +336,16 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-02, the AN12 slice)
+### Last measured state (2026-11-03, the DF2 slice)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 10/10 passed, 0 failed, 275.59 s** (re-measured 2026-11-02 at
-  AN12; l4_intra is the slow one at 213.58 s; `pipeline` 53.74 s;
-  `l3_transforms` 7.24 s; the rest under 0.5 s including l9_analysis.
-  Earlier runs of the same tree: a first AN12 run 269.63 s, the AN11
+- **ctest: 11/11 passed, 0 failed, 270.04 s** (re-measured 2026-11-03 at
+  DF2; l4_intra is the slow one; `pipeline` and `l3_transforms` next;
+  the rest under 0.5 s including l10_filters.
+  Earlier runs of the same tree: the AN12 run 275.59 s at 10/10
+  (l4_intra 213.58 s, `pipeline` 53.74 s, `l3_transforms` 7.24 s),
+  a first AN12 run 269.63 s, the AN11
   run 264.78 s, a second AN11 run 264.07 s, the AN10
   run 266.17 s, the AN9
   run 262.05 s, the AN8 run
@@ -353,7 +355,7 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
-  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-02 at AN12: rebuilt, and
+  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-03 at DF2: rebuilt, and
   byte-identical to the committed file). History, not a figure to chase:
   884,980 B was the value from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
@@ -362,15 +364,17 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 14.3%** (see the completion metric section;
-  re-measured 2026-11-02: 22,530 of 157,718 non-blank lines, +704 from
-  21,826 - the AN12 FFT port: +704 in A11 (the fft_common.h GEN_FFT_2..
-  GEN_FFT_32 macro bodies :113-414, 298 non-blank, and the
-  GEN_IFFT_2..GEN_IFFT_32 macro bodies :416-823, 406 non-blank); the
-  printed percentage MOVED at AN12: 22,530/157,718 = 14.2841% crosses
-  the 14.25 rounding boundary, so 14.3% prints where AN10/AN11 printed
-  13.8%; it last MOVED before that at AN10:
-  13.6% -> 13.8% (21,778/157,718 = 13.8082% crosses the 13.75 rounding
+- **Portable-C coverage: 14.5%** (see the completion metric section;
+  re-measured 2026-11-03 at DF2: 22,840 of 157,718 non-blank lines,
+  +310 from 22,530 - the A8 campaign's two slices: DF1 +215 (the 8-bit
+  deblocking kernel family in A8) and DF2 +95 (the 14-tap family in A8,
+  23+35+4+30+3); A8 now prints 3% (310 of 10,600). The DF1+DF2 pair is
+  COVERAGE-ONLY: it moves no conformance count; the printed percentage
+  history: 22,840/157,718 = 14.4807% crosses the 14.45 boundary (DF2
+  prints 14.5%); 22,745/157,718 = 14.4204% (DF1) and 22,530/157,718 =
+  14.2841% (AN12) crossed 14.25, so AN12 printed 14.3% and the AN10/AN11
+  runs printed
+  13.8% (21,778/157,718 = 13.8082% crosses the 13.75 rounding
   boundary the AN9 13.5685% sat below). Earlier history of the same
   metric: the AN9 run measured 21,400/157,718 = 13.5685%; the AN8 run
   measured 21,347/157,718 = 13.5349%; the AN7 run measured
@@ -755,7 +759,7 @@ are partly right and I re-measured rather than restated them:
   corrected scout errors: the anchor is fft_common.h:113-414/:416-823,
   NOT :114-330, and the "cos/sin tables" are inline literals, no tables
   exist. Host only, no GPU twin (parked, named - scout marked [G]).
-- l10_filters - the 8-bit deblocking kernel family (A8 campaign, DF1).
+- l10_filters - the 8-bit deblocking kernel family (A8 campaign, DF1+DF2).
   Ported 1:1 from the pinned deblocking_common.c: the mask/flat/hev gates
   (filterMask2/filterMask/filterMask3Chroma/flatMask3Chroma/flatMask4/
   hevMask :152-:223), the filter4/6/8 cores (:225-:317), the
@@ -765,7 +769,19 @@ are partly right and I re-measured rather than restated them:
   loop_filter_frame_init wall, not in DF1); highbd_* and
   signed_char_clamp_high are PARKED. Host only, no GPU twin. COVERAGE-ONLY
   slice: moves no conformance count, touches no bitstream (the filter
-  enable bits stay literal 0); DF2 = the 14-tap family.
+  enable bits stay literal 0). DF2 LANDED: the 14-tap family (95 nb,
+  measured 23+35+4+30+3) - filter14 (:786-:809, the 13-tap
+  [1,1,1,1,1,2,2,2,1,1,1,1,1] writing op5..oq5 with RPOT(...,4), op6/oq6
+  untouched), mbLpfHorizontalEdgeW (:811-:847, step=4, taps s[-7p..+6p],
+  flat2 = flatMask4(1, p6, p5, p4, p0, q0, q4, q5, q6) - the OUTER flatness
+  vs p0/q0) + lpfHorizontal14 (:849-:852, count=1 with step=4 = FOUR
+  columns per call, pinned from the code), mbLpfVerticalEdgeW (:854-:885)
+  + lpfVertical14 (:887-:889, count=4 = four rows); the else chain STACKS
+  filter14 -> filter8 -> filter4 composed from the DF1 primitives (the
+  mb_* edge functions are file-local static in the port as in the
+  reference). Mutations M1 (swapped op5 tap order), M2 (flat2 span
+  p5-for-p6), M3 (else chain reordered to filter4), M4 (RPOT shift 3) each
+  killed by a named fixture; the h/v count pins are mutation-verified too.
 
 
 ## Completion metric (the portable-C coverage number)
@@ -775,14 +791,29 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-02 (AN12): 14.3%** (22,530 of 157,718 non-blank
-lines - the covered count moved +704 from 21,826: the AN12 FFT port,
+**THE NUMBER, as measured 2026-11-03 (DF2): 14.5%** (22,840 of 157,718 non-blank
+lines - the covered count moved +310 from 22,530: the A8 campaign's two
+slices, DF1 +215 (the 8-bit deblocking kernel family: the mask/flat/hev
+gates, filter4/6/8, the lpf 4/6/8 entry points, updateSharpness + the
+scc helper) and DF2 +95 (the 14-tap family: filter14 :786-:809,
+mb_lpf_horizontal_edge_w :811-:847, lpf_horizontal_14_c :849-:852,
+mb_lpf_vertical_edge_w :854-:885, lpf_vertical_14_c :887-:889, measured
+23+35+4+30+3; deblocking_common.c is 782 nb, so A8 prints 310 covered
+of 10,600 (3% as the tool prints the rounded cov%). The DF1+DF2 pair is
+COVERAGE-ONLY: it moves NO conformance count
+- see the paired-metric caveat. Earlier
+history of the same
+metric: the AN12 run measured 22,530 = +704 from 21,826 (the AN12 FFT port,
 +704 in A11 (the fft_common.h GEN_FFT_2..GEN_FFT_32 macro bodies :113-414,
 298 non-blank, and the GEN_IFFT_2..GEN_IFFT_32 macro bodies :416-823,
 406 non-blank; the 10 fft.c entry-point instantiation lines are NOT
-counted - our analysis:: names have no instantiation shell). Earlier
-history of the same
-metric: the AN11 run measured 21,826 = +48 from 21,778 (the AN11 HME
+counted - our analysis:: names have no instantiation shell); the
+printed percentage MOVED at AN12: 22,530/157,718 = 14.2841% crosses
+the 14.25 rounding boundary, so AN12 prints 14.3% where AN10/AN11 printed
+13.8%; the AN12 percentage did NOT move again at DF1's +215: 22,745/157,718
+= 14.4204% stays below the 14.45 boundary; DF2's +95 moved it:
+22,840/157,718 = 14.4807% crosses the 14.45 boundary, so DF2 prints 14.5%);
+the AN11 run measured 21,826 = +48 from 21,778 (the AN11 HME
 downsampling driver port); the AN10 run measured 21,778 = +378 from 21,400: the AN10
 pad-family port, +142 in A6 (the pic_operators.c pad spans) and +236
 in A11 (the pic_analysis_process.c pad spans); the AN9 run measured
@@ -856,7 +887,7 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 55% | 4,653 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 11% | 1,535 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
-| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 0% | 0 |
+| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 3% | 310 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
 | A11 | Content analysis + temporal filtering | 16 | 12,028 | 14% | 1,706 |
@@ -864,7 +895,7 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 32% | 463 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **22,530** |
+| | **TOTAL** | **254** | **157,718** | | **22,840** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

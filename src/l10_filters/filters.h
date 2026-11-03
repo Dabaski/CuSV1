@@ -114,4 +114,27 @@ void lpfVertical8(std::uint8_t* s, int pitch, std::uint8_t blimit, std::uint8_t 
 // svt_av1_loop_filter_frame_init, a light-wall function outside DF1).
 void updateSharpness(LoopFilterInfoN* lfi, int sharpnessLvl);
 
+// DF2. filter14 (deblocking_common.c:786-809): the 14-tap family's core,
+// the 13-tap flat filter [1,1,1,1,1,2,2,2,1,1,1,1,1] writing op5..oq5
+// (op6/oq6 untouched), ROUND_POWER_OF_TWO(...,4); the else chain STACKS
+// through filter8 to filter4 (DF1 composition, not re-implementation).
+void filter14(std::int8_t mask, std::uint8_t thresh, std::int8_t flat, std::int8_t flat2, std::uint8_t* op6,
+              std::uint8_t* op5, std::uint8_t* op4, std::uint8_t* op3, std::uint8_t* op2, std::uint8_t* op1,
+              std::uint8_t* op0, std::uint8_t* oq0, std::uint8_t* oq1, std::uint8_t* oq2, std::uint8_t* oq3,
+              std::uint8_t* oq4, std::uint8_t* oq5, std::uint8_t* oq6);
+
+// lpf_horizontal_14_c (deblocking_common.c:849-852): the 14-tap horizontal
+// entry. mb_lpf_horizontal_edge_w (:811-847, static in the reference) loops
+// step*count columns with step=4; the entry passes count=1, so exactly
+// FOUR columns are filtered per call (count semantics pinned from :849-852).
+// Taps s[-7*pitch .. +6*pitch]; flat2 = flat_mask4(1, p6, p5, p4, p0, q0,
+// q4, q5, q6) - the OUTER flatness measured against p0/q0.
+void lpfHorizontal14(std::uint8_t* s, int pitch, std::uint8_t blimit, std::uint8_t limit, std::uint8_t thresh);
+
+// lpf_vertical_14_c (deblocking_common.c:854-889): the 14-tap vertical
+// entry via mb_lpf_vertical_edge_w (static), taps contiguous s[-7..+6],
+// the pointer advances by pitch per row; the entry passes count=4
+// (four rows per call).
+void lpfVertical14(std::uint8_t* s, int pitch, std::uint8_t blimit, std::uint8_t limit, std::uint8_t thresh);
+
 } // namespace l10_filters
