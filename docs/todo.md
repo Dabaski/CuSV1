@@ -1173,6 +1173,80 @@ A0. SLICE-LEVEL STATE (the live register)
     the paired conformance count unchanged (9 artifacts, all
     content-1:1 - the FFT kernels emit no bitstream). Host only, no GPU
     twin (parked, named - the scout marked [G] possible).
+
+  - [x] **A8-CAMPAIGN OPENED (2026-11-03, PERRY-A8/DF1): the deblocking
+    kernel family is ported in src/l10_filters (l10_filters:: namespace,
+    ctest target l10_filters - the suite went 10 -> 11 targets).** The
+    user set the campaign target at 20% portable-C coverage; scout F
+    measured the path and the A8 kernel campaign is its core, the
+    deblocking kernels being the easiest pure-math block. **THE
+    PAIRED-METRIC CAVEAT (verbatim, applies to every A8-kernel slice):**
+    this slice is COVERAGE-ONLY - it moves no conformance count, touches
+    no bitstream (the filter enable bits stay literal 0), and must not be
+    read as progress toward decoder conformance. The A8 driver wiring
+    that WOULD move conformance is a separate, larger campaign,
+    deliberately not opened. **THE DF1/DF2 SPLIT:** DF1 (this slice) =
+    the 8-bit mask/flat/hev gates, the filter4/6/8 cores, the lpf 4/6/8
+    h+v entry points and update_sharpness; DF2 (a later commit) =
+    filter14 + mb_lpf_*_edge_w + lpf_h/v_14_c (:786-:889, 95 nblk).
+    Parked by name inside DF1's range: highbd_flat_mask3_chroma
+    :194-:203, highbd_filter_mask2/filter_mask/flat_mask4 :388-:430, the
+    :431-:567 and :591-:780 highbd blocks, signed_char_clamp_high
+    :34-:44. Reference: third_party/SVT-AV1/Source/Lib/Codec/
+    deblocking_common.c (782 nb; the 8-bit pure surface is 308 nblk, DF1
+    scope 213 nblk per the brief). Every anchor was re-verified against
+    the tree: all 16 spans match (filter_mask2 :152-:158, filter_mask
+    :160-:171, filter_mask3_chroma :173-:182, flat_mask3_chroma
+    :184-:192, flat_mask4 :205-:215, hev_mask :218-:223, filter4
+    :225-:251, lpf_horizontal_4_c :253-:267, lpf_vertical_4_c :269-:283,
+    filter6 :285-:299, filter8 :301-:317, lpf_horizontal_6_c :319-:335,
+    lpf_vertical_6_c :337-:353, lpf_horizontal_8_c :355-:371,
+    lpf_vertical_8_c :373-:386, svt_aom_update_sharpness :568-:589;
+    MAX_LOOP_FILTER 63 at definitions.h:1652, SIMD_WIDTH 16 at :1653,
+    LoopFilterThresh at :1678-:1682, lfthr[MAX_LOOP_FILTER+1] at :1685).
+    NO anchor correction was needed - the scout's tables all verified.
+    **MEASURED span counts (non-blank): the listed DF1 spans sum to 212
+    nblk (78+28+60+28+18), and the port additionally carries the
+    signed_char_clamp helper :30-:32 (3 nblk) that filter4 requires, so
+    the ported reference surface is 215 nblk; the brief's "~213" sat
+    between the two and the coverage fraction was set from the measured
+    215.** RED evidence: the first slice's build failed with
+    "error C1083: Cannot open include file: 'filters.h'" (the
+    missing-layer compile failure), then each function landed behind a
+    failing assertion or unresolved-symbol link (LNK2019 x9); three
+    fixtures fired on WRONG hand-derivations or non-discriminating shapes
+    of mine and were corrected as findings, not papered over (the filter8
+    op2 derivation 701->601, i.e. 88->75; the filterMask six-tap
+    enumeration rows 5/6 initially re-breached q1-q0; the filter6
+    flat-path fixture was NOT discriminating on flat-domain pixels -
+    fallback and 5-tap coincide there - and was replaced by an asymmetric
+    instrument-driven fixture; the F3 outer-adjustment fixture passed on
+    first build and is declared the named killer-fixture for the
+    outer-adjustment mutations). GREEN: 32 test cases / 1209 assertions,
+    0 failed (tests/test_filters.cpp; av1_l10_filters_tests). MUTATIONS
+    (all captured against the FINAL fixture set, all reverted, all killed
+    by named fixtures): M1 filter6 tap swap (q0*3+...+p2) -> 3 fail
+    (filter6 flat + lpfHorizontal6 flat col + lpfVertical6 flat row);
+    M2 scc low clamp -128 -> -127 -> 2 fail (signedCharClamp fixture);
+    M3 hev_mask inverted (~hev) -> 11 fail (hevMask fixture + F2 + the
+    F2-derived lpf patterns); M4 mblim 2*(lvl+2) -> 2*lvl -> 5 fail
+    (both updateSharpness fixtures); M5 lpfHorizontal4 ++s -> s += pitch
+    -> 4 fail (per-column fixture); M6 filterMask2 blimit *2 dropped ->
+    1 fail (blimit-line fixture). Port-shape deviations (named):
+    blimit/limit/thresh flattened from const uint8_t* (SIMD_WIDTH
+    element-[0] reads) to scalar uint8_t parameters; explicit
+    static_cast<int8_t> narrowing casts added where the reference relies
+    on implicit int8 assignment (MSVC /W4 hygiene; semantics unchanged);
+    signedCharClamp exported (file-local static INLINE in the reference)
+    so the clamp CONSTANTS are directly testable; LoopFilterInfoN carries
+    the lfthr table only (lvl[] belongs to the loop_filter_frame_init
+    driver). MEASURED (2026-11-03): ctest 11/11 (the time is in the
+    commit message); GATE byte-identical, diff 0 (no generator input);
+    coverage A8 0.00 -> 0.0203 (+215 non-blank ref lines: 212 DF1 spans
+    + 3 scc), total 22,530 -> 22,745 of 157,718; the printed percentage
+    MOVED: 14.3% -> 14.4% (22,745/157,718 = 14.4242%); the paired
+    conformance count UNCHANGED (9 artifacts, all content-1:1) - exactly
+    the coverage-only shape the caveat names.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------

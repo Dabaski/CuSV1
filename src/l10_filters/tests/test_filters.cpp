@@ -1,0 +1,467 @@
+#include <doctest.h>
+#include <filters.h>
+
+TEST_CASE("filterMask2 applies when no condition breaches") {
+    CHECK(l10_filters::filterMask2(1, 1, 100, 100, 100, 100) == -1);
+}
+
+TEST_CASE("filterMask2 disables on a p1-p0 limit breach") {
+    CHECK(l10_filters::filterMask2(1, 1, 120, 100, 100, 100) == 0);
+}
+
+TEST_CASE("filterMask2 disables on a q1-q0 limit breach") {
+    CHECK(l10_filters::filterMask2(1, 1, 100, 100, 100, 120) == 0);
+}
+
+TEST_CASE("filterMask2 blimit line is exact at 2*|p0-q0| + |p1-q1|/2") {
+    // |p0-q0|*2 + |p1-q1|/2 = 2*2 + 0 = 4: == blimit still filters, +1 over does not.
+    CHECK(l10_filters::filterMask2(1, 4, 100, 101, 99, 100) == -1);
+    CHECK(l10_filters::filterMask2(1, 3, 100, 101, 99, 100) == 0);
+}
+
+TEST_CASE("filterMask applies clean and disables on the p3-p2 breach") {
+    CHECK(l10_filters::filterMask(1, 4, 100, 100, 100, 100, 100, 100, 100, 100) == -1);
+    CHECK(l10_filters::filterMask(1, 4, 120, 100, 100, 100, 100, 100, 100, 100) == 0);
+}
+
+TEST_CASE("filterMask disables on each of its six limit taps") {
+    // limit=20, blimit=100 keeps every non-breach tap and the blimit term clean;
+    // each row breaches exactly one adjacent pair by 21.
+    CHECK(l10_filters::filterMask(20, 100, 121, 100, 100, 100, 100, 100, 100, 100) == 0); // p3-p2
+    CHECK(l10_filters::filterMask(20, 100, 121, 121, 100, 100, 100, 100, 100, 100) == 0); // p2-p1
+    CHECK(l10_filters::filterMask(20, 100, 121, 121, 121, 100, 100, 100, 100, 100) == 0); // p1-p0
+    CHECK(l10_filters::filterMask(20, 100, 100, 100, 100, 100, 121, 100, 100, 100) == 0); // q1-q0
+    CHECK(l10_filters::filterMask(20, 100, 100, 100, 100, 100, 100, 100, 121, 121) == 0); // q2-q1
+    CHECK(l10_filters::filterMask(20, 100, 100, 100, 100, 100, 100, 100, 100, 121) == 0); // q3-q2
+}
+
+TEST_CASE("filterMask blimit line is exact") {
+    // 2*|p0-q0| + |p1-q1|/2 = 4; == blimit filters, +1 over does not.
+    CHECK(l10_filters::filterMask(1, 4, 100, 100, 100, 101, 99, 100, 100, 100) == -1);
+    CHECK(l10_filters::filterMask(1, 3, 100, 100, 100, 101, 99, 100, 100, 100) == 0);
+}
+
+TEST_CASE("filterMask3Chroma applies clean and disables on the p2-p1 breach") {
+    CHECK(l10_filters::filterMask3Chroma(1, 4, 100, 100, 100, 100, 100, 100) == -1);
+    CHECK(l10_filters::filterMask3Chroma(1, 4, 120, 100, 100, 100, 100, 100) == 0);
+}
+
+TEST_CASE("filterMask3Chroma disables on each remaining limit tap") {
+    CHECK(l10_filters::filterMask3Chroma(20, 100, 121, 121, 100, 100, 100, 100) == 0); // p1-p0
+    CHECK(l10_filters::filterMask3Chroma(20, 100, 100, 100, 100, 121, 100, 100) == 0); // q1-q0
+    CHECK(l10_filters::filterMask3Chroma(20, 100, 100, 100, 100, 100, 100, 121) == 0); // q2-q1
+}
+
+TEST_CASE("filterMask3Chroma blimit line is exact") {
+    // 2*|p0-q0| + |p1-q1|/2 = 4.
+    CHECK(l10_filters::filterMask3Chroma(1, 4, 100, 100, 101, 99, 100, 100) == -1);
+    CHECK(l10_filters::filterMask3Chroma(1, 3, 100, 100, 101, 99, 100, 100) == 0);
+}
+
+TEST_CASE("flatMask3Chroma flat at step-1 ramp and disables on p2-p0") {
+    // |p1-p0|=|q1-q0|=|p2-p0|=|q2-q0|=1 at thresh 1 -> flat.
+    CHECK(l10_filters::flatMask3Chroma(1, 100, 100, 101, 101, 102, 102) == -1);
+    // |p2-p0| = 2 > 1.
+    CHECK(l10_filters::flatMask3Chroma(1, 103, 100, 101, 101, 102, 102) == 0);
+}
+
+TEST_CASE("flatMask3Chroma disables on each remaining threshold tap") {
+    CHECK(l10_filters::flatMask3Chroma(20, 100, 121, 100, 100, 100, 100) == 0); // p1-p0
+    CHECK(l10_filters::flatMask3Chroma(20, 100, 100, 100, 100, 121, 100) == 0); // q1-q0
+    CHECK(l10_filters::flatMask3Chroma(20, 100, 100, 100, 100, 100, 121) == 0); // q2-q0
+}
+
+TEST_CASE("flatMask4 flat at step-1 ramp and disables on q3-q0") {
+    // |p1-p0|=0, |q1-q0|=0, |p2-p0|=1, |q2-q0|=1, |p3-p0|=1, |q3-q0|=1 at thresh 1.
+    CHECK(l10_filters::flatMask4(1, 101, 101, 102, 102, 103, 103, 104, 104) == -1);
+    // |q3-q0| = 2 > 1.
+    CHECK(l10_filters::flatMask4(1, 101, 101, 102, 102, 103, 103, 104, 105) == 0);
+}
+
+TEST_CASE("flatMask4 disables on each remaining threshold tap") {
+    CHECK(l10_filters::flatMask4(20, 100, 100, 121, 100, 100, 100, 100, 100) == 0); // p1-p0
+    CHECK(l10_filters::flatMask4(20, 100, 100, 100, 100, 100, 121, 100, 100) == 0); // q1-q0
+    CHECK(l10_filters::flatMask4(20, 100, 121, 100, 100, 100, 100, 100, 100) == 0); // p2-p0
+    CHECK(l10_filters::flatMask4(20, 100, 100, 100, 100, 100, 100, 121, 100) == 0); // q2-q0
+    CHECK(l10_filters::flatMask4(20, 121, 100, 100, 100, 100, 100, 100, 100) == 0); // p3-p0
+}
+
+TEST_CASE("hevMask is not inverted: over thresh is -1, at thresh is 0") {
+    // |p1-p0| = 10: > 9 fires, == 10 does not (NOT inverted - 0 means no high variance).
+    CHECK(l10_filters::hevMask(9, 110, 100, 100, 100) == -1);
+    CHECK(l10_filters::hevMask(10, 110, 100, 100, 100) == 0);
+    CHECK(l10_filters::hevMask(9, 100, 100, 100, 110) == -1); // the q1-q0 tap
+}
+
+TEST_CASE("signedCharClamp clamps to [-128, 127]") {
+    CHECK(l10_filters::signedCharClamp(-255) == -128);
+    CHECK(l10_filters::signedCharClamp(-128) == -128);
+    CHECK(l10_filters::signedCharClamp(128) == 127);
+    CHECK(l10_filters::signedCharClamp(255) == 127);
+    CHECK(l10_filters::signedCharClamp(0) == 0);
+}
+
+TEST_CASE("filter4 inner taps at hev=0") {
+    // F1: ps0 = 2, qs0 = -2; filter = 3*(qs0-ps0) = -12; filter1 = -8>>3 = -1;
+    // filter2 = -9>>3 = -2 (arithmetic); oq0 = 126+1 = 127, op0 = 130-2 = 128;
+    // outer adjustment (filter1+1)>>1 = 0 -> op1/oq1 unchanged.
+    std::uint8_t op1 = 128, op0 = 130, oq0 = 126, oq1 = 128;
+    l10_filters::filter4(-1, 2, &op1, &op0, &oq0, &oq1);
+    CHECK(op1 == 128);
+    CHECK(op0 == 128);
+    CHECK(oq0 == 127);
+    CHECK(oq1 == 128);
+}
+
+TEST_CASE("filter4 outer taps engage at hev=1 but the outer adjustment does not") {
+    // F2: ps1 = 12, qs1 = -12 (hev: |p1-p0| = 10 > 1); filter = scc(24) = 24;
+    // inner: 24 + 3*(-4) = 12; filter1 = 16>>3 = 2, filter2 = 15>>3 = 1;
+    // oq0 = -4 -> 124, op0 = 3 -> 131; outer adjustment (2+1)>>1 = 1 masked by
+    // ~hev = 0, so op1/oq1 come back unchanged through the write path.
+    std::uint8_t op1 = 140, op0 = 130, oq0 = 126, oq1 = 116;
+    l10_filters::filter4(-1, 1, &op1, &op0, &oq0, &oq1);
+    CHECK(op1 == 140);
+    CHECK(op0 == 131);
+    CHECK(oq0 == 124);
+    CHECK(oq1 == 116);
+}
+
+TEST_CASE("filter4 outer adjustment applies at hev=0") {
+    // F3: ps0 = 6, qs0 = -6; filter = -36; filter1 = -32>>3 = -4, filter2 = -33>>3 = -5;
+    // oq0 = -2 -> 126, op0 = 1 -> 129; adjustment (-4+1)>>1 = -2 unmasked:
+    // oq1 = scc(0+2) = 2 -> 130, op1 = scc(0-2) = -2 -> 126.
+    std::uint8_t op1 = 128, op0 = 134, oq0 = 122, oq1 = 128;
+    l10_filters::filter4(-1, 6, &op1, &op0, &oq0, &oq1);
+    CHECK(op1 == 126);
+    CHECK(op0 == 129);
+    CHECK(oq0 == 126);
+    CHECK(oq1 == 130);
+}
+
+TEST_CASE("filter6 falls back to filter4 when flat=0") {
+    // Same edge samples as F1; op2/oq2 untouched.
+    std::uint8_t op2 = 128, op1 = 128, op0 = 130, oq0 = 126, oq1 = 128, oq2 = 128;
+    l10_filters::filter6(-1, 2, 0, &op2, &op1, &op0, &oq0, &oq1, &oq2);
+    CHECK(op2 == 128);
+    CHECK(op1 == 128);
+    CHECK(op0 == 128);
+    CHECK(oq0 == 127);
+    CHECK(oq1 == 128);
+    CHECK(oq2 == 128);
+}
+
+TEST_CASE("filter6 flat path is the 5-tap [1,2,2,2,1] filter") {
+    // On flat-domain pixels the fallback coincides with the 5-tap (checked
+    // above the mutation pass), so the branch is driven with flat forced -1
+    // on asymmetric samples where the two paths provably differ:
+    // op1 = RPOT(24+128+256+129,3) = 67; op0 = RPOT(8+128+256+258+192,3) = 105;
+    // oq0 = RPOT(64+256+258+384+250,3) = 152; oq1 = RPOT(128+258+384+750,3) = 190.
+    // (The filter4 fallback on the same samples gives 64/112/145/192.)
+    std::uint8_t op2 = 8, op1 = 64, op0 = 128, oq0 = 129, oq1 = 192, oq2 = 250;
+    l10_filters::filter6(-1, 8, -1, &op2, &op1, &op0, &oq0, &oq1, &oq2);
+    CHECK(op2 == 8);
+    CHECK(op1 == 67);
+    CHECK(op0 == 105);
+    CHECK(oq0 == 152);
+    CHECK(oq1 == 190);
+    CHECK(oq2 == 250);
+}
+
+TEST_CASE("filter8 falls back to filter4 when flat=0") {
+    // F1 edge samples; op3/op2/oq2/oq3 untouched.
+    std::uint8_t op3 = 128, op2 = 128, op1 = 128, op0 = 130, oq0 = 126, oq1 = 128, oq2 = 128, oq3 = 128;
+    l10_filters::filter8(-1, 2, 0, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3);
+    CHECK(op3 == 128);
+    CHECK(op2 == 128);
+    CHECK(op1 == 128);
+    CHECK(op0 == 128);
+    CHECK(oq0 == 127);
+    CHECK(oq1 == 128);
+    CHECK(oq2 == 128);
+    CHECK(oq3 == 128);
+}
+
+TEST_CASE("filter8 flat path is the 7-tap [1,1,1,2,1,1,1] filter") {
+    // flat forced -1 on asymmetric samples where the 7-tap provably differs
+    // from the fallback: op2 = RPOT(24+128+128+129+192,3) = 75;  [601, first
+    // hand-derived as 701/88 - caught by this fixture, corrected]
+    // op1 = RPOT(16+64+256+129+192+250,3) = 113; op0 = RPOT(8+64+128+258+192+250+16,3) = 115;
+    // oq0 = RPOT(64+128+129+384+250+16+200,3) = 146; oq1 = RPOT(128+129+192+500+16+200+200,3) = 171;
+    // oq2 = RPOT(129+192+250+32+200+200+200,3) = 150.
+    std::uint8_t op3 = 8, op2 = 64, op1 = 128, op0 = 129, oq0 = 192, oq1 = 250, oq2 = 16, oq3 = 200;
+    l10_filters::filter8(-1, 8, -1, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3);
+    CHECK(op3 == 8);
+    CHECK(op2 == 75);
+    CHECK(op1 == 113);
+    CHECK(op0 == 115);
+    CHECK(oq0 == 146);
+    CHECK(oq1 == 171);
+    CHECK(oq2 == 150);
+    CHECK(oq3 == 200);
+}
+
+TEST_CASE("lpfHorizontal4 filters four columns independently across the pointer step") {
+    // 8x8, pitch 8, edge between rows 3 and 4 (s = row 4). Columns 0..3 carry
+    // F1 / flat / F2 / F1 patterns; columns 4..7 are sentinel 200.
+    std::uint8_t buf[64];
+    for (int i = 0; i < 64; ++i) {
+        buf[i] = 200;
+    }
+    const int pitch = 8;
+    // column 0: F1 (rows 2,3,4,5 = 128,130,126,128)
+    buf[2 * 8 + 0] = 128; buf[3 * 8 + 0] = 130; buf[4 * 8 + 0] = 126; buf[5 * 8 + 0] = 128;
+    // column 1: flat (all 128)
+    buf[2 * 8 + 1] = 128; buf[3 * 8 + 1] = 128; buf[4 * 8 + 1] = 128; buf[5 * 8 + 1] = 128;
+    // column 2: F2 (rows 2,3,4,5 = 140,130,126,116)
+    buf[2 * 8 + 2] = 140; buf[3 * 8 + 2] = 130; buf[4 * 8 + 2] = 126; buf[5 * 8 + 2] = 116;
+    // column 3: F1 again
+    buf[2 * 8 + 3] = 128; buf[3 * 8 + 3] = 130; buf[4 * 8 + 3] = 126; buf[5 * 8 + 3] = 128;
+
+    l10_filters::lpfHorizontal4(buf + 4 * pitch, pitch, 20, 16, 2);
+
+    CHECK(buf[2 * 8 + 0] == 128); CHECK(buf[3 * 8 + 0] == 128);
+    CHECK(buf[4 * 8 + 0] == 127); CHECK(buf[5 * 8 + 0] == 128);
+    CHECK(buf[3 * 8 + 1] == 128); CHECK(buf[4 * 8 + 1] == 128);
+    CHECK(buf[2 * 8 + 2] == 140); CHECK(buf[3 * 8 + 2] == 131);
+    CHECK(buf[4 * 8 + 2] == 124); CHECK(buf[5 * 8 + 2] == 116);
+    CHECK(buf[3 * 8 + 3] == 128); CHECK(buf[4 * 8 + 3] == 127);
+    CHECK(buf[0] == 200); CHECK(buf[6 * 8 + 4] == 200); CHECK(buf[7 * 8 + 7] == 200);
+}
+
+TEST_CASE("lpfVertical4 filters four rows independently across the pitch step") {
+    // 8x8, vertical edge between columns 3 and 4 (s = column 4, row 0).
+    // Rows 0..3 carry F1 / flat / F2 / F1 patterns; rows 4..7 sentinel 200.
+    std::uint8_t buf[64];
+    for (int i = 0; i < 64; ++i) {
+        buf[i] = 200;
+    }
+    const int pitch = 8;
+    // row 0: F1 (cols 2,3,4,5 = 128,130,126,128)
+    buf[0 * 8 + 2] = 128; buf[0 * 8 + 3] = 130; buf[0 * 8 + 4] = 126; buf[0 * 8 + 5] = 128;
+    // row 1: flat
+    buf[1 * 8 + 2] = 128; buf[1 * 8 + 3] = 128; buf[1 * 8 + 4] = 128; buf[1 * 8 + 5] = 128;
+    // row 2: F2
+    buf[2 * 8 + 2] = 140; buf[2 * 8 + 3] = 130; buf[2 * 8 + 4] = 126; buf[2 * 8 + 5] = 116;
+    // row 3: F1
+    buf[3 * 8 + 2] = 128; buf[3 * 8 + 3] = 130; buf[3 * 8 + 4] = 126; buf[3 * 8 + 5] = 128;
+
+    l10_filters::lpfVertical4(buf + 4, pitch, 20, 16, 2);
+
+    CHECK(buf[0 * 8 + 2] == 128); CHECK(buf[0 * 8 + 3] == 128);
+    CHECK(buf[0 * 8 + 4] == 127); CHECK(buf[0 * 8 + 5] == 128);
+    CHECK(buf[1 * 8 + 3] == 128); CHECK(buf[1 * 8 + 4] == 128);
+    CHECK(buf[2 * 8 + 2] == 140); CHECK(buf[2 * 8 + 3] == 131);
+    CHECK(buf[2 * 8 + 4] == 124); CHECK(buf[2 * 8 + 5] == 116);
+    CHECK(buf[3 * 8 + 3] == 128); CHECK(buf[3 * 8 + 4] == 127);
+    CHECK(buf[4 * 8 + 4] == 200); CHECK(buf[7 * 8 + 7] == 200);
+}
+
+TEST_CASE("lpfHorizontal6 routes flat columns to the 5-tap and others to filter4") {
+    // 8x8, edge rows 1..6 (s = row 4: p2..q2 = rows 1..6). Column 0 flat
+    // (100,100,101,101,102,102 -> 5-tap writes rows 2..5, rows 1/6 untouched);
+    // column 1 non-flat (128,128,130,126,128,128 -> F1 fallback). Columns
+    // 2..3 flat, 4..7 sentinel 200.
+    std::uint8_t buf[64];
+    for (int i = 0; i < 64; ++i) {
+        buf[i] = 200;
+    }
+    const int pitch = 8;
+    const int colA = 0;
+    buf[1 * 8 + colA] = 100; buf[2 * 8 + colA] = 100; buf[3 * 8 + colA] = 101;
+    buf[4 * 8 + colA] = 101; buf[5 * 8 + colA] = 102; buf[6 * 8 + colA] = 102;
+    const int colB = 1;
+    buf[1 * 8 + colB] = 128; buf[2 * 8 + colB] = 128; buf[3 * 8 + colB] = 130;
+    buf[4 * 8 + colB] = 126; buf[5 * 8 + colB] = 128; buf[6 * 8 + colB] = 128;
+    for (int c = 2; c <= 3; ++c) {
+        buf[1 * 8 + c] = 100; buf[2 * 8 + c] = 100; buf[3 * 8 + c] = 101;
+        buf[4 * 8 + c] = 101; buf[5 * 8 + c] = 102; buf[6 * 8 + c] = 102;
+    }
+
+    l10_filters::lpfHorizontal6(buf + 4 * pitch, pitch, 20, 2, 2);
+
+    // flat column: 5-tap outputs on rows 2..5, rows 1/6 untouched
+    CHECK(buf[1 * 8 + 0] == 100);
+    CHECK(buf[2 * 8 + 0] == 100);
+    CHECK(buf[3 * 8 + 0] == 101);
+    CHECK(buf[4 * 8 + 0] == 101);
+    CHECK(buf[5 * 8 + 0] == 102);
+    CHECK(buf[6 * 8 + 0] == 102);
+    // fallback column: filter4 on rows 2..5, rows 1/6 untouched
+    CHECK(buf[1 * 8 + 1] == 128);
+    CHECK(buf[2 * 8 + 1] == 128);
+    CHECK(buf[3 * 8 + 1] == 128);
+    CHECK(buf[4 * 8 + 1] == 127);
+    CHECK(buf[5 * 8 + 1] == 128);
+    CHECK(buf[6 * 8 + 1] == 128);
+    // sentinel columns untouched
+    CHECK(buf[4 * 8 + 4] == 200); CHECK(buf[3 * 8 + 7] == 200);
+}
+
+TEST_CASE("lpfVertical6 routes flat rows to the 5-tap and others to filter4") {
+    // 8x8, vertical edge columns 1..6 (s = column 4: p2..q2 = cols 1..6).
+    // Row 0 flat, row 1 non-flat (F1 fallback), rows 2..3 flat, 4..7 sentinel.
+    std::uint8_t buf[64];
+    for (int i = 0; i < 64; ++i) {
+        buf[i] = 200;
+    }
+    const int pitch = 8;
+    const int rowA = 0;
+    buf[rowA * 8 + 1] = 100; buf[rowA * 8 + 2] = 100; buf[rowA * 8 + 3] = 101;
+    buf[rowA * 8 + 4] = 101; buf[rowA * 8 + 5] = 102; buf[rowA * 8 + 6] = 102;
+    const int rowB = 1;
+    buf[rowB * 8 + 1] = 128; buf[rowB * 8 + 2] = 128; buf[rowB * 8 + 3] = 130;
+    buf[rowB * 8 + 4] = 126; buf[rowB * 8 + 5] = 128; buf[rowB * 8 + 6] = 128;
+    for (int r = 2; r <= 3; ++r) {
+        buf[r * 8 + 1] = 100; buf[r * 8 + 2] = 100; buf[r * 8 + 3] = 101;
+        buf[r * 8 + 4] = 101; buf[r * 8 + 5] = 102; buf[r * 8 + 6] = 102;
+    }
+
+    l10_filters::lpfVertical6(buf + 4, pitch, 20, 2, 2);
+
+    // flat row: 5-tap outputs on cols 2..5, cols 1/6 untouched
+    CHECK(buf[0 * 8 + 1] == 100);
+    CHECK(buf[0 * 8 + 2] == 100);
+    CHECK(buf[0 * 8 + 3] == 101);
+    CHECK(buf[0 * 8 + 4] == 101);
+    CHECK(buf[0 * 8 + 5] == 102);
+    CHECK(buf[0 * 8 + 6] == 102);
+    // fallback row: filter4 on cols 2..5, cols 1/6 untouched
+    CHECK(buf[1 * 8 + 1] == 128);
+    CHECK(buf[1 * 8 + 2] == 128);
+    CHECK(buf[1 * 8 + 3] == 128);
+    CHECK(buf[1 * 8 + 4] == 127);
+    CHECK(buf[1 * 8 + 5] == 128);
+    CHECK(buf[1 * 8 + 6] == 128);
+    // sentinel rows untouched
+    CHECK(buf[4 * 8 + 4] == 200); CHECK(buf[7 * 8 + 3] == 200);
+}
+
+TEST_CASE("lpfHorizontal8 routes flat columns to the 7-tap and others to filter4") {
+    // 8x8, edge rows 0..7 (s = row 4: p3..q3 = rows 0..7). Column 0 flat
+    // (101,101,102,102,103,103,104,104 -> 7-tap writes rows 1..6, rows 0/7
+    // untouched); column 1 non-flat (128,128,128,130,126,128,128,128 -> F1).
+    std::uint8_t buf[64];
+    for (int i = 0; i < 64; ++i) {
+        buf[i] = 200;
+    }
+    const int pitch = 8;
+    const int flatCol[8] = {101, 101, 102, 102, 103, 103, 104, 104};
+    for (int r = 0; r < 8; ++r) {
+        buf[r * 8 + 0] = static_cast<std::uint8_t>(flatCol[r]);
+        buf[r * 8 + 2] = static_cast<std::uint8_t>(flatCol[r]);
+        buf[r * 8 + 3] = static_cast<std::uint8_t>(flatCol[r]);
+    }
+    const int fbCol[8] = {128, 128, 128, 130, 126, 128, 128, 128};
+    for (int r = 0; r < 8; ++r) {
+        buf[r * 8 + 1] = static_cast<std::uint8_t>(fbCol[r]);
+    }
+
+    l10_filters::lpfHorizontal8(buf + 4 * pitch, pitch, 20, 2, 2);
+
+    // flat column: 7-tap outputs on rows 1..6, rows 0/7 untouched
+    CHECK(buf[0 * 8 + 0] == 101);
+    CHECK(buf[1 * 8 + 0] == 102);
+    CHECK(buf[2 * 8 + 0] == 102);
+    CHECK(buf[3 * 8 + 0] == 102);
+    CHECK(buf[4 * 8 + 0] == 103);
+    CHECK(buf[5 * 8 + 0] == 103);
+    CHECK(buf[6 * 8 + 0] == 104);
+    CHECK(buf[7 * 8 + 0] == 104);
+    // fallback column: F1 on rows 2..5, rows 0/1/6/7 untouched
+    CHECK(buf[0 * 8 + 1] == 128);
+    CHECK(buf[1 * 8 + 1] == 128);
+    CHECK(buf[2 * 8 + 1] == 128);
+    CHECK(buf[3 * 8 + 1] == 128);
+    CHECK(buf[4 * 8 + 1] == 127);
+    CHECK(buf[5 * 8 + 1] == 128);
+    CHECK(buf[6 * 8 + 1] == 128);
+    CHECK(buf[7 * 8 + 1] == 128);
+    // sentinel columns untouched
+    CHECK(buf[4 * 8 + 4] == 200); CHECK(buf[0 * 8 + 7] == 200);
+}
+
+TEST_CASE("lpfVertical8 routes flat rows to the 7-tap and others to filter4") {
+    // 8x8, vertical edge columns 0..7 (s = column 4). Row 0 flat, row 1
+    // non-flat (F1), rows 2..3 flat, rows 4..7 sentinel.
+    std::uint8_t buf[64];
+    for (int i = 0; i < 64; ++i) {
+        buf[i] = 200;
+    }
+    const int pitch = 8;
+    const int flatRow[8] = {101, 101, 102, 102, 103, 103, 104, 104};
+    for (int c = 0; c < 8; ++c) {
+        buf[0 * 8 + c] = static_cast<std::uint8_t>(flatRow[c]);
+        buf[2 * 8 + c] = static_cast<std::uint8_t>(flatRow[c]);
+        buf[3 * 8 + c] = static_cast<std::uint8_t>(flatRow[c]);
+    }
+    const int fbRow[8] = {128, 128, 128, 130, 126, 128, 128, 128};
+    for (int c = 0; c < 8; ++c) {
+        buf[1 * 8 + c] = static_cast<std::uint8_t>(fbRow[c]);
+    }
+
+    l10_filters::lpfVertical8(buf + 4, pitch, 20, 2, 2);
+
+    // flat row: 7-tap outputs on cols 1..6, cols 0/7 untouched
+    CHECK(buf[0 * 8 + 0] == 101);
+    CHECK(buf[0 * 8 + 1] == 102);
+    CHECK(buf[0 * 8 + 2] == 102);
+    CHECK(buf[0 * 8 + 3] == 102);
+    CHECK(buf[0 * 8 + 4] == 103);
+    CHECK(buf[0 * 8 + 5] == 103);
+    CHECK(buf[0 * 8 + 6] == 104);
+    CHECK(buf[0 * 8 + 7] == 104);
+    // fallback row: F1 on cols 2..5, cols 0/1/6/7 untouched
+    CHECK(buf[1 * 8 + 0] == 128);
+    CHECK(buf[1 * 8 + 1] == 128);
+    CHECK(buf[1 * 8 + 2] == 128);
+    CHECK(buf[1 * 8 + 3] == 128);
+    CHECK(buf[1 * 8 + 4] == 127);
+    CHECK(buf[1 * 8 + 5] == 128);
+    CHECK(buf[1 * 8 + 6] == 128);
+    CHECK(buf[1 * 8 + 7] == 128);
+    // sentinel rows untouched
+    CHECK(buf[4 * 8 + 4] == 200); CHECK(buf[7 * 8 + 0] == 200);
+}
+
+TEST_CASE("updateSharpness ladder at sharpness 0") {
+    // s=0: lim = lvl (min 1); mblim = 2*(lvl+2) + lim.
+    l10_filters::LoopFilterInfoN lfi;
+    l10_filters::updateSharpness(&lfi, 0);
+    CHECK(lfi.lfthr[0].lim[0] == 1);
+    CHECK(lfi.lfthr[0].mblim[0] == 5);
+    CHECK(lfi.lfthr[63].lim[0] == 63);
+    CHECK(lfi.lfthr[63].mblim[0] == 193);
+}
+
+TEST_CASE("updateSharpness caps blockInsideLimit at 9-sharpness when sharpness>0") {
+    // s=7, lvl=63: 63>>2 = 15 -> cap 2 -> lim 2, mblim 2*65+2 = 132.
+    // s=7, lvl=20: 20>>2 = 5 -> cap 2 -> lim 2, mblim 46.
+    // s=4, lvl=63: shift 1 only -> 31 -> cap 5 -> lim 5, mblim 135.
+    l10_filters::LoopFilterInfoN lfi;
+    l10_filters::updateSharpness(&lfi, 7);
+    CHECK(lfi.lfthr[63].lim[0] == 2);
+    CHECK(lfi.lfthr[63].mblim[0] == 132);
+    CHECK(lfi.lfthr[20].lim[0] == 2);
+    CHECK(lfi.lfthr[20].mblim[0] == 46);
+    l10_filters::updateSharpness(&lfi, 4);
+    CHECK(lfi.lfthr[63].lim[0] == 5);
+    CHECK(lfi.lfthr[63].mblim[0] == 135);
+}
+
+TEST_CASE("updateSharpness does not touch hev_thr") {
+    // hev_thr is set by svt_av1_loop_filter_frame_init (outside DF1), never
+    // by update_sharpness: all 64 triplets must survive untouched.
+    l10_filters::LoopFilterInfoN lfi;
+    for (int lvl = 0; lvl <= 63; ++lvl) {
+        for (int b = 0; b < 16; ++b) {
+            lfi.lfthr[lvl].hev_thr[b] = 0xAB;
+        }
+    }
+    l10_filters::updateSharpness(&lfi, 0);
+    l10_filters::updateSharpness(&lfi, 7);
+    for (int lvl = 0; lvl <= 63; ++lvl) {
+        for (int b = 0; b < 16; ++b) {
+            CHECK(lfi.lfthr[lvl].hev_thr[b] == 0xAB);
+        }
+    }
+}
