@@ -336,14 +336,15 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-04, the CDEF1 slice)
+### Last measured state (2026-11-04, the CDEF3+LR1 slice)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 11/11 passed, 0 failed, 269.66 s** (re-measured 2026-11-04 at
-  CDEF1; l4_intra is the slow one; `pipeline` and `l3_transforms` next;
-  the rest under 0.5 s including l10_filters.
-  Earlier runs of the same tree: the DF2 run 270.04 s, the AN12 run
+- **ctest: 11/11 passed, 0 failed, 280.41 s** (re-measured 2026-11-04 at
+  CDEF3+LR1; l4_intra is the slow one; `pipeline` and `l3_transforms` next;
+  the rest under 0.5 s including l10_filters, which now also runs
+  test_restoration.cpp and test_cdef3.cpp.
+  Earlier runs of the same tree: the CDEF1 run 269.66 s, the DF2 run 270.04 s, the AN12 run
   275.59 s at 10/10
   (l4_intra 213.58 s, `pipeline` 53.74 s, `l3_transforms` 7.24 s),
   a first AN12 run 269.63 s, the AN11
@@ -356,8 +357,9 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
-  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-04 at CDEF1: rebuilt, and
-  byte-identical to the committed file; no generator input in CDEF1). History, not a figure to chase:
+  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-04 at CDEF3+LR1: rebuilt, and
+  byte-identical to the committed file; no generator input in the A8/LR
+  slices). History, not a figure to chase:
   884,980 B was the value from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
   13 gate lines, all chroma-side - and the RT21 regen moved it to 884,851 B
@@ -365,11 +367,13 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 14.7%** (see the completion metric section;
-  re-measured 2026-11-04 at CDEF1: 23,207 of 157,718 non-blank lines,
-  +367 from 22,840 - the A8 campaign's third slice: CDEF1 +367 (the CDEF
-  find_dir + filter kernel family, cdef.c spans measured 367 nb); A8 now
-  prints 6% (677 of 10,600). CDEF1 is
+- **Portable-C coverage: 16.3%** (see the completion metric section;
+  re-measured 2026-11-04 at CDEF3+LR1: 25,658 of 157,718 non-blank lines,
+  +2,451 from 23,207 at CDEF1 - the AN13/AN14/AN16/AN17 noise+FFT slices
+  (+1,513 across A11+A13) and the A8 slices CDEF2 +377, CDEF3 +318 and
+  LR1 +243 (all span-measured; per-slice register entries in docs/todo.md
+  section A0); A8 prints 15% (1,615 of 10,600), A11 prints 26% (3,173 of
+  12,028). All of it is
   COVERAGE-ONLY: it moves no conformance count; the printed percentage
   history: 23,207/157,718 = 14.7168% crosses the 14.65 boundary (CDEF1
   prints 14.7%); 22,840/157,718 = 14.4807% crosses the 14.45 boundary (DF2
@@ -827,17 +831,13 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-04 (CDEF1): 14.7%** (23,207 of 157,718 non-blank
-lines - the covered count moved +367 from 22,840: the A8 campaign's third
-slice, CDEF1 +367 (the CDEF find_dir + filter kernel family of cdef.c in
-src/l10_filters/cdef: sign :16-:18, constrain :20-:27, the padded
-directions tables :35-:56/:408-:422, adjust_strength :66-:70,
-cdefFindDir :88-:150, the dual/walker pairs :152-:187/:313-:317/:509-:535,
-the pri/sec taps :189-:190, cdefFilterBlock :193-:254, cdefFilterBlock8bit
-:257-:300, cdefTapOffFrame :427-:430 and cdefFilterBlock8bitBounded
-:437-:504, measured 367 nb; cdef.c is 738 nb, so A8 prints 677 covered
-of 10,600 (6% as the tool prints the rounded cov%). The DF1+DF2+CDEF1 set is
-COVERAGE-ONLY: it moves NO conformance count
+**THE NUMBER, as measured 2026-11-04 (CDEF3+LR1): 16.3%** (25,658 of 157,718
+non-blank lines - the covered count moved +2,451 from 23,207 at CDEF1: the
+AN13/AN14/AN16/AN17 noise+FFT slices (+1,513 across A11+A13) and the A8
+slices CDEF2 +377 (the fb/lbd driver chain), CDEF3 +318 (the enc_cdef
+mse/search block) and LR1 +243 (the restoration math core), so A8 prints
+1,615 covered of 10,600 (15%). All of it is COVERAGE-ONLY: it moves NO
+conformance count
 - see the paired-metric caveat. Earlier
 history of the same
 metric: the DF2 run measured 22,840 = +95 from 22,745 (the 14-tap family,
@@ -930,15 +930,15 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 55% | 4,653 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 11% | 1,535 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
-| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 6% | 677 |
+| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 15% | 1,615 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 14% | 1,706 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 26% | 3,173 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
-| A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
+| A13 | Utility + platform + core headers | 24 | 5,357 | 6% | 314 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 32% | 463 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **23,207** |
+| | **TOTAL** | **254** | **157,718** | | **25,658** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

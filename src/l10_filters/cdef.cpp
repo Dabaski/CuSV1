@@ -23,6 +23,13 @@ std::int32_t getMsb(std::uint32_t n) {
     return log;
 }
 
+// CDEF geometry constants (cdef.h:30-37, the source of the halo/border math):
+//   CDEF_VBORDER 3, CDEF_HBORDER 8, CDEF_HALO 2, CDEF_BSTRIDE 144 (144 = 128
+//   + 2 * 8 aligned to 8).
+constexpr int kCdefVBorder = 3;
+constexpr int kCdefHBorder = 8;
+constexpr int kCdefHalo = 2;
+constexpr int kMiSize64x64 = 16;
 } // namespace
 
 // 1:1 port of sign (cdef.c:16-18).
@@ -695,6 +702,309 @@ void cdefFilterFb(std::uint8_t* dst8, std::uint16_t* dst16, std::int32_t dstride
                         coeffShift,
                         subsamplingFactor);
     }
+}
+
+namespace {
+
+// 1:1 port of svt_aom_memset16 (svt_malloc.h:95-101): the element loop the
+// cdef_copy.h helpers compose (named deviation: the reference svt_malloc.h
+// body, as a plain function - behavior identical, no allocator surface).
+void svtAomMemset16(std::uint16_t* dest, std::int32_t val, std::size_t length) {
+    for (std::size_t i = 0; i < length; ++i) {
+        dest[i] = static_cast<std::uint16_t>(val);
+    }
+}
+
+} // namespace
+
+// 1:1 port of svt_aom_fill_rect (cdef_copy.h:88-92): the uint16 rect fill
+// (edge-path off-frame sentinel); composes svt_aom_memset16 per row.
+void cdefFillRect(std::uint16_t* dst, std::int32_t dstride, std::int32_t v, std::int32_t h, std::uint16_t x) {
+    for (std::int32_t r = 0; r < v; ++r) {
+        svtAomMemset16(dst + r * dstride, x, static_cast<std::size_t>(h));
+    }
+}
+
+// 1:1 port of mse_8xn_16bit_c (enc_cdef.c:24-35). src packed (row stride 8),
+// dst strided by dstride; rows step by the subsampling factor.
+std::uint64_t cdefMse8xn16bit(const std::uint16_t* src, const std::uint16_t* dst, std::int32_t dstride,
+                              std::int32_t height, std::uint8_t subsamplingFactor) {
+    std::uint64_t sum = 0;
+    for (std::int32_t i = 0; i < height; i += subsamplingFactor) {
+        for (std::int32_t j = 0; j < 8; ++j) {
+            const std::int32_t e = dst[i * dstride + j] - src[8 * i + j];
+            sum += e * e;
+        }
+    }
+    return sum;
+}
+
+// 1:1 port of mse_4xn_16bit_c (enc_cdef.c:37-48): the 4-wide twin.
+std::uint64_t cdefMse4xn16bit(const std::uint16_t* src, const std::uint16_t* dst, std::int32_t dstride,
+                              std::int32_t height, std::uint8_t subsamplingFactor) {
+    std::uint64_t sum = 0;
+    for (std::int32_t i = 0; i < height; i += subsamplingFactor) {
+        for (std::int32_t j = 0; j < 4; ++j) {
+            const std::int32_t e = dst[i * dstride + j] - src[4 * i + j];
+            sum += e * e;
+        }
+    }
+    return sum;
+}
+
+// 1:1 port of mse_8xn_8bit_c (enc_cdef.c:50-61): the 8-bit 8-wide twin.
+std::uint64_t cdefMse8xn8bit(const std::uint8_t* src, const std::uint8_t* dst, std::int32_t dstride,
+                             std::int32_t height, std::uint8_t subsamplingFactor) {
+    std::uint64_t sum = 0;
+    for (std::int32_t i = 0; i < height; i += subsamplingFactor) {
+        for (std::int32_t j = 0; j < 8; ++j) {
+            const std::int32_t e = dst[i * dstride + j] - src[8 * i + j];
+            sum += e * e;
+        }
+    }
+    return sum;
+}
+
+// 1:1 port of mse_4xn_8bit_c (enc_cdef.c:63-74): the 8-bit 4-wide twin.
+std::uint64_t cdefMse4xn8bit(const std::uint8_t* src, const std::uint8_t* dst, std::int32_t dstride,
+                             std::int32_t height, std::uint8_t subsamplingFactor) {
+    std::uint64_t sum = 0;
+    for (std::int32_t i = 0; i < height; i += subsamplingFactor) {
+        for (std::int32_t j = 0; j < 4; ++j) {
+            const std::int32_t e = dst[i * dstride + j] - src[4 * i + j];
+            sum += e * e;
+        }
+    }
+    return sum;
+}
+
+// ---- CDEF3: the block-level dist walkers ----------------------------------
+
+// svt_aom_compute_cdef_dist_16bit_c (enc_cdef.c:77-113): the block-level dist
+// walker. src is the packed filtered-block scratch (bi << (log2w + log2h)),
+// dst the recon frame strided by dstride; the bsize branch pins the (by,bx)
+// origin shifts and the mse kernel per branch, and the sum is returned
+// >> 2*coeff_shift.
+std::uint64_t cdefComputeDist16bit(const std::uint16_t* dst, std::int32_t dstride, const std::uint16_t* src,
+                                   const CdefList* dlist, std::int32_t cdefCount, CdefBlockSize bsize,
+                                   std::int32_t coeffShift, std::uint8_t subsamplingFactor) {
+    std::uint64_t sum = 0;
+    std::int32_t bi, bx, by;
+    if (bsize == CdefBlockSize::BLOCK_8X8) {
+        for (bi = 0; bi < cdefCount; bi++) {
+            by = dlist[bi].by;
+            bx = dlist[bi].bx;
+            sum += cdefMse8xn16bit(&src[bi << (3 + 3)], &dst[(by << 3) * dstride + (bx << 3)], dstride, 8,
+                                   subsamplingFactor);
+        }
+    } else if (bsize == CdefBlockSize::BLOCK_4X8) {
+        for (bi = 0; bi < cdefCount; bi++) {
+            by = dlist[bi].by;
+            bx = dlist[bi].bx;
+            sum += cdefMse4xn16bit(&src[bi << (3 + 2)], &dst[(by << 3) * dstride + (bx << 2)], dstride, 8,
+                                   subsamplingFactor);
+        }
+    } else if (bsize == CdefBlockSize::BLOCK_8X4) {
+        for (bi = 0; bi < cdefCount; bi++) {
+            by = dlist[bi].by;
+            bx = dlist[bi].bx;
+            sum += cdefMse8xn16bit(&src[bi << (2 + 3)], &dst[(by << 2) * dstride + (bx << 3)], dstride, 4,
+                                   subsamplingFactor);
+        }
+    } else {
+        for (bi = 0; bi < cdefCount; bi++) {
+            by = dlist[bi].by;
+            bx = dlist[bi].bx;
+            sum += cdefMse4xn16bit(&src[bi << (2 + 2)], &dst[(by << 2) * dstride + (bx << 2)], dstride, 4,
+                                   subsamplingFactor);
+        }
+    }
+    return sum >> 2 * coeffShift;
+}
+
+// svt_aom_compute_cdef_dist_8bit_c (enc_cdef.c:115-151): the 8-bit twin -
+// identical shift pairs through the 8-bit mse kernels.
+std::uint64_t cdefComputeDist8bit(const std::uint8_t* dst, std::int32_t dstride, const std::uint8_t* src,
+                                  const CdefList* dlist, std::int32_t cdefCount, CdefBlockSize bsize,
+                                  std::int32_t coeffShift, std::uint8_t subsamplingFactor) {
+    std::uint64_t sum = 0;
+    std::int32_t bi, bx, by;
+    if (bsize == CdefBlockSize::BLOCK_8X8) {
+        for (bi = 0; bi < cdefCount; bi++) {
+            by = dlist[bi].by;
+            bx = dlist[bi].bx;
+            sum += cdefMse8xn8bit(&src[bi << (3 + 3)], &dst[(by << 3) * dstride + (bx << 3)], dstride, 8,
+                                  subsamplingFactor);
+        }
+    } else if (bsize == CdefBlockSize::BLOCK_4X8) {
+        for (bi = 0; bi < cdefCount; bi++) {
+            by = dlist[bi].by;
+            bx = dlist[bi].bx;
+            sum += cdefMse4xn8bit(&src[bi << (3 + 2)], &dst[(by << 3) * dstride + (bx << 2)], dstride, 8,
+                                  subsamplingFactor);
+        }
+    } else if (bsize == CdefBlockSize::BLOCK_8X4) {
+        for (bi = 0; bi < cdefCount; bi++) {
+            by = dlist[bi].by;
+            bx = dlist[bi].bx;
+            sum += cdefMse8xn8bit(&src[bi << (2 + 3)], &dst[(by << 2) * dstride + (bx << 3)], dstride, 4,
+                                  subsamplingFactor);
+        }
+    } else {
+        for (bi = 0; bi < cdefCount; bi++) {
+            by = dlist[bi].by;
+            bx = dlist[bi].bx;
+            sum += cdefMse4xn8bit(&src[bi << (2 + 2)], &dst[(by << 2) * dstride + (bx << 2)], dstride, 4,
+                                  subsamplingFactor);
+        }
+    }
+    return sum >> 2 * coeffShift;
+}
+
+// 1:1 port of cdef_apply_fb (enc_cdef.c:200-297, static inline, inside the
+// CDEF_8BITS_PATH guard): the native 8-bit src8 builder for one 64x64 fb.
+// src8 is the padded CDEF_BSTRIDE buffer (stride 144, vborder 3, hborder 8);
+// the body copy clamps its bottom/right extent on frame edges (off-frame
+// taps are masked geometrically by the bounded kernel). prevRowCdef selects
+// linebuf over recon for the top halos; colbuf carries the left halo; the
+// filter call runs whenever the strength is active or dir is stale.
+void cdefApplyFb(std::uint8_t* recBuff, std::uint32_t recStride, std::uint8_t* src8, std::uint8_t* linebufPli,
+                 std::uint8_t* colbufPli, const std::uint8_t* prevRowCdef, int fbr, int fbc, int nvfb, int nhfb,
+                 int coffset, int mhl2, int mwl2, int nhb, int nvb, int stride, int rend, int cend, int cstart,
+                 int cdefLeft, std::uint8_t dir[kCdefNblocks][kCdefNblocks], int* dirinit,
+                 std::int32_t var[kCdefNblocks][kCdefNblocks], int pli, CdefList* dlist, int cdefCount,
+                 int cdefStrength, int damping, int coeffShift, int xdec, int ydec, int frameTop, int frameLeft,
+                 int frameBottom, int frameRight) {
+    const int vsz = nvb << mhl2;
+    const int hsz = nhb << mwl2;
+    // CDEF taps reach only +-CDEF_HALO px, so the recon copies need only a CDEF_HALO-wide halo even
+    // though the buffer is padded to HBORDER/VBORDER for aligned SIMD loads (the extra border is
+    // never read into any output). Name the halo geometry inside the padded buffer.
+    const int halo_col = kCdefHBorder - kCdefHalo; // left-halo column
+    const int halo_row = kCdefVBorder - kCdefHalo; // top-halo row
+    const int top_off  = halo_row * kCdefBstride + kCdefHBorder; // src8 (top halo, body col 0)
+    const int tl_off   = halo_row * kCdefBstride + halo_col; // src8 (top halo, left halo col)
+    const int tr_off   = halo_row * kCdefBstride + kCdefHBorder + hsz; // src8 (top halo, right body edge)
+    const int lrow     = halo_row * stride; // linebuf row offset of the halo
+    const int cs       = cstart < -kCdefHalo ? -kCdefHalo : cstart;
+    // Off-frame bottom/right have no in-frame halo: clamp the recon body copy so it never reads past
+    // the frame edge (those taps are masked geometrically by the bounded kernel).
+    const int body_rows = frameBottom ? vsz : vsz + kCdefHalo;
+    const int cright    = frameRight ? hsz : cend - (kCdefHBorder - kCdefHalo);
+    // Body + top halo in ONE copy from recon (also brings the left/right and bottom halo). The top
+    // halo is overwritten from the pre-filter linebuf below wherever the top neighbour fb was already
+    // CDEF-filtered (its current recon is post-filter and unusable as halo).
+    cdefCopyRect8(&src8[(kCdefVBorder - kCdefHalo) * kCdefBstride + kCdefHBorder + cs], kCdefBstride, recBuff,
+                  (kMiSize64x64 << mhl2) * fbr - kCdefHalo, coffset + cs, recStride, kCdefHalo + body_rows,
+                  cright - cs);
+    // Overwrite top center / top-left / top-right from the pre-filter linebuf where that neighbour
+    // was filtered (else the recon copied above is correct).
+    if (prevRowCdef[fbc]) {
+        cdefCopyRect8(&src8[top_off], kCdefBstride, &linebufPli[lrow + coffset], 0, 0, stride, kCdefHalo, hsz);
+    }
+    if (prevRowCdef[fbc - 1]) {
+        cdefCopyRect8(&src8[tl_off], kCdefBstride, &linebufPli[lrow + coffset - kCdefHalo], 0, 0, stride,
+                      kCdefHalo, kCdefHalo);
+    }
+    if (prevRowCdef[fbc + 1]) {
+        cdefCopyRect8(&src8[tr_off], kCdefBstride, &linebufPli[lrow + coffset + hsz], 0, 0, stride,
+                      kCdefHalo, kCdefHalo);
+    }
+    // Left halo (from colbuf, if the left fb was filtered).
+    if (cdefLeft) {
+        cdefCopyRect8(&src8[halo_col], kCdefBstride, &colbufPli[halo_col], 0, 0, kCdefHBorder, rend + kCdefVBorder,
+                      kCdefHalo);
+    }
+    // Save right halo edge to colbuf for the fb to the right.
+    if (fbc < nhfb - 1) {
+        cdefCopyRect8(&colbufPli[halo_col], kCdefHBorder, &src8[hsz + halo_col], 0, 0, kCdefBstride,
+                      rend + kCdefVBorder, kCdefHalo);
+    }
+    // Save bottom edge to linebuf for the fb below.
+    if (fbr < nvfb - 1) {
+        cdefCopyRect8(&linebufPli[coffset], stride,
+                      &recBuff[((kMiSize64x64 << mhl2) * (fbr + 1) - kCdefVBorder) * recStride + coffset],
+                      0, 0, recStride, kCdefVBorder, hsz);
+    }
+    if (cdefStrength || !*dirinit) {
+        cdefFilterFbLbd(&recBuff[recStride * (kMiSize64x64 * fbr << mhl2) + (fbc * kMiSize64x64 << mwl2)],
+                        recStride, &src8[kCdefVBorder * kCdefBstride + kCdefHBorder], frameTop, frameLeft,
+                        frameBottom, frameRight, vsz, hsz, xdec, ydec, dir, dirinit, var, pli, dlist, cdefCount,
+                        cdefStrength, damping, coeffShift, 1);
+    }
+}
+
+// svt_search_one_dual_c (enc_cdef.c:714-772): the greedy /3 search over
+// (lev0, lev1) pairs. The search appends the best pair to lev0/lev1 at
+// nbStrengths and returns the total mse. This is the exact reference logic,
+// ported as-is with uint64 accumulation and the (uint64_t)1 << 63 init.
+std::uint64_t cdefSearchOneDual(std::int32_t* lev0, std::int32_t* lev1, int nbStrengths, std::uint64_t** mse[2],
+                                int sbCount, int startGi, int endGi) {
+    std::uint64_t totMse[64][64];
+    std::int32_t i, j, k;
+    std::uint64_t bestTotMse = (std::uint64_t)1 << 63;
+    std::int32_t bestId0 = 0;
+    std::int32_t bestId1 = 0;
+    const std::int32_t totalStrengths = endGi;
+    memset(totMse, 0, sizeof(totMse));
+    // Loop over the filter blocks in the frame
+    for (i = 0; i < sbCount; ++i) {
+        std::int32_t gi;
+        std::uint64_t bestMse = (std::uint64_t)1 << 63;
+        // Find best mse among already selected options.
+        for (gi = 0; gi < nbStrengths; ++gi) {
+            std::uint64_t curr = mse[0][i][lev0[gi]];
+            curr += mse[1][i][lev1[gi]];
+            if (curr < bestMse) {
+                bestMse = curr;
+            }
+        }
+        // Find best mse when adding each possible new option.
+        for (j = startGi; j < totalStrengths; ++j) {
+            for (k = startGi; k < totalStrengths; ++k) {
+                std::uint64_t best = bestMse;
+                std::uint64_t curr = mse[0][i][j];
+                curr += mse[1][i][k];
+                if (curr < best) {
+                    best = curr;
+                }
+                totMse[j][k] += best;
+            }
+        }
+    }
+    // Add the best (lev0, lev1) pair to the selected list.
+    for (j = startGi; j < totalStrengths; ++j) {
+        for (k = startGi; k < totalStrengths; ++k) {
+            if (totMse[j][k] < bestTotMse) {
+                bestTotMse = totMse[j][k];
+                bestId0 = j;
+                bestId1 = k;
+            }
+        }
+    }
+    lev0[nbStrengths] = bestId0;
+    lev1[nbStrengths] = bestId1;
+    return bestTotMse;
+}
+
+// joint_strength_search_dual (enc_cdef.c:787-818): the greedy + refine
+// search over the strength pairs. The list of nbStrengths pairs is
+// determined by adding one such pair at a time through cdefSearchOneDual.
+std::uint64_t cdefJointStrengthSearchDual(std::int32_t* bestLev0, std::int32_t* bestLev1, int nbStrengths,
+                                          std::uint64_t** mse[2], int sbCount, int startGi, int endGi) {
+    std::uint64_t bestTotMse = (std::uint64_t)1 << 63;
+    std::int32_t i, j;
+    for (i = 0; i < nbStrengths; ++i) {
+        bestTotMse = cdefSearchOneDual(bestLev0, bestLev1, i, mse, sbCount, startGi, endGi);
+    }
+    for (i = 0; i < 4 * nbStrengths; ++i) {
+        for (j = 0; j < nbStrengths - 1; ++j) {
+            bestLev0[j] = bestLev0[j + 1];
+            bestLev1[j] = bestLev1[j + 1];
+        }
+        bestTotMse = cdefSearchOneDual(bestLev0, bestLev1, nbStrengths - 1, mse, sbCount, startGi, endGi);
+    }
+    return bestTotMse;
 }
 
 } // namespace l10_filters

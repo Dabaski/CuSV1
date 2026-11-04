@@ -238,8 +238,80 @@ void cdefCopyRect8(std::uint8_t* dst, std::int32_t dstride, const std::uint8_t* 
 void cdefCopyRect16(std::uint16_t* dst, std::int32_t dstride, const std::uint16_t* src, std::int32_t sstride,
                     std::int32_t v, std::int32_t h);
 
-// svt_aom_fill_rect (cdef_copy.h:88-94): PARKED - its only callers are the
-// parked enc_cdef.c halo fills (CDEF3); nothing in CDEF2 scope composes it.
+// svt_aom_fill_rect (cdef_copy.h:88-94): LANDS WITH CDEF3 - its callers are
+// the enc_cdef.c halo fills. uint16 rect fill.
+void cdefFillRect(std::uint16_t* dst, std::int32_t dstride, std::int32_t v, std::int32_t h, std::uint16_t x);
+
+// cdef_apply_fb (enc_cdef.c:200-297): the fb (64x64 filter-block) src8 builder
+// + filter call. It builds src8 (the padded CDEF gather buffer) from recon +
+// the persistent linebuf/colbuf halos and then filters through
+// cdefFilterFbLbd. Exported as a plain function (reference static inline).
+void cdefApplyFb(std::uint8_t* recBuff, std::uint32_t recStride, std::uint8_t* src8, std::uint8_t* linebufPli,
+                 std::uint8_t* colbufPli, const std::uint8_t* prevRowCdef, int fbr, int fbc, int nvfb, int nhfb,
+                 int coffset, int mhl2, int mwl2, int nhb, int nvb, int stride, int rend, int cend, int cstart,
+                 int cdefLeft, std::uint8_t dir[kCdefNblocks][kCdefNblocks], int* dirinit,
+                 std::int32_t var[kCdefNblocks][kCdefNblocks], int pli, CdefList* dlist, int cdefCount,
+                 int cdefStrength, int damping, int coeffShift, int xdec, int ydec, int frameTop, int frameLeft,
+                 int frameBottom, int frameRight);
+
+// ---- CDEF3 (enc_cdef mse/search + fill_rect) ------------------------------
+// 1:1 port of third_party/SVT-AV1/Source/Lib/Codec/enc_cdef.c:
+//   mse_8xn_16bit_c :24-35, mse_4xn_16bit_c :37-48, mse_8xn_8bit_c :50-61,
+//   mse_4xn_8bit_c :63-74 (four static INLINE kernels; exported for direct
+//   testability, cdefSign precedent), svt_aom_compute_cdef_dist_16bit_c
+//   :77-113, svt_aom_compute_cdef_dist_8bit_c :115-151 (the block-level
+//   dist walkers), cdef_apply_fb :200-297 (the 8-bit src8 builder + filter
+//   call, inside the CDEF_8BITS_PATH guard; static inline in the reference,
+//   exported here), svt_search_one_dual_c :714-772 and
+//   joint_strength_search_dual :787-818 (the greedy /3 search over
+//   (lev0,lev1) pairs), and cdef_copy.h svt_aom_fill_rect :88-94 (the uint16
+//   rect fill). PARKED (named): svt_sb_compute_cdef_list :153-184 (mi_grid
+//   coupled), svt_av1_cdef_frame :300-... (pcs/frm_hdr coupled),
+//   svt_pick_cdef_from_qp :823-... (float), propagate_cdef_strength :875-...,
+//   finish_cdef_search :897-.... Coverage-only slice: no bitstream surface.
+
+// mse_8xn_16bit_c (enc_cdef.c:24-35): src packed (row stride 8), dst strided
+// by dstride; rows step by the subsampling factor.
+std::uint64_t cdefMse8xn16bit(const std::uint16_t* src, const std::uint16_t* dst, std::int32_t dstride,
+                              std::int32_t height, std::uint8_t subsamplingFactor);
+
+// mse_4xn_16bit_c (enc_cdef.c:37-48): the 4-wide twin.
+std::uint64_t cdefMse4xn16bit(const std::uint16_t* src, const std::uint16_t* dst, std::int32_t dstride,
+                              std::int32_t height, std::uint8_t subsamplingFactor);
+
+// mse_8xn_8bit_c (enc_cdef.c:50-61): the 8-bit 8-wide twin.
+std::uint64_t cdefMse8xn8bit(const std::uint8_t* src, const std::uint8_t* dst, std::int32_t dstride,
+                             std::int32_t height, std::uint8_t subsamplingFactor);
+
+// mse_4xn_8bit_c (enc_cdef.c:63-74): the 8-bit 4-wide twin.
+std::uint64_t cdefMse4xn8bit(const std::uint8_t* src, const std::uint8_t* dst, std::int32_t dstride,
+                             std::int32_t height, std::uint8_t subsamplingFactor);
+
+// svt_aom_compute_cdef_dist_16bit_c (enc_cdef.c:77-113): the block-level dist
+// walker over the mse kernels. src is the packed filtered-block scratch
+// (bi << (log2w + log2h)), dst the recon frame strided by dstride.
+std::uint64_t cdefComputeDist16bit(const std::uint16_t* dst, std::int32_t dstride, const std::uint16_t* src,
+                                   const CdefList* dlist, std::int32_t cdefCount, CdefBlockSize bsize,
+                                   std::int32_t coeffShift, std::uint8_t subsamplingFactor);
+
+// svt_aom_compute_cdef_dist_8bit_c (enc_cdef.c:115-151): the 8-bit twin.
+std::uint64_t cdefComputeDist8bit(const std::uint8_t* dst, std::int32_t dstride, const std::uint8_t* src,
+                                  const CdefList* dlist, std::int32_t cdefCount, CdefBlockSize bsize,
+                                  std::int32_t coeffShift, std::uint8_t subsamplingFactor);
+
+// TOTAL_STRENGTHS (enc_cdef.c): the strength-grid dimension of the search.
+constexpr int kCdefTotalStrengths = 64;
+
+// svt_search_one_dual_c (enc_cdef.c:714-772): the greedy /3 search over
+// (lev0, lev1) pairs. Appends the best pair to lev0/lev1 at nbStrengths.
+// File-local in the reference? It is exported (declared in enc_cdef.h):
+// exported here for direct testability (named deviation, cdefSign precedent).
+std::uint64_t cdefSearchOneDual(std::int32_t* lev0, std::int32_t* lev1, int nbStrengths, std::uint64_t** mse[2],
+                                int sbCount, int startGi, int endGi);
+
+// joint_strength_search_dual (enc_cdef.c:787-818): the greedy + refine search.
+std::uint64_t cdefJointStrengthSearchDual(std::int32_t* bestLev0, std::int32_t* bestLev1, int nbStrengths,
+                                          std::uint64_t** mse[2], int sbCount, int startGi, int endGi);
 
 // svt_aom_copy_sb8_16 (cdef_copy.h:96-105): the CDEF superblock copy into
 // the padded src buffer - widen 8-bit recon (u8->u16), or copy 16-bit recon

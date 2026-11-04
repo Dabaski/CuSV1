@@ -1646,8 +1646,7 @@ A0. SLICE-LEVEL STATE (the live register)
 |    24,375 -> 24,752 of 157,718; the printed percentage MOVED:
 |    15.5% -> 15.7%; GATE byte-identical 884,851 B; the paired conformance
 |    count UNCHANGED (9 artifacts, all content-1:1) - COVERAGE-ONLY.
-|    PARKED (named): svt_aom_fill_rect (cdef_copy.h:88-:94, callers all
-|    enc_cdef.c), enc_cdef mse/search (CDEF3), corner_match.c/
+|    PARKED (named): corner_match.c/
 |    corner_detect.c (global-motion machinery, ORPHANED per Scout CDEF).
 |  - [x] **A8/LR1 (2026-11-04): the restoration math core landed** in
 |    src/l10_filters/restoration.{h,cpp} + tests/test_restoration.cpp
@@ -1707,6 +1706,41 @@ A0. SLICE-LEVEL STATE (the live register)
 |    dependency), the selfguided family :632-:962 (LR2), sgrproj/wiener
 |    stripe + highbd :987-:1035, the :1040+ filter_unit/frame walkers,
 |    :1124+ the tile walkers and boundary-line savers.
+|  - [x] **A8/CDEF3 (2026-11-04, judge-merged from the parallel writer):
+|    the enc_cdef mse/search block landed** in src/l10_filters/cdef.{h,cpp}
+|    + tests/test_cdef3.cpp (registered in the CMake test list - the
+|    writer's commit had left that line uncommitted; the judge added it at
+|    merge). Spans, 318 nb MEASURED by the judge span-by-span against the
+|    pinned enc_cdef.c (1017 nb) + cdef_copy.h: the four mse kernels
+|    mse_8xn_16bit :24-:35 (12), mse_4xn_16bit :37-:48 (12), mse_8xn_8bit
+|    :50-:61 (12), mse_4xn_8bit :63-:76 (13); the two dist bodies
+|    svt_aom_compute_cdef_dist_16bit :77-:113 (37) and _8bit :115-:151
+|    (37, the <8-rows/8-cols dispatch over the mse kernels); cdef_apply_fb
+|    :200-:298 (99, the halo/copy walk calling the CDEF2 copy helpers +
+|    the filter driver, inside #if CDEF_8BITS_PATH); svt_search_one_dual_c
+|    :714-:772 (59, the greedy /3 search over (lev0,lev1) windows) and
+|    joint_strength_search_dual :787-:818 (31); cdef_copy.h
+|    svt_aom_fill_rect :88-:94 (6, the CDEF2-parked helper, now landed).
+|    WRITER-CLAIM CORRECTION (the judge's re-measure, named): the writer's
+|    register line and coverage row quoted "A8 10% (1054/10600)" - that is
+|    the PRE-CDEF3 count (its branch had no LR1) and the writer never
+|    moved the fraction; the judge measured the spans at 318 nb and set
+|    A8 0.1224 -> 0.1524 (1615/10600, 15.2%; the judge's first run printed
+|    1372 because it added 318 to the PRE-LR1 1054 instead of the post-LR1
+|    1297 - caught by the regenerated tool run, see the CDEF3 register
+|    entry), total 25,340 -> 25,658 (16.3%).
+|    The commit message carried RED + mutation evidence but no suite or
+|    byte figures - the judge's post-merge run is the measured record:
+|    full ctest 11/11, GATE byte-identical 884,851 B diff 0. Mutations
+|    named by the writer (mse stride swap, dist accumulation drop, search
+|    window-init corruption, halo offset swap, fill_rect bound off-by-one)
+|    each reverted after killing a named fixture. Coverage-only slice:
+|    moves no conformance count, filter enable bits stay literal 0.
+|    PARKED (named): svt_sb_compute_cdef_list :153-:199, svt_av1_cdef_frame
+|    :300-:713, svt_pick_cdef_from_qp :823-:875, propagate_cdef_strength
+|    :875-:897, finish_cdef_search :897-:1017 (the struct-walled driver
+|    chain); corner_match.c/
+|    corner_detect.c (global-motion machinery, ORPHANED per Scout CDEF).
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
