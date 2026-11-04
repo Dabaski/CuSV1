@@ -20,12 +20,22 @@
 //   x_by_xplus1 :610-:625 (256 entries, entry 0 special-cased to 1),
 //   one_by_x :627-:630 (25 entries = MAX_NELEM, MAX_RADIUS = 2,
 //   restoration.h:110-111).
+// LR2 (A8 campaign): the selfguided family :632-:962 -
+//   selfguided_restoration_fast_internal :632-:764 (estimation rows
+//   stepped by 2, row-parity *6/*5 kernels, assert(r == 2) at the filter),
+//   selfguided_restoration_internal :766-:884 (row stride 1, 3x3 *4/*3
+//   kernel, nb = 5),
+//   svt_av1_selfguided_restoration_c :886-:922 (the dgd32 staging copy +
+//   the r[0]/r[1] skip pair),
+//   svt_apply_selfguided_restoration_c :924-:962 (tmpbuf flt0/flt1, the
+//   decodeXq composition, the u/v accumulation, the >> (PRJ+RST) and the
+//   clip_pixel_highbd write).
 // PARKED (named, port nothing): the stripe machinery
 // setup/restore_processing_stripe_boundary :249-:397 and
 // get_stripe_boundary_info :216 (RestorationTileLimits /
 // RestorationLineBuffers struct-coupled), wiener_filter_stripe :399
-// (RestorationUnitInfo + the convolve.c A13 dependency), the selfguided
-// family :632-:962 (LR2), sgrproj/wiener stripe + highbd :987-:1035, the
+// (RestorationUnitInfo + the convolve.c A13 dependency),
+// sgrproj/wiener stripe + highbd :987-:1035, the
 // :1040+ filter_unit/frame walkers, :1124+ the tile walkers and
 // boundary-line savers.
 // Coverage-only slice: moves no conformance count, touches no bitstream;
@@ -45,6 +55,31 @@ struct SgrParamsType {
     std::int32_t r[2];
     std::int32_t s[2];
 };
+
+// LR2: the SGR constants of the reference header, verbatim values.
+// SGRPROJ_BORDER_VERT / SGRPROJ_BORDER_HORZ (restoration.h:41-:42).
+constexpr std::int32_t sgrprojBorderVert = 3;
+constexpr std::int32_t sgrprojBorderHorz = 3;
+// SGRPROJ_PRJ_BITS (:94), SGRPROJ_RST_BITS (:96), SGRPROJ_SGR_BITS (:98),
+// SGRPROJ_SGR (:99).
+constexpr std::int32_t sgrprojPrjBits = 7;
+constexpr std::int32_t sgrprojRstBits = 4;
+constexpr std::int32_t sgrprojSgrBits = 8;
+constexpr std::int32_t sgrprojSgr = 1 << sgrprojSgrBits;
+// MAX_RADIUS (:110); MAX_NELEM = 25 is the oneByX extent (:111).
+constexpr std::int32_t maxRadius = 2;
+// SGRPROJ_MTABLE_BITS (:112), SGRPROJ_RECIP_BITS (:113).
+constexpr std::int32_t sgrprojMtableBits = 20;
+constexpr std::int32_t sgrprojRecipBits = 12;
+// RESTORATION_PROC_UNIT_PELS (:76-:78): (RESTORATION_PROC_UNIT_SIZE 64,
+// :36 + RESTORATION_BORDER_HORZ/VERT = SGRPROJ_* via the :52/:61 #if, +
+// RESTORATION_PADDING 20, :75) per side.
+constexpr std::int32_t restorationProcUnitPels = (64 + sgrprojBorderHorz * 2 + 20) *
+    (64 + sgrprojBorderVert * 2 + 20);
+// RESTORATION_UNITPELS_MAX (:84): RESTORATION_UNITSIZE_MAX 256 (:80) * 3/2
+// + 2*border + 16 (:81) x + 2*border + RESTORATION_UNIT_OFFSET 8 (:82-:83).
+constexpr std::int32_t restorationUnitpelsMax =
+    (256 * 3 / 2 + 2 * sgrprojBorderHorz + 16) * (256 * 3 / 2 + 2 * sgrprojBorderVert + 8);
 
 // sgr_params (restoration.c:31-49): 16 rows indexed by sgr_params_idx.
 extern const SgrParamsType sgrParams[16];
@@ -68,7 +103,8 @@ void boxsum(std::int32_t* src, std::int32_t width, std::int32_t height, std::int
             std::int32_t sqr, std::int32_t* dst, std::int32_t dst_stride);
 
 // svt_decode_xq (restoration.c:597-:608): the params-aware xqd -> xq map
-// (SGRPROJ_PRJ_BITS = 7 base). Named deviation: exported under decodeXq.
+// (SGRPROJ_PRJ_BITS = 7 base, the LR2 sgrprojPrjBits constant). Named
+// deviation: exported under decodeXq.
 void decodeXq(const std::int32_t* xqd, std::int32_t* xq, const SgrParamsType* params);
 
 // x_by_xplus1 (restoration.c:610-:625): 256 entries, entry 0 special-cased
@@ -103,6 +139,45 @@ void copyTileLowbd(std::int32_t width, std::int32_t height, const std::uint8_t* 
 // ported.
 void copyTile(std::int32_t width, std::int32_t height, const std::uint8_t* src, std::int32_t src_stride,
               std::uint8_t* dst, std::int32_t dst_stride, std::int32_t highbd);
+
+// selfguided_restoration_fast_internal (restoration.c:632-:764): the
+// radius-r boxsums over the 3-bordered dgd, the z/A/B estimation pass
+// (rows stepped by 2), then the row-parity *6/*5 filter kernels. File-local
+// static in the reference; exported for direct testability (named
+// deviation, LR1 boxsum1 precedent). Requires r == 2 (assert) and the dgd
+// buffer to carry 3 border rows/cols around the width x height content.
+void selfguidedRestorationFastInternal(std::int32_t* dgd, std::int32_t width, std::int32_t height,
+    std::int32_t dgd_stride, std::int32_t* dst, std::int32_t dst_stride, std::int32_t bit_depth,
+    std::int32_t sgr_params_idx, std::int32_t radius_idx);
+
+// selfguided_restoration_internal (restoration.c:766-:884): the slow twin -
+// the same estimation pass with the row stride 1, then the 3x3 *4/*3
+// kernel (nb = 5, no r == 2 assert). File-local static in the reference;
+// exported for direct testability (named deviation).
+void selfguidedRestorationInternal(std::int32_t* dgd, std::int32_t width, std::int32_t height,
+    std::int32_t dgd_stride, std::int32_t* dst, std::int32_t dst_stride, std::int32_t bit_depth,
+    std::int32_t sgr_params_idx, std::int32_t radius_idx);
+
+// svt_av1_selfguided_restoration_c (restoration.c:886-:922): stage the
+// 3-bordered dat8 window into a stack int32 buffer, then the r[0]/r[1]
+// skip pair - fast into flt0, slow into flt1, a zero radius leaves its
+// flt untouched. The highbd branch is PARKED (named): CONVERT_TO_SHORTPTR
+// reads assert(0), unreachable in our 8-bit-only emission
+// (enable_restoration 0).
+void selfguidedRestoration(const std::uint8_t* dgd8, std::int32_t width, std::int32_t height,
+    std::int32_t dgd_stride, std::int32_t* flt0, std::int32_t* flt1, std::int32_t flt_stride,
+    std::int32_t sgr_params_idx, std::int32_t bit_depth, std::int32_t highbd);
+
+// svt_apply_selfguided_restoration_c (restoration.c:924-:962): both
+// filters into tmpbuf (flt1 = flt0 + RESTORATION_UNITPELS_MAX), decodeXq,
+// then the per-pixel u/v accumulation, the >> (SGRPROJ_PRJ_BITS +
+// SGRPROJ_RST_BITS) and the clip_pixel_highbd write. tmpbuf needs
+// 2 * RESTORATION_UNITPELS_MAX int32; dat8 must carry 3 border rows/cols.
+// The highbd reads/writes are PARKED (named, unreachable in our 8-bit
+// emission).
+void applySelfguidedRestoration(const std::uint8_t* dat8, std::int32_t width, std::int32_t height,
+    std::int32_t stride, std::int32_t eps, const std::int32_t* xqd, std::uint8_t* dst8,
+    std::int32_t dst_stride, std::int32_t* tmpbuf, std::int32_t bit_depth, std::int32_t highbd);
 
 } // namespace restoration
 

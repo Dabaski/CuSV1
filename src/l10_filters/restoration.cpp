@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 
@@ -6,6 +7,36 @@
 namespace l10_filters {
 
 namespace restoration {
+
+namespace {
+
+// definitions.h:457: ROUND_POWER_OF_TWO, the unsigned instantiation used
+// by the selfguided estimation arithmetic.
+std::uint32_t roundPowerOfTwoU32(std::uint32_t value, std::int32_t n) {
+    return (value + (((1u << n) >> 1))) >> n;
+}
+
+// definitions.h:457: ROUND_POWER_OF_TWO on signed int (arithmetic shift;
+// the apply-site call passes a possibly negative v).
+std::int32_t roundPowerOfTwoI32(std::int32_t value, std::int32_t n) {
+    return (value + (((1 << n) >> 1))) >> n;
+}
+
+// definitions.h:704-:714: clip_pixel_highbd, verbatim switch shape
+// (case 8 / default, 10, 12).
+std::uint16_t clipPixelHighbd(std::int32_t val, std::int32_t bd) {
+    switch (bd) {
+    case 8:
+    default:
+        return (std::uint16_t)(val > 255 ? 255 : (val < 0) ? 0 : val);
+    case 10:
+        return (std::uint16_t)(val > 1023 ? 1023 : (val < 0) ? 0 : val);
+    case 12:
+        return (std::uint16_t)(val > 4095 ? 4095 : (val < 0) ? 0 : val);
+    }
+}
+
+} // namespace
 
 // sgr_params (restoration.c:31-49): 16 rows indexed by sgr_params_idx.
 // Rows 10-13 have r[0] == 0 (first pass skipped); rows 14-15 have r[1] == 0
@@ -180,17 +211,18 @@ void boxsum(std::int32_t* src, std::int32_t width, std::int32_t height, std::int
     }
 }
 
-// svt_decode_xq (restoration.c:597-:608). 1:1.
+// svt_decode_xq (restoration.c:597-:608). 1:1; the (1 << SGRPROJ_PRJ_BITS)
+// base is the LR2 sgrprojPrjBits constant (LR6 refactor: was literal 7).
 void decodeXq(const std::int32_t* xqd, std::int32_t* xq, const SgrParamsType* params) {
     if (params->r[0] == 0) {
         xq[0] = 0;
-        xq[1] = (1 << 7) - xqd[1];
+        xq[1] = (1 << sgrprojPrjBits) - xqd[1];
     } else if (params->r[1] == 0) {
         xq[0] = xqd[0];
         xq[1] = 0;
     } else {
         xq[0] = xqd[0];
-        xq[1] = (1 << 7) - xq[0] - xqd[1];
+        xq[1] = (1 << sgrprojPrjBits) - xq[0] - xqd[1];
     }
 }
 
@@ -284,6 +316,237 @@ void copyTile(std::int32_t width, std::int32_t height, const std::uint8_t* src, 
         assert(0 && "highbd restoration path parked (LR1)");
     } else {
         copyTileLowbd(width, height, src, src_stride, dst, dst_stride);
+    }
+}
+
+// selfguided_restoration_fast_internal (restoration.c:632-:764). 1:1:
+// radius-r boxsums over the extended view, the z/A/B estimation pass with
+// the row stride 2 (i += 2), then the row-parity *6/*5 kernels; r == 2 is
+// asserted at the filter stage. AOMMIN(z, 255) -> std::min(z, 255u)
+// (matching uint32 types); comments stripped, one-line provenance header.
+void selfguidedRestorationFastInternal(std::int32_t* dgd, std::int32_t width, std::int32_t height,
+    std::int32_t dgd_stride, std::int32_t* dst, std::int32_t dst_stride, std::int32_t bit_depth,
+    std::int32_t sgr_params_idx, std::int32_t radius_idx) {
+    const SgrParamsType* const params     = &sgrParams[sgr_params_idx];
+    const std::int32_t         r          = params->r[radius_idx];
+    const std::int32_t         width_ext  = width + 2 * sgrprojBorderHorz;
+    const std::int32_t         height_ext = height + 2 * sgrprojBorderVert;
+    std::int32_t  buf_stride = ((width_ext + 3) & ~3) + 16;
+    std::int32_t  a_[restorationProcUnitPels];
+    std::int32_t  b_[restorationProcUnitPels];
+    std::int32_t* A = a_;
+    std::int32_t* B = b_;
+    std::int32_t  i, j;
+
+    assert(r <= maxRadius && "Need MAX_RADIUS >= r");
+    assert(r <= sgrprojBorderVert - 1 && r <= sgrprojBorderHorz - 1 && "Need SGRPROJ_BORDER_* >= r+1");
+
+    boxsum(dgd - dgd_stride * sgrprojBorderVert - sgrprojBorderHorz, width_ext, height_ext, dgd_stride, r, 0, B,
+        buf_stride);
+    boxsum(dgd - dgd_stride * sgrprojBorderVert - sgrprojBorderHorz, width_ext, height_ext, dgd_stride, r, 1, A,
+        buf_stride);
+    A += sgrprojBorderVert * buf_stride + sgrprojBorderHorz;
+    B += sgrprojBorderVert * buf_stride + sgrprojBorderHorz;
+    for (i = -1; i < height + 1; i += 2) {
+        for (j = -1; j < width + 1; ++j) {
+            const std::int32_t k = i * buf_stride + j;
+            const std::int32_t n = (2 * r + 1) * (2 * r + 1);
+
+            std::uint32_t a = (std::uint32_t)roundPowerOfTwoI32(A[k], 2 * (bit_depth - 8));
+            std::uint32_t b = (std::uint32_t)roundPowerOfTwoI32(B[k], bit_depth - 8);
+
+            std::uint32_t p = (a * n < b * b) ? 0u : a * n - b * b;
+
+            const std::uint32_t s = (std::uint32_t)params->s[radius_idx];
+
+            const std::uint32_t z = roundPowerOfTwoU32(p * s, sgrprojMtableBits);
+
+            A[k] = xByXplus1[std::min(z, 255u)];
+
+            B[k] = (std::int32_t)roundPowerOfTwoU32(
+                (std::uint32_t)(sgrprojSgr - A[k]) * (std::uint32_t)B[k] * (std::uint32_t)oneByX[n - 1],
+                sgrprojRecipBits);
+        }
+    }
+    assert(r == 2);
+    for (i = 0; i < height; ++i) {
+        if (!(i & 1)) { // even row
+            for (j = 0; j < width; ++j) {
+                const std::int32_t k  = i * buf_stride + j;
+                const std::int32_t l  = i * dgd_stride + j;
+                const std::int32_t m  = i * dst_stride + j;
+                const std::int32_t nb = 5;
+                const std::int32_t a  = (A[k - buf_stride] + A[k + buf_stride]) * 6 +
+                    (A[k - 1 - buf_stride] + A[k - 1 + buf_stride] + A[k + 1 - buf_stride] +
+                        A[k + 1 + buf_stride]) * 5;
+                const std::int32_t b = (B[k - buf_stride] + B[k + buf_stride]) * 6 +
+                    (B[k - 1 - buf_stride] + B[k - 1 + buf_stride] + B[k + 1 - buf_stride] +
+                        B[k + 1 + buf_stride]) * 5;
+                const std::int32_t v = a * dgd[l] + b;
+                dst[m]               = roundPowerOfTwoI32(v, sgrprojSgrBits + nb - sgrprojRstBits);
+            }
+        } else { // odd row
+            for (j = 0; j < width; ++j) {
+                const std::int32_t k  = i * buf_stride + j;
+                const std::int32_t l  = i * dgd_stride + j;
+                const std::int32_t m  = i * dst_stride + j;
+                const std::int32_t nb = 4;
+                const std::int32_t a  = A[k] * 6 + (A[k - 1] + A[k + 1]) * 5;
+                const std::int32_t b  = B[k] * 6 + (B[k - 1] + B[k + 1]) * 5;
+                const std::int32_t v  = a * dgd[l] + b;
+                dst[m]                = roundPowerOfTwoI32(v, sgrprojSgrBits + nb - sgrprojRstBits);
+            }
+        }
+    }
+}
+
+// selfguided_restoration_internal (restoration.c:766-:884). 1:1: the same
+// estimation pass with the row stride 1, then the 3x3 *4/*3 kernel
+// (nb = 5, no r == 2 assert).
+void selfguidedRestorationInternal(std::int32_t* dgd, std::int32_t width, std::int32_t height,
+    std::int32_t dgd_stride, std::int32_t* dst, std::int32_t dst_stride, std::int32_t bit_depth,
+    std::int32_t sgr_params_idx, std::int32_t radius_idx) {
+    const SgrParamsType* const params     = &sgrParams[sgr_params_idx];
+    const std::int32_t         r          = params->r[radius_idx];
+    const std::int32_t         width_ext  = width + 2 * sgrprojBorderHorz;
+    const std::int32_t         height_ext = height + 2 * sgrprojBorderVert;
+    std::int32_t  buf_stride = ((width_ext + 3) & ~3) + 16;
+    std::int32_t  a_[restorationProcUnitPels];
+    std::int32_t  b_[restorationProcUnitPels];
+    std::int32_t* A = a_;
+    std::int32_t* B = b_;
+    std::int32_t  i, j;
+
+    assert(r <= maxRadius && "Need MAX_RADIUS >= r");
+    assert(r <= sgrprojBorderVert - 1 && r <= sgrprojBorderHorz - 1 && "Need SGRPROJ_BORDER_* >= r+1");
+
+    boxsum(dgd - dgd_stride * sgrprojBorderVert - sgrprojBorderHorz, width_ext, height_ext, dgd_stride, r, 0, B,
+        buf_stride);
+    boxsum(dgd - dgd_stride * sgrprojBorderVert - sgrprojBorderHorz, width_ext, height_ext, dgd_stride, r, 1, A,
+        buf_stride);
+    A += sgrprojBorderVert * buf_stride + sgrprojBorderHorz;
+    B += sgrprojBorderVert * buf_stride + sgrprojBorderHorz;
+    for (i = -1; i < height + 1; ++i) {
+        for (j = -1; j < width + 1; ++j) {
+            const std::int32_t k = i * buf_stride + j;
+            const std::int32_t n = (2 * r + 1) * (2 * r + 1);
+
+            std::uint32_t a = (std::uint32_t)roundPowerOfTwoI32(A[k], 2 * (bit_depth - 8));
+            std::uint32_t b = (std::uint32_t)roundPowerOfTwoI32(B[k], bit_depth - 8);
+
+            std::uint32_t p = (a * n < b * b) ? 0u : a * n - b * b;
+
+            const std::uint32_t s = (std::uint32_t)params->s[radius_idx];
+
+            const std::uint32_t z = roundPowerOfTwoU32(p * s, sgrprojMtableBits);
+
+            A[k] = xByXplus1[std::min(z, 255u)];
+
+            B[k] = (std::int32_t)roundPowerOfTwoU32(
+                (std::uint32_t)(sgrprojSgr - A[k]) * (std::uint32_t)B[k] * (std::uint32_t)oneByX[n - 1],
+                sgrprojRecipBits);
+        }
+    }
+    for (i = 0; i < height; ++i) {
+        for (j = 0; j < width; ++j) {
+            const std::int32_t k  = i * buf_stride + j;
+            const std::int32_t l  = i * dgd_stride + j;
+            const std::int32_t m  = i * dst_stride + j;
+            const std::int32_t nb = 5;
+            const std::int32_t a  = (A[k] + A[k - 1] + A[k + 1] + A[k - buf_stride] + A[k + buf_stride]) * 4 +
+                (A[k - 1 - buf_stride] + A[k - 1 + buf_stride] + A[k + 1 - buf_stride] +
+                    A[k + 1 + buf_stride]) * 3;
+            const std::int32_t b = (B[k] + B[k - 1] + B[k + 1] + B[k - buf_stride] + B[k + buf_stride]) * 4 +
+                (B[k - 1 - buf_stride] + B[k - 1 + buf_stride] + B[k + 1 - buf_stride] +
+                    B[k + 1 + buf_stride]) * 3;
+            const std::int32_t v = a * dgd[l] + b;
+            dst[m]               = roundPowerOfTwoI32(v, sgrprojSgrBits + nb - sgrprojRstBits);
+        }
+    }
+}
+
+// svt_av1_selfguided_restoration_c (restoration.c:886-:922). 1:1: the
+// dgd32 staging copy (rows/cols -3..+3 beyond the content window), then
+// the r[0]/r[1] skip pair. The highbd staging branch is named-parked
+// (CONVERT_TO_SHORTPTR; unreachable in our 8-bit emission).
+void selfguidedRestoration(const std::uint8_t* dgd8, std::int32_t width, std::int32_t height,
+    std::int32_t dgd_stride, std::int32_t* flt0, std::int32_t* flt1, std::int32_t flt_stride,
+    std::int32_t sgr_params_idx, std::int32_t bit_depth, std::int32_t highbd) {
+    std::int32_t       dgd32_[restorationProcUnitPels];
+    const std::int32_t dgd32_stride = width + 2 * sgrprojBorderHorz;
+    std::int32_t*      dgd32        = dgd32_ + dgd32_stride * sgrprojBorderVert + sgrprojBorderHorz;
+
+    if (highbd) {
+        assert(0 && "highbd restoration path parked (LR2)");
+    } else {
+        for (std::int32_t i = -sgrprojBorderVert; i < height + sgrprojBorderVert; ++i) {
+            for (std::int32_t j = -sgrprojBorderHorz; j < width + sgrprojBorderHorz; ++j) {
+                dgd32[i * dgd32_stride + j] = dgd8[i * dgd_stride + j];
+            }
+        }
+    }
+
+    const SgrParamsType* const params = &sgrParams[sgr_params_idx];
+    // If params->r == 0 we skip the corresponding filter. We only allow one of
+    // the radii to be 0, as having both equal to 0 would be equivalent to
+    // skipping SGR entirely.
+    assert(!(params->r[0] == 0 && params->r[1] == 0));
+
+    if (params->r[0] > 0) {
+        selfguidedRestorationFastInternal(
+            dgd32, width, height, dgd32_stride, flt0, flt_stride, bit_depth, sgr_params_idx, 0);
+    }
+    if (params->r[1] > 0) {
+        selfguidedRestorationInternal(
+            dgd32, width, height, dgd32_stride, flt1, flt_stride, bit_depth, sgr_params_idx, 1);
+    }
+}
+
+// svt_apply_selfguided_restoration_c (restoration.c:924-:962). 1:1: both
+// filters into tmpbuf (flt1 = flt0 + RESTORATION_UNITPELS_MAX), the
+// decodeXq composition, then the per-pixel u/v accumulation, the
+// ROUND_POWER_OF_TWO at SGRPROJ_PRJ_BITS + SGRPROJ_RST_BITS and the
+// clip_pixel_highbd write. The highbd reads/writes are named-parked
+// (CONVERT_TO_SHORTPTR; unreachable in our 8-bit emission).
+void applySelfguidedRestoration(const std::uint8_t* dat8, std::int32_t width, std::int32_t height,
+    std::int32_t stride, std::int32_t eps, const std::int32_t* xqd, std::uint8_t* dst8,
+    std::int32_t dst_stride, std::int32_t* tmpbuf, std::int32_t bit_depth, std::int32_t highbd) {
+    std::int32_t* flt0 = tmpbuf;
+    std::int32_t* flt1 = flt0 + restorationUnitpelsMax;
+    assert(width * height <= restorationUnitpelsMax);
+
+    selfguidedRestoration(dat8, width, height, stride, flt0, flt1, width, eps, bit_depth, highbd);
+    const SgrParamsType* const params = &sgrParams[eps];
+    std::int32_t xq[2];
+    decodeXq(xqd, xq, params);
+    for (std::int32_t i = 0; i < height; ++i) {
+        for (std::int32_t j = 0; j < width; ++j) {
+            const std::int32_t  k      = i * width + j;
+            std::uint8_t*       dst8ij = dst8 + i * dst_stride + j;
+            const std::uint8_t* dat8ij = dat8 + i * stride + j;
+
+            // const uint16_t pre_u = highbd ? *CONVERT_TO_SHORTPTR(dat8ij)
+            // : *dat8ij; highbd parked (named).
+            const std::uint16_t pre_u = *dat8ij;
+            const std::int32_t  u     = (std::int32_t)pre_u << sgrprojRstBits;
+            std::int32_t        v     = u << sgrprojPrjBits;
+            // r == 0 => that filter was skipped in selfguidedRestoration
+            // (flt[k] == u), so its blend term is skipped here too.
+            if (params->r[0] > 0) {
+                v += xq[0] * (flt0[k] - u);
+            }
+            if (params->r[1] > 0) {
+                v += xq[1] * (flt1[k] - u);
+            }
+            const std::int16_t w = (std::int16_t)roundPowerOfTwoI32(v, sgrprojPrjBits + sgrprojRstBits);
+
+            const std::uint16_t out = clipPixelHighbd(w, bit_depth);
+            if (highbd) {
+                assert(0 && "highbd restoration path parked (LR2)");
+            } else {
+                *dst8ij = (std::uint8_t)out;
+            }
+        }
     }
 }
 

@@ -1,16 +1,28 @@
 #include <doctest.h>
 #include <restoration.h>
 
+#include <algorithm>
+#include <vector>
+
 // LR1 (A8 campaign): 1:1 port of the restoration math core of
 // third_party/SVT-AV1/Source/Lib/Codec/restoration.c: sgr_params :31-:49,
 // boxsum1 :430-:495, boxsum2 :497-:584, boxsum :586-:594, svt_decode_xq
 // :597-:608, x_by_xplus1 :610-:625, one_by_x :627-:630, extend_frame_lowbd
 // :110-:126 + svt_extend_frame :150-:157, copy_tile_lowbd :159-:164 +
-// copy_tile :173-:180. PARKED (named): the stripe machinery :216/:249-:397,
-// wiener_filter_stripe :399, the selfguided family :632-:962 (LR2),
+// copy_tile :173-:180.
+// LR2 (A8 campaign): the selfguided family :632-:962 -
+// selfguided_restoration_fast_internal :632-:764,
+// selfguided_restoration_internal :766-:884,
+// svt_av1_selfguided_restoration_c :886-:922,
+// svt_apply_selfguided_restoration_c :924-:962 - fixture classes: the
+// independent clamped-box oracle (three estimator regimes: saturated
+// z >= 255, mid-variance, flat z == 0), the r==0 skip pair, the apply
+// composition + both clip bounds.
+// PARKED (named): the stripe machinery :216/:249-:397,
+// wiener_filter_stripe :399,
 // sgrproj/wiener stripe + highbd :987-:1035, the filter_unit/frame walkers
-// :1040+, the tile walkers :1124+. Coverage-only slice: moves no conformance
-// count; enable_restoration stays 0.
+// :1040+, the tile walkers :1124+. Coverage-only slice: moves no
+// conformance count; enable_restoration stays 0.
 
 TEST_CASE("sgrParams row 0 is {2,1},{140,3236}") {
     CHECK(l10_filters::restoration::sgrParams[0].r[0] == 2);
@@ -278,6 +290,25 @@ TEST_CASE("copyTile dispatches highbd=0 to the lowbd body") {
     for (int k = 0; k < 3 * 10; ++k) CHECK(a[k] == b[k]);
 }
 
+// LR2-S1: the SGR constant set the selfguided family consumes
+// (restoration.h:41-:42, :94, :96, :98-:99, :110, :112-:113, :36, :52, :61,
+// :75-:78, :80-:84). Transcribe-verify: the aggregate sizes are computed
+// from the same sub-terms the reference macros use.
+TEST_CASE("sgrproj constant set matches the reference macros") {
+    using namespace l10_filters::restoration;
+    CHECK(sgrprojBorderVert == 3);
+    CHECK(sgrprojBorderHorz == 3);
+    CHECK(sgrprojPrjBits == 7);
+    CHECK(sgrprojRstBits == 4);
+    CHECK(sgrprojSgrBits == 8);
+    CHECK(sgrprojSgr == 256);
+    CHECK(maxRadius == 2);
+    CHECK(sgrprojMtableBits == 20);
+    CHECK(sgrprojRecipBits == 12);
+    CHECK(restorationProcUnitPels == (64 + 3 * 2 + 20) * (64 + 3 * 2 + 20));
+    CHECK(restorationUnitpelsMax == (256 * 3 / 2 + 2 * 3 + 16) * (256 * 3 / 2 + 2 * 3 + 8));
+}
+
 // S1: table-identity fixture over ALL 16 rows (transcribe-verify against
 // restoration.c:33-:48; the mutation-proof class for data tables).
 TEST_CASE("sgrParams table identity over all 16 rows") {
@@ -295,4 +326,417 @@ TEST_CASE("sgrParams table identity over all 16 rows") {
         CHECK(l10_filters::restoration::sgrParams[i].s[0] == kExpected[i][1][0]);
         CHECK(l10_filters::restoration::sgrParams[i].s[1] == kExpected[i][1][1]);
     }
+}
+
+// LR2 oracle for the selfguided family, derived by tracing
+// restoration.c:632-:884. Independent structure: the LR1 clamped-box
+// oracle (boxOracle above) replaces the prefix-walk boxsum, then the
+// estimation and filter stages are re-derived per cell. iStep is the
+// estimation row stride (2 = the fast variant, 1 = the slow variant); the
+// filter kernel switches with it (restoration.c:737-:762 vs :870-:882).
+// The bit_depth shifts are kept symbolic (exact at 8 where 2*(bd-8) and
+// bd-8 fold to 0, matching the reference expressions).
+namespace {
+
+std::int32_t oracleRp2I32(std::int32_t v, std::int32_t n) { return (v + ((1 << n) >> 1)) >> n; }
+
+void selfguidedOracle(const std::int32_t* dgd, int w, int h, int dgdStride, int iStep, int idx, int radiusIdx,
+                      int bitDepth, std::int32_t* dst, int dstStride) {
+    const l10_filters::restoration::SgrParamsType& pr = l10_filters::restoration::sgrParams[idx];
+    const int r = pr.r[radiusIdx];
+    const std::uint32_t s = (std::uint32_t)pr.s[radiusIdx];
+    const int widthExt = w + 6, heightExt = h + 6;
+    const int bs = ((widthExt + 3) & ~3) + 16;
+    std::vector<std::int32_t> Abuf(bs * (heightExt + 2), 0), Bbuf(bs * (heightExt + 2), 0);
+    const std::int32_t* dgdExt = dgd - dgdStride * 3 - 3;
+    boxOracle(dgdExt, widthExt, heightExt, dgdStride, r, 1, Abuf.data(), bs);
+    boxOracle(dgdExt, widthExt, heightExt, dgdStride, r, 0, Bbuf.data(), bs);
+    std::int32_t* A = Abuf.data() + 3 * bs + 3;
+    std::int32_t* B = Bbuf.data() + 3 * bs + 3;
+    const std::uint32_t n = (std::uint32_t)((2 * r + 1) * (2 * r + 1));
+    for (int i = -1; i < h + 1; i += iStep) {
+        for (int j = -1; j < w + 1; ++j) {
+            const int k = i * bs + j;
+            std::uint32_t a = (std::uint32_t)oracleRp2I32(A[k], 2 * (bitDepth - 8));
+            std::uint32_t b = (std::uint32_t)oracleRp2I32(B[k], bitDepth - 8);
+            std::uint32_t p = (a * n < b * b) ? 0u : a * n - b * b;
+            const std::uint32_t z = (p * s + ((1u << 20) >> 1)) >> 20;
+            A[k] = l10_filters::restoration::xByXplus1[z < 255u ? z : 255u];
+            B[k] = (std::int32_t)(((std::uint32_t)(256 - A[k]) * (std::uint32_t)B[k] *
+                                      (std::uint32_t)l10_filters::restoration::oneByX[n - 1] +
+                                  ((1u << 12) >> 1)) >>
+                12);
+        }
+    }
+    for (int i = 0; i < h; ++i) {
+        for (int j = 0; j < w; ++j) {
+            const int k = i * bs + j;
+            int nb, a, b;
+            if (iStep == 2) {
+                if (!(i & 1)) {
+                    nb = 5;
+                    a = (A[k - bs] + A[k + bs]) * 6 +
+                        (A[k - 1 - bs] + A[k - 1 + bs] + A[k + 1 - bs] + A[k + 1 + bs]) * 5;
+                    b = (B[k - bs] + B[k + bs]) * 6 +
+                        (B[k - 1 - bs] + B[k - 1 + bs] + B[k + 1 - bs] + B[k + 1 + bs]) * 5;
+                } else {
+                    nb = 4;
+                    a = A[k] * 6 + (A[k - 1] + A[k + 1]) * 5;
+                    b = B[k] * 6 + (B[k - 1] + B[k + 1]) * 5;
+                }
+            } else {
+                nb = 5;
+                a = (A[k] + A[k - 1] + A[k + 1] + A[k - bs] + A[k + bs]) * 4 +
+                    (A[k - 1 - bs] + A[k - 1 + bs] + A[k + 1 - bs] + A[k + 1 + bs]) * 3;
+                b = (B[k] + B[k - 1] + B[k + 1] + B[k - bs] + B[k + bs]) * 4 +
+                    (B[k - 1 - bs] + B[k - 1 + bs] + B[k + 1 - bs] + B[k + 1 + bs]) * 3;
+            }
+            const std::int32_t v = a * dgd[i * dgdStride + j] + b;
+            const int shift = 8 + nb - 4;
+            dst[i * dstStride + j] = (v + ((1 << shift) >> 1)) >> shift;
+        }
+    }
+}
+
+// LCG-filled uint8 plane of (h + 8) x (w + 8), content at offset (4, 4);
+// the caller stages the 3-border window into int32 (the entry's shape).
+void fillLcgPlane(std::vector<std::uint8_t>& plane, int h, int stride, std::uint32_t seed) {
+    plane.assign((h + 8) * stride, 0);
+    for (auto& px : plane) {
+        seed = seed * 1103515245u + 12345u;
+        px = (std::uint8_t)((seed >> 16) & 0xFF);
+    }
+}
+
+void stageInt32(const std::uint8_t* content, int stride, int w, int h, std::vector<std::int32_t>& out) {
+    out.assign((h + 6) * (w + 6), 0);
+    for (int i = -3; i < h + 3; ++i)
+        for (int j = -3; j < w + 3; ++j) out[(i + 3) * (w + 6) + (j + 3)] = content[i * stride + j];
+}
+
+// Mid-variance fixture generator: base 128 + (lcg % amp) - (amp / 2),
+// clamped to [0, 255]. MEASURED FINDING: full-range LCG saturates the SGR
+// estimator (z >= 255 everywhere -> A[k] = 256, B[k] = 0), which collapses
+// BOTH kernels to dst = 16*dgd, so the fast/slow pair is indistinguishable
+// there; amp 45 (Var ~ 500) gives fast z ~ 42 / slow z ~ 128 at idx 0 -
+// both kernels live.
+void fillMidAmpPlane(std::vector<std::uint8_t>& plane, int h, int stride, int amp, std::uint32_t seed) {
+    plane.assign((h + 8) * stride, 0);
+    std::uint32_t s = seed;
+    for (auto& px : plane) {
+        s = s * 1103515245u + 12345u;
+        int v = 128 + (int)(s % (std::uint32_t)amp) - amp / 2;
+        px = (std::uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+    }
+}
+
+} // namespace
+
+// LR2-S2: selfguided_restoration_fast_internal (:632-:764) vs the
+// independent oracle, LCG 9x6, idx 0 radius 0 (r = 2, s = 140). The
+// fixture also pins the -1 estimate-loop border (e): the staged buffer's
+// border row/col feed the filter, so a border skip mutation is observable.
+TEST_CASE("selfguidedRestorationFastInternal matches the oracle on LCG 9x6 (idx 0)") {
+    using l10_filters::restoration::selfguidedRestorationFastInternal;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane;
+    fillLcgPlane(plane, h, stride, 12345u);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    std::vector<std::int32_t> dgd32;
+    stageInt32(content, stride, w, h, dgd32);
+    const std::int32_t* dgdC = dgd32.data() + 3 * (w + 6) + 3;
+    std::vector<std::int32_t> dst(w * h, -777), exp(w * h, -777);
+    selfguidedOracle(dgdC, w, h, w + 6, 2, 0, 0, 8, exp.data(), w);
+    selfguidedRestorationFastInternal(
+        const_cast<std::int32_t*>(dgdC), w, h, w + 6, dst.data(), w, 8, 0, 0);
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j) CHECK(dst[i * w + j] == exp[i * w + j]);
+}
+
+// LR2-S3a: selfguided_restoration_internal (:766-:884) vs the oracle,
+// LCG 9x6, idx 0 radius 1 (r = 1, s = 3236 - the realistic radius for
+// radius_idx 1; every sgr row with r[1] > 0 carries r[1] = 1).
+TEST_CASE("selfguidedRestorationInternal matches the oracle on LCG 9x6 (idx 0, r=1)") {
+    using l10_filters::restoration::selfguidedRestorationInternal;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane;
+    fillLcgPlane(plane, h, stride, 777u);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    std::vector<std::int32_t> dgd32;
+    stageInt32(content, stride, w, h, dgd32);
+    const std::int32_t* dgdC = dgd32.data() + 3 * (w + 6) + 3;
+    std::vector<std::int32_t> dst(w * h, -777), exp(w * h, -777);
+    selfguidedOracle(dgdC, w, h, w + 6, 1, 0, 1, 8, exp.data(), w);
+    selfguidedRestorationInternal(const_cast<std::int32_t*>(dgdC), w, h, w + 6, dst.data(), w, 8, 0, 1);
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j) CHECK(dst[i * w + j] == exp[i * w + j]);
+}
+
+// LR2-S3b (discriminating-power pins, verified by the S7 mutation runs):
+// (1) the slow path is generic over r - called directly with radius_idx 0
+// (r = 2, s = 140), the whole r range the sgr table admits for the slow
+// call ({1, 2}); (2) the fast/slow pair split: on the same staged input
+// the two kernels produce DIFFERENT output (if a port collapsed one into
+// the other, this fails).
+TEST_CASE("selfguidedRestorationInternal matches the oracle at r=2 (radius_idx 0)") {
+    using l10_filters::restoration::selfguidedRestorationInternal;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane;
+    fillLcgPlane(plane, h, stride, 4242u);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    std::vector<std::int32_t> dgd32;
+    stageInt32(content, stride, w, h, dgd32);
+    const std::int32_t* dgdC = dgd32.data() + 3 * (w + 6) + 3;
+    std::vector<std::int32_t> dst(w * h, -777), exp(w * h, -777);
+    selfguidedOracle(dgdC, w, h, w + 6, 1, 0, 0, 8, exp.data(), w);
+    selfguidedRestorationInternal(const_cast<std::int32_t*>(dgdC), w, h, w + 6, dst.data(), w, 8, 0, 0);
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j) CHECK(dst[i * w + j] == exp[i * w + j]);
+}
+
+TEST_CASE("fast and slow kernels differ on the same staged input (mid-variance)") {
+    using l10_filters::restoration::selfguidedRestorationFastInternal;
+    using l10_filters::restoration::selfguidedRestorationInternal;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane;
+    fillMidAmpPlane(plane, h, stride, 45, 999u);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    std::vector<std::int32_t> dgd32;
+    stageInt32(content, stride, w, h, dgd32);
+    const std::int32_t* dgdC = dgd32.data() + 3 * (w + 6) + 3;
+    std::vector<std::int32_t> dstF(w * h, -777), dstS(w * h, -777);
+    selfguidedRestorationFastInternal(const_cast<std::int32_t*>(dgdC), w, h, w + 6, dstF.data(), w, 8, 0, 0);
+    selfguidedRestorationInternal(const_cast<std::int32_t*>(dgdC), w, h, w + 6, dstS.data(), w, 8, 0, 1);
+    int diffs = 0;
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j)
+            if (dstF[i * w + j] != dstS[i * w + j]) ++diffs;
+    CHECK(diffs > 0);
+}
+
+// LR2-S3c: the mid-variance regime for the fast path vs the oracle (the
+// S2 fixture pins the saturated z >= 255 regime; this one pins the live
+// estimator: 0 < z < 255, A[k] strictly inside (1, 256), B[k] != 0).
+TEST_CASE("selfguidedRestorationFastInternal matches the oracle on mid-variance 9x6 (idx 0)") {
+    using l10_filters::restoration::selfguidedRestorationFastInternal;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane;
+    fillMidAmpPlane(plane, h, stride, 45, 31337u);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    std::vector<std::int32_t> dgd32;
+    stageInt32(content, stride, w, h, dgd32);
+    const std::int32_t* dgdC = dgd32.data() + 3 * (w + 6) + 3;
+    std::vector<std::int32_t> dst(w * h, -777), exp(w * h, -777);
+    selfguidedOracle(dgdC, w, h, w + 6, 2, 0, 0, 8, exp.data(), w);
+    selfguidedRestorationFastInternal(const_cast<std::int32_t*>(dgdC), w, h, w + 6, dst.data(), w, 8, 0, 0);
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j) CHECK(dst[i * w + j] == exp[i * w + j]);
+}
+
+// LR2-S3d (fixture (c)): the flat-input z == 0 saturation. Hand-derived:
+// constant 100 gives p = 0, z = 0, A[k] = xByXplus1[0] = 1 (the [1, 256]
+// saturation floor), B[k] = ((256-1)*n*c*oneByX[n-1] + 2048) >> 12 ->
+// fast (n=25): 25525, dst = (32*100 + 32*25525 + 256) >> 9 = 1602 on every
+// cell; slow (n=9, oneByX[8] = 455): 25494, dst = 1600 on every cell.
+// An AOMMIN(z, 255) -> 255 mutation (A[k] = 256, B[k] = 0, dst = 16*c =
+// 1600) fails both halves.
+TEST_CASE("flat input: z=0 saturation pins A[k]=1, fast dst=1602, slow dst=1600") {
+    using l10_filters::restoration::selfguidedRestorationFastInternal;
+    using l10_filters::restoration::selfguidedRestorationInternal;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane((h + 8) * stride, 100);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    std::vector<std::int32_t> dgd32;
+    stageInt32(content, stride, w, h, dgd32);
+    const std::int32_t* dgdC = dgd32.data() + 3 * (w + 6) + 3;
+    std::vector<std::int32_t> dstF(w * h, -777), dstS(w * h, -777);
+    selfguidedRestorationFastInternal(const_cast<std::int32_t*>(dgdC), w, h, w + 6, dstF.data(), w, 8, 0, 0);
+    selfguidedRestorationInternal(const_cast<std::int32_t*>(dgdC), w, h, w + 6, dstS.data(), w, 8, 0, 1);
+        for (int i = 0; i < h; ++i)
+            for (int j = 0; j < w; ++j) {
+                CHECK(dstF[i * w + j] == 1602);
+                CHECK(dstS[i * w + j] == 1600);
+            }
+}
+
+// LR2-S4: the entry svt_av1_selfguided_restoration_c (:886-:922). idx 0:
+// both radii live, flt0 = fast oracle / flt1 = slow oracle on the same
+// dat8 (the entry's own staging must agree with the manual stageInt32 the
+// oracle consumes).
+TEST_CASE("selfguidedRestoration entry matches both oracles at idx 0") {
+    using l10_filters::restoration::selfguidedRestoration;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane;
+    fillMidAmpPlane(plane, h, stride, 45, 5150u);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    std::vector<std::int32_t> dgd32;
+    stageInt32(content, stride, w, h, dgd32);
+    const std::int32_t* dgdC = dgd32.data() + 3 * (w + 6) + 3;
+    std::vector<std::int32_t> expF(w * h, -777), expS(w * h, -777);
+    selfguidedOracle(dgdC, w, h, w + 6, 2, 0, 0, 8, expF.data(), w);
+    selfguidedOracle(dgdC, w, h, w + 6, 1, 0, 1, 8, expS.data(), w);
+    std::vector<std::int32_t> flt0(w * h, -777), flt1(w * h, -777);
+    selfguidedRestoration(content, w, h, stride, flt0.data(), flt1.data(), w, 0, 8, 0);
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j) {
+            CHECK(flt0[i * w + j] == expF[i * w + j]);
+            CHECK(flt1[i * w + j] == expS[i * w + j]);
+        }
+}
+
+// LR2-S4 (fixture (b)): r[idx] == 0 skips that filter and leaves flt[idx]
+// UNTOUCHED - sgr row 10 has r[0] == 0 (flt0 sentinel stays), row 14 has
+// r[1] == 0 (flt1 sentinel stays).
+TEST_CASE("selfguidedRestoration r==0 rows leave the paired flt untouched") {
+    using l10_filters::restoration::selfguidedRestoration;
+    const int w = 9, h = 6, stride = w + 8;
+    const std::int32_t sentinel = -424242;
+    std::vector<std::uint8_t> plane;
+    fillMidAmpPlane(plane, h, stride, 45, 6160u);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    std::vector<std::int32_t> dgd32;
+    stageInt32(content, stride, w, h, dgd32);
+    const std::int32_t* dgdC = dgd32.data() + 3 * (w + 6) + 3;
+    std::vector<std::int32_t> expS(w * h, -777), expF(w * h, -777);
+    selfguidedOracle(dgdC, w, h, w + 6, 1, 10, 1, 8, expS.data(), w);
+    selfguidedOracle(dgdC, w, h, w + 6, 2, 14, 0, 8, expF.data(), w);
+    std::vector<std::int32_t> f0(w * h, sentinel), f1(w * h, sentinel);
+    selfguidedRestoration(content, w, h, stride, f0.data(), f1.data(), w, 10, 8, 0);
+    for (int k = 0; k < w * h; ++k) {
+        CHECK(f0[k] == sentinel);
+        CHECK(f1[k] == expS[k]);
+    }
+    std::fill(f0.begin(), f0.end(), sentinel);
+    std::fill(f1.begin(), f1.end(), sentinel);
+    selfguidedRestoration(content, w, h, stride, f0.data(), f1.data(), w, 14, 8, 0);
+    for (int k = 0; k < w * h; ++k) {
+        CHECK(f0[k] == expF[k]);
+        CHECK(f1[k] == sentinel);
+    }
+}
+
+// LR2 apply oracle (restoration.c:924-:962 re-derived): stage, run the
+// selfguided oracle into flt0/flt1 ONLY where r > 0 (the skipped flt stays
+// sentinel and is never read), the decodeXq composition (the LR1-verified
+// port primitive), then the u/v accumulation, the ROUND_POWER_OF_TWO at
+// SGRPROJ_PRJ_BITS + SGRPROJ_RST_BITS = 11 and the 8-bit clip. wOut
+// optionally dumps the pre-clip w for fixture calibration.
+void applyOracle(const std::uint8_t* dat8, int w, int h, int stride, int eps, const std::int32_t* xqd,
+    std::uint8_t* dst8, int dstStride, std::int32_t* wOut) {
+    using namespace l10_filters::restoration;
+    const SgrParamsType& pr = sgrParams[eps];
+    std::vector<std::int32_t> dgd32;
+    stageInt32(dat8, stride, w, h, dgd32);
+    const std::int32_t* dgdC = dgd32.data() + 3 * (w + 6) + 3;
+    const std::int32_t sentinel = -424242;
+    std::vector<std::int32_t> flt0(w * h, sentinel), flt1(w * h, sentinel);
+    if (pr.r[0] > 0) selfguidedOracle(dgdC, w, h, w + 6, 2, eps, 0, 8, flt0.data(), w);
+    if (pr.r[1] > 0) selfguidedOracle(dgdC, w, h, w + 6, 1, eps, 1, 8, flt1.data(), w);
+    std::int32_t xq[2];
+    decodeXq(xqd, xq, &pr);
+    for (int i = 0; i < h; ++i) {
+        for (int j = 0; j < w; ++j) {
+            const int k = i * w + j;
+            const std::int32_t u = (std::int32_t)dat8[i * stride + j] << 4;
+            std::int32_t v = u << 7;
+            if (pr.r[0] > 0) v += xq[0] * (flt0[k] - u);
+            if (pr.r[1] > 0) v += xq[1] * (flt1[k] - u);
+            const std::int32_t wv = (v + (1 << 10)) >> 11;
+            if (wOut) wOut[k] = wv;
+            dst8[i * dstStride + j] =
+                (std::uint8_t)(wv < 0 ? 0 : (wv > 255 ? 255 : wv));
+        }
+    }
+}
+
+// LR2-S5: svt_apply_selfguided_restoration_c (:924-:962) vs the
+// composition oracle, mid-variance 9x6, eps 0, xqd {5, 3}. The dst plane
+// is sentinel-prefilled and the border ring must stay untouched (dst
+// stride independence).
+TEST_CASE("applySelfguidedRestoration matches the composition oracle (eps 0, xqd 5,3)") {
+    using l10_filters::restoration::applySelfguidedRestoration;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane;
+    fillMidAmpPlane(plane, h, stride, 45, 7170u);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    const std::int32_t xqd[2] = {5, 3};
+    std::vector<std::uint8_t> expD((h + 8) * stride, 0xEE), dst((h + 8) * stride, 0xEE);
+    applyOracle(content, w, h, stride, 0, xqd, expD.data() + 4 * stride + 4, stride, nullptr);
+    std::vector<std::int32_t> tmpbuf(2 * l10_filters::restoration::restorationUnitpelsMax, -424242);
+    applySelfguidedRestoration(content, w, h, stride, 0, xqd, dst.data() + 4 * stride + 4, stride, tmpbuf.data(),
+        8, 0);
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j) CHECK(dst[i * stride + j] == expD[i * stride + j]);
+    CHECK(dst[0] == 0xEE);
+    CHECK(dst[(h + 8) * stride - 1] == 0xEE);
+    CHECK(dst[4 * stride + 3] == 0xEE);
+    CHECK(dst[(h + 3) * stride + 4 + w] == 0xEE);
+}
+
+// LR2-S5b: the clip bounds. A single bright outlier (255 at (2,3)) in a 0
+// field: the SGR estimate pulls flt far below u there, so the xqd extremes
+// drive the pre-clip w past both bounds - xqd {-96, 95} (xq0 = -96,
+// xq1 = 33) pushes w > 255 at the outlier; xqd {-96, -32} (xq1 = 256)
+// pushes w < 0. The calibration CHECKs pin that the fixture really fires
+// both bounds.
+TEST_CASE("applySelfguidedRestoration clips w > 255 at the outlier (xqd -96,95)") {
+    using l10_filters::restoration::applySelfguidedRestoration;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane((h + 8) * stride, 0);
+    plane[(4 + 2) * stride + (4 + 3)] = 255;
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    const std::int32_t xqd[2] = {-96, 95};
+    std::vector<std::int32_t> wPre(w * h, 0);
+    std::vector<std::uint8_t> expD((h + 8) * stride, 0xEE), dst((h + 8) * stride, 0xEE);
+    applyOracle(content, w, h, stride, 0, xqd, expD.data() + 4 * stride + 4, stride, wPre.data());
+    int maxW = wPre[0];
+    for (int k = 1; k < w * h; ++k) maxW = (wPre[k] > maxW ? wPre[k] : maxW);
+    CHECK(maxW > 255);
+    std::vector<std::int32_t> tmpbuf(2 * l10_filters::restoration::restorationUnitpelsMax, -424242);
+    applySelfguidedRestoration(content, w, h, stride, 0, xqd, dst.data() + 4 * stride + 4, stride, tmpbuf.data(),
+        8, 0);
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j) CHECK(dst[i * stride + j] == expD[i * stride + j]);
+}
+
+TEST_CASE("applySelfguidedRestoration clips w < 0 at the dark outlier (xqd -96,-32)") {
+    using l10_filters::restoration::applySelfguidedRestoration;
+    const int w = 9, h = 6, stride = w + 8;
+    // A single dark outlier (0 at (2,3)) in a 255 field: the SGR estimate
+    // pulls flt far ABOVE u there (flt0 - u ~ +30, flt1 = 0 with u = 0),
+    // so xq0 = -96 drives the pre-clip w negative.
+    std::vector<std::uint8_t> plane((h + 8) * stride, 255);
+    plane[(4 + 2) * stride + (4 + 3)] = 0;
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    const std::int32_t xqd[2] = {-96, -32};
+    std::vector<std::int32_t> wPre(w * h, 0);
+    std::vector<std::uint8_t> expD((h + 8) * stride, 0xEE), dst((h + 8) * stride, 0xEE);
+    applyOracle(content, w, h, stride, 0, xqd, expD.data() + 4 * stride + 4, stride, wPre.data());
+    int minW = wPre[0];
+    for (int k = 1; k < w * h; ++k) minW = (wPre[k] < minW ? wPre[k] : minW);
+    CHECK(minW < 0);
+    std::vector<std::int32_t> tmpbuf(2 * l10_filters::restoration::restorationUnitpelsMax, -424242);
+    applySelfguidedRestoration(content, w, h, stride, 0, xqd, dst.data() + 4 * stride + 4, stride, tmpbuf.data(),
+        8, 0);
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j) CHECK(dst[i * stride + j] == expD[i * stride + j]);
+}
+
+// LR2-S5c: the r==0 blend skip - eps 10 has r[0] == 0, so flt0 is never
+// computed and never read; the sentinel-prefilled tmpbuf proves no read
+// (a read would leak -424242 into dst and diverge from the oracle).
+TEST_CASE("applySelfguidedRestoration eps 10 never reads the skipped flt0") {
+    using l10_filters::restoration::applySelfguidedRestoration;
+    const int w = 9, h = 6, stride = w + 8;
+    std::vector<std::uint8_t> plane;
+    fillMidAmpPlane(plane, h, stride, 45, 8180u);
+    const std::uint8_t* content = plane.data() + 4 * stride + 4;
+    const std::int32_t xqd[2] = {5, 3};
+    std::vector<std::uint8_t> expD((h + 8) * stride, 0xEE), dst((h + 8) * stride, 0xEE);
+    applyOracle(content, w, h, stride, 10, xqd, expD.data() + 4 * stride + 4, stride, nullptr);
+    std::vector<std::int32_t> tmpbuf(2 * l10_filters::restoration::restorationUnitpelsMax, -424242);
+    applySelfguidedRestoration(content, w, h, stride, 10, xqd, dst.data() + 4 * stride + 4, stride, tmpbuf.data(),
+        8, 0);
+    for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j) CHECK(dst[i * stride + j] == expD[i * stride + j]);
 }
