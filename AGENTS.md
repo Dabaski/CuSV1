@@ -336,14 +336,15 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-03, the DF2 slice)
+### Last measured state (2026-11-04, the CDEF1 slice)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 11/11 passed, 0 failed, 270.04 s** (re-measured 2026-11-03 at
-  DF2; l4_intra is the slow one; `pipeline` and `l3_transforms` next;
+- **ctest: 11/11 passed, 0 failed, 269.66 s** (re-measured 2026-11-04 at
+  CDEF1; l4_intra is the slow one; `pipeline` and `l3_transforms` next;
   the rest under 0.5 s including l10_filters.
-  Earlier runs of the same tree: the AN12 run 275.59 s at 10/10
+  Earlier runs of the same tree: the DF2 run 270.04 s, the AN12 run
+  275.59 s at 10/10
   (l4_intra 213.58 s, `pipeline` 53.74 s, `l3_transforms` 7.24 s),
   a first AN12 run 269.63 s, the AN11
   run 264.78 s, a second AN11 run 264.07 s, the AN10
@@ -355,8 +356,8 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
-  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-03 at DF2: rebuilt, and
-  byte-identical to the committed file). History, not a figure to chase:
+  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-04 at CDEF1: rebuilt, and
+  byte-identical to the committed file; no generator input in CDEF1). History, not a figure to chase:
   884,980 B was the value from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
   13 gate lines, all chroma-side - and the RT21 regen moved it to 884,851 B
@@ -364,13 +365,14 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 14.5%** (see the completion metric section;
-  re-measured 2026-11-03 at DF2: 22,840 of 157,718 non-blank lines,
-  +310 from 22,530 - the A8 campaign's two slices: DF1 +215 (the 8-bit
-  deblocking kernel family in A8) and DF2 +95 (the 14-tap family in A8,
-  23+35+4+30+3); A8 now prints 3% (310 of 10,600). The DF1+DF2 pair is
+- **Portable-C coverage: 14.7%** (see the completion metric section;
+  re-measured 2026-11-04 at CDEF1: 23,207 of 157,718 non-blank lines,
+  +367 from 22,840 - the A8 campaign's third slice: CDEF1 +367 (the CDEF
+  find_dir + filter kernel family, cdef.c spans measured 367 nb); A8 now
+  prints 6% (677 of 10,600). CDEF1 is
   COVERAGE-ONLY: it moves no conformance count; the printed percentage
-  history: 22,840/157,718 = 14.4807% crosses the 14.45 boundary (DF2
+  history: 23,207/157,718 = 14.7168% crosses the 14.65 boundary (CDEF1
+  prints 14.7%); 22,840/157,718 = 14.4807% crosses the 14.45 boundary (DF2
   prints 14.5%); 22,745/157,718 = 14.4204% (DF1) and 22,530/157,718 =
   14.2841% (AN12) crossed 14.25, so AN12 printed 14.3% and the AN10/AN11
   runs printed
@@ -782,6 +784,40 @@ are partly right and I re-measured rather than restated them:
   reference). Mutations M1 (swapped op5 tap order), M2 (flat2 span
   p5-for-p6), M3 (else chain reordered to filter4), M4 (RPOT shift 3) each
   killed by a named fixture; the h/v count pins are mutation-verified too.
+  CDEF1 LANDED (2026-11-04): a SECOND file pair, cdef.{h,cpp} - the CDEF
+  find_dir + filter kernel family of cdef.c, 367 nb: sign :16-:18,
+  constrain :20-:27 (the damping/get_msb guard; cdefSign/cdefConstrain
+  exported for testability, DF1 signedCharClamp precedent), the padded
+  directions table :35-:56 + :58 (kCdefDirectionsPadded, the +2 offset
+  folded into cdefDirections/cdefDirectionsRc accessors), adjust_strength
+  :66-:70, cdefFindDir :88-:150 (THE SPEC kernel: div_table
+  {0,840,420,280,210,168,140,120,105} - div_table[8] = 105 = 840/8, the
+  8-pixel-bucket weight; cost MAXimizes because cost[d] is the weighted
+  variance around per-line means along direction d), cdefFindDirDual
+  :152-:156 + cdefFindDirList :158-:187 (list walker, CdefList +
+  kCdefNblocks = 16), pri/sec taps :189-:190, cdefFilterBlock :193-:254
+  (the 16-bit SPEC filter: kCdefVeryLarge 0x7F7F sentinel, max guarded,
+  min unguarded-but-sentinel-never-wins, int16 sum, round-half-away
+  (8+sum-(sum<0))>>4), cdefFilterBlock8bit :257-:300 (interior twin, no
+  sentinel, sub = BLOCK_4X4 ? 1 : sub), cdefFindDir8bit :303-:311 +
+  cdefFindDirDual8bit :313-:317 + cdefFindDir8bitList :509-:535 (widen,
+  delegate), cdefTapOffFrame :427-:430 + cdefFilterBlock8bitBounded
+  :437-:504 (the frame-edge kernel: off-frame taps excluded from
+  sum/max/min - the geometric equivalent of the sentinel; single damping).
+  Local CdefBlockSize enum (only equality used; l0_core::BlockSize lacks
+  4X8/8X4 - named deviation). The 16-bit kernel is the SPEC; the 8-bit
+  twins are their own 1:1 bodies and the derivation relationship is pinned
+  BY TESTS (8-bit == 16-bit widened; bounded == 16-bit-with-sentinels at
+  exactly the off-frame taps, both corners). Integer-only (no float in the
+  family). PARKED: cdef_filter_fb + the CDEF_8BITS_PATH fb/lbd drivers
+  (:322-:778 remainder - CDEF2), svt_aom_copy_rect8 (cdef_copy.h - CDEF2),
+  enc_cdef mse/search (CDEF3). Mutations: the whole-pair dir+2/dir-2 swap
+  SURVIVES BY CONSTRUCTION (read multiset invariant) - sharpened to the
+  minimal observable s0-only swap, killed by the asymmetric sec fixture;
+  div_table[1]<->[2] killed by a weighting fixture derived with an
+  independent PS replica (cost[6] 36,126,720 > cost[0] 36,114,432);
+  damping-shift, sentinel-guard-inversion and edge-flag mutations each
+  killed by named fixtures.
 
 
 ## Completion metric (the portable-C coverage number)
@@ -791,19 +827,24 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-03 (DF2): 14.5%** (22,840 of 157,718 non-blank
-lines - the covered count moved +310 from 22,530: the A8 campaign's two
-slices, DF1 +215 (the 8-bit deblocking kernel family: the mask/flat/hev
-gates, filter4/6/8, the lpf 4/6/8 entry points, updateSharpness + the
-scc helper) and DF2 +95 (the 14-tap family: filter14 :786-:809,
-mb_lpf_horizontal_edge_w :811-:847, lpf_horizontal_14_c :849-:852,
-mb_lpf_vertical_edge_w :854-:885, lpf_vertical_14_c :887-:889, measured
-23+35+4+30+3; deblocking_common.c is 782 nb, so A8 prints 310 covered
-of 10,600 (3% as the tool prints the rounded cov%). The DF1+DF2 pair is
+**THE NUMBER, as measured 2026-11-04 (CDEF1): 14.7%** (23,207 of 157,718 non-blank
+lines - the covered count moved +367 from 22,840: the A8 campaign's third
+slice, CDEF1 +367 (the CDEF find_dir + filter kernel family of cdef.c in
+src/l10_filters/cdef: sign :16-:18, constrain :20-:27, the padded
+directions tables :35-:56/:408-:422, adjust_strength :66-:70,
+cdefFindDir :88-:150, the dual/walker pairs :152-:187/:313-:317/:509-:535,
+the pri/sec taps :189-:190, cdefFilterBlock :193-:254, cdefFilterBlock8bit
+:257-:300, cdefTapOffFrame :427-:430 and cdefFilterBlock8bitBounded
+:437-:504, measured 367 nb; cdef.c is 738 nb, so A8 prints 677 covered
+of 10,600 (6% as the tool prints the rounded cov%). The DF1+DF2+CDEF1 set is
 COVERAGE-ONLY: it moves NO conformance count
 - see the paired-metric caveat. Earlier
 history of the same
-metric: the AN12 run measured 22,530 = +704 from 21,826 (the AN12 FFT port,
+metric: the DF2 run measured 22,840 = +95 from 22,745 (the 14-tap family,
+23+35+4+30+3); the DF1 run measured 22,745 = +215 from 22,530 (the 8-bit
+deblocking kernel family: the mask/flat/hev gates, filter4/6/8, the lpf
+4/6/8 entry points, updateSharpness + the scc helper); the AN12 run
+measured 22,530 = +704 from 21,826 (the AN12 FFT port,
 +704 in A11 (the fft_common.h GEN_FFT_2..GEN_FFT_32 macro bodies :113-414,
 298 non-blank, and the GEN_IFFT_2..GEN_IFFT_32 macro bodies :416-823,
 406 non-blank; the 10 fft.c entry-point instantiation lines are NOT
@@ -812,7 +853,9 @@ printed percentage MOVED at AN12: 22,530/157,718 = 14.2841% crosses
 the 14.25 rounding boundary, so AN12 prints 14.3% where AN10/AN11 printed
 13.8%; the AN12 percentage did NOT move again at DF1's +215: 22,745/157,718
 = 14.4204% stays below the 14.45 boundary; DF2's +95 moved it:
-22,840/157,718 = 14.4807% crosses the 14.45 boundary, so DF2 prints 14.5%);
+22,840/157,718 = 14.4807% crosses the 14.45 boundary, so DF2 prints 14.5%;
+CDEF1's +367 moved it again: 23,207/157,718 = 14.7168% crosses the 14.65
+boundary, so CDEF1 prints 14.7%);
 the AN11 run measured 21,826 = +48 from 21,778 (the AN11 HME
 downsampling driver port); the AN10 run measured 21,778 = +378 from 21,400: the AN10
 pad-family port, +142 in A6 (the pic_operators.c pad spans) and +236
@@ -887,7 +930,7 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 55% | 4,653 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 11% | 1,535 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
-| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 3% | 310 |
+| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 6% | 677 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
 | A11 | Content analysis + temporal filtering | 16 | 12,028 | 14% | 1,706 |
@@ -895,7 +938,7 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A13 | Utility + platform + core headers | 24 | 5,357 | 5% | 268 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 32% | 463 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **22,840** |
+| | **TOTAL** | **254** | **157,718** | | **23,207** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

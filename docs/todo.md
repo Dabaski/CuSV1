@@ -1286,6 +1286,57 @@ A0. SLICE-LEVEL STATE (the live register)
     14.4% -> 14.5% (22,840/157,718 = 14.4807% crosses the 14.45
     boundary); GATE byte-identical diff 0; the paired conformance count
     UNCHANGED (9 artifacts, all content-1:1) - COVERAGE-ONLY again.
+  - [x] **A8/CDEF1 (2026-11-04, PERRY-A8): the CDEF find_dir + filter kernel
+    family landed** in src/l10_filters/cdef.{h,cpp} + tests/test_cdef.cpp
+    (test target registered). Spans (cdef.c, 367 nb measured): sign :16-:18,
+    constrain :20-:27, eb_cdef_directions_padded :35-:56 (+ :58), 
+    adjust_strength :66-:70, svt_aom_cdef_find_dir_c :88-:150 (the SPEC
+    kernel; cost MAXimizes because cost[d] is the weighted variance of the
+    input around its per-line means along direction d - the sum(x^2) term
+    cancels across directions), find_dir_dual_c :152-:156, cdef_find_dir
+    :158-:187 (list walker), pri/sec taps :189-:190 ({{4,2},{3,3}} /
+    {{2,1},{2,1}}), svt_cdef_filter_block_c :193-:254 (the 16-bit SPEC
+    filter: CDEF_VERY_LARGE 0x7F7F, max guarded vs sentinel, min
+    unguarded-but-sentinel-never-wins, int16 sum, y = clamp(x +
+    ((8+sum-(sum<0))>>4), min, max)), filter_block_8bit_c :257-:300,
+    find_dir_8bit_c :303-:311, find_dir_dual_8bit_c :313-:317,
+    eb_cdef_directions_rc :408-:422, cdef_tap_off_frame :427-:430,
+    filter_block_8bit_bounded_c :437-:504 and cdef_find_dir_8bit :509-:535.
+    Named deviations: cdefSign/cdefConstrain exported (file-local static
+    INLINE in the reference) for direct testability - DF1
+    signedCharClamp precedent; a local CdefBlockSize enum (only equality is
+    used; l0_core::BlockSize lacks 4X8/8X4, shared header not extended);
+    getMsb file-local (definitions.h:628-643 portable fallback). Fixture
+    derivations: the var fixture FAILED FIRST (215040 vs the brief-worked
+    1720320) because div_table[8] = 105 = 840/8, the 8-pixel-bucket weight;
+    the port was right, the hand-derivation was wrong. The 16-bit kernel is
+    the SPEC the 8-bit twins replicate - the derivation relationship is
+    pinned by tests (8-bit == 16-bit on widened sentinel-free input; bounded
+    == 16-bit with sentinels at exactly the off-frame tap positions, both
+    corners), not by shared code. Integer-only verified (no float/double
+    code in cdef.{h,cpp}). MUTATIONS (all reverted, against the FINAL set):
+    M1 whole-pair dir+2/dir-2 swap SURVIVES BY CONSTRUCTION (the read
+    multiset {+d1,-d1,+d2,-d2} is permutation-invariant and sum/max/min are
+    order-independent) - sharpened to the minimal observable form (s0's
+    offset dir+4 -> dir), killed by the asymmetric sec fixture (129 vs 128)
+    plus the 8-bit==16-bit pin; M2 div_table[1]<->[2] (840<->420) survived
+    the pre-existing set and was killed by a NEW weighting fixture (dir 6
+    wins by 36,126,720 vs 36,114,432, unique; derived with an independent
+    PowerShell replica of the cost walk, replica verified to reproduce the
+    215040 var fixture exactly; mutant flips to dir 0); M3 damping shift
+    (-1) killed by the constrain boundary pin (8 vs 0); M4 sentinel guard
+    inversion killed by the 208-clamp fixture (210 vs 208); M5 bounded edge
+    flag (r >= rows -> r > rows) killed by the bottom+right corner
+    sentinel-equivalence fixture; BONUS partial[0]/partial[4] swap killed by
+    the dir 3/4/5 sweeps + the weighting fixture.     GREEN: 87 test cases / 1281 assertions, 0 failed (l10_filters; the
+    DF1/DF2 cases included; +47 cases / +41 assertions over DF2).
+    MEASURED (2026-11-04): coverage A8 0.0292 -> 0.0639 (+367 nb), total
+    22,840 -> 23,207 of 157,718; the printed percentage MOVED: 14.5% ->
+    14.7% (23,207/157,718 = 14.7168% crosses the 14.65 boundary); GATE
+    byte-identical 884,851 B; the paired conformance count UNCHANGED (9
+    artifacts, all content-1:1) - COVERAGE-ONLY. PARKED: cdef_filter_fb and
+    the CDEF_8BITS_PATH fb/lbd drivers (:322-:778 remainder - CDEF2),
+    svt_aom_copy_rect8 (cdef_copy.h - CDEF2), enc_cdef mse/search (CDEF3).
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
