@@ -309,30 +309,40 @@ A0. SLICE-LEVEL STATE (the live register)
   legacy/GPU callers keep the 4096-wide facade; unification = a
   1024-position GPU quant kernel + bench protocol.
 - [~] PENDING: Luna's full audit of the FS/TD state at series close.
-- [~] STATE REFRESH (2026-11-04, after the a8-kernels<-master merge):
+- [~] STATE REFRESH (2026-11-04, second pass, after CDEF2 + AN14 merged
+  to master at fb98d59):
   everything done so far, so the next slice does not have to infer it
-  from the per-entry history. LANDED on master (0744920): the l0-l8
-  layers (transforms/quant, intra, motion scaffolding, entropy+od_ec,
-  bitstream assembly + nine committed .obu artifacts, all decode
-  content-1:1 via ffmpeg libaom-av1 + libdav1d), the AN-series
-  AN1-AN13 + AN15-AN17 (mean/variance family, histogram, downsample2d,
-  b64Variance, screen-content pair, luma-dominant, the pad family, the
-  HME downsampling driver, fft1d+fft2d float kernels, the noise
-  strength solver, the flat-block finder + noise model init/update) and
-  the A8 campaign DF1+DF2 (the 8-bit deblocking kernel family of
-  deblocking_common.c in src/l10_filters, merged via 0ec1c34/0ec1c34).
-  LANDED on a8-kernels only (2c82dc1, PERRY-A8): CDEF1, the CDEF
-  find_dir + filter kernel family of cdef.c in
-  src/l10_filters/cdef.{h,cpp} - merged into the branch at b0a4d54, NOT
-  yet on master; the branch measures 15.5% (24,375/157,718) after the
-  merge fixup 8889f36. STILL OPEN: CDEF2 (cdef.c :322-:778 fb/lbd drivers + cdef_copy.h), CDEF3 (enc_cdef mse/search);
+  from the per-entry history. LANDED on master: the l0-l8 layers
+  (transforms/quant, intra, motion scaffolding, entropy+od_ec, bitstream
+  assembly + nine committed .obu artifacts, all decode content-1:1 via
+  ffmpeg libaom-av1 + libdav1d), the AN-series AN1-AN17 COMPLETE
+  (mean/variance family, histogram, downsample2d, b64Variance, the
+  screen-content pair, luma-dominant, the pad family, the HME
+  downsampling driver, the fft1d+fft2d float kernels, the noise-util tx
+  family + OD_DIVU table, the noise strength solver, the flat-block
+  finder + noise model init/update) and the A8 campaign DF1+DF2+CDEF1+
+  CDEF2 (the deblocking kernel family + the CDEF find_dir/filter/
+  fb-lbd/copy family, all in src/l10_filters; CDEF1 came via 2c82dc1/
+  b0a4d54/8889f36, CDEF2 via ec89686, AN14 via a2f4aa9/fb98d59).
+  MEASURED NOW (2026-11-04, this tree, by the instruments): ctest 11/11
+  passed, 0 failed, 277.83 s; GATE byte-identical 884,851 B, 421 lines,
+  diff 0; portable-C coverage 15.9% (25,097 / 157,718); cite_check 506
+  citations, 495 resolved in-tree, 0 out-of-range, 11 unresolved (the
+  known external set); doc_audit PASS + self-test 4/4. Phase B COMPLETE
+  (AN12-AN14 landed 2026-11-02..04). STILL OPEN: CDEF3 (enc_cdef
+  mse/search + svt_aom_fill_rect, the last named A8-kernel item; the
+  pick_cdef_from_qp/finish_cdef_search spans are struct-walled, named);
   Phase C/D (AN18-AN22) parked behind A3/GOP per the decomposition
-  above. IN FLIGHT (this session): CDEF2 in the av1_a8 worktree;
-  AN14 noise_util LANDED 2026-11-04 (PERRY): the noise_tx surface
-  (noisePsdGetDefaultValue + noiseTxMalloc/Forward/FilterC/Inverse/Free)
-  + the OD_DIVU table [1024][2], 345 nb = 87 alg + 258 table, in
-  src/l9_analysis/noise_util.cpp with tests/test_noise_util.cpp.
-  Phase B COMPLETE - AN15/AN16/AN17 already landed (2026-11-01/02).
+  above; after those, the remaining portable-math blocks named by the
+  scouts: the restoration boxsum/selfguided/wiener-solver math
+  (restoration.c :31-:962, Scout REST's tables ready) and the resize 1D
+  kernels (resize.c :221-:430 + the :147-:219 closure, Scout D's
+  tables ready). IN FLIGHT (this session): CDEF3 and LR1 as two
+  parallel swarm writers, each in its own worktree off this commit per
+  the AUTOSWARM.md scale-up pattern. Worktree hygiene: av1_a8 (a8-
+  kernels at ec89686) and av1_an14 (an14-noiseutil at a2f4aa9) are both
+  ancestors of master now - their content is fully landed; the worktrees
+  are stale checkouts, not open work.
 - [x] **AN-SERIES decomposition (AN0 scout, accepted by the judge
   2026-11-01; this section is its DURABLE HOME - the scout's report lived
   only in %TEMP%, which the evidence contract does not count).** 22
