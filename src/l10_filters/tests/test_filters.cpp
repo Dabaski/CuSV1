@@ -465,3 +465,243 @@ TEST_CASE("updateSharpness does not touch hev_thr") {
         }
     }
 }
+
+// DF2. The impulse fixtures force mask/flat/flat2 = -1: filter14 takes the
+// gates as arguments and never verifies flatness itself, so the 13-tap core
+// is directly observable. p6 impulse: p6 = 32, every other tap 0.
+TEST_CASE("filter14 13-tap core: p6 impulse drives op5") {
+    std::uint8_t op6 = 32, op5 = 0, op4 = 0, op3 = 0, op2 = 0, op1 = 0, op0 = 0;
+    std::uint8_t oq0 = 0, oq1 = 0, oq2 = 0, oq3 = 0, oq4 = 0, oq5 = 0, oq6 = 7;
+    l10_filters::filter14(-1, 2, -1, -1, &op6, &op5, &op4, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3, &oq4,
+                          &oq5, &oq6);
+    // op5 = RPOT(p6*7, 4) = (224+8)>>4 = 14.
+    CHECK(op5 == 14);
+    // op4 = RPOT(p6*5, 4) = (160+8)>>4 = 10.
+    CHECK(op4 == 10);
+    // op3 = RPOT(p6*4, 4) = (128+8)>>4 = 8.
+    CHECK(op3 == 8);
+    // op2 = RPOT(p6*3, 4) = (96+8)>>4 = 6.
+    CHECK(op2 == 6);
+    // op1 = RPOT(p6*2, 4) = (64+8)>>4 = 4.
+    CHECK(op1 == 4);
+    // op0 = RPOT(p6, 4) = (32+8)>>4 = 2.
+    CHECK(op0 == 2);
+    // The outer taps are NEVER written by the 13-tap path: op6 keeps its
+    // input (32) and oq6 keeps its sentinel (7; every computed output in
+    // this fixture is 0/2/4/6/8/10/14, so any stray write is caught).
+    CHECK(op6 == 32);
+    CHECK(oq6 == 7);
+}
+
+// q6 impulse: q6 = 32, every other tap 0 - the q-side mirror of the p6
+// impulse (oq0..oq5 carry q6 with weights 1,2,3,4,5,7; the p-side is 0).
+TEST_CASE("filter14 13-tap core: q6 impulse drives oq0") {
+    std::uint8_t op6 = 0, op5 = 0, op4 = 0, op3 = 0, op2 = 0, op1 = 0, op0 = 0;
+    std::uint8_t oq0 = 0, oq1 = 0, oq2 = 0, oq3 = 0, oq4 = 0, oq5 = 0, oq6 = 32;
+    l10_filters::filter14(-1, 2, -1, -1, &op6, &op5, &op4, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3, &oq4,
+                          &oq5, &oq6);
+    // oq0 = RPOT(q6, 4) = (32+8)>>4 = 2.
+    CHECK(oq0 == 2);
+    // oq1 = RPOT(q6*2, 4) = (64+8)>>4 = 4.
+    CHECK(oq1 == 4);
+    // oq2 = RPOT(q6*3, 4) = (96+8)>>4 = 6.
+    CHECK(oq2 == 6);
+    // oq3 = RPOT(q6*4, 4) = (128+8)>>4 = 8.
+    CHECK(oq3 == 8);
+    // oq4 = RPOT(q6*5, 4) = (160+8)>>4 = 10.
+    CHECK(oq4 == 10);
+    // oq5 = RPOT(q6*7, 4) = (224+8)>>4 = 14.
+    CHECK(oq5 == 14);
+}
+
+// ELSE-STACKING (S14): flat2=0 must fall through to filter8's 7-tap path
+// (filter14's else chain stacks filter8, which itself stacks filter4).
+// Fixture: mask/flat forced -1, flat2 forced 0; the 7-tap computes
+// op2 = (p3*3 + p2*2 + p1 + p0 + q0 + 4)>>3 = (300+198+100+100+101+4)>>3
+// = 100, distinct from the pre-value 99 (no-op) and from the 13-tap path.
+TEST_CASE("filter14 else-stack: flat2=0 flat=1 takes the filter8 path") {
+    std::uint8_t op6 = 200, op5 = 201, op4 = 202, op3 = 100, op2 = 99, op1 = 100, op0 = 100;
+    std::uint8_t oq0 = 101, oq1 = 101, oq2 = 101, oq3 = 101, oq4 = 105, oq5 = 106, oq6 = 107;
+    l10_filters::filter14(-1, 2, -1, 0, &op6, &op5, &op4, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3, &oq4,
+                          &oq5, &oq6);
+    CHECK(op2 == 100);
+}
+
+// ELSE-STACKING (S15): flat=0 falls THROUGH filter8 to filter4 (the chain
+// is filter14-else -> filter8-else -> filter4). Fixture values make
+// hev fire (|p1-p0| = 10 > thresh 2): filter4 computes op0 = 102 while
+// the filter8 7-tap would give 100 and no-op leaves the pre-value 100.
+TEST_CASE("filter14 else-stack: flat=0 falls through to the filter4 path") {
+    std::uint8_t op6 = 200, op5 = 201, op4 = 202, op3 = 100, op2 = 100, op1 = 90, op0 = 100;
+    std::uint8_t oq0 = 110, oq1 = 100, oq2 = 100, oq3 = 100, oq4 = 105, oq5 = 106, oq6 = 107;
+    l10_filters::filter14(-1, 2, 0, -1, &op6, &op5, &op4, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3, &oq4,
+                          &oq5, &oq6);
+    CHECK(op0 == 102);
+}
+
+// ELSE-STACKING (S16): mask=0 disables the whole stacked chain - filter4
+// still runs but its mask gate writes the originals back, so every tap
+// is unchanged. hev still fires in this fixture (|p1-p0| = 10) to prove
+// it is the MASK gate, not hev, that holds the chain.
+TEST_CASE("filter14 else-stack: mask=0 leaves every tap unchanged") {
+    std::uint8_t op6 = 200, op5 = 201, op4 = 202, op3 = 100, op2 = 100, op1 = 90, op0 = 100;
+    std::uint8_t oq0 = 110, oq1 = 100, oq2 = 100, oq3 = 100, oq4 = 105, oq5 = 106, oq6 = 107;
+    l10_filters::filter14(0, 2, -1, -1, &op6, &op5, &op4, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3, &oq4,
+                          &oq5, &oq6);
+    CHECK(op0 == 100);
+}
+
+// SATURATION EXTREMES (S17): all taps 255 - the tap sum is 16*255 = 4080,
+// RPOT(...,4) lands exactly on 255. Under an RPOT shift-3 mutation this
+// reads (4084)>>3 = 510 -> 254 after the uint8 truncation, so the
+// assertion is the named killer for M4 (the RPOT shift).
+TEST_CASE("filter14 saturation: all-255 flat block stays 255") {
+    std::uint8_t op6 = 255, op5 = 255, op4 = 255, op3 = 255, op2 = 255, op1 = 255, op0 = 255;
+    std::uint8_t oq0 = 255, oq1 = 255, oq2 = 255, oq3 = 255, oq4 = 255, oq5 = 255, oq6 = 255;
+    l10_filters::filter14(-1, 2, -1, -1, &op6, &op5, &op4, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3, &oq4,
+                          &oq5, &oq6);
+    CHECK(op5 == 255);
+    CHECK(oq5 == 255);
+}
+
+TEST_CASE("filter14 saturation: all-0 block stays 0 (no wrap)") {
+    // NOTE: every written tap is also READ as its input (p5 = *op5 etc.),
+    // so pre-values cannot be garbage on this fixture - all inputs 0, all
+    // outputs 0, the assertion is the no-underflow/no-wrap extreme.
+    std::uint8_t op6 = 0, op5 = 0, op4 = 0, op3 = 0, op2 = 0, op1 = 0, op0 = 0;
+    std::uint8_t oq0 = 0, oq1 = 0, oq2 = 0, oq3 = 0, oq4 = 0, oq5 = 0, oq6 = 0;
+    l10_filters::filter14(-1, 2, -1, -1, &op6, &op5, &op4, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3, &oq4,
+                          &oq5, &oq6);
+    CHECK(op5 == 0);
+    CHECK(oq5 == 0);
+}
+
+// M1 KILLER (two-tap op5): with p6 and p5 BOTH nonzero the p6*7/p5*2 vs
+// p6*2/p5*7 swap becomes visible: real op5 = (224+32+8)>>4 = 16, the
+// swapped order gives (64+112+8)>>4 = 11.
+TEST_CASE("filter14 op5 tap order: p6 carries 7, p5 carries 2") {
+    std::uint8_t op6 = 32, op5 = 16, op4 = 0, op3 = 0, op2 = 0, op1 = 0, op0 = 0;
+    std::uint8_t oq0 = 0, oq1 = 0, oq2 = 0, oq3 = 0, oq4 = 0, oq5 = 0, oq6 = 0;
+    l10_filters::filter14(-1, 2, -1, -1, &op6, &op5, &op4, &op3, &op2, &op1, &op0, &oq0, &oq1, &oq2, &oq3, &oq4,
+                          &oq5, &oq6);
+    CHECK(op5 == 16);
+}
+
+// M2 KILLER (S22b, the flat2 boundary): the block is flat at the CORE
+// (flat=-1) but broken at the OUTER span by p6=104 vs p0=101 -> flat2=0,
+// so the filter8 path must run (op5 untouched, oq0 gets the 7-tap 101
+// over the pre-value 100). Under the flat2-p5-for-p6 mutation flat2
+// becomes 1 and the 13-tap writes op5 = 102 instead.
+TEST_CASE("filter14 flat2 boundary: core flat, outer broken takes filter8") {
+    std::uint8_t buf[16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        buf[i] = 100;
+    }
+    // column 2: p6=104 (row 0) breaks flat2; the core rows are within 1.
+    buf[0 * 16 + 2] = 104;                     // p6
+    buf[4 * 16 + 2] = 101;                     // p2
+    buf[5 * 16 + 2] = 101;                     // p1
+    buf[6 * 16 + 2] = 101;                     // p0
+    buf[9 * 16 + 2] = 101;                     // q2
+    l10_filters::lpfHorizontal14(buf + 7 * 16 + 2, 16, 255, 255, 2);
+    CHECK(buf[1 * 16 + 2] == 100); // op5 untouched by the filter8 path
+    CHECK(buf[7 * 16 + 2] == 101); // oq0 = (101+101+101+200+100+101+100+4)>>3 = 101
+}
+
+// S22c (the flat2 boundary's VICE VERSA): outer span flat (flat2=-1) but
+// the core broken (flat=0) -> the chain falls through filter8 to filter4:
+// hev fires (|p1-p0| = 10 > thresh 2) and oq0 = 107 (the filter4 result);
+// the filter8 7-tap would give 101 and no-op leaves 100.
+TEST_CASE("filter14 flat2 boundary: outer flat, core broken takes filter4") {
+    std::uint8_t buf[16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        buf[i] = 100;
+    }
+    buf[5 * 16 + 2] = 90;  // p1 breaks the core flatness
+    buf[7 * 16 + 2] = 110; // q0
+    l10_filters::lpfHorizontal14(buf + 7 * 16 + 2, 16, 255, 255, 2);
+    CHECK(buf[7 * 16 + 2] == 107); // oq0 = filter4's scc(qs0 - filter1) ^ 0x80
+}
+
+// ENTRY POINTS (S18-S21). The 13-tap is an averager: a perfectly flat block
+// maps to itself, so the entry-point fixtures use a block that is flat by
+// every gate but split across the edge: p-group 102 (p6..p0), q0/q1 100,
+// q2/q3 102, outer q 100. blimit/limit = 255 so the mask never fires.
+// The 13-tap then moves op0 102->101 and oq0/oq1 100->101.
+TEST_CASE("lpfHorizontal14 filters four columns through the 13-tap path") {
+    std::uint8_t buf[16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        buf[i] = 100;
+    }
+    // column 2 (the first filtered column): rows 0-6 = 102 (p6..p0),
+    // rows 7-8 = 100 (q0, q1), rows 9-10 = 102 (q2, q3), rows 11-13 = 100.
+    for (int r = 0; r <= 6; ++r) {
+        buf[r * 16 + 2] = 102;
+    }
+    buf[9 * 16 + 2] = 102;
+    buf[10 * 16 + 2] = 102;
+    l10_filters::lpfHorizontal14(buf + 7 * 16 + 2, 16, 255, 255, 2);
+    // op0 (row 6) = RPOT(...13-tap..., 4) = (1622+8)>>4 = 101.
+    CHECK(buf[6 * 16 + 2] == 101);
+}
+
+// COUNT SEMANTICS (S19, pinned from deblocking_common.c:849-852): the entry
+// passes count=1 and the loop covers step*count = 4 columns (cols 2..5 for
+// s at col 2). Column 6, given the same split-block pattern, must stay
+// UNTOUCHED - a count>=2 mutation would move its op0 102->101.
+TEST_CASE("lpfHorizontal14 count=1 filters exactly four columns") {
+    std::uint8_t buf[16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        buf[i] = 100;
+    }
+    for (int c = 2; c <= 6; ++c) {
+        for (int r = 0; r <= 6; ++r) {
+            buf[r * 16 + c] = 102;
+        }
+        buf[9 * 16 + c] = 102;
+        buf[10 * 16 + c] = 102;
+    }
+    l10_filters::lpfHorizontal14(buf + 7 * 16 + 2, 16, 255, 255, 2);
+    CHECK(buf[6 * 16 + 2] == 101); // in span: filtered
+    CHECK(buf[6 * 16 + 6] == 102); // one past the four-column span: untouched
+}
+
+// S20: the vertical twin filters FOUR ROWS (count=4, deblocking_common.c:
+// 887-889), taps contiguous, pointer += pitch per row. Same split-block
+// fixture transposed: s at (row 2, col 7), p-group cols 0-6 = 102,
+// q0/q1 = 100, q2/q3 = 102, outer q = 100.
+TEST_CASE("lpfVertical14 filters four rows through the 13-tap path") {
+    std::uint8_t buf[16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        buf[i] = 100;
+    }
+    for (int r = 2; r <= 5; ++r) {
+        for (int c = 0; c <= 6; ++c) {
+            buf[r * 16 + c] = 102;
+        }
+        buf[r * 16 + 9] = 102;
+        buf[r * 16 + 10] = 102;
+    }
+    l10_filters::lpfVertical14(buf + 2 * 16 + 7, 16, 255, 255, 2);
+    // op0 (col 6) = (1622+8)>>4 = 101.
+    CHECK(buf[2 * 16 + 6] == 101);
+}
+
+// S21: the vertical entry passes count=4 exactly - row 6 (one past the
+// four-row span rows 2..5) must stay untouched.
+TEST_CASE("lpfVertical14 count=4 filters exactly four rows") {
+    std::uint8_t buf[16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        buf[i] = 100;
+    }
+    for (int r = 2; r <= 6; ++r) {
+        for (int c = 0; c <= 6; ++c) {
+            buf[r * 16 + c] = 102;
+        }
+        buf[r * 16 + 9] = 102;
+        buf[r * 16 + 10] = 102;
+    }
+    l10_filters::lpfVertical14(buf + 2 * 16 + 7, 16, 255, 255, 2);
+    CHECK(buf[2 * 16 + 6] == 101); // in span: filtered
+    CHECK(buf[6 * 16 + 6] == 102); // one past the four-row span: untouched
+}

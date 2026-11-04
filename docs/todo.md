@@ -1377,6 +1377,45 @@ A0. SLICE-LEVEL STATE (the live register)
     MOVED: 14.3% -> 14.4% (22,745/157,718 = 14.4242%); the paired
     conformance count UNCHANGED (9 artifacts, all content-1:1) - exactly
     the coverage-only shape the caveat names.
+  - [x] **A8/DF2 (2026-11-03, PERRY-A8/DF2): the 14-tap family landed**
+    (filter14 :786-:809, mb_lpf_horizontal_edge_w :811-:847,
+    lpf_horizontal_14_c :849-:852, mb_lpf_vertical_edge_w :854-:885,
+    lpf_vertical_14_c :887-:889; measured 23+35+4+30+3 = 95 nb, the
+    DF1/DF2 split's promised span, deblocking_common.c 782 nb -> A8 at
+    310 nb). Anchors re-verified against the tree; the COUNT SEMANTICS
+    were pinned from the code, not the ambiguous brief: the horizontal
+    entry passes count=1 and mb_lpf_horizontal_edge_w loops
+    step*count = 4 columns (step=4 folded in), the vertical entry passes
+    count=4 rows. The else chain STACKS filter14 -> filter8 -> filter4
+    composed from the DF1 primitives (the mb_* edge functions are
+    file-local static in the port, as in the reference). RED evidence:
+    C2039 filter14 (S1), 11 behavioral REDs on the 13-tap lines (impulse
+    fixtures: p6 impulse for the op side, q6 impulse for the oq side -
+    oq0 has NO p6 tap so the p6 impulse cannot discriminate it; oq0 has
+    p5..p0+q0..q6), C2039 lpfHorizontal14, LNK2019 lpfVertical14; three
+    tests passed by design and were proven discriminating by mutation
+    (op6/oq6-untouched via a stray-write mutation; mask=0 via dropping
+    filter4's mask gate; the h/v count pins via count 1->2 / 4->8).
+    Fixture findings, not papered over: the first S13 edit landed the
+    untouched checks in the WRONG fixture (the q6 impulse, where
+    op6=0/oq6=32) and failed for that reason; the first all-0 fixture
+    set garbage pre-values on written taps, but every written tap is
+    ALSO its own input (p5 = *op5 read before write), so the fixture was
+    incoherent - corrected to a true all-zero block. MUTATIONS (captured
+    against the final fixture set, all reverted, each killed by a named
+    fixture): M1 op5 tap order swapped (p6*2/p5*7) -> "filter14 op5 tap
+    order" (16 vs 11); M2 flat2 span p5-for-p6 -> "filter14 flat2
+    boundary: core flat, outer broken" (BOTH op5 and oq0 assertions
+    failed: flat2 flipped 0->1 sends the block down the 13-tap path);
+    M3 else chain reordered (else->filter4) -> "filter14 else-stack:
+    flat2=0 flat=1 takes the filter8 path" (op2 stayed 99); M4 RPOT
+    shift 4->3 -> "filter14 saturation: all-255" (op5 = 254, not 255).
+    GREEN: 40 test cases / 1240 assertions, 0 failed. MEASURED
+    (2026-11-03): coverage A8 0.0203 -> 0.0292 (+95 nb), total
+    22,745 -> 22,840 of 157,718; the printed percentage MOVED:
+    14.4% -> 14.5% (22,840/157,718 = 14.4807% crosses the 14.45
+    boundary); GATE byte-identical diff 0; the paired conformance count
+    UNCHANGED (9 artifacts, all content-1:1) - COVERAGE-ONLY again.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
