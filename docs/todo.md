@@ -309,6 +309,29 @@ A0. SLICE-LEVEL STATE (the live register)
   legacy/GPU callers keep the 4096-wide facade; unification = a
   1024-position GPU quant kernel + bench protocol.
 - [~] PENDING: Luna's full audit of the FS/TD state at series close.
+- [~] STATE REFRESH (2026-11-04, after the a8-kernels<-master merge):
+  everything done so far, so the next slice does not have to infer it
+  from the per-entry history. LANDED on master (0744920): the l0-l8
+  layers (transforms/quant, intra, motion scaffolding, entropy+od_ec,
+  bitstream assembly + nine committed .obu artifacts, all decode
+  content-1:1 via ffmpeg libaom-av1 + libdav1d), the AN-series
+  AN1-AN13 + AN15-AN17 (mean/variance family, histogram, downsample2d,
+  b64Variance, screen-content pair, luma-dominant, the pad family, the
+  HME downsampling driver, fft1d+fft2d float kernels, the noise
+  strength solver, the flat-block finder + noise model init/update) and
+  the A8 campaign DF1+DF2 (the 8-bit deblocking kernel family of
+  deblocking_common.c in src/l10_filters, merged via 0ec1c34/0ec1c34).
+  LANDED on a8-kernels only (2c82dc1, PERRY-A8): CDEF1, the CDEF
+  find_dir + filter kernel family of cdef.c in
+  src/l10_filters/cdef.{h,cpp} - merged into the branch at b0a4d54, NOT
+  yet on master; the branch measures 15.5% (24,375/157,718) after the
+  merge fixup 8889f36. STILL OPEN: AN14 (noise_util :20, :70-:104, the
+  OD_DIVU table :114 - the last Phase B slice), CDEF2 (cdef.c
+  :322-:778 fb/lbd drivers + cdef_copy.h), CDEF3 (enc_cdef mse/search);
+  Phase C/D (AN18-AN22) parked behind A3/GOP per the decomposition
+  above. IN FLIGHT (this session): CDEF2 and AN14 as two parallel
+  swarm writers, CDEF2 in the av1_a8 worktree, AN14 in a second
+  worktree off a8-kernels.
 - [x] **AN-SERIES decomposition (AN0 scout, accepted by the judge
   2026-11-01; this section is its DURABLE HOME - the scout's report lived
   only in %TEMP%, which the evidence contract does not count).** 22
