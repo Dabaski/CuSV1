@@ -1304,6 +1304,109 @@ A0. SLICE-LEVEL STATE (the live register)
     least-squares solve is a poor GPU fit and the AN12/AN13 GPU parking
     covers the family).
 
+  - [x] AN17 LANDED (2026-11-04, PERRY): the flat-block finder + the noise
+    model init/update - the noise_model.c spans :27-:102 (the
+    GET_BLOCK_MEAN / GET_NOISE_VAR helper family, 69 nb), :399-:634 (the
+    finder, 218 nb) and :636-:1157 (the model, 460 nb) ported into
+    src/l9_analysis/noise_model.cpp + the struct surface in analysis.h.
+    FINDER: flatBlockFinderInit (:399-:454, A rows [yd, xd, 1] with
+    yd = (y - bs/2.)/(bs/2.), at_a_inv = inv(A^T A) via THREE
+    equation_system_solve calls against unit vectors - composing AN16's
+    solver, never re-implemented), flatBlockFinderFree (:456-:463),
+    flatBlockFinderExtractBlock (:465-:508, the kLowPolyNumParams = 3
+    specialized multiply_mat_1_n_3/_3_3_1/_n_3_1 path from
+    noise_model.h:322-:366, plane fit then block -= plane), the
+    IndexAndscore + compare_scores pair (:510-:518, file-local) and
+    flatBlockFinderRun (:520-:634: interior gradient covariance g_xx/g_xy/
+    g_yy + var over the (bs-2)^2 window, trace/det/e1/e2, norm = e1,
+    ratio = e1/max(e2, 1e-6), is_flat = trace < 0.15/1024 && ratio < 1.25
+    && norm < 0.08/1024 && var > 0.005/n, the sigmoid weights
+    {-6682, -0.2056, 13087, -12434, 2.5694}, score forced 0 when
+    var <= k_var, flat_blocks = is_flat ? 255 : 0, qsort ASCENDING and the
+    top-10th-percentile union flat_blocks[index] or-equals 1 for every
+    score >= scores[num*90/100].score). MODEL: noiseModelInit (:636-:697,
+    kMaxLag = 4 gates, three channels x combined+latest at n + (c > 0)
+    columns, the diamond/square coords walk), noiseModelFree (:699-:714),
+    extractArRow (the EXTRACT_AR_ROW lowbd instantiation :719-:756),
+    addBlockObservationsInternal (:759-:803, the unrolled-by-8
+    normal-equation accumulate, accumulation order preserved),
+    addBlockObservations (:805-:890, the y/x start-end walk: y_start/
+    x_start drop to 0 on a flat left/upper neighbour, x_end = min(w-side -
+    lag, flat-right ? block : block - lag) - the :845-:849 branch),
+    addNoiseStdObservations (:892-:956, the num_samples > block_size gate,
+    block_mean from the ALT luma plane at (x_o << sub, y_o << sub) with
+    the FULL block_size, noise_var over the (w >> sub, h >> sub) plane,
+    luma_strength = luma_gain * get_value(luma_solver, block_mean),
+    uncorr_std = sqrt(max(noise_var/16, noise_var - (corr*luma_strength)^2)),
+    adjusted = uncorr_std / ar_gain), arEquationSystemSolve (:958-:996,
+    var = mean diagonal/num_observations over n - is_chroma entries,
+    sum_covar with the chroma b correction bi -= A[i][n-1]*x[n-1],
+    noise_var = max(var - sum_covar, 1e-6), ar_gain = max(1,
+    sqrt(max(var/noise_var, 1e-6)))), noiseModelUpdate (:1019-:1145, the
+    block_size gates, the >1-flat-block gate, per-channel
+    add/solve/std/solve then the combined OVERWRITE from latest +
+    re-solve - the combined state is REPLACED each update, not
+    accumulated, ported as-is) and noiseModelSaveLatest (:1147-:1157).
+    DEVIATIONS (named): the EB_MALLOC_ALIGNED/malloc scratch becomes
+    std::vector and the allocation-failure branches are dead (:410-:416,
+    :539-:545, :667-:671, :823-:826, :830-:834); the NOISE_MODEL_LOG_SCORE
+    debug blocks (:547-:549, :605-:607, :611-:613, :615-:617) dropped; the
+    highbd instantiations of all three macro families (:54, :92, :757) and
+    the use_highbd dispatcher branches (:58-:60, :97-:100, :852-:876 = 25
+    nb) are PARKED (8-bit discipline, use_highbd threads through the
+    params but only the lowbd path exists); the coords malloc becomes
+    vector<array<int32_t,2>>; the structs stay in analysis.h; the :29-:36
+    pack2d extern declarations are NOT AN17's family (they resolve to
+    pic_operators.c and are unclaimed). THE QSORT QUESTION (Scout B3):
+    verified from the code - the union marks by score >= threshold where
+    the threshold is scores[top_nth].score, so every tie AT the boundary
+    is marked regardless of qsort's tie order; the map is tie-invariant,
+    pinned by T5c (three distinct + 17 identical zero scores, map
+    bit-for-bit). THE ZERO-SCORE EDGE (Scout B3's derivation, pinned):
+    var = 0 -> is_flat = 0 AND score = 0 -> threshold = 0 -> EVERY block
+    or-equals 1 (T5b; a single ramp block returns 1 with flat[0] == 1).
+    RED/TEST FINDINGS: (1) the g_xx == g_yy bitwise + g_xy == 0 fixtures
+    (the a=2 cross-checkerboard, the (2,2) cross) drive the reference's
+    OWN sqrt(trace*trace - 4*det) into the NaN domain through cancellation
+    rounding (det = fl(gxx*gxx) vs trace^2 = (2gxx)^2 round
+    independently; the sub-ulp difference goes negative) - is_flat reads
+    false and the score goes NaN; NOT pinned as a fixture (qsort on NaN
+    is implementation-defined) and avoided by construction: every flat
+    fixture keeps g_xy != 0 (T5d) or trace == 0 exactly (the checkerboards,
+    where sqrt(0 - 0) = 0 is exact). (2) THREE hand-derivation defects
+    caught by the suite, all test-side: the T4 fixture data (row [10,20,
+    20,20] instead of [0,0,10,20] - the clamped reads never touched the
+    intended pixels), T8's A[2][1] expectation (60, not 12) and T12's
+    normalization (A entries carry ONE factor 1/255^2 via buffer_norm, so
+    x = [0, 1] and ar_gain = sqrt(16.5/(65025*1e-6)) = 15.93, not the
+    /255^4 pair first derived). (3) The Edit tool fuzzy-matched a tail
+    anchor twice: once deleting updatePiecewiseLinearResidual +
+    noiseStrengthSolverFitPiecewise from noise_model.cpp (LNK2019 caught
+    it, restored verbatim) and once replacing T5b's flat[0] == 1 with
+    == 255 (the suite caught it) - tail anchors now carry unique
+    context. MUTATIONS (6, all run against the final fixture set, all
+    reverted, all killed by NAMED fixtures): sigmoid w0<->w2 swap ->
+    T5e (the marked set flips {Y,Z} -> {Z,X}: Y 1 -> 0); w0<->w1 and
+    w1<->w2 swaps -> T5c (every special-block score saturates to 0 or 1
+    and A gets marked - map differs); k_trace 0.15 -> 0.05 -> T5d block 0
+    (trace 1.26618e-4 > 4.8828e-5 -> flat[0] 255 -> 1); k_ratio 1.25 ->
+    2.5 -> T5d block 1 (ratio 1.55192 < 2.5 -> flat[1] 1 -> 255);
+    90th-percentile index 90 -> 80 -> T5c (threshold 0 marks all 20);
+    EXTRACT_AR_ROW coordinate order swap -> T7 (up != left residuals);
+    the :845-:849 flat-right branch removed -> T9 fixture 2 (98
+    observations -> 91). MEASURED (2026-11-04): ctest 11/11 passed,
+    0 failed, 266.52 s; GATE unchanged 884,851 B, byte-identical, diff 0
+    (analysis-only code, no generator input); coverage A11 fraction
+    0.1798 -> 0.2351 (2163 -> 2828, +665: 664 nb claimed of the 747
+    in-scope, the 83 parked lines itemized above) and the total
+    14.8% -> 15.2% (24,008 / 157,718); cite_check 500 citations, 489
+    resolved, 0 out-of-range (11 unresolved = the known external decoder
+    set); doc_audit PASS (exit 0; the 3 candidates it flags are dated
+    historical run records - 5ce0224's own GATE figure 884,953 B and the
+    AN4/CS-era percentages - correct for their own commits). Host only,
+    no GPU twin (parked, named - the finder is a per-block double
+    least-squares fit and the solver family is the AN16 parking).
+
   - [x] **A8-CAMPAIGN OPENED (2026-11-03, PERRY-A8/DF1): the deblocking
     kernel family is ported in src/l10_filters (l10_filters:: namespace,
     ctest target l10_filters - the suite went 10 -> 11 targets).** The
