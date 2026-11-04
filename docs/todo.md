@@ -1649,6 +1649,64 @@ A0. SLICE-LEVEL STATE (the live register)
 |    PARKED (named): svt_aom_fill_rect (cdef_copy.h:88-:94, callers all
 |    enc_cdef.c), enc_cdef mse/search (CDEF3), corner_match.c/
 |    corner_detect.c (global-motion machinery, ORPHANED per Scout CDEF).
+|  - [x] **A8/LR1 (2026-11-04): the restoration math core landed** in
+|    src/l10_filters/restoration.{h,cpp} + tests/test_restoration.cpp
+|    (registered; new test file, l10_filters::restoration namespace).
+|    Spans, 243 nb measured span-by-span against the pinned restoration.c
+|    (1534 nb): sgr_params :31-:49 (19), extend_frame_lowbd :110-:126 (17),
+|    the svt_extend_frame entry :150-:157 (8), copy_tile_lowbd :159-:164
+|    (6), the copy_tile dispatcher :173-:180 (8), boxsum1 :430-:495 (61),
+|    boxsum2 :497-:584 (83), boxsum :586-:594 (9), svt_decode_xq :597-:608
+|    (12), x_by_xplus1 :610-:625 (16), one_by_x :627-:630 (4). The brief's
+|    ~370-450 nb estimate did not reproduce - the named spans sum to 243.
+|    BRIEF CORRECTION (grep-verified): svt_decode_xq in this tree is the
+|    params-aware version (r[0]==0 -> xq[0]=0, xq[1]=(1<<7)-xqd[1];
+|    r[1]==0 -> xq[1]=0; else xq[1]=(1<<7)-xq[0]-xqd[1]), NOT the brief's
+|    spec-style "xqd[0]==0 -> 96 else 128-3*xqd[0], xqd[1] -> 5*xqd[1]";
+|    no 96 or 5* constant exists in :597-:608. Semantics finding: the
+|    boxsum family's edge handling is TRUNCATION, not border reads - the
+|    outermost rows/cols of the given array get 2-sums (r=1) / 3-sums
+|    (r=2); composed, the walk is a 2D box sum clamped at the array
+|    bounds, pinned by an independent clamped-box oracle on 7x9 fixtures
+|    (distinct values, stride 12, sentinel padding proving no OOB reads).
+|    Data tables pinned by 0-mismatch formula oracles over ALL entries:
+|    x_by_xplus1[x] = floor((256*x + (x+1)/2) / (x+1)) with entry 0 = 1
+|    and entry 255 = 256; one_by_x[x] = floor((4096 + (x+1)/2) / (x+1)).
+|    Named deviations: file-local statics exported for testability
+|    (cdefSign precedent); highbd branches assert-parked
+|    (extend_frame_highbd :128-:148, copy_tile_highbd :166-:171 -
+|    unreachable in our emission, enable_restoration stays 0);
+|    svt_memcpy -> memcpy. GREEN: 133 test cases / 2237 assertions, 0
+|    failed (l10_filters, +20 cases / +921 assertions over CDEF2); full
+|    ctest 11/11, 290.27 s.
+|    MUTATIONS (all reverted, against the FINAL set): M-sgr-row0 (r0 2->3)
+|    killed by the row-0 test; M-sgr-row14 (s1 -1->0) killed by the 16-row
+|    identity fixture; M-boxsum-clamp (top-edge a+b -> b+c) killed by the
+|    7x9 oracle (all-ones cannot see direction); M-boxsum-sqr (vertical
+|    else-branch squaring dropped) killed by the sqr fixture; M-boxsum2-
+|    bound (i<height-3 -> height-2) killed by the oracle; M-boxsum-dispatch
+|    (r==1/r==2 swap) killed by the dispatch fixture; M-decode-xq
+|    ((1<<7) -> (1<<6) in the else branch, the adapted form of the brief's
+|    96->128 swap) killed by the else-branch fixture; M-xbyx-entry (entry
+|    103, 254 -> 999) killed by the formula oracle - and the REVERT itself
+|    corrupted row 13 (restored with row-12 content), caught at entries
+|    104-109 by the same oracle before any commit; M-onebyx-entry (entry
+|    17, 195 -> 999) killed by the formula oracle; M-extend-bottom (bottom
+|    fill emptied) killed by the extend fixture; M-copytile-stride (src
+|    reads dst_stride) killed as a compile error (src_stride unreferenced,
+|    C2220 warning-as-error).
+|    MEASURED (2026-11-04, an14-noiseutil): coverage A8 0.0994 -> 0.1224
+|    (+243 nb), total 25,097 -> 25,340 of 157,718; the printed percentage
+|    MOVED: 15.9% -> 16.1% (25,340/157,718 = 16.0715% crosses the 16.05
+|    boundary); GATE byte-identical 884,851 B; the paired conformance
+|    count UNCHANGED (9 artifacts, all content-1:1) - COVERAGE-ONLY.
+|    PARKED (named): the stripe machinery setup/restore_processing_
+|    stripe_boundary :249-:397 and get_stripe_boundary_info :216
+|    (RestorationTileLimits / RestorationLineBuffers struct-coupled),
+|    wiener_filter_stripe :399 (RestorationUnitInfo + the convolve.c A13
+|    dependency), the selfguided family :632-:962 (LR2), sgrproj/wiener
+|    stripe + highbd :987-:1035, the :1040+ filter_unit/frame walkers,
+|    :1124+ the tile walkers and boundary-line savers.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
