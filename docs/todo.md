@@ -1593,6 +1593,46 @@ A0. SLICE-LEVEL STATE (the live register)
     artifacts, all content-1:1) - COVERAGE-ONLY. PARKED: cdef_filter_fb and
     the CDEF_8BITS_PATH fb/lbd drivers (:322-:778 remainder - CDEF2),
     svt_aom_copy_rect8 (cdef_copy.h - CDEF2), enc_cdef mse/search (CDEF3).
+|  - [x] **A8/CDEF2 (2026-11-04, PERRY-A8): the fb/lbd driver chain + the
+|    copy helpers landed** in src/l10_filters/cdef.{h,cpp} +
+|    tests/test_cdef2.cpp (registered; the CDEF1 test file untouched).
+|    Spans, 377 nb measured span-by-span: svt_aom_copy_rect8_8bit_to_16bit_c
+|    cdef.c:72-:79 (8), svt_cdef_filter_fb :322-:402 (76 - the brief's
+|    81/97/65 counts did not reproduce; 76/92/64 measured),
+|    cdef_filter_fb_lbd_impl :542-:638 (92), the luma/chroma wrappers
+|    :640-:704 (64), the dispatch svt_cdef_filter_fb_lbd :706-:778 (73),
+|    and cdef_copy.h svt_cdef_copy_rect8 :28-:74 (47), svt_aom_copy_rect
+|    :79-:85 (7) and svt_aom_copy_sb8_16 :96-:105 (10). Named deviations:
+|    cdefPriStrength/cdefSecStrength factored out of the fb bodies
+|    (:327-:329 / :551-:553; cdefSign precedent) so the encoding contract
+|    s = pri*4 + sec, sec codes {0,1,2,3} -> {0,1,2,4}, is directly
+|    testable; the impl exported as a plain function where the reference
+|    AOM_FORCE_INLINEs it into the wrappers (perf property, not behavior).
+|    Anchor notes: PLANE_Y = 0 = the first enum value (definitions.h:683),
+|    so pli != 0 is chroma; CDEF_8BITS_PATH has NO definition in Codec or
+|    the cmake files - it is a build-system define, and the :506/:779
+|    guard wraps the 8-bit list walker :509-:535, the impl/wrappers/
+|    dispatch :542-:778 AND the cdef_copy.h include (:507), while the
+|    16-bit fb driver :322-:402 is OUTSIDE (always compiled); the brief's
+|    "s=12 -> pri 3/sec 1?" derived to pri 3/sec 0 (12%4 = 0); copy_rect
+|    landed as copy_sb8_16's is_16bit-branch dependency despite the brief's
+|    park note (named), fill_rect parked (callers all in enc_cdef.c).
+|    GREEN: 113 test cases / 1316 assertions, 0 failed (l10_filters,
+|    +26 cases / +35 assertions over CDEF1); full ctest 11/11, 271.56 s.
+|    MUTATIONS (all reverted, against the FINAL set): M1 swapped pri/sec
+|    derivation killed by 13 cases; M2 dirinit stale-check dropped killed
+|    by 5 (the poisoned-dir fixtures); M3 edgeRight off-by-one (bxLast-1)
+|    killed by the named right-edge fixture; M4 swapped v/h halo offsets
+|    in copy_rect8 killed by the two offset fixtures; M5 fb t-selection
+|    swapped killed by 4 (incl. the chroma pli=1 t=pri fixture); M6
+|    always-conv422 killed by the conv440 fixture. MEASURED (2026-11-04,
+|    a8-kernels): coverage A8 0.0639 -> 0.0994 (+377 nb), total
+|    24,375 -> 24,752 of 157,718; the printed percentage MOVED:
+|    15.5% -> 15.7%; GATE byte-identical 884,851 B; the paired conformance
+|    count UNCHANGED (9 artifacts, all content-1:1) - COVERAGE-ONLY.
+|    PARKED (named): svt_aom_fill_rect (cdef_copy.h:88-:94, callers all
+|    enc_cdef.c), enc_cdef mse/search (CDEF3), corner_match.c/
+|    corner_detect.c (global-motion machinery, ORPHANED per Scout CDEF).
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------

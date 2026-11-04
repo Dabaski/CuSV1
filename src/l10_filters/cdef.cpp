@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cstring>
 
 #include "cdef.h"
 
@@ -398,6 +399,301 @@ void cdefFindDir8bitList(const std::uint8_t* in, const CdefList* dlist,
         const std::uint8_t by = dlist[bi].by;
         const std::uint8_t bx = dlist[bi].bx;
         dir[by][bx] = cdefFindDir8bit(&in[8 * by * kCdefBstride + 8 * bx], kCdefBstride, &var[by][bx], coeffShift);
+    }
+}
+
+// The strength derivation of cdef.c:327-329 / :551-553 (named deviation:
+// factored out of the fb bodies for testability).
+std::int32_t cdefPriStrength(std::int32_t cdefStrength, std::int32_t coeffShift) {
+    return (cdefStrength / kCdefSecStrengths) << coeffShift;
+}
+
+std::int32_t cdefSecStrength(std::int32_t cdefStrength, std::int32_t coeffShift) {
+    const std::int32_t sec = cdefStrength % kCdefSecStrengths;
+    return (sec + (sec == 3)) << coeffShift;
+}
+
+// 1:1 port of svt_aom_copy_rect8_8bit_to_16bit_c (cdef.c:72-79).
+void cdefCopyRect8To16(std::uint16_t* dst, std::int32_t dstride, const std::uint8_t* src, std::int32_t sstride,
+                       std::int32_t v, std::int32_t h) {
+    for (std::int32_t i = 0; i < v; ++i) {
+        for (std::int32_t j = 0; j < h; ++j) {
+            dst[i * dstride + j] = src[i * sstride + j];
+        }
+    }
+}
+
+// 1:1 port of svt_cdef_copy_rect8 (cdef_copy.h:28-74): the row copy is a
+// memcpy of h bytes either at a listed constant width or the variable
+// fallback; base = src + src_voffset * sstride + src_hoffset.
+void cdefCopyRect8(std::uint8_t* dst, std::int32_t dstride, const std::uint8_t* src, std::int32_t srcVoffset,
+                   std::int32_t srcHoffset, std::int32_t sstride, std::int32_t v, std::int32_t h) {
+    const std::uint8_t* base = src + srcVoffset * sstride + srcHoffset;
+    if (h == 2 || h == 32 || h == 34 || h == 36 || h == 64 || h == 66 || h == 68) {
+        for (std::int32_t r = 0; r < v; ++r) {
+            std::memcpy(dst, base, static_cast<std::size_t>(h));
+            dst += dstride;
+            base += sstride;
+        }
+        return;
+    }
+    for (std::int32_t r = 0; r < v; ++r) {
+        std::memcpy(dst, base, static_cast<std::size_t>(h));
+        dst += dstride;
+        base += sstride;
+    }
+}
+
+// 1:1 port of svt_aom_copy_rect (cdef_copy.h:79-85) - copy_sb8_16's 16-bit
+// branch dependency.
+void cdefCopyRect16(std::uint16_t* dst, std::int32_t dstride, const std::uint16_t* src, std::int32_t sstride,
+                    std::int32_t v, std::int32_t h) {
+    for (std::int32_t r = 0; r < v; ++r) {
+        std::memcpy(dst, src, sizeof(*dst) * static_cast<std::size_t>(h));
+        dst += dstride;
+        src += sstride;
+    }
+}
+
+// 1:1 port of svt_aom_copy_sb8_16 (cdef_copy.h:96-105).
+void cdefCopySb8To16(std::uint16_t* dst, std::int32_t dstride, const std::uint8_t* src, std::int32_t srcVoffset,
+                     std::int32_t srcHoffset, std::int32_t sstride, std::int32_t vsize, std::int32_t hsize,
+                     int is16bit) {
+    if (is16bit) {
+        cdefCopyRect16(dst, dstride, reinterpret_cast<const std::uint16_t*>(src) + (srcVoffset * sstride + srcHoffset),
+                       sstride, vsize, hsize);
+    } else {
+        cdefCopyRect8To16(dst, dstride, src + srcVoffset * sstride + srcHoffset, sstride, vsize, hsize);
+    }
+}
+
+// 1:1 port of cdef_filter_fb_lbd_impl (cdef.c:542-638): the 8-bit fb BODY.
+// Exported (named deviation - see the header note).
+void cdefFilterFbLbdImpl(std::uint8_t* dst8, std::int32_t dstride, const std::uint8_t* in8, int frameTop,
+                         int frameLeft, int frameBottom, int frameRight, int vsize, int hsize, std::int32_t xdec,
+                         std::int32_t ydec, std::uint8_t dir[kCdefNblocks][kCdefNblocks], std::int32_t* dirinit,
+                         std::int32_t var[kCdefNblocks][kCdefNblocks], std::int32_t pli, const CdefList* dlist,
+                         std::int32_t cdefCount, std::int32_t cdefStrength, std::int32_t damping,
+                         std::int32_t coeffShift, std::uint8_t subsamplingFactor, CdefBlockSize bsize,
+                         std::int32_t bsizex, std::int32_t bsizey, int isLuma) {
+    const std::int32_t priStrength = cdefPriStrength(cdefStrength, coeffShift);
+    const std::int32_t secStrength = cdefSecStrength(cdefStrength, coeffShift);
+    damping += coeffShift - (isLuma ? 0 : 1);
+
+    // Last block row/col index within the fb (frame-edge ring detection)
+    // (cdef.c:557-558).
+    const std::int32_t byLast = (vsize >> bsizey) - 1;
+    const std::int32_t bxLast = (hsize >> bsizex) - 1;
+
+    if (!dstride && cdefStrength == 0) {
+        // Zero-strength search candidate: copy input straight to packed
+        // output (4/8-byte rows) (cdef.c:561-581).
+        const int w = 1 << bsizex;
+        if (w == 8) {
+            for (std::int32_t bi = 0; bi < cdefCount; ++bi) {
+                const std::uint8_t* src8 = in8 + ((dlist[bi].by << bsizey) * kCdefBstride + (dlist[bi].bx << bsizex));
+                std::uint8_t* dstb = dst8 + (bi << (bsizex + bsizey));
+                for (std::int32_t iy = 0; iy < (1 << bsizey); iy += subsamplingFactor) {
+                    std::memcpy(dstb + (iy << bsizex), src8 + iy * kCdefBstride, 8);
+                }
+            }
+        } else {
+            for (std::int32_t bi = 0; bi < cdefCount; ++bi) {
+                const std::uint8_t* src8 = in8 + ((dlist[bi].by << bsizey) * kCdefBstride + (dlist[bi].bx << bsizex));
+                std::uint8_t* dstb = dst8 + (bi << (bsizex + bsizey));
+                for (std::int32_t iy = 0; iy < (1 << bsizey); iy += subsamplingFactor) {
+                    std::memcpy(dstb + (iy << bsizex), src8 + iy * kCdefBstride, 4);
+                }
+            }
+        }
+        return;
+    }
+
+    if (isLuma) {
+        if (!dirinit || !*dirinit) {
+            cdefFindDir8bitList(in8, dlist, var, cdefCount, coeffShift, dir);
+            if (dirinit) {
+                *dirinit = 1;
+            }
+        }
+    } else if (pli == 1 && xdec != ydec) {
+        for (std::int32_t bi = 0; bi < cdefCount; ++bi) {
+            static const std::uint8_t conv422[8] = {7, 0, 2, 4, 5, 6, 6, 6};
+            static const std::uint8_t conv440[8] = {1, 2, 2, 2, 3, 4, 6, 0};
+            const std::int32_t by = dlist[bi].by;
+            const std::int32_t bx = dlist[bi].bx;
+            dir[by][bx] = (xdec ? conv422 : conv440)[dir[by][bx]];
+        }
+    }
+
+    // Strength 0 reaches here only as the "compute dir for later planes"
+    // pass; identity passthrough (cdef.c:601-603).
+    if (cdefStrength == 0) {
+        return;
+    }
+
+    const bool edgeFb = frameTop || frameLeft || frameBottom || frameRight;
+    for (std::int32_t bi = 0; bi < cdefCount; ++bi) {
+        const std::int32_t by = dlist[bi].by;
+        const std::int32_t bx = dlist[bi].bx;
+        const std::int32_t t = isLuma ? cdefAdjustStrength(priStrength, var[by][bx]) : priStrength;
+        const std::int32_t k = dstride ? ((by << bsizey) * dstride + (bx << bsizex)) : (bi << (bsizex + bsizey));
+        const std::int32_t ds = dstride ? dstride : (1 << bsizex);
+        const std::int32_t off = (by * kCdefBstride << bsizey) + (bx << bsizex);
+        const std::int32_t bdir = priStrength ? dir[by][bx] : 0;
+        const int edgeTop = frameTop && by == 0;
+        const int edgeBottom = frameBottom && by == byLast;
+        const int edgeLeft = frameLeft && bx == 0;
+        const int edgeRight = frameRight && bx == bxLast;
+        if (edgeFb && (edgeTop || edgeBottom || edgeLeft || edgeRight)) {
+            cdefFilterBlock8bitBounded(&dst8[k],
+                                       ds,
+                                       &in8[off],
+                                       t,
+                                       secStrength,
+                                       bdir,
+                                       damping,
+                                       bsize,
+                                       coeffShift,
+                                       subsamplingFactor,
+                                       edgeTop,
+                                       edgeLeft,
+                                       edgeBottom,
+                                       edgeRight);
+        } else {
+            cdefFilterBlock8bit(&dst8[k], ds, &in8[off], t, secStrength, bdir, damping, bsize, coeffShift,
+                                subsamplingFactor);
+        }
+    }
+}
+
+// 1:1 port of cdef_filter_fb_lbd_luma (cdef.c:640-671): the compile-time
+// luma pinning 8X8 / 3 / 3 / is_luma 1, pli forced 0, xdec=ydec=0.
+void cdefFilterFbLbdLuma(std::uint8_t* dst8, std::int32_t dstride, const std::uint8_t* in8, int frameTop,
+                         int frameLeft, int frameBottom, int frameRight, int vsize, int hsize,
+                         std::uint8_t dir[kCdefNblocks][kCdefNblocks], std::int32_t* dirinit,
+                         std::int32_t var[kCdefNblocks][kCdefNblocks], const CdefList* dlist, std::int32_t cdefCount,
+                         std::int32_t cdefStrength, std::int32_t damping, std::int32_t coeffShift,
+                         std::uint8_t subsamplingFactor) {
+    cdefFilterFbLbdImpl(dst8, dstride, in8, frameTop, frameLeft, frameBottom, frameRight, vsize, hsize, 0, 0, dir,
+                        dirinit, var, 0, dlist, cdefCount, cdefStrength, damping, coeffShift, subsamplingFactor,
+                        CdefBlockSize::BLOCK_8X8, 3, 3, 1);
+}
+
+// 1:1 port of cdef_filter_fb_lbd_chroma (cdef.c:673-704): the compile-time
+// chroma 4:2:0 pinning 4X4 / 2 / 2 / is_luma 0, pli passed through.
+void cdefFilterFbLbdChroma(std::uint8_t* dst8, std::int32_t dstride, const std::uint8_t* in8, int frameTop,
+                           int frameLeft, int frameBottom, int frameRight, int vsize, int hsize, std::int32_t pli,
+                           std::uint8_t dir[kCdefNblocks][kCdefNblocks], std::int32_t* dirinit,
+                           std::int32_t var[kCdefNblocks][kCdefNblocks], const CdefList* dlist,
+                           std::int32_t cdefCount, std::int32_t cdefStrength, std::int32_t damping,
+                           std::int32_t coeffShift, std::uint8_t subsamplingFactor) {
+    cdefFilterFbLbdImpl(dst8, dstride, in8, frameTop, frameLeft, frameBottom, frameRight, vsize, hsize, 1, 1, dir,
+                        dirinit, var, pli, dlist, cdefCount, cdefStrength, damping, coeffShift, subsamplingFactor,
+                        CdefBlockSize::BLOCK_4X4, 2, 2, 0);
+}
+
+// 1:1 port of svt_cdef_filter_fb_lbd (cdef.c:706-778): the xdec/ydec
+// dispatch.
+void cdefFilterFbLbd(std::uint8_t* dst8, std::int32_t dstride, const std::uint8_t* in8, int frameTop, int frameLeft,
+                     int frameBottom, int frameRight, int vsize, int hsize, std::int32_t xdec, std::int32_t ydec,
+                     std::uint8_t dir[kCdefNblocks][kCdefNblocks], std::int32_t* dirinit,
+                     std::int32_t var[kCdefNblocks][kCdefNblocks], std::int32_t pli, const CdefList* dlist,
+                     std::int32_t cdefCount, std::int32_t cdefStrength, std::int32_t damping,
+                     std::int32_t coeffShift, std::uint8_t subsamplingFactor) {
+    if (xdec == 0 && ydec == 0) {  // luma: BLOCK_8X8
+        cdefFilterFbLbdLuma(dst8, dstride, in8, frameTop, frameLeft, frameBottom, frameRight, vsize, hsize, dir,
+                            dirinit, var, dlist, cdefCount, cdefStrength, damping, coeffShift, subsamplingFactor);
+    } else if (xdec == 1 && ydec == 1) {  // chroma 4:2:0: BLOCK_4X4
+        cdefFilterFbLbdChroma(dst8, dstride, in8, frameTop, frameLeft, frameBottom, frameRight, vsize, hsize, pli, dir,
+                              dirinit, var, dlist, cdefCount, cdefStrength, damping, coeffShift, subsamplingFactor);
+    } else {  // 4:2:2 / 4:4:4: runtime block size
+        const CdefBlockSize bsize =
+            ydec ? (xdec ? CdefBlockSize::BLOCK_4X4 : CdefBlockSize::BLOCK_8X4)
+                 : (xdec ? CdefBlockSize::BLOCK_4X8 : CdefBlockSize::BLOCK_8X8);
+        cdefFilterFbLbdImpl(dst8, dstride, in8, frameTop, frameLeft, frameBottom, frameRight, vsize, hsize, xdec, ydec,
+                            dir, dirinit, var, pli, dlist, cdefCount, cdefStrength, damping, coeffShift,
+                            subsamplingFactor, bsize, 3 - xdec, 3 - ydec, pli == 0);
+    }
+}
+
+// 1:1 port of svt_cdef_filter_fb (cdef.c:322-402). bsize derives per the
+// reference ternary (:332); the zero-strength + packed-dst search-scratch
+// identity copy is cdef.c:336-364.
+void cdefFilterFb(std::uint8_t* dst8, std::uint16_t* dst16, std::int32_t dstride, const std::uint16_t* in,
+                  std::int32_t xdec, std::int32_t ydec, std::uint8_t dir[kCdefNblocks][kCdefNblocks],
+                  std::int32_t* dirinit, std::int32_t var[kCdefNblocks][kCdefNblocks], std::int32_t pli,
+                  const CdefList* dlist, std::int32_t cdefCount, std::int32_t cdefStrength, std::int32_t damping,
+                  std::int32_t coeffShift, std::uint8_t subsamplingFactor) {
+    const std::int32_t priStrength = cdefPriStrength(cdefStrength, coeffShift);
+    const std::int32_t secStrength = cdefSecStrength(cdefStrength, coeffShift);
+    damping += coeffShift - (pli != 0);
+
+    const CdefBlockSize bsize =
+        ydec ? (xdec ? CdefBlockSize::BLOCK_4X4 : CdefBlockSize::BLOCK_8X4)
+             : (xdec ? CdefBlockSize::BLOCK_4X8 : CdefBlockSize::BLOCK_8X8);
+    const std::int32_t bsizex = 3 - xdec;
+    const std::int32_t bsizey = 3 - ydec;
+
+    if (!dstride && cdefStrength == 0) {
+        for (std::int32_t bi = 0; bi < cdefCount; ++bi) {
+            const std::int32_t by = dlist[bi].by << bsizey;
+            const std::int32_t bx = dlist[bi].bx << bsizex;
+            const std::uint16_t* src16 = in + (by * kCdefBstride + bx);
+            if (dst8) {
+                // size 2x2 and 3x3, no gain to use SIMD (cdef.c:348)
+                std::uint8_t* dst8b = dst8 + (bi << (bsizex + bsizey));
+                for (std::int32_t iy = 0; iy < (1 << bsizey); iy += subsamplingFactor) {
+                    for (std::int32_t ix = 0; ix < (1 << bsizex); ++ix) {
+                        dst8b[(iy << bsizex) + ix] = static_cast<std::uint8_t>(src16[iy * kCdefBstride + ix]);
+                    }
+                }
+            } else {
+                std::uint16_t* dst16b = dst16 + (bi << (bsizex + bsizey));
+                for (std::int32_t iy = 0; iy < (1 << bsizey); iy += subsamplingFactor) {
+                    std::memcpy(dst16b + (iy << bsizex), src16 + iy * kCdefBstride,
+                                static_cast<std::uint32_t>(1 << bsizex) * sizeof(std::uint16_t));
+                }
+            }
+        }
+        return;
+    }
+
+    if (pli == 0) {
+        if (!dirinit || !*dirinit) {
+            cdefFindDirList(in, dlist, var, cdefCount, coeffShift, dir);
+            if (dirinit) {
+                *dirinit = 1;
+            }
+        }
+    } else if (pli == 1 && xdec != ydec) {
+        for (std::int32_t bi = 0; bi < cdefCount; ++bi) {
+            static const std::uint8_t conv422[8] = {7, 0, 2, 4, 5, 6, 6, 6};
+            static const std::uint8_t conv440[8] = {1, 2, 2, 2, 3, 4, 6, 0};
+
+            const std::int32_t by = dlist[bi].by;
+            const std::int32_t bx = dlist[bi].bx;
+            dir[by][bx] = (xdec ? conv422 : conv440)[dir[by][bx]];
+        }
+    }
+
+    for (std::int32_t bi = 0; bi < cdefCount; ++bi) {
+        const std::int32_t by = dlist[bi].by;
+        const std::int32_t bx = dlist[bi].bx;
+        const std::int32_t t = pli ? priStrength : cdefAdjustStrength(priStrength, var[by][bx]);
+        const std::int32_t k = dstride ? ((by << bsizey) * dstride + (bx << bsizex)) : (bi << (bsizex + bsizey));
+        cdefFilterBlock(dst8 ? &dst8[k] : nullptr,
+                        dst8 ? nullptr : &dst16[k],
+                        dstride ? dstride : (1 << bsizex),
+                        &in[(by * kCdefBstride << bsizey) + (bx << bsizex)],
+                        t,
+                        secStrength,
+                        priStrength ? dir[by][bx] : 0,
+                        damping,
+                        damping,
+                        bsize,
+                        coeffShift,
+                        subsamplingFactor);
     }
 }
 

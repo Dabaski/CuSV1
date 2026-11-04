@@ -24,9 +24,27 @@
 //   filter_block_8bit_bounded_c :437-:504 (frame-edge kernel: off-frame
 //   taps excluded from sum/max/min - exactly what the sentinel does in the
 //   16-bit kernel), cdef_find_dir_8bit :509-:535 (list walker).
-// PARKED: cdef_filter_fb and the fb/lbd drivers :322-:778 (CDEF2),
-// svt_aom_copy_rect8* (cdef_copy.h, CDEF2), the enc_cdef mse/search family
-// (CDEF3).
+//
+// CDEF2 (PERRY-A8): the fb/lbd driver chain + the copy helpers:
+//   svt_aom_copy_rect8_8bit_to_16bit_c :72-:79,
+//   svt_cdef_filter_fb :322-:402 (the 16-bit fb driver; OUTSIDE the
+//   CDEF_8BITS_PATH guard that opens at :506),
+//   cdef_filter_fb_lbd_impl :542-:638, the lbd wrappers :640-:704 and the
+//   dispatch svt_cdef_filter_fb_lbd :706-:778 (all INSIDE the
+//   CDEF_8BITS_PATH guard; the guard's macro has no definition in Codec -
+//   it is a build-system define),
+//   cdef_copy.h: svt_cdef_copy_rect8 :28-:74 (the constant-width dispatch
+//   {2,32,34,36,64,66,68} + variable fallback), svt_aom_copy_rect :79-:85
+//   (landed as copy_sb8_16's 16-bit-branch dependency), svt_aom_copy_sb8_16
+//   :96-:105.
+// PARKED (named): svt_aom_fill_rect :88-:94 (its only callers are the
+// parked enc_cdef.c halo fills), the enc_cdef mse/search family (CDEF3),
+// corner_match.c/corner_detect.c (global-motion machinery, ORPHANED per the
+// Scout CDEF classification).
+// The strength derivation (:327-:329 / :551-:553) is factored into
+// cdefPriStrength/cdefSecStrength (named deviation, cdefSign precedent);
+// the impl is exported as a plain function where the reference
+// force-inlines it into the wrappers (perf property, not behavior).
 // The 16-bit filter kernel is the SPEC; the 8-bit twins are their own 1:1
 // bodies (as in the reference) and the derivation relationship is pinned by
 // tests. Integer only: no float anywhere in this family.
@@ -160,5 +178,87 @@ void cdefFindDirList(const std::uint16_t* in, const CdefList* dlist, std::int32_
 void cdefFindDir8bitList(const std::uint8_t* in, const CdefList* dlist,
                          std::int32_t var[kCdefNblocks][kCdefNblocks], std::int32_t cdefCount,
                          std::int32_t coeffShift, std::uint8_t dir[kCdefNblocks][kCdefNblocks]);
+
+// ---- CDEF2 (PERRY-A8): the fb/lbd driver chain + cdef_copy ---------------
+
+// CDEF_SEC_STRENGTHS (cdef.h:23): the cdef_strength encoding base.
+constexpr int kCdefSecStrengths = 4;
+
+// The strength derivation of cdef.c:327-329 / :551-553, factored out of the
+// fb bodies for direct testability (named deviation, cdefSign precedent):
+//   pri = (cdef_strength / CDEF_SEC_STRENGTHS) << coeff_shift
+//   sec = (cdef_strength % CDEF_SEC_STRENGTHS + (sec == 3)) << coeff_shift
+// i.e. sec codes {0,1,2,3} carry effective secondary strengths {0,1,2,4}.
+std::int32_t cdefPriStrength(std::int32_t cdefStrength, std::int32_t coeffShift);
+std::int32_t cdefSecStrength(std::int32_t cdefStrength, std::int32_t coeffShift);
+
+// cdef_filter_fb_lbd_impl (cdef.c:542-638): the 8-bit production fb BODY.
+// The reference force-inlines it into the per-plane call sites below so
+// bsize/bsizex/bsizey/is_luma are compile-time constants (a perf property,
+// not behavior - named deviation: exported as a plain function here, with
+// the wrappers keeping the pinned constants). frame_* are the fb's
+// frame-edge flags; by_last/bx_last derive from vsize/hsize (:557-558).
+void cdefFilterFbLbdImpl(std::uint8_t* dst8, std::int32_t dstride, const std::uint8_t* in8, int frameTop,
+                         int frameLeft, int frameBottom, int frameRight, int vsize, int hsize, std::int32_t xdec,
+                         std::int32_t ydec, std::uint8_t dir[kCdefNblocks][kCdefNblocks], std::int32_t* dirinit,
+                         std::int32_t var[kCdefNblocks][kCdefNblocks], std::int32_t pli, const CdefList* dlist,
+                         std::int32_t cdefCount, std::int32_t cdefStrength, std::int32_t damping,
+                         std::int32_t coeffShift, std::uint8_t subsamplingFactor, CdefBlockSize bsize,
+                         std::int32_t bsizex, std::int32_t bsizey, int isLuma);
+
+// cdef_filter_fb_lbd_luma/chroma (cdef.c:640-704) and
+// svt_cdef_filter_fb_lbd (cdef.c:706-778): the thin per-plane wrappers
+// pinning bsize/bsizex/bsizey/is_luma at compile time (luma 8X8/3/3/1,
+// chroma 4X4/2/2/0) and the xdec/ydec dispatch - (0,0) luma, (1,1)
+// chroma 4:2:0, any other pairing the runtime-variant impl body.
+void cdefFilterFbLbd(std::uint8_t* dst8, std::int32_t dstride, const std::uint8_t* in8, int frameTop, int frameLeft,
+                     int frameBottom, int frameRight, int vsize, int hsize, std::int32_t xdec, std::int32_t ydec,
+                     std::uint8_t dir[kCdefNblocks][kCdefNblocks], std::int32_t* dirinit,
+                     std::int32_t var[kCdefNblocks][kCdefNblocks], std::int32_t pli, const CdefList* dlist,
+                     std::int32_t cdefCount, std::int32_t cdefStrength, std::int32_t damping,
+                     std::int32_t coeffShift, std::uint8_t subsamplingFactor);
+
+// svt_aom_copy_rect8_8bit_to_16bit_c (cdef.c:72-79): the u8->u16 widening
+// copy the CDEF gather and copy_sb8_16 compose.
+void cdefCopyRect8To16(std::uint16_t* dst, std::int32_t dstride, const std::uint8_t* src, std::int32_t sstride,
+                       std::int32_t v, std::int32_t h);
+
+// svt_cdef_copy_rect8 (cdef_copy.h:28-74): the 8-bit recon -> padded-src8
+// rect copy. Dispatches on the fixed width set {2,32,34,36,64,66,68} to
+// constant-size row copies (a perf property of the reference - behavior is
+// identical for every width; the fallback covers any other h). The listed
+// widths are all the CDEF gather ever uses (body hsz+2*halo, halo strips).
+void cdefCopyRect8(std::uint8_t* dst, std::int32_t dstride, const std::uint8_t* src, std::int32_t srcVoffset,
+                   std::int32_t srcHoffset, std::int32_t sstride, std::int32_t v, std::int32_t h);
+
+// svt_aom_copy_rect (cdef_copy.h:79-85): the uint16->uint16 rect copy.
+// The brief marks it HBD-only/PARKED, but copy_sb8_16's is_16bit branch
+// calls it, so it lands as that composition's dependency (named deviation);
+// its only other callers are the parked enc_cdef.c edge path.
+void cdefCopyRect16(std::uint16_t* dst, std::int32_t dstride, const std::uint16_t* src, std::int32_t sstride,
+                    std::int32_t v, std::int32_t h);
+
+// svt_aom_fill_rect (cdef_copy.h:88-94): PARKED - its only callers are the
+// parked enc_cdef.c halo fills (CDEF3); nothing in CDEF2 scope composes it.
+
+// svt_aom_copy_sb8_16 (cdef_copy.h:96-105): the CDEF superblock copy into
+// the padded src buffer - widen 8-bit recon (u8->u16), or copy 16-bit recon
+// (u16->u16), from a (voffset, hoffset) origin; is16bit selects the branch.
+void cdefCopySb8To16(std::uint16_t* dst, std::int32_t dstride, const std::uint8_t* src, std::int32_t srcVoffset,
+                     std::int32_t srcHoffset, std::int32_t sstride, std::int32_t vsize, std::int32_t hsize,
+                     int is16bit);
+
+// svt_cdef_filter_fb (cdef.c:322-402): the 16-bit fb driver over the padded
+// in buffer (stride CDEF_BSTRIDE). dst8/dst16: exactly one non-null - dst8
+// writes the 8-bit search scratch, dst16 the 16-bit scratch; dstride == 0
+// means the packed per-block search-scratch layout (bi << (bsizex+bsizey)).
+// dirinit (the search's freshness flag, may be null): pli == 0 recomputes
+// dir through the list walker exactly when !dirinit || !*dirinit, then sets
+// *dirinit = 1. PLANE_Y is 0 (definitions.h:683), so pli != 0 is chroma.
+void cdefFilterFb(std::uint8_t* dst8, std::uint16_t* dst16, std::int32_t dstride, const std::uint16_t* in,
+                  std::int32_t xdec, std::int32_t ydec, std::uint8_t dir[kCdefNblocks][kCdefNblocks],
+                  std::int32_t* dirinit, std::int32_t var[kCdefNblocks][kCdefNblocks], std::int32_t pli,
+                  const CdefList* dlist, std::int32_t cdefCount, std::int32_t cdefStrength, std::int32_t damping,
+                  std::int32_t coeffShift, std::uint8_t subsamplingFactor);
 
 } // namespace l10_filters
