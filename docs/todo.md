@@ -1,4 +1,4 @@
-# Production-Readiness Roadmap - av1_gpu_pascal
+﻿# Production-Readiness Roadmap - av1_gpu_pascal
 
 NOTE: this file was recreated 2026-09-23 (FS6) after the original untracked
 copy was deleted in error, then RESTORED THE SAME DAY by the court from its
@@ -325,13 +325,14 @@ A0. SLICE-LEVEL STATE (the live register)
   find_dir + filter kernel family of cdef.c in
   src/l10_filters/cdef.{h,cpp} - merged into the branch at b0a4d54, NOT
   yet on master; the branch measures 15.5% (24,375/157,718) after the
-  merge fixup 8889f36. STILL OPEN: AN14 (noise_util :20, :70-:104, the
-  OD_DIVU table :114 - the last Phase B slice), CDEF2 (cdef.c
-  :322-:778 fb/lbd drivers + cdef_copy.h), CDEF3 (enc_cdef mse/search);
+  merge fixup 8889f36. STILL OPEN: CDEF2 (cdef.c :322-:778 fb/lbd drivers + cdef_copy.h), CDEF3 (enc_cdef mse/search);
   Phase C/D (AN18-AN22) parked behind A3/GOP per the decomposition
-  above. IN FLIGHT (this session): CDEF2 and AN14 as two parallel
-  swarm writers, CDEF2 in the av1_a8 worktree, AN14 in a second
-  worktree off a8-kernels.
+  above. IN FLIGHT (this session): CDEF2 in the av1_a8 worktree;
+  AN14 noise_util LANDED 2026-11-04 (PERRY): the noise_tx surface
+  (noisePsdGetDefaultValue + noiseTxMalloc/Forward/FilterC/Inverse/Free)
+  + the OD_DIVU table [1024][2], 345 nb = 87 alg + 258 table, in
+  src/l9_analysis/noise_util.cpp with tests/test_noise_util.cpp.
+  Phase B COMPLETE - AN15/AN16/AN17 already landed (2026-11-01/02).
 - [x] **AN-SERIES decomposition (AN0 scout, accepted by the judge
   2026-11-01; this section is its DURABLE HOME - the scout's report lived
   only in %TEMP%, which the evidence contract does not count).** 22

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 
@@ -922,4 +922,88 @@ AomNoiseStatus noiseModelUpdate(AomNoiseModel* noiseModel,
 // num_observations and ar_gain.
 void noiseModelSaveLatest(AomNoiseModel* noiseModel);
 
+
+// ============================================================================
+// AN14: noise_util (third_party/SVT-AV1/Source/Lib/Codec/noise_util.c:20-121
+// + the OD_DIVU table :113-:370, noise_util.h:24-30 the struct).
+// THE CONSUMER (grep-verified 2026-11-04): the noise_tx family feeds ONLY
+// wiener_denoise_2d in noise_model.c (the future AN17b) in the 8-bit port
+// path; the OD_DIVU table feeds nothing else in Codec (divide-unroll macro
+// users only).
+// THE PORT SHAPE (named): fft/ifft are PLAIN function pointers to the landed
+// analysis::fft2dN/ifft2dN (no std::function - the reference stores C
+// function pointers, and ours resolve to real functions, so the plain
+// pointer type is exact). The reference's signature is
+// void(*)(const float* input, float* temp, float* output) - identical to
+// fft2dN's (input, temp, output) per analysis.h:508-518. Justified: an enum +
+// call-site switch would diverge from noise_util.c:30-50's pointer-store
+// structure for no gain.
+// MEMALIGN (named): svt_aom_memalign(32, ...) -> std::aligned_alloc(32, ...)
+// with the size rounded UP to the 32 multiple aligned_alloc requires
+// (C++17); svt_aom_free -> std::free. The 32-byte alignment is kept: the
+// reference requires it "for compatibility with existing SIMD
+// implementations" (noise_util.h:40, :51), so even though the landed scalar
+// fft2d kernels read floats pointwise and do NOT require it, the struct
+// contract preserves it - a future SIMD twin inherits the guarantee.
+// Both buffers are memset to zero up front (noise_util.c:63-66): the forward
+// transform's real-only outputs (the last-column/row imaginary slots) are
+// never written, so zero-init keeps the tx_block deterministic.
+// ============================================================================
+struct NoiseTx {
+    float*  tx_block;
+    float*  temp;
+    std::int32_t block_size;
+    void (*fft)(const float*, float*, float*);
+    void (*ifft)(const float*, float*, float*);
+};
+
+// noise_util.c:20-22: (factor*factor / 10000) * block_size * block_size / 8.
+// ALL FLOAT except the int32 block_size which promotes: block_size*block_size
+// is int math (<= 1024, no overflow), then promotes to float for the divide.
+// Hand-checked: bs=8 f=2.5 -> 0.005f exactly representable? (6.25/10000)*64/8
+// = 6.25*8/10000 = 0.005 - the reference computes float((f*f)/10000)*64/8 in
+// that order; the tests pin the exact float bits against a same-order
+// float expression.
+float noisePsdGetDefaultValue(std::int32_t blockSize, float factor);
+
+// noise_util.c:24-71. malloc analog: returns nullptr on unsupported sizes
+// (2,4,8,16,32 supported) and on allocation failure; the SVT_ERROR print is
+// DROPPED (no stderr in the port) - the nullptr return is the contract.
+// Buffers: 2*bs*bs floats each, 32-byte aligned, zero-initialized.
+NoiseTx* noiseTxMalloc(std::int32_t blockSize);
+void     noiseTxFree(NoiseTx* noiseTx);
+
+// noise_util.c:70-72: one fft call (data -> temp workspace, tx_block output).
+void noiseTxForward(NoiseTx* noiseTx, const float* data);
+
+// noise_util.c:74-94: k_beta = 1.1f; k_beta_m1_div_k_beta computed per call
+// as (k_beta - 1.0f) / k_beta (the reference's float rounding of that
+// division is preserved, NOT re-derived in double); per-pair power
+// p = re^2 + im^2; threshold branch p > psd_mul_k_beta && p > 1e-6 (the
+// literal 1e-6 is DOUBLE - p promotes - the port keeps the double comparison
+// exactly); val = (p - psd)/AOMMAX(p, k_eps) with k_eps = 1e-6f, scaling
+// BOTH components; else scale both by k_beta_m1_div_k_beta. Mutates
+// block_ptr IN PLACE, 2 floats per pair, bs*bs pairs.
+void noiseTxFilterC(std::int32_t blockSize, float* blockPtr, const float psd);
+
+// noise_util.c:96-102: n = block_size*block_size; ifft then data[i] /= n -
+// THE NORMALIZATION LIVES HERE (the AN13 finding: with n = side length,
+// ifft2d(fft2d(f)) == n*n * f because each of the two 1D passes carries an
+// unnormalized gain n; noise_util's divisor is block_size*block_size, which
+// IS that n*n. So the composed forward->inverse roundtrip is IDENTITY:
+// n*n*f / n*n = f). The test pins data[i] = input[i] within the landed
+// tolerance (AN12/13: EPSILON 1e-4 absolute on the roundtrip).
+void noiseTxInverse(NoiseTx* noiseTx, float* data);
+
+// OD_DIVU (noise_util.c:113-370): OD_DIVU_DMAX = 1024, uint32_t [1024][2].
+// TRANSCRIBED MECHANICALLY (read the reference lines, emit our table) - the
+// paired-metric caveat applies: this block moves the coverage number by
+// transcription, not by algorithm. The diff check (test_noise_util.cpp:
+// every one of the 2048 constants matches the reference EXACTLY) IS the
+// test for this span. Sentinel rows: {0xFFFFFFFF, 0xFFFFFFFF} at powers of
+// two reproduce x/d exactly through the magic-multiplier formula:
+// d=1: M = 2^32-1 = 0xFFFFFFFF, h1 = (M+1)/2^32 = 1, so
+//   (M*x) hi32 = (2^32-1)*x >> 32 = x - 1 (for x >= 1) then the h1 add and
+//   the reference's lowbit adjustment give x. d=8: M = 0xE38E38E4, h1 = 8.
+extern std::uint32_t odDivuSmallConsts[1024][2];
 }  // namespace analysis
