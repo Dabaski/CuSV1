@@ -2,6 +2,9 @@
 
 #include <cstdint>
 
+#include <array>
+#include <vector>
+
 namespace analysis {
 
 // EbColorFormat (third_party/SVT-AV1/Source/API/EbSvtAv1Formats.h:110):
@@ -478,5 +481,445 @@ void ifft1d4(const float* input, float* output, std::int32_t stride);
 void ifft1d8(const float* input, float* output, std::int32_t stride);
 void ifft1d16(const float* input, float* output, std::int32_t stride);
 void ifft1d32(const float* input, float* output, std::int32_t stride);
+
+// AN13: the 2D FFT drivers (third_party/SVT-AV1/Source/Lib/Codec/fft.c),
+// composing the landed AN12 1D kernels - the port never re-implements a
+// 1D butterfly. COMPOSITION (fft_2d_gen, fft.c:51-64): five passes -
+// fft1dN(input + x, output + x, n) per column x, simple_transpose,
+// fft1dN(temp + x, output + x, n) per second-axis row, simple_transpose,
+// then unpack_2d_output. NO scaling in any pass (fft.c has zero arithmetic
+// divisions - verified).
+//
+// THE UNPACK CONTRACT (fft.c:23-49): output is 2*n*n floats holding
+// n*(n/2+1) complex values interleaved as output[2*(y*n+x)] = Re F(y,x),
+// output[2*(y*n+x)+1] = Im F(y,x) for ALL y but ONLY x in 0..n/2; the tail
+// of the output buffer is NEVER written by the port (the caller zeroes it,
+// noise_util.c:65). simple_transpose and unpack_2d_output are file-local
+// helpers in fft2d.cpp (the reference keeps them static INLINE in fft.c).
+// vec_size is 1 at every reference _c entry point (fft.c:89-105 /
+// :180-236); the port folds it - named deviation, noted per function.
+//
+// NORMALIZATION FINDING (verified fft.c:1-237): no scaling anywhere; the
+// caller divides (noise_util.c:96-102 does ifft then data[i] /= n). So
+// ifft2d(fft2d(f)) == n*n * f.
+// Entry-point names mirror the reference's per-size wrappers
+// svt_aom_fft2x2_float_c ... svt_aom_fft32x32_float_c (fft.c:88-106) and
+// svt_aom_ifft2x2_float_c ... svt_aom_ifft32x32_float_c (fft.c:179-237).
+void fft2d2(const float* input, float* temp, float* output);
+void fft2d4(const float* input, float* temp, float* output);
+void fft2d8(const float* input, float* temp, float* output);
+void fft2d16(const float* input, float* temp, float* output);
+void fft2d32(const float* input, float* temp, float* output);
+
+void ifft2d2(const float* input, float* temp, float* output);
+void ifft2d4(const float* input, float* temp, float* output);
+void ifft2d8(const float* input, float* temp, float* output);
+void ifft2d16(const float* input, float* temp, float* output);
+void ifft2d32(const float* input, float* temp, float* output);
+
+// AN16: the noise strength solver (third_party/SVT-AV1/Source/Lib/Codec/
+// noise_model.c:104-397). linsolve is the port's own private copy of the
+// dependency at Codec/mathutils.h:22-65 (A13-classified header; the
+// reference keeps it static INLINE so every includer carries a copy - the
+// port carries one copy in the l9 TU and exposes it here for the tests,
+// named deviation). Verbatim dense Gaussian elimination with partial
+// pivoting, tiny_near_zero 1e-16; returns 0 on a singular system.
+int32_t linsolve(int32_t n, double* a, int32_t stride, double* b, double* x);
+
+// AomNoiseShape (noise_model.h:150): DIAMOND = 0, SQUARE = 1.
+enum class AomNoiseShape : std::int32_t { Diamond = 0, Square = 1 };
+
+// AomNoiseModelParams (noise_model.h:154-160): shape, lag, bit depth, and
+// the uint8/uint16 input selector - pure data, POD in the port.
+struct AomNoiseModelParams {
+    AomNoiseShape shape;
+    std::int32_t lag;
+    std::int32_t bitDepth;
+    std::int32_t useHighbd;
+};
+
+// 1:1 port of num_coeffs (noise_model.c:181-190): the AR-model basis is
+// 2*lag+1 wide; DIAMOND keeps lag*(lag+1) coefficients, SQUARE (n*n)/2 with
+// the reference's own INTEGER division (lag 1 -> 4, lag 2 -> 12).
+int32_t numCoeffs(const AomNoiseModelParams params);
+
+// AomEquationSystem (noise_model.h:30-35): the dense double system A x = b.
+// The reference's malloc'd A/b/x pointers become std::vector (named
+// deviation: allocation cannot fail, so equation_system_free's failure
+// branches are dead and free() becomes a vector reset).
+struct AomEquationSystem {
+    std::vector<double> a;
+    std::vector<double> b;
+    std::vector<double> x;
+    std::int32_t n = 0;
+};
+
+// AomNoiseStrengthSolver (noise_model.h:69-76): the piecewise-linear noise
+// strength model over num_bins bins covering
+// [min_intensity, max_intensity].
+struct AomNoiseStrengthSolver {
+    AomEquationSystem eqns;
+    double minIntensity = 0;
+    double maxIntensity = 0;
+    std::int32_t numBins = 0;
+    std::int32_t numEquations = 0;
+    double total = 0;
+};
+
+// 1:1 port of svt_aom_noise_strength_solver_init (noise_model.c:305-316):
+// zero-fills the solver, sets num_bins, min_intensity 0,
+// max_intensity (1 << bit_depth) - 1, and inits the num_bins x num_bins
+// equation system (zeroed A/b/x, n = num_bins).
+int32_t noiseStrengthSolverInit(AomNoiseStrengthSolver* solver, int32_t numBins,
+                                int32_t bitDepth);
+
+// 1:1 port of svt_aom_noise_strength_solver_get_center (noise_model.c:
+// 318-322): the x coordinate of bin i, i/(n-1)*range + min_intensity.
+double noiseStrengthSolverGetCenter(const AomNoiseStrengthSolver* solver, int32_t i);
+
+// 1:1 port of noise_strength_solver_get_bin_index (noise_model.c:236-240):
+// fclamp (definitions.h:696-698) into [min_intensity, max_intensity], then
+// the linear map (n-1)*(val - min)/range. Static in the reference; exposed
+// for the tests (named deviation, the AN8 detector pattern).
+double noiseStrengthSolverGetBinIndex(const AomNoiseStrengthSolver* solver, double value);
+
+// 1:1 port of noise_strength_solver_get_value (noise_model.c:242-248):
+// the linear interpolation (1-a)*x[i0] + a*x[i1] between the neighbouring
+// bin values, i1 clamped by AOMMIN. Static in the reference; exposed for
+// the tests (named deviation, the AN8 detector pattern).
+double noiseStrengthSolverGetValue(const AomNoiseStrengthSolver* solver, double x);
+
+// 1:1 port of svt_aom_noise_strength_solver_add_measurement (noise_model.c:
+// 250-265): one observation (block_mean, noise_std) becomes the 2x2
+// weighted normal-equation accumulation across the two neighbouring bins
+// (weights (1-a)^2, a(1-a), a(1-a), a^2 into A; (1-a)*std, a*std into b),
+// plus total += std and num_equations++.
+void noiseStrengthSolverAddMeasurement(AomNoiseStrengthSolver* solver, double blockMean,
+                                       double noiseStd);
+
+// 1:1 port of equation_system_solve (noise_model.c:145-166): copies A and
+// b into temporaries, runs linsolve(n, A, n, b, x) writing x, returns 0 on
+// a singular system. A and b are left unchanged (non-destructive).
+int32_t equationSystemSolve(AomEquationSystem* eqns);
+
+// 1:1 port of svt_aom_noise_strength_solver_solve (noise_model.c:267-303):
+// the k_alpha = 2*num_equations/n Laplacian regularization (i_lo and i_hi
+// -= k_alpha, diagonal += 2*k_alpha, boundary rows folding onto the
+// diagonal), then the +1/8192 diagonal and the +mean/8192 b smoothing.
+// NAMED QUIRK, ported as-is: the b write is PERSISTENT on solver->eqns.b
+// (the reference modifies b in place, outside the copied-A protection), so
+// solve() called twice accumulates mean/8192 twice. The reference's
+// A-pointer swap dance becomes a local vector copy + assign + restore
+// (named deviation, same semantics).
+int32_t noiseStrengthSolverSolve(AomNoiseStrengthSolver* solver);
+
+// AomNoiseStrengthLut (noise_model.h:41-44): the piecewise-linear curve as
+// (x, y) points. The reference's double(*)[2] malloc block becomes a
+// vector of pairs (named deviation); the fit's memmove becomes erase.
+struct AomNoiseStrengthLut {
+    std::vector<std::array<double, 2>> points;
+    std::int32_t numPoints = 0;
+};
+
+// 1:1 port of svt_aom_noise_strength_lut_init (noise_model.c:214-225):
+// num_points zero-filled (x, y) pairs; returns 0 for a null lut.
+int32_t noiseStrengthLutInit(AomNoiseStrengthLut* lut, int32_t numPoints);
+
+// 1:1 port of svt_aom_noise_strength_lut_free (noise_model.c:227-234):
+// releases the points and zeroes the count (a vector reset here).
+void noiseStrengthLutFree(AomNoiseStrengthLut* lut);
+
+// 1:1 port of svt_aom_noise_strength_solver_fit_piecewise (noise_model.c:
+// 353-397): the tolerance is max_intensity*0.00625/255; the lut starts as
+// all num_bins solver points and interior points are greedily removed
+// smallest-residual-first while num_points > 2, stopping when
+// num_points <= max_output_points AND the smallest avg residual exceeds
+// the tolerance. Endpoints are never removed. The residual around a
+// removed index is the ONLY thing recomputed (update_piecewise_linear_
+// residual, :327-351, dx = 255./num_bins HARDCODED - not max_intensity;
+// a 10-bit fixture pins the difference); stale residual entries beyond
+// the recomputed window are kept and re-read, exactly as the reference
+// leaves them.
+int32_t noiseStrengthSolverFitPiecewise(const AomNoiseStrengthSolver* solver,
+                                        int32_t maxOutputPoints, AomNoiseStrengthLut* lut);
+
+// 1:1 ports of the equation-system memory family (noise_model.c:104-129):
+// free releases the storage (a vector reset here), clear zeroes A/b/x in
+// place, copy duplicates A/b/x (dst sized as src), init sizes and zeroes.
+void equationSystemFree(AomEquationSystem* eqns);
+void equationSystemClear(AomEquationSystem* eqns);
+void equationSystemCopy(AomEquationSystem* dst, const AomEquationSystem* src);
+
+// 1:1 ports of noise_strength_solver_clear/copy (noise_model.c:168-178):
+// clear zeroes the equations and the measurement counters (geometry
+// untouched); copy duplicates equations + counters.
+void noiseStrengthSolverClear(AomNoiseStrengthSolver* solver);
+void noiseStrengthSolverCopy(AomNoiseStrengthSolver* dest, const AomNoiseStrengthSolver* src);
+
+// AomNoiseState (noise_model.h:166-174): the per-channel noise-model state
+// - the AR equation system plus the strength solver.
+struct AomNoiseState {
+    AomEquationSystem eqns;
+    AomNoiseStrengthSolver strengthSolver;
+    std::int32_t numObservations = 0;
+    double arGain = 0;
+};
+
+// 1:1 port of noise_state_init (noise_model.c:192-201): k_num_bins = 20,
+// ar_gain = 1.0, num_observations = 0, and the strength solver over 20
+// bins at the given bit depth. Returns 0 only if the caller passed a
+// broken n (the reference's allocation-failure branch is dead here).
+int32_t noiseStateInit(AomNoiseState* state, int32_t n, int32_t bitDepth);
+
+// 1:1 port of set_chroma_coefficient_fallback_soln (noise_model.c:203-212):
+// zeroes every solution entry, then solves ONLY the last diagonal for the
+// luma-correlation fallback when |A[last][last]| > 1e-6.
+void setChromaCoefficientFallbackSoln(AomEquationSystem* eqns);
+
+// ---------------------------------------------------------------------------
+// AN17: the flat-block finder + the noise model init/update
+// (third_party/SVT-AV1/Source/Lib/Codec/noise_model.c:27-:102 helper span,
+// :399-:634 flat-block finder, :636-:1157 noise model init/update).
+// Composes the AN16 landed solver primitives.
+// ---------------------------------------------------------------------------
+
+// 1:1 port of get_block_mean (noise_model.c:39-62, the GET_BLOCK_MEAN macro's
+// lowbd instantiation): the mean of the block_size x block_size region at
+// (x_o, y_o), clamped to the picture bounds (max_h = min(h - y_o,
+// block_size), max_w = min(w - x_o, block_size)); the divisor is the CLAMPED
+// area max_w * max_h. The highbd instantiation (:54) is PARKED (8-bit
+// discipline) and the use_highbd dispatcher branch (:58-:60) collapses with
+// it - named deviation.
+double getBlockMean(const std::uint8_t* data, std::int32_t w, std::int32_t h,
+                    std::int32_t stride, std::int32_t xO, std::int32_t yO,
+                    std::int32_t blockSize);
+
+// 1:1 port of get_noise_var (noise_model.c:66-102, the GET_NOISE_VAR macro's
+// lowbd instantiation): the population variance of the per-pixel residual
+// (data - denoised) over the block_size_x x block_size_y region at (x_o,
+// y_o), clamped to the picture bounds; var = E[n^2] - E[n]^2 with the
+// CLAMPED area as divisor. The highbd instantiation (:92) is PARKED (8-bit
+// discipline) and the use_highbd dispatcher branch (:97-:101) collapses
+// with it - named deviation.
+double getNoiseVar(const std::uint8_t* data, const std::uint8_t* denoised,
+                   std::int32_t stride, std::int32_t w, std::int32_t h,
+                   std::int32_t xO, std::int32_t yO,
+                   std::int32_t blockSizeX, std::int32_t blockSizeY);
+
+// kLowPolyNumParams (noise_util.h:19): the low-order planar model
+// <[y x 1], [a1 a2 a3]> = b used by the flat-block finder.
+constexpr std::int32_t kLowPolyNumParams = 3;
+
+// AomFlatBlockFinder (noise_model.h:120-127): precomputed design matrix A
+// (block_size^2 rows of [yd, xd, 1]) and its normal-equation inverse
+// at_a_inv = inv(A^T A). The reference mallocs A/at_a_inv; the port holds
+// std::vector members (named deviation - allocation cannot fail).
+struct AomFlatBlockFinder {
+    std::vector<double> atAInv;
+    std::vector<double> a;
+    std::int32_t numParams = 0;
+    std::int32_t blockSize = 0;
+    double normalization = 0;
+    std::int32_t useHighbd = 0;
+};
+
+// 1:1 port of svt_aom_flat_block_finder_init (noise_model.c:399-454):
+// builds A with rows [((y - bs/2.)/(bs/2.)), ((x - bs/2.)/(bs/2.)), 1],
+// accumulates M = A^T A into an equation system, then obtains
+// at_a_inv = inv(M) via kLowPolyNumParams solves against unit vectors.
+// The reference's malloc-failure branch (:410-:416) is dead here - named
+// deviation. Returns 1 on success.
+int32_t flatBlockFinderInit(AomFlatBlockFinder* blockFinder, int32_t blockSize,
+                            int32_t bitDepth, int32_t useHighbd);
+
+// 1:1 port of svt_aom_flat_block_finder_free (noise_model.c:456-463):
+// releases storage and zeroes the struct (a vector reset here).
+void flatBlockFinderFree(AomFlatBlockFinder* blockFinder);
+
+// 1:1 port of svt_aom_flat_block_finder_extract_block_c (noise_model.c:
+// 465-:508). Extracts the block_size^2 block at (offsx, offsy) - each
+// sample clamped into the picture bounds - normalized by
+// 1 / (2^bit_depth - 1), fits the kLowPolyNumParams planar model through
+// A / at_a_inv, writes the fitted plane into plane[] and leaves
+// block[] = normalized data - plane (the residual). The use_highbd branch
+// (:477-:485) is PARKED with the highbd macro family - named deviation.
+// The reference keeps this function extern ("_c" suffix, called through a
+// dispatch pointer); the port exposes it directly (the AN8 detector
+// pattern).
+void flatBlockFinderExtractBlock(const AomFlatBlockFinder* blockFinder,
+                                 const std::uint8_t* data, std::int32_t w,
+                                 std::int32_t h, std::int32_t stride,
+                                 std::int32_t offsx, std::int32_t offsy,
+                                 double* plane, double* block);
+
+// 1:1 port of svt_aom_flat_block_finder_run (noise_model.c:520-:634).
+// Per block: extract the plane residual, accumulate the gradient covariance
+// (g_xx, g_xy, g_yy) and the interior mean/variance over the
+// (block_size-2)^2 interior, then the features trace/det/e1/e2, norm = e1,
+// ratio = e1 / max(e2, 1e-6); is_flat = trace < 0.15/1024 && ratio < 1.25
+// && norm < 0.08/1024 && var > 0.005/n; the sigmoid score with weights
+// {-6682, -0.2056, 13087, -12434, 2.5694} ([var, ratio, trace, norm,
+// offset]) is recorded only when var > 0.005/n, else 0. flat_blocks[i] =
+// is_flat ? 255 : 0, then the scores are sorted ASCENDING by compare_scores
+// and every block with score >= scores[num_blocks * 90 / 100].score gets
+// flat_blocks[index] |= 1 (the top-10th-percentile union; a zero-score
+// field therefore marks every block - the reference's own behavior, pinned
+// by a fixture). Returns num_flat. The reference's malloc-failure branch
+// (:539-:545) and the NOISE_MODEL_LOG_SCORE debug blocks (:547-:549,
+// :605-:607, :611-:617) are dead/absent here - named deviations; the
+// mallocs become vectors.
+int32_t flatBlockFinderRun(const AomFlatBlockFinder* blockFinder,
+                           const std::uint8_t* data, std::int32_t w,
+                           std::int32_t h, std::int32_t stride,
+                           std::uint8_t* flatBlocks);
+
+// AomNoiseStatus (noise_model.h:191-198): the noise_model_update result.
+enum class AomNoiseStatus : std::int32_t {
+    Ok = 0,
+    InvalidArgument = 1,
+    InsufficientFlatBlocks = 2,
+    DifferentNoiseType = 3,
+    InternalError = 4,
+    InsufficientNoisePixels = 5,
+};
+
+// AomNoiseModel (noise_model.h:181-188): the per-channel combined + latest
+// noise states plus the AR coordinate offsets. The reference's
+// int32_t (*)[2] malloc'd coords become a vector of (x, y) pairs (named
+// deviation); bit_depth is threaded verbatim.
+struct AomNoiseModel {
+    AomNoiseModelParams params;
+    AomNoiseState combinedState[3];
+    AomNoiseState latestState[3];
+    std::vector<std::array<std::int32_t, 2>> coords;
+    std::int32_t n = 0;
+    std::int32_t bitDepth = 0;
+};
+
+// 1:1 port of svt_aom_noise_model_init (noise_model.c:636-:697). k_max_lag
+// = 4 (:27); the lag gates return 0. After zeroing the model it stores the
+// params, runs noiseStateInit (AN16) for all three channels with
+// n + (c > 0) columns (combined AND latest), sets model->n and builds
+// coords: the walk y in [-lag, 0] (max_x = (y == 0) ? -1 : lag), x in
+// [-lag, max_x]; DIAMOND keeps |x| <= y + lag, SQUARE keeps everything.
+// The coords malloc-failure branch (:667-:671) is dead here - named
+// deviation. Returns 1 on success.
+int32_t noiseModelInit(AomNoiseModel* model, const AomNoiseModelParams params);
+
+// 1:1 port of svt_aom_noise_model_free (noise_model.c:699-:714): releases
+// the coords and every per-channel equation system, then zeroes the model
+// (vector resets here - allocation cannot fail).
+void noiseModelFree(AomNoiseModel* model);
+
+// 1:1 port of the EXTRACT_AR_ROW macro's lowbd instantiation
+// (noise_model.c:719-:756). Extracts the neighborhood defined by coords
+// around (x, y) from the difference between data and denoised into
+// buffer[0..num_coords), returns val = data[y*stride + x] -
+// denoised[y*stride + x], and - when BOTH alt_data and alt_denoised are
+// non-null - averages (alt_data - alt_denoised) over the (1 <<
+// sub_log2[0]) x (1 << sub_log2[1]) block at luma coordinates
+// ((x << sub_log2[0]), (y << sub_log2[1])) into buffer[num_coords]. The
+// highbd instantiation (:757) is PARKED with the other uint16 macro
+// families - named deviation.
+double extractArRow(const std::array<std::int32_t, 2>* coords,
+                    std::int32_t numCoords,
+                    const std::uint8_t* data, const std::uint8_t* denoised,
+                    std::int32_t stride, const std::int32_t* subLog2,
+                    const std::uint8_t* altData, const std::uint8_t* altDenoised,
+                    std::int32_t altStride, std::int32_t x, std::int32_t y,
+                    double* buffer);
+
+// 1:1 port of svt_av1_add_block_observations_internal_c (noise_model.c:
+// 759-:803). One observation: buffer_norm[i] = buffer[i] * recp_sqr_norm,
+// b[i] += buffer_norm[i] * val, and A[i][j] += buffer_norm[i] * buffer[j]
+// over the n x n normal equations. The reference unrolls both loops by 8
+// before the tails; the port keeps the same accumulation order (the
+// unroll contributes no reassociation of the adds - each element is an
+// independent +=).
+void addBlockObservationsInternal(std::uint32_t n, const double val,
+                                  const double recpSqrNorm, const double* buffer,
+                                  double* bufferNorm, double* b, double* a);
+
+// 1:1 port of add_block_observations (noise_model.c:805-:890, static
+// there; exposed for the tests - the AN8 detector pattern). For every flat
+// block: y_start/x_start drop to 0 when the left/upper neighbour block is
+// also flat (else lag), y_end = min((h >> sub[1]) - by*(block >> sub[1]),
+// block >> sub[1]) and x_end = min((w >> sub[0]) - bx*(block >> sub[0]) -
+// lag, flat-right ? (block >> sub[0]) : (block >> sub[0]) - lag) - the
+// :845-:849 flat-right-neighbour branch - and each (x, y) in the window
+// contributes extractArRow + addBlockObservationsInternal against the
+// LATEST state of channel c. num_observations accumulates
+// max(y_end - y_start, 0) * max(x_end - x_start, 0). The
+// EB_MALLOC_ALIGNED scratch buffers become vectors (named deviation; the
+// failure branches :823-:826/:830-:834 are dead). The
+// params.use_highbd ternary (:852-:876) is PARKED with the highbd macro
+// family - the port always takes the lowbd path. Returns 1.
+int32_t addBlockObservations(AomNoiseModel* noiseModel, int32_t c,
+                             const std::uint8_t* data, const std::uint8_t* denoised,
+                             int32_t w, int32_t h, int32_t stride,
+                             const std::int32_t* subLog2,
+                             const std::uint8_t* altData, const std::uint8_t* altDenoised,
+                             int32_t altStride, const std::uint8_t* flatBlocks,
+                             int32_t blockSize, int32_t numBlocksW, int32_t numBlocksH);
+
+// 1:1 port of add_noise_std_observations (noise_model.c:892-:956, static
+// there; exposed for the tests - the AN8 detector pattern). For every flat
+// block with more than block_size samples (num_samples_w * num_samples_h >
+// block_size): block_mean = getBlockMean over the alt (luma) plane when
+// present, else the data plane, at (x_o << sub[0], y_o << sub[1]) with the
+// FULL block_size; noise_var = getNoiseVar over the (block >> sub) region
+// of the (w >> sub, h >> sub) plane; luma_strength = (c > 0) ?
+// latest_state[0].ar_gain * noiseStrengthSolverGetValue(luma_solver,
+// block_mean) : 0; corr = (c > 0) ? coeffs[num_coords] : 0;
+// uncorr_std = sqrt(max(noise_var / 16, noise_var - (corr * luma_strength)^2));
+// adjusted = uncorr_std / latest_state[c].ar_gain; one
+// noiseStrengthSolverAddMeasurement(solver, block_mean, adjusted). The
+// use_highbd arguments to the two helpers are PARKED with the highbd macro
+// family (the lowbd paths are taken) - named deviation.
+void addNoiseStdObservations(AomNoiseModel* noiseModel, int32_t c, const double* coeffs,
+                             const std::uint8_t* data, const std::uint8_t* denoised,
+                             int32_t w, int32_t h, int32_t stride, const std::int32_t* subLog2,
+                             const std::uint8_t* altData, int32_t altStride,
+                             const std::uint8_t* flatBlocks, int32_t blockSize,
+                             int32_t numBlocksW, int32_t numBlocksH);
+
+// 1:1 port of ar_equation_system_solve (noise_model.c:958-:996, static
+// there; exposed for the tests - the AN8 detector pattern). Solves the
+// state's equation system (equationSystemSolve); on failure ar_gain is
+// reset to 1 and 0 is returned. On success: var = mean over the first
+// (n - is_chroma) diagonals of A[i][i] / num_observations; sum_covar
+// sums (bi * x[i]) / num_observations where the chroma case removes the
+// correlated part, bi -= A[i][n-1] * x[n-1]; noise_var = max(var -
+// sum_covar, 1e-6); ar_gain = max(1, sqrt(max(var / noise_var, 1e-6))).
+int32_t arEquationSystemSolve(AomNoiseState* state, int32_t isChroma);
+
+// 1:1 port of noise_model_update (noise_model.c:1019-:1145, static there;
+// exposed for the tests - the AN8 detector pattern). Gates: block_size
+// <= 1 or block_size < lag*2 + 1 -> InvalidArgument. Clears the three
+// latest equation systems / observation counts / strength solvers, then
+// requires MORE than one flat block (else InsufficientFlatBlocks). Per
+// channel 0..2 (breaking out when a plane pointer is null): sub = the
+// chroma_sub_log2 for c > 0 else {0, 0}, alt = the luma plane for c > 0;
+// addBlockObservations -> arEquationSystemSolve (chroma failure falls back
+// via setChromaCoefficientFallbackSoln, luma failure returns
+// InsufficientNoisePixels) -> addNoiseStdObservations with coeffs =
+// latest eqns.x -> noiseStrengthSolverSolve (failure: InternalError);
+// then the combined state is OVERWRITTEN from the latest (num_observations,
+// equation_system_copy, ar solve with the same fallback split,
+// noise_strength_solver_copy, strength solve). Returns Ok.
+AomNoiseStatus noiseModelUpdate(AomNoiseModel* noiseModel,
+                                const std::uint8_t* const data[3],
+                                const std::uint8_t* const denoised[3],
+                                std::int32_t w, std::int32_t h,
+                                const std::int32_t* stride,
+                                const std::int32_t* chromaSubLog2,
+                                const std::uint8_t* flatBlocks,
+                                std::int32_t blockSize);
+
+// 1:1 port of svt_aom_noise_model_save_latest (noise_model.c:1147-:1157):
+// per channel, copies the latest equation systems into the combined state
+// (AR eqns and strength-solver eqns), plus num_equations,
+// num_observations and ar_gain.
+void noiseModelSaveLatest(AomNoiseModel* noiseModel);
 
 }  // namespace analysis

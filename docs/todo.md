@@ -1174,6 +1174,239 @@ A0. SLICE-LEVEL STATE (the live register)
     content-1:1 - the FFT kernels emit no bitstream). Host only, no GPU
     twin (parked, named - the scout marked [G] possible).
 
+  - [x] AN13 LANDED (2026-11-03, PERRY): analysis::fft2d2, fft2d4, fft2d8,
+    fft2d16, fft2d32 + ifft2d2, ifft2d4, ifft2d8, ifft2d16, ifft2d32 in
+    src/l9_analysis/fft2d.cpp, composing the LANDED AN12 1D kernels - the
+    port never re-implements a 1D butterfly. Reference:
+    third_party/SVT-AV1/Source/Lib/Codec/fft.c (189 nb / 237 phys):
+    simple_transpose :15-21, unpack_2d_output :33-49 (the 10-line contract
+    comment :23-32), svt_aom_fft_2d_gen :51-64 (the fwd driver), the five
+    GEN_FFT instantiations :66-86 + five fwd entries :88-106,
+    svt_aom_ifft_2d_gen :108-171 (the inv driver - a REAL/IMAG
+    split-and-pack rearrangement, NOT a 5-pass mirror; the brief's
+    five-pass inverse reading was wrong and is corrected here), the five
+    GEN_IFFT instantiations :173-177 + five inv entries :179-237. The
+    fwd driver IS the five-pass composition: column tform (stride n),
+    simple_transpose, second-axis tform, simple_transpose, unpack.
+    NORMALIZATION FINDING: fft.c carries zero arithmetic divisions
+    (grep-verified: the only '/' hits are n/2 index halvings and comment
+    text); noise_util.c:96-102 noise_tx_inverse does ifft(...) THEN
+    data[i] /= n - the normalization lives at the CALLER, the port stays
+    1:1 unnormalized, and the 2D roundtrip ifft2d(fft2d(f)) = n*n*f is
+    pinned by fixtures at tolerance n*n*kEpsilon (the AN12 roundtrip
+    discipline inherited). THE UNPACK CONTRACT: output[2*(y*n+x)] =
+    Re F(y,x), output[2*(y*n+x)+1] = Im F(y,x) for ALL y but ONLY x in
+    0..n/2 - n*(n/2+1) complex values in a 2*n*n float buffer whose tail
+    is never written (noise_util.c:65 caller zeroes it). POISON DERIVATION
+    (fixture-relevant): the working passes (pass 1/3 write the full n*n
+    floats of output) clobber the first n*n floats, so the slots assertable
+    as never-written poison are exactly the unpack-unwritten pairs
+    (y,x) with 2*(y*n+x) >= n*n; at n=4 those are {22,23,30,31} (the
+    fixture first asserted {6,7,14,15} too and RED fired - corrected).
+    vec_size = 1 at every reference _c entry; fft_single == fft_multi at
+    vec_size 1 (fft.c:136-138 loop is empty) - both folded with named
+    notes. RED (captured): fwd - LNK2019 unresolved analysis::fft2d2
+    (skeleton test, no definitions); then two fixture defects the suite
+    caught (AN12 lesson): the unpack-tail poison set was over-broad
+    ({6,7,14,15} are pass-3-written) and the rank-1 expected vector
+    missed the y_extra mirror slot F(3,1)=4 at index 26. GREEN: 115
+    test cases / 6436 assertions, 0 failed, in tests/test_fft2d.cpp
+    (CMakeLists gains fft2d.cpp + the file): per N in {2,4,8,16,32} -
+    impulse all-ones (DC only, poison-checked tail), the n=4 rank-1
+    separability fixture (outer product -> F(1,1)=4 AND mirror F(3,1)=4),
+    the roundtrip n*n*f at every N. MUTATIONS (all captured, all
+    reverted, all against the FINAL fixture set): M1 swap the two
+    simpleTranspose calls -> 8 named fixtures fail; M2 drop the unpack
+    cross terms -> 8 + warning C4189 for the dead xExtra; M3 wrong
+    stride in the first tform pass (1 instead of n) -> 8; M4 normalize
+    in the wrong place (fwd driver, before the unpack) -> rank-1 +
+    poison checks. Every mutation caught by at least one named fixture;
+    none survives. MEASURED (2026-11-03): GATE unchanged 884,851 B,
+    421 lines, byte-identical, diff 0 (analysis-only code, no generator
+    input); coverage A11 fraction 0.1418 -> 0.1576 (+190 non-blank ref
+    lines, recount done by direct non-blank measurement 2026-11-03 - the
+    scout's 189 estimate is corrected: the fft.c 2D span :15-171 minus the
+    10 macro-instantiation lines :82-86/:173-177, PLUS the five inv entry
+    wrappers :179-237 (55 nb, the reference lists its six function-pointer
+    args over eleven lines each) = :15-65 45 + :66-81 12 + :87-106 15 +
+    :108-171 63 + :179-237 55 = 190; :82-86 and :173-177 stay NOT counted
+    per the AN12 ruling - our per-size names have no instantiation shell).
+
+  - [x] AN16 LANDED (2026-11-03, PERRY): the noise strength solver - the
+    WHOLE noise_model.c:104-397 block (267 nb, measured) ported into
+    src/l9_analysis/noise_model.cpp + the struct/enum surface in
+    analysis.h: equation_system_free/clear/copy/init/solve (:104-166),
+    noise_strength_solver_clear/copy (:168-178), num_coeffs (:181-190,
+    DIAMOND lag*(lag+1) / SQUARE (n*n)/2 with the reference's INTEGER
+    division), noise_state_init (:192-201, k_num_bins 20, ar_gain 1.0),
+    set_chroma_coefficient_fallback_soln (:203-212), the lut init/free
+    pair (:214-234), get_bin_index (:236-240), get_value (:242-248),
+    add_measurement (:250-265), solver_solve (:267-303), solver_init/
+    get_center (:305-322), update_piecewise_linear_residual (:327-351)
+    and fit_piecewise (:353-397). The linsolve DEPENDENCY (Scout B3):
+    mathutils.h:22-65 (43 nb, A13-classified) ported as the port's own
+    copy in the l9 TU, exposed in the analysis namespace for the tests
+    (named deviation - the reference keeps it static INLINE per-includer);
+    fclamp (definitions.h:696-698, 3 nb) private in the TU. STRUCTS: the
+    four POD carriers (AomEquationSystem/AomNoiseStrengthLut/
+    AomNoiseStrengthSolver/AomNoiseState, noise_model.h:30-35/:41-44/
+    :69-76/:166-174) with the malloc/free pointers as std::vector (named
+    deviation; allocation cannot fail so the init/free failure branches
+    are dead) - the solve()'s A-POINTER SWAP dance (:275-:299) becomes a
+    local vector copy + assign + restore, and fit's memmove becomes
+    vector::erase, both named. TOLERANCE: doubles throughout, harness
+    tolerance 1e-12 RELATIVE documented in the test header (the
+    AN12/AN13 discipline); every expected value is a hand-derived closed
+    form over the reference's own equations, never port output. THE
+    REGULARIZATION MATH (fixture-load-bearing): the k_alpha Laplacian has
+    row sums zero at EVERY row (boundary rows fold i_lo/i_hi onto the
+    diagonal), so CONSTANT strength curves are in its kernel and the
+    +1/8192 diagonal cancels against the +mean/8192 b term - T8 recovers
+    a constant 7.0 EXACTLY through the full solve. RED/TEST FINDINGS:
+    (1) T9's first design (symmetric two-endpoint, stds 2/4) is EXACTLY
+    k_alpha-INVARIANT - the closed-form derivative (1+e)[e(s0+s2) - 2t]/
+    det^2 with t = mean*e = (s0+s2)/2*e vanishes identically; MEASURED:
+    T9 PASSED under k_alpha 2.0 -> 3.0. Redone ASYMMETRIC (std 2 once at
+    bin 0, std 8 thrice at bin 2, d2 = 3, mean = 6.5; general Cramer form
+    x1 = (PSt + Pk(s2+t) + kS(s0+t))/det) - the mutation now fires.
+    (2) The survival condition is avg = r*(255/num_bins)/
+    (points[min+1][0] - points[min-1][0]) - the residual's dx (255/
+    num_bins, HARDCODED 255, NOT max_intensity) and the lut-span dx are
+    DIFFERENT factors; the brief's r-threshold estimates had to be
+    re-derived through both. (3) T17's first fixture carried a
+    hand-arithmetic defect (b = [7,5] for x = [3,1] under A = [[2,1],
+    [1,3]]; the correct b is [7,6]) - the suite caught it, the port was
+    right. (4) A tail-anchored edit adding clear/copy silently DELETED
+    updatePiecewiseLinearResidual + fitPiecewise (LNK2019 caught it;
+    restored verbatim). GREEN: 140 test cases / 7015 assertions,
+    0 failed, in tests/test_noise_strength.cpp. Named quirks pinned:
+    solve() restores A bit-for-bit but LEAVES the +mean/8192 b write in
+    place (the reference modifies solver->eqns.b outside the copied-A
+    protection - a second solve accumulates again; T18); the stale
+    residual entries beyond the recomputed window are kept and re-read
+    exactly as the reference leaves them (structure ported; T19 pins the
+    smallest-residual-first order and the windowed recompute). MUTATIONS
+    (14, all against the FINAL fixture set, all reverted, all killed by
+    named fixtures): kAlpha 2->3 -> T9; diag 1/8192 dropped -> T8b+T9;
+    b mean/8192 dropped -> T9; num_coeffs formulas swapped -> T4a/T4b;
+    get_value interp swap -> T7; fclamp dropped -> T6; add_measurement
+    b-weight swap -> T13; tol x2 -> T11b; tol /2 -> T11c; dx
+    255->max_intensity -> T12 (10-bit, the brief's named killer); largest-
+    first removal order -> T19; recompute-after-removal skipped -> T19;
+    singular guard disabled -> T2; pivoting disabled -> T3. MEASURED
+    (2026-11-03): GATE unchanged 884,851 B, 421 lines, byte-identical,
+    diff 0 (analysis-only code, no generator input); coverage A11
+    fraction 0.1576 -> 0.1798 (+267 nb = the whole span) and A13
+    0.05 -> 0.0586 (+46 nb: linsolve 43 + fclamp 3); total
+    14.5% -> 14.7% (23,248 / 157,718; the committed pre-AN16 state
+    already carried A8's DF1 +215, so the AN16-attributable delta is
+    +313). Host only, no GPU twin (parked, named - a 20-bin dense double
+    least-squares solve is a poor GPU fit and the AN12/AN13 GPU parking
+    covers the family).
+
+  - [x] AN17 LANDED (2026-11-04, PERRY): the flat-block finder + the noise
+    model init/update - the noise_model.c spans :27-:102 (the
+    GET_BLOCK_MEAN / GET_NOISE_VAR helper family, 69 nb), :399-:634 (the
+    finder, 218 nb) and :636-:1157 (the model, 460 nb) ported into
+    src/l9_analysis/noise_model.cpp + the struct surface in analysis.h.
+    FINDER: flatBlockFinderInit (:399-:454, A rows [yd, xd, 1] with
+    yd = (y - bs/2.)/(bs/2.), at_a_inv = inv(A^T A) via THREE
+    equation_system_solve calls against unit vectors - composing AN16's
+    solver, never re-implemented), flatBlockFinderFree (:456-:463),
+    flatBlockFinderExtractBlock (:465-:508, the kLowPolyNumParams = 3
+    specialized multiply_mat_1_n_3/_3_3_1/_n_3_1 path from
+    noise_model.h:322-:366, plane fit then block -= plane), the
+    IndexAndscore + compare_scores pair (:510-:518, file-local) and
+    flatBlockFinderRun (:520-:634: interior gradient covariance g_xx/g_xy/
+    g_yy + var over the (bs-2)^2 window, trace/det/e1/e2, norm = e1,
+    ratio = e1/max(e2, 1e-6), is_flat = trace < 0.15/1024 && ratio < 1.25
+    && norm < 0.08/1024 && var > 0.005/n, the sigmoid weights
+    {-6682, -0.2056, 13087, -12434, 2.5694}, score forced 0 when
+    var <= k_var, flat_blocks = is_flat ? 255 : 0, qsort ASCENDING and the
+    top-10th-percentile union flat_blocks[index] or-equals 1 for every
+    score >= scores[num*90/100].score). MODEL: noiseModelInit (:636-:697,
+    kMaxLag = 4 gates, three channels x combined+latest at n + (c > 0)
+    columns, the diamond/square coords walk), noiseModelFree (:699-:714),
+    extractArRow (the EXTRACT_AR_ROW lowbd instantiation :719-:756),
+    addBlockObservationsInternal (:759-:803, the unrolled-by-8
+    normal-equation accumulate, accumulation order preserved),
+    addBlockObservations (:805-:890, the y/x start-end walk: y_start/
+    x_start drop to 0 on a flat left/upper neighbour, x_end = min(w-side -
+    lag, flat-right ? block : block - lag) - the :845-:849 branch),
+    addNoiseStdObservations (:892-:956, the num_samples > block_size gate,
+    block_mean from the ALT luma plane at (x_o << sub, y_o << sub) with
+    the FULL block_size, noise_var over the (w >> sub, h >> sub) plane,
+    luma_strength = luma_gain * get_value(luma_solver, block_mean),
+    uncorr_std = sqrt(max(noise_var/16, noise_var - (corr*luma_strength)^2)),
+    adjusted = uncorr_std / ar_gain), arEquationSystemSolve (:958-:996,
+    var = mean diagonal/num_observations over n - is_chroma entries,
+    sum_covar with the chroma b correction bi -= A[i][n-1]*x[n-1],
+    noise_var = max(var - sum_covar, 1e-6), ar_gain = max(1,
+    sqrt(max(var/noise_var, 1e-6)))), noiseModelUpdate (:1019-:1145, the
+    block_size gates, the >1-flat-block gate, per-channel
+    add/solve/std/solve then the combined OVERWRITE from latest +
+    re-solve - the combined state is REPLACED each update, not
+    accumulated, ported as-is) and noiseModelSaveLatest (:1147-:1157).
+    DEVIATIONS (named): the EB_MALLOC_ALIGNED/malloc scratch becomes
+    std::vector and the allocation-failure branches are dead (:410-:416,
+    :539-:545, :667-:671, :823-:826, :830-:834); the NOISE_MODEL_LOG_SCORE
+    debug blocks (:547-:549, :605-:607, :611-:613, :615-:617) dropped; the
+    highbd instantiations of all three macro families (:54, :92, :757) and
+    the use_highbd dispatcher branches (:58-:60, :97-:100, :852-:876 = 25
+    nb) are PARKED (8-bit discipline, use_highbd threads through the
+    params but only the lowbd path exists); the coords malloc becomes
+    vector<array<int32_t,2>>; the structs stay in analysis.h; the :29-:36
+    pack2d extern declarations are NOT AN17's family (they resolve to
+    pic_operators.c and are unclaimed). THE QSORT QUESTION (Scout B3):
+    verified from the code - the union marks by score >= threshold where
+    the threshold is scores[top_nth].score, so every tie AT the boundary
+    is marked regardless of qsort's tie order; the map is tie-invariant,
+    pinned by T5c (three distinct + 17 identical zero scores, map
+    bit-for-bit). THE ZERO-SCORE EDGE (Scout B3's derivation, pinned):
+    var = 0 -> is_flat = 0 AND score = 0 -> threshold = 0 -> EVERY block
+    or-equals 1 (T5b; a single ramp block returns 1 with flat[0] == 1).
+    RED/TEST FINDINGS: (1) the g_xx == g_yy bitwise + g_xy == 0 fixtures
+    (the a=2 cross-checkerboard, the (2,2) cross) drive the reference's
+    OWN sqrt(trace*trace - 4*det) into the NaN domain through cancellation
+    rounding (det = fl(gxx*gxx) vs trace^2 = (2gxx)^2 round
+    independently; the sub-ulp difference goes negative) - is_flat reads
+    false and the score goes NaN; NOT pinned as a fixture (qsort on NaN
+    is implementation-defined) and avoided by construction: every flat
+    fixture keeps g_xy != 0 (T5d) or trace == 0 exactly (the checkerboards,
+    where sqrt(0 - 0) = 0 is exact). (2) THREE hand-derivation defects
+    caught by the suite, all test-side: the T4 fixture data (row [10,20,
+    20,20] instead of [0,0,10,20] - the clamped reads never touched the
+    intended pixels), T8's A[2][1] expectation (60, not 12) and T12's
+    normalization (A entries carry ONE factor 1/255^2 via buffer_norm, so
+    x = [0, 1] and ar_gain = sqrt(16.5/(65025*1e-6)) = 15.93, not the
+    /255^4 pair first derived). (3) The Edit tool fuzzy-matched a tail
+    anchor twice: once deleting updatePiecewiseLinearResidual +
+    noiseStrengthSolverFitPiecewise from noise_model.cpp (LNK2019 caught
+    it, restored verbatim) and once replacing T5b's flat[0] == 1 with
+    == 255 (the suite caught it) - tail anchors now carry unique
+    context. MUTATIONS (6, all run against the final fixture set, all
+    reverted, all killed by NAMED fixtures): sigmoid w0<->w2 swap ->
+    T5e (the marked set flips {Y,Z} -> {Z,X}: Y 1 -> 0); w0<->w1 and
+    w1<->w2 swaps -> T5c (every special-block score saturates to 0 or 1
+    and A gets marked - map differs); k_trace 0.15 -> 0.05 -> T5d block 0
+    (trace 1.26618e-4 > 4.8828e-5 -> flat[0] 255 -> 1); k_ratio 1.25 ->
+    2.5 -> T5d block 1 (ratio 1.55192 < 2.5 -> flat[1] 1 -> 255);
+    90th-percentile index 90 -> 80 -> T5c (threshold 0 marks all 20);
+    EXTRACT_AR_ROW coordinate order swap -> T7 (up != left residuals);
+    the :845-:849 flat-right branch removed -> T9 fixture 2 (98
+    observations -> 91). MEASURED (2026-11-04): ctest 11/11 passed,
+    0 failed, 266.52 s; GATE unchanged 884,851 B, byte-identical, diff 0
+    (analysis-only code, no generator input); coverage A11 fraction
+    0.1798 -> 0.2351 (2163 -> 2828, +665: 664 nb claimed of the 747
+    in-scope, the 83 parked lines itemized above) and the total
+    14.8% -> 15.2% (24,008 / 157,718); cite_check 500 citations, 489
+    resolved, 0 out-of-range (11 unresolved = the known external decoder
+    set); doc_audit PASS (exit 0; the 3 candidates it flags are dated
+    historical run records - 5ce0224's own GATE figure 884,953 B and the
+    AN4/CS-era percentages - correct for their own commits). Host only,
+    no GPU twin (parked, named - the finder is a per-block double
+    least-squares fit and the solver family is the AN16 parking).
+
   - [x] **A8-CAMPAIGN OPENED (2026-11-03, PERRY-A8/DF1): the deblocking
     kernel family is ported in src/l10_filters (l10_filters:: namespace,
     ctest target l10_filters - the suite went 10 -> 11 targets).** The
