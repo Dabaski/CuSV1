@@ -134,7 +134,10 @@ traversal at deeper SB trees; the filter-intra flag surface joined
 the chroma walk (RT7-b - the c4/c8 exit-69 root cause); the chroma
 chains run in the LUT-derived transform domain (`intraUvTxType`, the
 RT9 fix); the bottom-left edge extension is gathered (RT10b - the
-luma residual at c4/c8 eliminated).
+luma residual at c4/c8 eliminated); the chroma bottom-left got the
+same Z-order gate (CS7, `5ce0224`) and the chroma above-right its own
+(`pipeline::topRightPx`, RT21, `927e697`) - the color set is
+full-plane content 1:1 4/4.
 
 ## The color artifacts
 
@@ -148,8 +151,8 @@ recon):
 | --- | --- | --- | --- |
 | structural_keyframe_color32.obu | 165 B | lumaB = 64, UV tx 32 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
 | structural_keyframe_color16.obu | 133 B | lumaB = 32, UV tx 16 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
-| structural_keyframe_color8.obu | 139 B | lumaB = 16, UV tx 8 | luma 1:1 (0/4096); U 165/1024, V 205/1024 - divergent |
-| structural_keyframe_color4.obu | 201 B | lumaB = 8, UV tx 4 | luma 1:1 (0/4096); U 244/1024, V 287/1024 - divergent |
+| structural_keyframe_color8.obu | 137 B | lumaB = 16, UV tx 8 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 (chroma closed at CS7, `5ce0224`) |
+| structural_keyframe_color4.obu | 183 B | lumaB = 8, UV tx 4 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 (closed at RT21, `927e697`) |
 
 **Deriving the geometry column (do not re-type these numbers).** The
 `lumaB` / `UV tx` pair is not a free annotation - it is fixed by three
@@ -178,20 +181,20 @@ frame header 42 bits); the per-plane decode results and the conformance
 matrix live in `docs/decode_conformance.md`; the coefficient-semantics
 audit deltas in `docs/cs5c_deltas.md`.
 
-## Named follow-ups (open)
+## The follow-up ledger
 
-- The filter-intra DC-deciding fixture: the FI branch is
-  predicate-gated but never fires in the committed fixtures (the
-  fs232 fixture decided mode 1; the grid decided 10 5 3 7 - no DC
-  block).
-- FS5d: the 64x64 dual-domain unification - the emission case runs
-  the vendored compacted token domain while the legacy/GPU callers
-  keep the 4096 facade (the GPU quant_dequant_64x64 is a 4096-position
-  kernel); for the fs264 fixture the two domains' recon coincide (the
-  outer-ring coefficients quantize to 0 at q100).
-- The chroma bottom-left edge (RT-series): the c8/c4 U/V planes still
-  diverge - needs its own measurement slice before any fix; the
-  dav1d U/V edge availability comes from a SEPARATE
-  dav1d_prepare_intra_edges call handed LUMA coordinates
-  (recon_tmpl.c:1455-1478), so the flags are not even the same
-  variables (decode_conformance.md, "Next open item").
+- LANDED (FI1): the filter-intra DC-deciding fixture now exists - the
+  8x8 4x4-grid fixture at q100 (test_pipeline.cpp:5507) decides
+  FI_D157_PRED on one block and the walk emits the FI=1 flag + mode,
+  the l7 reader round-tripping content-exact; the production D2
+  policy is unchanged (FI stays parked as a candidate - the
+  decision-override lives only in the test walk).
+- FS5d (open): the 64x64 dual-domain unification - the emission case
+  runs the vendored compacted token domain while the legacy/GPU
+  callers keep the 4096 facade (the GPU quant_dequant_64x64 is a
+  4096-position kernel); for the fs264 fixture the two domains' recon
+  coincide (the outer-ring coefficients quantize to 0 at q100).
+- CLOSED (CS7 `5ce0224` + RT21 `927e697`): the chroma bottom-left /
+  above-right edge extension - the c8/c4 U/V residuals are gone, the
+  color set is full-plane content 1:1 4/4
+  (docs/decode_conformance.md).

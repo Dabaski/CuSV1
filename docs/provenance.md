@@ -1,12 +1,16 @@
 # PV - function-by-function provenance table
 
 Every port artifact in `src/l3_transforms`, `src/l4_intra`,
-`src/l5_motion`, `src/l6_pipeline`, `src/l7_entropy` and
-`src/l8_bitstream` (plus the l2 runtime and fixture classification
-below) traced to the pinned vendored reference (`third_party/SVT-AV1/`,
-REFERENCE PINNING rule in `AGENTS.md`). l0_core/l1_pixels are
+`src/l5_motion`, `src/l6_pipeline`, `src/l7_entropy`,
+`src/l8_bitstream`, `src/l9_analysis` and `src/l10_filters` (plus the
+l2 runtime and fixture classification below) traced to the pinned
+vendored reference (`third_party/SVT-AV1/`, REFERENCE PINNING rule in
+`AGENTS.md`). l0_core/l1_pixels are
 infrastructure with no SVT symbol to trace (single policy row in the
-classification section). Status vocabulary:
+classification section). The l9/l10 families' span-by-span anchors
+(file:line per function) live in the A8/A11/A13/A14 rows of
+`tools/coverage_areas.txt`; the tables below carry the family-level
+record. Status vocabulary:
 
 - **exact (mech)** - the SVT body was ported mechanically from the committed
   verbatim extract (`svt_gen.c`) with identifier/table renames only; the
@@ -160,7 +164,35 @@ port (tests in test_transform.cpp).
 | write_frame_header_av1 (:3843-3920), encode_sps_av1 (:3925-3948) | `assembleStructuralKeyframeTU`/`assembleStructuralKeyframeTUv2` | adapted | phase-1 measure / phase-2 uleb rewrite (SPS); TG header 0 bytes + tile copy with no per-tile prefix at tile_cnt == 1; v1 dst zeroed first (spec byte_alignment zeros - named); SPS byte-identical between v1/v2 (gate-HALTed if it moves) |
 | D1 mono patch spans (entropy_coding.c:2689, :2706-2710, :2385-2386) | generator-side only (composition.c) | policy | court-ratified monochrome still-picture writer: is_monochrome const 0 -> 1, commented spec mono branch live, U/V quantization delta writes skipped (the num_planes guard the pinned writer lacks) - see deviations, item 5. CS3 UN-PATCHED it for color (the mono producers stay pinned for the mono artifact set, gate lines diff-0) |
 | the color header v3 (CS3) | the SPS v3 color config + frame-header v3 in the color packer path | adapted | the D1 un-patch as the spec-faithful non-mono walks: mono bit 0, no early return, csp UNKNOWN 2 bits, separate_uv_delta_q 0 (color section 4 -> 7 bits); frame header 40 -> 42 bits (the U/V delta_q 1 bit each at 0; NO diff_uv_delta bit - the vendored writer emits it only at 1, :2379-2381); gate lines sps_obu_v3/frame_obu_v3/tu_bytes_v3 |
-| - | the committed artifact set `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` (the grayscale five: d4 30B, d8 30B, d16 44B, d32 47B v2, d64 441B; the color four: color4 201B, color8 139B, color16 133B, color32 165B) | policy | produced from the generator output (never hand-typed); three-way identity composed TU == file == gate bytes per artifact; the grayscale set decoder-accepted AND content-1:1 per geometry (FS5c, verify_decode4.ps1 -Geometry N); the color set 2/4 full-plane (color32/color16 all three planes 1:1; color4/color8 luma 1:1, chroma divergent - the decode_conformance.md matrix); v1 bytes remain gated (tu_bytes) |
+| - | the committed artifact set `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` (the grayscale five: d4 30B, d8 30B, d16 44B, d32 47B v2, d64 441B; the color four: color4 183B, color8 137B, color16 133B, color32 165B) | policy | produced from the generator output (never hand-typed); three-way identity composed TU == file == gate bytes per artifact; the grayscale set decoder-accepted AND content-1:1 per geometry (FS5c, verify_decode4.ps1 -Geometry N); the color set full-plane content 1:1 4/4 (color16/color32 from CS5, color8 at CS7 `5ce0224`, color4 at RT21 `927e697` - the decode_conformance.md matrix); v1 bytes remain gated (tu_bytes) |
+
+## l9_analysis (src/l9_analysis) - the AN-series
+
+Host-only content analysis, 1:1 with the pinned analysis C; no GPU
+twin (parked, named). Span-by-span anchors in the A11/A13/A14 rows of
+`tools/coverage_areas.txt`; the family-level record:
+
+| SVT source | Port family | Status | Notes |
+| --- | --- | --- | --- |
+| pic_analysis_process.c | mean/variance family: `mean8x8`, `meanSquare8x8`, `subMean8x8`, `subMeanSquareValues`, `intermVarFour8x8`, `b64Variance`, `variance16x16`/`variance8x8` | exact (hand) | svt_compute_mean_c :194-214, svt_compute_mean_squared_values_c :220-240, the sub-mean pair :242-284, svt_compute_interm_var_four8x8_c :286-313 (COMPOSES the pair - four side-by-side 8x8s along one row origin, not quadrants), compute_b64_variance :318-442 (every fold per array; the Full branch ported alongside the live Sub); the VAR macro instances from C_DEFAULT/variance.c |
+| pic_analysis_process.c | sampling/stats: `calculateHistogram`, `downsample2d`, the pad family (`padInputPicture`, `padInputPicture16bit`, `padInputPictures`), `downsampleFilteringInputPicture` | exact (hand) | calculate_histogram :170-188 (file-local, no header twin), svt_aom_downsample_2d_c :134-164 (declaration twin motion_estimation.h:33-35, A3-charged), the pad spans :648-:866 + :1549-1615, the HME driver :1498-1547 |
+| pic_analysis_process.c | detectors: `countColorsWithThreshold`, `isValidPaletteNbColors`, `findDominantValue`, `dilateBlock`, `getSbyPerpixelVariance16x16/8x8`, `scAaCollectCounts`, `isScreenContentAaAware`, `isScreenContent`, `isInputLumaDominant` | exact (hand) | the AN8 spans :911-1429 (the AA-aware form :1207-1350, the plain form :1354-1429) and AN9 :1440-1493 with its FRAME_LUMA_DOMINANT_* defines; the detectors consume NONE of the mean/variance primitives (checked against the reference's actual inputs) |
+| fft_common.h + fft.c | `fft1d2..fft1d32` / `ifft1d2..ifft1d32` (the GEN_FFT/GEN_IFFT macro bodies, :113-414/:416-823) + the 2D drivers `fft2dN`/`ifft2dN` (fft.c:51/:108) | exact (hand) | float, the macros' own scalar instantiation (T_VEC = float); the fft.c entry-instantiation lines are not ported (our names are direct); the 2D inverse is the REAL/IMAG split-and-pack rearrangement, NOT a five-pass mirror; the fft->ifft roundtrip uses n * 1e-4 tolerance (test-header documented) |
+| noise_util.c | the noise-tx family: `noisePsdGetDefaultValue`, `noiseTxMalloc`, `noiseTxForward`, `noiseTxFilterC`, `noiseTxInverse`, `noiseTxFree` + the OD_DIVU table | exact (hand) | :20-:111 (87 nb) - the spectral filter k_beta = 1.1f, the 1/n normalization lives in noise_tx_inverse (the composed forward->inverse is identity); the OD_DIVU table :113-:370 (258 nb) is transcription - the paired-metric caveat applies, stated; diff-verified + sentinel rows in test_noise_util.cpp |
+| noise_model.c | the noise strength solver (:104-397), the flat-block finder (:399-634) + the model init/update (:636-1157): `noiseStrengthSolver*`, `flatBlockFinderInit/Free/ExtractBlock/Run`, `getBlockMean`/`getNoiseVar`, `noiseModelInit/Free/Update/SaveLatest`, `extractArRow`, `addBlockObservations(Internal)`, `addNoiseStdObservations`, `arEquationSystemSolve` | exact (hand) | AN16/AN17; named deviations: malloc-failure branches, the NOISE_MODEL_LOG_SCORE debug blocks and the use_highbd ternary parked (8-bit discipline); AomNoiseStatus -> enum class with the reference's own ordinals; the linsolve + fclamp dependencies counted under A13 |
+
+## l10_filters (src/l10_filters) - the DF/CDEF families
+
+Host-only post-filter kernel families; coverage-only (nothing is
+wired into an encode loop, the filter enable bits stay 0). Span
+anchors in the A8 row of `tools/coverage_areas.txt`; the family-level
+record:
+
+| SVT source | Port family | Status | Notes |
+| --- | --- | --- | --- |
+| deblocking_common.c | the mask/flat/hev gates (`filterMask2/filterMask/filterMask3Chroma/flatMask3Chroma/flatMask4/hevMask`), `filter4/6/8`, the `lpfHorizontal/Vertical 4/6/8` entry points, `updateSharpness` | exact (hand) | DF1 (:152-:589); blimit/limit/thresh flattened from the SIMD_WIDTH element-[0] reads to scalars; hev_thr excluded (set by the loop_filter_frame_init wall); highbd_* parked |
+| deblocking_common.c | the 14-tap family: `filter14`, `mbLpfHorizontalEdgeW`, `lpfHorizontal14`, `mbLpfVerticalEdgeW`, `lpfVertical14` | exact (hand) | DF2 (:786-:889); flat2 = the OUTER flatness vs p0/q0; the h/v count pins (count=1 step=4 / count=4) mutation-verified; the else chain stacks filter14 -> filter8 -> filter4 from the DF1 primitives |
+| cdef.c + cdef_copy.h | `cdefFindDir` (+ dual/list + the 8-bit twins), `cdefFilterBlock` (16-bit) / `cdefFilterBlock8bit` / `cdefFilterBlock8bitBounded`, `cdefPriStrength`/`cdefSecStrength`, the fb/lbd driver chain (`cdefFilterFb`, `cdefFilterFbLbdImpl`, the luma/chroma wrappers, `cdefFilterFbLbd`), the copy helpers (`cdefCopyRect8To16`, `cdefCopyRect8`, `cdefCopyRect16`, `cdefCopySb8To16`) | exact (hand) | CDEF1 (find_dir + filter kernel family, 367 nb) + CDEF2 (the fb/lbd drivers + copy helpers, 377 nb); the direction table is the padded +2-offset form; the 16-bit kernel is the SPEC, the 8-bit twins their own 1:1 bodies with the derivation pinned BY TESTS; the strength derivation factored out for testability (cdefSign precedent); fill_rect and the enc_cdef mse/search parked (CDEF3), corner_match/corner_detect orphaned |
 
 ## GPU runtime (l2_gpurt), infrastructure, and fixtures
 

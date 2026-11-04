@@ -15,9 +15,9 @@
 # only place the figure exists.
 generated  : 2026-11-04
 reference  : third_party/SVT-AV1 pinned snapshot, CHANGELOG 4.2.0
-areas file : 29476 B, sha256:FC5690B9F701C1FF
+areas file : 31037 B, sha256:82A001B42DECB0A4
 surface    : 254 files, 157718 non-blank lines
-coverage   : 15.7%  (24,752 covered, 157,718 denominator)
+coverage   : 15.9%  (25,097 covered, 157,718 denominator)
 
 A1    Transform/TX                                    9   27008      33%     8913
 A2    Intra prediction                                4    3478      90%     3130
@@ -29,7 +29,7 @@ A7    Bitstream + OBU + headers                       5    1436      40%      57
 A8    Post-filters (deblock/CDEF/restoration/grain)     27   10600      10%     1054
 A9    Rate control                                   17    5951       0%        0
 A10   Picture management + threading                 30    9662       0%        0
-A11   Content analysis + temporal filtering          16   12028      24%     2828
+A11   Content analysis + temporal filtering          16   12028      26%     3173
 A12   Palette + segmentation + misc                   8    1612       0%        0
 A13   Utility + platform + core headers              24    5357       6%      314
 A14   C_DEFAULT portable reference kernels           15    1466      32%      463

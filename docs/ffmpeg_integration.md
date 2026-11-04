@@ -21,10 +21,10 @@
   `encodeFrameChromaQ`, plus the uv_mode / uv angle-delta entropy
   surfaces), DOES have an entropy coder (the od_ec writer and reader, the
   full intra token chain with neighbour-derived contexts), and DOES emit
-  a bitstream (nine committed `.obu` artifacts; seven decode
-  content-1:1 on every plane - the five grayscale plus color16 and
-  color32 - while color4 and color8 decode with the luma plane 1:1
-  and their U/V planes divergent; see `docs/decode_conformance.md` for
+  a bitstream (nine committed `.obu` artifacts; ALL NINE decode
+  content-1:1 on every plane - the five grayscale plus the four
+  color artifacts, the color chase closed at CS7 `5ce0224` and
+  RT21 `927e697`; see `docs/decode_conformance.md` for
   the authoritative matrix).
   What is still missing is inter/motion compensation, the partition
   tree beyond a fixed uniform grid, rate control, the in-loop filters,
@@ -221,10 +221,16 @@ error-free; a `SKIP:` note on GPU-less machines.
 
 ## Risks & open questions
 
-1. **Encoder-core completion is the critical path.** There is no quantizer,
-   chroma, inter, entropy coder, or OBU writer today. "A month around the clock"
-   realistically buys the core, not the FFmpeg layer - the wiring here is the
-   *last* ~2 weeks.
+1. **Encoder-core completion is still the critical path.** The
+   quantizer, the chroma walk, the entropy coder and the OBU writer
+   exist (nine committed `.obu` artifacts, all content-1:1); what
+   remains of the core is inter/motion compensation, the partition
+   tree beyond a fixed uniform grid, rate control, the in-loop filter
+   wiring (the DF/CDEF kernel families landed in `src/l10_filters`
+   but are not applied in an encode loop), and multi-frame
+   sequencing. "A month around the clock" realistically buys the
+   core, not the FFmpeg layer - the wiring here is the *last* ~2
+   weeks.
 2. **Context ownership.** `gpurt` creates its own `CUcontext`; it must adopt
    FFmpeg's. This touches every kernel path and is the most likely source of
    subtle breakage.

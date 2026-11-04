@@ -19,6 +19,8 @@ l5_motion       SAD                       (host; GPU at 4x4/8x8)
 l6_pipeline     composition + decision    (host + GPU frame paths)
 l7_entropy      entropy coder + symbols   (host, gate-exact)
 l8_bitstream    raw-bit writer + OBU      (host, gate-exact)
+l9_analysis     content analysis           (host; AN-series, coverage)
+l10_filters     deblocking + CDEF kernels  (host; DF/CDEF, not wired)
                          |
              tools/golden_gen (the gate)
              tools/bench (perf)
@@ -211,11 +213,60 @@ SVT's packer structure. The committed artifacts
 `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` - five
 grayscale (d4 30B, d8 30B, d16 44B, d32 47B, d64 441B; the d32 v2
 lossy TU is the structural-keyframe milestone artifact) + four color
-(color4 201B, color8 139B, color16 133B, color32 165B) - prove composed
+(color4 183B, color8 137B, color16 133B, color32 165B) - prove composed
 TU == committed file == gate bytes; the grayscale set is
 decoder-accepted AND content-1:1 per geometry
-(tools/verify_decode4.ps1 -Geometry N), the color set 2/4 full-plane
-per the conformance matrix (docs/decode_conformance.md).
+(tools/verify_decode4.ps1 -Geometry N), the color set full-plane
+content 1:1 4/4 (color16/color32 from CS5, color8 at the CS7 fix, the
+color4 last-43-V-bytes gap at RT21) per the conformance matrix
+(docs/decode_conformance.md).
+
+## l9_analysis - content analysis (AN-series)
+
+Host-only primitives 1:1 with SVT's analysis C
+(`pic_analysis_process.c`, `noise_model.c`, `noise_util.c`,
+`fft_common.h`/`fft.c`, `firstpass.c`); no GPU twin (parked, named).
+They feed future RDO decisions; nothing in the encoder consumes them
+yet. The families:
+
+- Mean/variance: `mean8x8`, `meanSquare8x8`, the sub-mean pair
+  (`subMean8x8`, `subMeanSquareValues`), `intermVarFour8x8` (composes
+  the pair - four side-by-side 8x8 blocks, not quadrants),
+  `b64Variance` (the RDO-input capstone: the 8x8/16x16/32x32/64x64
+  pyramid, every fold per array), `variance16x16`/`variance8x8`.
+- Sampling/stats: `calculateHistogram` (the 256-bin pixel histogram),
+  `downsample2d` (the 2x2 0-phase decimation, generic over
+  decim_step), the pad family, the HME downsampling driver
+  (`downsampleFilteringInputPicture`).
+- Detectors: the screen-content pair (`isScreenContent`,
+  `isScreenContentAaAware` + the count/palette/dominant/dilate
+  helpers) and `isInputLumaDominant`.
+- FFT + noise model (the first float surface): the verbatim
+  `fft1d2..fft1d32` / `ifft1d2..ifft1d32` macro bodies, the 2D
+  drivers (`fft2dN`/`ifft2dN`, N = 2..32), the noise-tx family
+  (the spectral filter whose inverse carries the 1/n normalization),
+  the OD_DIVU division table, the noise strength solver, the
+  flat-block finder and the noise-model init/update.
+
+## l10_filters - post-filter kernels (DF/CDEF)
+
+The deblocking and CDEF kernel families, 1:1 with the pinned
+`deblocking_common.c` and `cdef.c`/`cdef_copy.h`, host only.
+Coverage-only: nothing here is wired into an encode loop yet (the
+filter enable bits in the bitstream stay literal 0), so these slices
+move no conformance count - see the paired-metric caveat in
+`AGENTS.md`.
+
+- Deblocking (DF1/DF2): the mask/flat/hev gates, `filter4/6/8`, the
+  `lpfHorizontal/Vertical 4/6/8` entry points, `updateSharpness`, and
+  the 14-tap long-filter family (`filter14` + the mb-level edge
+  walkers).
+- CDEF (CDEF1/CDEF2): `cdefFindDir` (the direction-cost kernel, the
+  div_table bucket weighting), the 16-bit and 8-bit pri/sec-tap
+  filter kernels plus the frame-edge bounded variant, the fb/lbd
+  driver chain (`cdefFilterFb`, `cdefFilterFbLbd*`) and the copy
+  helpers. The 16-bit kernel is the spec; the 8-bit twins are their
+  own 1:1 bodies with the derivation relationship pinned by tests.
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 
@@ -271,11 +322,12 @@ hand-traces:
 
 ## Test suite map
 
-Nine doctest targets (l0_core, l1_pixels, l2_gpurt, l3_transforms,
-l4_intra, l5_motion, l7_entropy, l6_pipeline, l8_bitstream), each with
+Eleven doctest targets (l0_core, l1_pixels, l2_gpurt, l3_transforms,
+l4_intra, l5_motion, l7_entropy, l6_pipeline, l8_bitstream,
+l9_analysis, l10_filters), each with
 a "test runner boots" guard plus real test files. GPU-required tests
 skip with a `SKIP:`-prefixed message when no CUDA device is present.
-`ctest --test-dir build` runs all nine.
+`ctest --test-dir build` runs all eleven.
 
 ## Where the deep detail lives
 

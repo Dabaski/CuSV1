@@ -203,19 +203,24 @@ walk. The color artifact set: structural_keyframe_color{4,8,16,32}.obu
   produces decoded by an independent reference decoder.
 - color16 (133 B): FULL-PLANE content 1:1 (Y 4096/4096, U 1024/1024,
   V 1024/1024).
-- color4 (201 B) / color8 (139 B): DECODE (the exit-69 parse desyncs
-  were fixed by the RT-series: RT6 the tree-order leaf emission -
-  the flat walk had emitted the interior partition SPLIT symbols in
-  raster order, diverging from decode_partition's hierarchical
-  traversal - and RT7-b the filter-intra flag surface in the chroma
-  walk). The LUMA plane is content 1:1 at both (0/4096 byte diffs;
-  the RT10b bottom-left edge extension eliminated the luma residual);
-  the U/V planes still diverge (c8 U 165/1024, V 205/1024; c4 U
-  244/1024, V 287/1024) - the chroma bottom-left edge is the named
-  next measurement slice; OPEN.
+- color8 (137 B): FULL-PLANE content 1:1 (Y 4096/4096, U 1024/1024,
+  V 1024/1024). The exit-69 parse desyncs were fixed by the
+  RT-series: RT6 the tree-order leaf emission - the flat walk had
+  emitted the interior partition SPLIT symbols in raster order,
+  diverging from decode_partition's hierarchical traversal - and
+  RT7-b the filter-intra flag surface in the chroma walk; the luma
+  residual fell to the RT10b bottom-left edge extension; the chroma
+  U/V closed at the CS7 fix (`5ce0224`, the chroma bottom-left
+  Z-order gate).
+- color4 (183 B): FULL-PLANE content 1:1 - Y and U closed at CS7, and
+  the last chroma divergence (V 43/1024, first at 647, across UV
+  leaves 41/42/48/56) closed at RT21 (`927e697`), the chroma
+  above-right Z-order gate: leaf 41's owner block walks one step
+  later, so the gather read zeros, and the regen moved exactly those
+  43 bytes, all to 255.
 
 The honest per-plane matrix is in `docs/decode_conformance.md` (full
-plane 2/4). The self-consistency lesson fired its fourth entry: the
+plane 4/4, CLOSED). The self-consistency lesson fired its fourth entry: the
 CS4 walk's
 partition/skip omission was shared by BOTH sides of every internal
 check (the l6 mirror and the generator drives) - every internal

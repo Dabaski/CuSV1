@@ -99,25 +99,41 @@ each three-way-identity-tested and decoded with the per-plane
 instrument (`tools/verify_decode4.ps1 -Color <4|8|16|32>`, yuv420p
 compared plane-by-plane):
 
-- color32 (165 B) and color16 (133 B): FULL-PLANE content 1:1 (all
-  three planes equal the generator's recon).
-- color8 (139 B) and color4 (201 B): the luma plane is content 1:1
-  (0/4096; the RT10b bottom-left edge extension eliminated the luma
-  residual) but the U/V planes diverge (c8 U 165/1024 V 205/1024;
-  c4 U 244/1024 V 287/1024).
+- color32 (165 B), color16 (133 B), color8 (137 B) and color4
+  (183 B): FULL-PLANE content 1:1 (all three planes equal the
+  generator's recon). color16/color32 from CS5; color8 joined at the
+  CS7 fix (`5ce0224`, the chroma bottom-left Z-order gate); color4 at
+  RT21 (`927e697`, the chroma above-right Z-order gate - its last 43
+  divergent V bytes of 1024, across UV leaves 41/42/48/56).
 
-Full-plane color conformance is 2/4 - the honest per-plane matrix and
-the chase record are in `docs/decode_conformance.md`.
+Full-plane color conformance is 4/4, CLOSED - the honest per-plane
+matrix and the full chase record are in `docs/decode_conformance.md`.
 
-## 8. The open item: the chroma bottom-left edge
+## 8. The resolved chase: the chroma edge extension (CS7 + RT21)
 
-The c8/c4 chroma residuals need their own MEASUREMENT slice (the
-chroma analogue of RT10 step 2) before any fix. A confirmed luma
-mechanism implies nothing about them: the chroma chains run
-`buildIntraPredictorsUv` (a different builder with its own edge setup
-and n_bottomleft call sites), and dav1d's U/V edge availability comes
-from a SEPARATE `dav1d_prepare_intra_edges` call handed LUMA
-coordinates (recon_tmpl.c:1455-1478) - the flags are not even the
-same variables. `enable_intra_edge_filter = 1` is already correct in
-the v3 header and confirmed set decoder-side - the FOOTPRINT is the
-suspect, never the flag.
+The c8/c4 chroma residuals were resolved in two slices; the full
+record (the per-plane matrix, the divergence maps, the RT21 regen
+analysis) is in `docs/decode_conformance.md`. The pre-fix state: the
+luma plane was content 1:1 after the RT10b bottom-left edge
+extension, while c8 carried U 165/1024 and V 205/1024 and c4 U
+244/1024 and V 287/1024. The investigation note below stays true and
+is why the chroma got its own measurement slice before any fix: the
+chroma chains run `buildIntraPredictorsUv` (a different builder with
+its own edge setup and n_bottomleft call sites), and dav1d's U/V edge
+availability comes from a SEPARATE `dav1d_prepare_intra_edges` call
+handed LUMA coordinates (recon_tmpl.c:1455-1478) - the flags are not
+even the same variables.
+
+- CS7 (`5ce0224`): the chroma bottom-left gather became Z-order gated
+  (`pipeline::bottomLeftPx` - the below-left leaf counts as available
+  exactly when its Z position precedes the block's). c8 went exact on
+  all three planes and c4's U followed.
+- RT21 (`927e697`): the chroma above-right gather got the same
+  Z-order gate (`pipeline::topRightPx`). c4's remaining V 43/1024
+  closed: leaf 41's owner block walks one step later (zpos 36 vs 35),
+  so the gather had read zeros from the zero-initialised cabove[65];
+  the regen moved exactly those 43 bytes, all to 255.
+
+`enable_intra_edge_filter = 1` was already correct in the v3 header
+and confirmed set decoder-side - the FOOTPRINT was the suspect, never
+the flag, and that is where both fixes landed.
