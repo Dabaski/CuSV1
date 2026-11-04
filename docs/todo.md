@@ -1741,6 +1741,59 @@ A0. SLICE-LEVEL STATE (the live register)
 |    :875-:897, finish_cdef_search :897-:1017 (the struct-walled driver
 |    chain); corner_match.c/
 |    corner_detect.c (global-motion machinery, ORPHANED per Scout CDEF).
+|  - [x] **A8/LR2 (2026-11-04, PERRY-LR2, ff-merged at 7cca15c): the
+|    selfguided restoration family lands** in src/l10_filters/restoration.
+|    {h,cpp} + tests/test_restoration.cpp. Spans of restoration.c
+|    :632-:962, 306 nb MEASURED by the writer span-by-span (the judge
+|    re-ran coverage.ps1 in the worktree and spot-checked every cited
+|    restoration.h constant line - 11/11 match): the fast internal
+|    :632-:764 (125 nb; estimation rows stepped by 2, row-parity *6/*5
+|    kernels, assert(r == 2) at the filter stage), the slow internal
+|    :766-:884 (111 nb; row stride 1, the 3x3 *4/*3 kernel, nb = 5),
+|    svt_av1_selfguided_restoration_c :886-:922 (34 nb; dgd32 staging +
+|    the r[0]/r[1] skip pair) and svt_apply_selfguided_restoration_c
+|    :924-:962 (36 nb; decodeXq composition + u/v accumulation + clip).
+|    300 claimed (6 named-parked: the highbd staging loop :894-:898 = 5,
+|    the :956 CONVERT_TO_SHORTPTR write = 1). The SGR constant set added
+|    to our restoration.h (SGRPROJ_BORDER_HORZ/VERT :41-:42,
+|    SGRPROJ_PRJ_BITS :94, SGRPROJ_RST_BITS :96, SGRPROJ_SGR_BITS/:SGR
+|    :98-:99, MAX_RADIUS :110, SGRPROJ_MTABLE_BITS :112,
+|    SGRPROJ_RECIP_BITS :113, RESTORATION_PROC_UNIT_PELS :76-:78,
+|    RESTORATION_UNITPELS_MAX :84). RED: five compile-error slices + two
+|    fixture-calibration REDs, both MEASURED findings, not code bugs:
+|    (1) full-range LCG inputs drive z >= 255 everywhere, so A[k] = 256,
+|    B[k] = 0 and BOTH kernels collapse to dst = 16*dgd - the fast/slow
+|    pair is indistinguishable there, fixture moved to mid-variance;
+|    (2) a BRIGHT outlier does not fire w < 0 (the filter preserves it),
+|    the clip-low fixture moved to a DARK outlier. 13 new TEST_CASEs
+|    (binary 162 cases / 3,142 assertions): three-estimator-regime
+|    clamped-box oracles (saturated / mid / flat with hand-derived
+|    fast 1602 / slow 1600), the r==0 skip sentinels, both clip bounds
+|    with calibration CHECKs, eps-10 never-reads-skip. Mutations M1-M9:
+|    M1 (even-row *6/*5 swap), M2 (odd-row (k-1) drop), M3 (RECIP shift
+|    12->11), M4 (min(z,255) -> always-255, killed by the flat fixture
+|    1602 -> 1600), M5 (inverted a*n < b*b guard), M6 (oneByX[n-1] ->
+|    [n-2]) each killed by named fixtures; M7 (fast stride i+=2 -> i+=1)
+|    SURVIVES BY CONSTRUCTION and is proven dead code, sharpened to
+|    i+=3 (killed by 7); M9 measured COMPOUND with M8 still applied
+|    (procedural slip, disclosed: 10 fail, 3 slow-specific beyond M8's
+|    7). Writer's tree run: full suite 11/11 (269.14 s), GATE
+|    byte-identical 884,851 B diff 0. Judge post-merge re-measure on
+|    master: full suite 11/11 (260.65 s), GATE byte-identical
+|    884,851 B diff 0. A8 fraction 0.1524 -> 0.1807 (1,615 -> 1,915 of
+|    10,600), total 25,658 -> 25,958 (16.5%). Coverage-only slice: moves
+|    no conformance count, enable_restoration stays literal 0. Named
+|    deviations: the four reference statics exported (LR1 precedent);
+|    highbd branches assert-parked with CONVERT_TO_SHORTPTR parked;
+|    AOMMIN -> std::min(z, 255u); ROUND_POWER_OF_TWO via file-local
+|    roundPowerOfTwoU32/roundPowerOfTwoI32 (definitions.h:457 shape);
+|    clip_pixel_highbd via clipPixelHighbd (definitions.h:704-:714
+|    switch shape); bit_depth kept symbolic, nothing hardcoded to 8;
+|    REFACTOR: decodeXq's literal (1 << 7) -> (1 << sgrprojPrjBits),
+|    green-before/after.
+|    PARKED (named): sgrproj_filter_stripe :964+ and the stripe
+|    machinery, sgrproj/wiener stripe + highbd :987-:1035, the :1040+
+|    filter_unit/frame walkers, the :1124+ tile walkers.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
