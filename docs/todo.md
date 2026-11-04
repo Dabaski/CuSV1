@@ -310,7 +310,7 @@ A0. SLICE-LEVEL STATE (the live register)
   1024-position GPU quant kernel + bench protocol.
 - [~] PENDING: Luna's full audit of the FS/TD state at series close.
 - [~] STATE REFRESH (2026-11-04, second pass, after CDEF2 + AN14 merged
-  to master at fb98d59):
+  to master at 8795371):
   everything done so far, so the next slice does not have to infer it
   from the per-entry history. LANDED on master: the l0-l8 layers
   (transforms/quant, intra, motion scaffolding, entropy+od_ec, bitstream
@@ -322,8 +322,8 @@ A0. SLICE-LEVEL STATE (the live register)
   family + OD_DIVU table, the noise strength solver, the flat-block
   finder + noise model init/update) and the A8 campaign DF1+DF2+CDEF1+
   CDEF2 (the deblocking kernel family + the CDEF find_dir/filter/
-  fb-lbd/copy family, all in src/l10_filters; CDEF1 came via 2c82dc1/
-  b0a4d54/8889f36, CDEF2 via ec89686, AN14 via a2f4aa9/fb98d59).
+  fb-lbd/copy family, all in src/l10_filters; CDEF1 came via 416dfa1/
+  5b8ed9b/e136487, CDEF2 via 80b95cb, AN14 via fccaa4e/8795371).
   MEASURED NOW (2026-11-04, this tree, by the instruments): ctest 11/11
   passed, 0 failed, 277.83 s; GATE byte-identical 884,851 B, 421 lines,
   diff 0; portable-C coverage 15.9% (25,097 / 157,718); cite_check 506
@@ -340,9 +340,14 @@ A0. SLICE-LEVEL STATE (the live register)
   tables ready). IN FLIGHT (this session): CDEF3 and LR1 as two
   parallel swarm writers, each in its own worktree off this commit per
   the AUTOSWARM.md scale-up pattern. Worktree hygiene: av1_a8 (a8-
-  kernels at ec89686) and av1_an14 (an14-noiseutil at a2f4aa9) are both
-  ancestors of master now - their content is fully landed; the worktrees
-  are stale checkouts, not open work.
+  kernels at 80b95cb) and av1_an14 (an14-noiseutil at fccaa4e) are both
+  ancestors of master now - their content is fully landed; RE-MEASURED
+  later the same day: neither worktree is a stale checkout any more,
+  both hold IN-FLIGHT uncommitted work (av1_a8: modified
+  src/l10_filters/cdef.{h,cpp} + CMakeLists.txt, the CDEF3 writer;
+  av1_an14: untracked src/l10_filters/restoration.{h,cpp}, the LR1
+  writer) - do not remove these worktrees or reset their working
+  trees; the hash-cited branch tips predate that work.
 - [x] **AN-SERIES decomposition (AN0 scout, accepted by the judge
   2026-11-01; this section is its DURABLE HOME - the scout's report lived
   only in %TEMP%, which the evidence contract does not count).** 22
