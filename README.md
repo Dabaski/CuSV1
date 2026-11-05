@@ -75,8 +75,10 @@ JIT-compiled at runtime via NVRTC.
   AN1-AN17 in `l9_analysis` (the mean/variance family, the
   screen-content + luma-dominant detectors, the pad family, the
   float FFT kernels, the noise model) and the post-filter kernel
-  families DF1/DF2 + CDEF1/CDEF2 in `l10_filters` (deblocking, the
-  CDEF find-dir/filter/fb family) - coverage-only slices that move
+  families in `l10_filters` - deblocking DF1/DF2, the CDEF
+  find-dir/filter/fb/mse-search family (CDEF1-CDEF3), and the
+  restoration math core + selfguided family (LR1/LR2) - coverage-only
+  slices that move
   no conformance count: nothing is wired into an encode loop yet
   (the filter enable bits stay 0) and analysis feeds no decision.
 - All layers green: 11 doctest targets pass, and the golden gate
@@ -220,14 +222,19 @@ the chroma/color pipeline: `docs/color.md`; decoder-acceptance status:
   solver + the flat-block finder + the noise-model init/update
   (AN1-AN17).
 - **l10_filters** - post-filter kernel families, 1:1 with the pinned
-  `deblocking_common.c` and `cdef.c`/`cdef_copy.h`, host only: the
-  8-bit deblocking family (DF1/DF2 - the mask/flat/hev gates,
-  `filter4/6/8`, the `lpf` 4/6/8 entries, `updateSharpness`, and the
-  14-tap long-filter family) and the CDEF family (CDEF1/CDEF2 -
-  `cdefFindDir` + the pri/sec-tap filter kernels in 16-bit and 8-bit
-  form, the fb/lbd driver chain, the copy helpers). Coverage-only:
-  no bitstream surface, the filter enable bits stay 0, no conformance
-  count moves.
+  `deblocking_common.c`, `cdef.c`/`cdef_copy.h`/`enc_cdef.c` and
+  `restoration.c`, host only: the 8-bit deblocking family (DF1/DF2 -
+  the mask/flat/hev gates, `filter4/6/8`, the `lpf` 4/6/8 entries,
+  `updateSharpness`, and the 14-tap long-filter family), the CDEF
+  family (CDEF1-CDEF3 - `cdefFindDir` + the pri/sec-tap filter kernels
+  in 16-bit and 8-bit form, the fb/lbd driver chain, the copy
+  helpers, and the enc_cdef mse/search block: the four mse kernels,
+  the dist bodies, `cdef_apply_fb`, the dual strength searches), and
+  the restoration family (LR1/LR2 - `sgrParams`, the boxsum
+  family, `extendFrame`, `copyTile`, `decodeXq` with the
+  xByXplus1/oneByX tables, and the selfguided restoration
+  internals). Coverage-only: no bitstream surface, the filter enable
+  bits stay 0, no conformance count moves.
 
 ## Repository layout
 
@@ -253,8 +260,9 @@ src/
                   screen-content + luma-dominant detectors, pad family,
                   FFT, noise model; host only)
   l10_filters/    post-filter kernel families: deblocking (DF1/DF2) +
-                  CDEF (find_dir/filter/fb/copy), coverage-only, not
-                  wired into the encode loop
+                  CDEF (find_dir/filter/fb/copy + enc_cdef mse/search)
+                  + restoration (boxsum/selfguided math), coverage-only,
+                  not wired into the encode loop
 tools/
   golden_gen/     SVT golden-vector generator (mechanical verbatim
                   extraction from third_party/SVT-AV1, committed)

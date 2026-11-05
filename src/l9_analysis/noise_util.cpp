@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // AN14: noise_util - 1:1 port of third_party/SVT-AV1/Source/Lib/Codec/
 // noise_util.c:20-121 + the OD_DIVU constant table (:113-:370). The struct
 // is NoiseTx (noise_util.h:24-30) and the fft/ifft pointers resolve to the

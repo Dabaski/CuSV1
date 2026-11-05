@@ -20,7 +20,7 @@ l6_pipeline     composition + decision    (host + GPU frame paths)
 l7_entropy      entropy coder + symbols   (host, gate-exact)
 l8_bitstream    raw-bit writer + OBU      (host, gate-exact)
 l9_analysis     content analysis           (host; AN-series, coverage)
-l10_filters     deblocking + CDEF kernels  (host; DF/CDEF, not wired)
+l10_filters     deblock/CDEF/restoration   (host; DF/CDEF/LR, not wired)
                          |
              tools/golden_gen (the gate)
              tools/bench (perf)
@@ -250,8 +250,9 @@ yet. The families:
 
 ## l10_filters - post-filter kernels (DF/CDEF)
 
-The deblocking and CDEF kernel families, 1:1 with the pinned
-`deblocking_common.c` and `cdef.c`/`cdef_copy.h`, host only.
+The deblocking, CDEF and restoration kernel families, 1:1 with the
+pinned `deblocking_common.c`, `cdef.c`/`cdef_copy.h`/`enc_cdef.c` and
+`restoration.c`, host only.
 Coverage-only: nothing here is wired into an encode loop yet (the
 filter enable bits in the bitstream stay literal 0), so these slices
 move no conformance count - see the paired-metric caveat in
@@ -261,12 +262,22 @@ move no conformance count - see the paired-metric caveat in
   `lpfHorizontal/Vertical 4/6/8` entry points, `updateSharpness`, and
   the 14-tap long-filter family (`filter14` + the mb-level edge
   walkers).
-- CDEF (CDEF1/CDEF2): `cdefFindDir` (the direction-cost kernel, the
+- CDEF (CDEF1-CDEF3): `cdefFindDir` (the direction-cost kernel, the
   div_table bucket weighting), the 16-bit and 8-bit pri/sec-tap
   filter kernels plus the frame-edge bounded variant, the fb/lbd
   driver chain (`cdefFilterFb`, `cdefFilterFbLbd*`) and the copy
-  helpers. The 16-bit kernel is the spec; the 8-bit twins are their
-  own 1:1 bodies with the derivation relationship pinned by tests.
+  helpers, then the enc_cdef mse/search block (the four mse kernels,
+  the dist bodies, `cdefApplyFb`'s halo/copy walk,
+  `cdefSearchOneDual`/`cdefJointStrengthSearchDual`). The 16-bit
+  kernel is the spec; the 8-bit twins are their own 1:1 bodies with
+  the derivation relationship pinned by tests.
+- Restoration (LR1/LR2): `sgrParams`, `extendFrame`/`copyTile` (the
+  lowbd forms; highbd assert-parked), the `boxsum` family (edge
+  handling is TRUNCATION - a 2D box sum clamped at the array bounds),
+  `decodeXq` and the `xByXplus1`/`oneByX` tables, and the
+  selfguided restoration internals (fast/slow + the apply
+  composition). The stripe machinery, wiener, and the sgrproj/wiener
+  stripe walkers stay parked.
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 

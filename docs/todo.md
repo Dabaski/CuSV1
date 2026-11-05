@@ -1,4 +1,4 @@
-﻿# Production-Readiness Roadmap - av1_gpu_pascal
+# Production-Readiness Roadmap - av1_gpu_pascal
 
 NOTE: this file was recreated 2026-09-23 (FS6) after the original untracked
 copy was deleted in error, then RESTORED THE SAME DAY by the court from its

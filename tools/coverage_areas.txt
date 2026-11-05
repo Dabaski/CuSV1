@@ -1,4 +1,4 @@
-﻿# coverage_areas.txt - the auditable area classification for the portable-C
+# coverage_areas.txt - the auditable area classification for the portable-C
 # coverage metric (AGENTS.md "Completion metric").
 #
 # WHY THIS FILE IS DATA AND NOT CODE: the metric has two halves and they must

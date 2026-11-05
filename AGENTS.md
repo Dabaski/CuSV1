@@ -814,9 +814,42 @@ are partly right and I re-measured rather than restated them:
   twins are their own 1:1 bodies and the derivation relationship is pinned
   BY TESTS (8-bit == 16-bit widened; bounded == 16-bit-with-sentinels at
   exactly the off-frame taps, both corners). Integer-only (no float in the
-  family). PARKED: cdef_filter_fb + the CDEF_8BITS_PATH fb/lbd drivers
-  (:322-:778 remainder - CDEF2), svt_aom_copy_rect8 (cdef_copy.h - CDEF2),
-  enc_cdef mse/search (CDEF3). Mutations: the whole-pair dir+2/dir-2 swap
+  family). LANDED AFTER CDEF1 (2026-11-04): CDEF2, the fb/lbd driver
+  chain + the copy helpers (svt_cdef_filter_fb :322-:402,
+  cdef_filter_fb_lbd_impl :542-:638, the luma/chroma wrappers
+  :640-:704, the svt_cdef_filter_fb_lbd dispatch :706-:778, and
+  cdef_copy.h svt_cdef_copy_rect8 :28-:74 + svt_aom_copy_rect :79-:85
+  + svt_aom_copy_sb8_16 :96-:105 - 377 nb; the strength derivation
+  factored out as cdefPriStrength/cdefSecStrength, cdefSign
+  precedent), and CDEF3, the enc_cdef mse/search block (the four
+  mse_8xn/4xn 16bit/8bit kernels, svt_aom_compute_cdef_dist_16bit/
+  _8bit, cdef_apply_fb :200-:298, svt_search_one_dual_c :714-:772 +
+  joint_strength_search_dual :787-:818, and cdef_copy.h
+  svt_aom_fill_rect :88-:94 - 318 nb; the struct-walled driver chain
+  svt_sb_compute_cdef_list / svt_av1_cdef_frame / svt_pick_cdef_from_
+  qp / propagate_cdef_strength / finish_cdef_search stays parked, and
+  corner_match.c/corner_detect.c stay orphaned). RESTORATION (LR1 +
+  LR2, src/l10_filters/restoration.{h,cpp}, the A8 restoration.c
+  spans): LR1 the math core, 243 nb - sgr_params :31-:49,
+  extend_frame_lowbd :110-:126 + the svt_extend_frame entry :150-:157,
+  copy_tile_lowbd :159-:164 + the dispatcher :173-:180, the
+  boxsum1/boxsum2/boxsum family :430-:594 (edge handling is
+  TRUNCATION - a 2D box sum clamped at the array bounds, pinned by an
+  independent clamped-box oracle), svt_decode_xq :597-:608 (the
+  params-aware form, NOT the brief's spec-style constants) and the
+  x_by_xplus1/one_by_x tables (0-mismatch formula oracles over ALL
+  entries); LR2 the selfguided restoration family, 306 nb - the fast
+  internal :632-:764 (estimation rows stepped by 2, *6/*5 kernels),
+  the slow internal :766-:884 (stride 1, the 3x3 *4/*3 kernel),
+  svt_av1_selfguided_restoration_c :886-:922 and
+  svt_apply_selfguided_restoration_c :924-:962 (6 named-parked: the
+  highbd staging loop and the CONVERT_TO_SHORTPTR write). highbd
+  branches assert-parked (8-bit discipline); enable_restoration stays
+  0, so CDEF2/CDEF3/LR1/LR2 are all COVERAGE-ONLY. Parked still: the
+  stripe machinery (setup/restore_processing_stripe_boundary,
+  get_stripe_boundary_info), wiener_filter_stripe, sgrproj/wiener
+  stripe + highbd, the :1040+ filter_unit/frame walkers and the tile
+  walkers/boundary-line savers. Mutations: the whole-pair dir+2/dir-2 swap
   SURVIVES BY CONSTRUCTION (read multiset invariant) - sharpened to the
   minimal observable s0-only swap, killed by the asymmetric sec fixture;
   div_table[1]<->[2] killed by a weighting fixture derived with an
