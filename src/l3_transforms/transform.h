@@ -97,11 +97,26 @@ void idct16(const std::int32_t input[16], std::int32_t output[16]);
 // consumed at stages 3/5/7; no all-zero early-out at 16
 void iadst16(const std::int32_t input[16], std::int32_t output[16]);
 
+// TX2: the full TxType list, verbatim order of definitions.h:1031-1047 (the
+// landed four are the first four; the enum values are the reference's, so
+// vtx_tab/htx_tab and the ext-tx tables index correctly)
 enum class TxType {
     DCT_DCT,
     ADST_DCT,
     DCT_ADST,
     ADST_ADST,
+    FLIPADST_DCT,
+    DCT_FLIPADST,
+    FLIPADST_FLIPADST,
+    ADST_FLIPADST,
+    FLIPADST_ADST,
+    IDTX,
+    V_DCT,
+    H_DCT,
+    V_ADST,
+    H_ADST,
+    V_FLIPADST,
+    H_FLIPADST,
 };
 
 // The square-up transform size class, i.e. the range of txsize_sqr_up_map
@@ -185,6 +200,36 @@ struct Txfm2dFlipCfg {
     int stageNumCol;
     int stageNumRow;
 };
+
+// TX2: svt_av1_fidentity4_c (transforms.c:2318-2325): round_shift(in*5793,12)
+void fwdIdentity4(const std::int32_t input[4], std::int32_t output[4], int cosBit);
+
+// TX2: svt_av1_fidentity8_c (transforms.c:2327-2333): in*2
+void fwdIdentity8(const std::int32_t input[8], std::int32_t output[8], int cosBit);
+
+// TX2: svt_av1_fidentity16_c (transforms.c:2335-2342): round_shift(in*2*5793,12)
+void fwdIdentity16(const std::int32_t input[16], std::int32_t output[16], int cosBit);
+
+// TX2: svt_av1_fidentity32_c (transforms.c:2344-2350): in*4
+void fwdIdentity32(const std::int32_t input[32], std::int32_t output[32], int cosBit);
+
+// TX2: av1_fidentity64_c (transforms.c:2352-2359): round_shift(in*4*5793,12)
+void fwdIdentity64(const std::int32_t input[64], std::int32_t output[64], int cosBit);
+
+// TX2: svt_av1_iidentity4_c (inv_transforms.c:2346-2355): round_shift(5793*in,12)
+void invIdentity4(const std::int32_t input[4], std::int32_t output[4], int cosBit);
+
+// TX2: svt_av1_iidentity8_c (inv_transforms.c:2357-2363): in*2
+void invIdentity8(const std::int32_t input[8], std::int32_t output[8], int cosBit);
+
+// TX2: svt_av1_iidentity16_c (inv_transforms.c:2365-2372): round_shift(5793*2*in,12)
+void invIdentity16(const std::int32_t input[16], std::int32_t output[16], int cosBit);
+
+// TX2: svt_av1_iidentity32_c (inv_transforms.c:2374-2380): in*4
+void invIdentity32(const std::int32_t input[32], std::int32_t output[32], int cosBit);
+
+// TX2: av1_iidentity64_c (inv_transforms.c:2382-2389): round_shift(5793*4*in,12)
+void invIdentity64(const std::int32_t input[64], std::int32_t output[64], int cosBit);
 
 // TX1: svt_aom_transform_config (transforms.c:2494-2510)
 void fwdTransformConfig(TxType type, TxSize size, Txfm2dFlipCfg& cfg);

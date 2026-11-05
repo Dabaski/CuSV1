@@ -143,6 +143,309 @@ TEST_CASE("fwd cfg identity at the four larger squares (landed driver constants)
     CHECK(cfg.txfmTypeRow == transforms::TxfmTypeLs::DCT64);
 }
 
+TEST_CASE("TX2 DCT_FLIPADST inv reads the DCT_ADST recon columns reversed") {
+    // the lr_flip read loop (inv_transforms.c:2554-2563): temp_in[r] =
+    // buf[r][w-1-c] - with ud_flip = 0 the write is normal, so the column-c
+    // output of DCT_FLIPADST is the column-(w-1-c) output of DCT_ADST (same
+    // row pass: both htx entries map the ADST kernel, same buf).
+    const int w = 4;
+    const int h = 4;
+    std::int32_t coeffs[w * h];
+    for (int i = 0; i < w * h; ++i) {
+        coeffs[i] = (i * 17) % 37 - 18;
+    }
+    std::uint8_t dstFlip[w * h] = {0};
+    std::uint8_t dstRef[w * h] = {0};
+    transforms::invTxfm2dAdd4x4(coeffs, dstFlip, w, transforms::TxType::DCT_FLIPADST);
+    transforms::invTxfm2dAdd4x4(coeffs, dstRef, w, transforms::TxType::DCT_ADST);
+    int bad = 0;
+    int firstBad = -1;
+    for (int r = 0; r < h; ++r) {
+        for (int c = 0; c < w; ++c) {
+            if (dstFlip[r * w + c] != dstRef[r * w + (w - 1 - c)]) {
+                if (firstBad < 0) firstBad = r * w + c;
+                ++bad;
+            }
+        }
+    }
+    CHECK_MESSAGE(bad == 0, "DCT_FLIPADST inv vs cols-reversed DCT_ADST inv: " << bad << " cells, first at " << firstBad);
+}
+
+TEST_CASE("TX2 FLIPADST_DCT inv writes the ADST_DCT recon rows reversed") {
+    // the ud_flip write loop (inv_transforms.c:2567-2577): output_w[r] gets
+    // temp_out[h-1-r] - with lr_flip = 0 the whole upstream (row pass, col
+    // pass inputs) is identical to ADST_DCT (FLIPADST_1D maps the ADST
+    // kernel), so the recon rows come out reversed. Both dsts start at 0.
+    const int w = 4;
+    const int h = 4;
+    std::int32_t coeffs[w * h];
+    for (int i = 0; i < w * h; ++i) {
+        coeffs[i] = (i * 13) % 41 - 20;
+    }
+    std::uint8_t dstFlip[w * h] = {0};
+    std::uint8_t dstRef[w * h] = {0};
+    transforms::invTxfm2dAdd4x4(coeffs, dstFlip, w, transforms::TxType::FLIPADST_DCT);
+    transforms::invTxfm2dAdd4x4(coeffs, dstRef, w, transforms::TxType::ADST_DCT);
+    int bad = 0;
+    int firstBad = -1;
+    for (int r = 0; r < h; ++r) {
+        for (int c = 0; c < w; ++c) {
+            if (dstFlip[r * w + c] != dstRef[(h - 1 - r) * w + c]) {
+                if (firstBad < 0) firstBad = r * w + c;
+                ++bad;
+            }
+        }
+    }
+    CHECK_MESSAGE(bad == 0, "FLIPADST_DCT inv vs rows-reversed ADST_DCT inv: " << bad << " cells, first at " << firstBad);
+}
+
+TEST_CASE("TX2 DCT_FLIPADST fwd = row-ADST of the column-flipped intermediate") {
+    // the lr_flip write loop (transforms.c:2443-2452): buf[r][w-1-c] =
+    // temp_out[r] - the intermediate is written with its columns flipped, so
+    // DCT_FLIPADST(x) = row-ADST of fliplr(DCT_DCT-intermediate(x)) (the row
+    // pass kernel is FLIPADST_1D = the ADST kernel, inv_transforms.h:69). At
+    // 4x4 the shifts are {2,0,0}: shift[1] and shift[2] are no-ops, so the
+    // intermediate IS the DCT_DCT output and the oracle needs no shifts.
+    const int w = 4;
+    const int h = 4;
+    std::int16_t src[w * h];
+    for (int r = 0; r < h; ++r) {
+        for (int c = 0; c < w; ++c) {
+            src[r * w + c] = static_cast<std::int16_t>(r * 11 + c * 7 + 1);
+        }
+    }
+    std::int32_t inter[w * h] = {0};
+    for (int c = 0; c < w; ++c) {
+        std::int32_t colIn[4];
+        std::int32_t colOut[4];
+        for (int r = 0; r < h; ++r) {
+            colIn[r] = src[r * w + c] * 4;  // shift[0] = 2 -> <<2
+        }
+        transforms::fdct4(colIn, colOut);  // col pass kernel, cos_bit 13
+        for (int r = 0; r < h; ++r) {
+            inter[r * w + c] = colOut[r];  // shift[1] = 0 -> no-op
+        }
+    }
+    std::int32_t got[w * h] = {0};
+    transforms::fwdTxfm2d4x4(src, got, w, transforms::TxType::DCT_FLIPADST);
+    int bad = 0;
+    int firstBad = -1;
+    for (int r = 0; r < h; ++r) {
+        std::int32_t rowIn[4];
+        std::int32_t rowOut[4];
+        for (int c = 0; c < w; ++c) {
+            rowIn[c] = inter[r * w + (w - 1 - c)];  // flip left to right
+        }
+        transforms::fadst4(rowIn, rowOut);
+        for (int c = 0; c < w; ++c) {
+            if (got[r * w + c] != rowOut[c]) {
+                if (firstBad < 0) firstBad = r * w + c;
+                ++bad;
+            }
+        }
+    }
+    CHECK_MESSAGE(bad == 0, "DCT_FLIPADST vs flipped-intermediate oracle: " << bad << " cells, first at " << firstBad);
+}
+
+TEST_CASE("TX2 FLIPADST_DCT fwd = ADST_DCT of the vertically-flipped input") {
+    // the ud_flip read loop (transforms.c:2430-2438): temp_in[r] =
+    // input[(h-1-r)*stride + c] - the column pass sees the flipped rows, so
+    // FLIPADST_DCT(x) (same kernels as ADST_DCT: col ADST, row DCT) ==
+    // ADST_DCT(flipud(x)) value-for-value
+    const int w = 4;
+    const int h = 4;
+    std::int16_t src[w * h];
+    for (int r = 0; r < h; ++r) {
+        for (int c = 0; c < w; ++c) {
+            src[r * w + c] = static_cast<std::int16_t>(r * 5 + c * 3);
+        }
+    }
+    std::int16_t flipped[w * h];
+    for (int r = 0; r < h; ++r) {
+        for (int c = 0; c < w; ++c) {
+            flipped[(h - 1 - r) * w + c] = src[r * w + c];
+        }
+    }
+    std::int32_t got[w * h] = {0};
+    std::int32_t ref[w * h] = {0};
+    transforms::fwdTxfm2d4x4(src, got, w, transforms::TxType::FLIPADST_DCT);
+    transforms::fwdTxfm2d4x4(flipped, ref, w, transforms::TxType::ADST_DCT);
+    int bad = 0;
+    int firstBad = -1;
+    for (int i = 0; i < w * h; ++i) {
+        if (got[i] != ref[i]) {
+            if (firstBad < 0) firstBad = i;
+            ++bad;
+        }
+    }
+    CHECK_MESSAGE(bad == 0, "FLIPADST_DCT vs flipped ADST_DCT: " << bad << " cells, first at " << firstBad);
+}
+
+TEST_CASE("TX2 IDTX roundtrips exactly at 4x4") {
+    // fwd IDTX = in*8 (up to the kernel's own rounding), inv IDTX divides it
+    // back: the identity roundtrip is exact on this non-negative ramp
+    // (measured maxDelta 0; a signed ramp would clip at 0 in clipPixelAdd,
+    // which is the reference's own behavior)
+    std::int16_t src[16];
+    for (int i = 0; i < 16; ++i) {
+        src[i] = static_cast<std::int16_t>(i * 7);
+    }
+    std::int32_t coeffs[16] = {0};
+    transforms::fwdTxfm2d4x4(src, coeffs, 4, transforms::TxType::IDTX);
+    std::uint8_t dst[16] = {0};
+    transforms::invTxfm2dAdd4x4(coeffs, dst, 4, transforms::TxType::IDTX);
+    int maxDelta = 0;
+    for (int i = 0; i < 16; ++i) {
+        const int d = src[i] - static_cast<int>(dst[i]);
+        const int ad = d < 0 ? -d : d;
+        if (ad > maxDelta) maxDelta = ad;
+    }
+    CHECK(maxDelta == 0);
+}
+
+TEST_CASE("TX2 fwdTxfm2d4x4 IDTX = the identity-kernel composition oracle") {
+    // 4x4 shifts {2,0,0} (transforms.c:122): in<<2, fidentity4 (x5793>>12),
+    // shift[1] 0, fidentity4, shift[2] 0. The oracle is the exported kernel
+    // composed by hand; the scale bound |oracle - 8*in| <= 1 pins the shift
+    // rule against silent constant drift (measured maxDelta 1 over this ramp).
+    std::int16_t src[16];
+    for (int i = 0; i < 16; ++i) {
+        src[i] = static_cast<std::int16_t>(i * 7 - 40);
+    }
+    std::int32_t got[16] = {0};
+    transforms::fwdTxfm2d4x4(src, got, 4, transforms::TxType::IDTX);
+    int maxScaleDelta = 0;
+    for (int i = 0; i < 16; ++i) {
+        std::int32_t in4[4] = {src[i] * 4, 0, 0, 0};
+        std::int32_t mid[4] = {0};
+        std::int32_t expect[4] = {0};
+        transforms::fwdIdentity4(in4, mid, 0);
+        transforms::fwdIdentity4(mid, expect, 0);
+        CHECK(got[i] == expect[0]);
+        const int d = expect[0] - 8 * src[i];
+        const int ad = d < 0 ? -d : d;
+        if (ad > maxScaleDelta) maxScaleDelta = ad;
+    }
+    CHECK(maxScaleDelta <= 1);
+}
+
+TEST_CASE("TX2 invIdentity64 scales 5793*4>>12 (inv_transforms.c:2382-2389)") {
+    const std::int32_t in[64] = {100, -3};
+    std::int32_t got[64] = {0};
+    transforms::invIdentity64(in, got, 0);
+    CHECK(got[0] == 566);
+    CHECK(got[1] == -17);
+    CHECK(got[63] == 0);
+}
+
+TEST_CASE("TX2 invIdentity32 quadruples (inv_transforms.c:2374-2380)") {
+    const std::int32_t in[32] = {100, -3};
+    std::int32_t got[32] = {0};
+    transforms::invIdentity32(in, got, 0);
+    CHECK(got[0] == 400);
+    CHECK(got[1] == -12);
+    CHECK(got[31] == 0);
+}
+
+TEST_CASE("TX2 invIdentity16 scales 5793*2>>12 (inv_transforms.c:2365-2372)") {
+    const std::int32_t in[16] = {100, -3, 1, 0, 7, -1, 2, 5, 9, 4, 6, 8, 3, 11, 13, 10};
+    std::int32_t got[16] = {0};
+    transforms::invIdentity16(in, got, 0);
+    CHECK(got[0] == 283);
+    CHECK(got[1] == -8);
+    CHECK(got[2] == 3);
+    CHECK(got[15] == 28);
+}
+
+TEST_CASE("TX2 invIdentity8 doubles (inv_transforms.c:2357-2363)") {
+    const std::int32_t in[8] = {100, -3, 1, 0, 7, -1, 2, 5};
+    std::int32_t got[8] = {0};
+    transforms::invIdentity8(in, got, 0);
+    CHECK(got[0] == 200);
+    CHECK(got[1] == -6);
+    CHECK(got[7] == 10);
+}
+
+TEST_CASE("TX2 invIdentity4 scales 5793>>12 (inv_transforms.c:2346-2355)") {
+    const std::int32_t in[4] = {100, -3, 1, 0};
+    std::int32_t got[4] = {0};
+    transforms::invIdentity4(in, got, 0);
+    CHECK(got[0] == 141);
+    CHECK(got[1] == -4);
+    CHECK(got[2] == 1);
+    CHECK(got[3] == 0);
+}
+
+TEST_CASE("TX2 fwdIdentity64 scales 4*5793>>12 (transforms.c:2352-2359)") {
+    const std::int32_t in[64] = {100, -3};
+    std::int32_t got[64] = {0};
+    transforms::fwdIdentity64(in, got, 0);
+    // measured: 5793*4*100 = 2317200, +2048 = 2319248, >>12 = 566 (566.22 -> 566);
+    // -3: -69516+2048 = -67468 >> 12 = -17 (-16.47 floors to -17)
+    CHECK(got[0] == 566);
+    CHECK(got[1] == -17);
+    CHECK(got[63] == 0);
+}
+
+TEST_CASE("TX2 fwdIdentity32 quadruples (transforms.c:2344-2350)") {
+    const std::int32_t in[32] = {100, -3};
+    std::int32_t got[32] = {0};
+    transforms::fwdIdentity32(in, got, 0);
+    CHECK(got[0] == 400);
+    CHECK(got[1] == -12);
+    CHECK(got[31] == 0);
+}
+
+TEST_CASE("TX2 fwdIdentity16 scales 2*5793>>12 (transforms.c:2335-2342)") {
+    const std::int32_t in[16] = {100, -3, 1, 0, 7, -1, 2, 5, 9, 4, 6, 8, 3, 11, 13, 10};
+    std::int32_t got[16] = {0};
+    transforms::fwdIdentity16(in, got, 0);
+    // measured: 5793*2*100 = 1158600, +2048 = 1160648, >>12 = 283 (283.36 -> 283);
+    // -3: -34758+2048 = -32710 >> 12 = -8; 1: 11586+2048 = 13634 >> 12 = 3
+    CHECK(got[0] == 283);
+    CHECK(got[1] == -8);
+    CHECK(got[2] == 3);
+    CHECK(got[15] == 28);
+}
+
+TEST_CASE("TX2 fwdIdentity8 doubles (no rounding, transforms.c:2327-2333)") {
+    const std::int32_t in[8] = {100, -3, 1, 0, 7, -1, 2, 5};
+    std::int32_t got[8] = {0};
+    transforms::fwdIdentity8(in, got, 0);
+    CHECK(got[0] == 200);
+    CHECK(got[1] == -6);
+    CHECK(got[7] == 10);
+}
+
+TEST_CASE("TX2 fwdIdentity4 scales by the reference's 5793>>12 rule") {
+    // svt_av1_fidentity4_c (transforms.c:2318-2325): round_shift(in*5793, 12)
+    const std::int32_t in[4] = {100, -3, 1, 0};
+    std::int32_t got[4] = {0};
+    transforms::fwdIdentity4(in, got, 0);
+    // measured: 5793*100 = 579300, +2048 = 581348, >>12 = 141 (141.9 rounds 142? 581348/4096 = 141.93 -> 141)
+    CHECK(got[0] == 141);
+    CHECK(got[1] == -4);
+    CHECK(got[2] == 1);
+    CHECK(got[3] == 0);
+}
+
+TEST_CASE("TX2 flip config per type (get_flip_cfg, inv_transforms.h:139-177)") {
+    // (ud_flip, lr_flip) per TxType, verbatim from get_flip_cfg: DCT_DCT..
+    // ADST_ADST and the IDTX/one-axis DCT/ADST block are 0/0; FLIPADST_DCT,
+    // FLIPADST_FLIPADST and V_FLIPADST flip the vertical axis (ud=1, lr=0);
+    // DCT_FLIPADST, ADST_FLIPADST and H_FLIPADST flip the horizontal axis
+    // (ud=0, lr=1); FLIPADST_FLIPADST flips both.
+    const int expectUd[16] = {0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0};
+    const int expectLr[16] = {0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1};
+    for (int t = 0; t < 16; ++t) {
+        const auto type = static_cast<transforms::TxType>(t);
+        transforms::Txfm2dFlipCfg cfg;
+        transforms::fwdTransformConfig(type, transforms::TxSize::TX_4X4, cfg);
+        CHECK(cfg.udFlip == expectUd[t]);
+        CHECK(cfg.lrFlip == expectLr[t]);
+    }
+}
+
 TEST_CASE("fwd cfg type selection follows vtx/htx per square (ADST rows/cols)") {
     transforms::Txfm2dFlipCfg cfg;
     transforms::fwdTransformConfig(transforms::TxType::ADST_DCT, transforms::TxSize::TX_8X8, cfg);
@@ -391,60 +694,233 @@ TEST_CASE("fwdTxfm2d4x16 ADST_ADST exercises fadst16B col and fadst4B row at 12"
     CHECK(maxDelta == 0);
 }
 
-TEST_CASE("dispatch admissible set over every (TxSize, TxType) pair") {
+TEST_CASE("TX2 IDTX cfg stage ranges follow the fidtx range_mult2 tables") {
+    // set_fwd_txfm_non_scale_range (transforms.c:2471-2492) over the fidtx
+    // tables: col[i] = (fidtxN_range_mult2[i]+1)>>1; row[i] =
+    // (colLast + fidtxRow[i] + 1)>>1. At TX_16X16 both passes are IDENTITY16
+    // (fidtx16 {3}): col[0] = 2, row[0] = (3+3+1)>>1 = 3. (Mutation target:
+    // a corrupted fidtx16 entry moves these.)
+    transforms::Txfm2dFlipCfg cfg;
+    transforms::fwdTransformConfig(transforms::TxType::IDTX, transforms::TxSize::TX_16X16, cfg);
+    CHECK(cfg.txfmTypeCol == transforms::TxfmTypeLs::IDENTITY16);
+    CHECK(cfg.txfmTypeRow == transforms::TxfmTypeLs::IDENTITY16);
+    CHECK(cfg.stageNumCol == 1);
+    CHECK(cfg.stageNumRow == 1);
+    CHECK(cfg.stageRangeCol[0] == 2);
+    CHECK(cfg.stageRangeRow[0] == 3);
+}
+
+TEST_CASE("TX2 FLIPADST_DCT roundtrip delta equals the ADST_DCT roundtrip delta") {
+    // the flip pair cancels: fwd reads rows bottom-up (ud_flip), inv writes
+    // rows bottom-up - the roundtrip loss is the ADST_DCT one (measured equal,
+    // both 0 on this ramp)
+    const int w = 4;
+    const int h = 4;
+    std::int16_t src[w * h];
+    for (int r = 0; r < h; ++r) {
+        for (int c = 0; c < w; ++c) {
+            src[r * w + c] = static_cast<std::int16_t>(r * 9 + c * 5);
+        }
+    }
+    std::int32_t coeffs[w * h] = {0};
+    transforms::fwdTxfm2d4x4(src, coeffs, w, transforms::TxType::FLIPADST_DCT);
+    std::uint8_t dst[w * h] = {0};
+    transforms::invTxfm2dAdd4x4(coeffs, dst, w, transforms::TxType::FLIPADST_DCT);
+    int maxFlip = 0;
+    for (int i = 0; i < w * h; ++i) {
+        const int d = src[i] - static_cast<int>(dst[i]);
+        const int ad = d < 0 ? -d : d;
+        if (ad > maxFlip) maxFlip = ad;
+    }
+    std::int32_t coeffs2[w * h] = {0};
+    transforms::fwdTxfm2d4x4(src, coeffs2, w, transforms::TxType::ADST_DCT);
+    std::uint8_t dst2[w * h] = {0};
+    transforms::invTxfm2dAdd4x4(coeffs2, dst2, w, transforms::TxType::ADST_DCT);
+    int maxAdst = 0;
+    for (int i = 0; i < w * h; ++i) {
+        const int d = src[i] - static_cast<int>(dst2[i]);
+        const int ad = d < 0 ? -d : d;
+        if (ad > maxAdst) maxAdst = ad;
+    }
+    CHECK(maxFlip == maxAdst);
+    CHECK(maxFlip == 0);
+}
+
+TEST_CASE("TX2 V_FLIPADST/H_FLIPADST = single-axis flipped one-axis transforms") {
+    // V_FLIPADST: vtx FLIPADST_1D (col = ADST kernel), htx IDTX_1D (row =
+    // fidentity4), ud_flip = 1 (rows read bottom-up); H_FLIPADST: vtx IDTX_1D,
+    // htx FLIPADST_1D (row = ADST kernel), lr_flip = 1 (intermediate columns
+    // written right-to-left). Impulse fixtures through the landed 1D kernels.
+    const int w = 4;
+    const int h = 4;
+    // impulse row r=2, amp 37: V_FLIPADST - the flip moves it to r=1 before
+    // the column pass
+    std::int16_t rowImp[w * h] = {0};
+    for (int c = 0; c < w; ++c) {
+        rowImp[2 * w + c] = 37;
+    }
+    std::int32_t gotV[w * h] = {0};
+    transforms::fwdTxfm2d4x4(rowImp, gotV, w, transforms::TxType::V_FLIPADST);
+    std::int32_t colIn[4];
+    std::int32_t colOut[4];
+    for (int r = 0; r < h; ++r) {
+        colIn[r] = (r == h - 1 - 2 ? 37 : 0) * 4;  // flipped read, then <<2
+    }
+    transforms::fadst4(colIn, colOut);  // col pass, shift[1] = 0
+    int bad = 0;
+    for (int r = 0; r < h; ++r) {
+        std::int32_t rowScaled[4] = {colOut[r], colOut[r], colOut[r], colOut[r]};
+        std::int32_t rowOut[4] = {0};
+        transforms::fwdIdentity4(rowScaled, rowOut, 0);  // row pass, shift[2] = 0
+        for (int c = 0; c < w; ++c) {
+            if (gotV[r * w + c] != rowOut[c]) ++bad;
+        }
+    }
+    CHECK_MESSAGE(bad == 0, "V_FLIPADST impulse-row mismatch: " << bad << " cells");
+    // impulse column c=1, amp 29: H_FLIPADST - the col pass is identity, then
+    // the intermediate column lands flipped at w-1-1 = 2, then the row-ADST
+    std::int16_t colImp[w * h] = {0};
+    for (int r = 0; r < h; ++r) {
+        colImp[r * w + 1] = 29;
+    }
+    std::int32_t gotH[w * h] = {0};
+    transforms::fwdTxfm2d4x4(colImp, gotH, w, transforms::TxType::H_FLIPADST);
+    bad = 0;
+    std::int32_t one[4] = {29 * 4, 0, 0, 0};
+    std::int32_t scaled[4] = {0};
+    transforms::fwdIdentity4(one, scaled, 0);  // col pass = identity kernel
+    for (int r = 0; r < h; ++r) {
+        std::int32_t rowIn[4] = {0, 0, scaled[0], 0};  // flipped write: column 2
+        std::int32_t rowOut[4] = {0};
+        transforms::fadst4(rowIn, rowOut);
+        for (int c = 0; c < w; ++c) {
+            if (gotH[r * w + c] != rowOut[c]) ++bad;
+        }
+    }
+    CHECK_MESSAGE(bad == 0, "H_FLIPADST impulse-column mismatch: " << bad << " cells");
+}
+
+TEST_CASE("TX2 V_DCT/H_DCT = DCT on one axis, identity on the other") {
+    // V_DCT: vtx DCT_1D (col pass), htx IDTX_1D (row pass = fidentity4);
+    // H_DCT: vtx IDTX_1D (col pass = fidentity4), htx DCT_1D. Impulse fixtures
+    // through the landed 1D kernels + the exported identity kernel.
+    const int w = 4;
+    const int h = 4;
+    // impulse row r=2, amp 37: V_DCT
+    std::int16_t rowImp[w * h] = {0};
+    for (int c = 0; c < w; ++c) {
+        rowImp[2 * w + c] = 37;
+    }
+    std::int32_t gotV[w * h] = {0};
+    transforms::fwdTxfm2d4x4(rowImp, gotV, w, transforms::TxType::V_DCT);
+    std::int32_t colIn[4];
+    std::int32_t colOut[4];
+    for (int r = 0; r < h; ++r) {
+        colIn[r] = (r == 2 ? 37 : 0) * 4;  // shift[0] = 2 -> <<2
+    }
+    transforms::fdct4(colIn, colOut);  // shift[1] = 0
+    int bad = 0;
+    for (int r = 0; r < h; ++r) {
+        std::int32_t rowScaled[4] = {colOut[r], colOut[r], colOut[r], colOut[r]};
+        std::int32_t rowOut[4] = {0};
+        transforms::fwdIdentity4(rowScaled, rowOut, 0);  // row pass, shift[2] = 0
+        for (int c = 0; c < w; ++c) {
+            if (gotV[r * w + c] != rowOut[c]) ++bad;
+        }
+    }
+    CHECK_MESSAGE(bad == 0, "V_DCT impulse-row mismatch: " << bad << " cells");
+    // impulse column c=1, amp 29: H_DCT
+    std::int16_t colImp[w * h] = {0};
+    for (int r = 0; r < h; ++r) {
+        colImp[r * w + 1] = 29;
+    }
+    std::int32_t gotH[w * h] = {0};
+    transforms::fwdTxfm2d4x4(colImp, gotH, w, transforms::TxType::H_DCT);
+    bad = 0;
+    std::int32_t colScaled[4];
+    for (int r = 0; r < h; ++r) {
+        std::int32_t one[4] = {29 * 4, 0, 0, 0};  // the impulse column: every row feeds 29
+        std::int32_t scaled[4] = {0};
+        transforms::fwdIdentity4(one, scaled, 0);
+        colScaled[r] = scaled[0];
+    }
+    for (int r = 0; r < h; ++r) {
+        std::int32_t rowIn[4] = {0, colScaled[0], 0, 0};  // buf row: impulse at column 1
+        std::int32_t rowOut[4] = {0};
+        transforms::fdct4(rowIn, rowOut);
+        for (int c = 0; c < w; ++c) {
+            if (gotH[r * w + c] != rowOut[c]) ++bad;
+        }
+    }
+    CHECK_MESSAGE(bad == 0, "H_DCT impulse-column mismatch: " << bad << " cells");
+}
+
+TEST_CASE("TX2 dispatch admissible set over every (TxSize, TxType) pair") {
     // enumerated from the reference: the fwd dispatch (transforms.c:3185-3360)
     // asserts DCT_DCT (IDTX parked) at TX_32X16/16X32/32X8/8X32/32X64/64X32/
-    // 64X16/16X64 and at the squares TX_32X32/TX_64X64; the inv wrappers
-    // (inv_transforms.c:2901-3137) assert only at TX_32X32/TX_64X64, so the
-    // inv gate is the type table itself (av1_txfm_type_ls, inv_transforms.h:
-    // 191-196): ADST on a 64 axis is INVALID. Order within each shape:
-    // DCT_DCT, ADST_DCT, DCT_ADST, ADST_ADST.
-    const bool fwdSupported[19][4] = {
-        {1, 1, 1, 1},  // 4x4
-        {1, 1, 1, 1},  // 8x8
-        {1, 1, 1, 1},  // 16x16
-        {1, 0, 0, 0},  // 32x32
-        {1, 0, 0, 0},  // 64x64
-        {1, 1, 1, 1},  // 4x8
-        {1, 1, 1, 1},  // 8x4
-        {1, 1, 1, 1},  // 8x16
-        {1, 1, 1, 1},  // 16x8
-        {1, 0, 0, 0},  // 16x32
-        {1, 0, 0, 0},  // 32x16
-        {1, 0, 0, 0},  // 32x64
-        {1, 0, 0, 0},  // 64x32
-        {1, 1, 1, 1},  // 4x16
-        {1, 1, 1, 1},  // 16x4
-        {1, 0, 0, 0},  // 8x32
-        {1, 0, 0, 0},  // 32x8
-        {1, 0, 0, 0},  // 16x64
-        {1, 0, 0, 0},  // 64x16
+    // 64X16/16X64 and at the squares TX_32X32/TX_64X64, so the fwd gate is the
+    // type table (av1_txfm_type_ls, inv_transforms.h:191-196) plus those
+    // asserts; TX2 widens the assert columns to the 16-type enum: IDTX joins
+    // the (DCT_DCT || IDTX) asserts at TX_32X16/16X32/32X8/8X32/32X32, the six
+    // one-axis types join TX_32X32 through the transform_two_d_32x32_c
+    // fallback branch (:3329-3331, live at the default build's
+    // CONFIG_ENABLE_NON_DCT_LARGE_TX=1, EbConfigMacros.h:246), and the small
+    // shapes (both axes <= 16) carry no assert, so all 16 cfg-valid types are
+    // admitted. The inv wrappers (inv_transforms.c:2901-3137) assert only at
+    // TX_32X32 (DCT_DCT or IDTX switch, :2924-2932) and TX_64X64
+    // (DCT_DCT, :2940), so the inv gate elsewhere is the type table alone:
+    // ADST/FLIPADST on a 64 axis is INVALID, the one-axis and IDTX types are
+    // cfg-valid there. The first four columns of every row are the landed
+    // TX1 table, byte-identical. Order within each row: DCT_DCT, ADST_DCT,
+    // DCT_ADST, ADST_ADST, FLIPADST_DCT, DCT_FLIPADST, FLIPADST_FLIPADST,
+    // ADST_FLIPADST, FLIPADST_ADST, IDTX, V_DCT, H_DCT, V_ADST, H_ADST,
+    // V_FLIPADST, H_FLIPADST.
+    const bool fwdSupported[19][16] = {
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 4x4
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 8x8
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 16x16
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1},  // 32x32
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // 64x64
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 4x8
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 8x4
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 8x16
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 16x8
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},  // 16x32
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},  // 32x16
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // 32x64
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // 64x32
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 4x16
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 16x4
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},  // 8x32
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},  // 32x8
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // 16x64
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // 64x16
     };
-    const bool invSupported[19][4] = {
-        {1, 1, 1, 1},  // 4x4
-        {1, 1, 1, 1},  // 8x8
-        {1, 1, 1, 1},  // 16x16
-        {1, 0, 0, 0},  // 32x32
-        {1, 0, 0, 0},  // 64x64
-        {1, 1, 1, 1},  // 4x8
-        {1, 1, 1, 1},  // 8x4
-        {1, 1, 1, 1},  // 8x16
-        {1, 1, 1, 1},  // 16x8
-        {1, 1, 1, 1},  // 16x32
-        {1, 1, 1, 1},  // 32x16
-        {1, 0, 1, 0},  // 32x64 (DCT_ADST: col DCT64, row ADST32)
-        {1, 1, 0, 0},  // 64x32 (ADST_DCT: col ADST32, row DCT64)
-        {1, 1, 1, 1},  // 4x16
-        {1, 1, 1, 1},  // 16x4
-        {1, 1, 1, 1},  // 8x32
-        {1, 1, 1, 1},  // 32x8
-        {1, 0, 1, 0},  // 16x64 (DCT_ADST: col DCT64, row ADST16)
-        {1, 1, 0, 0},  // 64x16 (ADST_DCT: col ADST16, row DCT64)
+    const bool invSupported[19][16] = {
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 4x4
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 8x8
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 16x16
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},  // 32x32
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // 64x64
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 4x8
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 8x4
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 8x16
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 16x8
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 16x32
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 32x16
+        {1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1},  // 32x64
+        {1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0},  // 64x32
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 4x16
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 16x4
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 8x32
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},  // 32x8
+        {1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1},  // 16x64
+        {1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0},  // 64x16
     };
     int fwdTrue = 0;
     int invTrue = 0;
     for (int s = 0; s < 19; ++s) {
-        for (int t = 0; t < 4; ++t) {
+        for (int t = 0; t < 16; ++t) {
             const auto size = static_cast<transforms::TxSize>(s);
             const auto type = static_cast<transforms::TxType>(t);
             CHECK(transforms::fwdTxfmSupported(size, type) == (fwdSupported[s][t] != 0));
@@ -453,8 +929,8 @@ TEST_CASE("dispatch admissible set over every (TxSize, TxType) pair") {
             invTrue += invSupported[s][t];
         }
     }
-    CHECK(fwdTrue == 46);
-    CHECK(invTrue == 62);
+    CHECK(fwdTrue == 165);
+    CHECK(invTrue == 243);
 }
 
 TEST_CASE("invTxfm2dAdd16x64 roundtrips the packed 16x32 coefficient block") {

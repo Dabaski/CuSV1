@@ -3623,14 +3623,16 @@ const std::int8_t kFwdCosBitRow[5][5] = {
 const std::int8_t kTxSizeWideLog2[19] = {2, 3, 4, 5, 6, 2, 3, 3, 4, 4, 5, 5, 6, 2, 4, 3, 5, 4, 6};
 const std::int8_t kTxSizeHighLog2[19] = {2, 3, 4, 5, 6, 3, 2, 4, 3, 5, 4, 6, 5, 4, 2, 5, 3, 6, 4};
 
-// TX1: TxType1D (the four separable 1D classes; FLIPADST_1D and IDTX_1D are
-// unreachable through the port's four-value TxType scope but the cfg table
-// carries all four columns), and vtx_tab/htx_tab rows 0..3
-// (inv_transforms.h:45-62 / :63-80)
+// TX1/TX2: TxType1D (the four separable 1D classes) and vtx_tab/htx_tab
+// (inv_transforms.h:45-62 / :63-80), TX2: all 16 rows verbatim
 enum TxType1D { DCT_1D = 0, ADST_1D = 1, FLIPADST_1D = 2, IDTX_1D = 3 };
 
-const std::int8_t kVtxTab[4] = {DCT_1D, ADST_1D, DCT_1D, ADST_1D};
-const std::int8_t kHtxTab[4] = {DCT_1D, DCT_1D, ADST_1D, ADST_1D};
+const std::int8_t kVtxTab[16] = {DCT_1D,    ADST_1D, DCT_1D,    ADST_1D, FLIPADST_1D, DCT_1D,
+                                 FLIPADST_1D, ADST_1D, FLIPADST_1D, IDTX_1D, DCT_1D,    IDTX_1D,
+                                 ADST_1D,   IDTX_1D, FLIPADST_1D, IDTX_1D};
+const std::int8_t kHtxTab[16] = {DCT_1D,    DCT_1D,    ADST_1D,   ADST_1D, DCT_1D,      FLIPADST_1D,
+                                 FLIPADST_1D, FLIPADST_1D, ADST_1D,  IDTX_1D, IDTX_1D,     DCT_1D,
+                                 IDTX_1D,   ADST_1D,   IDTX_1D,   FLIPADST_1D};
 
 // TX1: av1_txfm_type_ls (inv_transforms.h:191-196), [size_log2][TxType1D]
 const TxfmTypeLs kAv1TxfmTypeLs[5][4] = {
@@ -3667,13 +3669,33 @@ const std::int8_t* kFwdTxfmRangeMult2List[14] = {kFdct4RangeMult2,  kFdct8RangeM
                                                  kFidtx4RangeMult2, kFidtx8RangeMult2, kFidtx16RangeMult2,
                                                  kFidtx32RangeMult2, kFidtx64RangeMult2};
 
-// TX1: set_flip_cfg (inv_transforms.h:179-181) at the port's four-type scope:
-// get_flip_cfg (:139-177) returns ud_flip = lr_flip = 0 for DCT_DCT, ADST_DCT,
-// DCT_ADST and ADST_ADST; the FLIPADST/IDTX branches are unreachable here
-// (named deviation: flips fixed at 0)
-void setFlipCfg(Txfm2dFlipCfg& cfg) {
+// TX2: set_flip_cfg (inv_transforms.h:179-181) over the full 16-type list:
+// get_flip_cfg (:139-177) verbatim - 0/0 for DCT_DCT..ADST_ADST and for
+// IDTX/V_DCT/H_DCT/V_ADST/H_ADST; ud=1 lr=0 for FLIPADST_DCT, FLIPADST_ADST
+// and V_FLIPADST; ud=0 lr=1 for DCT_FLIPADST, ADST_FLIPADST and H_FLIPADST;
+// FLIPADST_FLIPADST flips both. The default assert(0) branch is unreachable
+// through the 16-value enum (the reference holds it for out-of-range casts).
+void setFlipCfg(Txfm2dFlipCfg& cfg, TxType type) {
     cfg.udFlip = 0;
     cfg.lrFlip = 0;
+    switch (type) {
+    case TxType::FLIPADST_DCT:
+    case TxType::FLIPADST_ADST:
+    case TxType::V_FLIPADST:
+        cfg.udFlip = 1;
+        break;
+    case TxType::DCT_FLIPADST:
+    case TxType::ADST_FLIPADST:
+    case TxType::H_FLIPADST:
+        cfg.lrFlip = 1;
+        break;
+    case TxType::FLIPADST_FLIPADST:
+        cfg.udFlip = 1;
+        cfg.lrFlip = 1;
+        break;
+    default:
+        break;
+    }
 }
 
 // TX1: set_fwd_txfm_non_scale_range (transforms.c:2471-2492)
@@ -3743,7 +3765,7 @@ const std::int8_t kIadst4Range[7] = {0, 1, 0, 0, 0, 0, 0};
 // TX1: svt_aom_transform_config (transforms.c:2494-2510)
 void fwdTransformConfig(TxType type, TxSize size, Txfm2dFlipCfg& cfg) {
     cfg.txSize = size;
-    setFlipCfg(cfg);
+    setFlipCfg(cfg, type);
     const int txType1dCol = kVtxTab[static_cast<int>(type)];
     const int txType1dRow = kHtxTab[static_cast<int>(type)];
     const int txwIdx = kTxSizeWideLog2[static_cast<int>(size)] - 2;
@@ -3763,7 +3785,7 @@ void fwdTransformConfig(TxType type, TxSize size, Txfm2dFlipCfg& cfg) {
 // bake the bd-8 range shim, so the cfg copy is bookkeeping here.
 void invTransformConfig(TxType type, TxSize size, Txfm2dFlipCfg& cfg) {
     cfg.txSize = size;
-    setFlipCfg(cfg);
+    setFlipCfg(cfg, type);
     for (int i = 0; i < 12; ++i) {
         cfg.stageRangeCol[i] = 0;
         cfg.stageRangeRow[i] = 0;
@@ -3845,24 +3867,93 @@ void fadst4(const std::int32_t input[4], std::int32_t output[4]) {
     fadst4B(input, output, 13);
 }
 
+// TX2: svt_av1_fidentity4_c (transforms.c:2318-2325): round_shift(in*5793,12);
+// cos_bit and stage_range are unused in the reference ((void)'d); the 5793/12
+// constants are new_sqrt2/new_sqrt2_bits (inv_transforms.h:253-255)
+void fwdIdentity4(const std::int32_t input[4], std::int32_t output[4], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 4; ++i) {
+        output[i] = roundShift(static_cast<std::int64_t>(input[i]) * 5793, 12);
+    }
+}
+
+// TX2: svt_av1_fidentity8_c (transforms.c:2327-2333): output = input * 2
+void fwdIdentity8(const std::int32_t input[8], std::int32_t output[8], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 8; ++i) {
+        output[i] = input[i] * 2;
+    }
+}
+
+// TX2: svt_av1_fidentity16_c (transforms.c:2335-2342): round_shift(in*2*5793,12)
+void fwdIdentity16(const std::int32_t input[16], std::int32_t output[16], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 16; ++i) {
+        output[i] = roundShift(static_cast<std::int64_t>(input[i]) * 2 * 5793, 12);
+    }
+}
+
+// TX2: svt_av1_fidentity32_c (transforms.c:2344-2350): output = input * 4
+void fwdIdentity32(const std::int32_t input[32], std::int32_t output[32], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 32; ++i) {
+        output[i] = input[i] * 4;
+    }
+}
+
+// TX2: av1_fidentity64_c (transforms.c:2352-2359): round_shift(in*4*5793,12)
+void fwdIdentity64(const std::int32_t input[64], std::int32_t output[64], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 64; ++i) {
+        output[i] = roundShift(static_cast<std::int64_t>(input[i]) * 4 * 5793, 12);
+    }
+}
+
+// TX2: svt_av1_iidentity4_c (inv_transforms.c:2346-2355): round_shift(5793*in,12)
+void invIdentity4(const std::int32_t input[4], std::int32_t output[4], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 4; ++i) {
+        output[i] = roundShift(static_cast<std::int64_t>(5793) * input[i], 12);
+    }
+}
+
+// TX2: svt_av1_iidentity8_c (inv_transforms.c:2357-2363): output = input * 2
+void invIdentity8(const std::int32_t input[8], std::int32_t output[8], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 8; ++i) {
+        output[i] = static_cast<std::int32_t>(static_cast<std::int64_t>(input[i]) * 2);
+    }
+}
+
+// TX2: svt_av1_iidentity16_c (inv_transforms.c:2365-2372): round_shift(5793*2*in,12)
+void invIdentity16(const std::int32_t input[16], std::int32_t output[16], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 16; ++i) {
+        output[i] = roundShift(static_cast<std::int64_t>(5793) * 2 * input[i], 12);
+    }
+}
+
+// TX2: svt_av1_iidentity32_c (inv_transforms.c:2374-2380): output = input * 4
+void invIdentity32(const std::int32_t input[32], std::int32_t output[32], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 32; ++i) {
+        output[i] = static_cast<std::int32_t>(static_cast<std::int64_t>(input[i]) * 4);
+    }
+}
+
+// TX2: av1_iidentity64_c (inv_transforms.c:2382-2389): round_shift(5793*4*in,12)
+void invIdentity64(const std::int32_t input[64], std::int32_t output[64], int cosBit) {
+    (void)cosBit;
+    for (int i = 0; i < 64; ++i) {
+        output[i] = roundShift(static_cast<std::int64_t>(5793) * 4 * input[i], 12);
+    }
+}
+
 namespace {
 
 using TxfmFn = void (*)(const std::int32_t*, std::int32_t*);
 
 using TxfmFnB = void (*)(const std::int32_t*, std::int32_t*, int);
-
-
-// vtx_tab/htx_tab (inv_transforms.h:45-62, :63-80) give the 1D type per pass:
-// ADST_DCT is ADST in the column pass and DCT in the row pass, DCT_ADST is the
-// mirror. Only the four in-scope separable types are represented, so the
-// selection reduces to "is this pass ADST" (svt_aom_transform_config,
-// transforms.c:2498-2499 reads the two tables; the per-size 1D widening at
-// :2505-2506 does not change the ADST-vs-DCT choice for square transforms).
-// Named by DIRECTION, not by side: the forward runs columns first and the
-// inverse runs rows first (inv_transforms.c:2532 before :2541), so both kernels
-// select from this same pair and the difference lives in the pass order.
-inline bool isAdstCol(TxType type) { return type == TxType::ADST_DCT || type == TxType::ADST_ADST; }
-inline bool isAdstRow(TxType type) { return type == TxType::DCT_ADST || type == TxType::ADST_ADST; }
 
 
 
@@ -3909,178 +4000,59 @@ TxType intraUvTxType(int mode, TxSizeSqUp sqrUp) {
     return !kExtTxUsed[setRow][static_cast<int>(type)] ? TxType::DCT_DCT : type;
 }
 
-// svt_av1_transform_two_d_4x4_c / av1_tranform_two_d_core_c, TX_4X4 config:
-// shift {2, 0, 0}, cos_bit 13/13, no flips (DCT_DCT / ADST_ADST both ud/lr=0)
+// svt_av1_transform_two_d_4x4_c (transforms.c:2581-2589): config + core, the
+// reference's own square-facade shape (TX2: replaces the TX0-era inline fold;
+// the landed DCT_DCT/ADST outputs are unchanged - the core computes the same
+// values, the l3 suite and the golden gate are the guard)
 void fwdTxfm2d4x4(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type) {
-    TxfmFn txfmCol = isAdstCol(type) ? fadst4 : fdct4;
-    TxfmFn txfmRow = isAdstRow(type) ? fadst4 : fdct4;
+    Txfm2dFlipCfg cfg;
+    fwdTransformConfig(type, TxSize::TX_4X4, cfg);
     std::int32_t buf[4 * 4];
-    std::int32_t tempIn[4];
-    std::int32_t tempOut[4];
-
-    for (std::uint32_t c = 0; c < 4; ++c) {
-        for (std::uint32_t r = 0; r < 4; ++r) {
-            tempIn[r] = input[r * stride + c];
-        }
-        // round_shift_array(..., -shift[0]) with shift[0] = 2 -> x4
-        for (std::uint32_t i = 0; i < 4; ++i) {
-            tempIn[i] *= (1 << 2);
-        }
-        txfmCol(tempIn, tempOut);
-        for (std::uint32_t r = 0; r < 4; ++r) {
-            buf[r * 4 + c] = tempOut[r];
-        }
-    }
-
-    for (std::uint32_t r = 0; r < 4; ++r) {
-        txfmRow(buf + r * 4, output + r * 4);
-    }
+    fwdTxfm2dCore(input, stride, output, cfg, buf);
 }
 
-// av1_tranform_two_d_core_c (transforms.c:2398) at TX_8X8: fwd_shift_8x8 =
-// {2, -1, 0} (transforms.c:123), cos_bit 13/13 from fwd_cos_bit_col/row[1][1]
+// svt_av1_transform_two_d_8x8_c (transforms.c:2571-2579): config + core, the
+// reference's own square-facade shape (TX2: replaces the TX0-era inline fold;
+// the landed DCT/ADST outputs are unchanged - the suite and gate are the guard)
 void fwdTxfm2d8x8(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type) {
-    TxfmFn txfmCol = isAdstCol(type) ? fadst8 : fdct8;
-    TxfmFn txfmRow = isAdstRow(type) ? fadst8 : fdct8;
+    Txfm2dFlipCfg cfg;
+    fwdTransformConfig(type, TxSize::TX_8X8, cfg);
     std::int32_t buf[8 * 8];
-    std::int32_t tempIn[8];
-    std::int32_t tempOut[8];
-
-    for (std::uint32_t c = 0; c < 8; ++c) {
-        for (std::uint32_t r = 0; r < 8; ++r) {
-            tempIn[r] = input[r * stride + c];
-        }
-        // round_shift_array(..., -shift[0]) with shift[0] = 2 -> x4
-        for (std::uint32_t i = 0; i < 8; ++i) {
-            tempIn[i] *= (1 << 2);
-        }
-        txfmCol(tempIn, tempOut);
-        // round_shift_array(..., -shift[1]) with shift[1] = -1 -> >>1 rounding
-        for (std::uint32_t i = 0; i < 8; ++i) {
-            tempOut[i] = roundShift(tempOut[i], 1);
-        }
-        for (std::uint32_t r = 0; r < 8; ++r) {
-            buf[r * 8 + c] = tempOut[r];
-        }
-    }
-
-    for (std::uint32_t r = 0; r < 8; ++r) {
-        txfmRow(buf + r * 8, output + r * 8);
-        // round_shift_array(..., -shift[2]) with shift[2] = 0 -> no-op
-    }
+    fwdTxfm2dCore(input, stride, output, cfg, buf);
 }
 
-// av1_tranform_two_d_core_c (transforms.c:2398) at TX_16X16: fwd_shift_16x16
-// = {2, -2, 0} (transforms.c:124), cos_bit col 13 / row 12 from
-// fwd_cos_bit_col/row[2][2] (transforms.c:19-22)
+// svt_av1_transform_two_d_16x16_c (transforms.c:2561-2569): config + core, the
+// reference's own square-facade shape (TX2: replaces the TX0-era inline fold;
+// the landed DCT/ADST outputs are unchanged - the suite and gate are the guard)
 void fwdTxfm2d16x16(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type) {
-    // columns then rows, each with its own 1D function (transforms.c:2420-2421,
-    // :2428-2450); the symmetric types select the same function twice
-    TxfmFnB txfmCol = isAdstCol(type) ? fadst16B : fdct16B;
-    TxfmFnB txfmRow = isAdstRow(type) ? fadst16B : fdct16B;
+    Txfm2dFlipCfg cfg;
+    fwdTransformConfig(type, TxSize::TX_16X16, cfg);
     std::int32_t buf[16 * 16];
-    std::int32_t tempIn[16];
-    std::int32_t tempOut[16];
-
-    for (std::uint32_t c = 0; c < 16; ++c) {
-        for (std::uint32_t r = 0; r < 16; ++r) {
-            tempIn[r] = input[r * stride + c];
-        }
-        // round_shift_array(..., -shift[0]) with shift[0] = 2 -> x4
-        for (std::uint32_t i = 0; i < 16; ++i) {
-            tempIn[i] *= (1 << 2);
-        }
-        txfmCol(tempIn, tempOut, 13);
-        // round_shift_array(..., -shift[1]) with shift[1] = -2 -> >>2 rounding
-        for (std::uint32_t i = 0; i < 16; ++i) {
-            tempOut[i] = roundShift(tempOut[i], 2);
-        }
-        for (std::uint32_t r = 0; r < 16; ++r) {
-            buf[r * 16 + c] = tempOut[r];
-        }
-    }
-
-    for (std::uint32_t r = 0; r < 16; ++r) {
-        txfmRow(buf + r * 16, output + r * 16, 12);
-        // round_shift_array(..., -shift[2]) with shift[2] = 0 -> no-op
-    }
+    fwdTxfm2dCore(input, stride, output, cfg, buf);
 }
 
-// av1_tranform_two_d_core_c (transforms.c:2398) at TX_32X32: fwd_shift_32x32
-// = {2, -4, 0} (transforms.c:125), cos_bit col 12 / row 12 from
-// fwd_cos_bit_col/row[3][3] (transforms.c:19-22)
+// svt_av1_transform_two_d_32x32_c (transforms.c:2551-2559): config + core, the
+// reference's own square-facade shape (TX2: replaces the TX0-era inline fold;
+// the landed DCT outputs are unchanged - the suite and gate are the guard)
 void fwdTxfm2d32x32(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type) {
-    TxfmFn txfm = type == TxType::DCT_DCT ? fdct32 : fadst32;
+    Txfm2dFlipCfg cfg;
+    fwdTransformConfig(type, TxSize::TX_32X32, cfg);
     std::int32_t buf[32 * 32];
-    std::int32_t tempIn[32];
-    std::int32_t tempOut[32];
-
-    for (std::uint32_t c = 0; c < 32; ++c) {
-        for (std::uint32_t r = 0; r < 32; ++r) {
-            tempIn[r] = input[r * stride + c];
-        }
-        // round_shift_array(..., -shift[0]) with shift[0] = 2 -> x4
-        for (std::uint32_t i = 0; i < 32; ++i) {
-            tempIn[i] *= (1 << 2);
-        }
-        txfm(tempIn, tempOut);
-        // round_shift_array(..., -shift[1]) with shift[1] = -4 -> >>4 rounding
-        for (std::uint32_t i = 0; i < 32; ++i) {
-            tempOut[i] = roundShift(tempOut[i], 4);
-        }
-        for (std::uint32_t r = 0; r < 32; ++r) {
-            buf[r * 32 + c] = tempOut[r];
-        }
-    }
-
-    for (std::uint32_t r = 0; r < 32; ++r) {
-        txfm(buf + r * 32, output + r * 32);
-        // round_shift_array(..., -shift[2]) with shift[2] = 0 -> no-op
-    }
+    fwdTxfm2dCore(input, stride, output, cfg, buf);
 }
 
-// av1_tranform_two_d_core_c (transforms.c:2398) at TX_64X64: fwd_shift_64x64
-// = {0, -2, -2} (transforms.c:126), cos_bit col 13 / row 10 from
-// fwd_cos_bit_col/row[4][4] (transforms.c:19-22). DCT-ONLY at 64x64 (no ADST
-// exists in this tree, inv_transforms.h:196).
+// svt_av1_transform_two_d_64x64_c (transforms.c:2541-2549): config + core, the
+// reference's own square-facade shape (TX2: replaces the TX0-era inline fold;
+// the landed DCT outputs are unchanged - the suite and gate are the guard;
+// DCT-only at 64x64, inv_transforms.h:196, is the type table's job now)
 void fwdTxfm2d64x64(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type) {
-    (void)type;  // DCT-only
+    Txfm2dFlipCfg cfg;
+    fwdTransformConfig(type, TxSize::TX_64X64, cfg);
     std::int32_t buf[64 * 64];
-    std::int32_t tempIn[64];
-    std::int32_t tempOut[64];
-
-    for (std::uint32_t c = 0; c < 64; ++c) {
-        for (std::uint32_t r = 0; r < 64; ++r) {
-            tempIn[r] = input[r * stride + c];
-        }
-        // round_shift_array(..., -shift[0]) with shift[0] = 0 -> no-op
-        fdct64B(tempIn, tempOut, 13);  // cos_bit col 13
-        // round_shift_array(..., -shift[1]) with shift[1] = -2 -> >>2 rounding
-        for (std::uint32_t i = 0; i < 64; ++i) {
-            tempOut[i] = roundShift(tempOut[i], 2);
-        }
-        for (std::uint32_t r = 0; r < 64; ++r) {
-            buf[r * 64 + c] = tempOut[r];
-        }
-    }
-
-    for (std::uint32_t r = 0; r < 64; ++r) {
-        fdct64B(buf + r * 64, output + r * 64, 10);  // cos_bit row 10
-        // round_shift_array(..., -shift[2]) with shift[2] = -2 -> >>2 rounding
-        for (std::uint32_t i = 0; i < 64; ++i) {
-            output[r * 64 + i] = roundShift(output[r * 64 + i], 2);
-        }
-    }
+    fwdTxfm2dCore(input, stride, output, cfg, buf);
 }
 
 namespace {
-
-using InvTxfmFn = void (*)(const std::int32_t*, std::int32_t*);
-
-InvTxfmFn inv1d32(TxType type) {
-    return type == TxType::DCT_DCT ? idct32 : iadst32;
-}
-
 
 // svt_av1_round_shift_array_c (inv_transforms.c:2449)
 void roundShiftArrayIv(std::int32_t* arr, int size, int bit) {
@@ -4105,176 +4077,59 @@ void clipPixelAdd(std::uint8_t* dst, std::int32_t trans) {
 
 }  // namespace
 
-// svt_av1_inv_txfm2d_add_4x4_c / inv_txfm2d_add_c, TX_4X4: rows then columns,// inv_shift_4x4 = {0, -4}, cos_bit 12/12, no flips, clamp bit 16; add via
-// clip_pixel_highbd(pred + round_shift(out, 4), 8)
+// svt_av1_inv_txfm2d_add_4x4_c (inv_transforms.c:2591-2595): facade = config +
+// core, the reference's own shape (TX2: replaces the TX0-era inline fold; the
+// landed DCT/ADST outputs are unchanged - the suite and gate are the guard)
 void invTxfm2dAdd4x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type) {
-    InvTxfmFn txfmRow = isAdstRow(type) ? iadst4 : idct4;
-    InvTxfmFn txfmCol = isAdstCol(type) ? iadst4 : idct4;
-    std::int32_t buf[4 * 4];
-    std::int32_t tempIn[4];
-    std::int32_t tempOut[4];
-
-    for (std::uint32_t r = 0; r < 4; ++r) {
-        for (std::uint32_t c = 0; c < 4; ++c) {
-            tempIn[c] = coeffs[r * 4 + c];
-        }
-        clampBufIv(tempIn, 4, kInvClampBit);
-        txfmRow(tempIn, buf + r * 4);
-        roundShiftArrayIv(buf + r * 4, 4, 0);
-    }
-
-    for (std::uint32_t c = 0; c < 4; ++c) {
-        for (std::uint32_t r = 0; r < 4; ++r) {
-            tempIn[r] = buf[r * 4 + c];
-        }
-        clampBufIv(tempIn, 4, kInvClampBit);
-        txfmCol(tempIn, tempOut);
-        roundShiftArrayIv(tempOut, 4, 4);
-        for (std::uint32_t r = 0; r < 4; ++r) {
-            clipPixelAdd(dst + r * stride + c, tempOut[r]);
-        }
-    }
+    Txfm2dFlipCfg cfg;
+    invTransformConfig(type, TxSize::TX_4X4, cfg);
+    std::int32_t txfmBuf[4 * 4 + 2 * 4];
+    invTxfm2dAddCore(coeffs, dst, stride, cfg, txfmBuf);
 }
 
-// svt_av1_inv_txfm2d_add_4x4_c / inv_txfm2d_add_c, TX_8X8: rows then columns,
-// inv_shift_8x8 = {-1, -4}, cos_bit 12/12, no flips, clamp bits bd+8=16 and
-// max(bd+6,16)=16; add via clip_pixel_highbd(pred + round_shift(out, 4), 8)
+// svt_av1_inv_txfm2d_add_8x8_c (inv_transforms.c:2597-2601): facade = config +
+// core, the reference's own shape (TX2: replaces the TX0-era inline fold; the
+// landed DCT/ADST outputs are unchanged - the suite and gate are the guard)
 void invTxfm2dAdd8x8(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type) {
-    InvTxfmFn txfmRow = isAdstRow(type) ? iadst8 : idct8;
-    InvTxfmFn txfmCol = isAdstCol(type) ? iadst8 : idct8;
-    std::int32_t buf[8 * 8];
-    std::int32_t tempIn[8];
-    std::int32_t tempOut[8];
-
-    // rows: clamp 16, 1D, round_shift_array(-shift[0]) = +1 rounding >>1
-    for (std::uint32_t r = 0; r < 8; ++r) {
-        for (std::uint32_t c = 0; c < 8; ++c) {
-            tempIn[c] = coeffs[r * 8 + c];
-        }
-        clampBufIv(tempIn, 8, kInvClampBit);
-        txfmRow(tempIn, buf + r * 8);
-        roundShiftArrayIv(buf + r * 8, 8, 1);
-    }
-
-    // columns: clamp 16, 1D, round_shift_array(-shift[1]) = +4, clip add
-    for (std::uint32_t c = 0; c < 8; ++c) {
-        for (std::uint32_t r = 0; r < 8; ++r) {
-            tempIn[r] = buf[r * 8 + c];
-        }
-        clampBufIv(tempIn, 8, kInvClampBit);
-        txfmCol(tempIn, tempOut);
-        roundShiftArrayIv(tempOut, 8, 4);
-        for (std::uint32_t r = 0; r < 8; ++r) {
-            clipPixelAdd(dst + r * stride + c, tempOut[r]);
-        }
-    }
+    Txfm2dFlipCfg cfg;
+    invTransformConfig(type, TxSize::TX_8X8, cfg);
+    std::int32_t txfmBuf[8 * 8 + 2 * 8];
+    invTxfm2dAddCore(coeffs, dst, stride, cfg, txfmBuf);
 }
 
-// svt_av1_inv_txfm2d_add_16x16_c / inv_txfm2d_add_c, TX_16X16: rows then
-// columns, inv_shift_16x16 = {-2, -4}, cos_bit 12/12, no flips, clamp bits
-// bd+8=16 and max(bd+6,16)=16; add via clip_pixel_highbd(pred +
-// round_shift(out, 4), 8)
+// svt_av1_inv_txfm2d_add_16x16_c (inv_transforms.c:2603-2607): facade = config
+// + core, the reference's own shape (TX2: replaces the TX0-era inline fold;
+// the landed DCT/ADST outputs are unchanged - the suite and gate are the guard)
 void invTxfm2dAdd16x16(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type) {
-    // rows FIRST, then columns (inv_transforms.c:2532 txfm_func_row, :2541
-    // txfm_func_col) - the inverse of the forward order, so the first pass takes
-    // the type's ROW kernel and the second its COLUMN kernel. Both are selected
-    // independently from txfm_type_col/txfm_type_row (inv_transforms.c:2518-2521).
-    InvTxfmFn txfmRow = isAdstRow(type) ? iadst16 : idct16;
-    InvTxfmFn txfmCol = isAdstCol(type) ? iadst16 : idct16;
-    std::int32_t buf[16 * 16];
-    std::int32_t tempIn[16];
-    std::int32_t tempOut[16];
-
-    // rows: clamp 16, 1D, round_shift_array(-shift[0]) = +2 rounding >>2
-    for (std::uint32_t r = 0; r < 16; ++r) {
-        for (std::uint32_t c = 0; c < 16; ++c) {
-            tempIn[c] = coeffs[r * 16 + c];
-        }
-        clampBufIv(tempIn, 16, kInvClampBit);
-        txfmRow(tempIn, buf + r * 16);
-        roundShiftArrayIv(buf + r * 16, 16, 2);
-    }
-
-    // columns: clamp 16, 1D, round_shift_array(-shift[1]) = +4, clip add
-    for (std::uint32_t c = 0; c < 16; ++c) {
-        for (std::uint32_t r = 0; r < 16; ++r) {
-            tempIn[r] = buf[r * 16 + c];
-        }
-        clampBufIv(tempIn, 16, kInvClampBit);
-        txfmCol(tempIn, tempOut);
-        roundShiftArrayIv(tempOut, 16, 4);
-        for (std::uint32_t r = 0; r < 16; ++r) {
-            clipPixelAdd(dst + r * stride + c, tempOut[r]);
-        }
-    }
+    Txfm2dFlipCfg cfg;
+    invTransformConfig(type, TxSize::TX_16X16, cfg);
+    std::int32_t txfmBuf[16 * 16 + 2 * 16];
+    invTxfm2dAddCore(coeffs, dst, stride, cfg, txfmBuf);
 }
 
-// svt_av1_inv_txfm2d_add_32x32_c / inv_txfm2d_add_c, TX_32X32: rows then
-// columns, inv_shift_32x32 = {-2, -4}, cos_bit 12/12, no flips, clamp bits
-// bd+8=16 and max(bd+6,16)=16; add via clip_pixel_highbd(pred +
-// round_shift(out, 4), 8)
+// svt_av1_inv_txfm2d_add_32x32_c (inv_transforms.c:2609-2613): facade = config
+// + core, the reference's own shape (TX2: replaces the TX0-era inline fold;
+// the landed DCT outputs are unchanged - the suite and gate are the guard;
+// the DCT_DCT/IDTX-only wrapper gate lives in invTxfmSupported)
 void invTxfm2dAdd32x32(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type) {
-    InvTxfmFn txfmRow = inv1d32(type);
-    std::int32_t buf[32 * 32];
-    std::int32_t tempIn[32];
-    std::int32_t tempOut[32];
-
-    // rows: clamp 16, 1D, round_shift_array(-shift[0]) = +2 rounding >>2
-    for (std::uint32_t r = 0; r < 32; ++r) {
-        for (std::uint32_t c = 0; c < 32; ++c) {
-            tempIn[c] = coeffs[r * 32 + c];
-        }
-        clampBufIv(tempIn, 32, kInvClampBit);
-        txfmRow(tempIn, buf + r * 32);
-        roundShiftArrayIv(buf + r * 32, 32, 2);
-    }
-
-    // columns: clamp 16, 1D, round_shift_array(-shift[1]) = +4, clip add
-    for (std::uint32_t c = 0; c < 32; ++c) {
-        for (std::uint32_t r = 0; r < 32; ++r) {
-            tempIn[r] = buf[r * 32 + c];
-        }
-        clampBufIv(tempIn, 32, kInvClampBit);
-        txfmRow(tempIn, tempOut);
-        roundShiftArrayIv(tempOut, 32, 4);
-        for (std::uint32_t r = 0; r < 32; ++r) {
-            clipPixelAdd(dst + r * stride + c, tempOut[r]);
-        }
-    }
+    Txfm2dFlipCfg cfg;
+    invTransformConfig(type, TxSize::TX_32X32, cfg);
+    std::int32_t txfmBuf[32 * 32 + 2 * 32];
+    invTxfm2dAddCore(coeffs, dst, stride, cfg, txfmBuf);
 }
 
-// svt_av1_inv_txfm2d_add_64x64_c / inv_txfm2d_add_c, TX_64X64: rows then
-// columns, inv_shift_64x64 = {-2, -4}, cos_bit 12/12, no flips, clamp bits
-// bd+8=16 and max(bd+6,16)=16; add via clip_pixel_highbd(pred +
-// round_shift(out, 4), 8). DCT-ONLY at 64x64.
+// svt_av1_inv_txfm2d_add_64x64_c is the COMPACTING facade in the reference
+// (inv_transforms.c:2615-2628 remaps a 32x32 block into the top-left of a
+// 64x64 area); the LANDED port facade is the 4096 form instead - the l6/GPU
+// callers expand the compacted dqcoeff themselves and pass a full 64x64 block
+// (the FS5d named follow-up in AGENTS.md). TX2 keeps that contract and only
+// routes the body through the core (the landed DCT outputs are unchanged -
+// the suite and gate are the guard).
 void invTxfm2dAdd64x64(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type) {
-    (void)type;  // DCT-only
-    std::int32_t buf[64 * 64];
-    std::int32_t tempIn[64];
-    std::int32_t tempOut[64];
-
-    // rows: clamp 16, 1D, round_shift_array(-shift[0]) = +2 rounding >>2
-    for (std::uint32_t r = 0; r < 64; ++r) {
-        for (std::uint32_t c = 0; c < 64; ++c) {
-            tempIn[c] = coeffs[r * 64 + c];
-        }
-        clampBufIv(tempIn, 64, kInvClampBit);
-        idct64(tempIn, buf + r * 64);
-        roundShiftArrayIv(buf + r * 64, 64, 2);
-    }
-
-    // columns: clamp 16, 1D, round_shift_array(-shift[1]) = +4, clip add
-    for (std::uint32_t c = 0; c < 64; ++c) {
-        for (std::uint32_t r = 0; r < 64; ++r) {
-            tempIn[r] = buf[r * 64 + c];
-        }
-        clampBufIv(tempIn, 64, kInvClampBit);
-        idct64(tempIn, tempOut);
-        roundShiftArrayIv(tempOut, 64, 4);
-        for (std::uint32_t r = 0; r < 64; ++r) {
-            clipPixelAdd(dst + r * stride + c, tempOut[r]);
-        }
-    }
+    Txfm2dFlipCfg cfg;
+    invTransformConfig(type, TxSize::TX_64X64, cfg);
+    std::int32_t txfmBuf[64 * 64 + 2 * 64];
+    invTxfm2dAddCore(coeffs, dst, stride, cfg, txfmBuf);
 }
 
 // ===================================================================
@@ -4288,8 +4143,8 @@ namespace {
 
 // svt_aom_fwd_txfm_type_to_func (transforms.c:2361-2394) over the landed 1D
 // kernels: every fwd 1D class is cos_bit-parameterized here (the B variants);
-// IDENTITY* and INVALID are unreachable through the port's four-value TxType
-// scope (the reference maps them to fidentity/NULL + assert)
+// TX2 adds the IDENTITY* kernels (fidentity, transforms.c:2381-2390); INVALID
+// maps to nullptr + assert
 using TxfmFnCB = void (*)(const std::int32_t*, std::int32_t*, int);
 
 TxfmFnCB fwd1d(TxfmTypeLs type) {
@@ -4303,6 +4158,11 @@ TxfmFnCB fwd1d(TxfmTypeLs type) {
     case TxfmTypeLs::DCT32: return fdct32B;
     case TxfmTypeLs::ADST32: return fadst32B;
     case TxfmTypeLs::DCT64: return fdct64B;
+    case TxfmTypeLs::IDENTITY4: return fwdIdentity4;
+    case TxfmTypeLs::IDENTITY8: return fwdIdentity8;
+    case TxfmTypeLs::IDENTITY16: return fwdIdentity16;
+    case TxfmTypeLs::IDENTITY32: return fwdIdentity32;
+    case TxfmTypeLs::IDENTITY64: return fwdIdentity64;
     default: return nullptr;
     }
 }
@@ -4325,14 +4185,14 @@ void roundShiftArrayTx1(std::int32_t* arr, int size, int bit) {
 
 }  // namespace
 
-// av1_tranform_two_d_core_c (transforms.c:2398-2469) with the port's four-type
-// scope: ud_flip/lr_flip fixed 0 (named deviation, set_flip_cfg is 0 for all
-// four types), bit_depth fixed 8. The reference reuses the output buffer as
-// scratch; the port keeps local temps (same values, the scratch is invisible).
-// The gen_fwd_stage_range arrays (transforms.c:148-160) are NOT computed here:
-// the landed fwd 1D kernels take no stage_range and clamp nothing (the
-// reference (void)s it too), so the arrays had no consumer; the cfg's
-// non-scale ranges remain and are test-pinned.
+// av1_tranform_two_d_core_c (transforms.c:2398-2469) with the port's full
+// 16-type scope (TX2): the ud_flip read and lr_flip write branches live
+// (:2430-2438 read, :2443-2452 write), bit_depth fixed 8. The reference reuses
+// the output buffer as scratch; the port keeps local temps (same values, the
+// scratch is invisible). The gen_fwd_stage_range arrays (transforms.c:148-160)
+// are NOT computed here: the landed fwd 1D kernels take no stage_range and
+// clamp nothing (the reference (void)s it too), so the arrays had no consumer;
+// the cfg's non-scale ranges remain and are test-pinned.
 void fwdTxfm2dCore(const std::int16_t* input, std::uint32_t stride, std::int32_t* output,
                    const Txfm2dFlipCfg& cfg, std::int32_t* buf) {
     const int txfmSizeCol = txSizeWide(cfg.txSize);
@@ -4350,14 +4210,28 @@ void fwdTxfm2dCore(const std::int16_t* input, std::uint32_t stride, std::int32_t
 
     // Columns
     for (int c = 0; c < txfmSizeCol; ++c) {
-        for (int r = 0; r < txfmSizeRow; ++r) {
-            tempIn[r] = input[r * stride + c];
+        if (cfg.udFlip == 0) {
+            for (int r = 0; r < txfmSizeRow; ++r) {
+                tempIn[r] = input[r * stride + c];
+            }
+        } else {
+            for (int r = 0; r < txfmSizeRow; ++r) {
+                // flip upside down (transforms.c:2435-2438)
+                tempIn[r] = input[(txfmSizeRow - r - 1) * stride + c];
+            }
         }
         roundShiftArrayTx1(tempIn, txfmSizeRow, -shift[0]);
         txfmCol(tempIn, tempOut, cfg.cosBitCol);
         roundShiftArrayTx1(tempOut, txfmSizeRow, -shift[1]);
-        for (int r = 0; r < txfmSizeRow; ++r) {
-            buf[r * txfmSizeCol + c] = tempOut[r];
+        if (cfg.lrFlip == 0) {
+            for (int r = 0; r < txfmSizeRow; ++r) {
+                buf[r * txfmSizeCol + c] = tempOut[r];
+            }
+        } else {
+            for (int r = 0; r < txfmSizeRow; ++r) {
+                // flip from left to right (transforms.c:2448-2451)
+                buf[r * txfmSizeCol + (txfmSizeCol - c - 1)] = tempOut[r];
+            }
         }
     }
 
@@ -4493,8 +4367,17 @@ namespace {
 
 // svt_aom_inv_txfm_type_to_func (inv_transforms.c:2391-2425) over the landed
 // inverse 1D kernels (all cos_bit 12 = INV_COS_BIT, matching
-// inv_cos_bit_col/row); IDENTITY* and INVALID map to nullptr + assert
+// inv_cos_bit_col/row); TX2 adds the IDENTITY* kernels (iidentity,
+// inv_transforms.c:2411-2420); INVALID maps to nullptr + assert
 using InvTxfmFnTx1 = void (*)(const std::int32_t*, std::int32_t*);
+
+// TX2: the identity kernels carry the reference's (in, out, cos_bit) signature
+// (cos_bit unused); the inv core's 1D table is 2-arg, so wrap
+void invIdentity4Tx1(const std::int32_t* in, std::int32_t* out) { invIdentity4(in, out, 0); }
+void invIdentity8Tx1(const std::int32_t* in, std::int32_t* out) { invIdentity8(in, out, 0); }
+void invIdentity16Tx1(const std::int32_t* in, std::int32_t* out) { invIdentity16(in, out, 0); }
+void invIdentity32Tx1(const std::int32_t* in, std::int32_t* out) { invIdentity32(in, out, 0); }
+void invIdentity64Tx1(const std::int32_t* in, std::int32_t* out) { invIdentity64(in, out, 0); }
 
 InvTxfmFnTx1 inv1dTx1(TxfmTypeLs type) {
     switch (type) {
@@ -4507,6 +4390,11 @@ InvTxfmFnTx1 inv1dTx1(TxfmTypeLs type) {
     case TxfmTypeLs::DCT32: return idct32;
     case TxfmTypeLs::ADST32: return iadst32;
     case TxfmTypeLs::DCT64: return idct64;
+    case TxfmTypeLs::IDENTITY4: return invIdentity4Tx1;
+    case TxfmTypeLs::IDENTITY8: return invIdentity8Tx1;
+    case TxfmTypeLs::IDENTITY16: return invIdentity16Tx1;
+    case TxfmTypeLs::IDENTITY32: return invIdentity32Tx1;
+    case TxfmTypeLs::IDENTITY64: return invIdentity64Tx1;
     default: return nullptr;
     }
 }
@@ -4521,14 +4409,14 @@ void clipPixelAddTx1(std::uint8_t* dst, std::int32_t trans) {
 
 }  // namespace
 
-// inv_txfm2d_add_c (inv_transforms.c:2496-2579) with the port's four-type
-// scope: ud_flip/lr_flip fixed 0 (named deviation), bd fixed 8, the new_
-// inv_sqrt2 pre-multiply live for the 2:1 shapes (rect_type +-1,
-// inv_transforms.c:2534-2538; new_inv_sqrt2 = 2896, new_sqrt2_bits = 12).
-// gen_inv_stage_range (inv_transforms.c:44-86) is NOT computed here: at bd=8
-// it writes opt_range 16 into every stage, which is exactly the {16,...} shim
-// the landed inverse 1D kernels bake in (B1 gate lines), so the arrays had no
-// consumer.
+// inv_txfm2d_add_c (inv_transforms.c:2496-2579) with the port's full 16-type
+// scope (TX2): the lr_flip column read and ud_flip row write branches live
+// (:2554-2563 read, :2567-2577 write), bd fixed 8, the new_inv_sqrt2
+// pre-multiply live for the 2:1 shapes (rect_type +-1, inv_transforms.c:2534-
+// 2538; new_inv_sqrt2 = 2896, new_sqrt2_bits = 12). gen_inv_stage_range
+// (inv_transforms.c:44-86) is NOT computed here: at bd=8 it writes opt_range
+// 16 into every stage, which is exactly the {16,...} shim the landed inverse
+// 1D kernels bake in (B1 gate lines), so the arrays had no consumer.
 void invTxfm2dAddCore(const std::int32_t* input, std::uint8_t* dst, std::uint32_t stride,
                       const Txfm2dFlipCfg& cfg, std::int32_t* txfmBuf) {
     const int txfmSizeCol = txSizeWide(cfg.txSize);
@@ -4567,14 +4455,28 @@ void invTxfm2dAddCore(const std::int32_t* input, std::uint8_t* dst, std::uint32_
 
     // Columns
     for (int c = 0; c < txfmSizeCol; ++c) {
-        for (int r = 0; r < txfmSizeRow; ++r) {
-            tempIn[r] = buf[r * txfmSizeCol + c];
+        if (cfg.lrFlip == 0) {
+            for (int r = 0; r < txfmSizeRow; ++r) {
+                tempIn[r] = buf[r * txfmSizeCol + c];
+            }
+        } else {
+            // flip left right (inv_transforms.c:2558-2563)
+            for (int r = 0; r < txfmSizeRow; ++r) {
+                tempIn[r] = buf[r * txfmSizeCol + (txfmSizeCol - c - 1)];
+            }
         }
         clampBufIv(tempIn, txfmSizeRow, kInvClampBit);
         txfmCol(tempIn, tempOut);
         roundShiftArrayIv(tempOut, txfmSizeRow, -shift[1]);
-        for (int r = 0; r < txfmSizeRow; ++r) {
-            clipPixelAddTx1(dst + r * stride + c, tempOut[r]);
+        if (cfg.udFlip == 0) {
+            for (int r = 0; r < txfmSizeRow; ++r) {
+                clipPixelAddTx1(dst + r * stride + c, tempOut[r]);
+            }
+        } else {
+            // flip upside down (inv_transforms.c:2572-2576)
+            for (int r = 0; r < txfmSizeRow; ++r) {
+                clipPixelAddTx1(dst + r * stride + c, tempOut[txfmSizeRow - r - 1]);
+            }
         }
     }
 }
@@ -4724,11 +4626,15 @@ void invTxfm2dAdd64x16(const std::int32_t* coeffs, std::uint8_t* dst, std::uint3
     invTxfm2dAddCore(modInput, dst, stride, cfg, txfmBuf);
 }
 
-// TX1: the fwd dispatch's admissible predicate (av1_estimate_transform_default,
+// TX1/TX2: the fwd dispatch's admissible predicate (av1_estimate_transform_default,
 // transforms.c:3185-3360): the type table gates first (av1_txfm_type_ls), then
-// the dispatch asserts DCT_DCT (IDTX parked) at every shape with an axis
-// >= 32 (:3193, :3208, :3223, :3238, :3254, :3266, :3286, :3298, :3336, and
-// the 64x64 case)
+// the dispatch asserts: DCT_DCT only at TX_64X32/32X64/64X16/16X64 and TX_64X64
+// (:3193, :3208, :3223, :3238 and the 64x64 case); DCT_DCT or IDTX at
+// TX_32X16/16X32/32X8/8X32/32X32 (:3254, :3266, :3286, :3298, :3336); TX2 adds
+// the six one-axis types at TX_32X32 through the transform_two_d_32x32_c
+// fallback branch (:3329-3331, live at the default build's
+// CONFIG_ENABLE_NON_DCT_LARGE_TX=1, EbConfigMacros.h:246); the small shapes
+// (both axes <= 16) carry no assert, so every cfg-valid type is admitted
 bool fwdTxfmSupported(TxSize size, TxType type) {
     Txfm2dFlipCfg cfg;
     fwdTransformConfig(type, size, cfg);
@@ -4737,16 +4643,29 @@ bool fwdTxfmSupported(TxSize size, TxType type) {
     }
     const int w = txSizeWide(size);
     const int h = txSizeHigh(size);
-    if ((w >= 32 || h >= 32) && type != TxType::DCT_DCT) {
-        return false;
+    if (w < 32 && h < 32) {
+        return true;
     }
-    return true;
+    if (w >= 64 || h >= 64) {
+        // TX_64X32/32X64/64X16/16X64 and TX_64X64: the asserts name DCT_DCT
+        // only (transforms.c:3193, :3208, :3223, :3238 and the 64x64 case)
+        return type == TxType::DCT_DCT;
+    }
+    if (type == TxType::DCT_DCT || type == TxType::IDTX) {
+        return true;
+    }
+    if (w == 32 && h == 32) {
+        return type == TxType::V_DCT || type == TxType::H_DCT || type == TxType::V_ADST ||
+               type == TxType::H_ADST || type == TxType::V_FLIPADST || type == TxType::H_FLIPADST;
+    }
+    return false;
 }
 
-// TX1: the inv dispatch's admissible predicate (highbd_inv_txfm_add +
+// TX1/TX2: the inv dispatch's admissible predicate (highbd_inv_txfm_add +
 // wrappers, inv_transforms.c:3167-3236): the non-square wrappers carry no type
 // assert, so the gate is the type table alone except at the squares TX_32X32
-// (DCT_DCT or IDTX, :2924-2932) and TX_64X64 (DCT_DCT, :2940)
+// (the wrapper switch takes DCT_DCT or IDTX, :2924-2932 - TX2 adds IDTX) and
+// TX_64X64 (DCT_DCT, :2940)
 bool invTxfmSupported(TxSize size, TxType type) {
     Txfm2dFlipCfg cfg;
     invTransformConfig(type, size, cfg);
@@ -4755,7 +4674,10 @@ bool invTxfmSupported(TxSize size, TxType type) {
     }
     const int w = txSizeWide(size);
     const int h = txSizeHigh(size);
-    if ((w == 32 && h == 32) || (w == 64 && h == 64)) {
+    if (w == 32 && h == 32) {
+        return type == TxType::DCT_DCT || type == TxType::IDTX;
+    }
+    if (w == 64 && h == 64) {
         return type == TxType::DCT_DCT;
     }
     return true;
