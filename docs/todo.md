@@ -1892,6 +1892,58 @@ A0. SLICE-LEVEL STATE (the live register)
 |    (29,157/157,718): A1 36% (9,839), A8 30% (3,191), A11 30% (3,618),
 |    A12 24% (389). The 20% push needs ~+2,350 more; wave 3 opens
 |    immediately.
+|  - [x] **A11/TF1 (2026-11-04, PERRY-TF1, ff-merged 736f2cc): the
+|    temporal filtering kernel family lands** in src/l9_analysis/
+|    temporal_filter.{h,cpp} + tests/test_temporal.cpp (namespace
+|    analysis::temporal) - 534 nb of temporal_filtering.c (judge
+|    re-measured exact, span-by-span): the log1p_tab_fp16 table
+|    :339-:565 (227, mechanically extracted, 0 hand-typed), noise_log1p
+|    :568-:586, decay/shift factors :589-:619, the expf/sqrt tables
+|    :624-:677, the squared-error sum :697-:707 and both planewise
+|    kernel pairs (zz :738-:814, non-zz :930-:1087). Consumed MeContext
+|    fields threaded as parameters. PARKED named: the hbd twins, the
+|    subpel searches, block_plane_wise, apply_filtering_central (wall
+|    deep). 21 TEST_CASEs, 6 mutations killed. BRIEF CORRECTIONS: the
+|    writer's span boundaries supersede the brief's (measured); the
+|    brief's "partial (<=) vs full (<) split" phrasing did not
+|    reproduce - the actual half-open subblock/quadrant rule pinned via
+|    M3. Writer run 14/14 (280.64 s), GATE byte-identical 884,851 B.
+|    A11 0.3008 -> 0.3452. Coverage-only.
+|  - [x] **A14/PU1 (2026-11-04, PERRY-PU1, cherry-picked 64778f3): the
+|    pack/unpack + blend + VAR family lands** in src/l9_analysis/
+|    packunpack.{h,cpp} + the analysis PU1 block - pack_unpack_c.c WHOLE
+|    (183 nb, all 7 kernels), blend_a64_mask_c.c WHOLE (31 nb, the
+|    vmask blend - its reference name carries "highbd" but it is
+|    struct-free; judgment named) and variance.c varianceCore + the 20
+|    missing VAR instances (general two-buffer shape; AN8's offs-folded
+|    shape coexists) = +236. FINDING pinned: at bStride 0 varianceCore
+|    still indexes b[0..w-1] - the offs array is REAL. 9 mutations
+|    killed. PARKED named: SUBPIX/OBMC_VAR families, the bilinear
+|    helpers, upsampled_pred, the highbd wrappers. Writer run 14/14
+|    (281.62 s), GATE byte-identical 884,851 B. A14 0.316 -> 0.4768.
+|    Coverage-only.
+|  - [x] **A6/PO1 (2026-11-04, PERRY-PO1, cherry-picked 0b06713): the
+|    struct-free pic_operators kernels land** in src/l6_pipeline/
+|    picops.{h,cpp} + tests/test_picops.cpp (namespace pipeline::picops)
+|    - 199 nb: the two residual kernels (NO clamp, the uint16 wrap-cast
+|    - matches the l6 convention), the three full-distortion kernels +
+|    the 32-single dispatcher (shift-free int64 SQR - the brief's
+|    shift-table claim did not reproduce, corrected), the yv12 copy trio
+|    and generatePadding16Bit (struct-free; AN10 had NAMED it excluded -
+|    now landed in picops). PARKED 172 named (the pack2d/unpack2d
+|    dispatches - callees are PU1's packunpack; the five
+|    EbPictureBufferDesc-walled pic drivers). 14 TEST_CASEs, 11 mutation
+|    kills (the naive predOffset mutant is a compile-kill under /WX -
+|    behavioral kill used instead). INCIDENT disclosed: picops.cpp was
+|    overwritten mid-session by out-of-band activity (recovered; the
+|    Copy-Item-timestamp/stale-obj lesson recorded in the commit).
+|    memset32bit grep-verified DEAD. Writer run 14/14 (278.73 s + the
+|    first full 280.06 s), GATE byte-identical 884,851 B. A6 0.1102 ->
+|    0.1245. Coverage-only.
+|  - [x] **WAVE-3 CLOSE (judge, post-merge re-measure on master)**: full
+|    ctest 14/14 (278.04 s), GATE byte-identical 884,851 B diff 0,
+|    coverage 19.1% (30,126/157,718): A6 12% (1,734), A11 35% (4,152),
+|    A14 48% (699). ~+1,400 nb to 20%; wave 4 opens immediately.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
