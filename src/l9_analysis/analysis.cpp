@@ -282,6 +282,159 @@ void dilateBlock(const std::uint8_t* src, int srcStride, std::uint8_t* dilated,
     }
 }
 
+// PU1: the missing VAR(W,H) macro instances of C_DEFAULT/variance.c in the
+// GENERAL two-buffer shape (the reference macro :184-190; the AN8
+// variance16x16/8x8 above are the offs-folded single-buffer shape). Each
+// instance: varianceCore(a, aStride, b, bStride, W, H, sse, &sum), then
+// *sse - (uint32_t)(((int64_t)sum * sum) / (W * H)) (:189, truncating).
+// The 20 sizes below complete the VARIANCES(W, H) enumeration
+// (:208-:229) - the 16x16 and 8x8 instances already landed with AN8.
+
+// 1:1 port of the VAR(4, 4) instance svt_aom_variance4x4_c (:222).
+std::uint32_t variance4x4(const std::uint8_t* a, int aStride,
+                          const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 4, 4, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (4 * 4));
+}
+
+// The remaining VARIANCES(W, H) instances, in the reference's own order
+// (:208-:229). The 16x16 and 8x8 shapes live in the offs-folded form above.
+std::uint32_t variance128x128(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 128, 128, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (128 * 128));
+}
+
+std::uint32_t variance128x64(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 128, 64, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (128 * 64));
+}
+
+std::uint32_t variance64x128(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 64, 128, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (64 * 128));
+}
+
+std::uint32_t variance64x64(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 64, 64, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (64 * 64));
+}
+
+std::uint32_t variance64x32(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 64, 32, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (64 * 32));
+}
+
+std::uint32_t variance32x64(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 32, 64, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (32 * 64));
+}
+
+std::uint32_t variance32x32(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 32, 32, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (32 * 32));
+}
+
+std::uint32_t variance32x16(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 32, 16, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (32 * 16));
+}
+
+std::uint32_t variance16x32(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 16, 32, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (16 * 32));
+}
+
+std::uint32_t variance16x8(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 16, 8, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (16 * 8));
+}
+
+std::uint32_t variance8x16(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 8, 16, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (8 * 16));
+}
+
+std::uint32_t variance8x4(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 8, 4, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (8 * 4));
+}
+
+std::uint32_t variance4x8(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 4, 8, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (4 * 8));
+}
+
+std::uint32_t variance4x16(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 4, 16, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (4 * 16));
+}
+
+std::uint32_t variance16x4(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 16, 4, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (16 * 4));
+}
+
+std::uint32_t variance8x32(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 8, 32, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (8 * 32));
+}
+
+std::uint32_t variance32x8(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 32, 8, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (32 * 8));
+}
+
+std::uint32_t variance16x64(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 16, 64, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (16 * 64));
+}
+
+std::uint32_t variance64x16(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse) {
+    int sum;
+    varianceCore(a, aStride, b, bStride, 64, 16, sse, &sum);
+    return *sse - static_cast<std::uint32_t>(static_cast<std::int64_t>(sum) * sum / (64 * 16));
+}
+
+// 1:1 port of variance_c (third_party/SVT-AV1/Source/Lib/C_DEFAULT/
+// variance.c:141-158) - static there, the core the VAR(W,H) macro drives;
+// exported here for the tests (the AN8 statics precedent). Signed diff
+// summed as int, squared as uint32, per row advanced by the strides.
+void varianceCore(const std::uint8_t* a, int aStride, const std::uint8_t* b,
+                  int bStride, int w, int h, std::uint32_t* sse, int* sum) {
+    *sum = 0;
+    *sse = 0;
+
+    for (int i = 0; i < h; ++i) {
+        for (int j = 0; j < w; ++j) {
+            const int diff = a[j] - b[j];
+            *sum += diff;
+            *sse += static_cast<std::uint32_t>(diff * diff);
+        }
+
+        a += aStride;
+        b += bStride;
+    }
+}
+
 // 1:1 port of svt_aom_variance16x16_c (C_DEFAULT/variance.c:184-190 via
 // variance_c :141-158) at ref_stride 0 over the constant-128 offs
 // (pic_analysis_process.c:936-942, folded). The (int64_t) cast on sum*sum

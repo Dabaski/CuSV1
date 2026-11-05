@@ -104,6 +104,47 @@ std::uint8_t findDominantValue(const std::uint8_t* src, int stride, int rows, in
 void dilateBlock(const std::uint8_t* src, int srcStride, std::uint8_t* dilated,
                  int dilatedStride, int rows, int cols);
 
+// 1:1 port of variance_c (third_party/SVT-AV1/Source/Lib/C_DEFAULT/
+// variance.c:141-158) - static there, the core the VAR(W,H) macro drives;
+// exported for the tests (the AN8 statics precedent).
+void varianceCore(const std::uint8_t* a, int aStride, const std::uint8_t* b,
+                  int bStride, int w, int h, std::uint32_t* sse, int* sum);
+
+// PU1: the missing VAR(W,H) macro instances of C_DEFAULT/variance.c in the
+// GENERAL two-buffer shape (the reference macro :184-190; the AN8
+// variance16x16/8x8 above are the offs-folded single-buffer shape). Each
+// instance: varianceCore(a, aStride, b, bStride, W, H, sse, &sum), then
+// *sse - (uint32_t)(((int64_t)sum * sum) / (W * H)) (:189, truncating).
+// The 20 declarations below complete the VARIANCES(W, H) enumeration
+// (:208-:229) - the 16x16 and 8x8 instances already landed with AN8.
+
+// 1:1 port of the VAR(4, 4) instance svt_aom_variance4x4_c (:222).
+std::uint32_t variance4x4(const std::uint8_t* a, int aStride,
+                          const std::uint8_t* b, int bStride, std::uint32_t* sse);
+
+// The remaining VARIANCES(W, H) instances, in the reference's own order
+// (C_DEFAULT/variance.c:208-:229). The 16x16 and 8x8 shapes are the
+// offs-folded single-buffer declarations above (AN8).
+std::uint32_t variance128x128(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance128x64(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance64x128(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance64x64(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance64x32(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance32x64(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance32x32(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance32x16(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance16x32(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance16x8(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance8x16(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance8x4(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance4x8(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance4x16(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance16x4(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance8x32(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance32x8(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance16x64(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+std::uint32_t variance64x16(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, std::uint32_t* sse);
+
 // 1:1 port of the VAR(W,H) macro instance svt_aom_variance16x16_c
 // (third_party/SVT-AV1/Source/Lib/C_DEFAULT/variance.c:184-190, via
 // variance_c :141-158), called the way the screen-content detectors call it
