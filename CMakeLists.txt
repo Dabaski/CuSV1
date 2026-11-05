@@ -33,6 +33,7 @@ if(BUILD_TESTING)
   add_subdirectory(src/l11_resize)
   add_subdirectory(src/l12_convolve)
   add_subdirectory(src/l13_palette)
+  add_subdirectory(src/l14_utility)
 endif()
 
 # benchmark tool: own target, not a ctest (tools/bench/README notes inside
