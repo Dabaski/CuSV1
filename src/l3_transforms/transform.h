@@ -15,23 +15,53 @@ std::int32_t roundShift(std::int64_t value, int bit);
 
 void fdct4(const std::int32_t input[4], std::int32_t output[4]);
 
+// TX1: the same kernel with the reference's cos_bit parameter (12 at the
+// TX_4X16 row pass per fwd_cos_bit_row[0][2])
+void fdct4B(const std::int32_t input[4], std::int32_t output[4], int cosBit);
+
 void fadst4(const std::int32_t input[4], std::int32_t output[4]);
+
+// TX1: the same kernel with the reference's cos_bit parameter (12 at the
+// TX_4X16 ADST row pass per fwd_cos_bit_row[0][2]); sinpi row follows the bit
+void fadst4B(const std::int32_t input[4], std::int32_t output[4], int cosBit);
 
 void fdct8(const std::int32_t input[8], std::int32_t output[8]);
 
+// TX1: the same kernel with the reference's cos_bit parameter (12 at the
+// TX_8X32 row pass per fwd_cos_bit_row[1][3])
+void fdct8B(const std::int32_t input[8], std::int32_t output[8], int cosBit);
+
 void fadst8(const std::int32_t input[8], std::int32_t output[8]);
+
+// TX1: the same kernel with the reference's cos_bit parameter (12 at the
+// TX_8X32 ADST row pass per fwd_cos_bit_row[1][3])
+void fadst8B(const std::int32_t input[8], std::int32_t output[8], int cosBit);
 
 // svt_av1_fdct16_new (transforms.c:268), cos_bit = 13
 void fdct16(const std::int32_t input[16], std::int32_t output[16]);
 
+// TX1: the cos_bit-parameterized form the cfg machinery dispatches through
+void fdct16B(const std::int32_t input[16], std::int32_t output[16], int cosBit);
+
 // svt_av1_fadst16_new (transforms.c:1714), cos_bit = 13
 void fadst16(const std::int32_t input[16], std::int32_t output[16]);
+
+// TX1: the cos_bit-parameterized form the cfg machinery dispatches through
+void fadst16B(const std::int32_t input[16], std::int32_t output[16], int cosBit);
 
 // svt_av1_fdct32_new (transforms.c:422), cos_bit = 12 (fwd_cos_bit[3][3])
 void fdct32(const std::int32_t input[32], std::int32_t output[32]);
 
+// TX1: the same kernel with the reference's cos_bit parameter (13 at the
+// TX_32X16 row pass, 11 at the TX_32X64 / TX_64X32 row passes)
+void fdct32B(const std::int32_t input[32], std::int32_t output[32], int cosBit);
+
 // static av1_fadst32_new (transforms.c:1908), cos_bit = 12
 void fadst32(const std::int32_t input[32], std::int32_t output[32]);
+
+// TX1: the same kernel with the reference's cos_bit parameter (13 at the
+// TX_32X16 ADST row pass, 11 at the TX_32X64 / TX_64X32 ADST row passes)
+void fadst32B(const std::int32_t input[32], std::int32_t output[32], int cosBit);
 
 // svt_av1_idct32_new (inv_transforms.c:378), cos_bit = 12; stage_range
 // consumed at the butterfly stages per the C3-style audit (L3 slice)
@@ -85,6 +115,191 @@ enum class TxSizeSqUp {
     TX_32X32,
     TX_64X64,
 };
+
+// TX1: the full TxSize shape list, verbatim order of definitions.h:955-974
+// (the fwd_txfm_shift_ls / inv_txfm_shift_ls indexing order)
+enum class TxSize {
+    TX_4X4,
+    TX_8X8,
+    TX_16X16,
+    TX_32X32,
+    TX_64X64,
+    TX_4X8,
+    TX_8X4,
+    TX_8X16,
+    TX_16X8,
+    TX_16X32,
+    TX_32X16,
+    TX_32X64,
+    TX_64X32,
+    TX_4X16,
+    TX_16X4,
+    TX_8X32,
+    TX_32X8,
+    TX_16X64,
+    TX_64X16,
+};
+
+// tx_size_wide / tx_size_high (common_utils.c:116-122)
+int txSizeWide(TxSize size);
+int txSizeHigh(TxSize size);
+
+// get_rect_tx_log_ratio (inv_transforms.h:293-315)
+int rectTxLogRatio(int col, int row);
+
+// TX1: TxfmType (inv_transforms.h:84-101), the 1D kernel classes the cfg
+// tables name. IDENTITY* and the ADST-at-64 entry are carried for table
+// fidelity; our TxType scope can only reach DCT* and ADST4..ADST32.
+enum class TxfmTypeLs {
+    DCT4,
+    DCT8,
+    DCT16,
+    DCT32,
+    DCT64,
+    ADST4,
+    ADST8,
+    ADST16,
+    ADST32,
+    IDENTITY4,
+    IDENTITY8,
+    IDENTITY16,
+    IDENTITY32,
+    IDENTITY64,
+    INVALID,
+};
+
+// TX1: Txfm2dFlipCfg (inv_transforms.h:103-116). stageRangeCol/Row hold the
+// NON-SCALE ranges (set_fwd_txfm_non_scale_range, transforms.c:2471-2492);
+// the cores compute the final bd-8 ranges locally.
+struct Txfm2dFlipCfg {
+    TxSize txSize;
+    int udFlip;
+    int lrFlip;
+    const std::int8_t* shift;
+    std::int8_t cosBitCol;
+    std::int8_t cosBitRow;
+    std::int8_t stageRangeCol[12];
+    std::int8_t stageRangeRow[12];
+    TxfmTypeLs txfmTypeCol;
+    TxfmTypeLs txfmTypeRow;
+    int stageNumCol;
+    int stageNumRow;
+};
+
+// TX1: svt_aom_transform_config (transforms.c:2494-2510)
+void fwdTransformConfig(TxType type, TxSize size, Txfm2dFlipCfg& cfg);
+
+// TX1: svt_av1_get_inv_txfm_cfg (inv_transforms.c:2470-2494)
+void invTransformConfig(TxType type, TxSize size, Txfm2dFlipCfg& cfg);
+
+// TX1: inv_txfm2d_add_c (inv_transforms.c:2496-2579); txfmBuf is the
+// caller-provided w*h + 2*max(w,h) scratch
+void invTxfm2dAddCore(const std::int32_t* input, std::uint8_t* dst, std::uint32_t stride,
+                      const Txfm2dFlipCfg& cfg, std::int32_t* txfmBuf);
+
+// TX1: svt_av1_inv_txfm2d_add_4x8_c (inv_transforms.c:2630-2635)
+void invTxfm2dAdd4x8(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_8x4_c (inv_transforms.c:2637-2642)
+void invTxfm2dAdd8x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_8x16_c (inv_transforms.c:2644-2650)
+void invTxfm2dAdd8x16(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_16x8_c (inv_transforms.c:2652-2658)
+void invTxfm2dAdd16x8(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_16x32_c (inv_transforms.c:2660-2666)
+void invTxfm2dAdd16x32(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_32x16_c (inv_transforms.c:2668-2674)
+void invTxfm2dAdd32x16(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_4x16_c (inv_transforms.c:2736-2742)
+void invTxfm2dAdd4x16(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_16x4_c (inv_transforms.c:2743-2749)
+void invTxfm2dAdd16x4(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_8x32_c (inv_transforms.c:2750-2756)
+void invTxfm2dAdd8x32(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_32x8_c (inv_transforms.c:2758-2764)
+void invTxfm2dAdd32x8(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_64x32_c (inv_transforms.c:2676-2690); coeffs is
+// the COMPACTED 32x32 block (max_eob 1024, inv_transforms.h:129-137)
+void invTxfm2dAdd64x32(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_32x64_c (inv_transforms.c:2692-2704); coeffs is
+// the COMPACTED 32x32 block (max_eob 1024)
+void invTxfm2dAdd32x64(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_16x64_c (inv_transforms.c:2706-2718); coeffs is
+// the COMPACTED 16x32 block (max_eob 512)
+void invTxfm2dAdd16x64(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_inv_txfm2d_add_64x16_c (inv_transforms.c:2720-2734); coeffs is
+// the COMPACTED 32x16 block (max_eob 512)
+void invTxfm2dAdd64x16(const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: the dispatch admissible-set predicates: fwd mirrors the dispatch
+// asserts of av1_estimate_transform_default, inv mirrors the type table plus
+// the square-wrapper asserts
+bool fwdTxfmSupported(TxSize size, TxType type);
+bool invTxfmSupported(TxSize size, TxType type);
+
+// TX1: the dispatch switches, av1_estimate_transform_default
+// (transforms.c:3185-3360) and highbd_inv_txfm_add (inv_transforms.c:3167-3236)
+void fwdTxfm2d(TxSize size, const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+void invTxfm2dAdd(TxSize size, const std::int32_t* coeffs, std::uint8_t* dst, std::uint32_t stride, TxType type);
+
+// TX1: av1_tranform_two_d_core_c (transforms.c:2398-2469); `buf` is the
+// caller-provided w*h intermediate (the facade's intermediate_transform_buffer)
+void fwdTxfm2dCore(const std::int16_t* input, std::uint32_t stride, std::int32_t* output,
+                   const Txfm2dFlipCfg& cfg, std::int32_t* buf);
+
+// TX1: svt_av1_fwd_txfm2d_4x8_c (transforms.c:2790-2797)
+void fwdTxfm2d4x8(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_8x4_c (transforms.c:2781-2788)
+void fwdTxfm2d8x4(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_8x16_c (transforms.c:2736-2743)
+void fwdTxfm2d8x16(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_16x8_c (transforms.c:2727-2734)
+void fwdTxfm2d16x8(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_16x32_c (transforms.c:2718-2725)
+void fwdTxfm2d16x32(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_32x16_c (transforms.c:2709-2716)
+void fwdTxfm2d32x16(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_32x64_c (transforms.c:2616-2625)
+void fwdTxfm2d32x64(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_64x32_c (transforms.c:2594-2602)
+void fwdTxfm2d64x32(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_4x16_c (transforms.c:2772-2779)
+void fwdTxfm2d4x16(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_16x4_c (transforms.c:2763-2770)
+void fwdTxfm2d16x4(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_8x32_c (transforms.c:2754-2761)
+void fwdTxfm2d8x32(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_32x8_c (transforms.c:2745-2752)
+void fwdTxfm2d32x8(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_16x64_c (transforms.c:2655-2664)
+void fwdTxfm2d16x64(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
+
+// TX1: svt_av1_fwd_txfm2d_64x16_c (transforms.c:2633-2641)
+void fwdTxfm2d64x16(const std::int16_t* input, std::int32_t* output, std::uint32_t stride, TxType type);
 
 // svt_aom_get_intra_uv_tx_type (mode_decision.c:2985-2997). `mode` is the
 // ALREADY-FOLDED luma-space intra mode (0..12): the reference folds internally
