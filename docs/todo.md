@@ -1842,6 +1842,56 @@ A0. SLICE-LEVEL STATE (the live register)
 |    l12_convolve joined at the scaffold), GATE byte-identical
 |    884,851 B diff 0, coverage 17.5% (27,575/157,718): A8 28% (2,942),
 |    A11 30% (3,600), A13 9% (477).
+|  - [x] **A8/LR3 (2026-11-04, PERRY-LR3, ff-merged b888d90): the
+|    restoration stripe/unit family lands** in src/l10_filters/restoration
+|    - 249 nb ported (whole_frame_rect, count_units_in_tile,
+|    get_stripe_boundary_info, setup/restore_processing_stripe_boundary,
+|    wiener_filter_stripe, sgrproj_filter_stripe,
+|    svt_av1_loop_restoration_filter_unit), 571 nb named-parked (the
+|    highbd stripes, the Av1Common-walled filter_frame pair, the tile
+|    walkers). The wiener stripe consumes the landed
+|    convolve::wienerConvolveAddSrc - the l10 link line gained
+|    av1_convolve under a JUDGE COURT ORDER (one line, named in the
+|    commit). FINDING: WienerInfo's alignas(16) is LOAD-BEARING - the
+|    convolve selects its tap row BY ADDRESS ALIGNMENT (measured offV=15).
+|    FINDING: the wiener stripe's w round-up rule differs from sgrproj's
+|    plain AOMMIN; M1 pinned it by the overflow-region observation. 13 new
+|    TEST_CASEs (206 in the l10 exe), 6 mutations killed. Writer run
+|    14/14 (280.56 s), GATE byte-identical 884,851 B. The stale-exe trap
+|    hit once (C4100-as-C2220) and was named - later greens verified by
+|    case count. Coverage-only.
+|  - [x] **A12/PAL1 (2026-11-04, PERRY-PAL1, cherry-picked 81edc4d): the
+|    palette + k-means family lands** in src/l13_palette (new module,
+|    scaffold e128cbb) - 389 nb of palette.c (+18 of
+|    pic_analysis_process.c charged to A11; count_colors' body lives
+|    there), k_means_template.h bodies both dims (k 2..8 enumerated). 39
+|    TEST_CASEs / 371 assertions, 9 mutations killed (M5/M8/M9 survived
+|    their first form and were sharpened - disclosed). BRIEF CORRECTIONS:
+|    count_colors is DEFINED in pic_analysis_process.c:868-:909; dim-2
+|    k-means has no portable-C caller (palette.c:526 is dim 1) - ported +
+|    tested anyway. Writer run 14/14 (276.64 s), GATE byte-identical
+|    884,851 B; one non-reproducing l10 launch flake named (0xc0000374).
+|    A12 0.00 -> 0.2413. Coverage-only.
+|  - [x] **A1/TX1 (2026-11-04, PERRY-TX1, cherry-picked 6634c20): the
+|    non-square 2D transform family lands** in src/l3_transforms - 14
+|    shapes enumerated (the brief's 12 missed 8x16/16x8; the writer
+|    caught it), the generic cfg machinery (shift/type/cos_bit tables +
+|    two_d_core + dispatch switches) generalized, 76 admissible
+|    (shape,TxType) pairs enumerated (46 fwd / 62 inv), roundtrip
+|    exactness classified per shape (8x16 exact, 16x8 lossy-1 - the
+|    reference itself is asymmetric, measured and pinned). 113 TEST_CASEs
+|    / 444 assertions, 7 mutations killed. JUDGE CORRECTION: the writer's
+|    span set claimed 1,148 nb, of which 220 (inv_transforms.c
+|    :2901-:3137, ALL highbd_inv_txfm_add_* wrappers) are highbd and
+|    NAMED-PARKED - A1 charges 928, 0.33 -> 0.3643. Writer run 14/14
+|    (278.55 s), GATE byte-identical 884,851 B. Host only, no GPU twins
+|    (named). Coverage-only.
+|  - [x] **WAVE-2 CLOSE (judge, post-merge re-measure on master)**: full
+|    ctest 14/14 (272.63 s - l13_palette is the 14th target since
+|    e128cbb), GATE byte-identical 884,851 B diff 0, coverage 18.5%
+|    (29,157/157,718): A1 36% (9,839), A8 30% (3,191), A11 30% (3,618),
+|    A12 24% (389). The 20% push needs ~+2,350 more; wave 3 opens
+|    immediately.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
