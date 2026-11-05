@@ -2593,3 +2593,15 @@ TEST_CASE("chroma gpu 8x8 == host for all 14 uv modes (delta 0) + dr at -1/+1") 
     }
     CHECK(allOk);
 }
+// CS1: svt_cfl_predict_lbd_c (C_DEFAULT/cfl_c.c:26-40). dst = clip(
+// ROUND_POWER_OF_TWO_SIGNED(alpha_q3 * pred_buf_q3, 6) + pred). Fixture:
+// alpha_q3 = 4, pred_buf_q3 = {64, -64}, pred = {100, 100} ->
+// scaled {4, -4} -> dst {104, 96}.
+TEST_CASE("cflPredictLbd scales ac by alpha and adds dc pred") {
+    std::int16_t buf[2] = {64, -64};
+    std::uint8_t pred[2] = {100, 100};
+    std::uint8_t dst[2] = {0, 0};
+    intra::cflPredictLbd(buf, pred, 2, dst, 2, 4, 8, 2, 1);
+    CHECK(dst[0] == 104);
+    CHECK(dst[1] == 96);
+}

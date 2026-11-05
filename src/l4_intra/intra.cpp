@@ -3438,4 +3438,27 @@ extern "C" __global__ void __launch_bounds__(1024) predict_block_64x64(
 )CUDB2";
 }
 
+// get_scaled_luma_q0 (C_DEFAULT/cfl_c.c:17-20): alpha_q3 * pred_q3,
+// rounded to q0 via signed ROUND_POWER_OF_TWO(.., 6).
+static int getScaledLumaQ0(int alphaQ3, int16_t predBufQ3) {
+    int scaledLumaQ6 = alphaQ3 * predBufQ3;
+    return scaledLumaQ6 < 0 ? -(((-scaledLumaQ6) + 32) >> 6) : ((scaledLumaQ6 + 32) >> 6);
+}
+
+// svt_cfl_predict_lbd_c (C_DEFAULT/cfl_c.c:26-40, verbatim).
+void cflPredictLbd(const std::int16_t* predBufQ3, const std::uint8_t* pred, int predStride, std::uint8_t* dst,
+                   int dstStride, int alphaQ3, int bitDepth, int width, int height) {
+    const int kCflBufLine = 32;  // CFL_BUF_LINE
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            dst[i] = static_cast<std::uint8_t>(
+                clipPixelHighbd(getScaledLumaQ0(alphaQ3, predBufQ3[i]) + static_cast<std::int16_t>(pred[i]),
+                                bitDepth));
+        }
+        dst += dstStride;
+        pred += predStride;
+        predBufQ3 += kCflBufLine;
+    }
+}
+
 }  // namespace intra

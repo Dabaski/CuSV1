@@ -1,5 +1,6 @@
 #include <doctest.h>
 #include <cstdint>
+#include <vector>
 #include <picops.h>
 
 namespace picops = pipeline::picops;
@@ -224,4 +225,144 @@ TEST_CASE("l6 picops generatePadding16Bit pads left right then replicates rows")
 
 TEST_CASE("l6 picops scaffold boots") {
     CHECK(true);
+}
+
+// CS1: svt_aom_picture_copy_kernel (C_DEFAULT/picture_operators_c.c:30-49).
+// Copies area_width x area_height rows row-by-row honoring strides.
+// Fixture: 3 rows x 4 cols, src stride 6, dst stride 8; padding bytes
+// in dst beyond area_width must stay 9.
+TEST_CASE("pictureCopy honors strides and leaves dst padding untouched") {
+    std::uint8_t src[3 * 6] = {0};
+    std::uint8_t dst[3 * 8];
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 8; ++x) dst[y * 8 + x] = 9;
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 4; ++x) src[y * 6 + x] = static_cast<std::uint8_t>(y * 10 + x + 1);
+    pipeline::picops::pictureCopy(src, 6, dst, 8, 4, 3, 1);
+    CHECK(dst[0] == 1);
+    CHECK(dst[3] == 4);
+    CHECK(dst[4] == 9);   // dst padding col 4 row 0
+    CHECK(dst[8] == 11);  // row 1 col 0
+    CHECK(dst[16] == 21); // row 2 col 0
+    CHECK(dst[19] == 24); // row 2 col 3 (copied)
+    CHECK(dst[23] == 9);  // dst padding col 7 row 2
+}
+
+// CS1: svt_spatial_full_distortion_kernel_c (C_DEFAULT/picture_operators_c.c:53-71).
+// Sum of squared per-pixel differences with byte/element offsets applied
+// to both planes. Fixture: 4x2, input ramp 1..8, recon zeros -> SSE 204.
+// Second call applies input_offset = 2 to a 4x2 area inside a wider
+// values 3,4,5,6 and 9,10,11,12 used -> SSE = 86 + 446 = 532.
+TEST_CASE("spatialFullDistortion sums squared diffs, honoring offsets") {
+    std::uint8_t input[2 * 4] = {1, 2, 3, 4, 5, 6, 7, 8};
+    std::uint8_t recon[2 * 4] = {0};
+    CHECK(pipeline::picops::spatialFullDistortion(input, 0, 4, recon, 0, 4, 4, 2) == 204);
+
+    std::uint8_t input2[2 * 6] = {0};
+    for (int i = 0; i < 12; ++i) input2[i] = static_cast<std::uint8_t>(i + 1);
+    CHECK(pipeline::picops::spatialFullDistortion(input2, 2, 6, recon, 0, 4, 4, 2) == 532);
+}
+
+// CS1: svt_aom_hadamard_4x4_c (C_DEFAULT/picture_operators_c.c:85-115).
+// Oracle derived with an independent Python replica of the reference
+// algorithm (col4 butterflies with >>1, second pass stride 4, final
+// SSE2-style transpose). Fixture: 4x4 ramp 1..16, stride 4.
+TEST_CASE("hadamard4x4 ramp 1..16 matches replica") {
+    std::int16_t src[16];
+    for (int i = 0; i < 16; ++i) src[i] = static_cast<std::int16_t>(i + 1);
+    std::int32_t coeff[16] = {0};
+    pipeline::picops::hadamard4x4(src, 4, coeff);
+    std::int32_t want[16] = {34, -8, -16, 0, -2, 0, 0, 0, -4, 0, 0, 0, 0, 0, 0, 0};
+    CHECK(std::vector<std::int32_t>(coeff, coeff + 16) == std::vector<std::int32_t>(want, want + 16));
+}
+
+// CS1: svt_aom_hadamard_8x8_c (C_DEFAULT/picture_operators_c.c:150-174).
+// col8 butterflies without >>1, second pass stride 8, no transpose (output
+// stays in buffer2 order). Oracle from the independent Python replica.
+// Fixture: 8x8 ramp 1..64, stride 8.
+TEST_CASE("hadamard8x8 ramp 1..64 matches replica") {
+    std::int16_t src[64];
+    for (int i = 0; i < 64; ++i) src[i] = static_cast<std::int16_t>(i + 1);
+    std::int32_t coeff[64] = {0};
+    pipeline::picops::hadamard8x8(src, 8, coeff);
+    std::int32_t want[64] = {2080, 0, -128, -64, 0, 0, 0, -32, 0, 0, 0, 0, 0, 0, 0, 0,
+                             -1024, 0, 0, 0, 0, 0, 0, 0, -512, 0, 0, 0, 0, 0, 0, 0,
+                             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                             0, 0, 0, 0, 0, 0, 0, 0, -256, 0, 0, 0, 0, 0, 0, 0};
+    CHECK(std::vector<std::int32_t>(coeff, coeff + 64) == std::vector<std::int32_t>(want, want + 64));
+}
+
+// CS1: svt_aom_hadamard_16x16_c (C_DEFAULT/picture_operators_c.c:265-292).
+// Four 8x8 quadrant passes + fold at >>1 over {0,64,128,192}. Oracle from
+// the independent Python replica. Fixture: 16x16 ramp 1..256, stride 16.
+TEST_CASE("hadamard16x16 ramp 1..256 matches replica") {
+    std::int16_t src[256];
+    for (int i = 0; i < 256; ++i) src[i] = static_cast<std::int16_t>(i + 1);
+    std::int32_t coeff[256] = {0};
+    pipeline::picops::hadamard16x16(src, 16, coeff);
+    CHECK(coeff[0] == 16448);
+    CHECK(coeff[2] == -256);
+    CHECK(coeff[3] == -128);
+    CHECK(coeff[7] == -64);
+    CHECK(coeff[16] == -4096);
+    CHECK(coeff[24] == -2048);
+    CHECK(coeff[56] == -1024);
+    CHECK(coeff[64] == -512);
+    CHECK(coeff[128] == -8192);
+    CHECK(coeff[1] == 0);
+    CHECK(coeff[255] == 0);
+}
+
+// CS1: svt_aom_hadamard_32x32_c (C_DEFAULT/picture_operators_c.c:294-321).
+// Four 16x16 quadrant passes + fold at >>2 over {0,256,512,768}. Oracle
+// from the independent Python replica. Fixture uses small magnitudes
+// ((c % 8) - (r % 4), range -3..7) because the reference's own int16
+// intermediate buffers are only specified for residual-range inputs
+// (comments at :117 and :268 say 9-bit src_diff); a 1..1024 ramp would
+// wrap inside the reference's int16 buffers.
+TEST_CASE("hadamard32x32 small-magnitude fixture matches replica") {
+    std::int16_t src[1024];
+    for (int r = 0; r < 32; ++r) {
+        for (int c = 0; c < 32; ++c) {
+            src[r * 32 + c] = static_cast<std::int16_t>((c % 8) - (r % 4));
+        }
+    }
+    std::int32_t coeff[1024] = {0};
+    pipeline::picops::hadamard32x32(src, 32, coeff);
+    CHECK(coeff[0] == 256);
+    CHECK(coeff[2] == -256);
+    CHECK(coeff[3] == -128);
+    CHECK(coeff[7] == -64);
+    CHECK(coeff[24] == 128);
+    CHECK(coeff[56] == 64);
+    CHECK(coeff[1] == 0);
+    CHECK(coeff[255] == 0);
+    CHECK(coeff[1023] == 0);
+}
+
+// CS1: svt_av1_copy_wxh_8bit_c (C_DEFAULT/picture_operators_c.c:323-328)
+// and svt_av1_copy_wxh_16bit_c (:330-335): row-by-row w-wide copies
+// honoring both strides. Fixture: 3 rows x 5 cols in a stride-7 buffer.
+TEST_CASE("copyWxh8bit/16bit copy rows honoring strides") {
+    std::uint8_t src8[3 * 7] = {0}, dst8[3 * 7];
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 7; ++x) dst8[y * 7 + x] = 200;
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 5; ++x) src8[y * 7 + x] = static_cast<std::uint8_t>(y + 1);
+    pipeline::picops::copyWxh8bit(src8, 7, dst8, 7, 3, 5);
+    CHECK(dst8[0] == 1);
+    CHECK(dst8[5] == 200);  // beyond w, untouched
+    CHECK(dst8[7] == 2);    // row 1
+    CHECK(dst8[14] == 3);   // row 2
+
+    std::uint16_t src16[3 * 7] = {0}, dst16[3 * 7];
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 7; ++x) dst16[y * 7 + x] = 60000;
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 5; ++x) src16[y * 7 + x] = static_cast<std::uint16_t>(1000 * (y + 1) + x);
+    pipeline::picops::copyWxh16bit(src16, 7, dst16, 7, 3, 5);
+    CHECK(dst16[0] == 1000);
+    CHECK(dst16[4] == 1004);
+    CHECK(dst16[5] == 60000); // beyond w, untouched
+    CHECK(dst16[7] == 2000);  // row 1
 }

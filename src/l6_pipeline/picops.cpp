@@ -263,3 +263,212 @@ void pipeline::picops::generatePadding16Bit(std::uint16_t* srcPic, std::uint32_t
         --verticalIdx;
     }
 }
+
+// C_DEFAULT/picture_operators_c.c:22-28
+void pipeline::picops::memcpyC(void* dst, const void* src, std::size_t size) {
+    std::memcpy(dst, src, size);
+}
+
+void pipeline::picops::memsetC(void* dst, int c, std::size_t size) {
+    std::memset(dst, c, size);
+}
+
+// C_DEFAULT/picture_operators_c.c:30-49 (verbatim)
+void pipeline::picops::pictureCopy(const std::uint8_t* src, std::uint32_t srcStride, std::uint8_t* dst,
+                 std::uint32_t dstStride, std::uint32_t areaWidth, std::uint32_t areaHeight,
+                 std::uint32_t bytesPerSample) {
+    std::uint32_t sampleCount = 0;
+    const std::uint32_t sampleTotalCount = areaWidth * areaHeight;
+    const std::uint32_t copyLength = areaWidth * bytesPerSample;
+
+    const std::uint32_t srcStrideBytes = srcStride * bytesPerSample;
+    const std::uint32_t dstStrideBytes = dstStride * bytesPerSample;
+
+    while (sampleCount < sampleTotalCount) {
+        memcpyC(dst, src, copyLength);
+        src += srcStrideBytes;
+        dst += dstStrideBytes;
+        sampleCount += areaWidth;
+    }
+}
+
+// hadamard_col8 (C_DEFAULT/picture_operators_c.c:119-146, verbatim; no >>1)
+static void hadamardCol8(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int16_t* coeff) {
+    const std::int16_t b0 = srcDiff[0 * srcStride] + srcDiff[1 * srcStride];
+    const std::int16_t b1 = srcDiff[0 * srcStride] - srcDiff[1 * srcStride];
+    const std::int16_t b2 = srcDiff[2 * srcStride] + srcDiff[3 * srcStride];
+    const std::int16_t b3 = srcDiff[2 * srcStride] - srcDiff[3 * srcStride];
+    const std::int16_t b4 = srcDiff[4 * srcStride] + srcDiff[5 * srcStride];
+    const std::int16_t b5 = srcDiff[4 * srcStride] - srcDiff[5 * srcStride];
+    const std::int16_t b6 = srcDiff[6 * srcStride] + srcDiff[7 * srcStride];
+    const std::int16_t b7 = srcDiff[6 * srcStride] - srcDiff[7 * srcStride];
+
+    const std::int16_t c0 = b0 + b2;
+    const std::int16_t c1 = b1 + b3;
+    const std::int16_t c2 = b0 - b2;
+    const std::int16_t c3 = b1 - b3;
+    const std::int16_t c4 = b4 + b6;
+    const std::int16_t c5 = b5 + b7;
+    const std::int16_t c6 = b4 - b6;
+    const std::int16_t c7 = b5 - b7;
+
+    coeff[0] = c0 + c4;
+    coeff[7] = c1 + c5;
+    coeff[3] = c2 + c6;
+    coeff[4] = c3 + c7;
+    coeff[2] = c0 - c4;
+    coeff[6] = c1 - c5;
+    coeff[1] = c2 - c6;
+    coeff[5] = c3 - c7;
+}
+
+// svt_aom_hadamard_8x8_c (C_DEFAULT/picture_operators_c.c:150-174, verbatim)
+void pipeline::picops::hadamard8x8(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff) {
+    std::int16_t buffer[64];
+    std::int16_t buffer2[64];
+    std::int16_t* tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 8; ++idx) {
+        hadamardCol8(srcDiff, srcStride, tmpBuf);
+        tmpBuf += 8;
+        ++srcDiff;
+    }
+
+    tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 8; ++idx) {
+        hadamardCol8(tmpBuf, 8, buffer2 + 8 * idx);
+        ++tmpBuf;
+    }
+
+    for (int idx = 0; idx < 64; ++idx) {
+        coeff[idx] = static_cast<std::int32_t>(buffer2[idx]);
+    }
+}
+
+// svt_aom_hadamard_16x16_c (C_DEFAULT/picture_operators_c.c:265-292, verbatim)
+void pipeline::picops::hadamard16x16(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff) {
+    for (int idx = 0; idx < 4; ++idx) {
+        const std::int16_t* srcPtr = srcDiff + (idx >> 1) * 8 * srcStride + (idx & 0x01) * 8;
+        hadamard8x8(srcPtr, srcStride, coeff + idx * 64);
+    }
+
+    for (int idx = 0; idx < 64; ++idx) {
+        const std::int32_t a0 = coeff[0];
+        const std::int32_t a1 = coeff[64];
+        const std::int32_t a2 = coeff[128];
+        const std::int32_t a3 = coeff[192];
+
+        const std::int32_t b0 = (a0 + a1) >> 1;
+        const std::int32_t b1 = (a0 - a1) >> 1;
+        const std::int32_t b2 = (a2 + a3) >> 1;
+        const std::int32_t b3 = (a2 - a3) >> 1;
+
+        coeff[0]   = b0 + b2;
+        coeff[64]  = b1 + b3;
+        coeff[128] = b0 - b2;
+        coeff[192] = b1 - b3;
+
+        ++coeff;
+    }
+}
+
+// svt_aom_hadamard_32x32_c (C_DEFAULT/picture_operators_c.c:294-321, verbatim)
+void pipeline::picops::hadamard32x32(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff) {
+    for (int idx = 0; idx < 4; ++idx) {
+        const std::int16_t* srcPtr = srcDiff + (idx >> 1) * 16 * srcStride + (idx & 0x01) * 16;
+        hadamard16x16(srcPtr, srcStride, coeff + idx * 256);
+    }
+
+    for (int idx = 0; idx < 256; ++idx) {
+        const std::int32_t a0 = coeff[0];
+        const std::int32_t a1 = coeff[256];
+        const std::int32_t a2 = coeff[512];
+        const std::int32_t a3 = coeff[768];
+
+        const std::int32_t b0 = (a0 + a1) >> 2;
+        const std::int32_t b1 = (a0 - a1) >> 2;
+        const std::int32_t b2 = (a2 + a3) >> 2;
+        const std::int32_t b3 = (a2 - a3) >> 2;
+
+        coeff[0]   = b0 + b2;
+        coeff[256] = b1 + b3;
+        coeff[512] = b0 - b2;
+        coeff[768] = b1 - b3;
+
+        ++coeff;
+    }
+}
+
+// C_DEFAULT/picture_operators_c.c:323-335 (verbatim)
+void pipeline::picops::copyWxh8bit(std::uint8_t* src, std::uint32_t srcStride, std::uint8_t* dst,
+                                   std::uint32_t dstStride, std::uint32_t height, std::uint32_t width) {
+    for (std::uint32_t j = 0; j < height; j++) {
+        memcpyC(dst + j * dstStride, src + j * srcStride, width);
+    }
+}
+
+void pipeline::picops::copyWxh16bit(std::uint16_t* src, std::uint32_t srcStride, std::uint16_t* dst,
+                                    std::uint32_t dstStride, std::uint32_t height, std::uint32_t width) {
+    for (std::uint32_t j = 0; j < height; j++) {
+        memcpyC(dst + j * dstStride, src + j * srcStride, width * 2);
+    }
+}
+
+// C_DEFAULT/picture_operators_c.c:53-71 (verbatim)
+std::uint64_t pipeline::picops::spatialFullDistortion(const std::uint8_t* input, std::uint32_t inputOffset,
+                                                      std::uint32_t inputStride, const std::uint8_t* recon,
+                                                      std::uint32_t reconOffset, std::uint32_t reconStride,
+                                                      std::uint32_t areaWidth, std::uint32_t areaHeight) {
+    std::uint64_t spatialDistortion = 0;
+    input += inputOffset;
+    recon += reconOffset;
+
+    for (std::uint32_t rowIndex = 0; rowIndex < areaHeight; ++rowIndex) {
+        std::uint32_t columnIndex = 0;
+        while (columnIndex < areaWidth) {
+            const long long diff = static_cast<long long>(input[columnIndex]) - static_cast<long long>(recon[columnIndex]);
+            spatialDistortion += static_cast<std::uint64_t>(diff * diff);
+            ++columnIndex;
+        }
+
+        input += inputStride;
+        recon += reconStride;
+    }
+    return spatialDistortion;
+}
+
+// hadamard_col4 (C_DEFAULT/picture_operators_c.c:73-83, verbatim)
+static void hadamardCol4(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int16_t* coeff) {
+    const std::int16_t b0 = (srcDiff[0 * srcStride] + srcDiff[1 * srcStride]) >> 1;
+    const std::int16_t b1 = (srcDiff[0 * srcStride] - srcDiff[1 * srcStride]) >> 1;
+    const std::int16_t b2 = (srcDiff[2 * srcStride] + srcDiff[3 * srcStride]) >> 1;
+    const std::int16_t b3 = (srcDiff[2 * srcStride] - srcDiff[3 * srcStride]) >> 1;
+
+    coeff[0] = b0 + b2;
+    coeff[1] = b1 + b3;
+    coeff[2] = b0 - b2;
+    coeff[3] = b1 - b3;
+}
+
+// svt_aom_hadamard_4x4_c (C_DEFAULT/picture_operators_c.c:85-115, verbatim)
+void pipeline::picops::hadamard4x4(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff) {
+    std::int16_t buffer[16];
+    std::int16_t buffer2[16];
+    std::int16_t* tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 4; ++idx) {
+        hadamardCol4(srcDiff, srcStride, tmpBuf);
+        tmpBuf += 4;
+        ++srcDiff;
+    }
+
+    tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 4; ++idx) {
+        hadamardCol4(tmpBuf, 4, buffer2 + 4 * idx);
+        ++tmpBuf;
+    }
+
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            coeff[i * 4 + j] = static_cast<std::int32_t>(buffer2[j * 4 + i]);
+        }
+    }
+}

@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
 namespace pipeline {
 namespace picops {
@@ -54,6 +55,47 @@ std::uint64_t fullDistortionKernel16Bits(const std::uint16_t* input, std::uint32
                                          std::uint32_t inputStride, const std::uint16_t* pred,
                                          std::int32_t predOffset, std::uint32_t predStride,
                                          std::uint32_t areaWidth, std::uint32_t areaHeight);
+
+// svt_memcpy_c / svt_memset_c (C_DEFAULT/picture_operators_c.c:22-28):
+// thin wrappers around memcpy/memset.
+void memcpyC(void* dst, const void* src, std::size_t size);
+void memsetC(void* dst, int c, std::size_t size);
+
+// svt_aom_picture_copy_kernel (C_DEFAULT/picture_operators_c.c:30-49):
+// row-by-row copy honoring strides, bytes_per_sample = 1 always.
+void pictureCopy(const std::uint8_t* src, std::uint32_t srcStride, std::uint8_t* dst,
+                 std::uint32_t dstStride, std::uint32_t areaWidth, std::uint32_t areaHeight,
+                 std::uint32_t bytesPerSample);
+
+// svt_spatial_full_distortion_kernel_c (C_DEFAULT/picture_operators_c.c:53-71):
+// sum over the area of (input - recon)^2, with offsets applied to both planes.
+std::uint64_t spatialFullDistortion(const std::uint8_t* input, std::uint32_t inputOffset,
+                                    std::uint32_t inputStride, const std::uint8_t* recon,
+                                    std::uint32_t reconOffset, std::uint32_t reconStride,
+                                    std::uint32_t areaWidth, std::uint32_t areaHeight);
+
+// svt_aom_hadamard_4x4_c (C_DEFAULT/picture_operators_c.c:85-115): two
+// butterfly passes (col4 with >>1) plus the SSE2-style final transpose.
+void hadamard4x4(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff);
+
+// svt_aom_hadamard_8x8_c (C_DEFAULT/picture_operators_c.c:150-174): two
+// col8 butterfly passes (no >>1), no final transpose.
+void hadamard8x8(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff);
+
+// svt_aom_hadamard_16x16_c (C_DEFAULT/picture_operators_c.c:265-292): four
+// 8x8 quadrant transforms, then a fold over offsets {0,64,128,192} with >>1.
+void hadamard16x16(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff);
+
+// svt_aom_hadamard_32x32_c (C_DEFAULT/picture_operators_c.c:294-321): four
+// 16x16 quadrant transforms, then a fold over offsets {0,256,512,768} with >>2.
+void hadamard32x32(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff);
+
+// svt_av1_copy_wxh_8bit_c / _16bit_c (C_DEFAULT/picture_operators_c.c:323-335):
+// height row copies of width elements, honoring both strides.
+void copyWxh8bit(std::uint8_t* src, std::uint32_t srcStride, std::uint8_t* dst, std::uint32_t dstStride,
+                 std::uint32_t height, std::uint32_t width);
+void copyWxh16bit(std::uint16_t* src, std::uint32_t srcStride, std::uint16_t* dst, std::uint32_t dstStride,
+                  std::uint32_t height, std::uint32_t width);
 
 // 1:1 port of svt_full_distortion_kernel_cbf_zero32_bits_c
 // (pic_operators.c:128-147): prediction = SSE(coeff), and BOTH result

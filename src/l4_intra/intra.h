@@ -142,4 +142,11 @@ void smoothHPredict(std::uint8_t* dst, int stride, int bw, int bh, const std::ui
 void drPredictor(std::uint8_t* dst, int stride, int bw, int bh, const std::uint8_t* above, const std::uint8_t* left,
                  int upsampleAbove, int upsampleLeft, int angle);
 
+// svt_cfl_predict_lbd_c (C_DEFAULT/cfl_c.c:26-40): CFL prediction by
+// multiplying alpha (q3) to ac values (q3) and adding the dc chroma pred.
+// predBufQ3 advances by CFL_BUF_LINE (32) per row. The hbd variant
+// (svt_cfl_predict_hbd_c) is parked per 8-bit discipline.
+void cflPredictLbd(const std::int16_t* predBufQ3, const std::uint8_t* pred, int predStride, std::uint8_t* dst,
+                   int dstStride, int alphaQ3, int bitDepth, int width, int height);
+
 }  // namespace intra

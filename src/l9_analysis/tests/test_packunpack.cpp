@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <doctest.h>
 #include <analysis.h>
+#include <cdefault_extra.h>
 #include <packunpack.h>
 
 TEST_CASE("msbPack2d packs one pixel as in8<<2 plus the byte's top 2 bits") {
@@ -389,4 +390,29 @@ TEST_CASE("the remaining VAR instances match the oracle at every reference size"
         const std::uint32_t var = dispatch(w, h, aBuf.data(), 133, bBuf.data(), 128, &sse);
         CHECK(var == expectedVar);
     }
+}
+
+// CS1: svt_av1_build_compound_diffwtd_mask_d16_c
+// (C_DEFAULT/inter_prediction_c.c:30-43) with diffwtd_mask_d16 (:15-28).
+// round = 2*FILTER_BITS(7) - round_0 - round_1 + (bd-8); m = clamp(38 +
+// (|src0-src1| >> round)/16, 0, 64); mask = m, or 64-m for the INV type.
+// round_0/round_1 are threaded as parameters (named deviation: the
+// ConvolveParams struct-walled caller is not ported). Fixture: 8-bit,
+// round_0=3, round_1=7 -> round=4; src0 = {0, 256, 1024, 65535}, src1 = 0
+// -> diffs>>4 = {0,16,64,4095} -> /16 = {0,1,4,255} -> m = {38,39,42,64}.
+TEST_CASE("diffwtdMaskD16 builds 38 and inverted masks from clamped m") {
+    std::array<std::uint16_t, 4> a = {0, 256, 1024, 65535};
+    std::array<std::uint16_t, 4> b = {0, 0, 0, 0};
+    std::array<std::uint8_t, 4> mask = {0, 0, 0, 0};
+    analysis::buildCompoundDiffwtdMaskD16(mask.data(), 0, a.data(), 2, b.data(), 2, 2, 2, 3, 7, 8);
+    CHECK(mask[0] == 38);
+    CHECK(mask[1] == 39);
+    CHECK(mask[2] == 42);
+    CHECK(mask[3] == 64);
+    std::array<std::uint8_t, 4> maskInv = {0, 0, 0, 0};
+    analysis::buildCompoundDiffwtdMaskD16(maskInv.data(), 1, a.data(), 2, b.data(), 2, 2, 2, 3, 7, 8);
+    CHECK(maskInv[0] == 26);
+    CHECK(maskInv[1] == 25);
+    CHECK(maskInv[2] == 22);
+    CHECK(maskInv[3] == 0);
 }
