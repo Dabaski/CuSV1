@@ -1944,6 +1944,65 @@ A0. SLICE-LEVEL STATE (the live register)
 |    ctest 14/14 (278.04 s), GATE byte-identical 884,851 B diff 0,
 |    coverage 19.1% (30,126/157,718): A6 12% (1,734), A11 35% (4,152),
 |    A14 48% (699). ~+1,400 nb to 20%; wave 4 opens immediately.
+|  - [x] **A12/SEG1 (2026-11-04, PERRY-SEG1, ff-merged 81e5020): the
+|    struct-free segmentation surface lands** in
+|    src/l13_palette/segmentation.{h,cpp} + tests/test_segmentation.cpp
+|    (namespace l13_palette::segmentation) - 116 nb ported
+|    (get_variance_for_cu :23-:84, calculate_segmentation_data
+|    :260-:271, find_segment_qps :273-:326 + 3 nb of params tables);
+|    165 parked (the roi_map/PCS walls); temporally_update_qps
+|    grep-verified DEAD (declared, defined nowhere). QUIRKS PRESERVED
+|    1:1 and fixture-pinned: the ROUND identity (step_size can only
+|    ever be 1), the POW2 narrowing wraps, the descending bin-edge
+|    pairing, the transposed getVarianceForCu index pairings, log2f_safe
+|    = get_msb(x|1). 17 TEST_CASEs, 6 mutations killed. Writer run
+|    15/15 (289.45 s - l14_utility is the 15th target), GATE
+|    byte-identical 884,851 B. A12 0.2413 -> 0.3133 (389 + 116 = 505 of
+|    1,612). Coverage-only.
+|  - [x] **A13/U1 (2026-11-04, PERRY-U1, cherry-picked bf6d225): the
+|    utility.c surface lands** in src/l14_utility (new module, scaffold
+|    0f0cf7e; namespace l14_utility) - 347 nb of utility.c (the block
+|    geometry builder svt_aom_build_blk_geom :332-:413 = 82, the md-scan
+|    walk :227-:289, the coded-unit + mini-GOP stats arrays, the
+|    ns/d1-depth-offset tables, hvsizeToBsize...) + 31 nb of
+|    common_utils.c dependencies (ssSizeLookup + getPlaneBlockSize) =
+|    378 nb to A13. 26 TEST_CASEs / 647 assertions incl. the FULL
+|    builder enumeration over all 11 geoms + the GEOM_2 85-block
+|    cross-check against coded_unit_stats_array (two independent
+|    transcriptions agreeing through the algorithm). 6 mutations killed
+|    - M6 by CRASH (the mutated gate overruns the 41-entry test array;
+|    fail-fast 0xC0000409, mechanism named). Writer run 15/15 (289.39
+|    s), GATE byte-identical 884,851 B. A13 0.0890 -> 0.1596. PARK: the
+|    FIXED_POINT_ASSERT_TEST breakpoint (5 nb, dead under NDEBUG).
+|    Coverage-only.
+|  - [x] **A14/CS1 (2026-11-04, PERRY-CS1, cherry-picked 401a526): the
+|    C_DEFAULT small-file sweep lands** (multi-home) - 322 ported / 177
+|    recorded already-landed / 246 parked. NEW: picture_operators_c.c
+|    195 nb (the WHOLE hadamard family + pictureCopy + copyWxh -> l6
+|    picops; PO1's file was Codec/pic_operators.c, this sibling was
+|    untouched), inter_prediction_c.c 28 nb (buildCompoundDiffwtdMaskD16
+|    -> new src/l9_analysis/cdefault_extra), cfl_c.c 25 nb
+|    (cflPredictLbd -> l4), compute_sad_c.c 52 + sad_av1.c 22 (sad16b +
+|    sadLoopKernel + obmcSad -> l5). The overlap audit CONFIRMED
+|    already-landed: encode_txb_ref (40, l7), filterintra (93, l4),
+|    intra upsample (20, l4), compute_mean.h (AN1-AN4). 7 mutations
+|    killed; 3 fixture-side non-reproductions disclosed. INCIDENT: a
+|    hung cl.exe (PID 5752, ~5h17m at 11.6 CPU-seconds = mspdb/AV
+|    deadlock, not a slow compile) wedged the writer's build; the judge
+|    killed it and the writer resumed with no work lost - the
+|    kill-the-hung-compiler recipe joins the ops notes. Writer run
+|    15/15 (~301 s sum), GATE byte-identical 884,851 B. Charges: A2 +25
+|    (0.9074), A3 +74 (0.0242), A14 +223 (0.6290). Coverage-only.
+|  - [x] **WAVE-4 CLOSE (judge, post-merge re-measure on master)**: full
+|    ctest 15/15 (294.41 s), GATE byte-identical 884,851 B diff 0,
+|    coverage 19.6% (30,943/157,718): A2 91% (3,156), A3 2% (429), A12
+|    31% (505), A13 16% (855), A14 63% (922). PARSE-BUG EPISODE: the
+|    first post-merge tool run printed A12 as 0/0 and TOTAL 30,438 - an
+|    embedded pipe in the SEG1 sentence (get_msb(x|1)) split the
+|    pipe-delimited row; caught by the -11 covered move, sentence
+|    rewritten, and the TRUE total is 30,943 not 30,448 (the broken
+|    parse had also dropped A12's whole 505). ~+575 nb to 20%; wave 5
+|    (the hash pair + global motion) opens immediately.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
