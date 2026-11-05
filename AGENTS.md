@@ -336,15 +336,16 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-04, the wave-4 close)
+### Last measured state (2026-11-05, the 20% line crossed)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 15/15 passed, 0 failed, 294.41 s** (re-measured 2026-11-04 at
-  the wave-4 close; the suite is 15 targets since 0f0cf7e - l14_utility
+- **ctest: 16/16 passed, 0 failed, 277.79 s** (re-measured 2026-11-05 at
+  the 20% line; the suite is 16 targets since 1909438 - l15_rc
   joined; l4_intra is the slow one; `pipeline` and
   `l3_transforms` next; the rest under 0.5 s.
-  Earlier runs of the same tree: the TF1/PU1/PO1 run 278.04 s (14 targets), the LR3/PAL1/TX1 run 272.63 s, the GR1/AN21/CV1 run 264.97 s (13 targets), the LR2 run 260.65 s (11 targets), the CDEF3+LR1 run 280.41 s, the CDEF1 run 269.66 s, the DF2 run 270.04 s, the AN12 run
+  Earlier runs of the same tree: the HM1 wave 15/15 (277.34-278.39 s),
+  the wave-4 close run 15/15 294.41 s, the TF1/PU1/PO1 run 278.04 s (14 targets), the LR3/PAL1/TX1 run 272.63 s, the GR1/AN21/CV1 run 264.97 s (13 targets), the LR2 run 260.65 s (11 targets), the CDEF3+LR1 run 280.41 s, the CDEF1 run 269.66 s, the DF2 run 270.04 s, the AN12 run
   275.59 s at 10/10
   (l4_intra 213.58 s, `pipeline` 53.74 s, `l3_transforms` 7.24 s),
   a first AN12 run 269.63 s, the AN11
@@ -357,9 +358,9 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
-  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-04 at the wave-4
-  close: rebuilt, and byte-identical to the committed file; no generator
-  input in any wave slice). History, not a figure to chase:
+  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-05 at the 20% line:
+  rebuilt, and byte-identical to the committed file; no generator input
+  in any wave slice). History, not a figure to chase:
   884,980 B was the value from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
   13 gate lines, all chroma-side - and the RT21 regen moved it to 884,851 B
@@ -367,17 +368,17 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 19.6%** (see the completion metric section;
-  re-measured 2026-11-04 at the wave-4 close: 30,943 of 157,718
-  non-blank lines, +817 from 30,126 at the wave-3 close - SEG1 +116 in
-  A12, U1 +378 in A13, CS1 +322 (A2 +25, A3 +74, A14 +223); all
-  span-measured, register entries in docs/todo.md section A0; A2 prints
-  91% (3,156 of 3,478), A3 prints 2% (429 of 17,738), A12 prints 31%
-  (505 of 1,612), A13 prints 16% (855 of 5,357), A14 prints 63% (922 of
-  1,466). PARSE-BUG EPISODE (recorded): an embedded pipe in a prose
-  sentence (get_msb(x|1)) split the A12 row's 5 fields and the tool
-  silently printed A12 as 0 files/0 lines - caught by the -13 total
-  move, fixed by rewriting the sentence; the areas rows are
+- **Portable-C coverage: 20.1%** (see the completion metric section;
+  re-measured 2026-11-05 at the 20% line: 31,693 of 157,718 non-blank
+  lines, +750 from 30,943 at the wave-4 close - HM1 +473 in A3 (the
+  motion-hash + global-motion surface; judge-charge, spans named in the
+  register) and RC1 +278 in A9 (rc_tables.h, mechanically extracted,
+  the transcription caveat STATED); all span-measured, register entries
+  in docs/todo.md section A0; A3 prints 5% (901 of 17,738), A9 prints
+  5% (278 of 5,951). PARSE-BUG EPISODE (recorded, wave 4): an embedded
+  pipe in a prose sentence (get_msb(x|1)) split the A12 row's 5 fields
+  and the tool silently printed A12 as 0 files/0 lines - caught by the
+  -13 total move, fixed by rewriting the sentence; the areas rows are
   pipe-delimited DATA and prose in them must not contain pipes. All of
   it is
   COVERAGE-ONLY: it moves no conformance count; the printed percentage
@@ -870,16 +871,16 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-04 (the wave-4 close): 19.6%**
-(30,943 of 157,718 non-blank lines - the covered count moved +817 from
-30,126 at the wave-3 close: SEG1 +116 in A12 (the segmentation surface),
-U1 +378 in A13 (the utility.c block-geometry builder + stats arrays +
-common_utils deps) and CS1 +322 (A2 +25 the CFL prediction kernel, A3
-+74 the sad16b/sadLoopKernel/obmcSad kernels, A14 +223 the WHOLE
-hadamard family + diffwtd mask; the sweep's overlap audit recorded 177
-nb as already-landed rather than double-charging), so A2 prints 3,156
-of 3,478 (91%), A12 505 of 1,612 (31%), A13 855 of 5,357 (16%), A14 922
-of 1,466 (63%). All of it is COVERAGE-ONLY: it
+**THE NUMBER, as measured 2026-11-05 (the 20% line): 20.1%**
+(31,693 of 157,718 non-blank lines - the covered count moved +750 from
+30,943 at the wave-4 close: HM1 +473 in A3 (the motion-hash + global
+motion surface in src/l5_motion: crc32c, the hash-table machinery, the
+block-hash generation and walk, and the GM param surface incl.
+refine_integerized_param; 21 TEST_CASEs, M1-M5 killed) and RC1 +278 in
+A9 (rc_tables.h's 18 qindex-mapping tables, mechanically extracted,
+runtime diff-verified - the transcription caveat STATED, the AN14
+OD_DIVU precedent), so A3 prints 901 covered of 17,738 (5%) and A9 278
+of 5,951 (5%). All of it is COVERAGE-ONLY: it
 moves NO conformance count
 - see the paired-metric caveat. Earlier
 history of the same
@@ -968,20 +969,20 @@ newly added reference file lowers the percentage loudly rather than silently.
 |---|---|---|---|---|---|
 | A1 | Transform/TX | 9 | 27,008 | 36% | 9,839 |
 | A2 | Intra prediction | 4 | 3,478 | 91% | 3,156 |
-| A3 | Inter prediction + motion estimation | 44 | 17,738 | 2% | 429 |
+| A3 | Inter prediction + motion estimation | 44 | 17,738 | 5% | 901 |
 | A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 3% | 933 |
 | A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 55% | 4,653 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 12% | 1,734 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 30% | 3,191 |
-| A9 | Rate control | 17 | 5,951 | 0% | 0 |
+| A9 | Rate control | 17 | 5,951 | 5% | 278 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
 | A11 | Content analysis + temporal filtering | 16 | 12,028 | 35% | 4,152 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 31% | 505 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 16% | 855 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 63% | 922 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **30,943** |
+| | **TOTAL** | **254** | **157,718** | | **31,693** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

@@ -2003,6 +2003,45 @@ A0. SLICE-LEVEL STATE (the live register)
 |    rewritten, and the TRUE total is 30,943 not 30,448 (the broken
 |    parse had also dropped A12's whole 505). ~+575 nb to 20%; wave 5
 |    (the hash pair + global motion) opens immediately.
+|  - [x] **A3/HM1 (2026-11-05, PERRY-HM1 + judge finalize, ff-merged
+|    0152825): the motion-hash + global-motion surface lands** in
+|    src/l5_motion/hash_motion.{h,cpp} + global_motion.{h,cpp} - 473 nb
+|    judge-charge (crc32c pair hash.c :28-:70 = 41; the hash-table
+|    machinery + block-hash generation + the walk, hash_motion.c
+|    :20-:341 = 269; the GM param surface global_motion.c :30-:212 =
+|    163 incl. refine_integerized_param with GmControls threaded as
+|    scalars); parks 137 named (the two hbd twins + the correspondence/
+|    PCS walls). 21 TEST_CASEs; M1-M5 killed, RED lines quoted in the
+|    commit. TRANSPORT WEDGE INCIDENT (named, the ops lesson): the
+|    writer's session wedged after the question "your shell caps at
+|    120 s, run the suite for me" - the judge ran suite (15/15,
+|    278.39 s) + GATE and sent the confirmation; the send appeared
+|    undelivered (wait replayed a stale final), a cancel+resume hit
+|    session_busy, and the judge nearly stomped the LIVE writer (its
+|    worktree was mid-M-phase when the judge attempted a verification
+|    mutation - the mutation was aborted, the file restored, the
+|    worktree left alone). The writer was ALIVE the whole time
+|    (session_busy was true) and completed properly: worklog
+|    HM1_WORKLOG.md + commit. LESSONS: (a) wait's stale-final replay
+|    is NOT evidence of death - check worktree mtimes/git state before
+|    touching anything; (b) never mutate-verify a worktree that has
+|    recent mtime activity; (c) children should write worklogs early
+|    and often, not only at finalize.
+|  - [x] **A9/RC1 (2026-11-05, judge slice, e0a8ac2): rc_tables.h
+|    lands** in src/l15_rc (new module, scaffold 1909438) - 18
+|    qindex-mapping tables x 256, 278 nb, mechanically extracted, the
+|    runtime diff-verify test parses the reference file itself. RED:
+|    C2039 findTable + the STALE-EXE TRAP during the strcmp include
+|    miss (a ctest 'pass' over a failed build - caught, re-run clean).
+|    PAIRED-METRIC CAVEAT STATED: transcription, not algorithm (the
+|    AN14 OD_DIVU precedent). Suite 16/16 (277.79 s), GATE
+|    byte-identical 884,851 B.
+|  - [x] **WAVE-5 CLOSE / THE 20% LINE (judge, post-merge re-measure on
+|    master)**: full ctest 16/16 (277.79 s), GATE byte-identical
+|    884,851 B diff 0, coverage **20.1% (31,693/157,718)**: A3 5% (901),
+|    A9 5% (278). **THE 20% TARGET IS CROSSED** - the campaign arc:
+|    13.1 (AN1-3 era) -> 16.5 (LR2) -> 17.5 (wave 1) -> 18.5 (wave 2)
+|    -> 19.1 (wave 3) -> 19.6 (wave 4) -> 20.1 (wave 5).
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
