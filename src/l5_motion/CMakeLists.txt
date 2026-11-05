@@ -1,4 +1,4 @@
-add_library(av1_motion STATIC motion.cpp)
+add_library(av1_motion STATIC motion.cpp hash_motion.cpp global_motion.cpp)
 target_include_directories(av1_motion PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(av1_motion PUBLIC av1_core av1_gpurt)
 
