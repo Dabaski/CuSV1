@@ -30,6 +30,8 @@ if(BUILD_TESTING)
   add_subdirectory(src/l6_pipeline)
   add_subdirectory(src/l9_analysis)
   add_subdirectory(src/l10_filters)
+  add_subdirectory(src/l11_resize)
+  add_subdirectory(src/l12_convolve)
 endif()
 
 # benchmark tool: own target, not a ctest (tools/bench/README notes inside
