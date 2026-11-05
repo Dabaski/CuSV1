@@ -336,15 +336,16 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-04, the LR2 slice)
+### Last measured state (2026-11-04, the GR1/AN21/CV1 wave)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 11/11 passed, 0 failed, 260.65 s** (re-measured 2026-11-04 at
-  LR2; l4_intra is the slow one; `pipeline` and `l3_transforms` next;
-  the rest under 0.5 s including l10_filters, which now also runs
-  test_restoration.cpp and test_cdef3.cpp.
-  Earlier runs of the same tree: the CDEF3+LR1 run 280.41 s, the CDEF1 run 269.66 s, the DF2 run 270.04 s, the AN12 run
+- **ctest: 13/13 passed, 0 failed, 264.97 s** (re-measured 2026-11-04 at
+  the GR1/AN21/CV1 wave; the suite is 13 targets since the scaffold
+  1e9ac65 - l11_resize and l12_convolve joined, and l10_filters now also
+  runs the grain tests; l4_intra is the slow one; `pipeline` and
+  `l3_transforms` next; the rest under 0.5 s.
+  Earlier runs of the same tree: the LR2 run 260.65 s (11 targets), the CDEF3+LR1 run 280.41 s, the CDEF1 run 269.66 s, the DF2 run 270.04 s, the AN12 run
   275.59 s at 10/10
   (l4_intra 213.58 s, `pipeline` 53.74 s, `l3_transforms` 7.24 s),
   a first AN12 run 269.63 s, the AN11
@@ -357,9 +358,9 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
 - **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
-  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-04 at LR2: rebuilt, and
-  byte-identical to the committed file; no generator input in the A8/LR
-  slices). History, not a figure to chase:
+  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-04 at the GR1/AN21/CV1
+  wave: rebuilt, and byte-identical to the committed file; no generator
+  input in the A8/LR/GR/AN21/CV slices). History, not a figure to chase:
   884,980 B was the value from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
   13 gate lines, all chroma-side - and the RT21 regen moved it to 884,851 B
@@ -367,14 +368,15 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 16.5%** (see the completion metric section;
-  re-measured 2026-11-04 at LR2: 25,958 of 157,718 non-blank lines,
-  +2,751 from 23,207 at CDEF1 - the AN13/AN14/AN16/AN17 noise+FFT slices
-  (+1,513 across A11+A13) and the A8 slices CDEF2 +377, CDEF3 +318,
-  LR1 +243 and LR2 +300 (all span-measured; per-slice register entries in
-  docs/todo.md section A0); A8 prints 18% (1,915 of 10,600), A11 prints
-  26% (3,173 of
-  12,028). All of it is
+- **Portable-C coverage: 17.5%** (see the completion metric section;
+  re-measured 2026-11-04 at the GR1/AN21/CV1 wave: 27,575 of 157,718
+  non-blank lines, +1,617 from 25,958 at LR2 - GR1 +998 in A8 (the grain
+  core; judge band 995-1,020), AN21 +427 in A11 (328 algorithm + 99
+  resize.c tables) + 28 in A8 (the super_res.c normative table), CV1 +163
+  in A13 (the convolve family, 161-163 judge band); all span-measured,
+  register entries in docs/todo.md section A0; A8 prints 28% (2,942 of
+  10,600), A11 prints 30% (3,600 of 12,028), A13 prints 9% (477 of
+  5,357). All of it is
   COVERAGE-ONLY: it moves no conformance count; the printed percentage
   history: 23,207/157,718 = 14.7168% crosses the 14.65 boundary (CDEF1
   prints 14.7%); 22,840/157,718 = 14.4807% crosses the 14.45 boundary (DF2
@@ -865,13 +867,14 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-04 (LR2): 16.5%** (25,958 of 157,718
-non-blank lines - the covered count moved +2,751 from 23,207 at CDEF1: the
-AN13/AN14/AN16/AN17 noise+FFT slices (+1,513 across A11+A13) and the A8
-slices CDEF2 +377 (the fb/lbd driver chain), CDEF3 +318 (the enc_cdef
-mse/search block), LR1 +243 (the restoration math core) and LR2 +300 (the
-selfguided restoration family, 306 nb measured, 6 named-parked), so A8
-prints 1,915 covered of 10,600 (18%). All of it is COVERAGE-ONLY: it moves NO
+**THE NUMBER, as measured 2026-11-04 (the GR1/AN21/CV1 wave): 17.5%**
+(27,575 of 157,718 non-blank lines - the covered count moved +1,617 from
+25,958 at LR2: GR1 +998 in A8 (the film grain synthesis core of
+grainSynthesis.c, 998 of 1,140 nb live), AN21 +455 (328 resize.c
+algorithm + 99 resize.c tables in A11, + 28 super_res.c table in A8) and
+CV1 +163 in A13 (the convolve.c kernel family in the new src/l12_convolve
+module), so A8 prints 2,942 covered of 10,600 (28%), A11 3,600 of 12,028
+(30%), A13 477 of 5,357 (9%). All of it is COVERAGE-ONLY: it moves NO
 conformance count
 - see the paired-metric caveat. Earlier
 history of the same
@@ -965,15 +968,15 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 55% | 4,653 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 11% | 1,535 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
-| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 18% | 1,915 |
+| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 28% | 2,942 |
 | A9 | Rate control | 17 | 5,951 | 0% | 0 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 26% | 3,173 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 30% | 3,600 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 0% | 0 |
-| A13 | Utility + platform + core headers | 24 | 5,357 | 6% | 314 |
+| A13 | Utility + platform + core headers | 24 | 5,357 | 9% | 477 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 32% | 463 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **25,958** |
+| | **TOTAL** | **254** | **157,718** | | **27,575** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

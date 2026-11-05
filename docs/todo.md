@@ -1794,6 +1794,54 @@ A0. SLICE-LEVEL STATE (the live register)
 |    PARKED (named): sgrproj_filter_stripe :964+ and the stripe
 |    machinery, sgrproj/wiener stripe + highbd :987-:1035, the :1040+
 |    filter_unit/frame walkers, the :1124+ tile walkers.
+|  - [x] **A8/GR1 (2026-11-04, PERRY-GR1, cherry-picked 582a409): the
+|    film grain synthesis core lands** in src/l10_filters/grain.{h,cpp}
+|    + tests/test_grain.cpp (namespace l10_filters::grain). 998 nb
+|    claimed of grainSynthesis.c's 1,140 (judge band 995-1,020):
+|    gaussian_sequence :28-:181 (2,048 entries transcribed, caveat
+|    STATED, diff-verified), the rng pair :306-:328, init_arrays
+|    :182-:266, luma/chroma grain generators :328-:466, scaling
+|    :466-:506, add_noise_to_block :506-:607, params_equal :709-:793,
+|    copy helpers + boundary overlaps :793-:865, the frame driver
+|    :865-:1140. hbd :607-:709 (92) + dealloc :266-:287 (18)
+|    named-parked. ~30 TEST_CASEs; 15 mutations killed by named
+|    fixtures. BRIEF CORRECTIONS (writer, grep-verified): no noise_shape
+|    parameter exists in the reference; AomFilmGrain lives in
+|    EbSvtAv1.h, not grainSynthesis.h. RED: 12 slices, plus measured
+|    hand-math anchor corrections on both port and oracle sides (the
+|    row-xor is luma_line >> 5; the 2x2 luma average is (sum+2)>>2;
+|    (32*20+128)>>8 = 3). Writer run: 13/13 (277.10 s), GATE
+|    byte-identical 884,851 B. Coverage-only.
+|  - [x] **A11/AN21 (2026-11-04, PERRY-AN21, cherry-picked f815055):
+|    the resize 1D kernel family lands** in src/l11_resize (namespace
+|    resize, new module - the scaffold commit 1e9ac65 pre-wired its
+|    CMake). resize.c :147-:489 = 328 nb algorithm (judge re-measured
+|    328) + the four interp tables resize.c :36-:137 (99) + the 1000-set
+|    from super_res.c :20-:47 (28, charged to A8). 21 new TEST_CASEs, 15
+|    nano-slices, 8 mutations killed (M8's killer is the 12->5
+|    full-clamp path); one property-RED was a TEST BUG (the
+|    in_length==1 break), corrected with M3 proving the corrected
+|    property's discrimination; two oracle incidents disclosed (typo +
+|    truncation-toward-zero). Parked: highbd :489-:781, save_YUV
+|    :782-:791, pack/unpack_highbd :791-:881, the EbPictureBufferDesc
+|    resize_frame driver :881+. Writer run: 13/13 (281.94 s), GATE
+|    byte-identical 884,851 B. Coverage-only.
+|  - [x] **A13/CV1 (2026-11-04, PERRY-CV1, ff-merged 3a1d0c9): the
+|    convolve.c kernel family lands** in src/l12_convolve (namespace
+|    convolve, new module). 163 nb (judge re-measured 161-163 band):
+|    scalar products + filter offset/base, add_src horiz/vert hip, the
+|    wiener convolve add-src (the uint16 staging contract: temp stride
+|    128, h+6 rows, sentinel row), convolve_horiz/vert + the convolve8
+|    pair; ConvolveParams + get_conv_params_wiener + the sub_pel_filters_8
+|    table (128 entries, diff-verified). highbd :155-:253 (93) parked. 14
+|    TEST_CASEs, 6 mutations killed. Writer run: 13/13 (287.33 s), GATE
+|    byte-identical 884,851 B. LR3 (the restoration stripe family)
+|    depends on CV1 and is the next wave. Coverage-only.
+|    WAVE-CLOSE (judge, post-merge re-measure on master): full ctest
+|    13/13 (264.97 s - the suite is 13 targets now: l11_resize +
+|    l12_convolve joined at the scaffold), GATE byte-identical
+|    884,851 B diff 0, coverage 17.5% (27,575/157,718): A8 28% (2,942),
+|    A11 30% (3,600), A13 9% (477).
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
