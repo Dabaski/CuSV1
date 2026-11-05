@@ -30,14 +30,11 @@
 //   svt_apply_selfguided_restoration_c :924-:962 (tmpbuf flt0/flt1, the
 //   decodeXq composition, the u/v accumulation, the >> (PRJ+RST) and the
 //   clip_pixel_highbd write).
-// PARKED (named, port nothing): the stripe machinery
-// setup/restore_processing_stripe_boundary :249-:397 and
-// get_stripe_boundary_info :216 (RestorationTileLimits /
-// RestorationLineBuffers struct-coupled), wiener_filter_stripe :399
-// (RestorationUnitInfo + the convolve.c A13 dependency),
-// sgrproj/wiener stripe + highbd :987-:1035, the
-// :1040+ filter_unit/frame walkers, :1124+ the tile walkers and
-// boundary-line savers.
+// PARKED (named, port nothing): the highbd stripe twins
+// wiener_filter_stripe_highbd :987-:1008 and sgrproj_filter_stripe_highbd
+// :1010-:1029, the Av1Common-walled frame walkers FilterFrameCtxt /
+// filter_frame_on_tile / filter_frame_on_unit :1112-:1149+ and the tile
+// walkers / boundary-line savers :1150+.
 // Coverage-only slice: moves no conformance count, touches no bitstream;
 // the restoration header surface stays disabled (enable_restoration 0).
 // BRIEF CORRECTION (worklog): the brief's decode_xq description
@@ -178,6 +175,184 @@ void selfguidedRestoration(const std::uint8_t* dgd8, std::int32_t width, std::in
 void applySelfguidedRestoration(const std::uint8_t* dat8, std::int32_t width, std::int32_t height,
     std::int32_t stride, std::int32_t eps, const std::int32_t* xqd, std::uint8_t* dst8,
     std::int32_t dst_stride, std::int32_t* tmpbuf, std::int32_t bit_depth, std::int32_t highbd);
+
+// LR3 (A8 campaign): the restoration stripe/unit family of restoration.c -
+//   whole_frame_rect :51-:62 + count_units_in_tile :71-:73,
+//   get_stripe_boundary_info :216-:234,
+//   setup/restore_processing_stripe_boundary :249-:397,
+//   wiener_filter_stripe :399-:421 (calls the landed
+//   convolve::wienerConvolveAddSrc; the av1_convolve link line was added to
+//   src/l10_filters/CMakeLists.txt under a judge-granted scoped court
+//   order),
+//   sgrproj_filter_stripe :964-:985 (calls the landed
+//   applySelfguidedRestoration),
+//   svt_av1_loop_restoration_filter_unit :1040-:1110 (the per-unit stripe
+//   walk composing all of the above).
+// Minimal struct carries, cited: FrameSize (av1_structs.h:269-:285, two
+// read fields), Av1PixelRect (restoration.h:193-:195), RestorationTileLimits
+// (:259-:261), RestorationStripeBoundaries (:217-:221),
+// RestorationLineBuffers (:206-:215, the two save arrays only),
+// WienerInfo (:167-:170, alignas(16) mirroring DECLARE_ALIGNED(16)),
+// SgrprojInfo (:172-:175), RestorationUnitInfo (:182-:186),
+// RestorationType (definitions.h:1421-:1428), and the stripe-geometry
+// constants RESTORATION_PROC_UNIT_SIZE :36 / RESTORATION_UNIT_OFFSET :39 /
+// RESTORATION_BORDER :64 / RESTORATION_CTX_VERT :68 /
+// RESTORATION_EXTRA_HORZ :72 / RESTORATION_LINEBUFFER_WIDTH :199.
+
+// Av1PixelRect (restoration.h:193-:195), minimal carry, verbatim fields.
+struct Av1PixelRect {
+    std::int32_t left, top, right, bottom;
+};
+
+// FrameSize (av1_structs.h:269-:285), minimal carry: whole_frame_rect
+// reads ONLY frame_height and superres_upscaled_width (:58/:60); the other
+// five fields are not carried (named deviation).
+struct FrameSize {
+    std::uint16_t frameHeight;
+    std::uint16_t superresUpscaledWidth;
+};
+
+// count_units_in_tile (restoration.c:71-:73): round-to-nearest division
+// (the right/bottom unit may extend to up to 150% its size), floored at 1
+// for tiles smaller than half a unit. File-local static in the reference;
+// exported for direct testability (named deviation).
+std::int32_t countUnitsInTile(std::int32_t unit_size, std::int32_t tile_size);
+
+// whole_frame_rect (restoration.c:51-:62): the full-frame restoration rect;
+// ss = is_uv && sub_*, top/left 0, bottom/right the subsampled dims.
+Av1PixelRect wholeFrameRect(FrameSize* frm_size, std::int32_t sub_x, std::int32_t sub_y, std::int32_t is_uv);
+
+// RestorationTileLimits (restoration.h:259-:261), verbatim fields.
+struct RestorationTileLimits {
+    std::int32_t h_start, h_end, v_start, v_end;
+};
+
+// RESTORATION_PROC_UNIT_SIZE (restoration.h:36) and RESTORATION_UNIT_OFFSET
+// (restoration.h:39), the stripe-geometry constants.
+constexpr std::int32_t restorationProcUnitSize = 64;
+constexpr std::int32_t restorationUnitOffset = 8;
+// RESTORATION_BORDER (restoration.h:64), RESTORATION_CTX_VERT (:68),
+// RESTORATION_EXTRA_HORZ (:72) and RESTORATION_LINEBUFFER_WIDTH (:199 =
+// RESTORATION_UNITSIZE_MAX * 3 / 2 + 2 * RESTORATION_EXTRA_HORZ).
+constexpr std::int32_t restorationBorder = 3;
+constexpr std::int32_t restorationCtxVert = 2;
+constexpr std::int32_t restorationExtraHorz = 4;
+constexpr std::int32_t restorationLinebufferWidth = 256 * 3 / 2 + 2 * restorationExtraHorz;
+
+// get_stripe_boundary_info (restoration.c:216-:234): copy_above = 0 iff the
+// stripe starts at the tile top; copy_below = 0 iff v_start + (full stripe
+// height - first-stripe runit_offset) reaches tile_rect->bottom. File-local
+// static in the reference; exported (named deviation).
+void getStripeBoundaryInfo(const RestorationTileLimits* limits, const Av1PixelRect* tile_rect, std::int32_t ss_y,
+    std::int32_t* copy_above, std::int32_t* copy_below);
+
+// RestorationStripeBoundaries (restoration.h:217-:221), verbatim fields.
+struct RestorationStripeBoundaries {
+    std::uint8_t* stripe_boundary_above;
+    std::uint8_t* stripe_boundary_below;
+    std::int32_t stripe_boundary_stride;
+    std::int32_t stripe_boundary_size;
+};
+
+// RestorationLineBuffers (restoration.h:206-:215), minimal carry: only the
+// 3-line above/below save arrays the ported spans consume; the
+// tmp_save_cdef/tmp_save_lr column-buffer arrays (:213-:214) are
+// named-parked (used only by the vertical-edge machinery of the parked
+// frame walkers).
+struct RestorationLineBuffers {
+    std::uint16_t tmp_save_above[restorationBorder][restorationLinebufferWidth];
+    std::uint16_t tmp_save_below[restorationBorder][restorationLinebufferWidth];
+};
+
+// setup_processing_stripe_boundary (restoration.c:249-:332): overwrite the
+// RESTORATION_BORDER rows above/below the stripe from the stored boundary
+// lines, saving the originals into rlbs. REAL_PTR folded to identity -
+// highbd is assert-parked (named deviation). opt = 1 saves/overwrites only
+// the single outermost line each side (the optimized_lr path).
+void setupProcessingStripeBoundary(const RestorationTileLimits* limits, const RestorationStripeBoundaries* rsb,
+    std::int32_t rsb_row, std::int32_t use_highbd, std::int32_t h, std::uint8_t* data8, std::int32_t data_stride,
+    RestorationLineBuffers* rlbs, std::int32_t copy_above, std::int32_t copy_below, std::int32_t opt);
+
+// restore_processing_stripe_boundary (restoration.c:347-:397): write the
+// saved boundary lines back. File-local static in the reference; exported
+// (named deviation). REAL_PTR folded (highbd assert-parked).
+void restoreProcessingStripeBoundary(const RestorationTileLimits* limits, const RestorationLineBuffers* rlbs,
+    std::int32_t use_highbd, std::int32_t h, std::uint8_t* data8, std::int32_t data_stride, std::int32_t copy_above,
+    std::int32_t copy_below, std::int32_t opt);
+
+// SgrprojInfo (restoration.h:172-:175), verbatim fields.
+struct SgrprojInfo {
+    std::int32_t ep;
+    std::int32_t xqd[2];
+};
+
+// InterpKernel (definitions.h:451), the 8-tap row the wiener filters use.
+using WienerKernel = std::int16_t[8];
+
+// WienerInfo (restoration.h:167-:170), verbatim field order: vfilter THEN
+// hfilter. alignas(16) mirrors the reference's DECLARE_ALIGNED(16) fields -
+// the wiener convolve's get_filter_base/offset mechanism selects the tap
+// row BY ADDRESS ALIGNMENT, so an unaligned WienerInfo would read a
+// misaligned (garbage) tap row.
+// C4324 (structure padded due to alignment specifier) is expected here:
+// RestorationUnitInfo inherits the 16-byte alignment; /WX would otherwise
+// fail the build on the reference-mandated padding.
+#pragma warning(push)
+#pragma warning(disable : 4324)
+struct alignas(16) WienerInfo {
+    WienerKernel vfilter;
+    WienerKernel hfilter;
+};
+
+// RestorationType (definitions.h:1421-:1428), verbatim enumerators.
+enum RestorationType {
+    RESTORE_NONE,
+    RESTORE_WIENER,
+    RESTORE_SGRPROJ,
+    RESTORE_SWITCHABLE,
+    RESTORE_SWITCHABLE_TYPES = RESTORE_SWITCHABLE,
+    RESTORE_TYPES            = 4,
+};
+
+// RestorationUnitInfo (restoration.h:182-:186), verbatim fields.
+struct RestorationUnitInfo {
+    RestorationType restoration_type;
+    WienerInfo wiener_info;
+    SgrprojInfo sgrproj_info;
+};
+#pragma warning(pop)
+
+// sgrproj_filter_stripe (restoration.c:964-:985): per procunit slice j,
+// w = AOMMIN(procunit_width, stripe_width - j) - the PLAIN min, no
+// round-up - then the landed applySelfguidedRestoration. File-local static
+// in the reference; exported (named deviation). bit_depth asserted 8
+// (highbd assert-parked); the highbd twin :1010-:1029 is not ported.
+void sgrprojFilterStripe(const RestorationUnitInfo* rui, std::int32_t stripe_width, std::int32_t stripe_height,
+    std::int32_t procunit_width, const std::uint8_t* src, std::int32_t src_stride, std::uint8_t* dst,
+    std::int32_t dst_stride, std::int32_t* tmpbuf, std::int32_t bit_depth);
+
+// wiener_filter_stripe (restoration.c:399-:421): per procunit slice j,
+// w = AOMMIN(procunit_width, (stripe_width - j + 15) & ~15) - the ROUND-UP
+// rule, deliberately different from sgrproj's plain min - then the landed
+// convolve::wienerConvolveAddSrc. File-local static in the reference;
+// exported (named deviation). bit_depth asserted 8 (highbd assert-parked);
+// the highbd twin :987-:1008 is not ported.
+void wienerFilterStripe(const RestorationUnitInfo* rui, std::int32_t stripe_width, std::int32_t stripe_height,
+    std::int32_t procunit_width, const std::uint8_t* src, std::int32_t src_stride, std::uint8_t* dst,
+    std::int32_t dst_stride, std::int32_t* tmpbuf, std::int32_t bit_depth);
+
+// svt_av1_loop_restoration_filter_unit (restoration.c:1040-:1110): filter
+// one restoration unit, stripe by stripe. The non-exported reference name
+// is kept (it is declared non-static in the reference header). The
+// StripeFilterFun dispatch table :1031-:1037 is folded into the two-way
+// 2*highbd + (rtype == RESTORE_SGRPROJ) index (the highbd entries are
+// parked; the SGRPROJ/wiener branch is a direct call, named deviation).
+// The Av1Common-walled frame walkers (:1112+) are not ported.
+void loopRestorationFilterUnit(std::uint8_t need_bounadaries, const RestorationTileLimits* limits,
+    const RestorationUnitInfo* rui, const RestorationStripeBoundaries* rsb, RestorationLineBuffers* rlbs,
+    const Av1PixelRect* tile_rect, std::int32_t tile_stripe0, std::int32_t ss_x, std::int32_t ss_y,
+    std::int32_t highbd, std::int32_t bit_depth, std::uint8_t* data8, std::int32_t stride, std::uint8_t* dst8,
+    std::int32_t dst_stride, std::int32_t* tmpbuf, std::int32_t optimized_lr);
 
 } // namespace restoration
 

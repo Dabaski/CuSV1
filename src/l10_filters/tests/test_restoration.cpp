@@ -1,8 +1,16 @@
 #include <doctest.h>
 #include <restoration.h>
+#include <convolve.h>
 
 #include <algorithm>
 #include <vector>
+
+namespace {
+// set_default_wiener (restoration.h:248-:256) with the WIENER_FILT_*_MIDV
+// defaults (restoration.h:129-:133): a normalized 7-tap (sum 128, tap[7]=0),
+// so wiener fixtures do not clip every output to 255.
+const std::int16_t kWienerDefaultTaps[8] = {3, -7, 15, 106, 15, -7, 3, 0};
+} // namespace
 
 // LR1 (A8 campaign): 1:1 port of the restoration math core of
 // third_party/SVT-AV1/Source/Lib/Codec/restoration.c: sgr_params :31-:49,
@@ -18,14 +26,560 @@
 // independent clamped-box oracle (three estimator regimes: saturated
 // z >= 255, mid-variance, flat z == 0), the r==0 skip pair, the apply
 // composition + both clip bounds.
-// PARKED (named): the stripe machinery :216/:249-:397,
-// wiener_filter_stripe :399,
-// sgrproj/wiener stripe + highbd :987-:1035, the filter_unit/frame walkers
-// :1040+, the tile walkers :1124+. Coverage-only slice: moves no
-// conformance count; enable_restoration stays 0.
+// PARKED (named): the highbd stripe twins :987-:1029, the Av1Common-walled
+// frame walkers :1112-:1149+ and the tile walkers :1150+. Coverage-only
+// slice: moves no conformance count; enable_restoration stays 0.
 
 TEST_CASE("sgrParams row 0 is {2,1},{140,3236}") {
     CHECK(l10_filters::restoration::sgrParams[0].r[0] == 2);
+}
+
+// LR3-S1: count_units_in_tile (restoration.c:71-:73): round-to-NEAREST
+// division (models the right/bottom unit extending to up to 150%), floored
+// at 1. Enumerated pins around the .5 boundary: exactly 1.5 rounds up, just
+// below 1.5 rounds down; tiles under half a unit clamp to 1.
+TEST_CASE("countUnitsInTile rounds to nearest and clamps at 1") {
+    using l10_filters::restoration::countUnitsInTile;
+    CHECK(countUnitsInTile(64, 8) == 1);   // tile < half unit -> 1
+    CHECK(countUnitsInTile(64, 32) == 1);  // exactly half -> 1
+    CHECK(countUnitsInTile(64, 33) == 1);  // just past half -> 1
+    CHECK(countUnitsInTile(64, 95) == 1);  // 1.48 rounds down
+    CHECK(countUnitsInTile(64, 96) == 2);  // exactly 1.5 rounds up
+    CHECK(countUnitsInTile(64, 160) == 3); // exactly 2.5 rounds up
+    CHECK(countUnitsInTile(64, 161) == 3);
+    CHECK(countUnitsInTile(128, 600) == 5); // 4.69 -> 5
+    CHECK(countUnitsInTile(256, 256) == 1);
+}
+
+// LR3-S2: whole_frame_rect (restoration.c:51-:62): the frame rect is
+// ROUND_POWER_OF_TWO(frame_height / superres_upscaled_width, ss) with
+// ss = is_uv && sub_*, top/left 0. Enumerated over the full
+// (is_uv, sub_x, sub_y) grid with an inline oracle.
+TEST_CASE("wholeFrameRect rounds frame dims by subsampling over the full flag grid") {
+    using l10_filters::restoration::FrameSize;
+    using l10_filters::restoration::wholeFrameRect;
+    FrameSize fs{};
+    fs.frameHeight = 1080;
+    fs.superresUpscaledWidth = 1920;
+    for (int isUv = 0; isUv <= 1; ++isUv)
+        for (int sx = 0; sx <= 1; ++sx)
+            for (int sy = 0; sy <= 1; ++sy) {
+                const int ssx = (isUv && sx) ? 1 : 0;
+                const int ssy = (isUv && sy) ? 1 : 0;
+                const auto rect = wholeFrameRect(&fs, sx, sy, isUv);
+                CHECK(rect.top == 0);
+                CHECK(rect.left == 0);
+                CHECK(rect.bottom == ((1080 + ((1 << ssy) >> 1)) >> ssy));
+                CHECK(rect.right == ((1920 + ((1 << ssx) >> 1)) >> ssx));
+            }
+}
+
+// LR3-S3: get_stripe_boundary_info (restoration.c:216-:234): copy_above = 0
+// iff the stripe starts at the tile top; copy_below = 0 iff v_start + (full
+// stripe height - first-stripe runit_offset) reaches the tile bottom. The
+// reachable stripe lattice for a 60-high luma tile (ss_y = 0) is v = 0, 28,
+// 60; for a 30-high chroma tile (ss_y = 1, full 32, offset 4) it is v = 0,
+// 28, 60 too. Plus the tiny-tile case where one stripe is both first and
+// last (both flags 0).
+TEST_CASE("getStripeBoundaryInfo flags over the enumerated stripe lattice") {
+    using l10_filters::restoration::getStripeBoundaryInfo;
+    using l10_filters::restoration::Av1PixelRect;
+    using l10_filters::restoration::RestorationTileLimits;
+    Av1PixelRect tile{0, 0, 1920, 60};
+    RestorationTileLimits lim{};
+    lim.h_start = 0;
+    lim.h_end = 64;
+    int ca, cb;
+    // Luma tile 60 high, ss_y = 0: full stripe 64, runit offset 8.
+    lim.v_start = 0;  getStripeBoundaryInfo(&lim, &tile, 0, &ca, &cb); // first
+    CHECK(ca == 0); CHECK(cb == 1);
+    lim.v_start = 28; getStripeBoundaryInfo(&lim, &tile, 0, &ca, &cb); // last (28+32 >= 60)
+    CHECK(ca == 1); CHECK(cb == 0);
+    lim.v_start = 60; getStripeBoundaryInfo(&lim, &tile, 0, &ca, &cb); // past-bottom stripe
+    CHECK(ca == 1); CHECK(cb == 0);
+    lim.v_start = 8;  getStripeBoundaryInfo(&lim, &tile, 0, &ca, &cb); // mid-stripe: 8+64 >= 60 -> last
+    CHECK(ca == 1); CHECK(cb == 0);
+    // Mid-stripe on a tall tile (bottom 200): 8+64 and 28+64 both stay
+    // inside -> neither boundary.
+    Av1PixelRect tileMid{0, 0, 1920, 200};
+    lim.v_start = 8;  getStripeBoundaryInfo(&lim, &tileMid, 0, &ca, &cb);
+    CHECK(ca == 1); CHECK(cb == 1);
+    lim.v_start = 28; getStripeBoundaryInfo(&lim, &tileMid, 0, &ca, &cb);
+    CHECK(ca == 1); CHECK(cb == 1);
+    // Chroma tile 30 high, ss_y = 1: full stripe 32, runit offset 4.
+    Av1PixelRect tileC{0, 0, 960, 30};
+    lim.v_start = 0;  getStripeBoundaryInfo(&lim, &tileC, 1, &ca, &cb);
+    CHECK(ca == 0); CHECK(cb == 1);
+    lim.v_start = 28; getStripeBoundaryInfo(&lim, &tileC, 1, &ca, &cb);
+    CHECK(ca == 1); CHECK(cb == 0);
+    // Tiny tile: the single stripe is both first and last.
+    Av1PixelRect tileT{0, 0, 960, 8};
+    lim.v_start = 0;  getStripeBoundaryInfo(&lim, &tileT, 0, &ca, &cb);
+    CHECK(ca == 0); CHECK(cb == 0);
+}
+
+// LR3-S4: setup_processing_stripe_boundary (restoration.c:249-:332), the
+// NON-opt copy_above path: rows v_start-3..v_start-1 (columns h_start-4 ..
+// h_end+4) are replaced from rsb->stripe_boundary_above at buf rows
+// rsb_row + max(i + RESTORATION_CTX_VERT, 0) = rsb_row + {0,0,1} for
+// i = {-3,-2,-1}, offset buf_x0_off = h_start in the boundary buffer; the
+// ORIGINAL rows are saved into rlbs->tmp_save_above[{0,1,2}]. Pixels
+// outside the line window (columns h_start-4-1 and h_end+4) stay untouched.
+TEST_CASE("setupProcessingStripeBoundary non-opt above: replace + save") {
+    using l10_filters::restoration::setupProcessingStripeBoundary;
+    using l10_filters::restoration::RestorationTileLimits;
+    using l10_filters::restoration::RestorationStripeBoundaries;
+    using l10_filters::restoration::RestorationLineBuffers;
+    const int stride = 96, bufStride = 128;
+    std::vector<std::uint8_t> data(40 * stride, 0);
+    for (int i = 0; i < 40; ++i)
+        for (int j = 0; j < stride; ++j) data[i * stride + j] = (std::uint8_t)(i * 7 + j);
+    std::vector<std::uint8_t> above(20 * bufStride, 0);
+    for (int i = 0; i < 20; ++i)
+        for (int j = 0; j < bufStride; ++j) above[i * bufStride + j] = (std::uint8_t)(100 + i * 3 + j * 2);
+    RestorationStripeBoundaries rsb{};
+    rsb.stripe_boundary_above = above.data();
+    rsb.stripe_boundary_stride = bufStride;
+    RestorationLineBuffers rlbs{};
+    RestorationTileLimits lim{8, 72, 16, 48};
+    setupProcessingStripeBoundary(&lim, &rsb, 5, 0, 32, data.data(), stride, &rlbs, 1, 0, 0);
+    // dst row v_start + i, cols [4, 76) == above row (5 + max(i+2,0)), from
+    // buf offset h_start = 8: i=-3,-2 -> row 5; i=-1 -> row 6.
+    for (int j = 0; j < 72; ++j) {
+        CHECK(data[(16 - 3) * stride + 4 + j] == above[5 * bufStride + 8 + j]);
+        CHECK(data[(16 - 2) * stride + 4 + j] == above[5 * bufStride + 8 + j]);
+        CHECK(data[(16 - 1) * stride + 4 + j] == above[6 * bufStride + 8 + j]);
+    }
+    // Saved originals: tmp_save_above[k] = old row v_start + (k - 3). The
+    // save arrays are RAW BYTE areas in uint16_t arrays - read as bytes.
+    for (int k = 0; k < 3; ++k)
+        for (int j = 0; j < 72; ++j)
+            CHECK(reinterpret_cast<const std::uint8_t*>(rlbs.tmp_save_above[k])[j] ==
+                  (std::uint8_t)((16 - 3 + k) * 7 + 4 + j));
+    // Outside the line window: untouched.
+    CHECK(data[(16 - 3) * stride + 3] == (std::uint8_t)(13 * 7 + 3));
+    CHECK(data[(16 - 1) * stride + 4 + 72] == (std::uint8_t)(15 * 7 + 76));
+    // The stripe body itself is untouched by setup.
+    CHECK(data[16 * stride + 8] == (std::uint8_t)(16 * 7 + 8));
+}
+
+// LR3-S5: setup_processing_stripe_boundary, the NON-opt copy_below path:
+// rows stripe_end..stripe_end+2 (stripe_end = v_start + h) are replaced from
+// rsb->stripe_boundary_below at buf rows rsb_row + AOMMIN(i, CTX_VERT-1) =
+// rsb_row + {0,1,1}, saved into tmp_save_below[{0,1,2}].
+TEST_CASE("setupProcessingStripeBoundary non-opt below: replace + save") {
+    using l10_filters::restoration::setupProcessingStripeBoundary;
+    using l10_filters::restoration::RestorationTileLimits;
+    using l10_filters::restoration::RestorationStripeBoundaries;
+    using l10_filters::restoration::RestorationLineBuffers;
+    const int stride = 96, bufStride = 128;
+    std::vector<std::uint8_t> data(70 * stride, 0);
+    for (int i = 0; i < 70; ++i)
+        for (int j = 0; j < stride; ++j) data[i * stride + j] = (std::uint8_t)(i * 5 + j + 3);
+    std::vector<std::uint8_t> below(20 * bufStride, 0);
+    for (int i = 0; i < 20; ++i)
+        for (int j = 0; j < bufStride; ++j) below[i * bufStride + j] = (std::uint8_t)(200 + i + j);
+    RestorationStripeBoundaries rsb{};
+    rsb.stripe_boundary_below = below.data();
+    rsb.stripe_boundary_stride = bufStride;
+    RestorationLineBuffers rlbs{};
+    RestorationTileLimits lim{8, 72, 16, 48};
+    setupProcessingStripeBoundary(&lim, &rsb, 5, 0, 32, data.data(), stride, &rlbs, 0, 1, 0);
+    // stripe_end = 48: rows 48,49,50 get below rows 5,6,6 from offset 8.
+    for (int j = 0; j < 72; ++j) {
+        CHECK(data[48 * stride + 4 + j] == below[5 * bufStride + 8 + j]);
+        CHECK(data[49 * stride + 4 + j] == below[6 * bufStride + 8 + j]);
+        CHECK(data[50 * stride + 4 + j] == below[6 * bufStride + 8 + j]);
+    }
+    for (int k = 0; k < 3; ++k)
+        for (int j = 0; j < 72; ++j)
+            CHECK(reinterpret_cast<const std::uint8_t*>(rlbs.tmp_save_below[k])[j] ==
+                  (std::uint8_t)((48 + k) * 5 + 4 + j + 3));
+    // Above rows untouched (copy_above = 0), stripe body untouched.
+    CHECK(data[15 * stride + 4] == (std::uint8_t)(15 * 5 + 7));
+    CHECK(data[16 * stride + 8] == (std::uint8_t)(16 * 5 + 11));
+}
+
+// LR3-S6: setup_processing_stripe_boundary, the OPT (optimized_lr) path:
+// only the single outermost line each side is saved+overwritten - above:
+// row v_start-3 <- row v_start-2; below: row stripe_end+2 <- row
+// stripe_end+1. The interior rows are untouched.
+TEST_CASE("setupProcessingStripeBoundary opt: single outermost line each side") {
+    using l10_filters::restoration::setupProcessingStripeBoundary;
+    using l10_filters::restoration::RestorationTileLimits;
+    using l10_filters::restoration::RestorationStripeBoundaries;
+    using l10_filters::restoration::RestorationLineBuffers;
+    const int stride = 96;
+    std::vector<std::uint8_t> data(70 * stride, 0);
+    for (int i = 0; i < 70; ++i)
+        for (int j = 0; j < stride; ++j) data[i * stride + j] = (std::uint8_t)(i * 2 + j + 1);
+    RestorationStripeBoundaries rsb{}; // boundary buffers never read on the opt path
+    RestorationLineBuffers rlbs{};
+    RestorationTileLimits lim{8, 72, 16, 48};
+    setupProcessingStripeBoundary(&lim, &rsb, 5, 0, 32, data.data(), stride, &rlbs, 1, 1, 1);
+    // Above: row 13 <- row 14; rows 14, 15 untouched.
+    for (int j = 0; j < 72; ++j) CHECK(data[13 * stride + 4 + j] == (std::uint8_t)(14 * 2 + 4 + j + 1));
+    CHECK(data[14 * stride + 4] == (std::uint8_t)(14 * 2 + 4 + 1));
+    CHECK(data[15 * stride + 4] == (std::uint8_t)(15 * 2 + 4 + 1));
+    for (int j = 0; j < 72; ++j)
+        CHECK(reinterpret_cast<const std::uint8_t*>(rlbs.tmp_save_above[0])[j] ==
+              (std::uint8_t)(13 * 2 + 4 + j + 1));
+    // Below: stripe_end = 48; row 50 <- row 49; rows 48, 49 untouched.
+    for (int j = 0; j < 72; ++j) CHECK(data[50 * stride + 4 + j] == (std::uint8_t)(49 * 2 + 4 + j + 1));
+    CHECK(data[48 * stride + 4] == (std::uint8_t)(48 * 2 + 4 + 1));
+    CHECK(data[49 * stride + 4] == (std::uint8_t)(49 * 2 + 4 + 1));
+    for (int j = 0; j < 72; ++j)
+        CHECK(reinterpret_cast<const std::uint8_t*>(rlbs.tmp_save_below[2])[j] ==
+              (std::uint8_t)(50 * 2 + 4 + j + 1));
+}
+
+// LR3-S7: restore_processing_stripe_boundary (restoration.c:347-:397): the
+// saved lines are written back. Roundtrip: setup (non-opt, both flags),
+// scribble every touched row, restore -> the 3 above rows and the 3 below
+// rows return to their pre-setup values. The opt path restores only the
+// single outermost line each side.
+TEST_CASE("restoreProcessingStripeBoundary roundtrip non-opt and opt") {
+    using l10_filters::restoration::setupProcessingStripeBoundary;
+    using l10_filters::restoration::restoreProcessingStripeBoundary;
+    using l10_filters::restoration::RestorationTileLimits;
+    using l10_filters::restoration::RestorationStripeBoundaries;
+    using l10_filters::restoration::RestorationLineBuffers;
+    const int stride = 96;
+    std::vector<std::uint8_t> data(70 * stride, 0), orig(70 * stride, 0);
+    for (int i = 0; i < 70; ++i)
+        for (int j = 0; j < stride; ++j) {
+            data[i * stride + j] = (std::uint8_t)(i * 2 + j + 1);
+            orig[i * stride + j] = (std::uint8_t)(i * 2 + j + 1);
+        }
+    RestorationStripeBoundaries rsb{};
+    std::vector<std::uint8_t> above(20 * 128, 0), below(20 * 128, 0);
+    for (int i = 0; i < 20; ++i)
+        for (int j = 0; j < 128; ++j) {
+            above[i * 128 + j] = (std::uint8_t)(i + j);
+            below[i * 128 + j] = (std::uint8_t)(i + j + 1);
+        }
+    rsb.stripe_boundary_above = above.data();
+    rsb.stripe_boundary_below = below.data();
+    rsb.stripe_boundary_stride = 128;
+    RestorationLineBuffers rlbs{};
+    RestorationTileLimits lim{8, 72, 16, 48};
+    // Non-opt: all 3+3 rows.
+    setupProcessingStripeBoundary(&lim, &rsb, 5, 0, 32, data.data(), stride, &rlbs, 1, 1, 0);
+    for (int i = 13; i < 16; ++i)
+        for (int j = 0; j < 72; ++j) data[i * stride + 4 + j] = 0xAA;
+    for (int i = 48; i < 51; ++i)
+        for (int j = 0; j < 72; ++j) data[i * stride + 4 + j] = 0xBB;
+    restoreProcessingStripeBoundary(&lim, &rlbs, 0, 32, data.data(), stride, 1, 1, 0);
+    for (int i = 13; i < 16; ++i)
+        for (int j = 0; j < 72; ++j) CHECK(data[i * stride + 4 + j] == orig[i * stride + 4 + j]);
+    for (int i = 48; i < 51; ++i)
+        for (int j = 0; j < 72; ++j) CHECK(data[i * stride + 4 + j] == orig[i * stride + 4 + j]);
+    // Opt: only the outermost lines.
+    RestorationLineBuffers rlbs2{};
+    setupProcessingStripeBoundary(&lim, &rsb, 5, 0, 32, data.data(), stride, &rlbs2, 1, 1, 1);
+    for (int i = 13; i < 16; ++i)
+        for (int j = 0; j < 72; ++j) data[i * stride + 4 + j] = 0xAA;
+    for (int i = 48; i < 51; ++i)
+        for (int j = 0; j < 72; ++j) data[i * stride + 4 + j] = 0xBB;
+    restoreProcessingStripeBoundary(&lim, &rlbs2, 0, 32, data.data(), stride, 1, 1, 1);
+    for (int j = 0; j < 72; ++j) CHECK(data[13 * stride + 4 + j] == orig[13 * stride + 4 + j]);
+    for (int j = 0; j < 72; ++j) CHECK(data[14 * stride + 4 + j] == 0xAA); // interior not restored
+    for (int j = 0; j < 72; ++j) CHECK(data[50 * stride + 4 + j] == orig[50 * stride + 4 + j]);
+    for (int j = 0; j < 72; ++j) CHECK(data[49 * stride + 4 + j] == 0xBB); // interior not restored
+}
+
+// LR3-S8: the restore below-loop break rule (:369-:371): with h overshooting
+// the unit (h = 34, stripe_bottom = 50 > v_end = 48), the guard
+// stripe_bottom + i >= v_end + RESTORATION_BORDER fires at i = 1 (51 >= 51),
+// so only i = 0 is restored; rows 51, 52 keep the scribble.
+TEST_CASE("restoreProcessingStripeBoundary below loop breaks at v_end + border") {
+    using l10_filters::restoration::setupProcessingStripeBoundary;
+    using l10_filters::restoration::restoreProcessingStripeBoundary;
+    using l10_filters::restoration::RestorationTileLimits;
+    using l10_filters::restoration::RestorationStripeBoundaries;
+    using l10_filters::restoration::RestorationLineBuffers;
+    const int stride = 96;
+    std::vector<std::uint8_t> data(70 * stride, 0), orig(70 * stride, 0);
+    for (int i = 0; i < 70; ++i)
+        for (int j = 0; j < stride; ++j) {
+            data[i * stride + j] = (std::uint8_t)(i * 2 + j + 1);
+            orig[i * stride + j] = (std::uint8_t)(i * 2 + j + 1);
+        }
+    RestorationStripeBoundaries rsb{};
+    std::vector<std::uint8_t> below(20 * 128, 1);
+    rsb.stripe_boundary_below = below.data();
+    rsb.stripe_boundary_stride = 128;
+    RestorationLineBuffers rlbs{};
+    RestorationTileLimits lim{8, 72, 16, 48};
+    setupProcessingStripeBoundary(&lim, &rsb, 5, 0, 34, data.data(), stride, &rlbs, 0, 1, 0);
+    for (int i = 50; i < 53; ++i)
+        for (int j = 0; j < 72; ++j) data[i * stride + 4 + j] = 0xCC;
+    restoreProcessingStripeBoundary(&lim, &rlbs, 0, 34, data.data(), stride, 0, 1, 0);
+    for (int j = 0; j < 72; ++j) CHECK(data[50 * stride + 4 + j] == orig[50 * stride + 4 + j]);
+    for (int j = 0; j < 72; ++j) CHECK(data[51 * stride + 4 + j] == 0xCC); // break skipped i=1, 2
+    for (int j = 0; j < 72; ++j) CHECK(data[52 * stride + 4 + j] == 0xCC);
+}
+
+// LR3-S9: sgrproj_filter_stripe (restoration.c:964-:985): per procunit
+// slice j, w = AOMMIN(procunit_width, stripe_width - j) - the PLAIN min, no
+// round-up. The whole-stripe dst must equal per-slice direct calls to the
+// landed applySelfguidedRestoration with the same w per slice. stripe_width
+// 40 / procunit 32 -> slices w = 32 and w = 8.
+TEST_CASE("sgrprojFilterStripe slices at the plain AOMMIN width rule") {
+    using l10_filters::restoration::sgrprojFilterStripe;
+    using l10_filters::restoration::RestorationUnitInfo;
+    using l10_filters::restoration::applySelfguidedRestoration;
+    const int stripeW = 40, stripeH = 6, procunit = 32, stride = stripeW + 16;
+    std::vector<std::uint8_t> plane((stripeH + 8) * stride, 0), expD((stripeH + 8) * stride, 0x11),
+        dst((stripeH + 8) * stride, 0x11);
+    for (int i = 0; i < stripeH + 8; ++i)
+        for (int j = 0; j < stride; ++j) plane[i * stride + j] = (std::uint8_t)(1 + (i * 13 + j * 7) % 251);
+    const std::uint8_t* src = plane.data() + 4 * stride + 4;
+    std::uint8_t* dstP = dst.data() + 4 * stride + 4;
+    std::uint8_t* expP = expD.data() + 4 * stride + 4;
+    RestorationUnitInfo rui{};
+    rui.sgrproj_info.ep = 0;
+    rui.sgrproj_info.xqd[0] = 5;
+    rui.sgrproj_info.xqd[1] = 3;
+    std::vector<std::int32_t> tmpbuf(2 * l10_filters::restoration::restorationUnitpelsMax, -424242);
+    // Oracle: the two slices by hand, w = 32 then w = 8.
+    applySelfguidedRestoration(src, 32, stripeH, stride, 0, rui.sgrproj_info.xqd, expP, stride, tmpbuf.data(), 8,
+        0);
+    applySelfguidedRestoration(src + 32, 8, stripeH, stride, 0, rui.sgrproj_info.xqd, expP + 32, stride,
+        tmpbuf.data(), 8, 0);
+    sgrprojFilterStripe(&rui, stripeW, stripeH, procunit, src, stride, dstP, stride, tmpbuf.data(), 8);
+    for (int i = 0; i < stripeH; ++i)
+        for (int j = 0; j < stripeW; ++j) CHECK(dstP[i * stride + j] == expP[i * stride + j]);
+}
+
+// LR3-S10: wiener_filter_stripe (restoration.c:399-:421): per procunit
+// slice j, w = AOMMIN(procunit_width, (stripe_width - j + 15) & ~15) - the
+// ROUND-UP rule, NOT sgrproj's plain min: at j = 32 the slice w is 16 even
+// though only 8 stripe columns remain, so the convolve OVERFLOWS the stripe
+// into dst cols 40..48. The comparison therefore covers [0, 48) - copying
+// sgrproj's w rule leaves the overflow cols at the fill and fails here.
+// Oracle: direct calls to the landed convolve::wienerConvolveAddSrc with
+// the same w per slice and the same filter pointers.
+TEST_CASE("wienerFilterStripe slices at the round-up width rule") {
+    using l10_filters::restoration::wienerFilterStripe;
+    using l10_filters::restoration::RestorationUnitInfo;
+    using convolve::wienerConvolveAddSrc;
+    using convolve::getConvParamsWiener;
+    const int stripeW = 40, stripeH = 6, procunit = 32, stride = stripeW + 16;
+    std::vector<std::uint8_t> plane((stripeH + 8) * stride, 0), expD((stripeH + 8) * stride, 0x11),
+        dst((stripeH + 8) * stride, 0x11);
+    for (int i = 0; i < stripeH + 8; ++i)
+        for (int j = 0; j < stride; ++j) plane[i * stride + j] = (std::uint8_t)(1 + (i * 13 + j * 7) % 251);
+    const std::uint8_t* src = plane.data() + 4 * stride + 4;
+    std::uint8_t* dstP = dst.data() + 4 * stride + 4;
+    std::uint8_t* expP = expD.data() + 4 * stride + 4;
+    RestorationUnitInfo rui{};
+    for (int k = 0; k < 8; ++k) {
+        rui.wiener_info.hfilter[k] = kWienerDefaultTaps[k];
+        rui.wiener_info.vfilter[k] = kWienerDefaultTaps[k];
+    }
+    const convolve::ConvolveParams cp = getConvParamsWiener(8);
+    // Oracle: the two slices by hand, w = 32 then w = 16 (the round-up).
+    wienerConvolveAddSrc(src, stride, expP, stride, rui.wiener_info.hfilter, rui.wiener_info.vfilter, 32, stripeH,
+        &cp);
+    wienerConvolveAddSrc(src + 32, stride, expP + 32, stride, rui.wiener_info.hfilter, rui.wiener_info.vfilter, 16,
+        stripeH, &cp);
+    wienerFilterStripe(&rui, stripeW, stripeH, procunit, src, stride, dstP, stride, nullptr, 8);
+    // The overflow cols are written by the round-up slice: prove the fixture
+    // really distinguishes the two w rules before comparing.
+    int overflowWritten = 1;
+    for (int i = 0; i < stripeH; ++i)
+        for (int j = 40; j < 48; ++j)
+            if (expP[i * stride + j] != 0x11) overflowWritten = 0;
+    CHECK(overflowWritten == 0);
+    for (int i = 0; i < stripeH; ++i)
+        for (int j = 0; j < 48; ++j) CHECK(dstP[i * stride + j] == expP[i * stride + j]);
+}
+
+// LR3-S11a: svt_av1_loop_restoration_filter_unit (restoration.c:1040-:1110),
+// the RESTORE_NONE branch: the unit rect is copied data8 -> dst8 via the
+// landed copyTile and nothing else runs.
+TEST_CASE("loopRestorationFilterUnit RESTORE_NONE copies the unit rect") {
+    using l10_filters::restoration::loopRestorationFilterUnit;
+    using l10_filters::restoration::RestorationTileLimits;
+    using l10_filters::restoration::RestorationUnitInfo;
+    using l10_filters::restoration::RestorationStripeBoundaries;
+    using l10_filters::restoration::RestorationLineBuffers;
+    using l10_filters::restoration::Av1PixelRect;
+    using l10_filters::restoration::RESTORE_NONE;
+    const int stride = 96;
+    std::vector<std::uint8_t> data(60 * stride, 0), dst(60 * stride, 0x22);
+    for (int i = 0; i < 60; ++i)
+        for (int j = 0; j < stride; ++j) data[i * stride + j] = (std::uint8_t)(i * 3 + j);
+    RestorationUnitInfo rui{};
+    rui.restoration_type = RESTORE_NONE;
+    RestorationTileLimits lim{8, 72, 16, 48};
+    RestorationStripeBoundaries rsb{};
+    RestorationLineBuffers rlbs{};
+    Av1PixelRect tile{0, 0, 1920, 64};
+    loopRestorationFilterUnit(0, &lim, &rui, &rsb, &rlbs, &tile, 0, 0, 0, 0, 8, data.data(), stride, dst.data(),
+        stride, nullptr, 0);
+    for (int i = 16; i < 48; ++i)
+        for (int j = 8; j < 72; ++j) CHECK(dst[i * stride + j] == data[i * stride + j]);
+    CHECK(dst[16 * stride + 7] == 0x22);  // outside the unit rect
+    CHECK(dst[15 * stride + 8] == 0x22);
+    CHECK(dst[48 * stride + 8] == 0x22);
+    CHECK(dst[16 * stride + 72] == 0x22);
+}
+
+// LR3-S11b: the stripe walk, WIENER unit, need_boundaries = 0. A 64x64 unit
+// at a tile with top 0 / bottom 64 splits into a 56-high first stripe (the
+// runit_offset reduction) and an 8-high remainder: h = AOMMIN(nominal,
+// v_end - v_start) with nominal = 64 - (tile_stripe == 0 ? 8 : 0). Oracle:
+// direct wienerFilterStripe calls at the same rows with the same shapes.
+TEST_CASE("loopRestorationFilterUnit walks wiener stripes 56+8") {
+    using l10_filters::restoration::loopRestorationFilterUnit;
+    using l10_filters::restoration::wienerFilterStripe;
+    using l10_filters::restoration::RestorationTileLimits;
+    using l10_filters::restoration::RestorationUnitInfo;
+    using l10_filters::restoration::RestorationStripeBoundaries;
+    using l10_filters::restoration::RestorationLineBuffers;
+    using l10_filters::restoration::Av1PixelRect;
+    using l10_filters::restoration::RESTORE_WIENER;
+    const int stride = 96;
+    std::vector<std::uint8_t> data(90 * stride, 0), dst(90 * stride, 0x22), expD(90 * stride, 0x22);
+    for (int i = 0; i < 90; ++i)
+        for (int j = 0; j < stride; ++j) data[i * stride + j] = (std::uint8_t)(1 + (i * 11 + j * 5) % 250);
+    RestorationUnitInfo rui{};
+    rui.restoration_type = RESTORE_WIENER;
+    for (int k = 0; k < 8; ++k) {
+        rui.wiener_info.hfilter[k] = kWienerDefaultTaps[k];
+        rui.wiener_info.vfilter[k] = kWienerDefaultTaps[k];
+    }
+    RestorationTileLimits lim{8, 72, 16, 80};
+    RestorationStripeBoundaries rsb{};
+    RestorationLineBuffers rlbs{};
+    Av1PixelRect tile{0, 0, 1920, 64};
+    loopRestorationFilterUnit(0, &lim, &rui, &rsb, &rlbs, &tile, 0, 0, 0, 0, 8, data.data(), stride, expD.data(),
+        stride, nullptr, 0);
+    // Oracle: the two stripes by hand.
+    std::uint8_t* dataTl = data.data() + 16 * stride + 8;
+    std::uint8_t* dstP = dst.data() + 16 * stride + 8;
+    wienerFilterStripe(&rui, 64, 56, 64, dataTl, stride, dstP, stride, nullptr, 8);
+    wienerFilterStripe(&rui, 64, 8, 64, dataTl + 56 * stride, stride, dstP + 56 * stride, stride, nullptr, 8);
+    for (int i = 16; i < 80; ++i)
+        for (int j = 8; j < 72; ++j) CHECK(dst[i * stride + j] == expD[i * stride + j]);
+    CHECK(dst[15 * stride + 8] == 0x22);
+    CHECK(dst[80 * stride + 8] == 0x22);
+}
+
+// LR3-S11c: the dispatch - a RESTORE_SGRPROJ unit runs sgrprojFilterStripe,
+// not wienerFilterStripe, even though BOTH filter sets are populated on the
+// unit (a wiener misdispatch produces different pixels and fails).
+TEST_CASE("loopRestorationFilterUnit dispatches SGRPROJ to the sgrproj stripe") {
+    using l10_filters::restoration::loopRestorationFilterUnit;
+    using l10_filters::restoration::sgrprojFilterStripe;
+    using l10_filters::restoration::RestorationTileLimits;
+    using l10_filters::restoration::RestorationUnitInfo;
+    using l10_filters::restoration::RestorationStripeBoundaries;
+    using l10_filters::restoration::RestorationLineBuffers;
+    using l10_filters::restoration::Av1PixelRect;
+    using l10_filters::restoration::RESTORE_SGRPROJ;
+    using l10_filters::restoration::restorationUnitpelsMax;
+    const int stride = 96;
+    std::vector<std::uint8_t> data(90 * stride, 0), dst(90 * stride, 0x22), expD(90 * stride, 0x22);
+    for (int i = 0; i < 90; ++i)
+        for (int j = 0; j < stride; ++j) data[i * stride + j] = (std::uint8_t)(1 + (i * 11 + j * 5) % 250);
+    RestorationUnitInfo rui{};
+    rui.restoration_type = RESTORE_SGRPROJ;
+    rui.sgrproj_info.ep = 0;
+    rui.sgrproj_info.xqd[0] = 5;
+    rui.sgrproj_info.xqd[1] = 3;
+    for (int k = 0; k < 8; ++k) {
+        rui.wiener_info.hfilter[k] = kWienerDefaultTaps[k];
+        rui.wiener_info.vfilter[k] = kWienerDefaultTaps[k];
+    }
+    RestorationTileLimits lim{8, 72, 16, 80};
+    RestorationStripeBoundaries rsb{};
+    RestorationLineBuffers rlbs{};
+    Av1PixelRect tile{0, 0, 1920, 64};
+    std::vector<std::int32_t> tmpbuf(2 * restorationUnitpelsMax, -424242);
+    loopRestorationFilterUnit(0, &lim, &rui, &rsb, &rlbs, &tile, 0, 0, 0, 0, 8, data.data(), stride, expD.data(),
+        stride, tmpbuf.data(), 0);
+    // Oracle: the two sgrproj stripes by hand.
+    std::uint8_t* dataTl = data.data() + 16 * stride + 8;
+    std::uint8_t* dstP = dst.data() + 16 * stride + 8;
+    sgrprojFilterStripe(&rui, 64, 56, 64, dataTl, stride, dstP, stride, tmpbuf.data(), 8);
+    sgrprojFilterStripe(&rui, 64, 8, 64, dataTl + 56 * stride, stride, dstP + 56 * stride, stride, tmpbuf.data(), 8);
+    for (int i = 16; i < 80; ++i)
+        for (int j = 8; j < 72; ++j) CHECK(dst[i * stride + j] == expD[i * stride + j]);
+}
+
+// LR3-S11d: need_boundaries = 1 - the walk composes
+// setup_processing_stripe_boundary / stripe filter / restore per stripe with
+// the rsb_row = RESTORATION_CTX_VERT * (tile_stripe0 + tile_stripe) math and
+// the copy_above/copy_below flags from getStripeBoundaryInfo. Oracle: the
+// same per-stripe sequence driven by hand on the same data plane. The
+// boundary rows the stripes filter THROUGH are the replaced ones, so a
+// wrong rsb_row or flag computation diverges the output.
+TEST_CASE("loopRestorationFilterUnit need_boundaries composes setup/filter/restore") {
+    using l10_filters::restoration::loopRestorationFilterUnit;
+    using l10_filters::restoration::setupProcessingStripeBoundary;
+    using l10_filters::restoration::restoreProcessingStripeBoundary;
+    using l10_filters::restoration::wienerFilterStripe;
+    using l10_filters::restoration::getStripeBoundaryInfo;
+    using l10_filters::restoration::RestorationTileLimits;
+    using l10_filters::restoration::RestorationUnitInfo;
+    using l10_filters::restoration::RestorationStripeBoundaries;
+    using l10_filters::restoration::RestorationLineBuffers;
+    using l10_filters::restoration::Av1PixelRect;
+    using l10_filters::restoration::RESTORE_WIENER;
+    const int stride = 96, bufStride = 128;
+    std::vector<std::uint8_t> data(90 * stride, 0), dst(90 * stride, 0x22), expD(90 * stride, 0x22);
+    for (int i = 0; i < 90; ++i)
+        for (int j = 0; j < stride; ++j) data[i * stride + j] = (std::uint8_t)(1 + (i * 11 + j * 5) % 250);
+    RestorationUnitInfo rui{};
+    rui.restoration_type = RESTORE_WIENER;
+    for (int k = 0; k < 8; ++k) {
+        rui.wiener_info.hfilter[k] = kWienerDefaultTaps[k];
+        rui.wiener_info.vfilter[k] = kWienerDefaultTaps[k];
+    }
+    RestorationStripeBoundaries rsb{};
+    std::vector<std::uint8_t> above(20 * bufStride, 0), below(20 * bufStride, 0);
+    for (int i = 0; i < 20; ++i)
+        for (int j = 0; j < bufStride; ++j) {
+            above[i * bufStride + j] = (std::uint8_t)(30 + i + j);
+            below[i * bufStride + j] = (std::uint8_t)(90 + i + j);
+        }
+    rsb.stripe_boundary_above = above.data();
+    rsb.stripe_boundary_below = below.data();
+    rsb.stripe_boundary_stride = bufStride;
+    RestorationLineBuffers rlbs{};
+    Av1PixelRect tile{0, 0, 1920, 200};
+    RestorationTileLimits lim{8, 72, 16, 80};
+    loopRestorationFilterUnit(1, &lim, &rui, &rsb, &rlbs, &tile, 0, 0, 0, 0, 8, data.data(), stride, dst.data(),
+        stride, nullptr, 0);
+    // Oracle: the walk by hand. Stripe 1: v_start 16, tile_stripe 0, rsb_row
+    // 0, h 56, flags (1, 1) - the unit does NOT start at the tile top, and
+    // the 200-high tile keeps both boundaries live. Stripe 2: v_start 72,
+    // tile_stripe 1, rsb_row 2, h 8, flags (1, 1). Limits are ABSOLUTE, like
+    // the walk's.
+    RestorationLineBuffers orlbs{};
+    std::uint8_t* dataTl = data.data() + 16 * stride + 8;
+    std::uint8_t* dstP = expD.data() + 16 * stride + 8;
+    RestorationTileLimits s1{8, 72, 16, 80};
+    int ca, cb;
+    getStripeBoundaryInfo(&s1, &tile, 0, &ca, &cb);
+    CHECK(ca == 1); CHECK(cb == 1);
+    setupProcessingStripeBoundary(&s1, &rsb, 0, 0, 56, data.data(), stride, &orlbs, ca, cb, 0);
+    wienerFilterStripe(&rui, 64, 56, 64, dataTl, stride, dstP, stride, nullptr, 8);
+    restoreProcessingStripeBoundary(&s1, &orlbs, 0, 56, data.data(), stride, ca, cb, 0);
+    RestorationTileLimits s2{8, 72, 72, 80};
+    getStripeBoundaryInfo(&s2, &tile, 0, &ca, &cb);
+    CHECK(ca == 1); CHECK(cb == 1);
+    setupProcessingStripeBoundary(&s2, &rsb, 2, 0, 8, data.data(), stride, &orlbs, ca, cb, 0);
+    wienerFilterStripe(&rui, 64, 8, 64, dataTl + 56 * stride, stride, dstP + 56 * stride, stride, nullptr, 8);
+    restoreProcessingStripeBoundary(&s2, &orlbs, 0, 8, data.data(), stride, ca, cb, 0);
+    for (int i = 16; i < 80; ++i)
+        for (int j = 8; j < 72; ++j) CHECK(dst[i * stride + j] == expD[i * stride + j]);
+    // The data plane's boundary rows are restored after the walk.
+    for (int i = 13; i < 19; ++i)
+        for (int j = 4; j < 80; ++j) CHECK(data[i * stride + j] == (std::uint8_t)(1 + (i * 11 + j * 5) % 250));
 }
 
 namespace {
