@@ -2042,6 +2042,76 @@ A0. SLICE-LEVEL STATE (the live register)
 |    A9 5% (278). **THE 20% TARGET IS CROSSED** - the campaign arc:
 |    13.1 (AN1-3 era) -> 16.5 (LR2) -> 17.5 (wave 1) -> 18.5 (wave 2)
 |    -> 19.1 (wave 3) -> 19.6 (wave 4) -> 20.1 (wave 5).
+|  - [x] **A1/TX2 (2026-11-05, e2c5cf4): the remaining TxType surface
+|    lands** in src/l3_transforms - the FULL 16-type list the lowbd
+|    tables admit (definitions.h:1031-1047): set_flip_cfg verbatim
+|    (inv_transforms.h:139-181, 39 nb), the vtx/htx tables all 16 rows
+|    (:45-:80, 36 nb), fwdIdentity4..64/invIdentity4..64
+|    (transforms.c:2318-:2359 + inv_transforms.c:2346-:2389, 78 nb;
+|    the reference's fidentity/iidentity renamed per the port's
+|    fwd/inv prefix convention, named deviation), the fwd/inv core
+|    flip branches (transforms.c:2430-:2452 + inv_transforms.c:
+|    2554-:2577, 47 nb - the TX1 fixed-zero-flips deviation
+|    RESOLVED), IDTX joined at the 32-class shapes and the six
+|    one-axis types at TX_32X32 through the CONFIG=1 fallback branch
+|    (EbConfigMacros.h:246; the 64-axis shapes stay DCT_DCT-only),
+|    supported() 165 fwd / 243 inv (+300 pairs). The ten square
+|    facades route through the TX1 config+core path (the reference's
+|    own facade shape) with the landed DCT/ADST outputs unchanged;
+|    invTxfm2dAdd64x64 keeps the landed 4096 facade - routing it
+|    through the compacting form broke the FS3 emission walk
+|    (pipeline 1/16 red) and was REVERTED in-slice (FS5d stands).
+|    204 nb measured. RED evidence: S1-S12 (compile C2039/LNK2019
+|    REDs per kernel, the S2 SIGSEGV out-of-bounds kVtxTab[4] read,
+|    two ORACLE BUGS named inside the tests (S8's DCT_FLIPADST
+|    intermediate, S12a's row-2 condition) and the S6 negative-ramp
+|    clip (the reference's own clipPixelAdd behavior)); M1-M5 killed
+|    (the flip-axis group swap, the ud_flip read-branch inversion,
+|    the fidtx16_range_mult2 corruption, the IDENTITY dispatch
+|    break, the identity scale corruption). Suite 16/16 (285.87 s);
+|    GATE byte-identical 884,851 B diff 0 - no generator input.
+|    REGISTER-LAG NOTE (recorded at bf32b4c): this entry and SYM1's
+|    belong in the slice's own commit; the state refresh
+|    (AGENTS.md + coverage_areas.txt) was left uncommitted too and
+|    landed at bf32b4c - the "register moves in the SAME commit"
+|    rule was violated twice by wave 6 and is hereby repaired.
+|  - [x] **A5/SYM1 (2026-11-05, c1ec838): the palette + segmentation
+|    symbol surface lands** in src/l7_entropy - six palette CDF
+|    families + the EcSegProbs struct (cabac_context_model.c:
+|    :477-:586, the nine mechanical .inc extracts via the committed
+|    tools/extract_palette_cdfs.ps1), allowPalette +
+|    getPaletteBsizeCtx (FINDING pinned: the reference's
+|    bsize >= BLOCK_8X8 gate is ENUM order, not geometry -
+|    BLOCK_4X16/16X4 pass it; the enumerated 22-bsize want[] table
+|    pins the quirk), deltaEncodePaletteColors, writeUniform/
+|    readUniform + readLiteralBits, writePaletteColorsY/
+|    readPaletteColorsY + the local indexColorCache twin
+|    (DUPLICATED from l13_palette - l7 cannot link l13; both port
+|    palette.c:111-141), writePaletteModeInfo (the uv continuation
+|    PARKED - the pinned writer emits no uv palette,
+|    entropy_coding.c:4371 asserts palette_size[1] == 0), the
+|    fast-context family twin (palette.c:639-776, also duplicated),
+|    tokenizeColorMap (palette.c:781-828; PAL1 had parked it) +
+|    packMapTokens + getColorIndexContext + decodeColorMapTokens -
+|    TWO roundtrip-caught defects named (the cdf-row pointer indexed
+|    the ELEMENT dimension instead of the [ctx]-th ROW; an
+|    out-of-range fixture map value, the fixture's bug), the wb trio
+|    duplicated into l7 (entropy_coding.c:1343-1382; l7 cannot link
+|    l8) + rbRead* + writeSegFeatures/readSegFeatures (a third
+|    caught defect: the seg-enabled bit was a parameter; the reader
+|    reads enabled itself and FORCES update_map=1/temporal=0/
+|    update_data=1 at PRIMARY_REF_NONE), getSegmentId/
+|    updateSegmentationMap/getSpatialSegPrediction/negInterleave/
+|    negDeinterleave/writeSegmentId/readSegmentId. SVT-side 634 nb
+|    (481 new-to-the-port + 153 duplicated with l13) + 242 nb aom
+|    reader twins (out-of-tree, not in the denominator). M1-M6
+|    killed (M3's palette-size ctx off-by-one is INVISIBLE to the
+|    roundtrips - both sides share the shifted row; the pure-function
+|    enumeration is the only guard). Suite 16/16 (278.64 s); GATE
+|    byte-identical 884,851 B diff 0. Parks named: the seg TEMPORAL
+|    path (the SVT writer SVT_ERRORs on it, entropy_coding.c:
+|    :4895-:4903), write_palette_colors_uv (does not exist in the
+|    pinned encoder).
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------

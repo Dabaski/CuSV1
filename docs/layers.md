@@ -19,9 +19,16 @@ l5_motion       SAD                       (host; GPU at 4x4/8x8)
 l6_pipeline     composition + decision    (host + GPU frame paths)
 l7_entropy      entropy coder + symbols   (host, gate-exact)
 l8_bitstream    raw-bit writer + OBU      (host, gate-exact)
-l9_analysis     content analysis           (host; AN-series, coverage)
-l10_filters     deblock/CDEF/restoration   (host; DF/CDEF/LR, not wired)
-                         |
+l9_analysis     content analysis + temporal filter
+                                          (host; AN/TF/PU-series)
+l10_filters     deblock/CDEF/restoration/grain
+                                          (host; DF/CDEF/LR/GR, not wired)
+l11_resize      resize 1D kernels         (host; AN21)
+l12_convolve    convolution kernels       (host; CV1)
+l13_palette     palette + k-means + segmentation (host; PAL1/SEG1)
+l14_utility     block geometry + utilities (host; U1)
+l15_rc          rate-control qindex tables (host; RC1)
+                          |
              tools/golden_gen (the gate)
              tools/bench (perf)
              tools/decode_handoff.ps1 + td0_ladder.ps1 (decoders)
@@ -78,6 +85,19 @@ arithmetic:
   bodies carry the verbatim stage arithmetic; the launch geometry
   (one thread per column/row, shared-memory staging) is ours. Every
   twin is bit-exact vs its host port.
+- Non-square shapes + the full TxType surface (TX1/TX2): the generic
+  cfg machinery (shift/type/cos_bit tables + `two_d_core` + dispatch
+  switches) over 14 shapes, 76 admissible (shape, TxType) pairs
+  (roundtrip exactness classified per shape - 8x16 exact, 16x8
+  lossy-1, the reference's own asymmetry), then the full 16-type list
+  the lowbd tables admit: `setFlipCfg` verbatim, the vtx/htx tables,
+  `fwdIdentity*`/`invIdentity*`, the fwd/inv core flip branches, IDTX
+  at the 32-class shapes and the six one-axis types at TX_32X32;
+  `supported()` enumerates 165 fwd / 243 inv pairs, and the ten square
+  facades route through the same config+core path the reference's own
+  facades use (the landed DCT/ADST outputs unchanged; the 64x64
+  inverse keeps the 4096-wide facade the port's callers expand - the
+  FS5d named follow-up). The highbd inv wrappers stay parked.
 
 ## l4_intra - intra prediction
 
@@ -114,6 +134,14 @@ SVT's call-site fold.
 8x8 kernel, the rest mirror `svt_nxm_sad_kernel_helper_c` at their
 dims. GPU kernels exist for 4x4/8x8; the 16x16/32x32/64x64 D2 policies
 score host-side by design.
+
+HM1 added the motion-hash + global-motion surface
+(`hash_motion.{h,cpp}`: the crc32c pair, the hash-table machinery, the
+block-hash generation and walk; `global_motion.{h,cpp}`: the GM param
+surface including `refine_integerized_param` with the GmControls
+fields threaded as scalars) - the first inter-prediction-adjacent
+analysis primitives in the port; the hbd twins and the
+correspondence/PCS walls stay parked.
 
 ## l6_pipeline - composition + decision
 
@@ -167,6 +195,13 @@ above, not zeros).
   five geometries. Host decides, GPU executes: decisions and edge
   gathers stay on the host (edges are read from the device recon
   buffer), kernels execute the per-block work.
+- PO1 added the struct-free pic_operators kernels (`picops.{h,cpp}`,
+  namespace `pipeline::picops`): the two residual kernels (no clamp,
+  the uint16 wrap-cast - the l6 convention), the three
+  full-distortion kernels + the 32-single dispatcher (shift-free
+  int64 SQR), the yv12 copy trio and `generatePadding16Bit`. The
+  pack2d/unpack2d dispatches stay parked (their callees are PU1's
+  packunpack in l9).
 
 ## l7_entropy - entropy coder + symbols
 
@@ -195,9 +230,15 @@ the committed gate (see `docs/bitstream.md` for the narrative):
   semantics (out-of-tree arbiter; no aom code is extracted).
 - Named scope: LUMA DCT_DCT only, whole-block TUs (txb_count = 1 at
   tx_depth = 0). Landed (CS1/CS4): the chroma uv_mode/uv-delta symbols
-  and the per-component token chains. Deferred: the CFL alphas
-  (UV_CFL_PRED is not a D2 candidate), the nonkey y-mode path,
-  palette, intrabc.
+  and the per-component token chains. Landed (SYM1): the palette +
+  segmentation symbol surface - the six palette CDF families, the
+  palette/segmentation writers and the aom-mirroring readers
+  (`tokenizeColorMap`, `writeSegFeatures`/`readSegFeatures`,
+  `negInterleave`/`negDeinterleave`); the uv palette continuation is
+  parked (the pinned writer emits no uv palette) and the seg TEMPORAL
+  path stays parked (the SVT writer errors on it upstream). Deferred:
+  the CFL alphas (UV_CFL_PRED is not a D2 candidate), the nonkey
+  y-mode path, intrabc.
 
 ## l8_bitstream - raw-bit writer + OBU
 
@@ -225,7 +266,9 @@ color4 last-43-V-bytes gap at RT21) per the conformance matrix
 
 Host-only primitives 1:1 with SVT's analysis C
 (`pic_analysis_process.c`, `noise_model.c`, `noise_util.c`,
-`fft_common.h`/`fft.c`, `firstpass.c`); no GPU twin (parked, named).
+`fft_common.h`/`fft.c`, `firstpass.c`, and - wave 3 -
+`temporal_filtering.c`, `pack_unpack_c.c`, `blend_a64_mask_c.c`,
+`variance.c`); no GPU twin (parked, named).
 They feed future RDO decisions; nothing in the encoder consumes them
 yet. The families:
 
@@ -247,8 +290,19 @@ yet. The families:
   (the spectral filter whose inverse carries the 1/n normalization),
   the OD_DIVU division table, the noise strength solver, the
   flat-block finder and the noise-model init/update.
+- Temporal filtering (TF1): the planewise kernel family of
+  `temporal_filtering.c` - the `log1p_tab_fp16` table (227 entries,
+  mechanically extracted), `noise_log1p`, the decay/shift factors,
+  the expf/sqrt tables, the squared-error sum and both planewise
+  kernel pairs (the zero-zig and non-zz forms); the consumed
+  MeContext fields threaded as parameters.
+- Pack/unpack + blend + VAR (PU1): `pack_unpack_c.c` whole (all 7
+  kernels), `blend_a64_mask_c.c` whole, and `varianceCore` + the 20
+  missing VAR instances (the general two-buffer shape; the AN8
+  offs-folded shape coexists - the offs array is REAL even at
+  bStride 0, finding pinned).
 
-## l10_filters - post-filter kernels (DF/CDEF)
+## l10_filters - post-filter kernels (DF/CDEF/LR/GR)
 
 The deblocking, CDEF and restoration kernel families, 1:1 with the
 pinned `deblocking_common.c`, `cdef.c`/`cdef_copy.h`/`enc_cdef.c` and
@@ -271,13 +325,82 @@ move no conformance count - see the paired-metric caveat in
   `cdefSearchOneDual`/`cdefJointStrengthSearchDual`). The 16-bit
   kernel is the spec; the 8-bit twins are their own 1:1 bodies with
   the derivation relationship pinned by tests.
-- Restoration (LR1/LR2): `sgrParams`, `extendFrame`/`copyTile` (the
+- Restoration (LR1/LR2/LR3): `sgrParams`, `extendFrame`/`copyTile` (the
   lowbd forms; highbd assert-parked), the `boxsum` family (edge
   handling is TRUNCATION - a 2D box sum clamped at the array bounds),
   `decodeXq` and the `xByXplus1`/`oneByX` tables, and the
   selfguided restoration internals (fast/slow + the apply
-  composition). The stripe machinery, wiener, and the sgrproj/wiener
-  stripe walkers stay parked.
+  composition). LR3 landed the stripe/unit family:
+  `wholeFrameRect`, `countUnitsInTile`, `getStripeBoundaryInfo`,
+  the stripe-boundary setup/restore pair, `wienerFilterStripe`,
+  `sgrprojFilterStripe` and `loopRestorationFilterUnit` - the wiener
+  stripe consumes `convolve::wienerConvolveAddSrc` (the l10 link line
+  gained av1_convolve by judge court order), and the pinned findings
+  are that `WienerInfo`'s `alignas(16)` is LOAD-BEARING (the convolve
+  selects its tap row BY ADDRESS ALIGNMENT) and the wiener stripe's
+  w round-up rule differs from sgrproj's plain min. The highbd
+  stripes and the tile walkers stay parked.
+- Film grain (GR1): the synthesis core of `grainSynthesis.c`
+  (998 nb of 1,140): `gaussian_sequence` (2,048 entries transcribed,
+  the caveat stated, diff-verified), the rng pair, `init_arrays`, the
+  luma/chroma grain generators, scaling, `add_noise_to_block`,
+  `params_equal`, the copy helpers + boundary overlaps and the frame
+  driver; the hbd path and dealloc are parked.
+
+## l11_resize - resize 1D kernels (AN21)
+
+The resize family of `resize.c` (`resize.c:147-489`, 328 nb): the
+1D resampling kernels generic over the filter phase plus the four
+interpolation tables (`resize.c:36-137`) and the 1000-set from
+`super_res.c` (charged to A8). Host only; the highbd half of the
+file, `save_YUV`, the highbd pack/unpack helpers and the
+`EbPictureBufferDesc` resize driver stay parked.
+
+## l12_convolve - convolution kernels (CV1)
+
+The `convolve.c` kernel family (163 nb): the scalar dot products +
+filter offset/base handling, the add-src horizontal/vertical half
+interpolation paths, the wiener add-src convolution (the uint16
+staging contract: temp stride 128, h+6 rows, sentinel row),
+`convolveHoriz`/`convolveVert` + the convolve8 pair, `ConvolveParams`
++ `getConvParamsWiener` + the `sub_pel_filters_8` table (128 entries,
+diff-verified). LR3's wiener stripe depends on it. The highbd half is
+parked.
+
+## l13_palette - palette + k-means + segmentation (PAL1/SEG1)
+
+- Palette (PAL1): 389 nb of `palette.c` plus the `count_colors` body
+  (its definition lives in `pic_analysis_process.c` - the one
+  cross-file correction pinned), and `k_means_template.h` bodies at
+  both dims (k = 2..8 enumerated; dim-2 k-means has no portable-C
+  caller in the reference - ported and tested anyway).
+- Segmentation (SEG1): the struct-free surface
+  (`getVarianceForCu`, `calculateSegmentationData`,
+  `findSegmentQps` + the params tables), with the reference's quirks
+  preserved 1:1 and fixture-pinned: the ROUND identity (step_size can
+  only ever be 1), the POW2 narrowing wraps, the descending bin-edge
+  pairing, the transposed index pairings, and `log2f_safe` =
+  `get_msb(x|1)`. The roi_map/PCS walls and the (declared-but-never-
+  defined) `temporally_update_qps` stay parked.
+
+## l14_utility - block geometry + utilities (U1)
+
+The `utility.c` surface (347 nb) + the `common_utils.c` dependencies
+(31 nb): the block geometry builder `svt_aom_build_blk_geom`, the
+md-scan walk, the coded-unit + mini-GOP stats arrays, the ns/d1-depth
+offset tables and `hvsizeToBsize`. The full builder enumeration over
+all 11 geometries and the GEOM_2 85-block cross-check against
+`coded_unit_stats_array` (two independent transcriptions agreeing
+through the algorithm) pin the tables. Host only.
+
+## l15_rc - rate-control qindex tables (RC1)
+
+`rc_tables.h` in `src/l15_rc`: the 18 qindex-mapping tables x 256
+entries (278 nb), mechanically extracted from the pinned reference
+with a runtime diff-verify test that parses the reference file itself.
+The paired-metric caveat is stated: this block moves the coverage
+number by transcription, not by algorithm (the AN14 OD_DIVU
+precedent). Host only.
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 
@@ -333,12 +456,13 @@ hand-traces:
 
 ## Test suite map
 
-Eleven doctest targets (l0_core, l1_pixels, l2_gpurt, l3_transforms,
+Sixteen doctest targets (l0_core, l1_pixels, l2_gpurt, l3_transforms,
 l4_intra, l5_motion, l7_entropy, l6_pipeline, l8_bitstream,
-l9_analysis, l10_filters), each with
+l9_analysis, l10_filters, l11_resize, l12_convolve, l13_palette,
+l14_utility, l15_rc), each with
 a "test runner boots" guard plus real test files. GPU-required tests
 skip with a `SKIP:`-prefixed message when no CUDA device is present.
-`ctest --test-dir build` runs all eleven.
+`ctest --test-dir build` runs all sixteen.
 
 ## Where the deep detail lives
 
