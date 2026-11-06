@@ -269,6 +269,169 @@ enum UvPredictionMode {
 PredictionMode uv2y(UvPredictionMode mode);
 
 // ---------------------------------------------------------------------------
+// SYM1: palette + segmentation symbol constants (verbatim values).
+// ---------------------------------------------------------------------------
+#define PALETTE_MAX_SIZE 8   // definitions.h:380
+#define PALETTE_MIN_SIZE 2   // definitions.h:382
+// definitions.h:1143-1151 (TWO_COLORS..EIGHT_COLORS; PALETTE_SIZES = 7).
+#define PALETTE_SIZES 7
+// definitions.h:1155-1164 (PALETTE_COLOR_ONE..EIGHT; PALETTE_COLORS = 8).
+#define PALETTE_COLORS 8
+#define PALETTE_COLOR_INDEX_CONTEXTS 5  // cabac_context_model.h:238
+#define PALETTE_Y_MODE_CONTEXTS 3       // cabac_context_model.h:246
+#define PALETTE_UV_MODE_CONTEXTS 2      // cabac_context_model.h:252
+// cabac_context_model.h:260 - SVT's own double-T spelling, kept verbatim.
+#define PALATTE_BSIZE_CTXS 7
+#define MAX_SEGMENTS 8              // definitions.h:1674
+#define SEG_TEMPORAL_PRED_CTXS 3    // cabac_context_model.h:264
+#define SPATIAL_PREDICTION_PROBS 3  // cabac_context_model.h:265
+// palette.c:639 (the hash bound; the lookup table has MAX + 1 entries).
+#define MAX_COLOR_CONTEXT_HASH 8
+// SEG_LVL_FEATURES count (segmentation_params.h:17-27; SEG_LVL_MAX = 8).
+#define SEG_LVL_MAX 8
+// definitions.h:1451
+#define PRIMARY_REF_NONE 7
+
+// SYM1: AomWriteBitBuffer (entropy_coding.h:116-119, verbatim layout). The
+// l7 twin of the landed l8 copy - both port entropy_coding.c:1343-1382; l7
+// cannot link l8 (no CMake edits; the duplication is named).
+struct AomWriteBitBuffer {
+    std::uint8_t* bit_buffer;
+    std::uint32_t bit_offset;
+};
+
+// SYM1: the aom read_bit_buffer (aom bitreader_buffer.h:21-27). The error
+// handler is dropped: out-of-buffer reads return 0 (named deviation; the
+// seg fixture buffers are sized to never hit it).
+struct AomReadBitBuffer {
+    const std::uint8_t* bit_buffer;
+    const std::uint8_t* bit_buffer_end;
+    std::uint32_t bit_offset;
+};
+
+// svt_aom_wb_write_bit / _literal / _inv_signed_literal
+// (entropy_coding.c:1351-1382).
+void wbWriteBit(AomWriteBitBuffer* wb, std::int32_t bit);
+void wbWriteLiteral(AomWriteBitBuffer* wb, std::int32_t data, std::int32_t bits);
+void wbWriteInvSignedLiteral(AomWriteBitBuffer* wb, std::int32_t data, std::int32_t bits);
+
+// aom aom_rb_read_bit / _literal / _inv_signed_literal
+// (bitreader_buffer.c:25-60).
+int rbReadBit(AomReadBitBuffer* rb);
+int rbReadLiteral(AomReadBitBuffer* rb, int bits);
+int rbReadInvSignedLiteral(AomReadBitBuffer* rb, int bits);
+
+// svt_aom_segmentation_feature_bits / _signed (segmentation_params.c:18/:16).
+extern const std::int32_t segFeatureBits[SEG_LVL_MAX];
+extern const std::int32_t segFeatureSigned[SEG_LVL_MAX];
+
+// SYM1: encode_segmentation (entropy_coding.c:2253-2280), the
+// PictureParentControlSet wall threaded: the enabled/update flags, the
+// primary_ref_frame (the update-flag block is written only when
+// primary_ref_frame != PRIMARY_REF_NONE, :2257), and the feature grid.
+void writeSegFeatures(AomWriteBitBuffer* wb, int enabled, int update_map, int temporal_update,
+                      int update_data, int primary_ref_frame,
+                      const std::int16_t feature_enabled[MAX_SEGMENTS][SEG_LVL_MAX],
+                      const std::int16_t feature_data[MAX_SEGMENTS][SEG_LVL_MAX]);
+
+// SYM1: the aom setup_segmentation reader twin (aom decodeframe.c, the
+// out-of-tree arbiter; the SVT tree carries no decoder side for the frame
+// header). The reader reads the enabled bit ITSELF (no enabled parameter -
+// the writer takes it, the reader reads it); on primary_ref_frame ==
+// PRIMARY_REF_NONE the update flags are FORCED (update_map=1, temporal=0,
+// update_data=1). The reader CLAMPS each datum into [-max, max]
+// (av1_seg_feature_data_max = (1 << bits) - 1); the pinned writer does not
+// clamp (its in-file TODO) - in-span values pass through unchanged.
+void readSegFeatures(AomReadBitBuffer* rb, int update_map, int temporal_update,
+                     int update_data, int primary_ref_frame,
+                     std::int16_t feature_enabled[MAX_SEGMENTS][SEG_LVL_MAX],
+                     std::int16_t feature_data[MAX_SEGMENTS][SEG_LVL_MAX]);
+
+// SYM1: the segmentation map surface. The Av1Common wall is threaded as
+// (segment_ids, mi_cols, mi_rows); the map is a per-mi-cell byte array.
+// svt_aom_get_segment_id (entropy_coding.c:4723-4740): the MIN over the
+// block's mi extent (edge-clamped).
+int getSegmentId(const std::uint8_t* segment_ids, int mi_cols, int mi_rows, BlockSize bsize,
+                 int mi_row, int mi_col);
+// svt_av1_update_segmentation_map (:4843-4861): writes segment_id over the
+// block's mi extent (edge-clamped).
+void updateSegmentationMap(std::uint8_t* segment_ids, int mi_cols, int mi_rows, BlockSize bsize,
+                           int mi_row, int mi_col, std::uint8_t segment_id);
+// svt_av1_get_spatial_seg_prediction (:4744-4800): the cdf index (0..2) out
+// and the predictor (the majority-or-left rule) returned.
+int getSpatialSegPrediction(const std::uint8_t* segment_ids, int mi_cols, int mi_rows,
+                            int up_available, int left_available, int mi_row, int mi_col,
+                            int* cdf_index);
+// svt_av1_neg_interleave (:4802-4818)
+int negInterleave(int x, int ref, int max);
+// aom av1_neg_deinterleave (decodemv.c:261-277) - the reader twin.
+int negDeinterleave(int diff, int ref, int max);
+#define AOMMAX(x, y) (((x) > (y)) ? (x) : (y))  // definitions.h:1002
+
+// SYM1: the l7 twin of the fast palette color-index context (palette.c:
+// 639-776; the landed l13_palette twin cannot be linked - no CMake edits -
+// so l7 carries its own copy of the same spans).
+extern const std::int32_t paletteColorIndexContextLookup[MAX_COLOR_CONTEXT_HASH + 1];
+int fastPaletteColorIndexContextOnEdge(const std::uint8_t* colorMap, int stride, int r, int c,
+                                       int* colorIdx);
+int fastPaletteColorIndexContext(const std::uint8_t* colorMap, int stride, int r, int c,
+                                 int* colorIdx);
+
+// eb_num_pels_log2_lookup (common_utils.c:39, verbatim) - the
+// get_palette_bsize_ctx lookup (local copy; l13_palette carries its own).
+extern const std::uint8_t ebNumPelsLog2Lookup[BLOCK_SIZES_ALL];
+
+// svt_aom_allow_palette (entropy_coding.c:4218-4223). CONFIG_ENABLE_PALETTE
+// is 1 for the pinned default config (EbConfigMacros.h:211; the RTC-build
+// 0 at :83 DCEs the palette entropy write in RTC only).
+int allowPalette(int allow_screen_content_tools, BlockSize bsize);
+
+// svt_aom_get_palette_bsize_ctx (entropy_coding.c:4224-4231).
+int getPaletteBsizeCtx(BlockSize bsize);
+
+// svt_aom_get_palette_mode_ctx (entropy_coding.c:4236-4249). DEVIATION
+// (named): the MacroBlockD/MbModeInfo wall is threaded - the two consumed
+// neighbor facts are the (available, palette_size) pairs.
+int getPaletteModeCtx(int above_available, int above_palette_size, int left_available,
+                      int left_palette_size);
+
+// delta_encode_palette_colors (entropy_coding.c:4252-4282): the WRITER twin
+// of the landed l13_palette::deltaEncodeCost (palette.c:80-109). colors[0]
+// as a bit_depth literal, then the 2-bit (bits - min_bits) header and the
+// shrinking bits-per-delta chain. min_val is the smallest legal delta (the
+// palette caller passes 1).
+void deltaEncodePaletteColors(const int* colors, int num, int bit_depth, int min_val, AomWriter* w);
+
+// get_unsigned_bits (entropy_coding.c:4284-4286)
+int getUnsignedBits(unsigned int num_values);
+// write_uniform (entropy_coding.c:4288-4302)
+void writeUniform(AomWriter* w, int n, int v);
+// svt_aom_write_uniform_cost (entropy_coding.c:4304-4314); av1_cost_literal
+// (md_rate_estimation.h:31, AV1_PROB_COST_SHIFT = 9).
+int writeUniformCost(int n, int v);
+// aom av1_read_uniform (aom decoder.h:488-496) - the reader twin of
+// write_uniform (the out-of-tree arbiter precedent).
+int readUniform(AomReader* r, int n);
+
+// aom_read_literal_ (bitreader.h:158-160): bits literal bits, MSB first -
+// the reader twin of odEcWriteLiteralBits.
+int readLiteralBits(AomReader* r, int bits);
+
+// write_palette_colors_y (entropy_coding.c:4320-4337). DEVIATIONS (named):
+// the svt_get_palette_cache_y MacroBlockD wall is threaded (the caller
+// passes the cache + n_cache); palette.c's svt_av1_index_color_cache is a
+// local twin (the landed l13_palette::indexColorCache cannot be linked -
+// l7/l13 duplication, both port palette.c:111-141).
+void writePaletteColorsY(AomWriter* w, int bit_depth, const std::uint16_t* color_cache, int n_cache,
+                         const std::uint16_t* colors, int n);
+
+// aom read_palette_colors_y (decodemv.c:478-507) - the reader twin. The
+// av1_get_palette_cache wall is threaded; colors receives the sorted
+// palette (the merge_colors / memcpy tails included).
+void readPaletteColorsY(AomReader* r, int bit_depth, const std::uint16_t* color_cache, int n_cache,
+                        std::uint16_t* colors, int n);
+
+// ---------------------------------------------------------------------------
 // Partition symbol surface (ECP1, court-ordered l7 exception).
 // ---------------------------------------------------------------------------
 // definitions.h:334 (verbatim value): fresh neighbor-array cells.
@@ -414,6 +577,25 @@ struct EcFrameContext {
     // Disallowed rows: 13-symbol (counter at cdf[13]); allowed rows:
     // 14-symbol (counter at cdf[14]).
     AomCdfProb uv_mode_cdf[CFL_ALLOWED_TYPES][INTRA_MODES][CDF_SIZE(UV_INTRA_MODES)];
+    // SYM1: the palette CDF families (cabac_context_model.h:306-311,
+    // verbatim shapes). The color-index rows are CDF_SIZE(PALETTE_COLORS)
+    // wide but code n symbols (n = palette size, 2..8): the adaptation
+    // counter sits at cdf[n] (cabac_context_model.c:2000-2001
+    // RESET_CDF_COUNTER_STRIDE semantics).
+    AomCdfProb palette_y_size_cdf[PALATTE_BSIZE_CTXS][CDF_SIZE(PALETTE_SIZES)];
+    AomCdfProb palette_uv_size_cdf[PALATTE_BSIZE_CTXS][CDF_SIZE(PALETTE_SIZES)];
+    AomCdfProb palette_y_color_index_cdf[PALETTE_SIZES][PALETTE_COLOR_INDEX_CONTEXTS]
+                                        [CDF_SIZE(PALETTE_COLORS)];
+    AomCdfProb palette_uv_color_index_cdf[PALETTE_SIZES][PALETTE_COLOR_INDEX_CONTEXTS]
+                                         [CDF_SIZE(PALETTE_COLORS)];
+    AomCdfProb palette_y_mode_cdf[PALATTE_BSIZE_CTXS][PALETTE_Y_MODE_CONTEXTS][CDF_SIZE(2)];
+    AomCdfProb palette_uv_mode_cdf[PALETTE_UV_MODE_CONTEXTS][CDF_SIZE(2)];
+    // SYM1: segmentation_probs (cabac_context_model.h:272-276, verbatim).
+    struct EcSegProbs {
+        AomCdfProb tree_cdf[CDF_SIZE(MAX_SEGMENTS)];
+        AomCdfProb pred_cdf[SEG_TEMPORAL_PRED_CTXS][CDF_SIZE(2)];
+        AomCdfProb spatial_pred_seg_cdf[SPATIAL_PREDICTION_PROBS][CDF_SIZE(MAX_SEGMENTS)];
+    } seg;
 };
 
 // Initialize from the SVT default tables (cabac_context_model.c:59-97,
@@ -691,6 +873,89 @@ void writeFilterIntra(AomWriter* w, EcFrameContext* fc, BlockSize bsize,
 // Return: the flag value (fi_mode != FILTER_INTRA_MODES).
 int readFilterIntra(AomReader* r, EcFrameContext* fc, BlockSize bsize,
                     FilterIntraMode* fi_mode);
+
+// SYM1: the color-map token chain.
+// TOKENEXTRA (cabac_context_model.h:31-36, verbatim layout)
+struct TokenExtra {
+    AomCdfProb* color_map_cdf;
+    std::uint8_t token;
+};
+
+// svt_av1_tokenize_color_map (palette.c:817-828) over
+// cost_and_tokenize_map (:781-815), the Av1ColorMapParam wall threaded:
+// the color map + dims + palette size + plane + the update flag in, the
+// token arena out. Returns the token count (rows * cols; the reference
+// advances the TOKENEXTRA* - named deviation). The first token carries
+// colorMap[0] with a NULL cdf (written via write_uniform by the packer).
+int tokenizeColorMap(EcFrameContext* fc, const std::uint8_t* colorMap, int stride, int rows, int cols,
+                     int n, int plane, int allowUpdateCdf, TokenExtra* tokens);
+
+// pack_map_tokens (entropy_coding.c:4339-4348): write_uniform for the
+// first token, then the per-token cdf symbols. DEVIATION (named): the
+// reference takes TOKENEXTRA** (it advances the shared arena pointer); this
+// takes the base pointer - the arena ownership stays with the caller.
+void packMapTokens(AomWriter* w, const TokenExtra* tokens, int n, int num);
+
+// aom av1_get_palette_color_index_context (entropymode.c:893-951) -
+// the DECODER-side full context (the aom arbiter precedent; the SVT tree
+// carries no decoder). Fills colorOrder (the score-sorted color order) and,
+// when colorIdx != NULL, the inverse-mapped current color. The aom lookup
+// table (entropymode.c:887-889) is byte-identical to SVT's
+// paletteColorIndexContextLookup, so the shared table is used.
+int getColorIndexContext(const std::uint8_t* colorMap, int stride, int r, int c, int paletteSize,
+                         std::uint8_t* colorOrder, int* colorIdx);
+
+// aom decode_color_map_tokens (detokenize.c:25-58) - the reader twin
+// of the tokenize/pack chain, with the Av1ColorMapParam wall threaded. The
+// plane_width/height padding tail (last column / last row copy) included.
+void decodeColorMapTokens(AomReader* r, std::uint8_t* colorMap, int planeWidth, int planeHeight,
+                          int rows, int cols, int n, int plane, EcFrameContext* fc);
+
+// SYM1: write_palette_mode_info (entropy_coding.c:4351-4377), the
+// pcs/mbmi/blk_ptr walls threaded: bit_depth, the luma/uv modes, the
+// is_chroma_reference fact (the l6 predicate), the y palette size/colors +
+// the y cache, and the two neighbor (available, palette_size) facts for the
+// mode ctx. The UV branch writes ONLY the uv-mode symbol (value 0): the
+// reference asserts palette_size[1] == 0 there (:4371) - no uv palette is
+// ever emitted.
+void writePaletteModeInfo(AomWriter* w, EcFrameContext* fc, BlockSize bsize, int bit_depth,
+                          PredictionMode intra_luma_mode, UvPredictionMode intra_chroma_mode,
+                          int is_chroma_ref, int palette_size_y, const std::uint16_t* palette_colors_y,
+                          const std::uint16_t* cache_y, int n_cache_y, int above_available,
+                          int above_palette_size, int left_available, int left_palette_size);
+
+// SYM1: aom read_palette_mode_info (decodemv.c:567-604) - the reader twin.
+// Reads the y-mode bit (+ size + colors when set) and the uv-mode bit.
+// DEVIATION (named): the uv modev=1 continuation (uv size symbol +
+// read_palette_colors_uv, decodemv.c:511-560) is PARKED - the pinned SVT
+// writer emits no uv palette, so no writer twin exists to roundtrip.
+// Returns the decoded y palette size (0 = unused); colors receives the
+// sorted palette when sizeY > 0.
+int readPaletteModeInfo(AomReader* r, EcFrameContext* fc, BlockSize bsize, int bit_depth,
+                        PredictionMode intra_luma_mode, UvPredictionMode intra_chroma_mode,
+                        int is_chroma_ref, const std::uint16_t* cache_y, int n_cache_y,
+                        int above_available, int above_palette_size, int left_available,
+                        int left_palette_size, std::uint16_t* colors_y);
+
+// SYM1: write_segment_id (entropy_coding.c:4863-4883), the
+// pcs/mbmi walls threaded. skip_coeff mirrors the reference's bool: when
+// set, NO symbol is written and the map/id take the prediction. Returns
+// the resolved segment id (the reference stores it into mbmi - named
+// deviation) and updates the map with it.
+int writeSegmentId(AomWriter* w, EcFrameContext* fc, BlockSize bsize, std::uint8_t* segment_ids,
+                   int mi_cols, int mi_rows, int mi_row, int mi_col, int up_available,
+                   int left_available, int segment_id, int last_active_seg_id, int skip_coeff);
+
+// SYM1: the aom read_segment_id reader twin (decodemv.c:280-303): the
+// prediction is derived from the READER's own map copy (the caller keeps
+// it in lockstep with the writer's updates), the coded id is read from
+// spatial_pred_seg_cdf[cdf_num] (MAX_SEGMENTS symbols) and deinterleaved.
+// No corrupt-frame check (the aom internal_error branch - named deviation;
+// the port trusts its own roundtrips). Updates the reader's map with the
+// decoded id (the aom set_segment_id tail).
+int readSegmentId(AomReader* r, EcFrameContext* fc, BlockSize bsize, std::uint8_t* segment_ids,
+                  int mi_cols, int mi_rows, int mi_row, int mi_col, int up_available,
+                  int left_available, int last_active_seg_id);
 
 // svt_od_ec_enc_done (bitstream_unit.c:309-343)
 unsigned char* odEcEncDone(OdEcEnc* enc, std::uint32_t* nbytes);

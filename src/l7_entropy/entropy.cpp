@@ -429,7 +429,6 @@ void odEcWriteSymbol(AomWriter* w, int symb, AomCdfProb* cdf, int nsymbs) {
     } else {
         odEcEncodeCdfQ15(&w->ec, symb, cdf, nsymbs);
     }
-
     if (w->allow_update_cdf) {
         updateCdf(cdf, symb, nsymbs);
     }
@@ -463,6 +462,13 @@ int odEcReadBit(AomReader* r) {
     // aom_read_(r, 128): p = (0x7FFFFF - (128 << 15) + 128) >> 8 = (0x7FFFFF - 0x400000 + 0x80) >> 8
     const int p = (0x7FFFFF - (128 << 15) + 128) >> 8;
     return odEcDecodeBoolQ15(&r->ec, static_cast<unsigned>(p));
+}
+
+// aom_read_literal_ (bitreader.h:158-160)
+int readLiteralBits(AomReader* r, int bits) {
+    int literal = 0, bit;
+    for (bit = bits - 1; bit >= 0; bit--) literal |= odEcReadBit(r) << bit;
+    return literal;
 }
 
 // aom_reader_init (bitreader.c:14-22)
@@ -530,6 +536,10 @@ const std::uint8_t intraModeContext[INTRA_MODES] = {
 // block_size_wide / block_size_high (common_utils.c:286-291, verbatim)
 const std::uint8_t blockSizeWide[BLOCK_SIZES_ALL] = {4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32,
                                                      64, 64, 64, 128, 128, 4, 16, 8, 32, 16, 64};
+
+// SYM1: eb_num_pels_log2_lookup (common_utils.c:39, verbatim)
+const std::uint8_t ebNumPelsLog2Lookup[BLOCK_SIZES_ALL] = {4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11,
+                                                           11, 12, 13, 13, 14, 6, 6, 8, 8, 10, 10};
 
 const std::uint8_t blockSizeHigh[BLOCK_SIZES_ALL] = {4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64,
                                                      32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16};
@@ -677,6 +687,39 @@ static const AomCdfProb intra_ext_tx_cdfs_default[EXT_TX_SETS_INTRA][EXT_TX_SIZE
 #include "intra_ext_tx_cdfs_default.inc"
 };
 
+// SYM1: palette + seg default CDF tables (cabac_context_model.c:477-:509,
+// :511-:586, :652-:664; mechanical extracts, no hand-transcribed values).
+static const AomCdfProb palette_y_size_cdfs_default[PALATTE_BSIZE_CTXS][CDF_SIZE(PALETTE_SIZES)] = {
+#include "palette_y_size_cdfs_default.inc"
+};
+static const AomCdfProb palette_uv_size_cdfs_default[PALATTE_BSIZE_CTXS][CDF_SIZE(PALETTE_SIZES)] = {
+#include "palette_uv_size_cdfs_default.inc"
+};
+static const AomCdfProb palette_y_mode_cdfs_default[PALATTE_BSIZE_CTXS][PALETTE_Y_MODE_CONTEXTS][CDF_SIZE(2)] = {
+#include "palette_y_mode_cdfs_default.inc"
+};
+static const AomCdfProb palette_uv_mode_cdfs_default[PALETTE_UV_MODE_CONTEXTS][CDF_SIZE(2)] = {
+#include "palette_uv_mode_cdfs_default.inc"
+};
+static const AomCdfProb
+    palette_y_color_index_cdfs_default[PALETTE_SIZES][PALETTE_COLOR_INDEX_CONTEXTS][CDF_SIZE(PALETTE_COLORS)] = {
+#include "palette_y_color_index_cdfs_default.inc"
+};
+static const AomCdfProb
+    palette_uv_color_index_cdfs_default[PALETTE_SIZES][PALETTE_COLOR_INDEX_CONTEXTS][CDF_SIZE(PALETTE_COLORS)] = {
+#include "palette_uv_color_index_cdfs_default.inc"
+};
+static const AomCdfProb seg_tree_cdfs_default[CDF_SIZE(MAX_SEGMENTS)] = {
+#include "seg_tree_cdfs_default.inc"
+};
+static const AomCdfProb segment_pred_cdfs_default[SEG_TEMPORAL_PRED_CTXS][CDF_SIZE(2)] = {
+#include "segment_pred_cdfs_default.inc"
+};
+static const AomCdfProb
+    spatial_pred_seg_tree_cdfs_default[SPATIAL_PREDICTION_PROBS][CDF_SIZE(MAX_SEGMENTS)] = {
+#include "spatial_pred_seg_tree_cdfs_default.inc"
+};
+
 // av1_num_ext_tx_set (common_utils.c:195, verbatim)
 const int32_t av1NumExtTxSet[EXT_TX_SET_TYPES] = {1, 2, 5, 7, 12, 16};
 
@@ -810,6 +853,20 @@ void initDefaultEcFrameContext(EcFrameContext* fc, std::int32_t base_q_idx) {
     memcpy(fc->eob_flag_cdf1024, eob_multi1024_cdfs_default[idx], sizeof(fc->eob_flag_cdf1024));
     memcpy(fc->intra_ext_tx_cdf, intra_ext_tx_cdfs_default, sizeof(fc->intra_ext_tx_cdf));
     memcpy(fc->uv_mode_cdf, uv_mode_cdf_default, sizeof(fc->uv_mode_cdf));
+    // SYM1: the palette + seg families (COPY_CDF, cabac_context_model.c
+    // :736-:746, :765-:766, :784 - none of them is qindex-bucketed).
+    memcpy(fc->palette_y_size_cdf, palette_y_size_cdfs_default, sizeof(fc->palette_y_size_cdf));
+    memcpy(fc->palette_uv_size_cdf, palette_uv_size_cdfs_default, sizeof(fc->palette_uv_size_cdf));
+    memcpy(fc->palette_y_mode_cdf, palette_y_mode_cdfs_default, sizeof(fc->palette_y_mode_cdf));
+    memcpy(fc->palette_uv_mode_cdf, palette_uv_mode_cdfs_default, sizeof(fc->palette_uv_mode_cdf));
+    memcpy(fc->palette_y_color_index_cdf, palette_y_color_index_cdfs_default,
+           sizeof(fc->palette_y_color_index_cdf));
+    memcpy(fc->palette_uv_color_index_cdf, palette_uv_color_index_cdfs_default,
+           sizeof(fc->palette_uv_color_index_cdf));
+    memcpy(fc->seg.tree_cdf, seg_tree_cdfs_default, sizeof(fc->seg.tree_cdf));
+    memcpy(fc->seg.pred_cdf, segment_pred_cdfs_default, sizeof(fc->seg.pred_cdf));
+    memcpy(fc->seg.spatial_pred_seg_cdf, spatial_pred_seg_tree_cdfs_default,
+           sizeof(fc->seg.spatial_pred_seg_cdf));
 }
 
 int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
@@ -833,7 +890,19 @@ int ecFrameCdfsEqual(const EcFrameContext* a, const EcFrameContext* b) {
            memcmp(a->eob_flag_cdf512, b->eob_flag_cdf512, sizeof(a->eob_flag_cdf512)) == 0 &&
            memcmp(a->eob_flag_cdf1024, b->eob_flag_cdf1024, sizeof(a->eob_flag_cdf1024)) == 0 &&
            memcmp(a->intra_ext_tx_cdf, b->intra_ext_tx_cdf, sizeof(a->intra_ext_tx_cdf)) == 0 &&
-           memcmp(a->uv_mode_cdf, b->uv_mode_cdf, sizeof(a->uv_mode_cdf)) == 0;
+           memcmp(a->uv_mode_cdf, b->uv_mode_cdf, sizeof(a->uv_mode_cdf)) == 0 &&
+           memcmp(a->palette_y_size_cdf, b->palette_y_size_cdf, sizeof(a->palette_y_size_cdf)) == 0 &&
+           memcmp(a->palette_uv_size_cdf, b->palette_uv_size_cdf, sizeof(a->palette_uv_size_cdf)) == 0 &&
+           memcmp(a->palette_y_mode_cdf, b->palette_y_mode_cdf, sizeof(a->palette_y_mode_cdf)) == 0 &&
+           memcmp(a->palette_uv_mode_cdf, b->palette_uv_mode_cdf, sizeof(a->palette_uv_mode_cdf)) == 0 &&
+           memcmp(a->palette_y_color_index_cdf, b->palette_y_color_index_cdf,
+                  sizeof(a->palette_y_color_index_cdf)) == 0 &&
+           memcmp(a->palette_uv_color_index_cdf, b->palette_uv_color_index_cdf,
+                  sizeof(a->palette_uv_color_index_cdf)) == 0 &&
+           memcmp(a->seg.tree_cdf, b->seg.tree_cdf, sizeof(a->seg.tree_cdf)) == 0 &&
+           memcmp(a->seg.pred_cdf, b->seg.pred_cdf, sizeof(a->seg.pred_cdf)) == 0 &&
+           memcmp(a->seg.spatial_pred_seg_cdf, b->seg.spatial_pred_seg_cdf,
+                  sizeof(a->seg.spatial_pred_seg_cdf)) == 0;
 }
 
 // svt_aom_get_kf_y_mode_ctx (entropy_coding.c:1004-1021), flattened
@@ -863,6 +932,922 @@ int filterIntraAllowedBsize(BlockSize bs) {
 int filterIntraAllowed(std::uint8_t enable_filter_intra, BlockSize bsize,
                        std::uint8_t palette_size, std::uint32_t mode) {
     return enable_filter_intra && mode == DC_PRED && palette_size == 0 && filterIntraAllowedBsize(bsize);
+}
+
+// ---------------------------------------------------------------------------
+// SYM1: palette + segmentation symbol surface.
+// ---------------------------------------------------------------------------
+// svt_aom_wb_write_bit_inlined (entropy_coding.c:1351-1363). The l7 twin of
+// the landed l8 wb trio - both port entropy_coding.c:1343-1382.
+void wbWriteBit(AomWriteBitBuffer* wb, std::int32_t bit) {
+    const std::int32_t off = (std::int32_t)wb->bit_offset;
+    const std::int32_t p   = off / CHAR_BIT;
+    const std::int32_t q   = CHAR_BIT - 1 - off % CHAR_BIT;
+    if (q == CHAR_BIT - 1) {
+        // zero next char and write bit
+        wb->bit_buffer[p] = (std::uint8_t)(bit << q);
+    } else {
+        wb->bit_buffer[p] &= (std::uint8_t)~(1 << q);
+        wb->bit_buffer[p] |= (std::uint8_t)(bit << q);
+    }
+    wb->bit_offset = (std::uint32_t)(off + 1);
+}
+
+// svt_aom_wb_write_literal_inlined (entropy_coding.c:1365-1370, MSB first)
+void wbWriteLiteral(AomWriteBitBuffer* wb, std::int32_t data, std::int32_t bits) {
+    std::int32_t bit;
+    for (bit = bits - 1; bit >= 0; bit--) {
+        wbWriteBit(wb, (data >> bit) & 1);
+    }
+}
+
+// svt_aom_wb_write_inv_signed_literal (entropy_coding.c:1380-1382)
+void wbWriteInvSignedLiteral(AomWriteBitBuffer* wb, std::int32_t data, std::int32_t bits) {
+    wbWriteLiteral(wb, data, bits + 1);
+}
+
+// aom aom_rb_read_bit (bitreader_buffer.c:25-41); the error handler is
+// dropped - out-of-buffer reads return 0 (named deviation).
+int rbReadBit(AomReadBitBuffer* rb) {
+    const std::uint32_t off = rb->bit_offset;
+    const std::uint32_t p = off >> 3;
+    const int q = 7 - (int)(off & 0x7);
+    if (rb->bit_buffer + p < rb->bit_buffer_end) {
+        const int bit = (rb->bit_buffer[p] >> q) & 1;
+        rb->bit_offset = off + 1;
+        return bit;
+    }
+    return 0;
+}
+
+// aom aom_rb_read_literal (bitreader_buffer.c:43-48)
+int rbReadLiteral(AomReadBitBuffer* rb, int bits) {
+    assert(bits <= 31);
+    int value = 0, bit;
+    for (bit = bits - 1; bit >= 0; bit--) value |= rbReadBit(rb) << bit;
+    return value;
+}
+
+// aom aom_rb_read_inv_signed_literal (bitreader_buffer.c:57-61)
+int rbReadInvSignedLiteral(AomReadBitBuffer* rb, int bits) {
+    const int nbits = (int)sizeof(unsigned) * 8 - bits - 1;
+    const unsigned value = (unsigned)rbReadLiteral(rb, bits + 1) << nbits;
+    return ((int)value) >> nbits;
+}
+
+// svt_aom_segmentation_feature_signed / _bits
+// (segmentation_params.c:16/:18); the l7 twin of the landed l13 tables.
+const std::int32_t segFeatureSigned[SEG_LVL_MAX] = {1, 1, 1, 1, 1, 0, 0, 0};
+const std::int32_t segFeatureBits[SEG_LVL_MAX] = {8, 6, 6, 6, 6, 3, 0, 0};
+
+// SYM1: encode_segmentation (entropy_coding.c:2253-2280), the walls threaded.
+void writeSegFeatures(AomWriteBitBuffer* wb, int enabled, int update_map, int temporal_update,
+                      int update_data, int primary_ref_frame,
+                      const std::int16_t feature_enabled[MAX_SEGMENTS][SEG_LVL_MAX],
+                      const std::int16_t feature_data[MAX_SEGMENTS][SEG_LVL_MAX]) {
+    wbWriteBit(wb, enabled);
+    if (enabled) {
+        if (!(primary_ref_frame == PRIMARY_REF_NONE)) {
+            wbWriteBit(wb, update_map);
+            if (update_map) {
+                wbWriteBit(wb, temporal_update);
+            }
+            wbWriteBit(wb, update_data);
+        }
+        if (update_data) {
+            for (int i = 0; i < MAX_SEGMENTS; i++) {
+                for (int j = 0; j < SEG_LVL_MAX; j++) {
+                    wbWriteBit(wb, feature_enabled[i][j]);
+                    if (feature_enabled[i][j]) {
+                        //TODO: add clamping (the reference's own comment)
+                        if (segFeatureSigned[j]) {
+                            wbWriteInvSignedLiteral(wb, feature_data[i][j], segFeatureBits[j]);
+                        } else {
+                            wbWriteLiteral(wb, feature_data[i][j], segFeatureBits[j]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// SYM1: the aom setup_segmentation reader twin (aom decodeframe.c): the
+// reader reads the enabled bit ITSELF (the writer takes it as a parameter -
+// the caller's state); on primary_ref_frame == PRIMARY_REF_NONE the update
+// flags are FORCED (update_map=1, temporal=0, update_data=1 - the aom
+// "these frames can't use previous frames" rule), not read.
+void readSegFeatures(AomReadBitBuffer* rb, int update_map, int temporal_update,
+                     int update_data, int primary_ref_frame,
+                     std::int16_t feature_enabled[MAX_SEGMENTS][SEG_LVL_MAX],
+                     std::int16_t feature_data[MAX_SEGMENTS][SEG_LVL_MAX]) {
+    const int enabled = rbReadBit(rb);
+    if (!enabled) {
+        return;
+    }
+    int rUpdateMap = update_map, rTemporalUpdate = temporal_update, rUpdateData = update_data;
+    if (!(primary_ref_frame == PRIMARY_REF_NONE)) {
+        rUpdateMap = rbReadBit(rb);
+        if (rUpdateMap) {
+            rTemporalUpdate = rbReadBit(rb);
+        } else {
+            rTemporalUpdate = 0;
+        }
+        rUpdateData = rbReadBit(rb);
+    } else {
+        rUpdateMap = 1;
+        rTemporalUpdate = 0;
+        rUpdateData = 1;
+    }
+    if (rUpdateData) {
+        for (int i = 0; i < MAX_SEGMENTS; i++) {
+            for (int j = 0; j < SEG_LVL_MAX; j++) {
+                int data = 0;
+                const int feature_enabled_bit = rbReadBit(rb);
+                if (feature_enabled_bit) {
+                    feature_enabled[i][j] = 1;
+                    const int data_max = (1 << segFeatureBits[j]) - 1;
+                    const int data_min = -data_max;
+                    const int ubits = getUnsignedBits((unsigned)data_max);
+                    if (segFeatureSigned[j]) {
+                        data = rbReadInvSignedLiteral(rb, ubits);
+                    } else {
+                        data = rbReadLiteral(rb, ubits);
+                    }
+                    data = AOMMIN(AOMMAX(data, data_min), data_max);
+                    data = data;
+                } else {
+                    feature_enabled[i][j] = 0;
+                }
+                feature_data[i][j] = (std::int16_t)data;
+            }
+        }
+    }
+}
+
+// SYM1: mi_size_wide / mi_size_high (common_utils.c:292-293, verbatim)
+const std::uint8_t miSizeWide[BLOCK_SIZES_ALL] = {1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16};
+const std::uint8_t miSizeHigh[BLOCK_SIZES_ALL] = {1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4};
+
+// svt_aom_get_segment_id (entropy_coding.c:4723-4740), the Av1Common wall
+// threaded as (segment_ids, mi_cols, mi_rows).
+int getSegmentId(const std::uint8_t* segment_ids, int mi_cols, int mi_rows, BlockSize bsize,
+                 int mi_row, int mi_col) {
+    const int mi_offset = mi_row * mi_cols + mi_col;
+    const int bw = miSizeWide[bsize];
+    const int bh = miSizeHigh[bsize];
+    const int xmis = AOMMIN(mi_cols - mi_col, bw);
+    const int ymis = AOMMIN(mi_rows - mi_row, bh);
+    int x, y, segment_id = MAX_SEGMENTS;
+
+    for (y = 0; y < ymis; ++y) {
+        for (x = 0; x < xmis; ++x) {
+            segment_id = AOMMIN(segment_id, segment_ids[mi_offset + y * mi_cols + x]);
+        }
+    }
+
+    assert(segment_id >= 0 && segment_id < MAX_SEGMENTS);
+    return segment_id;
+}
+
+// svt_av1_update_segmentation_map (entropy_coding.c:4843-4861), threaded.
+void updateSegmentationMap(std::uint8_t* segment_ids, int mi_cols, int mi_rows, BlockSize bsize,
+                           int mi_row, int mi_col, std::uint8_t segment_id) {
+    const int mi_offset = mi_row * mi_cols + mi_col;
+    const int bw = miSizeWide[bsize];
+    const int bh = miSizeHigh[bsize];
+    const int xmis = AOMMIN(mi_cols - mi_col, bw);
+    const int ymis = AOMMIN(mi_rows - mi_row, bh);
+    int x, y;
+
+    for (y = 0; y < ymis; ++y) {
+        for (x = 0; x < xmis; ++x) {
+            segment_ids[mi_offset + y * mi_cols + x] = segment_id;
+        }
+    }
+}
+
+// svt_av1_get_spatial_seg_prediction (entropy_coding.c:4744-4800), the
+// pcs/xd walls threaded (the neighbor reads use BLOCK_4X4 mi cells).
+int getSpatialSegPrediction(const std::uint8_t* segment_ids, int mi_cols, int mi_rows,
+                            int up_available, int left_available, int mi_row, int mi_col,
+                            int* cdf_index) {
+    int prev_ul = -1;  // top left segment_id
+    int prev_l = -1;   // left segment_id
+    int prev_u = -1;   // top segment_id
+
+    if ((up_available) && (left_available)) {
+        prev_ul = getSegmentId(segment_ids, mi_cols, mi_rows, BLOCK_4X4, mi_row - 1, mi_col - 1);
+    }
+
+    if (up_available) {
+        prev_u = getSegmentId(segment_ids, mi_cols, mi_rows, BLOCK_4X4, mi_row - 1, mi_col - 0);
+    }
+
+    if (left_available) {
+        prev_l = getSegmentId(segment_ids, mi_cols, mi_rows, BLOCK_4X4, mi_row - 0, mi_col - 1);
+    }
+
+    // Pick CDF index based on number of matching/out-of-bounds segment IDs.
+    if (prev_ul < 0 || prev_u < 0 || prev_l < 0) { /* Edge case */
+        *cdf_index = 0;
+    } else if ((prev_ul == prev_u) && (prev_ul == prev_l)) {
+        *cdf_index = 2;
+    } else if ((prev_ul == prev_u) || (prev_ul == prev_l) || (prev_u == prev_l)) {
+        *cdf_index = 1;
+    } else {
+        *cdf_index = 0;
+    }
+
+    // If 2 or more are identical returns that as predictor, otherwise prev_l.
+    if (prev_u == -1) {  // edge case
+        return prev_l == -1 ? 0 : prev_l;
+    }
+    if (prev_l == -1) {  // edge case
+        return prev_u;
+    }
+    return (prev_ul == prev_u) ? prev_u : prev_l;
+}
+
+// svt_av1_neg_interleave (entropy_coding.c:4802-4818)
+int negInterleave(int x, int ref, int max) {
+    assert(x < max);
+    const int diff = x - ref;
+    if (!ref) {
+        return x;
+    }
+    if (ref >= (max - 1)) {
+        return -x + max - 1;
+    }
+    if (2 * ref < max) {
+        if (abs(diff) <= ref) {
+            return diff > 0 ? (diff << 1) - 1 : ((-diff) << 1);
+        }
+        return x;
+    } else {
+        if (abs(diff) < (max - ref)) {
+            return diff > 0 ? (diff << 1) - 1 : ((-diff) << 1);
+        }
+        return (max - x) - 1;
+    }
+}
+
+// aom av1_neg_deinterleave (decodemv.c:261-277)
+int negDeinterleave(int diff, int ref, int max) {
+    if (!ref) return diff;
+    if (ref >= (max - 1)) return max - diff - 1;
+    if (2 * ref < max) {
+        if (diff <= 2 * ref) {
+            if (diff & 1)
+                return ref + ((diff + 1) >> 1);
+            else
+                return ref - (diff >> 1);
+        }
+        return diff;
+    } else {
+        if (diff <= 2 * (max - ref - 1)) {
+            if (diff & 1)
+                return ref + ((diff + 1) >> 1);
+            else
+                return ref - (diff >> 1);
+        }
+        return max - (diff + 1);
+    }
+}
+
+// svt_av1_write_segment_id's symbol emission (entropy_coding.c:4863-4883),
+// the walls threaded.
+int writeSegmentId(AomWriter* w, EcFrameContext* fc, BlockSize bsize, std::uint8_t* segment_ids,
+                   int mi_cols, int mi_rows, int mi_row, int mi_col, int up_available,
+                   int left_available, int segment_id, int last_active_seg_id, int skip_coeff) {
+    int cdf_num;
+    const int spatial_pred = getSpatialSegPrediction(segment_ids, mi_cols, mi_rows, up_available,
+                                                     left_available, mi_row, mi_col, &cdf_num);
+    if (skip_coeff) {
+        updateSegmentationMap(segment_ids, mi_cols, mi_rows, bsize, mi_row, mi_col,
+                              (std::uint8_t)spatial_pred);
+        return spatial_pred;
+    }
+    const int coded_id = negInterleave(segment_id, spatial_pred, last_active_seg_id + 1);
+    odEcWriteSymbol(w, coded_id, fc->seg.spatial_pred_seg_cdf[cdf_num], MAX_SEGMENTS);
+    updateSegmentationMap(segment_ids, mi_cols, mi_rows, bsize, mi_row, mi_col,
+                          (std::uint8_t)segment_id);
+    return segment_id;
+}
+
+// SYM1: the aom read_segment_id reader twin (decodemv.c:280-303), threaded.
+int readSegmentId(AomReader* r, EcFrameContext* fc, BlockSize bsize, std::uint8_t* segment_ids,
+                  int mi_cols, int mi_rows, int mi_row, int mi_col, int up_available,
+                  int left_available, int last_active_seg_id) {
+    int cdf_num;
+    const int pred = getSpatialSegPrediction(segment_ids, mi_cols, mi_rows, up_available,
+                                             left_available, mi_row, mi_col, &cdf_num);
+    const int coded_id = odEcReadSymbol(r, fc->seg.spatial_pred_seg_cdf[cdf_num], MAX_SEGMENTS);
+    const int segment_id = negDeinterleave(coded_id, pred, last_active_seg_id + 1);
+    // (the aom corrupt-frame internal_error branch is dropped - named
+    // deviation; the port trusts its own roundtrips)
+    updateSegmentationMap(segment_ids, mi_cols, mi_rows, bsize, mi_row, mi_col,
+                          (std::uint8_t)segment_id);
+    return segment_id;
+}
+
+// forward declarations: the token-chain functions sit below the uniform
+// pair and readPaletteModeInfo below the colors pair - the file orders the
+// writer bodies first, so the consumers carry these.
+void readPaletteColorsY(AomReader* r, int bit_depth, const std::uint16_t* color_cache, int n_cache,
+                        std::uint16_t* colors, int n);
+void writeUniform(AomWriter* w, int n, int v);
+int readUniform(AomReader* r, int n);
+
+// svt_aom_allow_palette (entropy_coding.c:4218-4223).
+int allowPalette(int allow_screen_content_tools, BlockSize bsize) {
+    return allow_screen_content_tools && blockSizeWide[bsize] <= 64 &&
+        blockSizeHigh[bsize] <= 64 && bsize >= BLOCK_8X8;
+}
+
+// svt_aom_get_palette_bsize_ctx (entropy_coding.c:4224-4231)
+int getPaletteBsizeCtx(BlockSize bsize) {
+    return ebNumPelsLog2Lookup[bsize] - ebNumPelsLog2Lookup[BLOCK_8X8];
+}
+
+// svt_aom_get_palette_mode_ctx (entropy_coding.c:4236-4249), the
+// MacroBlockD wall threaded as the (available, size) pairs.
+int getPaletteModeCtx(int above_available, int above_palette_size, int left_available,
+                      int left_palette_size) {
+    int ctx = 0;
+    if (above_available) {
+        ctx += (above_palette_size > 0);
+    }
+    if (left_available) {
+        ctx += (left_palette_size > 0);
+    }
+    return ctx;
+}
+
+// av1_ceil_log2 (cabac_context_model.h:366-371, svt_log2f = getMsb above;
+// the per-module local twin of l13_palette's).
+static int ceilLog2(int n) {
+    if (n < 2) {
+        return 0;
+    }
+    return getMsb((std::uint32_t)(n - 1)) + 1;
+}
+
+// delta_encode_palette_colors (entropy_coding.c:4252-4282), verbatim; the
+// num <= 0 / num == 1 early returns carry the writer's degenerate paths.
+void deltaEncodePaletteColors(const int* colors, int num, int bit_depth, int min_val,
+                              AomWriter* w) {
+    if (num <= 0) {
+        return;
+    }
+    assert(colors[0] < (1 << bit_depth));
+    odEcWriteLiteralBits(w, colors[0], bit_depth);
+    if (num == 1) {
+        return;
+    }
+    int max_delta = 0;
+    int deltas[PALETTE_MAX_SIZE];
+    memset(deltas, 0, sizeof(deltas));
+    for (int i = 1; i < num; ++i) {
+        assert(colors[i] < (1 << bit_depth));
+        const int delta = colors[i] - colors[i - 1];
+        deltas[i - 1] = delta;
+        assert(delta >= min_val);
+        if (delta > max_delta) {
+            max_delta = delta;
+        }
+    }
+    const int min_bits = bit_depth - 3;
+    int bits = AOMMAX(ceilLog2(max_delta + 1 - min_val), min_bits);
+    assert(bits <= bit_depth);
+    int range = (1 << bit_depth) - colors[0] - min_val;
+    odEcWriteLiteralBits(w, bits - min_bits, 2);
+    for (int i = 0; i < num - 1; ++i) {
+        odEcWriteLiteralBits(w, deltas[i] - min_val, bits);
+        range -= deltas[i];
+        bits = AOMMIN(bits, ceilLog2(range));
+    }
+}
+
+// svt_av1_index_color_cache (palette.c:111-141), the local twin of the
+// landed l13_palette::indexColorCache (l7 cannot link l13 - no-CMake-edits
+// rule; named duplication).
+static int indexColorCache(const std::uint16_t* colorCache, int nCache, const std::uint16_t* colors, int nColors,
+                           std::uint8_t* cacheColorFound, int* outCacheColors) {
+    if (nCache <= 0) {
+        for (int i = 0; i < nColors; ++i) {
+            outCacheColors[i] = colors[i];
+        }
+        return nColors;
+    }
+    memset(cacheColorFound, 0, nCache * sizeof(*cacheColorFound));
+    int n_in_cache = 0;
+    int in_cache_flags[PALETTE_MAX_SIZE];
+    memset(in_cache_flags, 0, sizeof(in_cache_flags));
+    for (int i = 0; i < nCache && n_in_cache < nColors; ++i) {
+        for (int j = 0; j < nColors; ++j) {
+            if (colors[j] == colorCache[i]) {
+                in_cache_flags[j] = 1;
+                cacheColorFound[i] = 1;
+                ++n_in_cache;
+                break;
+            }
+        }
+    }
+    int j = 0;
+    for (int i = 0; i < nColors; ++i) {
+        if (!in_cache_flags[i]) {
+            outCacheColors[j++] = colors[i];
+        }
+    }
+    assert(j == nColors - n_in_cache);
+    return j;
+}
+
+// write_palette_colors_y (entropy_coding.c:4320-4337), the cache wall
+// threaded (the reference derives it from svt_get_palette_cache_y(xd)).
+void writePaletteColorsY(AomWriter* w, int bit_depth, const std::uint16_t* color_cache, int n_cache,
+                         const std::uint16_t* colors, int n) {
+    int out_cache_colors[PALETTE_MAX_SIZE];
+    std::uint8_t cache_color_found[2 * PALETTE_MAX_SIZE];
+    const int n_out_cache =
+        indexColorCache(color_cache, n_cache, colors, n, cache_color_found, out_cache_colors);
+    int n_in_cache = 0;
+    for (int i = 0; i < n_cache && n_in_cache < n; ++i) {
+        const int found = cache_color_found[i];
+        odEcWriteLiteralBit(w, found, 0);  // aom_write_bit
+        n_in_cache += found;
+    }
+    assert(n_in_cache + n_out_cache == n);
+    deltaEncodePaletteColors(out_cache_colors, n_out_cache, bit_depth, 1, w);
+}
+
+// write_palette_mode_info (entropy_coding.c:4351-4377), the walls threaded.
+// The uv branch: uv_dc_pred = chroma == UV_DC_PRED && is_chroma_reference;
+// the writer emits the uv-mode symbol with value 0 ALWAYS (:4373 - the
+// assert palette_size[1] == 0 makes 0 the only reachable symbol).
+void writePaletteModeInfo(AomWriter* w, EcFrameContext* fc, BlockSize bsize, int bit_depth,
+                          PredictionMode intra_luma_mode, UvPredictionMode intra_chroma_mode,
+                          int is_chroma_ref, int palette_size_y, const std::uint16_t* palette_colors_y,
+                          const std::uint16_t* cache_y, int n_cache_y, int above_available,
+                          int above_palette_size, int left_available, int left_palette_size) {
+    const int bsize_ctx = getPaletteBsizeCtx(bsize);
+    assert(bsize_ctx >= 0);
+    if (intra_luma_mode == DC_PRED) {
+        const int n = palette_size_y;
+        const int palette_y_mode_ctx = getPaletteModeCtx(above_available, above_palette_size,
+                                                         left_available, left_palette_size);
+        odEcWriteSymbol(w, n > 0, fc->palette_y_mode_cdf[bsize_ctx][palette_y_mode_ctx], 2);
+        if (n > 0) {
+            odEcWriteSymbol(w, n - PALETTE_MIN_SIZE, fc->palette_y_size_cdf[bsize_ctx], PALETTE_SIZES);
+            writePaletteColorsY(w, bit_depth, cache_y, n_cache_y, palette_colors_y, n);
+        }
+    }
+
+    const int uv_dc_pred = intra_chroma_mode == UV_DC_PRED && is_chroma_ref;
+    if (uv_dc_pred) {
+        assert(0);  // the reference asserts blk_ptr->palette_size[1] == 0 here;
+                    // our emission never carries a uv palette - the uv colors
+                    // surface is parked (no writer twin in the pinned tree).
+        const int palette_uv_mode_ctx = (palette_size_y > 0);
+        odEcWriteSymbol(w, 0, fc->palette_uv_mode_cdf[palette_uv_mode_ctx], 2);
+    }
+}
+
+// aom read_palette_mode_info (decodemv.c:567-604), the walls threaded; the
+// uv modev=1 continuation parked (see the header note).
+int readPaletteModeInfo(AomReader* r, EcFrameContext* fc, BlockSize bsize, int bit_depth,
+                        PredictionMode intra_luma_mode, UvPredictionMode intra_chroma_mode,
+                        int is_chroma_ref, const std::uint16_t* cache_y, int n_cache_y,
+                        int above_available, int above_palette_size, int left_available,
+                        int left_palette_size, std::uint16_t* colors_y) {
+    const int bsize_ctx = getPaletteBsizeCtx(bsize);
+    int size_y = 0;
+    if (intra_luma_mode == DC_PRED) {
+        const int palette_mode_ctx = getPaletteModeCtx(above_available, above_palette_size,
+                                                       left_available, left_palette_size);
+        const int modev = odEcReadSymbol(r, fc->palette_y_mode_cdf[bsize_ctx][palette_mode_ctx], 2);
+        if (modev) {
+            size_y = odEcReadSymbol(r, fc->palette_y_size_cdf[bsize_ctx], PALETTE_SIZES) + PALETTE_MIN_SIZE;
+            readPaletteColorsY(r, bit_depth, cache_y, n_cache_y, colors_y, size_y);
+        }
+    }
+    if (intra_chroma_mode == UV_DC_PRED && is_chroma_ref) {
+        const int palette_uv_mode_ctx = (size_y > 0);
+        const int modev = odEcReadSymbol(r, fc->palette_uv_mode_cdf[palette_uv_mode_ctx], 2);
+        if (modev) {
+            // parked: the uv size symbol + read_palette_colors_uv
+            // (aom decodemv.c:511-560) - no writer twin in the pinned tree.
+            assert(0);
+        }
+    }
+    return size_y;
+}
+
+// svt_aom_palette_color_index_context_lookup (palette.c:639-641): negative
+// values are invalid. The l7 twin of the landed l13_palette table.
+const std::int32_t paletteColorIndexContextLookup[MAX_COLOR_CONTEXT_HASH + 1] = {-1, -1, 0, -1, -1, 4, 3, 2, 1};
+
+// NUM_PALETTE_NEIGHBORS (palette.c:642) / INVALID_COLOR_IDX (:643).
+#define NUM_PALETTE_NEIGHBORS 3
+#define INVALID_COLOR_IDX 255
+
+// av1_fast_palette_color_index_context_on_edge (palette.c:645-676), the l7
+// twin of the landed l13_palette::fastPaletteColorIndexContextOnEdge.
+int fastPaletteColorIndexContextOnEdge(const std::uint8_t* colorMap, int stride, int r, int c,
+                                       int* colorIdx) {
+    const bool has_left = (c - 1 >= 0);
+    const bool has_above = (r - 1 >= 0);
+    assert(r > 0 || c > 0);
+    assert(has_above ^ has_left);
+    assert(colorIdx);
+    (void)has_left;
+
+    const std::uint8_t color_neighbor = has_above ? colorMap[(r - 1) * stride + (c - 0)]
+                                                  : colorMap[(r - 0) * stride + (c - 1)];
+    // If the neighbor color has higher index than current color index, then we
+    // move up by 1.
+    *colorIdx = colorMap[r * stride + c];
+    const std::uint8_t current_color = static_cast<std::uint8_t>(*colorIdx);
+    if (color_neighbor > current_color) {
+        (*colorIdx)++;
+    } else if (color_neighbor == current_color) {
+        *colorIdx = 0;
+    }
+
+    // Get hash value of context.
+    // The non-diagonal neighbors get a weight of 2.
+    const std::uint8_t color_score = 2;
+    const std::uint8_t hash_multiplier = 1;
+    const std::uint8_t color_index_ctx_hash =
+        static_cast<std::uint8_t>(color_score * hash_multiplier);
+
+    // Lookup context from hash.
+    const int color_index_ctx = paletteColorIndexContextLookup[color_index_ctx_hash];
+    assert(color_index_ctx == 0);
+    (void)color_index_ctx;
+    return 0;
+}
+
+// av1_fast_palette_color_index_context (palette.c:680-776), the l7 twin of
+// the landed l13_palette::fastPaletteColorIndexContext.
+int fastPaletteColorIndexContext(const std::uint8_t* colorMap, int stride, int r, int c,
+                                 int* colorIdx) {
+    assert(r > 0 || c > 0);
+
+    const bool has_above = (r - 1 >= 0);
+    const bool has_left = (c - 1 >= 0);
+    assert(has_above || has_left);
+    if (has_above ^ has_left) {
+        return fastPaletteColorIndexContextOnEdge(colorMap, stride, r, c, colorIdx);
+    }
+
+    // This goes in the order of left, top, and top-left. This has the advantage
+    // that unless anything here are not distinct or invalid, this will already
+    // be in sorted order. Furthermore, if either of the first two is
+    // invalid, we know the last one is also invalid.
+    std::uint8_t color_neighbors[NUM_PALETTE_NEIGHBORS];
+    color_neighbors[0] = colorMap[(r - 0) * stride + (c - 1)];
+    color_neighbors[1] = colorMap[(r - 1) * stride + (c - 0)];
+    color_neighbors[2] = colorMap[(r - 1) * stride + (c - 1)];
+
+    // Aggregate duplicated values.
+    // Since our array is so small, using a couple if statements is faster
+    std::uint8_t scores[NUM_PALETTE_NEIGHBORS] = {2, 2, 1};
+    std::uint8_t num_invalid_colors = 0;
+    if (color_neighbors[0] == color_neighbors[1]) {
+        scores[0] = static_cast<std::uint8_t>(scores[0] + scores[1]);
+        color_neighbors[1] = INVALID_COLOR_IDX;
+        num_invalid_colors += 1;
+
+        if (color_neighbors[0] == color_neighbors[2]) {
+            scores[0] = static_cast<std::uint8_t>(scores[0] + scores[2]);
+            num_invalid_colors += 1;
+        }
+    } else if (color_neighbors[0] == color_neighbors[2]) {
+        scores[0] = static_cast<std::uint8_t>(scores[0] + scores[2]);
+        num_invalid_colors += 1;
+    } else if (color_neighbors[1] == color_neighbors[2]) {
+        scores[1] = static_cast<std::uint8_t>(scores[1] + scores[2]);
+        num_invalid_colors += 1;
+    }
+
+    const std::uint8_t num_valid_colors = static_cast<std::uint8_t>(NUM_PALETTE_NEIGHBORS - num_invalid_colors);
+
+    std::uint8_t* color_rank = color_neighbors;
+    std::uint8_t* score_rank = scores;
+
+    // Sort everything
+    if (num_valid_colors > 1) {
+        if (color_neighbors[1] == INVALID_COLOR_IDX) {
+            scores[1] = scores[2];
+            color_neighbors[1] = color_neighbors[2];
+        }
+
+        // We need to swap the first two elements if they have the same score but
+        // the color indices are not in the right order
+        if (score_rank[0] < score_rank[1] || (score_rank[0] == score_rank[1] && color_rank[0] > color_rank[1])) {
+            const std::uint8_t tmp_score = score_rank[0];
+            const std::uint8_t tmp_color = color_rank[0];
+            score_rank[0] = score_rank[1];
+            color_rank[0] = color_rank[1];
+            score_rank[1] = tmp_score;
+            color_rank[1] = tmp_color;
+        }
+        if (num_valid_colors > 2) {
+            if (score_rank[0] < score_rank[2]) {
+                const std::uint8_t tmp_score = score_rank[0];
+                const std::uint8_t tmp_color = color_rank[0];
+                score_rank[0] = score_rank[2];
+                color_rank[0] = color_rank[2];
+                score_rank[2] = tmp_score;
+                color_rank[2] = tmp_color;
+            }
+            if (score_rank[1] < score_rank[2]) {
+                const std::uint8_t tmp_score = score_rank[1];
+                const std::uint8_t tmp_color = color_rank[1];
+                score_rank[1] = score_rank[2];
+                color_rank[1] = color_rank[2];
+                score_rank[2] = tmp_score;
+                color_rank[2] = tmp_color;
+            }
+        }
+    }
+
+    // If any of the neighbor colors has higher index than current color index,
+    // then we move up by 1 unless the current color is the same as one of the
+    // neighbors.
+    *colorIdx = colorMap[r * stride + c];
+    const std::uint8_t current_color = static_cast<std::uint8_t>(*colorIdx);
+    for (int idx = 0; idx < num_valid_colors; idx++) {
+        if (color_rank[idx] > current_color) {
+            (*colorIdx)++;
+        } else if (color_rank[idx] == current_color) {
+            *colorIdx = idx;
+            break;
+        }
+    }
+
+    // Get hash value of context.
+    std::uint8_t color_index_ctx_hash = 0;
+    static const std::uint8_t hash_multipliers[NUM_PALETTE_NEIGHBORS] = {1, 2, 2};
+    for (int idx = 0; idx < num_valid_colors; ++idx) {
+        color_index_ctx_hash = static_cast<std::uint8_t>(color_index_ctx_hash + score_rank[idx] * hash_multipliers[idx]);
+    }
+    assert(color_index_ctx_hash > 0);
+    assert(color_index_ctx_hash <= MAX_COLOR_CONTEXT_HASH);
+
+    // Lookup context from hash.
+    const int color_index_ctx = 9 - color_index_ctx_hash;
+    assert(color_index_ctx == paletteColorIndexContextLookup[color_index_ctx_hash]);
+    assert(color_index_ctx >= 0);
+    assert(color_index_ctx < PALETTE_COLOR_INDEX_CONTEXTS);
+    return color_index_ctx;
+}
+
+// SYM1: svt_av1_tokenize_color_map (palette.c:817-828) over
+// cost_and_tokenize_map (:781-815), the Av1ColorMapParam wall threaded.
+int tokenizeColorMap(EcFrameContext* fc, const std::uint8_t* colorMap, int stride, int rows, int cols,
+                     int n, int plane, int allowUpdateCdf, TokenExtra* tokens) {
+    assert(plane == 0 || plane == 1);
+    AomCdfProb (*map_pb_cdf)[PALETTE_COLOR_INDEX_CONTEXTS][CDF_SIZE(PALETTE_COLORS)] =
+        plane ? fc->palette_uv_color_index_cdf : fc->palette_y_color_index_cdf;
+    const int palette_size_idx = n - PALETTE_MIN_SIZE;
+    // The first color index does not use context or entropy.
+    tokens[0].token = colorMap[0];
+    tokens[0].color_map_cdf = NULL;
+    int t = 1;
+    for (int k = 1; k < rows + cols - 1; ++k) {
+        for (int j = AOMMIN(k, cols - 1); j >= AOMMAX(0, k - rows + 1); --j) {
+            int i = k - j;
+            int color_new_idx;
+            const int color_ctx = fastPaletteColorIndexContext(colorMap, stride, i, j, &color_new_idx);
+            assert(color_new_idx >= 0 && color_new_idx < n);
+            tokens[t].token = static_cast<std::uint8_t>(color_new_idx);
+            tokens[t].color_map_cdf = &map_pb_cdf[palette_size_idx][color_ctx][0];
+            ++t;
+            if (allowUpdateCdf) {
+                updateCdf(&map_pb_cdf[palette_size_idx][color_ctx][0], color_new_idx, n);
+            }
+        }
+    }
+    return t;
+}
+
+// SYM1: pack_map_tokens (entropy_coding.c:4339-4348)
+void packMapTokens(AomWriter* w, const TokenExtra* tokens, int n, int num) {
+    const TokenExtra* p = tokens;
+    writeUniform(w, n, p->token);  // The first color index.
+    ++p;
+    --num;
+    for (int i = 0; i < num; ++i) {
+        odEcWriteSymbol(w, p->token, p->color_map_cdf, n);
+        ++p;
+    }
+}
+
+// SYM1: aom av1_get_palette_color_index_context (entropymode.c:893-951).
+int getColorIndexContext(const std::uint8_t* colorMap, int stride, int r, int c, int paletteSize,
+                         std::uint8_t* colorOrder, int* colorIdx) {
+    assert(paletteSize <= PALETTE_MAX_SIZE);
+    assert(r > 0 || c > 0);
+
+    // Get color indices of neighbors.
+    int color_neighbors[NUM_PALETTE_NEIGHBORS];
+    color_neighbors[0] = (c - 1 >= 0) ? colorMap[r * stride + c - 1] : -1;
+    color_neighbors[1] =
+        (c - 1 >= 0 && r - 1 >= 0) ? colorMap[(r - 1) * stride + c - 1] : -1;
+    color_neighbors[2] = (r - 1 >= 0) ? colorMap[(r - 1) * stride + c] : -1;
+
+    // The +10 below should not be needed. But we get a warning "array subscript
+    // is above array bounds [-Werror=array-bounds]" without it, possibly due to
+    // this (or similar) bug: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=59124
+    int scores[PALETTE_MAX_SIZE + 10] = {0};
+    static const int weights[NUM_PALETTE_NEIGHBORS] = {2, 1, 2};
+    for (int i = 0; i < NUM_PALETTE_NEIGHBORS; ++i) {
+        if (color_neighbors[i] >= 0) {
+            scores[color_neighbors[i]] += weights[i];
+        }
+    }
+
+    int inverse_color_order[PALETTE_MAX_SIZE];
+    for (int i = 0; i < PALETTE_MAX_SIZE; ++i) {
+        colorOrder[i] = static_cast<std::uint8_t>(i);  // k <= 8, no loss
+        inverse_color_order[i] = i;
+    }
+
+    // Get the top NUM_PALETTE_NEIGHBORS scores (sorted from large to small).
+    for (int i = 0; i < NUM_PALETTE_NEIGHBORS; ++i) {
+        int max = scores[i];
+        int max_idx = i;
+        for (int j = i + 1; j < paletteSize; ++j) {
+            if (scores[j] > max) {
+                max = scores[j];
+                max_idx = j;
+            }
+        }
+        if (max_idx != i) {
+            // Move the score at index 'max_idx' to index 'i', and shift the scores
+            // from 'i' to 'max_idx - 1' by 1.
+            const int max_score = scores[max_idx];
+            const std::uint8_t max_color_order = colorOrder[max_idx];
+            for (int k = max_idx; k > i; --k) {
+                scores[k] = scores[k - 1];
+                colorOrder[k] = colorOrder[k - 1];
+                inverse_color_order[colorOrder[k]] = k;
+            }
+            scores[i] = max_score;
+            colorOrder[i] = max_color_order;
+            inverse_color_order[colorOrder[i]] = i;
+        }
+    }
+
+    if (colorIdx != NULL) *colorIdx = inverse_color_order[colorMap[r * stride + c]];
+
+    // Get hash value of context.
+    int color_index_ctx_hash = 0;
+    static const int hash_multipliers[NUM_PALETTE_NEIGHBORS] = {1, 2, 2};
+    for (int i = 0; i < NUM_PALETTE_NEIGHBORS; ++i) {
+        color_index_ctx_hash += scores[i] * hash_multipliers[i];
+    }
+    assert(color_index_ctx_hash > 0);
+    assert(color_index_ctx_hash <= MAX_COLOR_CONTEXT_HASH);
+
+    // Lookup context from hash (aom entropymode.c:887-889; the table is
+    // byte-identical to SVT's palette.c:641 row).
+    const int color_index_ctx = paletteColorIndexContextLookup[color_index_ctx_hash];
+    assert(color_index_ctx >= 0);
+    assert(color_index_ctx < PALETTE_COLOR_INDEX_CONTEXTS);
+    return color_index_ctx;
+}
+
+// SYM1: aom decode_color_map_tokens (detokenize.c:25-58), the wall threaded.
+void decodeColorMapTokens(AomReader* r, std::uint8_t* colorMap, int planeWidth, int planeHeight,
+                          int rows, int cols, int n, int plane, EcFrameContext* fc) {
+    assert(plane == 0 || plane == 1);
+    AomCdfProb (*color_map_cdf)[PALETTE_COLOR_INDEX_CONTEXTS][CDF_SIZE(PALETTE_COLORS)] =
+        plane ? fc->palette_uv_color_index_cdf : fc->palette_y_color_index_cdf;
+    std::uint8_t colorOrder[PALETTE_MAX_SIZE];
+
+    // The first color index.
+    colorMap[0] = static_cast<std::uint8_t>(readUniform(r, n));
+    assert(colorMap[0] < n);
+
+    // Run wavefront on the palette map index decoding.
+    for (int i = 1; i < rows + cols - 1; ++i) {
+        for (int j = AOMMIN(i, cols - 1); j >= AOMMAX(0, i - rows + 1); --j) {
+            const int color_ctx = getColorIndexContext(colorMap, planeWidth, (i - j), j, n,
+                                                       colorOrder, NULL);
+            const int color_idx =
+                odEcReadSymbol(r, &color_map_cdf[n - PALETTE_MIN_SIZE][color_ctx][0], n);
+            assert(color_idx >= 0 && color_idx < n);
+            colorMap[(i - j) * planeWidth + j] = colorOrder[color_idx];
+        }
+    }
+    // Copy last column to extra columns.
+    if (cols < planeWidth) {
+        for (int i = 0; i < rows; ++i) {
+            memset(colorMap + i * planeWidth + cols, colorMap[i * planeWidth + cols - 1],
+                   (planeWidth - cols));
+        }
+    }
+    // Copy last row to extra rows.
+    for (int i = rows; i < planeHeight; ++i) {
+        memcpy(colorMap + i * planeWidth, colorMap + (rows - 1) * planeWidth, planeWidth);
+    }
+}
+
+// aom merge_colors (decodemv.c:471-476): merge the sorted cached prefix and
+// the sorted transmitted tail into one sorted list.
+static void mergeColors(std::uint16_t* colors, const std::uint16_t* cached_colors, int n_colors,
+                        int n_cached_colors) {
+    if (n_cached_colors == 0) return;
+    int cache_idx = 0, trans_idx = n_cached_colors;
+    for (int i = 0; i < n_colors; ++i) {
+        if (cache_idx < n_cached_colors &&
+            (trans_idx >= n_colors || cached_colors[cache_idx] <= colors[trans_idx])) {
+            colors[i] = cached_colors[cache_idx++];
+        } else {
+            assert(trans_idx < n_colors);
+            colors[i] = colors[trans_idx++];
+        }
+    }
+}
+
+// aom read_palette_colors_y (decodemv.c:478-507), the cache wall threaded.
+void readPaletteColorsY(AomReader* r, int bit_depth, const std::uint16_t* color_cache, int n_cache,
+                        std::uint16_t* colors, int n) {
+    std::uint16_t cached_colors[PALETTE_MAX_SIZE];
+    int idx = 0;
+    for (int i = 0; i < n_cache && idx < n; ++i)
+        if (odEcReadBit(r)) cached_colors[idx++] = color_cache[i];
+    if (idx < n) {
+        const int n_cached_colors = idx;
+        colors[idx++] = (std::uint16_t)readLiteralBits(r, bit_depth);
+        if (idx < n) {
+            const int min_bits = bit_depth - 3;
+            int bits = min_bits + readLiteralBits(r, 2);
+            int range = (1 << bit_depth) - colors[idx - 1] - 1;
+            for (; idx < n; ++idx) {
+                assert(range >= 0);
+                const int delta = readLiteralBits(r, bits) + 1;
+                int v = colors[idx - 1] + delta;
+                if (v < 0) v = 0;
+                if (v > (1 << bit_depth) - 1) v = (1 << bit_depth) - 1;
+                colors[idx] = (std::uint16_t)v;
+                range -= (colors[idx] - colors[idx - 1]);
+                bits = AOMMIN(bits, ceilLog2(range));
+            }
+        }
+        mergeColors(colors, cached_colors, n, n_cached_colors);
+    } else {
+        memcpy(colors, cached_colors, n * sizeof(cached_colors[0]));
+    }
+}
+// get_unsigned_bits (entropy_coding.c:4284-4286)
+int getUnsignedBits(unsigned int num_values) {
+    return num_values > 0 ? getMsb(num_values) + 1 : 0;
+}
+
+// write_uniform (entropy_coding.c:4288-4302)
+void writeUniform(AomWriter* w, int n, int v) {
+    const int l = getUnsignedBits(n);
+    const int m = (1 << l) - n;
+    if (l == 0) {
+        return;
+    }
+    if (v < m) {
+        odEcWriteLiteralBits(w, v, l - 1);
+    } else {
+        odEcWriteLiteralBits(w, m + ((v - m) >> 1), l - 1);
+        odEcWriteLiteralBits(w, (v - m) & 1, 1);
+    }
+}
+
+// svt_aom_write_uniform_cost (entropy_coding.c:4304-4314)
+int writeUniformCost(int n, int v) {
+    const int l = getUnsignedBits(n);
+    const int m = (1 << l) - n;
+    if (l == 0) {
+        return 0;
+    }
+    if (v < m) {
+        return (l - 1) << 9;  // av1_cost_literal(l - 1)
+    } else {
+        return l << 9;  // av1_cost_literal(l)
+    }
+}
+
+// aom av1_read_uniform (aom decoder.h:488-496)
+int readUniform(AomReader* r, int n) {
+    const int l = getUnsignedBits(n);
+    const int m = (1 << l) - n;
+    const int v = readLiteralBits(r, l - 1);
+    assert(l != 0);
+    if (v < m)
+        return v;
+    else
+        return (v << 1) - m + readLiteralBits(r, 1);
 }
 
 // encode_intra_luma_mode_kf_av1 (entropy_coding.c:1026-1040)

@@ -1141,3 +1141,668 @@ TEST_CASE("chroma per-block wrapper derives txb_skip_ctx offset 7 (CS1b)") {
                        entropy::TX_4X4, &ctx10, &sign10);
     CHECK(ctx10 == 12);
 }
+
+// ---------------------------------------------------------------------------
+// SYM1 (SY1): the palette + segmentation CDF families land in the frame
+// context. Defaults are the mechanical extracts (cabac_context_model.c
+// :477-:509, :511-:586, :652-:664); the spot rows below quote those lines.
+// ---------------------------------------------------------------------------
+TEST_CASE("palette + seg CDF defaults land in initDefaultEcFrameContext") {
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc, 0);
+    // palette_y_size_cdf[0]: AOM_CDF7(7952, 13000, 18149, 21478, 25527, 29241)
+    // - 6 explicit probs (indices 0..5), the 7-symbol zero tail at [6].
+    CHECK(fc.palette_y_size_cdf[0][0] == AOM_ICDF(7952));
+    CHECK(fc.palette_y_size_cdf[0][5] == AOM_ICDF(29241));
+    CHECK(fc.palette_y_size_cdf[0][6] == 0);
+    // palette_y_size_cdf[6] (last row): ..., 28999
+    CHECK(fc.palette_y_size_cdf[6][5] == AOM_ICDF(28999));
+    // palette_uv_size_cdf[6]: ..., 25865
+    CHECK(fc.palette_uv_size_cdf[6][5] == AOM_ICDF(25865));
+    // palette_y_mode_cdf[0][0]: AOM_CDF2(31676)
+    CHECK(fc.palette_y_mode_cdf[0][0][0] == AOM_ICDF(31676));
+    // palette_uv_mode_cdf[1]: AOM_CDF2(21488)
+    CHECK(fc.palette_uv_mode_cdf[1][0] == AOM_ICDF(21488));
+    // palette_y_color_index_cdf[0][0]: AOM_CDF2(28710) - one explicit prob,
+    // the 2-symbol zero tail at [1], counter cell at [8].
+    CHECK(fc.palette_y_color_index_cdf[0][0][0] == AOM_ICDF(28710));
+    CHECK(fc.palette_y_color_index_cdf[0][0][1] == 0);
+    // palette_uv_color_index_cdf[6][4]: AOM_CDF8(..., 32322) - 7th explicit
+    CHECK(fc.palette_uv_color_index_cdf[6][4][6] == AOM_ICDF(32322));
+    CHECK(fc.palette_uv_color_index_cdf[6][4][7] == 0);
+    // seg.tree_cdf: AOM_CDF8(4096, 8192, 12288, 16384, 20480, 24576, 28672)
+    CHECK(fc.seg.tree_cdf[0] == AOM_ICDF(4096));
+    CHECK(fc.seg.tree_cdf[6] == AOM_ICDF(28672));
+    CHECK(fc.seg.tree_cdf[7] == 0);
+    // seg.pred_cdf: AOM_CDF2(128 * 128)
+    CHECK(fc.seg.pred_cdf[0][0] == AOM_ICDF(128 * 128));
+    // seg.spatial_pred_seg_cdf[2]: AOM_CDF8(..., 32679)
+    CHECK(fc.seg.spatial_pred_seg_cdf[2][6] == AOM_ICDF(32679));
+}
+
+// SY1b: ecFrameCdfsEqual covers the palette + seg families (a one-cell
+// mutation in each must read unequal - the bit-equality contract).
+TEST_CASE("ecFrameCdfsEqual covers the palette + seg families") {
+    entropy::EcFrameContext a, b;
+    entropy::initDefaultEcFrameContext(&a, 0);
+    b = a;
+    CHECK(entropy::ecFrameCdfsEqual(&a, &b) == 1);
+    b.palette_y_size_cdf[3][2] = 1234;
+    CHECK(entropy::ecFrameCdfsEqual(&a, &b) == 0);
+    b = a;
+    b.palette_uv_color_index_cdf[1][1][1] = 4321;
+    CHECK(entropy::ecFrameCdfsEqual(&a, &b) == 0);
+    b = a;
+    b.seg.spatial_pred_seg_cdf[1][0] = 777;
+    CHECK(entropy::ecFrameCdfsEqual(&a, &b) == 0);
+}
+
+// SYM1 (SY2): svt_aom_allow_palette (entropy_coding.c:4218-4223) and
+// svt_aom_get_palette_bsize_ctx (:4224-4231) over the ENUMERATED bsize set
+// (all 22; the ctx values cite eb_num_pels_log2_lookup, common_utils.c:39).
+TEST_CASE("allowPalette + getPaletteBsizeCtx over the bsize set") {
+    // allow=0 -> 0 for every bsize (the && chain).
+    for (int b = 0; b < entropy::BLOCK_SIZES_ALL; ++b) {
+        CHECK(entropy::allowPalette(0, (entropy::BlockSize)b) == 0);
+    }
+    // allow=1: wide<=64 && high<=64 && bsize>=BLOCK_8X8 - the >= is ENUM
+    // order, not geometry: BLOCK_4X16/BLOCK_16X4 are enum-appended (16, 17)
+    // and PASS the gate despite being 4-px-tall blocks (the reference's own
+    // quirk, enumerated here).
+    static const int want[entropy::BLOCK_SIZES_ALL] = {
+        0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1};
+    for (int b = 0; b < entropy::BLOCK_SIZES_ALL; ++b) {
+        CHECK(entropy::allowPalette(1, (entropy::BlockSize)b) == want[b]);
+    }
+    // get_palette_bsize_ctx = eb_num_pels_log2_lookup[bsize] - 6, EVERY value
+    // the function admits (the 4x4-family negatives are reachable values of
+    // the pure function; the allow_palette gate keeps callers above 8x8).
+    static const int wantCtx[entropy::BLOCK_SIZES_ALL] = {
+        -2, -1, -1, 0, 1, 1, 2, 3, 3, 4, 5, 5, 6, 7, 7, 8, 0, 0, 2, 2, 4, 4};
+    for (int b = 0; b < entropy::BLOCK_SIZES_ALL; ++b) {
+        CHECK(entropy::getPaletteBsizeCtx((entropy::BlockSize)b) == wantCtx[b]);
+    }
+}
+
+// SYM1 (SY3): svt_aom_get_palette_mode_ctx (entropy_coding.c:236-4249,
+// i.e. :4236-:4249) - the MacroBlockD wall threaded: the two consumed
+// neighbor facts are (available, palette_size) pairs. Enumerated 2x2
+// availability grid x the size {0, 3} contrast.
+TEST_CASE("getPaletteModeCtx over the availability grid") {
+    CHECK(entropy::getPaletteModeCtx(0, 0, 0, 0) == 0);
+    CHECK(entropy::getPaletteModeCtx(1, 3, 0, 0) == 1);
+    CHECK(entropy::getPaletteModeCtx(0, 0, 1, 3) == 1);
+    CHECK(entropy::getPaletteModeCtx(1, 3, 1, 3) == 2);
+    // The > 0 test, not the size itself: size 0 available contributes 0.
+    CHECK(entropy::getPaletteModeCtx(1, 0, 1, 0) == 0);
+}
+
+// SYM1 (SY4): delta_encode_palette_colors (entropy_coding.c:4252-4282), the
+// WRITER twin of the landed l13_palette::deltaEncodeCost (palette.c:80-109 -
+// the same reference function counts what the writer emits). Fixture: the
+// writer's literal-bit count == the cost formula over sampled chains.
+namespace {
+// av1_ceil_log2 (cabac_context_model.h:366-371, svt_log2f = get_msb).
+int tCeilLog2(int n) {
+    if (n < 2) return 0;
+    int v = n - 1, log = 0;
+    while (v) { ++log; v >>= 1; }
+    return log;
+}
+// The deltaEncodeCost arithmetic (palette.c:80-109; transcribed from the
+// landed src/l13_palette/palette.cpp deltaEncodeCost - the cross-layer
+// agreement oracle).
+int costFormula(const int* colors, int num, int bitDepth, int minVal) {
+    if (num <= 0) return 0;
+    int bits_cost = bitDepth;
+    if (num == 1) return bits_cost;
+    bits_cost += 2;
+    int max_delta = 0;
+    int deltas[PALETTE_MAX_SIZE];
+    const int min_bits = bitDepth - 3;
+    for (int i = 1; i < num; ++i) {
+        const int delta = colors[i] - colors[i - 1];
+        deltas[i - 1] = delta;
+        if (delta > max_delta) max_delta = delta;
+    }
+    int bits_per_delta = tCeilLog2(max_delta + 1 - minVal);
+    if (min_bits > bits_per_delta) bits_per_delta = min_bits;
+    int range = (1 << bitDepth) - colors[0] - minVal;
+    for (int i = 0; i < num - 1; ++i) {
+        bits_cost += bits_per_delta;
+        range -= deltas[i];
+        const int rl = tCeilLog2(range);
+        if (rl < bits_per_delta) bits_per_delta = rl;
+    }
+    return bits_cost;
+}
+} // namespace
+
+TEST_CASE("deltaEncodePaletteColors bit count == the deltaEncodeCost formula") {
+    static const int chains[4][8] = {
+        {10, 50, 60, 200, 0, 0, 0, 0},       // num 4, growing + jump
+        {3, 3, 3, 0, 0, 0, 0, 0},            // num 3, zero deltas (min_val 1!)
+        {128, 129, 131, 136, 200, 255, 0, 0},// num 6, tight then wide
+        {0, 1, 0, 0, 0, 0, 0, 0},            // num 2, min_val 1 boundary
+    };
+    static const int nums[4] = {4, 3, 6, 2};
+    for (int tcase = 0; tcase < 4; ++tcase) {
+        entropy::AomWriter w{};
+        unsigned char buf[64] = {0};
+        w.ec.buf = buf;
+        entropy::odEcEncReset(&w.ec);
+        w.allow_update_cdf = 0;
+        w.pos = 0;
+        const int before = entropy::odEcEncTell(&w.ec);
+        entropy::deltaEncodePaletteColors(chains[tcase], nums[tcase], 8, 1, &w);
+        const int written = entropy::odEcEncTell(&w.ec) - before;
+        entropy::odEcStopEncode(&w);
+        CHECK(written == costFormula(chains[tcase], nums[tcase], 8, 1));
+        // num 1 / num 0 degenerates (the early returns).
+        entropy::odEcEncReset(&w.ec);
+        const int b1 = entropy::odEcEncTell(&w.ec);
+        entropy::deltaEncodePaletteColors(chains[tcase], 1, 8, 1, &w);
+        CHECK(entropy::odEcEncTell(&w.ec) - b1 == 8);
+        entropy::odEcEncReset(&w.ec);
+        const int b0 = entropy::odEcEncTell(&w.ec);
+        entropy::deltaEncodePaletteColors(chains[tcase], 0, 8, 1, &w);
+        CHECK(entropy::odEcEncTell(&w.ec) - b0 == 0);
+    }
+}
+
+// SYM1 (SY5): get_unsigned_bits (entropy_coding.c:4284-4286),
+// write_uniform (:4288-4302) + its cost twin svt_aom_write_uniform_cost
+// (:4304-4314), and the aom reader twin av1_read_uniform (aom
+// decoder.h:488-496). Enumerated (n, v) grid, write->read roundtrip.
+TEST_CASE("writeUniform/readUniform grid roundtrip + cost twin") {
+    for (int n = 1; n <= 16; ++n) {
+        const int l = entropy::getUnsignedBits((unsigned)n);
+        const int m = (1 << l) - n;
+        for (int v = 0; v < n; ++v) {
+            // The integer od_ec tell lags on short streams (the first
+            // half-prob literal from a fresh encoder accounts 2), so the
+            // bit-COUNT instrument here is the desync canary: a second,
+            // fixed write whose decode breaks if the first wrote the wrong
+            // number of bits. Content + count ride on one stream.
+            entropy::AomWriter w{};
+            unsigned char buf[16] = {0};
+            w.ec.buf = buf;
+            entropy::odEcEncReset(&w.ec);
+            w.allow_update_cdf = 0;
+            w.pos = 0;
+            entropy::writeUniform(&w, n, v);
+            entropy::writeUniform(&w, 16, 15);  // the canary
+            entropy::odEcStopEncode(&w);
+            // The cost twin (av1_cost_literal = n << 9, AV1_PROB_COST_SHIFT 9).
+            CHECK(entropy::writeUniformCost(n, v) == (v < m ? (l - 1) << 9 : l << 9));
+            // Reader twin roundtrip: value then canary.
+            entropy::AomReader r;
+            REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+            r.allow_update_cdf = 0;
+            CHECK(entropy::readUniform(&r, n) == v);
+            CHECK(entropy::readUniform(&r, 16) == 15);
+        }
+    }
+    // get_unsigned_bits degenerates: 0 -> 0 (the reference's ternary).
+    CHECK(entropy::getUnsignedBits(0) == 0);
+    CHECK(entropy::getUnsignedBits(1) == 1);
+    CHECK(entropy::getUnsignedBits(8) == 4);
+}
+
+// SYM1 (SY6): write_palette_colors_y (entropy_coding.c:4320-4337, the
+// svt_get_palette_cache_y wall threaded as the cache args) + the aom
+// read_palette_colors_y reader twin (decodemv.c:478-507). Sizes {2, 4, 8},
+// the cache-hit paths incl. the all-cached early stop (merge_colors /
+// memcpy) and the empty-cache chain.
+TEST_CASE("writePaletteColorsY/readPaletteColorsY roundtrip + cache paths") {
+    struct Case {
+        int n;
+        int nCache;
+        std::uint16_t cache[2 * PALETTE_MAX_SIZE];
+        std::uint16_t colors[PALETTE_MAX_SIZE];
+    };
+    static const Case cases[5] = {
+        // size 2, empty cache
+        {2, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {10, 50, 0, 0, 0, 0, 0, 0}},
+        // size 4, cache of 3: two hits then a miss
+        {4, 3, {5, 100, 200, 0, 0, 0}, {5, 100, 130, 250, 0, 0, 0, 0}},
+        // size 8, all 8 in a 4-entry cache: early stop + the memcpy branch
+        {8, 4, {2, 9, 20, 60, 0, 0, 0, 0},
+         {2, 9, 20, 60, 100, 150, 200, 250}},
+        // size 8, partial cache: hits at both cache slots (sorted in/out)
+        {8, 2, {9, 150, 0, 0}, {2, 9, 20, 60, 100, 150, 200, 250}},
+        // size 8, empty cache: the full 6-delta chain
+        {8, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+         {1, 2, 5, 30, 31, 90, 200, 255}},
+    };
+    for (int tc = 0; tc < 5; ++tc) {
+        entropy::AomWriter w{};
+        unsigned char buf[64] = {0};
+        w.ec.buf = buf;
+        entropy::odEcEncReset(&w.ec);
+        w.allow_update_cdf = 0;
+        w.pos = 0;
+        entropy::writePaletteColorsY(&w, 8, cases[tc].cache, cases[tc].nCache, cases[tc].colors,
+                                     cases[tc].n);
+        entropy::odEcStopEncode(&w);
+        entropy::AomReader r;
+        REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+        r.allow_update_cdf = 0;
+        std::uint16_t got[PALETTE_MAX_SIZE];
+        entropy::readPaletteColorsY(&r, 8, cases[tc].cache, cases[tc].nCache, got, cases[tc].n);
+        for (int i = 0; i < cases[tc].n; ++i) {
+            CHECK(got[i] == cases[tc].colors[i]);
+        }
+    }
+}
+
+// SYM1 (SY7): write_palette_mode_info (entropy_coding.c:4351-4377) threaded
+// (the pcs/mbmi/blk_ptr walls as parameters; is_chroma_reference threaded -
+// the l6 predicate) + the aom read_palette_mode_info reader twin
+// (decodemv.c:567-604, the uv modev=1 continuation parked - the SVT writer
+// emits no uv palette, entropy_coding.c:4371 asserts palette_size[1]==0).
+// The roundtrip also pins CDF adaptation: writer-side and reader-side
+// adaptations must leave identical frame contexts.
+TEST_CASE("writePaletteModeInfo/readPaletteModeInfo roundtrip") {
+    struct Case {
+        entropy::PredictionMode lumaMode;
+        entropy::UvPredictionMode chromaMode;
+        int isChromaRef;
+        int sizeY;                 // 0 = no y palette
+        int nCache;
+        std::uint16_t cache[2 * PALETTE_MAX_SIZE];
+    };
+    static const std::uint16_t colors8[PALETTE_MAX_SIZE] = {2, 9, 20, 60, 100, 150, 200, 250};
+    static const Case cases[5] = {
+        {entropy::DC_PRED, entropy::UV_DC_PRED, 1, 2, 0, {0}},
+        {entropy::DC_PRED, entropy::UV_DC_PRED, 1, 5, 2, {9, 150, 0, 0}},
+        {entropy::DC_PRED, entropy::UV_DC_PRED, 1, 8, 4, {2, 9, 20, 60, 0, 0, 0, 0}},
+        {entropy::V_PRED, entropy::UV_DC_PRED, 1, 0, 0, {0}},   // no y symbols
+        {entropy::DC_PRED, entropy::UV_V_PRED, 1, 3, 0, {0}},   // no uv symbol
+    };
+    for (int tc = 0; tc < 5; ++tc) {
+        entropy::EcFrameContext fcW, fcR;
+        entropy::initDefaultEcFrameContext(&fcW, 0);
+        fcR = fcW;
+        entropy::AomWriter w{};
+        unsigned char buf[64] = {0};
+        w.ec.buf = buf;
+        entropy::odEcEncReset(&w.ec);
+        w.allow_update_cdf = 1;
+        w.pos = 0;
+        std::uint16_t colors[PALETTE_MAX_SIZE];
+        memcpy(colors, colors8, sizeof(colors));
+        entropy::writePaletteModeInfo(&w, &fcW, entropy::BLOCK_16X16, 8, cases[tc].lumaMode,
+                                      cases[tc].chromaMode, cases[tc].isChromaRef, cases[tc].sizeY,
+                                      colors, cases[tc].cache, cases[tc].nCache, 1, 1, 0, 0);
+        entropy::odEcStopEncode(&w);
+        entropy::AomReader r;
+        REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+        r.allow_update_cdf = 1;
+        std::uint16_t got[PALETTE_MAX_SIZE];
+        const int gotSize = entropy::readPaletteModeInfo(&r, &fcR, entropy::BLOCK_16X16, 8,
+                                                         cases[tc].lumaMode, cases[tc].chromaMode,
+                                                         cases[tc].isChromaRef, cases[tc].cache,
+                                                         cases[tc].nCache, 1, 1, 0, 0, got);
+        CHECK(gotSize == cases[tc].sizeY);
+        for (int i = 0; i < cases[tc].sizeY; ++i) CHECK(got[i] == colors[i]);
+        // CDF adaptation in lockstep (fixture (e)).
+        CHECK(entropy::ecFrameCdfsEqual(&fcW, &fcR) == 1);
+    }
+}
+
+// SYM1 (SY8a): the l7 twin of the fast palette color-index context
+// (palette.c:639-776; the landed l13_palette twin cannot be linked - no
+// CMake edits - so l7 carries its own copy; both port the same spans and
+// the fixtures below mirror test_palette.cpp's).
+TEST_CASE("l7 fastPaletteColorIndexContext twin: edge + interior + dup branches") {
+    int idx = -1;
+    const std::uint8_t mapE[4] = {5, 7, 9, 11};  // stride 2
+    CHECK(entropy::fastPaletteColorIndexContextOnEdge(mapE, 2, 0, 1, &idx) == 0);
+    CHECK(idx == 7);  // left 5 < current 7: unchanged
+    idx = -1;
+    CHECK(entropy::fastPaletteColorIndexContextOnEdge(mapE, 2, 1, 0, &idx) == 0);
+    CHECK(idx == 9);  // above 5 < current 9: unchanged
+    const std::uint8_t mapUp[4] = {7, 5, 0, 0};
+    idx = -1;
+    CHECK(entropy::fastPaletteColorIndexContextOnEdge(mapUp, 2, 0, 1, &idx) == 0);
+    CHECK(idx == 6);  // left 7 > current 5: +1
+    const std::uint8_t mapEq[4] = {3, 3, 0, 0};
+    idx = -1;
+    CHECK(entropy::fastPaletteColorIndexContextOnEdge(mapEq, 2, 0, 1, &idx) == 0);
+    CHECK(idx == 0);  // left == current: 0
+    // All-distinct interior: hash 8 -> ctx 1, color_idx unchanged (8).
+    const std::uint8_t map[6] = {5, 2, 0, 6, 8, 0};
+    idx = -1;
+    CHECK(entropy::fastPaletteColorIndexContext(map, 3, 1, 1, &idx) == 1);
+    CHECK(idx == 8);
+    // Interior edge delegate (0,1): only a left neighbor.
+    const std::uint8_t edgeMap[6] = {5, 7, 0, 0, 0, 0};
+    idx = -1;
+    CHECK(entropy::fastPaletteColorIndexContext(edgeMap, 3, 0, 1, &idx) == 0);
+    CHECK(idx == 7);
+    // Duplicate aggregation, branch (a) left == top (scores[0] = 4, the
+    // INVALID shift pulls tl into slot 1): ctx 3, walk 7>4 -> 5, 5>4 -> 6.
+    const std::uint8_t mapA[6] = {5, 7, 9, 7, 4, 0};
+    idx = -1;
+    CHECK(entropy::fastPaletteColorIndexContext(mapA, 3, 1, 1, &idx) == 3);
+    CHECK(idx == 6);
+    // Branch (b) left == topleft (scores[0] = 3, top stays): ctx 2,
+    // walk 6>3 -> 4, 8>3 -> 5.
+    const std::uint8_t mapB[6] = {6, 8, 9, 6, 3, 0};
+    idx = -1;
+    CHECK(entropy::fastPaletteColorIndexContext(mapB, 3, 1, 1, &idx) == 2);
+    CHECK(idx == 5);
+}
+
+// SYM1 (SY8b): the color-map token chain. Writer: svt_av1_tokenize_color_map
+// (palette.c:781-828, the Av1ColorMapParam wall threaded) + pack_map_tokens
+// (entropy_coding.c:4339-4348). Reader: aom decode_color_map_tokens
+// (detokenize.c:25-46) over av1_get_palette_color_index_context
+// (entropymode.c:893-951) + av1_read_uniform. The roundtrip also proves the
+// SVT fast context and the aom full context agree on (ctx, symbol/order).
+TEST_CASE("palette color-map token chain roundtrip") {
+    struct TCase {
+        int n;
+        int rows;
+        int cols;
+        int planeW;
+        int planeH;
+        std::uint8_t map[64];
+    };
+    static const TCase cases[4] = {
+        {2, 4, 4, 4, 4,
+         {0, 1, 0, 1,
+          1, 1, 0, 0,
+          0, 1, 1, 1,
+          1, 0, 1, 0}},
+        {4, 4, 5, 5, 4,
+         {0, 1, 2, 3, 1,
+          3, 2, 1, 0, 2,
+          0, 0, 1, 1, 3,
+          2, 3, 3, 2, 0}},
+        {8, 8, 8, 8, 8,
+         {0, 1, 2, 3, 4, 5, 6, 7,
+          7, 6, 5, 4, 3, 2, 1, 0,
+          0, 0, 1, 1, 2, 2, 3, 3,
+          4, 4, 5, 5, 6, 6, 7, 7,
+          1, 3, 5, 7, 0, 2, 4, 6,
+          2, 2, 2, 2, 6, 6, 6, 6,
+          7, 0, 7, 0, 7, 0, 7, 0,
+          3, 1, 4, 1, 5, 2, 2, 6}},
+        // the padding tail: 3x3 coded on a 5x4 plane (planeW 5, planeH 4)
+        {4, 3, 3, 5, 4,
+         {0, 1, 2, 9, 9,
+          1, 2, 3, 9, 9,
+          2, 3, 0, 9, 9,
+          9, 9, 9, 9, 9}},
+    };
+    for (int tc = 0; tc < 4; ++tc) {
+        entropy::EcFrameContext fcW, fcR;
+        entropy::initDefaultEcFrameContext(&fcW, 0);
+        fcR = fcW;
+        entropy::TokenExtra tok[128];
+        const int nTok = entropy::tokenizeColorMap(&fcW, cases[tc].map, cases[tc].planeW, cases[tc].rows,
+                                                   cases[tc].cols, cases[tc].n, 0, 0, tok);
+        CHECK(nTok == cases[tc].rows * cases[tc].cols);
+        entropy::AomWriter w{};
+        unsigned char buf[512] = {0};
+        w.ec.buf = buf;
+        entropy::odEcEncReset(&w.ec);
+        w.allow_update_cdf = 1;
+        w.pos = 0;
+        entropy::packMapTokens(&w, tok, cases[tc].n, cases[tc].rows * cases[tc].cols);
+        entropy::odEcStopEncode(&w);
+        entropy::AomReader r;
+        REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+        r.allow_update_cdf = 1;
+        std::uint8_t got[64];
+        memset(got, 0xAA, sizeof(got));
+        entropy::decodeColorMapTokens(&r, got, cases[tc].planeW, cases[tc].planeH, cases[tc].rows,
+                                      cases[tc].cols, cases[tc].n, 0, &fcR);
+        // Coded cells: exact. Padded columns (c >= cols, r < rows): the
+        // decoder's last-column copy (the map's own last coded value).
+        // Padded rows (r >= rows): the last CODED row is copied WHOLE
+        // (its own padded columns already filled), so the oracle reads the
+        // reconstructed row itself.
+        for (int rr = 0; rr < cases[tc].planeH; ++rr) {
+            for (int cc = 0; cc < cases[tc].planeW; ++cc) {
+                int want;
+                if (rr < cases[tc].rows) {
+                    want = (cc < cases[tc].cols)
+                               ? cases[tc].map[rr * cases[tc].planeW + cc]
+                               : cases[tc].map[rr * cases[tc].planeW + (cases[tc].cols - 1)];
+                } else {
+                    want = got[(cases[tc].rows - 1) * cases[tc].planeW + cc];
+                }
+                if (got[rr * cases[tc].planeW + cc] != want) {
+                    fprintf(stderr, "MISMATCH tc=%d r=%d c=%d got=%d want=%d\n", tc, rr, cc,
+                            (int)got[rr * cases[tc].planeW + cc], want);
+                }
+                CHECK(got[rr * cases[tc].planeW + cc] == want);
+            }
+        }
+        // CDF adaptation in lockstep (fixture (e)).
+        CHECK(entropy::ecFrameCdfsEqual(&fcW, &fcR) == 1);
+    }
+}
+
+// SYM1 (SY9): the seg feature bits (encode_segmentation, entropy_coding.c:
+// 2253-2280, threaded) + the aom setup_segmentation reader twin
+// (decodeframe.c, the out-of-tree arbiter) over the enumerated feature/level
+// grid. The wb trio is the l7 twin of the landed l8 copy (both port
+// entropy_coding.c:1343-1382; l7 cannot link l8 - no CMake edits).
+TEST_CASE("seg feature write/read grid roundtrip") {
+    // segmentation_params.c:16/:18: signed {1,1,1,1,1,0,0,0},
+    // bits {8,6,6,6,6,3,0,0}.
+    for (int j = 0; j < SEG_LVL_MAX; ++j) {
+        const int bits = entropy::segFeatureBits[j];
+        const int hi = (1 << bits) - 1;   // the seg_feature_data_max span top
+        // Data probes per the feature's sign: the extremes, the clamping
+        // edge, and midpoints. Unsigned features take non-negative probes
+        // only (a negative datum is not a legal input there).
+        int probes[6];
+        int nProbes;
+        if (entropy::segFeatureSigned[j]) {
+            probes[0] = -hi;
+            probes[1] = -hi + 1;
+            probes[2] = -1;
+            probes[3] = 0;
+            probes[4] = 1;
+            probes[5] = hi;
+            nProbes = 6;
+        } else if (hi > 0) {
+            probes[0] = 0;
+            probes[1] = 1;
+            probes[2] = hi / 2;
+            probes[3] = hi;
+            nProbes = 4;
+        } else {  // the 0-bit features: only one probe
+            probes[0] = 0;
+            nProbes = 1;
+        }
+        for (int p = 0; p < nProbes; ++p) {
+            entropy::AomWriteBitBuffer wb;
+            std::uint8_t buf[64] = {0};
+            wb.bit_buffer = buf;
+            wb.bit_offset = 0;
+            std::int16_t enabled[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+            std::int16_t data[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+            enabled[0][j] = 1;
+            data[0][j] = (std::int16_t)probes[p];
+            entropy::writeSegFeatures(&wb, 1, 1, 0, 1, 7 /*primary_ref_frame = NONE*/, enabled, data);
+            entropy::AomReadBitBuffer rb;
+            rb.bit_buffer = buf;
+            rb.bit_buffer_end = buf + sizeof(buf);
+            rb.bit_offset = 0;
+            std::int16_t rEnabled[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+            std::int16_t rData[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+            entropy::readSegFeatures(&rb, 1, 0, 1, 7, rEnabled, rData);
+            CHECK(rEnabled[0][j] == 1);
+            // The reader clamps into [-max, max] (aom decodeframe.c); the
+            // probes are within span so the values must agree exactly.
+            CHECK((int)rData[0][j] == probes[p]);
+            // The wb byte accounting: the reader consumed exactly what was
+            // written (the feature grid + the four header bits per the
+            // primary_ref_frame gate).
+            CHECK(rb.bit_offset == wb.bit_offset);
+        }
+    }
+    // The clamp semantics (the aom reader's own guard; the pinned writer
+    // does NOT clamp - its in-file TODO). Through the writer's inv-signed
+    // emission the ONLY reachable out-of-span readback is the bottom edge:
+    // a datum of -(1 << bits) reads back as -256 and clamps to -255
+    // (higher magnitudes wrap positive through the 9-bit pattern - the
+    // inv-signed span is [-256, 255]; the clamp's reachable case is the
+    // bottom edge only, which is what this pins).
+    {
+        entropy::AomWriteBitBuffer wb;
+        std::uint8_t buf[64] = {0};
+        wb.bit_buffer = buf;
+        wb.bit_offset = 0;
+        std::int16_t enabled[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        std::int16_t data[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        enabled[0][0] = 1; data[0][0] = -256;  // one past the legal span
+        entropy::writeSegFeatures(&wb, 1, 0, 0, 1, 7, enabled, data);
+        entropy::AomReadBitBuffer rb;
+        rb.bit_buffer = buf;
+        rb.bit_buffer_end = buf + sizeof(buf);
+        rb.bit_offset = 0;
+        std::int16_t rEnabled[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        std::int16_t rData[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        entropy::readSegFeatures(&rb, 0, 0, 1, 7, rEnabled, rData);
+        CHECK(rData[0][0] == -255);
+        CHECK(rb.bit_offset == wb.bit_offset);
+    }
+    // Segment row 7 + several features at once (the grid walk order).
+    {
+        entropy::AomWriteBitBuffer wb;
+        std::uint8_t buf[64] = {0};
+        wb.bit_buffer = buf;
+        wb.bit_offset = 0;
+        std::int16_t enabled[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        std::int16_t data[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        enabled[7][0] = 1; data[7][0] = -128;
+        enabled[7][5] = 1; data[7][5] = 5;
+        enabled[3][6] = 1; data[3][6] = 0;  // SEG_LVL_SKIP: 0 bits
+        entropy::writeSegFeatures(&wb, 1, 0, 0, 1, 7, enabled, data);
+        entropy::AomReadBitBuffer rb;
+        rb.bit_buffer = buf;
+        rb.bit_buffer_end = buf + sizeof(buf);
+        rb.bit_offset = 0;
+        std::int16_t rEnabled[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        std::int16_t rData[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        entropy::readSegFeatures(&rb, 0, 0, 1, 7, rEnabled, rData);
+        CHECK(rEnabled[7][0] == 1); CHECK(rData[7][0] == -128);
+        CHECK(rEnabled[7][5] == 1); CHECK(rData[7][5] == 5);
+        CHECK(rEnabled[3][6] == 1); CHECK(rData[3][6] == 0);
+        CHECK(rb.bit_offset == wb.bit_offset);
+    }
+    // The disabled frame: nothing written, the reader reads nothing.
+    {
+        entropy::AomWriteBitBuffer wb;
+        std::uint8_t buf[8] = {0};
+        wb.bit_buffer = buf;
+        wb.bit_offset = 0;
+        std::int16_t enabled[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        std::int16_t data[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        entropy::writeSegFeatures(&wb, 0, 0, 0, 0, 0, enabled, data);
+        CHECK(wb.bit_offset == 1);  // only the enabled bit
+        entropy::AomReadBitBuffer rb;
+        rb.bit_buffer = buf;
+        rb.bit_buffer_end = buf + sizeof(buf);
+        rb.bit_offset = 0;
+        std::int16_t rEnabled[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        std::int16_t rData[MAX_SEGMENTS][SEG_LVL_MAX] = {{0}};
+        entropy::readSegFeatures(&rb, 0, 0, 0, 0, rEnabled, rData);
+        CHECK(rb.bit_offset == 1);
+        CHECK(rEnabled[7][7] == 0);
+    }
+}
+
+// SYM1 (SY10): the segmentation symbol surface. svt_aom_get_segment_id
+// (entropy_coding.c:4723-4740), svt_av1_get_spatial_seg_prediction
+// (:4744-4800), svt_av1_neg_interleave (:4802-4818) + the aom
+// av1_neg_deinterleave twin (decodemv.c:261-277),
+// svt_av1_update_segmentation_map (:4843-4861), write_segment_id
+// (:4863-4883) + the aom read_segment_id reader twin (decodemv.c:280-303).
+TEST_CASE("negInterleave/negDeinterleave inverse over the full grid") {
+    for (int max = 1; max <= MAX_SEGMENTS; ++max) {
+        for (int ref = 0; ref < max; ++ref) {
+            for (int x = 0; x < max; ++x) {
+                const int coded = entropy::negInterleave(x, ref, max);
+                CHECK(entropy::negDeinterleave(coded, ref, max) == x);
+            }
+        }
+    }
+}
+
+TEST_CASE("getSegmentId min-walk + updateSegmentationMap roundtrip") {
+    // A 6x5 mi grid; BLOCK_8X8 (2x2 mi) blocks; the map holds per-mi ids.
+    const int miCols = 6, miRows = 5;
+    std::uint8_t ids[6 * 5];
+    memset(ids, 0, sizeof(ids));
+    // Write block (1,2) = id 4, block (3,2) = id 7 (partial at the edge).
+    entropy::updateSegmentationMap(ids, miCols, miRows, entropy::BLOCK_8X8, 2, 2, 4);
+    entropy::updateSegmentationMap(ids, miCols, miRows, entropy::BLOCK_8X8, 2, 4, 7);
+    // Full-block read: the min over the 2x2 extent.
+    CHECK(entropy::getSegmentId(ids, miCols, miRows, entropy::BLOCK_8X8, 2, 2) == 4);
+    CHECK(entropy::getSegmentId(ids, miCols, miRows, entropy::BLOCK_8X8, 2, 4) == 7);
+    // The edge-clamped read at (4,2): xmis = min(6-4, 2) = 2 covers cols 4-5;
+    // the block extent reaches col 5 (id 7 from the (2,4) write).
+    CHECK(entropy::getSegmentId(ids, miCols, miRows, entropy::BLOCK_8X8, 2, 4) == 7);
+    // Untouched area -> 0.
+    CHECK(entropy::getSegmentId(ids, miCols, miRows, entropy::BLOCK_16X16, 0, 0) == 0);
+}
+
+// SYM1 (SY10b): write_segment_id / read_segment_id roundtrip over a block
+// walk (the raster emission order; the reader keeps its own map copy in
+// lockstep), plus the skip_coeff path (no symbol; the prediction lands in
+// both maps) and the CDF adaptation lockstep.
+TEST_CASE("writeSegmentId/readSegmentId block-walk roundtrip") {
+    const int miCols = 6, miRows = 5;
+    std::uint8_t mapW[6 * 5] = {0};
+    std::uint8_t mapR[6 * 5] = {0};
+    entropy::EcFrameContext fcW, fcR;
+    entropy::initDefaultEcFrameContext(&fcW, 0);
+    fcR = fcW;
+    entropy::AomWriter w{};
+    unsigned char buf[64] = {0};
+    w.ec.buf = buf;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    struct B { int r, c, up, left, id, skip; };
+    static const B blocks[6] = {
+        {0, 0, 0, 0, 3, 0}, {0, 2, 0, 1, 0, 0}, {0, 4, 0, 1, 5, 1},
+        {2, 0, 1, 0, 2, 0}, {2, 2, 1, 1, 7, 0}, {2, 4, 1, 1, 1, 0},
+    };
+    for (int b = 0; b < 6; ++b) {
+        entropy::writeSegmentId(&w, &fcW, entropy::BLOCK_8X8, mapW, miCols, miRows, blocks[b].r,
+                                blocks[b].c, blocks[b].up, blocks[b].left, blocks[b].id, 7,
+                                blocks[b].skip);
+    }
+    entropy::odEcStopEncode(&w);
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    for (int b = 0; b < 6; ++b) {
+        if (blocks[b].skip) {
+            // The skip path: no symbol; both sides take the prediction.
+            int cdfNum;
+            const int pred = entropy::getSpatialSegPrediction(mapR, miCols, miRows, blocks[b].up,
+                                                              blocks[b].left, blocks[b].r,
+                                                              blocks[b].c, &cdfNum);
+            entropy::updateSegmentationMap(mapR, miCols, miRows, entropy::BLOCK_8X8, blocks[b].r,
+                                           blocks[b].c, (std::uint8_t)pred);
+            CHECK(pred == 0);  // prev_u unavailable -> the left neighbor's id
+        } else {
+            const int got = entropy::readSegmentId(&r, &fcR, entropy::BLOCK_8X8, mapR, miCols,
+                                                   miRows, blocks[b].r, blocks[b].c, blocks[b].up,
+                                                   blocks[b].left, 7);
+            CHECK(got == blocks[b].id);
+        }
+    }
+    CHECK(memcmp(mapW, mapR, sizeof(mapW)) == 0);
+    CHECK(entropy::ecFrameCdfsEqual(&fcW, &fcR) == 1);
+}
