@@ -1,411 +1,62 @@
-# AV1 CUDA 12.2 Port (Pascal-targeted)
+# AV1 CUDA 12.2 port
 
-GPU-accelerated port of [SVT-AV1](https://gitlab.com/AOMediaCodec/SVT-AV1)
-encoder building blocks to CUDA 12.2, targeting NVIDIA Pascal
-(`sm_61` / GP104-class) hardware. The host reference paths are taken 1:1
-from SVT-AV1's C implementation and re-expressed as CUDA C++ kernels
-JIT-compiled at runtime via NVRTC.
+An experimental port of selected [SVT-AV1](https://gitlab.com/AOMediaCodec/SVT-AV1)
+encoder building blocks to CUDA 12.2, targeting NVIDIA Pascal (`sm_61`). Host
+reference code follows the project's pinned SVT-AV1 snapshot, and CUDA kernels
+are compiled at runtime with NVRTC.
 
-> **Disclaimer:** This project is actively being worked on. APIs will
-> change and not every SVT-AV1 feature is ported yet. Kernels are held
-> to bit-exact agreement with the vendored SVT host C (enforced by the
-> committed golden gate); the composite encoder loop is per-block
-> synchronous launches - see `AGENTS.md` for the dated benchmark
-> baseline and the known-overhead caveat. Not ready for production use.
+> **Progress: 20.5% portable-C coverage** (32,379 of 157,718 non-blank
+> reference lines), measured 2026-11-06. This source-coverage metric is not a
+> claim of overall completion or production readiness. The decoder-verified
+> artifacts and current scope are summarized in [project status](docs/project_status.md).
 
-## Status
+## Current state
 
-- **First decoder-accepted AV1 bitstream** (BS-series closed): the
-  pipeline emits a structural keyframe temporal unit that a reference
-  decoder accepts and decodes - libdav1d exits silently and ffprobe
-  reports `codec_name=av1`, 32x32, `pix_fmt=gray` (monochrome, D1
-  confirmed by an independent decoder) and `color_range=pc` (the
-  ratified `color_range=1`).
-- **Coefficient/token coding closed** (TS-series): the lossy v2
-  temporal unit (47 bytes, real token streams, `base_q_idx` = 100)
-  parses under the same decoders - an ffmpeg probe reports
-  `av1 (libdav1d) (Main)`, gray(pc), 32x32 - and was the
-  conformance gate until the FS-series extended it to all five
-  geometries.
-- **Decoder conformance closed, content 1:1** (TD-series): the
-  q100 token streams now decode **and reconstruct bit-identically**.
-  The root cause was the coefficient-CDF qindex bucket: the spec's
-  `init_coeff_cdfs` mandates selecting the token tables by
-  `base_q_idx` (07.bitstream.semantics.md:1800-1820; the verbatim
-  `get_q_ctx`, cabac_context_model.c:1907-1918); the writer used the
-  idx-0 bucket for every frame. With the bucketed init the 7-rung
-  bisect ladder is 7/7 byte-exact in the real libdav1d, and all 1024
-  decoded pixels of the committed 47-byte artifact equal the
-  generator's recon (the content fingerprint: the first pixels
-  `05 08 0c 11`).   The full resolution record:
-  `docs/decode_conformance.md`.
-- **Core Component Implementation completed** (L11-L15 / Grain Family): Completed the foundational layer, including geometric resizing (L11), convolving filters (L12), palette mapping utilities (L13), and reference check mechanisms (L15/RC). This completes the software's ability to manipulate and interpret AV1 data structures at the binary level, forming the basis for advanced features.
-- **Grain Family integration completed**: The grain family of components has been fully integrated, ensuring robust encoding and decoding workflows for the target engines.
-- **Per-geometry emission closed, content 1:1 at all five sizes**
-  (FS-series): every geometry (4x4, 8x8, 16x16, 32x32, 64x64) now
-  emits real symbol streams (partition/skip/kf-mode/filter-intra/
-  token chains) and carries a committed v3 artifact that a reference
-  decoder decodes **bit-identically** - measured: d4 30B->64B,
-  d8 30B->64B, d16 44B->256B, d32 47B->1024B, d64 441B->4096B decoded
-  bytes all equal the generator's recon lines
-  (`tools/verify_decode4.ps1 -Geometry <4|8|16|32|64>`). The 4x4
-  artifact codes an 8x8 frame as one 4-symbol partition symbol
-  (forced SPLIT) plus four 4x4 partition leaves: the decoders align
-  frame dims to 8 px, so a 4x4 frame is an 8x8 node and a 4x4 TU
-  exists only as a leaf (dav1d-trace-verified). Multi-block grids
-  emit running partition contexts (`updatePartitionContext`); the
-  grid conformance gate is the fs5g32 fixture. Scope: single-TU and
-  the grid fixtures are gate-pinned; the filter-intra DC-deciding
-  fixture and the 64x64 dual-domain GPU unification remain named
-  follow-ups.
-- **Color emission landed; chroma conformance closed 4/4**
-  (CS-series + RT-series): the monochrome limitation ended - the
-  chroma-emitting l6 walk emits the uv_mode symbol (ONE per block,
-  the V TU sharing the U decision) and the per-component U/V token
-  chains, and the color SPS v3 replaces the D1 mono patch (mono bit
-  0, the 4:2:0 config, the frame header 40 -> 42 bits; the mono
-  producers stay pinned for the mono artifact set). Four committed
-  color artifacts (`tools/verify_decode4.ps1 -Color <4|8|16|32>`).
-  Measured: ALL FOUR decode full-plane content 1:1 (all three
-  planes) - color16/color32 from CS5, color8 at the CS7 fix
-  (`5ce0224`, the chroma bottom-left Z-order gate) and color4 at
-  RT21 (`927e697`, the chroma above-right Z-order gate, its last 43
-  divergent V bytes). The honest per-plane matrix:
-  `docs/decode_conformance.md`; how chroma works end to end:
-  `docs/color.md`.
-- **The coverage campaign opened seven host layers**: content analysis
-  in `l9_analysis` (AN1-AN17: the mean/variance family, the
-  screen-content + luma-dominant detectors, the pad family, the
-  float FFT kernels, the noise model; plus TF1 the temporal-filter
-  kernels and PU1 the pack/unpack + blend + VAR family) and the
-  post-filter kernel families in `l10_filters` - deblocking DF1/DF2,
-  the CDEF find-dir/filter/fb/mse-search family (CDEF1-CDEF3), the
-  restoration family incl. the stripe/unit walkers (LR1-LR3), and the
-  film-grain synthesis core (GR1) - plus `l11_resize` (the resize 1D
-  kernels, AN21), `l12_convolve` (CV1), `l13_palette` (PAL1 + SEG1),
-  `l14_utility` (U1) and `l15_rc` (RC1) - coverage-only slices that
-  move
-  no conformance count: nothing is wired into an encode loop yet
-  (the filter enable bits stay 0) and analysis feeds no decision.
-- All layers green: 16 doctest targets pass, and the golden gate
-  reproduces the committed `expected_primitives.txt` 421/421 lines.
-- **Progress metric: 20.5% portable-C coverage** of the pinned
-  reference's algorithm surface (32,379 of 157,718 non-blank lines in
-  `Source/Lib/{Codec,C_DEFAULT}`), regenerated by
-  `powershell -File tools\coverage.ps1`. The per-area table and the
-  definition of the denominator are in `AGENTS.md`.
+The project includes transforms and quantization, intra prediction, frame
+composition, entropy coding, structural AV1 bitstream output, and a growing set
+of analysis, filtering, and utility modules. Nine committed grayscale and
+4:2:0 color artifacts have decoder conformance results recorded in the
+[conformance matrix](docs/decode_conformance.md).
 
-## What's implemented
+This is still an experimental project, not a production-ready encoder. The
+[project status](docs/project_status.md) summarizes verified milestones and
+important boundaries. See [the layer stack](docs/layers.md) for implementation
+details.
 
-Each layer is developed under incremental TDD (see `AGENTS.md`); GPU
-twins are held to bit-exact agreement with the SVT host reference.
-Symbol-by-symbol provenance lives in `docs/provenance.md` and
-`tools/golden_gen/README.md`; the gate-line inventory in the latter.
-How the stack works end to end: `docs/layers.md`; the bitstream path:
-`docs/bitstream.md`; the per-geometry emission walks: `docs/emission.md`;
-the chroma/color pipeline: `docs/color.md`; decoder-acceptance status:
-`docs/decode_conformance.md`.
+## Build and test
 
-- **l0_core** - minimal shared types: `Sample` (uint8), `BlockSize`.
-- **l1_pixels** - `pixels::Plane`: strided pixel buffer with left/right
-  padding.
-- **l2_gpurt** - NVRTC JIT + CUDA driver-API runtime: `GpuContext`,
-  `DeviceBuffer`, `Kernel`, `compileToPtx`, `ptxEntryNames`; kernel
-  sources are CUDA C++ strings compiled for `compute_61`.
-- **l3_transforms** - SVT-AV1 fixed-point transforms at every size
-  4x4..64x64, host plus bit-exact GPU twins: the verbatim 1D kernels
-  (forward fdct/fadst, inverse idct/iadst; 64x64 is DCT-only - no ADST
-  is signalable at TX_64X64 in this tree), the 2D wrappers
-  (`fwdTxfm2d*`/`invTxfm2dAdd*`) carrying SVT's per-size cos_bit/shift
-  configuration (16x16 is the one geometry with differing fwd col/row
-  cos_bit 13/12; 64x64 col/row 13/10 is the only pass below 12), and
-  the quantizer stage: `buildQuantTables`, default scans,
-  `quantizeFp*`/`quantizeB*` at log_scale 0/0/0/1/2 (dc/ac unified via
-  the dequant table index - this SVT tree has no `av1_quantize_dc`),
-  with GPU quantize+dequant twins (`quant_dequant_*`).
-- **l4_intra** - intra prediction 1:1 with SVT's
-  `build_intra_predictors`, size-generic over 4/8/16/32/64 (DC
-  availability variants, missing-neighbor fills): directional
-  prediction (z1/z2/z3 + drPredictor), edge filter/upsample, smooth
-  family, filter-intra, paeth. GPU twins `predict_block_*` at every
-  size - 32x32/64x64 run 1024 threads (the CUDA block maximum; 64x64
-  does four pixels per thread and has no filter-intra path, which is
-  not signalable at that size), the corner blend is live at 16x16 and
-  above, edge upsample never fires above 8x8, and GPU == host is
-  verified for all 8 dr modes x angle deltas at every size. Chroma:
-  `UvPredictionMode` (UV_CFL_PRED folds to DC_PRED - the cfl_alpha
-  AC-from-luma combine is out of scope), the `uv2y` fold and
-  `buildIntraPredictorsUv`; the predictors are plane-agnostic and
-  chroma never uses filter-intra.
-- **l5_motion** - SAD at 4x4/8x8/16x16/32x32/64x64 over strided uint8
-  (8x8 mirrors SVT's dedicated 8x8 kernel, the rest mirror
-  `svt_nxm_sad_kernel_helper_c`); GPU kernels for 4x4/8x8, the larger
-  dims score host-side.
-- **l6_pipeline** - block and frame composition and mode decision at
-  4x4..64x64. `encodeBlock4x4` composes plane window (l1) + intra
-  prediction (l4) + residual + forward transform (l3); `encodeRecon4x4`
-  adds the inverse round trip. Frame level: the Recon variants run a
-  raster grid with recon-only neighbors; the Auto variants drive full
-  frames with each block's mode chosen by the D2 policy
-  (`decideBlockMode*` - all 13 intra modes scored by SAD against
-  reconstructed edges; project-defined policy on SVT primitives).
-  Quantized variants (`*Q`) wire the FP quantizer at a fixed qindex so
-  quantization loss feeds back through decisions. The 16x16 fwd/inv
-  roundtrip is exact; 8x8/32x32/64x64 are lossy by design (64x64
-  DCT-only within our TxType scope). Chroma: the 4:2:0 chroma-emitting
-  walk `encodeFrameChromaQ` runs a real superblock tree in the
-  decoder's Z-order DFS, carrying the chroma-ownership rule, UV block
-  sizes {4,8,16,32} selected from the luma size, and the per-block
-  order [luma mode][uv_mode][uv angle-delta][luma chain][U chain]
-  [V chain] with three separate neighbour arrays; the chroma
-  transform type is derived (never signalled) via `intraUvTxType`.
-  Entropy emission
-  runs per geometry: the 16x16 Auto/Q paths emit the kf y-mode +
-  angle delta + filter-intra flag (BSF1) and the real per-block
-  token stream (TS3, skip = 0); the 4x4Q/8x8Q/32x32Q/64x64Q loops
-  emit the full per-block walk [partition iff the frame reads one]
-  [skip][kf mode + angle delta][filter-intra iff the predicate]
-  [token chain] with the qindex-bucketed frame context (FS3/FS4) -
-  bit-exact vs the generator's per-size gate lines; multi-block
-  grids emit running partition contexts (`updatePartitionContext`,
-  the fs5g32 grid gate). Scope: the single-TU and grid fixtures are
-  gate-pinned; the filter-intra DC-deciding fixture and the 64x64
-  dual-domain GPU unification (a 1024-position GPU kernel + bench
-  work) are named follow-ups. GPU frame paths run the per-block
-  kernel chain (predict, subtract, forward, quantize where
-  configured, inverse-add), bit-exact vs host in lossless and q100
-  at all five geometries (host decides, GPU executes).
-- **l7_entropy** - the entropy coder, host port, integer only,
-  bit-exact vs the committed gate. The od_ec range encoder and decoder
-  (equal-prob, binary and cdf-coded symbol primitives, byte flush,
-  tell/tell_frac; the decoder side ports the vendored aom_dsp
-  `entdec.c` - `od_ec_dec_bits_` is declared-but-undefined in the
-  pinned tree and stays unported), CDF adaptation (`updateCdf`) and
-  the write/read symbol wrappers.   Symbol level: kf luma mode + angle
-  delta + filter-intra flag/mode, partition, skip, and the token
-  chain - per-TU coefficients (txb_skip -> eob position -> base/br ->
-  signs -> golomb) driven by the NA context model and the
-  per-position nz-map context LUT, plus the tx-type symbol through
-  `intra_ext_tx_cdf`. Named scope: the coefficient CDF tables are
-  **qindex-bucketed** (the spec's `init_coeff_cdfs`, via the verbatim
-  `getQCtx` mirror; the idx-0-bucket-always bug was the TS1 deviation
-  and is resolved), whole-block TUs, `reduced_tx_set = 1`; writer
-  and reader adapt CDFs identically (encoder/decoder
-  mutual-consistency test). Landed
-  (CS1/CS4): the chroma uv_mode/uv-delta symbols and the per-component
-  token chains (U and V). Deferred: the CFL alphas (UV_CFL_PRED is not
-  a D2 candidate), the nonkey y-mode path, palette, intrabc.
-- **l8_bitstream** - raw-bit writer + OBU container ground floor
-  (bit/literal/inv-signed-literal writers, uleb128, OBU header +
-  uleb payload size, temporal delimiter) and structural keyframe
-  assembly: sequence-header OBU payload (the max frame dims
-  parameterized; `frame_width_bits` = msb(dims)), the uncompressed
-  frame-header walk and the full temporal unit packer (TD + SPS +
-  OBU_FRAME in SVT's packer structure). Header history: v1 lossless
-  (22 bits + 2 pad), v2 lossy q100 (40 bits, TS4), and the color v3
-  (CS3, the D1 un-patch: mono bit 0, the 4:2:0 config, the U/V
-  delta_q bits, 42 bits - the D1 mono producers stay pinned for the
-  mono artifact set, their gate lines diff-0). The committed artifact
-  set `src/l8_bitstream/tests/goldens/structural_keyframe*.obu` -
-  five grayscale (the 47B d32 four-16x16-leaves walk + d4 30B, d8
-  30B, d16 44B, d64 441B) and four color (color4 183B, color8 137B,
-  color16 133B, color32 165B) - each proves the three-way identity
-  composed TU == committed file == gate bytes; the grayscale set is
-  decoder-accepted with content 1:1 (the d32 = all 1024 pixels ==
-  ecfrm_recon; the d4 = the 8x8-frame structure stated above), the
-  color set per the Status section. The BSF4-fix ec coupling is
-  stated as an invariant at both l6 emission sites: allow_update_cdf
-  = 1 only because the ratified config carries disable_cdf_update = 0.
-- **l9_analysis** - content-analysis primitives 1:1 with SVT's
-  analysis C (`pic_analysis_process.c`, `noise_model.c`,
-  `noise_util.c`, `fft.c`), host only, no GPU twins (parked, named):
-  the mean/variance family (`mean8x8`, `meanSquare8x8`, the sub-mean
-  pair, `intermVarFour8x8`, `b64Variance`), the 256-bin pixel
-  histogram, `downsample2d`, the pad family, the HME downsampling
-  driver, the screen-content detector pair + luma-dominant, the float
-  FFT kernels (`fft1d`/`ifft1d` at N = 2..32 plus the 2D drivers),
-  and the noise-util tx family + OD_DIVU table + the noise strength
-  solver + the flat-block finder + the noise-model init/update
-  (AN1-AN17).
-- **l10_filters** - post-filter kernel families, 1:1 with the pinned
-  `deblocking_common.c`, `cdef.c`/`cdef_copy.h`/`enc_cdef.c` and
-  `restoration.c`, host only: the 8-bit deblocking family (DF1/DF2 -
-  the mask/flat/hev gates, `filter4/6/8`, the `lpf` 4/6/8 entries,
-  `updateSharpness`, and the 14-tap long-filter family), the CDEF
-  family (CDEF1-CDEF3 - `cdefFindDir` + the pri/sec-tap filter kernels
-  in 16-bit and 8-bit form, the fb/lbd driver chain, the copy
-  helpers, and the enc_cdef mse/search block: the four mse kernels,
-  the dist bodies, `cdef_apply_fb`, the dual strength searches), and
-  the restoration family (LR1/LR2 - `sgrParams`, the boxsum
-  family, `extendFrame`, `copyTile`, `decodeXq` with the
-  xByXplus1/oneByX tables, and the selfguided restoration
-  internals). Coverage-only: no bitstream surface, the filter enable
-  bits stay 0, no conformance count moves.
+Prerequisites: Windows, Visual Studio 2022 with MSVC, CMake 3.22+, and CUDA
+Toolkit 12.2. GPU execution tests require a compatible NVIDIA device.
 
-## Repository layout
-
-```
-src/
-  l0_core/        core types, test harness
-  l1_pixels/      strided pixel buffers
-  l2_gpurt/       NVRTC JIT + driver-API runtime
-  l3_transforms/  fixed-point forward/inverse transforms, 4x4..64x64
-                  (DCT-only at 64x64), quantizer (host + GPU)
-  l4_intra/       intra prediction, 4x4..64x64 (host + GPU, chroma
-                  via the uv2y fold)
-  l5_motion/      SAD / motion (host; GPU kernels for 4x4/8x8)
-  l6_pipeline/    block + frame composition, 4x4..64x64 (host + GPU)
-  l7_entropy/     entropy coding: od_ec range coder, CDF adaptation,
-                  partition/skip/kf-mode/filter-intra + token/txb +
-                  tx-type symbols (host)
-  l8_bitstream/   raw-bit writer + OBU ground floor, structural keyframe
-                  TU assembly (+ the committed artifact set: NINE
-                  structural_keyframe*.obu - d4/d8/d16/d32/d64 plus
-                  color4/color8/color16/color32)
-  l9_analysis/    content-analysis primitives (AN-series: mean/variance,
-                  screen-content + luma-dominant detectors, pad family,
-                  FFT, noise model; host only)
-  l10_filters/    post-filter kernel families: deblocking (DF1/DF2) +
-                  CDEF (find_dir/filter/fb/copy + enc_cdef mse/search)
-                  + restoration (boxsum/selfguided math), coverage-only,
-                  not wired into the encode loop
-tools/
-  golden_gen/     SVT golden-vector generator (mechanical verbatim
-                  extraction from third_party/SVT-AV1, committed)
-  bench/          av1_bench: console benchmark tool (own target, not a
-                  ctest; env + host/GPU frame + per-stage timings;
-                  run the exe with the CUDA toolkit bin on PATH)
-  coverage_areas.txt  the per-area coverage judgement (which fraction of
-                  each SVT area is ported, with a rationale per row);
-                  this is DATA, coverage.ps1 measures and this judges
-  coverage_baseline.txt  the recorded coverage table, for a one-command
-                  drift diff (regenerate, never hand-edit)
-  coverage.ps1    the portable-C coverage metric (the progress bar)
-  cite_check.ps1  the doc citation audit: every file:line claim in the
-                  tracked markdown, resolved, with the actual bytes at
-                  that line printed for a claim-vs-content diff
-  decode_handoff.ps1             decoder acceptance runner
-                                 (dav1d/aomdec/ffmpeg) + self-test
-  test_decode_handoff.ps1        the decode-handoff self-test
-  td0_ladder.ps1                 decoder-conformance bisect ladder
-                                (TD-series closed; see
-docs/decode_conformance.md)
-  verify_decode4.ps1             the per-geometry decode instrument:
-                                artifact decode + content-1:1 vs the
-                                gate's recon line (exit 0 = pass;
-                                -Geometry 4|8|16|32|64, default 32;
-                                -Color for the 4:2:0 artifacts)
-  rt7_trace_diff.ps1             cross-decoder symbol-trace diff (our
-                                read twin vs a throwaway dav1d build)
-  rt8_divergence_map.ps1         per-leaf chroma divergence map
-third_party/
-  SVT-AV1/        vendored source of truth (do not modify; pinned
-                  snapshot - see Third-party notices)
-  aom/            FULL libaom checkout, vendored: it is the resolution
-                  target for the aom-side citations (decodeframe.c,
-                  decodemv.c, token_cdfs.h, av1_quantize.c). Not a
-                  1:1 port target.
-  aom_dsp/        src/entdec.c + src/bitreader.c, the reader-side
-                  extracts the generator and l7 mirror
-  doctest/        test framework
-  hardware_docs/  perf-axis reference only (PTX ISA, GP104 whitepaper,
-                  Pascal Tuning Guide, nvprof-era Profiler Users Guides
-                  - concepts-only on CUDA 12.2, whose profiler is ncu)
-docs/             bitstream.md, color.md, cs5c_deltas.md,
-                  decode_conformance.md, emission.md, ffmpeg_integration.md,
-                  layers.md, provenance.md, todo.md
-CMakeLists.txt    top-level build
-AGENTS.md         TDD methodology + CUDA-specific GREEN rules + standing
-                  rules (bench-before/after, citation verification,
-                  REFERENCE PINNING); the detailed layer map and the
-                  completion metric
-```
-
-## Target hardware
-
-- NVIDIA Pascal, `sm_61` (GP104-class, e.g. GTX 1080).
-- CUDA Toolkit 12.2.
-- Kernels compiled at runtime via NVRTC (no offline `nvcc` kernel
-  build); `ptxas -v` register/spill review is done manually during
-  REFACTOR on kernels that land.
-- Primary dev platform: Windows + MSVC.
-
-## Building
-
-Prerequisites: CUDA Toolkit 12.2, CMake 3.22+, MSVC (VS 2022).
-
-```
+```powershell
 cmake -S . -B build
-cmake --build build
-ctest --test-dir build
+cmake --build build --config Release
+ctest --test-dir build -C Release
 ```
 
-Run a single layer's tests:
+For setup, individual test targets, the golden gate, decoder verification, and
+benchmarks, see [development and verification](docs/development.md).
 
-```
-ctest --test-dir build -R l4_intra
-```
+## Documentation
 
-## Testing
+- [Project status](docs/project_status.md) - progress, verified milestones,
+  and remaining scope
+- [Development and verification](docs/development.md) - build, tests, decoders,
+  benchmarks, and reference notes
+- [Layer stack](docs/layers.md) - implementation details by module
+- [Bitstream](docs/bitstream.md), [emission walks](docs/emission.md), and
+  [color/chroma](docs/color.md)
+- [Decoder conformance](docs/decode_conformance.md) - per-artifact results
+- [Provenance](docs/provenance.md) - reference sources for ported code
+- [Roadmap and task register](docs/todo.md)
+- [FFmpeg integration blueprint](docs/ffmpeg_integration.md)
 
-- Test framework: [doctest](https://github.com/doctest/doctest), vendored
-  under `third_party/doctest/`.
-- Each layer has a `tests/test_harness.cpp` ("test runner boots") guard
-  plus real test files (`test_core.cpp`, `test_pixels.cpp`, ...).
-- GPU-required tests follow the `SKIP:` convention from `AGENTS.md`:
-  when no CUDA device / required compute capability is present, tests
-  return early with a `SKIP:`-prefixed message rather than failing.
-- Goldens are produced by `tools/golden_gen/` - a committed generator
-  that mechanically extracts functions verbatim from the vendored
-  SVT-AV1 tree (see `tools/golden_gen/README.md`); its validation gate
-  diffs generator output against committed tests.
-- Decode handoff: `tools/decode_handoff.ps1` runs dav1d / aomdec /
-  ffmpeg against the committed `.obu` artifact (dated report written
-  to `decode_handoff_results.txt` at the repo root, kept untracked).
-  `tools/test_decode_handoff.ps1` is the self-test (fake decoder,
-  report-content check).
+## Reference and licenses
 
-## Benchmarks
+The pinned SVT-AV1 snapshot in `third_party/SVT-AV1/` is the 1:1 reference for
+this port. It is a 4.2-era snapshot and is not byte-identical to the official
+v4.2.0 tag. See its `LICENSE` and `NOTICE` files. This project is not
+affiliated with or endorsed by SVT-AV1's authors or the Alliance for Open Media.
 
-`tools/bench/` builds the `av1_bench` console tool: it records the GPU
-name/driver/clocks at run time (nvidia-smi query), then times host and
-GPU composite auto-frame encodes (lossless + q100, 4x4, 8x8, 16x16,
-32x32 and 64x64 geometry - 64x64 frame tiled from the B7 fixture for
-4x4/8x8/16x16, 128x128 for 32x32, 256x256 for 64x64) plus per-stage
-single-launch kernel timings. Every GPU configuration runs an untimed
-bit-exact verification pass against the host output first and refuses
-to report timings on mismatch. The composite loop is host decision +
-per-block synchronous launches - the tool's header names this known
-overhead. Dated baseline numbers and the bench-before/after rule for
-perf-relevant slices live in `AGENTS.md`.
-
-## Methodology
-
-Development follows Uncle Bob's Three Laws of TDD as a nano-cycle
-(one assertion per RED/GREEN loop), with CUDA-specific extensions:
-correctness-green != performance-acceptable, explicit FP tolerances
-decided up front, `SKIP:` for missing GPUs, and PTX-level sanity
-checks during REFACTOR. See `AGENTS.md` for the full rules.
-
-## Third-party notices
-
-- **SVT-AV1** - vendored under `third_party/SVT-AV1/` as the 1:1 source
-  of truth. See its top-level `LICENSE` and `NOTICE` for terms. This
-  project is a derivative port and is not affiliated with or endorsed
-  by the SVT-AV1 authors or the Alliance for Open Media.
-  **Reference pinning:** the vendored tree is a 4.2-era snapshot
-  (CHANGELOG 4.2.0, 2026-07-14), NOT byte-identical to the official
-  v4.2.0 tag, and upstream master has diverged further. The snapshot is
-  pinned and is not updated - the target is bit-exact 1:1 with this
-  pinned vendored reference, and updating it would invalidate every
-  committed golden and provenance citation.
-- **libaom** - vendored under `third_party/aom/` as a full checkout, and
-  a small subtree under `third_party/aom_dsp/`. It is NOT a 1:1 port
-  target; it is vendored so the aom-side citations in `docs/provenance.md`
-  and `docs/color.md` can be resolved in-tree. See
-  `third_party/aom/LICENSE` for terms.
-- **doctest** - vendored under `third_party/doctest/`, MIT License.
-- **hardware_docs** - vendored NVIDIA reference material (PTX ISA,
-  GP104 whitepaper, Pascal Tuning Guide, nvprof-era Profiler Users
-  Guides), perf-axis only; our profile on CUDA 12.2 is `ncu` - the
-  guides are used for concepts only.
+Other third-party components and their license locations are described in
+[development and verification](docs/development.md).
