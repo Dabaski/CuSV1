@@ -871,9 +871,16 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-05 (the 20% line): 20.1%**
-(31,693 of 157,718 non-blank lines - the covered count moved +750 from
-30,943 at the wave-4 close: HM1 +473 in A3 (the motion-hash + global
+**THE NUMBER, as measured 2026-11-05 (the wave-6 close): 20.5%**
+(32,379 of 157,718 non-blank lines - the covered count moved +686 from
+31,693 at the 20% line: TX2 +205 in A1 (0.3643 -> 0.3719; the slice's
+span count is 204 nb - the full 16-TxType surface: flips + identity,
+l3_transforms) and SYM1 +436 in A5 + +45 in A12 (the palette +
+segmentation symbol surface, SVT-side 634 nb of which 481
+new-to-the-port; the +45 is tokenizeColorMap palette.c:781-828, charged
+to palette.c's own area), so A1 prints 10,044 of 27,008 (37%), A5
+5,089 of 8,460 (60%) and A12 550 of 1,612 (34%). The wave-5 movement
+was +750 from 30,943 at the wave-4 close: HM1 +473 in A3 (the motion-hash + global
 motion surface in src/l5_motion: crc32c, the hash-table machinery, the
 block-hash generation and walk, and the GM param surface incl.
 refine_integerized_param; 21 TEST_CASEs, M1-M5 killed) and RC1 +278 in
@@ -967,22 +974,22 @@ newly added reference file lowers the percentage loudly rather than silently.
 
 | id | area | files | non-blank | cov% | covered |
 |---|---|---|---|---|---|
-| A1 | Transform/TX | 9 | 27,008 | 36% | 9,839 |
+| A1 | Transform/TX | 9 | 27,008 | 37% | 10,044 |
 | A2 | Intra prediction | 4 | 3,478 | 91% | 3,156 |
 | A3 | Inter prediction + motion estimation | 44 | 17,738 | 5% | 901 |
 | A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 3% | 933 |
-| A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 55% | 4,653 |
+| A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 60% | 5,089 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 12% | 1,734 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 30% | 3,191 |
 | A9 | Rate control | 17 | 5,951 | 5% | 278 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
 | A11 | Content analysis + temporal filtering | 16 | 12,028 | 35% | 4,152 |
-| A12 | Palette + segmentation + misc | 8 | 1,612 | 31% | 505 |
+| A12 | Palette + segmentation + misc | 8 | 1,612 | 34% | 550 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 16% | 855 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 63% | 922 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **31,693** |
+| | **TOTAL** | **254** | **157,718** | | **32,379** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported
