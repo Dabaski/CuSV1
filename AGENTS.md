@@ -336,7 +336,7 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-07, the wave-8 close: A14 COMPLETE)
+### Last measured state (2026-11-07, the wave-9 close)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
@@ -368,13 +368,13 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 21.0%** (see the completion metric section;
-  re-measured 2026-11-07 at the wave-8 close: 33,062 of 157,718 non-blank
-  lines, +1,369 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
+- **Portable-C coverage: 21.4%** (see the completion metric section;
+  re-measured 2026-11-07 at the wave-9 close: 33,722 of 157,718 non-blank
+  lines, +2,028 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
   SYM1 +436 in A5 + +45 in A12) and wave 7 (IP1 +203 across A3/A13/A14,
   SUB1 +149 in A14) and wave 8 (SW1 +119 the SAD wrapper instances, HB1
-  +168 the hbd twins - all span-measured; register entries in docs/todo.md
-  section A0); A3 prints 6% (1,006 of 17,738), A13 prints 17% (889 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is
+  +168 the hbd twins) and wave 9 (RS2 +273 the hbd resize 1D family - the hbd park resolves, AM1+AN20 +386 the vmaf activity-masking family + the preprocessing statistics + the firstpass pure pair - the A4 RDO input side - all span-measured; register entries in docs/todo.md
+  section A0); A11 prints 40% (4,812 of 12,028), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is
   PARSE-BUG EPISODE (recorded, wave 4): an embedded
   pipe in a prose sentence (get_msb(x|1)) split the A12 row's 5 fields
   and the tool silently printed A12 as 0 files/0 lines - caught by the
@@ -964,10 +964,19 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-07 (the wave-8 close, A14 COMPLETE): 21.0%**
-(33,062 of 157,718 non-blank lines - the covered count moved +331 from
-32,731 at the wave-7 close: SW1 +119 in A14 (the SAD wrapper instances -
-the nxmSadKernelHelper generic + the sadMxN/sadMxNx4D/OBMCSADMxN macro
+**THE NUMBER, as measured 2026-11-07 (the wave-9 close): 21.4%**
+(33,722 of 157,718 non-blank lines - the covered count moved +660 from
+33,062 at the wave-8 close: RS2 +273 in A11 (the hbd resize 1D family -
+the AN21 8-bit-discipline park resolves; BRIEF CORRECTION: the hbd path
+does NOT scale filter coefficients by bd, the only bd dependence is
+clip_pixel_highbd) and AM1+AN20 +386 in A11 (the vmaf activity-masking
+family + the preprocessing statistics + the firstpass pure accumulation
+pair - the A4 RDO INPUT side; 25 new TEST_CASEs, 11 mutations killed,
+one UNOBSERVABLE finding recorded), so A11 prints 4,812 of 12,028
+(40%). The wave-8 movement
+was +331 from 32,731 at the wave-7 close: SW1 +119 in A14 (the SAD
+wrapper instances - the nxmSadKernelHelper generic + the
+sadMxN/sadMxNx4D/OBMCSADMxN macro
 families + all 66 instances, compute_sad_c.c and sad_av1.c land 100% of
 their portable surface, the paired-metric caveat STATED: instances are
 transcription of the reference's own dispatch surface) and HB1 +168 in
@@ -1099,12 +1108,12 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 30% | 3,191 |
 | A9 | Rate control | 17 | 5,951 | 5% | 278 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 35% | 4,152 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 40% | 4,812 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 34% | 550 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 17% | 889 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 100% | 1,466 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **33,062** |
+| | **TOTAL** | **254** | **157,718** | | **33,722** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

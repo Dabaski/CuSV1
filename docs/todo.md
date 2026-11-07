@@ -2170,6 +2170,43 @@ A0. SLICE-LEVEL STATE (the live register)
 |    reference's own shape (sadMxN(m,n) = helper(height=n, width=m);
 |    sadMxNx4D = the sadMxN instance per ref_array entry in index
 |    order; OBMCSADMxN(m,n) = obmcSad(m=width, n=height)).
+|  - [x] **A11/RS2 (2026-11-07, PERRY-RS2, ff-merged 8db61b7): the hbd
+|    resize 1D family lands** in src/l11_resize - resize.c :489-:779 =
+|    273 nb (judge re-measured exact), resolving the AN21 8-bit
+|    discipline park (the HB1 pattern). BRIEF CORRECTION measured: the
+|    hbd path does NOT scale filter coefficients by bd - the only bd
+|    dependence is clip_pixel_highbd (cited per call site). 35 test
+|    cases / 921 assertions incl. the full hbd@bd8 == 8-bit-twin sweep
+|    over the enumerated length set + bd-10/12 clamp-firing absolutes;
+|    6 mutations killed (M3's boundary flip SURVIVED its first fixture
+|    - killed after an edge-contrast input; honest finding). FINDING:
+|    a mutation that orphaned a parameter failed to BUILD (C4100 under
+|    /WX) and left a stale exe reporting green - every mutation is now
+|    compile-checked before its kill is claimed. Writer run 16/16
+|    (268.09 s), GATE byte-identical 884,851 B. Coverage-only.
+|  - [x] **A11/AM1+AN20 (2026-11-07, PERRY-AM1, cherry-picked ee8d249):
+|    the vmaf activity-masking family lands** in src/l9_analysis -
+|    pic_analysis_process.c 238 nb (the nine vmaf calculators + box
+|    blur + unsharp + the preprocess driver, pa_ctx/pcs walls threaded),
+|    the preprocessing statistics 89 nb (histogram bins + spatial
+|    statistics + gathering), the temporal_filtering.c helpers 135 nb
+|    (estimate_noise_fp16/avg_mad/gradient_coherence/the unsharp+blur
+|    row kernels - the :3556-:3733 family the TF1 brief did not scout)
+|    and firstpass.c AN20 the pure accumulation pair (13 nb; the
+|    output_stats TWO_PASS wall stays parked) = 386 nb (judge
+|    re-measured exact). 25 new TEST_CASEs (l9 251/251, 40,186
+|    assertions); 11 mutations killed (M9 survived the LCG plane -
+|    killed after a delta-plane strengthening); the literal gate_start
+|    +1 off-by-one is UNOBSERVABLE under the committed float bands -
+|    recorded, not faked. In-slice repair: a UTF-8 BOM + 3 non-ASCII
+|    bytes from a Set-Content -Encoding utf8 write (the PS 5.1 trap,
+|    live) stripped; all six files verified clean. Writer run 16/16
+|    (265.22 s), GATE byte-identical 884,851 B. The INPUT-SIDE work for
+|    the A4 RDO campaign: conformance-free.
+|  - [x] **WAVE-9 CLOSE (judge, post-merge re-measure on master)**: full
+|    rebuild + ctest 16/16 (264.09 s), GATE byte-identical 884,851 B
+|    diff 0, coverage 21.4% (33,722/157,718): A11 40% (4,812). The A4
+|    golden-regeneration campaign is blessed and opens next.
 |    PAIRED-METRIC CAVEAT STATED: the instance lines move the coverage
 |    number by transcription of the reference's own dispatch surface;
 |    the algorithm cores were already landed and tested.
