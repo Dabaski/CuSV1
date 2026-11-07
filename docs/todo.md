@@ -2158,6 +2158,53 @@ A0. SLICE-LEVEL STATE (the live register)
 |    884,851 B diff 0), coverage 20.8% (32,731/157,718): A3 6% (1,006),
 |    A13 17% (889), A14 77% (1,135). A14's remaining 331 nb: the hbd
 |    twins (named-parked) + the per-size SAD wrappers.
+|  - [x] **A14/SW1 (2026-11-07, 4fe6acc): the SAD wrapper instances -
+|    compute_sad_c.c + sad_av1.c land 100%** - the sadMxN macro + all
+|    22 instances and the sadMxNx4D macro + all 22 instances
+|    (compute_sad_c.c:103-193), the OBMCSADMxN macro + all 22 instances
+|    (sad_av1.c:36-64), plus the generic helper the sadMxN macro
+|    forwards to (svt_nxm_sad_kernel_helper_c :21-:40, ported verbatim
+|    as nxmSadKernelHelper). The landed sad4x4..64x64 ARE the sadMxN
+|    instances at those five sizes; the other 17 sadMxN sizes, all 22
+|    4D wrappers and all 22 obmc wrappers are new thin instances in the
+|    reference's own shape (sadMxN(m,n) = helper(height=n, width=m);
+|    sadMxNx4D = the sadMxN instance per ref_array entry in index
+|    order; OBMCSADMxN(m,n) = obmcSad(m=width, n=height)).
+|    PAIRED-METRIC CAVEAT STATED: the instance lines move the coverage
+|    number by transcription of the reference's own dispatch surface;
+|    the algorithm cores were already landed and tested.
+|    compute_sad_c.c and sad_av1.c land 100% of their portable surface,
+|    grep-verified 0 of 66 missing. RED: per-increment C2039 compile
+|    errors (sad4x8, sad8x4, sad128x128, the 22-size sweep).
+|  - [x] **A14/HB1 (2026-11-07, a12ab21): the hbd twins complete the
+|    four C_DEFAULT files - A14 COMPLETE** - DEVIATION RESOLUTION: the
+|    hbd spans parked under the 8-bit discipline (PU1/AN8/CDEF1-era)
+|    resolve as portable uint16 C; CONVERT_TO_SHORTPTR staging becomes
+|    plain uint16 params (the CS1/LR1 precedent). Spans, 168 nb
+|    measured span-by-span: variance.c:162-181
+|    svt_aom_variance_highbd_c (16) -> packunpack::varianceHighbd;
+|    variance.c:337-352 svt_aom_highbd_mse16x16_c (15) ->
+|    packunpack::highbdMse16x16; cfl_c.c:46-59 svt_cfl_predict_hbd_c
+|    (14) -> intra::cflPredictHbd; intra_prediction_c.c:15-37
+|    upsample_intra_edge_high_c (21) -> intra::upsampleIntraEdgeHigh;
+|    :64-92 highbd_dr_prediction_z3_c (27) -> intra::hbdDrZ3 (the
+|    complete 54-config dy-surface enumeration);
+|    picture_operators_c.c:176-:234 the two hb_col8 first/second-pass
+|    helpers (26+26) + :238-:262 highbd_hadamard_8x8_c (23) ->
+|    picops::highbdHadamard8x8. Brief non-reproductions named (its
+|    ~17 nb z3 and 47 nb hadamard guesses did not reproduce).
+|    Full-file inventory verdicts read every definition in all four
+|    files and classified it; the last 44 nb = the declaration-shell/
+|    glue surface, verified 1:1 before charging, license blocks
+|    represented by provenance headers (not quoted).
+|    derivation-relationship fixtures throughout (hbd == lbd widened at
+|    bd 8); 7 mutations killed.
+|  - [x] **WAVE-8 CLOSE / A14 COMPLETE (2026-11-07, 6a2bbfe)**: total
+|    **21.0% (33,062/157,718)** - **A14 is the first COMPLETE area
+|    (1,466/1,466 = 100%)**. Full rebuild -> ctest 16/16 (293.05 s),
+|    GATE byte-identical 884,851 B diff 0, citations 0 out-of-range.
+|    Remaining big blocks: A4 mode decision (3%), A10 picture mgmt (0%),
+|    A3's ME driver surface (6%).
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------

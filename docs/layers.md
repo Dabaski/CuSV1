@@ -20,11 +20,11 @@ l6_pipeline     composition + decision    (host + GPU frame paths)
 l7_entropy      entropy coder + symbols   (host, gate-exact)
 l8_bitstream    raw-bit writer + OBU      (host, gate-exact)
 l9_analysis     content analysis + temporal filter
-                                          (host; AN/TF/PU-series)
+                                       (host; AN/TF/PU/SUB + hbd twins)
 l10_filters     deblock/CDEF/restoration/grain
                                           (host; DF/CDEF/LR/GR, not wired)
 l11_resize      resize 1D kernels         (host; AN21)
-l12_convolve    convolution kernels       (host; CV1)
+l12_convolve    convolution + interp filters (host; CV1/IP1)
 l13_palette     palette + k-means + segmentation (host; PAL1/SEG1)
 l14_utility     block geometry + utilities (host; U1)
 l15_rc          rate-control qindex tables (host; RC1)
@@ -128,6 +128,11 @@ FILTER_INTRA_MODES (chroma never uses filter-intra). The predictors
 are plane-agnostic, so the wrapper IS the chroma dispatch - exactly
 SVT's call-site fold.
 
+HB1 added the hbd twins: `cflPredictHbd`, `upsampleIntraEdgeHigh`
+and `hbdDrZ3` with the complete 54-config dy-surface enumeration -
+derivation-relationship fixtures throughout (hbd == lbd widened at
+bd 8).
+
 ## l5_motion - SAD
 
 `sad4x4`..`sad64x64` over strided uint8: 8x8 mirrors SVT's dedicated
@@ -142,6 +147,13 @@ surface including `refine_integerized_param` with the GmControls
 fields threaded as scalars) - the first inter-prediction-adjacent
 analysis primitives in the port; the hbd twins and the
 correspondence/PCS walls stay parked.
+
+SW1 landed the SAD wrapper surface: the `nxmSadKernelHelper` generic +
+all 66 macro instances (`sadMxN`, `sadMxNx4D`, `OBMCSADMxN`) in the
+reference's own dispatch shape - `compute_sad_c.c` and `sad_av1.c`
+land 100% of their portable surface. The paired-metric caveat is
+stated: the instances are transcription of the reference's own
+dispatch surface (the algorithm cores were already landed).
 
 ## l6_pipeline - composition + decision
 
@@ -201,7 +213,10 @@ above, not zeros).
   full-distortion kernels + the 32-single dispatcher (shift-free
   int64 SQR), the yv12 copy trio and `generatePadding16Bit`. The
   pack2d/unpack2d dispatches stay parked (their callees are PU1's
-  packunpack in l9).
+  packunpack in l9). CS1 landed the lbd hadamard family
+  (`hadamard4x4..32x32`); HB1 added its hbd twin
+  (`highbdHadamard8x8` with the two 26 nb first/second-pass column
+  helpers).
 
 ## l7_entropy - entropy coder + symbols
 
@@ -301,6 +316,16 @@ yet. The families:
   missing VAR instances (the general two-buffer shape; the AN8
   offs-folded shape coexists - the offs array is REAL even at
   bStride 0, finding pinned).
+- Subpel variance (SUB1): the bilinear 2-tap pair
+  (`filterBlock2dBilFirstPass`/`SecondPass`) + table, the SUBPIX_VAR
+  macro + 22 instances, and the obmc core + OBMC pairs 22/22/22 - the
+  bilinear table is [8][2] with row 0 {128, 0}, rounding
+  (sum + 64) >> 7, offsets 0..7 per axis (all pinned by measurement
+  over the full 64-offset grid).
+- The hbd twins (HB1): `varianceHighbd` + `highbdMse16x16` in
+  packunpack - the 8-bit-discipline parks resolve for A14's
+  completion, with derivation-relationship fixtures throughout (hbd ==
+  lbd widened at bd 8).
 
 ## l10_filters - post-filter kernels (DF/CDEF/LR/GR)
 
@@ -366,6 +391,13 @@ staging contract: temp stride 128, h+6 rows, sentinel row),
 + `getConvParamsWiener` + the `sub_pel_filters_8` table (128 entries,
 diff-verified). LR3's wiener stripe depends on it. The highbd half is
 parked.
+
+IP1 added the interp-filter machinery: the `InterpFilter` surface
+(`extractInterpFilter`, `getConvolveFilterParams`,
+`getInterpFilterParamsWithBlockSize`, `makeInterpFilters` + the five
+filter tables, mechanically transcribed + diff-verified) and
+`upsampledPred` (the C_DEFAULT body's four paths; the brief had
+misplaced it in inter_prediction.c - grep 0 hits there).
 
 ## l13_palette - palette + k-means + segmentation (PAL1/SEG1)
 
