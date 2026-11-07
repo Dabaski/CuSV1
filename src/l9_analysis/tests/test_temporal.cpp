@@ -771,3 +771,362 @@ TEST_CASE("l9 temporal zz vs non-zz variants differ on the same input") {
     CHECK_NE(z.count[4 * NonZzFixture::kStride], n.count[4 * NonZzFixture::kStride]);
     CHECK_NE(z.count[4 * NonZzFixture::kStride + 4], n.count[4 * NonZzFixture::kStride + 4]);
 }
+
+// AM1 T1: the two-stage cascade of svt_vmaf_hpass_row_c
+// (temporal_filtering.c:3720-3733). Each stage is the delay-line pair
+// tmp2 = h_acc[s] + tmp1; h_acc[s] = tmp1; tmp1 = h_acc[s+1] + tmp2;
+// h_acc[s+1] = tmp2, so stage-0 output o0[c] = u[c-2]+2u[c-1]+u[c] and
+// stage-2 output p[c] = o0[c-2]+2o0[c-1]+o0[c]: the [1,4,6,4,1] kernel
+// with a startup ramp. Constant u = c gives p = [c, 5c, 11c, 15c, 16c,
+// 16c, ...] (c < 4 entries are the startup prefix, h_acc starts at 0).
+TEST_CASE("l9 temporal vmafHpassRow constant row startup ramp") {
+    const std::uint8_t src[4] = {10, 10, 10, 10};
+    std::int16_t h[8];
+    analysis::temporal::vmafHpassRow(src, 4, h);
+    const std::int16_t expect[8] = {10, 50, 110, 150, 160, 160, 160, 160};
+    for (int i = 0; i < 8; ++i) {
+        CHECK_EQ(h[i], expect[i]);
+    }
+}
+
+// AM1 T2: a ramp row against an INDEPENDENT oracle: the closed form
+// out[c] = [1,4,6,4,1] . u[c-4..c] (u = the edge-clamped sample sequence
+// u[i] = src[clamp(i-2)]), written here as a direct convolution, not the
+// reference's delay-line loop. Also pins the edge clamp: x <= 0 reads
+// src[0], x >= width reads src[width-1] (temporal_filtering.c:3724).
+namespace {
+std::int16_t hpassOracle(const std::uint8_t* src, int width, int j) {
+    const int taps[5] = {1, 4, 6, 4, 1};
+    // full window exists only for j >= 4; before that the missing taps
+    // contribute zero (h_acc starts cleared) - the startup prefix.
+    int sum = 0;
+    for (int k = 0; k < 5; ++k) {
+        int idx = j - 4 + k;
+        if (idx < 0) {
+            continue;
+        }
+        int x = idx - 2;
+        std::uint8_t s = x <= 0 ? src[0] : x >= width ? src[width - 1] : src[x];
+        sum += taps[k] * s;
+    }
+    return static_cast<std::int16_t>(sum);
+}
+}  // namespace
+
+TEST_CASE("l9 temporal vmafHpassRow ramp row matches the direct convolution oracle") {
+    const int w = 9;
+    std::uint8_t src[w] = {30, 40, 50, 60, 70, 80, 90, 100, 110};
+    std::int16_t h[w + 4];
+    analysis::temporal::vmafHpassRow(src, w, h);
+    for (int j = 0; j < w + 4; ++j) {
+        CHECK_EQ(h[j], hpassOracle(src, w, j));
+    }
+}
+
+// AM1 T3: svt_vmaf_vpass_row_c (temporal_filtering.c:3660-3669): the
+// vertical [1,4,6,4,1] over the five ring rows, offset j = x + blur_start
+// with blur_start = 2*steps_x, output (v + 128) >> 8 - the >>8 divides the
+// 16-weighted h-values by 16 (256/16). Hand-set distinct ring rows.
+TEST_CASE("l9 temporal vmafVpassRow weights and blur_start offset") {
+    std::int16_t r0[12], r1[12], r2[12], r3[12], r4[12];
+    for (int i = 0; i < 12; ++i) {
+        r0[i] = (std::int16_t)(100 + i);
+        r1[i] = (std::int16_t)(200 + i);
+        r2[i] = (std::int16_t)(300 + i);
+        r3[i] = (std::int16_t)(400 + i);
+        r4[i] = (std::int16_t)(500 + i);
+    }
+    std::uint8_t blur[4];
+    analysis::temporal::vmafVpassRow(r0, r1, r2, r3, r4, blur, 4, 2);
+    // blur_start = 2*steps_x = 4: blur[x] reads j = x+4.
+    for (int x = 0; x < 4; ++x) {
+        const int j = x + 4;
+        const std::uint32_t v = (std::uint32_t)r0[j] + (std::uint32_t)r4[j] +
+            4u * ((std::uint32_t)r1[j] + (std::uint32_t)r3[j]) + 6u * (std::uint32_t)r2[j];
+        CHECK_EQ(blur[x], (std::uint8_t)((v + 128u) >> 8));
+    }
+}
+
+// AM1 T4: vmaf_box_blur_frame (pic_analysis_process.c:1773-1799) on a 5x5
+// plane against an INDEPENDENT oracle: the separable structure reproduces
+// the 2D [1,4,6,4,1]-outer-[1,4,6,4,1] / 256 filter with EDGE REPLICATION
+// on both axes - vertical via the k-steps_y/m+steps_y clamps, horizontal
+// via hpass's x<=0/x>=width clamps. The hring ring rotation is checked
+// implicitly: the vpass window for output row m must be rows
+// {clamp(m-2), clamp(m-1), m, clamp(m+1), clamp(m+2)}.
+namespace {
+int blurOracle(const std::uint8_t* src, int stride, int width, int height, int x, int y) {
+    const int taps[5] = {1, 4, 6, 4, 1};
+    auto clampRow = [](int v, int h) { return v < 0 ? 0 : v >= h ? h - 1 : v; };
+    int sum = 0;
+    for (int dy = 0; dy < 5; ++dy) {
+        int row = clampRow(y + dy - 2, height);
+        const std::uint8_t* srow = src + (std::size_t)row * stride;
+        for (int dx = 0; dx < 5; ++dx) {
+            int col = clampRow(x + dx - 2, width);
+            sum += taps[dy] * taps[dx] * srow[col];
+        }
+    }
+    return (sum + 128) >> 8;
+}
+}  // namespace
+
+TEST_CASE("l9 temporal vmafBoxBlurFrame 5x5 plane matches the 2D oracle") {
+    const int w = 5, h = 5, stride = 7;
+    std::uint8_t src[h * stride];
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            src[y * stride + x] = (std::uint8_t)(13 * x + 7 * y + 3);
+        }
+    }
+    std::int16_t ring0[w + 4], ring1[w + 4], ring2[w + 4], ring3[w + 4], ring4[w + 4];
+    std::int16_t* hring[5] = {ring0, ring1, ring2, ring3, ring4};
+    std::uint8_t blur[w * h];
+    analysis::temporal::vmafBoxBlurFrame(src, stride, blur, w, h, hring);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            CHECK_EQ(blur[y * w + x], (std::uint8_t)blurOracle(src, stride, w, h, x, y));
+        }
+    }
+}
+
+// AM1 T5: svt_vmaf_apply_unsharp_row_c (temporal_filtering.c:3650-3658):
+// detail = src - blur clamped to [-max_delta, max_delta], result =
+// src + (detail * amount) >> 15, dst clamped to [0, 255].
+TEST_CASE("l9 temporal vmafApplyUnsharpRow clamp scale and result saturate") {
+    // detail in range, amount = 32768 (1.0 in Q15): 100 + 10 = 110.
+    {
+        const std::uint8_t src[3] = {100, 100, 100};
+        const std::uint8_t blur[3] = {90, 90, 90};
+        std::uint8_t dst[3] = {0, 0, 0};
+        analysis::temporal::vmafApplyUnsharpRow(src, blur, dst, 3, 32768, 25);
+        CHECK_EQ(dst[0], 110);
+    }
+    // detail over the clip: 100 + 30 clipped to +10 -> 110.
+    {
+        const std::uint8_t src[3] = {100, 100, 100};
+        const std::uint8_t blur[3] = {70, 70, 70};
+        std::uint8_t dst[3] = {0, 0, 0};
+        analysis::temporal::vmafApplyUnsharpRow(src, blur, dst, 3, 32768, 10);
+        CHECK_EQ(dst[0], 110);
+    }
+    // negative detail below the clip and result saturating at 0:
+    // src 5, blur 40 -> detail -35 -> clipped -10 -> 5 + (-10) = -5 -> 0.
+    {
+        const std::uint8_t src[3] = {5, 5, 5};
+        const std::uint8_t blur[3] = {40, 40, 40};
+        std::uint8_t dst[3] = {9, 9, 9};
+        analysis::temporal::vmafApplyUnsharpRow(src, blur, dst, 3, 32768, 10);
+        CHECK_EQ(dst[0], 0);
+    }
+    // result saturating at 255: src 250, blur 240, amount 65536 (2.0):
+    // detail 10, 10*65536>>15 = 20, 250+20 = 270 -> 255.
+    {
+        const std::uint8_t src[3] = {250, 250, 250};
+        const std::uint8_t blur[3] = {240, 240, 240};
+        std::uint8_t dst[3] = {0, 0, 0};
+        analysis::temporal::vmafApplyUnsharpRow(src, blur, dst, 3, 65536, 25);
+        CHECK_EQ(dst[0], 255);
+    }
+    // amount scaling: amount = 16384 (0.5): 100 + (10*16384>>15) = 105.
+    {
+        const std::uint8_t src[3] = {100, 100, 100};
+        const std::uint8_t blur[3] = {90, 90, 90};
+        std::uint8_t dst[3] = {0, 0, 0};
+        analysis::temporal::vmafApplyUnsharpRow(src, blur, dst, 3, 16384, 25);
+        CHECK_EQ(dst[0], 105);
+    }
+}
+
+// AM1 T6: vmaf_unsharp_apply_frame (pic_analysis_process.c:1815-1821):
+// per-row dispatch - src/dst advance by STRIDE, blur advances by WIDTH
+// (the compact blur plane). Distinct per-row details pin the mapping;
+// amount 32768 adds detail once, max_delta 80 leaves 60/65/70 unclipped.
+TEST_CASE("l9 temporal vmafUnsharpApplyFrame stride vs width row mapping") {
+    const int w = 4, h = 3, stride = 9;
+    std::uint8_t src[h * stride];
+    std::uint8_t blur[w * h];
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            src[y * stride + x] = (std::uint8_t)(100 + 10 * y);
+            blur[y * w + x] = (std::uint8_t)(40 + 5 * y);
+        }
+    }
+    std::uint8_t dst[h * stride];
+    for (int i = 0; i < h * stride; ++i) {
+        dst[i] = 77;
+    }
+    analysis::temporal::vmafUnsharpApplyFrame(src, blur, dst, w, h, stride, 32768, 80);
+    // detail per row = (100+10y) - (40+5y) = 60+5y; dst = src + detail.
+    const std::uint8_t expectRow[3] = {160, 175, 190};
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            CHECK_EQ(dst[y * stride + x], expectRow[y]);
+        }
+        // outside the row width, dst is untouched
+        CHECK_EQ(dst[y * stride + w], 77);
+    }
+}
+
+// AM1 T7: svt_vmaf_compute_avg_mad_c (temporal_filtering.c:3622-3648):
+// per-8x8-block mean (sum >> 6), mad = sum |p - mean| over the block,
+// total_activity / (block_count * 64); block_count == 0 -> 0.
+TEST_CASE("l9 temporal vmafComputeAvgMad blocks and empty case") {
+    // one 8x8 block, half 0 half 128: mean = (32*128) >> 6 = 64,
+    // mad = 32*64 + 32*64 = 4096, 4096 / (1*64) = 64.
+    std::uint8_t src[8 * 8];
+    for (int i = 0; i < 64; ++i) {
+        src[i] = i < 32 ? 0 : 128;
+    }
+    CHECK_EQ(analysis::temporal::vmafComputeAvgMad(src, 8, 8, 8), 64u);
+    // two blocks side by side (16 wide, stride 16): block 0 half 0/128
+    // mad 4096, block 1 constant 0 mad 0 -> 4096 / (2*64) = 32.
+    std::uint8_t src2[8 * 16];
+    for (int r = 0; r < 8; ++r) {
+        for (int c = 0; c < 16; ++c) {
+            src2[r * 16 + c] = c < 8 ? (r < 4 ? 0 : 128) : 0;
+        }
+    }
+    CHECK_EQ(analysis::temporal::vmafComputeAvgMad(src2, 16, 8, 16), 32u);
+    // narrower than one block: no blocks -> 0.
+    std::uint8_t src3[4 * 8] = {0};
+    CHECK_EQ(analysis::temporal::vmafComputeAvgMad(src3, 4, 8, 8), 0u);
+}
+
+// AM1 T8a: svt_vmaf_compute_gradient_coherence_c
+// (temporal_filtering.c:3671-3702): a flat plane has zero gradients, so
+// weight_sum <= 0 and the function returns 1.0f.
+TEST_CASE("l9 temporal vmafComputeGradientCoherence flat plane returns 1") {
+    std::uint8_t src[8 * 8];
+    for (int i = 0; i < 64; ++i) {
+        src[i] = 100;
+    }
+    CHECK_EQ(analysis::temporal::vmafComputeGradientCoherence(src, 8, 8, 8), doctest::Approx(1.0f));
+}
+
+// AM1 FLOAT TOLERANCE POLICY (stated once, the AN12 EPSILON precedent):
+// 1e-4 ABSOLUTE for every float-valued assertion in the AM1 tests
+// (coherence, gate, amounts), written as an explicit CHECK_LT band;
+// exact CHECK_EQ everywhere else. The AM1 float graph carries double
+// accumulators + a float sqrtf, so the only noise is the float cast.
+namespace {
+// T8b oracle: the reference's blockwise coherence replicated in pure
+// double (std::sqrt, no float casts) - an independent transcription of
+// temporal_filtering.c:3671-3702.
+double gcohOracle(const std::uint8_t* src, int width, int height, int stride) {
+    double weighted_coh = 0.0;
+    double weight_sum = 0.0;
+    for (int by = 1; by < height - 1; by += 16) {
+        for (int bx = 1; bx < width - 1; bx += 16) {
+            std::int64_t sum_xx = 0, sum_yy = 0, sum_xy = 0;
+            int y_end = (by + 16 < height - 1) ? by + 16 : height - 1;
+            int x_end = (bx + 16 < width - 1) ? bx + 16 : width - 1;
+            for (int y = by; y < y_end; y++) {
+                const std::uint8_t* row = src + y * stride;
+                const std::uint8_t* up = src + (y - 1) * stride;
+                const std::uint8_t* down = src + (y + 1) * stride;
+                for (int x = bx; x < x_end; x++) {
+                    std::int32_t gx = (std::int32_t)row[x + 1] - (std::int32_t)row[x - 1];
+                    std::int32_t gy = (std::int32_t)down[x] - (std::int32_t)up[x];
+                    sum_xx += (std::int64_t)gx * gx;
+                    sum_yy += (std::int64_t)gy * gy;
+                    sum_xy += (std::int64_t)gx * gy;
+                }
+            }
+            double xx = (double)sum_xx;
+            double yy = (double)sum_yy;
+            double xy = (double)sum_xy;
+            weighted_coh += std::sqrt((xx - yy) * (xx - yy) + 4.0 * xy * xy);
+            weight_sum += xx + yy;
+        }
+    }
+    if (weight_sum <= 0.0) {
+        return 1.0;
+    }
+    return weighted_coh / weight_sum;
+}
+}  // namespace
+
+TEST_CASE("l9 temporal vmafComputeGradientCoherence mixed gradient plane matches double oracle") {
+    const int w = 18, h = 18;
+    std::uint8_t src[w * h];
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            src[y * w + x] = (std::uint8_t)(2 * x + 3 * y + (x >= 9 ? 17 : 0) + (y >= 8 ? 40 : 0));
+        }
+    }
+    const float got = analysis::temporal::vmafComputeGradientCoherence(src, w, h, w);
+    const double o = gcohOracle(src, w, h, w);
+    CHECK_LT(std::fabs(got - o), 1e-4);
+    // and the fixture is not accidentally coherent (coherence = 1 means
+    // the gradient field carries no mixing - the oracle disagrees here)
+    CHECK_LT(got, 0.999);
+}
+
+// AM1 T9: svt_vmaf_count_detail_le_c (temporal_filtering.c:3704-3718):
+// the count of |src - blur| <= thresh; blur advances by width. The <=
+// boundary is pinned (detail == thresh counts).
+TEST_CASE("l9 temporal vmafCountDetailLe counts details at and below the threshold") {
+    const std::uint8_t src[4] = {100, 100, 100, 100};
+    const std::uint8_t blur[4] = {100, 95, 88, 87};  // details 0, 5, 12, 13
+    CHECK_EQ(analysis::temporal::vmafCountDetailLe(src, blur, 4, 1, 4, 12), 3u);
+    // threshold 5: only details 0 and 5.
+    CHECK_EQ(analysis::temporal::vmafCountDetailLe(src, blur, 4, 1, 4, 5), 2u);
+    // two rows: the second row's src read via src_stride, blur via width.
+    const std::uint8_t src2[8] = {1, 1, 1, 1, 200, 200, 200, 200};
+    const std::uint8_t blur2[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    // row 0 details 1 (<=12) x4; row 1 details 200 -> 0 counted; thresh 12.
+    CHECK_EQ(analysis::temporal::vmafCountDetailLe(src2, blur2, 4, 2, 4, 12), 4u);
+}
+
+// AM1 T10: svt_estimate_noise_fp16_c (temporal_filtering.c:3556-3585).
+// Constants (temporal_filtering.h:19-21): EDGE_THRESHOLD 50,
+// SQRT_PI_BY_2_FP16 82137, SMOOTH_THRESHOLD 16. Interior loop i,j in
+// [1, dim-1): Sobel gx/gy, ga = |gx|+|gy| < 50 admits the pixel, then
+// the 8-neighbour Laplacian; sum*82137/(6*num) fp16, num < 16 -> -65536.
+TEST_CASE("l9 temporal vmafEstimateNoiseFp16 single delta hand value plus branches") {
+    // (a) flat plane: every Laplacian 0, num 36 >= 16 -> 0.
+    std::uint8_t flat[8 * 8];
+    for (int i = 0; i < 64; ++i) {
+        flat[i] = 100;
+    }
+    CHECK_EQ(analysis::temporal::vmafEstimateNoiseFp16(flat, 8, 8, 8), 0);
+    // (b) 4x4 interior is 2x2 = 4 px < SMOOTH_THRESHOLD 16 -> -65536 even
+    // with an admitted nonzero-Laplacian pixel (sum 200).
+    std::uint8_t small[4 * 4];
+    for (int i = 0; i < 16; ++i) {
+        small[i] = 100;
+    }
+    small[1 * 4 + 1] = 150;
+    CHECK_EQ(analysis::temporal::vmafEstimateNoiseFp16(small, 4, 4, 4), -65536);
+    // (c) hand value: 6x6 all 100 with one delta at (2,2) = 110.
+    // Interior 4x4; every pixel admitted EXCEPT (3,3) (ga 60 >= 50, so
+    // num 15). |Laplacian| sum: center 40, the four edge-neighbours of
+    // the delta 20 each, the four diagonal-neighbours 10 each,
+    // everything else 0 -> 150. 150*82137 / (6*15) = 136895.
+    std::uint8_t src[6 * 6];
+    for (int i = 0; i < 36; ++i) {
+        src[i] = 100;
+    }
+    src[2 * 6 + 2] = 110;
+    CHECK_EQ(analysis::temporal::vmafEstimateNoiseFp16(src, 6, 6, 6), 136895);
+    // (d) ga boundary pair, delta 24 at (2,2): the 8 hood pixels have
+    // ga 48 < 50 (admitted), the center ga 0, and the 7 far interior
+    // pixels ga 0 (zero Laplacian): num 16, sum = 96 + 4*48 + 4*24 = 384;
+    // 384*82137 / (6*16) = 328548 (truncating).
+    std::uint8_t d24[6 * 6];
+    for (int i = 0; i < 36; ++i) {
+        d24[i] = 100;
+    }
+    d24[2 * 6 + 2] = 124;
+    CHECK_EQ(analysis::temporal::vmafEstimateNoiseFp16(d24, 6, 6, 6), 328548);
+    // (e) delta 25: every hood pixel sits at ga exactly 50, the ga < 50
+    // guard excludes all 8, admitted = center + 7 far = num 8 < 16 ->
+    // -65536 (with <= the run would be num 16, sum 400, 342237).
+    std::uint8_t d25[6 * 6];
+    for (int i = 0; i < 36; ++i) {
+        d25[i] = 100;
+    }
+    d25[2 * 6 + 2] = 125;
+    CHECK_EQ(analysis::temporal::vmafEstimateNoiseFp16(d25, 6, 6, 6), -65536);
+}

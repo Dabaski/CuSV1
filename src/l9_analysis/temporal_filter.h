@@ -24,6 +24,59 @@ namespace temporal {
   // 1:1 port of svt_aom_noise_log1p_fp16 (temporal_filtering.c:568-586).
 int32_t noiseLog1pFp16(int32_t noiseLevelFp16);
 
+// AM1: 1:1 port of svt_vmaf_hpass_row_c (temporal_filtering.c:3720-3733).
+// Two cascaded delay-line box stages = the [1,4,6,4,1] kernel over the
+// edge-clamped row; hRow holds width + 2*steps_x = width+4 entries and
+// hRow[x + steps_x] is the running output at loop position x (the
+// cascade's 4-step delay is why the vpass offsets by blur_start = 4).
+void vmafHpassRow(const uint8_t* srcRow, int width, int16_t* hRow);
+
+// AM1: 1:1 port of svt_vmaf_vpass_row_c (temporal_filtering.c:3660-3669).
+// The vertical [1,4,6,4,1] over the five ring rows; j = x + 2*steps_x.
+void vmafVpassRow(const int16_t* r0, const int16_t* r1, const int16_t* r2, const int16_t* r3,
+                  const int16_t* r4, uint8_t* blurRow, int width, int stepsX);
+
+// AM1: 1:1 port of vmaf_box_blur_frame (pic_analysis_process.c:1773-1799).
+// Separable two-stage box blur (steps_x = steps_y = 2) over the ring
+// buffers hring[5] (caller-owned, each width+4 int16): four primed rows
+// k-steps_y clamped, then per output row the new m+steps_y row and the
+// vpass, rotating the ring oldest-first.
+void vmafBoxBlurFrame(const uint8_t* lumaPlane, int stride, uint8_t* blurPlane, int width, int height,
+                      int16_t* const hring[5]);
+
+// AM1: 1:1 port of svt_vmaf_apply_unsharp_row_c
+// (temporal_filtering.c:3650-3658).
+void vmafApplyUnsharpRow(const uint8_t* src, const uint8_t* blur, uint8_t* dst, int width, int amount,
+                         int32_t maxDelta);
+
+// AM1: 1:1 port of vmaf_unsharp_apply_frame
+// (pic_analysis_process.c:1815-1821): the per-row dispatch over
+// vmafApplyUnsharpRow - src/dst advance by stride, blur by width.
+void vmafUnsharpApplyFrame(const uint8_t* src, const uint8_t* blurPlane, uint8_t* dst, int width, int height,
+                           int stride, int sharpAmount, int32_t deltaClip);
+
+// AM1: 1:1 port of svt_vmaf_compute_avg_mad_c
+// (temporal_filtering.c:3622-3648).
+uint32_t vmafComputeAvgMad(const uint8_t* src, int width, int height, int stride);
+
+// AM1: 1:1 port of svt_vmaf_compute_gradient_coherence_c
+// (temporal_filtering.c:3671-3702): 16-step blockwise gradient
+// coherence, double accumulators, float sqrtf; zero weight sum -> 1.0f.
+float vmafComputeGradientCoherence(const uint8_t* src, int width, int height, int stride);
+
+// AM1: 1:1 port of svt_vmaf_count_detail_le_c
+// (temporal_filtering.c:3704-3718): the count of |src - blur| <= thresh;
+// src advances by srcStride, blur by width.
+uint32_t vmafCountDetailLe(const uint8_t* src, const uint8_t* blur, int width, int height, int srcStride,
+                           int thresh);
+
+// AM1: 1:1 port of svt_estimate_noise_fp16_c
+// (temporal_filtering.c:3556-3585): Sobel-admitted 8-neighbour Laplacian
+// noise estimate in fp16; constants EDGE_THRESHOLD 50, SMOOTH_THRESHOLD
+// 16, SQRT_PI_BY_2_FP16 82137 (temporal_filtering.h:19-21); num < 16 ->
+// -65536.
+int32_t vmafEstimateNoiseFp16(const uint8_t* src, uint16_t width, uint16_t height, uint16_t yStride);
+
 // log1p(x) for x in [-1..6], step 1/32, fixed point shift 16
 // (temporal_filtering.c:339-565). 225 entries.
 extern const int32_t log1pTabFp16[225];

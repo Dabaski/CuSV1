@@ -1,5 +1,7 @@
 #include "temporal_filter.h"
 
+#include <cstdlib>
+
 namespace analysis {
 namespace temporal {
 
@@ -380,6 +382,195 @@ int32_t noiseLog1pFp16(int32_t noiseLevelFp16) {
         // approximation to line(fp16): y = 1860*x + 116456
         return ((1860 * (noiseLevelFp16 >> 8)) >> 8) + 116456;
     }
+}
+
+// AM1: svt_vmaf_hpass_row_c (temporal_filtering.c:3720-3733).
+void vmafHpassRow(const uint8_t* srcRow, int width, int16_t* hRow) {
+    const int steps_x = 2;
+    uint32_t h_acc[4] = {0};
+    for (int x = -steps_x; x < width + steps_x; x++) {
+        uint32_t tmp1 = x <= 0 ? srcRow[0] : x >= width ? srcRow[width - 1] : (uint32_t)srcRow[x];
+        for (int s = 0; s < steps_x * 2; s += 2) {
+            uint32_t tmp2 = h_acc[s] + tmp1;
+            h_acc[s] = tmp1;
+            tmp1 = h_acc[s + 1] + tmp2;
+            h_acc[s + 1] = tmp2;
+        }
+        hRow[x + steps_x] = (int16_t)tmp1;
+    }
+}
+
+// AM1: svt_vmaf_vpass_row_c (temporal_filtering.c:3660-3669).
+void vmafVpassRow(const int16_t* r0, const int16_t* r1, const int16_t* r2, const int16_t* r3,
+                  const int16_t* r4, uint8_t* blurRow, int width, int steps_x) {
+    const int blur_start = 2 * steps_x;
+    for (int x = 0; x < width; x++) {
+        const int j = x + blur_start;
+        uint32_t v = (uint32_t)r0[j] + (uint32_t)r4[j] + 4u * ((uint32_t)r1[j] + (uint32_t)r3[j]) +
+            6u * (uint32_t)r2[j];
+        blurRow[x] = (uint8_t)((v + 128u) >> 8);
+    }
+}
+
+// AM1: vmaf_box_blur_frame (pic_analysis_process.c:1773-1799).
+void vmafBoxBlurFrame(const uint8_t* lumaPlane, int stride, uint8_t* blurPlane, int width, int height,
+                      int16_t* const hring[5]) {
+    const int steps_x = 2;
+    const int steps_y = 2;
+
+    int16_t* r[5] = {hring[0], hring[1], hring[2], hring[3], hring[4]};
+    for (int k = 0; k < 4; k++) {
+        int row = k - steps_y;
+        row = row < 0 ? 0 : (row >= height ? height - 1 : row);
+        vmafHpassRow(lumaPlane + (size_t)row * stride, width, r[k]);
+    }
+
+    for (int m = 0; m < height; m++) {
+        int row = m + steps_y;
+        row = row >= height ? height - 1 : row;
+        vmafHpassRow(lumaPlane + (size_t)row * stride, width, r[4]);
+
+        vmafVpassRow(r[0], r[1], r[2], r[3], r[4], blurPlane + (size_t)m * width, width, steps_x);
+
+        int16_t* oldest = r[0];
+        r[0] = r[1];
+        r[1] = r[2];
+        r[2] = r[3];
+        r[3] = r[4];
+        r[4] = oldest;
+    }
+}
+
+// AM1: svt_vmaf_apply_unsharp_row_c (temporal_filtering.c:3650-3658).
+void vmafApplyUnsharpRow(const uint8_t* src, const uint8_t* blur, uint8_t* dst, int width, int amount,
+                         int32_t max_delta) {
+    for (int j = 0; j < width; j++) {
+        int32_t detail = (int32_t)src[j] - (int32_t)blur[j];
+        detail = detail > max_delta ? max_delta : detail < -max_delta ? -max_delta : detail;
+        int32_t result = (int32_t)src[j] + ((detail * amount) >> 15);
+        dst[j] = (uint8_t)(result < 0 ? 0 : result > 255 ? 255 : result);
+    }
+}
+
+// AM1: vmaf_unsharp_apply_frame (pic_analysis_process.c:1815-1821).
+void vmafUnsharpApplyFrame(const uint8_t* src, const uint8_t* blur_plane, uint8_t* dst, int width, int height,
+                           int stride, int sharp_amount, int32_t delta_clip) {
+    for (int y = 0; y < height; y++) {
+        vmafApplyUnsharpRow(
+            src + y * stride, blur_plane + y * width, dst + y * stride, width, sharp_amount, delta_clip);
+    }
+}
+
+// AM1: svt_vmaf_compute_avg_mad_c (temporal_filtering.c:3622-3648).
+uint32_t vmafComputeAvgMad(const uint8_t* src, int width, int height, int stride) {
+    uint64_t total_activity = 0;
+    int block_count = 0;
+    for (int by = 0; by + 8 <= height; by += 8) {
+        for (int bx = 0; bx + 8 <= width; bx += 8) {
+            uint32_t sum = 0;
+            for (int r = 0; r < 8; r++) {
+                for (int c = 0; c < 8; c++) {
+                    sum += src[(by + r) * stride + (bx + c)];
+                }
+            }
+            uint32_t mean = sum >> 6;
+            uint32_t mad = 0;
+            for (int r = 0; r < 8; r++) {
+                for (int c = 0; c < 8; c++) {
+                    mad += (uint32_t)abs((int)src[(by + r) * stride + (bx + c)] - (int)mean);
+                }
+            }
+            total_activity += mad;
+            block_count++;
+        }
+    }
+    if (block_count == 0) {
+        return 0;
+    }
+    return (uint32_t)(total_activity / ((uint64_t)block_count * 64));
+}
+
+// AM1: svt_vmaf_compute_gradient_coherence_c (temporal_filtering.c:3671-3702).
+float vmafComputeGradientCoherence(const uint8_t* src, int width, int height, int stride) {
+    double weighted_coh = 0.0;
+    double weight_sum = 0.0;
+    for (int by = 1; by < height - 1; by += 16) {
+        for (int bx = 1; bx < width - 1; bx += 16) {
+            int64_t sum_xx = 0, sum_yy = 0, sum_xy = 0;
+            int y_end = (by + 16 < height - 1) ? by + 16 : height - 1;
+            int x_end = (bx + 16 < width - 1) ? bx + 16 : width - 1;
+            for (int y = by; y < y_end; y++) {
+                const uint8_t* row = src + y * stride;
+                const uint8_t* up = src + (y - 1) * stride;
+                const uint8_t* down = src + (y + 1) * stride;
+                for (int x = bx; x < x_end; x++) {
+                    int32_t grad_x = (int32_t)row[x + 1] - (int32_t)row[x - 1];
+                    int32_t grad_y = (int32_t)down[x] - (int32_t)up[x];
+                    sum_xx += (int64_t)grad_x * grad_x;
+                    sum_yy += (int64_t)grad_y * grad_y;
+                    sum_xy += (int64_t)grad_x * grad_y;
+                }
+            }
+            double xx = (double)sum_xx;
+            double yy = (double)sum_yy;
+            double xy = (double)sum_xy;
+            weighted_coh += (double)sqrtf((float)((xx - yy) * (xx - yy) + 4.0 * xy * xy));
+            weight_sum += xx + yy;
+        }
+    }
+    if (weight_sum <= 0.0) {
+        return 1.0f;
+    }
+    return (float)(weighted_coh / weight_sum);
+}
+
+// AM1: svt_vmaf_count_detail_le_c (temporal_filtering.c:3704-3718).
+uint32_t vmafCountDetailLe(const uint8_t* src, const uint8_t* blur, int width, int height, int src_stride,
+                           int thresh) {
+    uint32_t match_count = 0;
+    for (int y = 0; y < height; y++) {
+        const uint8_t* src_row = src + (size_t)y * src_stride;
+        const uint8_t* blur_row = blur + (size_t)y * width;
+        for (int x = 0; x < width; x++) {
+            int32_t detail = abs((int32_t)src_row[x] - (int32_t)blur_row[x]);
+            if (detail <= thresh) {
+                match_count++;
+            }
+        }
+    }
+    return match_count;
+}
+
+// AM1: svt_estimate_noise_fp16_c (temporal_filtering.c:3556-3585).
+int32_t vmafEstimateNoiseFp16(const uint8_t* src, uint16_t width, uint16_t height, uint16_t y_stride) {
+    int64_t sum = 0;
+    int64_t num = 0;
+
+    for (int i = 1; i < height - 1; ++i) {
+        for (int j = 1; j < width - 1; ++j) {
+            const int k = i * y_stride + j;
+            // Sobel gradients
+            const int g_x = (src[k - y_stride - 1] - src[k - y_stride + 1]) +
+                (src[k + y_stride - 1] - src[k + y_stride + 1]) + 2 * (src[k - 1] - src[k + 1]);
+            const int g_y = (src[k - y_stride - 1] - src[k + y_stride - 1]) +
+                (src[k - y_stride + 1] - src[k + y_stride + 1]) + 2 * (src[k - y_stride] - src[k + y_stride]);
+            const int ga = abs(g_x) + abs(g_y);
+            if (ga < 50 /*EDGE_THRESHOLD*/) {  // Do not consider edge pixels to estimate the noise
+                // Find Laplacian
+                const int v = 4 * src[k] - 2 * (src[k - 1] + src[k + 1] + src[k - y_stride] + src[k + y_stride]) +
+                    (src[k - y_stride - 1] + src[k - y_stride + 1] + src[k + y_stride - 1] +
+                     src[k + y_stride + 1]);
+                sum += abs(v);
+                ++num;
+            }
+        }
+    }
+    // If very few smooth pels, return -1 since the estimate is unreliable
+    if (num < 16 /*SMOOTH_THRESHOLD*/) {
+        return -65536 /*-1:fp16*/;
+    }
+
+    return (int32_t)((sum * 82137 /*SQRT_PI_BY_2_FP16*/) / (6 * num));
 }
 }
 }

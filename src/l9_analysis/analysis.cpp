@@ -1,5 +1,7 @@
 #include "analysis.h"
 
+#include "temporal_filter.h"
+
 #include <cassert>
 #include <cstring>
 
@@ -1540,4 +1542,274 @@ void b64Variance(const std::uint8_t* y, std::uint16_t yStride, BlockMeanPrec pre
         kVariancePrecision);
 }
 
+// AM1: vmaf_get_spatial_amount (pic_analysis_process.c:1642-1652).
+float vmafGetSpatialAmount(std::uint32_t avgMad) {
+    if (avgMad < 2) {
+        return 0.15f;
+    } else if (avgMad < 5) {
+        return 0.22f;
+    } else if (avgMad < 12) {
+        return 0.28f;
+    } else {
+        return 0.30f;
+    }
+}
+
+// AM1: vmaf_get_qp_amount (pic_analysis_process.c:1654-1659).
+float vmafGetQpAmount(std::uint32_t baseQp) {
+    if (baseQp >= 35) {
+        return 0.3f;
+    }
+    return 0.5f - (baseQp / 35.0f) * (0.5f - 0.3f);
+}
+
+// AM1: vmaf_get_coherence_factor (pic_analysis_process.c:1661-1669).
+float vmafGetCoherenceFactor(float gcoh) {
+    if (gcoh < 0.40f) {
+        return 0.80f;
+    } else if (gcoh < 0.60f) {
+        return 0.9f;
+    } else {
+        return 1.0f;
+    }
+}
+
+// AM1: vmaf_compute_combined_amount (pic_analysis_process.c:1671-1678).
+float vmafComputeCombinedAmount(std::uint32_t baseQp, std::uint32_t avgMad, float gcoh) {
+    float per_qp = vmafGetQpAmount(baseQp);
+    float spatial = vmafGetSpatialAmount(avgMad);
+    float coh_factor = vmafGetCoherenceFactor(gcoh);
+
+    float combined_amount = (per_qp + spatial) / 2.0f;
+    return combined_amount * coh_factor;
+}
+
+// AM1: vmaf_get_delta_clip (pic_analysis_process.c:1741-1754).
+std::int32_t vmafGetDeltaClip(std::int32_t baseQp, int busy_frame) {
+    std::int32_t qp_delta;
+    if (baseQp <= 42) {
+        qp_delta = 8;
+    } else if (baseQp <= 51) {
+        qp_delta = 9;
+    } else if (baseQp <= 57) {
+        qp_delta = 10;
+    } else {
+        qp_delta = 12;
+    }
+
+    return busy_frame ? qp_delta - 4 : qp_delta;
+}
+
+// AM1: vmaf_get_noise_gate (pic_analysis_process.c:1701-1726). The
+// enhanced_pic wall threaded as the plane parameters (named deviation).
+float vmafGetNoiseGate(const std::uint8_t* y, std::uint16_t width, std::uint16_t height,
+                       std::uint16_t stride) {
+    std::int32_t noise_fp16 = temporal::vmafEstimateNoiseFp16(y, width, height, stride);
+    if (noise_fp16 < 0) {
+        return 1.0f;
+    }
+
+    std::int32_t noise_log1p = temporal::noiseLog1pFp16(noise_fp16);
+
+    const std::int32_t gate_start = 40000;
+    const std::int32_t gate_end = 80000;
+    const float gate_floor = 0.3f;
+
+    if (noise_log1p <= gate_start) {
+        return 1.0f;
+    }
+    if (noise_log1p >= gate_end) {
+        return gate_floor;
+    }
+
+    float t = (float)(noise_log1p - gate_start) / (float)(gate_end - gate_start);
+    return 1.0f - t * (1.0f - gate_floor);
+}
+
+// AM1: vmaf_unsharp_apply_frame (pic_analysis_process.c:1815-1821), the
+// local row loop over the temporal:: row kernel.
+void vmafUnsharpApplyFrameLocal(const std::uint8_t* src, const std::uint8_t* blur_plane, std::uint8_t* dst,
+                                int width, int height, int stride, int sharp_amount,
+                                std::int32_t delta_clip) {
+    for (int y = 0; y < height; y++) {
+        temporal::vmafApplyUnsharpRow(
+            src + y * stride, blur_plane + y * width, dst + y * stride, width, sharp_amount, delta_clip);
+    }
+}
+
+// AM1: vmaf_preprocess_frame (pic_analysis_process.c:1842-1900). The
+// :1856-1881 buffer-management block is the pa_ctx wall and is NOT
+// ported - the buffers arrive caller-owned.
+void vmafPreprocessFrame(std::uint8_t* luma, int stride, int width, int height, int16_t* const hring[5],
+                         std::uint8_t* blurPlane, std::uint32_t baseQp, int* sharpAmount,
+                         std::int32_t* deltaClip) {
+    /* Step 1: compute the per-frame sharpening amount, then gate it down on noisy frames. */
+    std::uint32_t avg_mad = temporal::vmafComputeAvgMad(luma, width, height, stride);
+    float gcoh = temporal::vmafComputeGradientCoherence(luma, width, height, stride);
+    int sharp_amount = (int)(vmafComputeCombinedAmount(baseQp, avg_mad, gcoh) * 32768.0f);
+    sharp_amount = (int)(sharp_amount * vmafGetNoiseGate(luma, (std::uint16_t)width, (std::uint16_t)height,
+                                                         (std::uint16_t)stride));
+    *sharpAmount = sharp_amount;
+
+    /* Step 2: build the low-pass reference by box-blurring the luma plane. */
+    temporal::vmafBoxBlurFrame(luma, stride, blurPlane, width, height, hring);
+
+    /* Step 3: flag busy frames (under 85% flat pixels) and derive the per-pixel delta clip. */
+    const std::int32_t flat_detail_thr = 12;
+    const std::uint32_t pixel_count = (std::uint32_t)(width * height);
+    const std::uint32_t flat_pixel_target = pixel_count * 85 / 100;
+    const std::uint32_t flat_pixel_count = temporal::vmafCountDetailLe(
+        luma, blurPlane, width, height, stride, flat_detail_thr);
+    const int is_busy_frame = (flat_pixel_count < flat_pixel_target);
+
+    const std::int32_t delta_clip = vmafGetDeltaClip((std::int32_t)baseQp, is_busy_frame);
+    *deltaClip = delta_clip;
+
+    /* Step 4: apply the unsharp mask in place, writing the sharpened luma back over the source. */
+    vmafUnsharpApplyFrameLocal(luma, blurPlane, luma, width, height, stride, sharp_amount, delta_clip);
+}
+
+// AM1: sub_sample_luma_generate_pixel_intensity_histogram_bins
+// (pic_analysis_process.c:527-589).
+void subSampleLumaHistogramBins(std::uint32_t regionsPerWidth, std::uint32_t regionsPerHeight,
+                                bool sceneChangeDetection, const std::uint8_t* y, std::uint32_t width,
+                                std::uint32_t height, std::uint32_t yStride,
+                                std::uint32_t* histograms[4][4], std::uint64_t avgIntensityPerRegion[4][4],
+                                std::uint64_t* sumAvgIntensityTtlRegionsLuma) {
+    *sumAvgIntensityTtlRegionsLuma = 0;
+    std::uint32_t region_width = width / regionsPerWidth;
+    std::uint32_t region_height = height / regionsPerHeight;
+
+    // Loop over regions inside the picture
+    for (std::uint32_t region_in_picture_width_index = 0;
+         region_in_picture_width_index < regionsPerWidth;
+         region_in_picture_width_index++) {  // loop over horizontal regions
+        for (std::uint32_t region_in_picture_height_index = 0;
+             region_in_picture_height_index < regionsPerHeight;
+             region_in_picture_height_index++) {  // loop over vertical regions
+
+            std::uint64_t sum = 0;
+
+            // Initialize bins to 1 (svt_initialize_buffer_32bits(h, 64, 0, 1)
+            // = 64*4 + 0 = HISTOGRAM_NUMBER_OF_BINS entries).
+            std::uint32_t* hist = histograms[region_in_picture_width_index]
+                                             [region_in_picture_height_index];
+            for (std::uint32_t bin = 0; bin < 64 * 4; ++bin) {
+                hist[bin] = 1;
+            }
+
+            std::uint32_t region_width_offset = (region_in_picture_width_index ==
+                                                 regionsPerWidth - 1)
+                ? width - (regionsPerWidth * region_width)
+                : 0;
+
+            std::uint32_t region_height_offset = (region_in_picture_height_index ==
+                                                  regionsPerHeight - 1)
+                ? height - (regionsPerHeight * region_height)
+                : 0;
+            std::uint8_t decim_step = sceneChangeDetection ? 1 : 4;
+            // Y Histogram
+            calculateHistogram(
+                &y[(region_in_picture_width_index * region_width) +
+                   ((region_in_picture_height_index * region_height) * yStride)],
+                region_width + region_width_offset,
+                region_height + region_height_offset,
+                yStride,
+                decim_step,
+                histograms[region_in_picture_width_index][region_in_picture_height_index],
+                &sum);
+            sum = (sum * decim_step * decim_step);
+
+            avgIntensityPerRegion[region_in_picture_width_index][region_in_picture_height_index] =
+                (std::uint8_t)((sum +
+                                (((region_width + region_width_offset) * (region_height + region_height_offset)) >> 1)) /
+                               ((region_width + region_width_offset) * (region_height + region_height_offset)));
+            *sumAvgIntensityTtlRegionsLuma += sum;
+            for (std::uint32_t histogram_bin = 0; histogram_bin < 256 /*HISTOGRAM_NUMBER_OF_BINS*/;
+                 histogram_bin++) {  // Loop over the histogram bins
+                histograms[region_in_picture_width_index][region_in_picture_height_index][histogram_bin] =
+                    histograms[region_in_picture_width_index][region_in_picture_height_index]
+                                              [histogram_bin] *
+                    4 * 4 * decim_step * decim_step;
+            }
+        }
+    }
+
+    *sumAvgIntensityTtlRegionsLuma /= (width * height);
+}
+
+// AM1: compute_picture_spatial_statistics (pic_analysis_process.c:597-617).
+void computePictureSpatialStatistics(const std::uint8_t* y, std::uint16_t yStride, BlockMeanPrec prec,
+                                     bool subBlockVariances, std::uint16_t b64TotalCount,
+                                     const std::uint16_t* orgX, const std::uint16_t* orgY,
+                                     std::uint16_t* sbVar, std::uint16_t* picAvgVariance) {
+    // Variance
+    std::uint64_t pic_tot_variance = 0;
+
+    for (std::uint16_t b64_idx = 0; b64_idx < b64TotalCount; ++b64_idx) {
+        std::uint16_t b64_origin_x = orgX[b64_idx];
+        std::uint16_t b64_origin_y = orgY[b64_idx];
+        std::uint32_t input_luma_origin_index = ((std::uint32_t)b64_origin_y) * yStride + b64_origin_x;
+
+        // the fold arrays are compute_b64_variance internals in the
+        // reference (its stack); the AN7 port exposes them as params.
+        std::uint64_t meanOf16x16Blocks[16];
+        std::uint64_t meanOf16x16SquaredValuesBlocks[16];
+        std::uint64_t meanOf32x32Blocks[4];
+        std::uint64_t meanOf32x32SquaredValuesBlocks[4];
+        std::uint64_t meanOf64x64Block;
+        std::uint64_t meanOf64x64SquaredValuesBlock;
+        b64Variance(&y[input_luma_origin_index], yStride, prec, subBlockVariances,
+                    sbVar + (std::size_t)b64_idx * kSbVarRowEntries, meanOf16x16Blocks,
+                    meanOf16x16SquaredValuesBlocks, meanOf32x32Blocks, meanOf32x32SquaredValuesBlocks,
+                    &meanOf64x64Block, &meanOf64x64SquaredValuesBlock);
+        pic_tot_variance += (sbVar[(std::size_t)b64_idx * kSbVarRowEntries + 0 /*RASTER_SCAN_CU_INDEX_64x64*/]);
+    }
+
+    *picAvgVariance = (std::uint16_t)(pic_tot_variance / b64TotalCount);
+}
+
+// AM1: svt_aom_gathering_picture_statistics (pic_analysis_process.c:624-643).
+void gatheringPictureStatistics(bool calcHist, bool calculateVariance,
+                                std::uint32_t regionsPerWidth, std::uint32_t regionsPerHeight,
+                                bool sceneChangeDetection, const std::uint8_t* histY, std::uint32_t histWidth,
+                                std::uint32_t histHeight, std::uint32_t histStride,
+                                std::uint32_t* histograms[4][4], std::uint64_t avgIntensityPerRegion[4][4],
+                                const std::uint8_t* statY, std::uint16_t statStride, BlockMeanPrec prec,
+                                bool subBlockVariances, std::uint16_t b64TotalCount, const std::uint16_t* orgX,
+                                const std::uint16_t* orgY, std::uint16_t* sbVar, std::uint64_t* avgLuma,
+                                std::uint16_t* picAvgVariance) {
+    *avgLuma = 256 /*INVALID_LUMA, definitions.h:93*/;
+    // Histogram bins
+    if (calcHist) {
+        // Use 1/16 Luma for Histogram generation
+        // 1/16 input ready
+        subSampleLumaHistogramBins(regionsPerWidth, regionsPerHeight, sceneChangeDetection, histY, histWidth,
+                                   histHeight, histStride, histograms, avgIntensityPerRegion, avgLuma);
+    }
+
+    if (calculateVariance) {
+        computePictureSpatialStatistics(statY, statStride, prec, subBlockVariances, b64TotalCount, orgX, orgY,
+                                        sbVar, picAvgVariance);
+    } else {
+        *picAvgVariance = 0;
+    }
+}
+
+// AN20: svt_av1_twopass_zero_stats (firstpass.c:133-139).
+void twopassZeroStats(FirstpassStats* section) {
+    section->frame = 0.0;
+    section->codedError = 0.0;
+    section->count = 0.0;
+    section->duration = 1.0;
+    std::memset(&section->statStruct, 0, sizeof(FirstpassStatStruct));
+}
+
+// AN20: svt_av1_accumulate_stats (firstpass.c:141-146).
+void accumulateStats(FirstpassStats* section, const FirstpassStats* frame) {
+    section->frame += frame->frame;
+    section->codedError += frame->codedError;
+    section->count += frame->count;
+    section->duration += frame->duration;
+}
 }  // namespace analysis

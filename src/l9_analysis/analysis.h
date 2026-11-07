@@ -1047,4 +1047,131 @@ void noiseTxInverse(NoiseTx* noiseTx, float* data);
 //   (M*x) hi32 = (2^32-1)*x >> 32 = x - 1 (for x >= 1) then the h1 add and
 //   the reference's lowbit adjustment give x. d=8: M = 0xE38E38E4, h1 = 8.
 extern std::uint32_t odDivuSmallConsts[1024][2];
+
+// AM1: the vmaf activity-masking family of pic_analysis_process.c
+// (third_party/SVT-AV1/Source/Lib/Codec/pic_analysis_process.c:1642-1900,
+// the CONFIG_ENABLE_VMAF block). The pcs/scs walls are threaded as
+// parameters per the campaign pattern.
+//
+// 1:1 port of vmaf_get_spatial_amount (:1642-1652): MAD-tier caps.
+float vmafGetSpatialAmount(std::uint32_t avgMad);
+
+// 1:1 port of vmaf_get_qp_amount (:1654-1659): full strength 0.5 at
+// qp 0 easing linearly to the 0.3 floor at qp >= 35.
+float vmafGetQpAmount(std::uint32_t baseQp);
+
+// 1:1 port of vmaf_get_coherence_factor (:1661-1669): the noise/grain
+// reduction tiers on gradient coherence.
+float vmafGetCoherenceFactor(float gcoh);
+
+// 1:1 port of vmaf_compute_combined_amount (:1671-1678): pcs read of
+// scs->static_config.qp threaded as the baseQp parameter (named
+// deviation).
+float vmafComputeCombinedAmount(std::uint32_t baseQp, std::uint32_t avgMad, float gcoh);
+
+// 1:1 port of vmaf_get_delta_clip (:1741-1754): the QP budget 8/9/10/12
+// at <= 42/51/57/else, minus 4 on busy frames.
+std::int32_t vmafGetDeltaClip(std::int32_t baseQp, int busyFrame);
+
+// 1:1 port of vmaf_get_noise_gate (:1701-1726): the enhanced_pic wall
+// threaded as the plane parameters (named deviation); consumes the
+// temporal:: estimator chain (vmafEstimateNoiseFp16 + noiseLog1pFp16)
+// and maps the log1p noise through the [0.3, 1.0] gate.
+float vmafGetNoiseGate(const std::uint8_t* y, std::uint16_t width, std::uint16_t height,
+                       std::uint16_t stride);
+
+// 1:1 port of vmaf_preprocess_frame (:1842-1900), the TUNE_VMAF driver.
+// Threading (named deviations): the pa_ctx wall - the hring[5] and
+// blur_plane buffers plus the :1857-1881 grow logic - is caller-owned;
+// pcs->vmaf_sharpening_amount / pcs->vmaf_max_delta become the
+// out-params; scs->static_config.qp becomes baseQp. The unsharp is
+// in place: luma is both source and destination. The blur helpers are
+// the temporal:: ports (vmafBoxBlurFrame / vmafApplyUnsharpRow via the
+// :1815-1821 row loop).
+void vmafPreprocessFrame(std::uint8_t* luma, int stride, int width, int height, int16_t* const hring[5],
+                         std::uint8_t* blurPlane, std::uint32_t baseQp, int* sharpAmount,
+                         std::int32_t* deltaClip);
+
+// AM1: 1:1 port of sub_sample_luma_generate_pixel_intensity_histogram_bins
+// (:527-589), the pre-processing histogram stage. Threading (named
+// deviations): scs->picture_analysis_number_of_regions_per_width/height
+// and static_config.scene_change_detection become the first three
+// params; the EbPictureBufferDesc wall becomes (y, width, height,
+// yStride); pcs->picture_histogram (uint32_t***, [4][4][256],
+// pcs.h:852, HISTOGRAM_NUMBER_OF_BINS = 256 pcs.h:39,
+// MAX_NUMBER_OF_REGIONS_IN_WIDTH/HEIGHT = 4/4 pcs.h:40-41) and
+// average_intensity_per_region become caller-owned arrays;
+// *sum_avg_intensity_ttl_regions_luma stays the out-param. The 256-bin
+// init to 1 inlines the svt_initialize_buffer_32bits(h, 64, 0, 1) call
+// (count128*4 + count32 entries; the helper itself lives in
+// me_sad_calculation.c and is not ported).
+void subSampleLumaHistogramBins(std::uint32_t regionsPerWidth, std::uint32_t regionsPerHeight,
+                                bool sceneChangeDetection, const std::uint8_t* y, std::uint32_t width,
+                                std::uint32_t height, std::uint32_t yStride,
+                                std::uint32_t* histograms[4][4], std::uint64_t avgIntensityPerRegion[4][4],
+                                std::uint64_t* sumAvgIntensityTtlRegionsLuma);
+
+// AM1: 1:1 port of compute_picture_spatial_statistics (:597-617).
+// Threading (named deviations): pcs->b64_geom[b64_idx].org_x/org_y
+// become the orgX/orgY arrays (the B64Geom struct wall), the
+// EbPictureBufferDesc wall becomes (y, yStride) with y pointing at each
+// b64 origin, pcs->variance[b64_idx][RASTER_SCAN_CU_INDEX_64x64 = 0]
+// (definitions.h:2068) becomes the caller-owned sbVar rows - row
+// b64_idx at sbVar + b64_idx * kSbVarRowEntries, the AN7 85-entry
+// layout (64x64 at base 0, only 0..84 ever written) - and
+// pcs->pic_avg_variance the out-param. Calls the landed b64Variance.
+void computePictureSpatialStatistics(const std::uint8_t* y, std::uint16_t yStride, BlockMeanPrec prec,
+                                     bool subBlockVariances, std::uint16_t b64TotalCount,
+                                     const std::uint16_t* orgX, const std::uint16_t* orgY,
+                                     std::uint16_t* sbVar, std::uint16_t* picAvgVariance);
+
+// The AN7 sbVar row length (entries 0..84 ever written; the reference's
+// pcs->variance rows are 209 wide with 85..208 untouched).
+constexpr std::size_t kSbVarRowEntries = 85;
+
+// AM1: 1:1 port of svt_aom_gathering_picture_statistics (:624-643), the
+// per-picture statistics driver. Threading (named deviations):
+// scs->calc_hist / calculate_variance become the two flags; the two
+// EbPictureBufferDesc walls become the sub-callee plane params; the
+// pcs->avg_luma (uint64, pcs.h:802; INVALID_LUMA = 256,
+// definitions.h:93) and pic_avg_variance become out-params. The flags
+// keep the reference's order: histograms first, then variance.
+void gatheringPictureStatistics(bool calcHist, bool calculateVariance,
+                                std::uint32_t regionsPerWidth, std::uint32_t regionsPerHeight,
+                                bool sceneChangeDetection, const std::uint8_t* histY, std::uint32_t histWidth,
+                                std::uint32_t histHeight, std::uint32_t histStride,
+                                std::uint32_t* histograms[4][4], std::uint64_t avgIntensityPerRegion[4][4],
+                                const std::uint8_t* statY, std::uint16_t statStride, BlockMeanPrec prec,
+                                bool subBlockVariances, std::uint16_t b64TotalCount, const std::uint16_t* orgX,
+                                const std::uint16_t* orgY, std::uint16_t* sbVar, std::uint64_t* avgLuma,
+                                std::uint16_t* picAvgVariance);
+
+// AN20: 1:1 port of StatStruct (third_party/SVT-AV1/Source/Lib/Codec/
+// definitions.h:2155-2161).
+struct FirstpassStatStruct {
+  std::uint64_t poc;
+  std::uint64_t totalNumBits;
+  std::uint8_t qindex;
+  std::uint8_t worstQindex;
+  std::uint8_t temporalLayerIndex;
+};
+
+// AN20: 1:1 port of FIRSTPASS_STATS (firstpass.h:30-50) - field order
+// frame, coded_error, duration, count + StatStruct.
+struct FirstpassStats {
+  double frame;
+  double codedError;
+  double duration;
+  double count;
+  FirstpassStatStruct statStruct;
+};
+
+// AN20: 1:1 port of svt_av1_twopass_zero_stats (firstpass.c:133-139).
+// NOTE duration starts at 1.0, not 0 - the reference's own choice.
+void twopassZeroStats(FirstpassStats* section);
+
+// AN20: 1:1 port of svt_av1_accumulate_stats (firstpass.c:141-146).
+// NOTE: stat_struct is NOT accumulated - the reference accumulates only
+// the four doubles.
+void accumulateStats(FirstpassStats* section, const FirstpassStats* frame);
 }  // namespace analysis

@@ -1,5 +1,6 @@
 #include <doctest.h>
 #include <analysis.h>
+#include <temporal_filter.h>
 
 // 1:1 target: svt_compute_mean_c at 8x8
 // (third_party/SVT-AV1/Source/Lib/Codec/pic_analysis_process.c:194-216,
@@ -1223,4 +1224,429 @@ TEST_CASE("calculateHistogram decimates rows and columns by decim_step") {
     CHECK(histogram[22] == 1);
     CHECK(histogram[1] == 0);
     CHECK(sum == 44);
+}
+
+// AN20 S1: the FIRSTPASS_STATS struct (firstpass.h:30-50) + the pure
+// accumulation pair svt_av1_twopass_zero_stats / svt_av1_accumulate_stats
+// (firstpass.c:133-146). The struct: double frame, coded_error, duration,
+// count + StatStruct{uint64 poc, total_num_bits; uint8 qindex,
+// worst_qindex, temporal_layer_index} (definitions.h:2155-2161). The
+// output_stats TWO_PASS wall (firstpass.c:83) stays parked.
+TEST_CASE("twopassZeroStats zeroes frame coded_error count and sets duration 1.0") {
+    analysis::FirstpassStats s{};
+    s.frame = 5.0;
+    s.codedError = 6.0;
+    s.count = 7.0;
+    s.duration = 99.0;
+    analysis::twopassZeroStats(&s);
+    CHECK_EQ(s.frame, 0.0);
+    CHECK_EQ(s.codedError, 0.0);
+    CHECK_EQ(s.count, 0.0);
+    CHECK_EQ(s.duration, 1.0);
+}
+
+// AN20 S2: the memset(&section->stat_struct, 0, sizeof(StatStruct)) tail
+// (firstpass.c:138) - every StatStruct field goes to zero, not just the
+// doubles.
+TEST_CASE("twopassZeroStats clears the stat_struct fields") {
+    analysis::FirstpassStats s{};
+    s.statStruct.poc = 9;
+    s.statStruct.totalNumBits = 10;
+    s.statStruct.qindex = 11;
+    s.statStruct.worstQindex = 12;
+    s.statStruct.temporalLayerIndex = 13;
+    analysis::twopassZeroStats(&s);
+    CHECK_EQ(s.statStruct.poc + s.statStruct.totalNumBits + s.statStruct.qindex +
+                 s.statStruct.worstQindex + s.statStruct.temporalLayerIndex,
+             0);
+}
+
+// AN20 S3: svt_av1_accumulate_stats adds frame->frame into
+// section->frame (firstpass.c:142).
+TEST_CASE("accumulateStats adds the frame field") {
+    analysis::FirstpassStats section{};
+    section.frame = 1.5;
+    analysis::FirstpassStats frame{};
+    frame.frame = 2.25;
+    analysis::accumulateStats(&section, &frame);
+    CHECK_EQ(section.frame, 3.75);
+}
+
+// AN20 S4: the remaining three accumulations (firstpass.c:143-145):
+// coded_error += , count += , duration += - the two-entry fold. The
+// stat_struct stays untouched (M6's omission is caught here).
+TEST_CASE("accumulateStats adds coded_error count and duration") {
+    analysis::FirstpassStats section{};
+    section.codedError = 0.5;
+    section.count = 1.0;
+    section.duration = 1.0;
+    analysis::FirstpassStats frame{};
+    frame.codedError = 0.25;
+    frame.count = 1.0;
+    frame.duration = 2.0;
+    frame.statStruct.poc = 77;
+    analysis::accumulateStats(&section, &frame);
+    CHECK_EQ(section.codedError, 0.75);
+    CHECK_EQ(section.count, 2.0);
+    CHECK_EQ(section.duration, 3.0);
+    CHECK_EQ(section.statStruct.poc, 0);
+}
+
+// AM1 FLOAT TOLERANCE POLICY (stated once for this file, the AN12
+// EPSILON precedent): the tier-map calculators return exact float
+// literals and hold equality under doctest::Approx; the two arithmetic
+// float results (qp amount at qp 34, gate mid-zone t) use an inline
+// 1e-6 RELATIVE band - tighter than the 1e-4 ABSOLUTE band used for the
+// temporal helpers in test_temporal.cpp, since this file's float graphs
+// are short closed forms with no accumulation noise.
+//
+// AM1 V1: vmaf_get_spatial_amount (pic_analysis_process.c:1642-1652):
+// MAD-tier caps. First tier: avg_mad < 2 -> 0.15f.
+TEST_CASE("vmafGetSpatialAmount lowest tier is 0.15") {
+    CHECK_EQ(analysis::vmafGetSpatialAmount(0), doctest::Approx(0.15f));
+}
+
+// AM1 V2: the FULL tier enumeration over the uint32 range
+// (pic_analysis_process.c:1643-1651): < 2 -> 0.15, < 5 -> 0.22,
+// < 12 -> 0.28, else 0.30. Every boundary is pinned, both sides.
+TEST_CASE("vmafGetSpatialAmount tier enumeration over the full mad range") {
+    const std::uint32_t mad[8] = {0, 1, 2, 4, 5, 11, 12, 1000000};
+    const float expect[8] = {0.15f, 0.15f, 0.22f, 0.22f, 0.28f, 0.28f, 0.30f, 0.30f};
+    for (int i = 0; i < 8; ++i) {
+        CHECK_EQ(analysis::vmafGetSpatialAmount(mad[i]), doctest::Approx(expect[i]));
+    }
+}
+
+// AM1 V3: vmaf_get_qp_amount (pic_analysis_process.c:1654-1659): qp = 0
+// is full strength 0.5f.
+TEST_CASE("vmafGetQpAmount zero qp is 0.5") {
+    CHECK_EQ(analysis::vmafGetQpAmount(0), doctest::Approx(0.5f));
+}
+
+// AM1 V4: the FULL qp range enumeration (pic_analysis_process.c:1655-1658):
+// qp >= 35 holds the 0.3 floor (35 and far above), qp < 34 + the formula
+// 0.5 - (qp/35)*0.2 at qp = 34 (0.30571429, the 1e-4 AM1 band), 0 at the
+// top (0.5). The range 0..255 is covered by its three regimes.
+TEST_CASE("vmafGetQpAmount full range enumeration") {
+    CHECK_EQ(analysis::vmafGetQpAmount(0), doctest::Approx(0.5f));
+    CHECK_EQ(analysis::vmafGetQpAmount(34), doctest::Approx(0.30571429f).epsilon(1e-6));
+    CHECK_EQ(analysis::vmafGetQpAmount(35), doctest::Approx(0.3f));
+    CHECK_EQ(analysis::vmafGetQpAmount(51), doctest::Approx(0.3f));
+}
+
+// AM1 V5: vmaf_get_coherence_factor (pic_analysis_process.c:1661-1669):
+// gcoh < 0.40 -> 0.80, < 0.60 -> 0.9, else 1.0. The three-tier map is
+// one behavior; the boundaries both sides are pinned.
+TEST_CASE("vmafGetCoherenceFactor tier map over the full gcoh range") {
+    CHECK_EQ(analysis::vmafGetCoherenceFactor(0.2f), doctest::Approx(0.80f));
+    CHECK_EQ(analysis::vmafGetCoherenceFactor(0.39f), doctest::Approx(0.80f));
+    CHECK_EQ(analysis::vmafGetCoherenceFactor(0.40f), doctest::Approx(0.9f));
+    CHECK_EQ(analysis::vmafGetCoherenceFactor(0.5f), doctest::Approx(0.9f));
+    CHECK_EQ(analysis::vmafGetCoherenceFactor(0.59f), doctest::Approx(0.9f));
+    CHECK_EQ(analysis::vmafGetCoherenceFactor(0.60f), doctest::Approx(1.0f));
+    CHECK_EQ(analysis::vmafGetCoherenceFactor(0.9f), doctest::Approx(1.0f));
+}
+
+// AM1 V6: vmaf_compute_combined_amount (pic_analysis_process.c:1671-1678).
+// The pcs->scs->static_config.qp wall is threaded as the baseQp param
+// (named deviation). combined = ((per_qp + spatial) / 2) * coh_factor.
+TEST_CASE("vmafComputeCombinedAmount blends qp spatial and coherence") {
+    // qp 0 -> 0.5, mad 0 -> 0.15, gcoh 1.0 -> 1.0: (0.65)/2 = 0.325.
+    CHECK_EQ(analysis::vmafComputeCombinedAmount(0, 0, 1.0f), doctest::Approx(0.325f));
+    // the coherence factor scales: gcoh 0.2 -> 0.325 * 0.8 = 0.26.
+    CHECK_EQ(analysis::vmafComputeCombinedAmount(0, 0, 0.2f), doctest::Approx(0.26f));
+    // qp 35 -> 0.3, mad 12 -> 0.30, gcoh 0.5 -> 0.9: (0.6)/2 * 0.9 = 0.27.
+    CHECK_EQ(analysis::vmafComputeCombinedAmount(35, 12, 0.5f), doctest::Approx(0.27f));
+}
+
+// AM1 V7: vmaf_get_delta_clip (pic_analysis_process.c:1741-1754): the
+// QP-budget tiers, tightened by 4 on busy frames.
+TEST_CASE("vmafGetDeltaClip low qp not busy is 8") {
+    CHECK_EQ(analysis::vmafGetDeltaClip(0, 0), 8);
+}
+
+// AM1 V8: the FULL delta-clip enumeration over the qp range
+// (pic_analysis_process.c:1743-1753): <= 42 -> 8, <= 51 -> 9,
+// <= 57 -> 10, else 12; busy subtracts 4 (both boolean cases, every
+// boundary both sides).
+TEST_CASE("vmafGetDeltaClip full qp and busy enumeration") {
+    const std::int32_t qp[7] = {0, 42, 43, 51, 52, 57, 58};
+    const std::int32_t base[7] = {8, 8, 9, 9, 10, 10, 12};
+    for (int i = 0; i < 7; ++i) {
+        CHECK_EQ(analysis::vmafGetDeltaClip(qp[i], 0), base[i]);
+        CHECK_EQ(analysis::vmafGetDeltaClip(qp[i], 1), base[i] - 4);
+    }
+}
+
+// AM1 V9: vmaf_get_noise_gate (pic_analysis_process.c:1701-1726). The
+// pcs->enhanced_pic wall is threaded as (y, width, height, stride)
+// (named deviation). Noise via the temporal:: estimator chain
+// (noiseLog1pFp16 is the LANDED temporal_filtering.c:568-586 port), then
+// the gate: <= 40000 -> 1.0, >= 80000 -> 0.3, else the linear 1 - t*0.7.
+TEST_CASE("vmafGetNoiseGate unreliable clean and noisy branches") {
+    // (a) 4x4 plane: interior 2x2 < SMOOTH_THRESHOLD -> noise -65536 < 0
+    // -> gate 1.0 (no reduction).
+    std::uint8_t tiny[4 * 4];
+    for (int i = 0; i < 16; ++i) {
+        tiny[i] = 100;
+    }
+    tiny[1 * 4 + 1] = 150;
+    CHECK_EQ(analysis::vmafGetNoiseGate(tiny, 4, 4, 4), doctest::Approx(1.0f));
+    // (b) clean flat plane: noise 0, log1p 0 <= gate_start -> 1.0.
+    std::uint8_t flat[8 * 8];
+    for (int i = 0; i < 64; ++i) {
+        flat[i] = 100;
+    }
+    CHECK_EQ(analysis::vmafGetNoiseGate(flat, 8, 8, 8), doctest::Approx(1.0f));
+    // (c) mid-zone: the 8x8 delta plane (noise 136895 fp16) has log1p in
+    // (40000, 80000); the expected gate replicates the formula from the
+    // REAL estimator values (the thresholds and the linear map are what
+    // is under test here).
+    std::uint8_t src[8 * 8];
+    for (int i = 0; i < 64; ++i) {
+        src[i] = 100;
+    }
+    src[2 * 8 + 2] = 110;
+    const int32_t nl = analysis::temporal::noiseLog1pFp16(
+        analysis::temporal::vmafEstimateNoiseFp16(src, 8, 8, 8));
+    CHECK(nl > 40000);
+    CHECK(nl < 80000);
+    const float t = (float)(nl - 40000) / (float)(80000 - 40000);
+    CHECK_EQ(analysis::vmafGetNoiseGate(src, 8, 8, 8),
+             doctest::Approx(1.0f - t * (1.0f - 0.3f)).epsilon(1e-6));
+    // (d) noisy checkerboard: noise 27926580 fp16 -> log1p 909052 >=
+    // gate_end -> the 0.3 floor.
+    std::uint8_t cb[8 * 8];
+    for (int i = 0; i < 64; ++i) {
+        cb[i] = (i + (i / 8)) % 2 ? 255 : 0;
+    }
+    CHECK_EQ(analysis::vmafGetNoiseGate(cb, 8, 8, 8), doctest::Approx(0.3f));
+}
+
+// AM1 V10: vmaf_preprocess_frame (pic_analysis_process.c:1842-1900), the
+// driver. Threading (named deviations): the pa_ctx wall - the hring[5]
+// and blur_plane buffers and the :1857-1881 grow logic - is caller-owned
+// (params); pcs->vmaf_sharpening_amount and pcs->vmaf_max_delta become
+// out-params; scs->static_config.qp becomes baseQp. The composition
+// ORDER is the behavior under test: amounts -> gate -> blur -> busy
+// count on the PRE-unsharp plane -> delta clip -> unsharp in place.
+TEST_CASE("vmafPreprocessFrame composition order and outputs") {
+    const int w = 8, h = 8, stride = 8;
+    std::uint8_t plane[w * h];
+    std::uint32_t seed = 12345;
+    for (int i = 0; i < w * h; ++i) {
+        seed = seed * 1103515245u + 12345u;
+        plane[i] = (std::uint8_t)(40 + ((seed >> 16) & 0x3F));
+    }
+    std::uint8_t orig[w * h];
+    for (int i = 0; i < w * h; ++i) {
+        orig[i] = plane[i];
+    }
+    std::int16_t ring0[w + 4], ring1[w + 4], ring2[w + 4], ring3[w + 4], ring4[w + 4];
+    std::int16_t* hring[5] = {ring0, ring1, ring2, ring3, ring4};
+    std::uint8_t blurPlane[w * h];
+    int sharpAmount = -1;
+    std::int32_t deltaClip = -1;
+    const std::uint32_t qp = 0;
+    analysis::vmafPreprocessFrame(plane, stride, w, h, hring, blurPlane, qp, &sharpAmount, &deltaClip);
+
+    // expected sharp: the landed calculator chain (each piece pinned by
+    // V1-V9/T1-T10) + the reference's two int casts.
+    const std::uint32_t mad = analysis::temporal::vmafComputeAvgMad(plane, w, h, stride);
+    const float gcoh = analysis::temporal::vmafComputeGradientCoherence(plane, w, h, stride);
+    int expectSharp = (int)(analysis::vmafComputeCombinedAmount(qp, mad, gcoh) * 32768.0f);
+    expectSharp = (int)(expectSharp * analysis::vmafGetNoiseGate(plane, w, h, stride));
+    CHECK_EQ(sharpAmount, expectSharp);
+
+    // expected busy/clip: the count runs on the PRE-unsharp plane vs the
+    // blur plane (pic_analysis_process.c:1888-1896, threshold 12, target
+    // = count * 85 / 100).
+    std::uint8_t expectBlur[w * h];
+    analysis::temporal::vmafBoxBlurFrame(orig, stride, expectBlur, w, h, hring);
+    const std::uint32_t flat = analysis::temporal::vmafCountDetailLe(orig, expectBlur, w, h, stride, 12);
+    const int busy = (flat < (std::uint32_t)(w * h) * 85 / 100) ? 1 : 0;
+    CHECK_EQ(deltaClip, analysis::vmafGetDeltaClip((std::int32_t)qp, busy));
+
+    // expected final plane: unsharp with the gated amount and the clip.
+    std::uint8_t expectPlane[w * h];
+    for (int i = 0; i < w * h; ++i) {
+        expectPlane[i] = orig[i];
+    }
+    for (int y = 0; y < h; ++y) {
+        analysis::temporal::vmafApplyUnsharpRow(expectPlane + y * stride, expectBlur + y * w,
+                                                expectPlane + y * stride, w, expectSharp, deltaClip);
+    }
+    for (int i = 0; i < w * h; ++i) {
+        CHECK_EQ(plane[i], expectPlane[i]);
+    }
+
+    // second case: the T10 delta plane has mid-zone noise (log1p ~73866,
+    // gate ~0.41), so the gate application is observable in sharpAmount.
+    std::uint8_t plane2[w * h];
+    for (int i = 0; i < w * h; ++i) {
+        plane2[i] = 100;
+    }
+    plane2[2 * w + 2] = 110;
+    std::uint8_t orig2[w * h];
+    for (int i = 0; i < w * h; ++i) {
+        orig2[i] = plane2[i];
+    }
+    std::uint8_t blurPlane2[w * h];
+    int sharpAmount2 = -1;
+    std::int32_t deltaClip2 = -1;
+    analysis::vmafPreprocessFrame(plane2, stride, w, h, hring, blurPlane2, qp, &sharpAmount2, &deltaClip2);
+    int expectSharp2 = (int)(analysis::vmafComputeCombinedAmount(
+                                 qp, analysis::temporal::vmafComputeAvgMad(orig2, w, h, stride),
+                                 analysis::temporal::vmafComputeGradientCoherence(orig2, w, h, stride)) *
+                             32768.0f);
+    expectSharp2 = (int)(expectSharp2 * analysis::vmafGetNoiseGate(orig2, w, h, stride));
+    CHECK(expectSharp2 < (int)(analysis::vmafComputeCombinedAmount(
+                                   qp, analysis::temporal::vmafComputeAvgMad(orig2, w, h, stride),
+                                   analysis::temporal::vmafComputeGradientCoherence(orig2, w, h, stride)) *
+                               32768.0f));
+    CHECK_EQ(sharpAmount2, expectSharp2);
+}
+
+// AM1 P1: sub_sample_luma_generate_pixel_intensity_histogram_bins
+// (pic_analysis_process.c:527-589), the scs/pcs walls threaded (named
+// deviations): the region counts + scene_change_detection become
+// params, the pcs->picture_histogram[4][4][256] and
+// average_intensity_per_region[4][4] become caller-owned arrays, the
+// EbPictureBufferDesc wall becomes (y, width, height, stride). Single
+// region covering a 4x4 plane at decim 1 (scene-change mode), uniform
+// 50: bins init to 1 then the AN5 histogram adds; the rescale multiplies
+// every bin by 16*decim^2; avg = (sum + area/2) / area as uint8; the
+// total sum is rescaled by decim^2 per region then divided by w*h.
+TEST_CASE("subSampleLumaHistogramBins single region decim 1 uniform plane") {
+    std::uint8_t plane[4 * 4];
+    for (int i = 0; i < 16; ++i) {
+        plane[i] = 50;
+    }
+    std::uint32_t* histograms[4][4] = {};
+    std::uint32_t bins[256];
+    histograms[0][0] = bins;
+    std::uint64_t avgIntensity[4][4] = {};
+    std::uint64_t sumAvg = 777;
+    analysis::subSampleLumaHistogramBins(1, 1, true, plane, 4, 4, 4, histograms, avgIntensity, &sumAvg);
+    // bin 50: 1 + 16 samples = 17, rescaled *16 -> 272; all others 16.
+    CHECK_EQ(bins[50], 272u);
+    CHECK_EQ(bins[0], 16u);
+    CHECK_EQ(bins[255], 16u);
+    // sum = 16 samples * 50 = 800; avg = (800 + (16 >> 1)) / 16 = 50
+    // (uint8 narrowing, the reference's).
+    CHECK_EQ(avgIntensity[0][0], 50u);
+    // total: 800 * 1 / 16 = 50.
+    CHECK_EQ(sumAvg, 50u);
+}
+
+// AM1 P2: the multi-region grid with the LAST-REGION remainder offsets
+// (:549-557) and decim 4 (scene_change_detection false): 2x2 regions on
+// a 5x5 plane (values y*10+x) -> region dims 2x2 plus width/height
+// offset 1 on the last row/col region. decim 4 samples only each
+// region's top-left pixel. Hand-derived: sums 0/2/20/22 sampled, x16;
+// avgs (0+2)/4=0, (32+3)/6=5, (320+3)/6=53, (352+4)/9=39; total
+// 704/25 = 28.
+TEST_CASE("subSampleLumaHistogramBins region grid remainder offsets and decim 4") {
+    std::uint8_t plane[5 * 5];
+    for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < 5; ++x) {
+            plane[y * 5 + x] = (std::uint8_t)(y * 10 + x);
+        }
+    }
+    std::uint32_t* histograms[4][4] = {};
+    std::uint32_t bins[4][256];
+    histograms[0][0] = bins[0];
+    histograms[1][0] = bins[1];
+    histograms[0][1] = bins[2];
+    histograms[1][1] = bins[3];
+    std::uint64_t avgIntensity[4][4] = {};
+    std::uint64_t sumAvg = 0;
+    analysis::subSampleLumaHistogramBins(2, 2, false, plane, 5, 5, 5, histograms, avgIntensity, &sumAvg);
+    CHECK_EQ(avgIntensity[0][0], 0u);
+    CHECK_EQ(avgIntensity[1][0], 5u);
+    CHECK_EQ(avgIntensity[0][1], 53u);
+    CHECK_EQ(avgIntensity[1][1], 39u);
+    CHECK_EQ(sumAvg, 28u);
+    // one sampled pixel per region: each touched bin is 2*256 (the
+    // rescale literal is * 4 * 4 * decim * decim = 256 at decim 4), the
+    // untouched are 256.
+    CHECK_EQ(bins[0][0], 512u);
+    CHECK_EQ(bins[1][2], 512u);
+    CHECK_EQ(bins[2][20], 512u);
+    CHECK_EQ(bins[3][22], 512u);
+    CHECK_EQ(bins[0][50], 256u);
+}
+
+// AM1 P3: compute_picture_spatial_statistics (:597-617). Threading
+// (named deviations): pcs->b64_geom[].org_x/org_y become the orgX/orgY
+// arrays, pcs->b64_total_count the count param, the EbPictureBufferDesc
+// wall becomes (y, yStride), pcs->variance[b64_idx][0] (RASTER_SCAN_
+// CU_INDEX_64x64 = 0, definitions.h:2068) - the sbVar rows keep the
+// AN7 layout (85 entries, 64x64 at base 0). pic_avg_variance = the
+// truncating mean of the 64x64 entries.
+TEST_CASE("computePictureSpatialStatistics quadrant plane fold value") {
+    // 64x64, four 32x32 quadrants of constants {100, 120, 140, 160}:
+    // every 8x8 block is constant, so every fold level is exact (no
+    // truncation): the 64x64 mean = 130 << 8 = 33280, the 64x64 meanSq =
+    // avg(v^2) << 16 = 17400 << 16 = 1,140,326,400; variance =
+    // (1,140,326,400 - 33280^2) >> 16 = (500 << 16) >> 16 = 500 - the
+    // exact population variance of {100, 120, 140, 160}.
+    std::uint8_t plane[64 * 64];
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            const std::uint8_t v[4] = {100, 120, 140, 160};
+            const int q = (y >= 32 ? 2 : 0) + (x >= 32 ? 1 : 0);
+            plane[y * 64 + x] = v[q];
+        }
+    }
+    std::uint16_t sbVar[85] = {};
+    std::uint16_t orgX[1] = {0};
+    std::uint16_t orgY[1] = {0};
+    std::uint16_t picAvg = 777;
+    analysis::computePictureSpatialStatistics(plane, 64, analysis::BlockMeanPrec::Sub,
+                                              false, 1, orgX, orgY, sbVar, &picAvg);
+    CHECK_EQ(picAvg, 500);
+    CHECK_EQ(sbVar[0], 500);
+}
+
+
+// AM1 P4: svt_aom_gathering_picture_statistics (:624-643), the driver.
+// Threading: scs->calc_hist / calculate_variance become the two flags;
+// the picture-desc walls become the sub-callee params; pcs->avg_luma
+// (uint64, pcs.h:802) and pcs->pic_avg_variance become out-params.
+// avg_luma = INVALID_LUMA = 256 (definitions.h:93) unless the histogram
+// path overwrites it. Both flags false: the else branches.
+TEST_CASE("gatheringPictureStatistics both flags false gives INVALID_LUMA and zero variance") {
+    std::uint64_t avgLuma = 5;
+    std::uint16_t picAvg = 6;
+    analysis::gatheringPictureStatistics(false, false,
+                                         1, 1, true, nullptr, 0, 0, 0, nullptr, nullptr,
+                                         nullptr, 0, analysis::BlockMeanPrec::Sub, false, 0, nullptr, nullptr,
+                                         nullptr, &avgLuma, &picAvg);
+    CHECK_EQ(avgLuma, 256u);
+    CHECK_EQ(picAvg, 0u);
+}
+
+// AM1 P5: the driver's histogram path: calc_hist true overwrites
+// avg_luma with the regions' mean (P1's 50), the variance else-branch
+// still zeroes pic_avg_variance.
+TEST_CASE("gatheringPictureStatistics histogram path overwrites avgLuma") {
+    std::uint8_t plane[4 * 4];
+    for (int i = 0; i < 16; ++i) {
+        plane[i] = 50;
+    }
+    std::uint32_t* histograms[4][4] = {};
+    std::uint32_t bins[256];
+    histograms[0][0] = bins;
+    std::uint64_t avgIntensity[4][4] = {};
+    std::uint64_t avgLuma = 5;
+    std::uint16_t picAvg = 6;
+    analysis::gatheringPictureStatistics(true, false,
+                                         1, 1, true, plane, 4, 4, 4, histograms, avgIntensity,
+                                         nullptr, 0, analysis::BlockMeanPrec::Sub, false, 0, nullptr, nullptr,
+                                         nullptr, &avgLuma, &picAvg);
+    CHECK_EQ(avgLuma, 50u);
+    CHECK_EQ(picAvg, 0u);
+    // and the histogram bins themselves flow through (the P1 value):
+    CHECK_EQ(bins[50], 272u);
 }
