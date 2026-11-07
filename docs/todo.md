@@ -2242,6 +2242,45 @@ A0. SLICE-LEVEL STATE (the live register)
 |    GATE byte-identical 884,851 B diff 0, citations 0 out-of-range.
 |    Remaining big blocks: A4 mode decision (3%), A10 picture mgmt (0%),
 |    A3's ME driver surface (6%).
+|  - [x] **A4/RE1 (2026-11-07, PERRY-RE1, cherry-picked 2b9ff79): the
+|    rate-estimation core lands** in src/l16_rdo (new module, scaffold
+|    bef6904; namespace l16_rdo) - the A4 golden-regeneration campaign's
+|    foundation slice, CONFORMANCE-FREE (no emission change, no golden
+|    churn - the wiring slices come later). md_rate_estimation.c spans:
+|    svt_aom_get_syntax_rate_from_cdf :50-:75 (23 nb), the
+|    estimate_syntax_rate INTRA surface :76-:269 (179 nb), the mv class
+|    + nmv cost tables :370-:448 (74), svt_aom_estimate_mv_rate
+|    :449-:485 (34), svt_aom_estimate_coefficients_rate :486-:607 (115),
+|    the interintra-allowed helpers :608-:640 (26) + the header tables
+|    (av1_prob_cost 8, the ext-tx tables 26) = 485 nb JUDGE-CHARGED
+|    (the writer claimed 645; the judge struck the parked inter block
+|    90 that was inside the quoted span and the 69-nb struct carry per
+|    the AN17 precedent - both corrections named in the A4 row).
+|    110,035 assertions; 10 mutations killed; M3's LESSON: an oracle
+|    that reads the same fixture as the port cannot see a substitution
+|    bug (the fixture was made divergent). The cfl sign-cost quirk
+|    transcribed verbatim (the writer's first draft added sign_fac_bits
+|    to BOTH planes - the oracle caught it, 128 failed). PARKED named:
+|    update_stats :823-:1042 (211, BlkStruct-walled - the wiring
+|    slices), update_part_stats :1043-:1105 (51, pcs-walled), the inter
+|    block :270-:363 (90, intra-only emission). Writer run 17/17
+|    (264.22 s), GATE byte-identical 884,851 B. The second commit
+|    139b4c4 is the writer's own commit-message correction (estimates
+|    -> measured, fixed forward per the HK1/L0 precedent).
+|  - [x] **THE A4 GOLDEN-REGENERATION CAMPAIGN OPENS (the user blessed
+|    it: 'wave 9 land, double check. go')**: the 1.6 ladder - RE1 the
+|    rate-estimation core (LANDED, conformance-free) -> the RD-lite
+|    SAD+rate composition -> angle-delta search -> tx-type search ->
+|    trellis/optimize_b -> adaptive scan -> intra partition search.
+|    The wiring slices change the emission: ALL NINE committed .obu
+|    artifacts regenerate and the decoder gate re-runs as the planned
+|    gated event. The conformance count moves WITH the coverage number
+|    there - the paired metric working as designed.
+|  - [x] **WAVE-10 CLOSE (judge, post-merge re-measure on master)**:
+|    full rebuild + ctest 17/17 (262.85 s - l16_rdo is the 17th
+|    target since bef6904), GATE byte-identical 884,851 B diff 0,
+|    coverage 21.7% (34,207/157,718): A4 5% (1,418). The A4 campaign
+|    continues: RE2 next.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
@@ -2391,9 +2430,10 @@ last and label it as table transcription, not encoder progress.
 [x] Docs: README, AGENTS.md layer map + completion metric,
     provenance.md, decode_conformance.md, bitstream.md, color.md,
     layers.md, emission.md, cs5c_deltas.md, this file
-[x] MEASURED 2026-11-07: ctest 16/16 (279.25 s), GATE 421/421 diff 0
-    (884,851 B), portable-C coverage 21.0% (33,062/157,718), 9 committed
-    .obu artifacts (all content-1:1 on every plane)
+[x] MEASURED 2026-11-07 (wave-10 close): ctest 17/17 (262.85 s), GATE
+    421/421 diff 0 (884,851 B), portable-C coverage 21.7%
+    (34,207/157,718), 9 committed .obu artifacts (all content-1:1 on
+    every plane)
 
 ------------------------------------------------------------
 1. KEYFRAME ENCODER COMPLETENESS (intra-only; luma + 4:2:0 chroma since
