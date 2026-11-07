@@ -336,7 +336,7 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-07, the wave-7 close)
+### Last measured state (2026-11-07, the wave-8 close: A14 COMPLETE)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
@@ -368,13 +368,13 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 20.8%** (see the completion metric section;
-  re-measured 2026-11-07 at the wave-7 close: 32,731 of 157,718 non-blank
-  lines, +1,038 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
+- **Portable-C coverage: 21.0%** (see the completion metric section;
+  re-measured 2026-11-07 at the wave-8 close: 33,062 of 157,718 non-blank
+  lines, +1,369 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
   SYM1 +436 in A5 + +45 in A12) and wave 7 (IP1 +203 across A3/A13/A14,
-  SUB1 +149 in A14 - all span-measured; register entries in docs/todo.md
-  section A0); A3 prints 6% (1,006 of 17,738), A13 prints 17% (889 of
-  5,357), A14 prints 77% (1,135 of 1,466). All of it is
+  SUB1 +149 in A14) and wave 8 (SW1 +119 the SAD wrapper instances, HB1
+  +168 the hbd twins - all span-measured; register entries in docs/todo.md
+  section A0); A3 prints 6% (1,006 of 17,738), A13 prints 17% (889 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is
   PARSE-BUG EPISODE (recorded, wave 4): an embedded
   pipe in a prose sentence (get_msb(x|1)) split the A12 row's 5 fields
   and the tool silently printed A12 as 0 files/0 lines - caught by the
@@ -964,13 +964,24 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-07 (the wave-7 close): 20.8%**
-(32,731 of 157,718 non-blank lines - the covered count moved +352 from
+**THE NUMBER, as measured 2026-11-07 (the wave-8 close, A14 COMPLETE): 21.0%**
+(33,062 of 157,718 non-blank lines - the covered count moved +331 from
+32,731 at the wave-7 close: SW1 +119 in A14 (the SAD wrapper instances -
+the nxmSadKernelHelper generic + the sadMxN/sadMxNx4D/OBMCSADMxN macro
+families + all 66 instances, compute_sad_c.c and sad_av1.c land 100% of
+their portable surface, the paired-metric caveat STATED: instances are
+transcription of the reference's own dispatch surface) and HB1 +168 in
+A14 (the hbd twins: varianceHighbd + highbdMse16x16, cflPredictHbd,
+upsampleIntraEdgeHigh + hbdDrZ3 with the complete 54-config dy-surface
+enumeration, and the hbd hadamard family - the 8-bit-discipline parks
+RESOLVE for A14's completion, derivation-relationship fixtures
+throughout, 7 mutations killed), so A14 prints 1,466 of 1,466
+(100% - the first area to reach COMPLETE). The wave-7 movement
+was +352 from
 32,379 at the wave-6 close: IP1 +203 (the interp filter-params machinery +
 upsampled_pred in src/l12_convolve: A3 +105 the five filter tables +
 params/getters, A13 +34 the enums/struct, A14 +64 av1_get_filter +
-upsampled_pred - the BRIEF MISPLACED upsampled_pred in inter_prediction.c,
-grep 0 hits, it lives in C_DEFAULT/variance.c :71-:137) and SUB1 +149
+SHOULD_NOT_MATCH
 (the subpel variance family in src/l9_analysis/subpel: the bilinear
 2-tap pair + table, the SUBPIX_VAR macro + 22 instances, the obmc core
 + OBMC pairs 22/22/22; the brief's four errors all corrected by
@@ -1091,9 +1102,9 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A11 | Content analysis + temporal filtering | 16 | 12,028 | 35% | 4,152 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 34% | 550 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 17% | 889 |
-| A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 77% | 1,135 |
+| A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 100% | 1,466 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **32,731** |
+| | **TOTAL** | **254** | **157,718** | | **33,062** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported
