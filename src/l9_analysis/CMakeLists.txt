@@ -1,5 +1,6 @@
 add_library(av1_analysis STATIC analysis.cpp fft1d.cpp fft2d.cpp noise_model.cpp
-               noise_util.cpp temporal_filter.cpp packunpack.cpp subpel.cpp)
+               noise_util.cpp temporal_filter.cpp packunpack.cpp cdefault_extra.cpp
+               subpel.cpp)
 target_include_directories(av1_analysis PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(av1_analysis PUBLIC av1_core)
 
