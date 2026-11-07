@@ -144,7 +144,94 @@ std::uint8_t clipPixel(int v) {
     return static_cast<std::uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
 }
 
+// clip_pixel_highbd definitions.h:704-714 (switch bd 8/10/12)
+std::uint16_t clipPixelHbd(int v, int bd) {
+    const int max = (1 << bd) - 1;
+    return static_cast<std::uint16_t>(v > max ? max : (v < 0 ? 0 : v));
+}
+
 } // namespace
+
+// svt_av1_highbd_interpolate_core_c resize.c:489
+void hbdInterpolateCore(const std::uint16_t* input, int inLength, std::uint16_t* output, int outLength, int bd,
+                        const std::int16_t* interpFilters) {
+    // RS_SCALE_SUBPEL_BITS 14 / RS_SCALE_EXTRA_BITS 8 / RS_SCALE_EXTRA_OFF 128
+    // / RS_SUBPEL_BITS 6 / RS_SUBPEL_MASK 63 (super_res.h:20-25) - IDENTICAL
+    // to the 8-bit core; the ONLY bd dependence is clipPixelHbd (:523/:535/
+    // :546/:557). No filter-coefficient or rounding bd scaling exists in the
+    // reference (brief correction).
+    const std::int32_t delta  = (((std::uint32_t)inLength << 14) + outLength / 2) / outLength;
+    const std::int32_t offset = inLength > outLength
+        ? (((std::int32_t)(inLength - outLength) << 13) + outLength / 2) / outLength
+        : -(((std::int32_t)(outLength - inLength) << 13) + outLength / 2) / outLength;
+    std::uint16_t* optr = output;
+    int           x, x1, x2, sum, k, intPel, subPel;
+    std::int32_t  y;
+
+    x = 0;
+    y = offset + 128;
+    while ((y >> 14) < (8 / 2 - 1)) {
+        x++;
+        y += delta;
+    }
+    x1 = x;
+    x  = outLength - 1;
+    y  = delta * x + offset + 128;
+    while ((y >> 14) + (std::int32_t)(8 / 2) >= inLength) {
+        x--;
+        y -= delta;
+    }
+    x2 = x;
+    if (x1 > x2) {
+        for (x = 0, y = offset + 128; x < outLength; ++x, y += delta) {
+            intPel = y >> 14;
+            subPel = (y >> 8) & 63;
+            const std::int16_t* filter = &interpFilters[subPel * 8];
+            sum = 0;
+            for (k = 0; k < 8; ++k) {
+                const int pk = intPel - 8 / 2 + 1 + k;
+                sum += filter[k] * input[pk > inLength - 1 ? inLength - 1 : (pk < 0 ? 0 : pk)];
+            }
+            *optr++ = clipPixelHbd((sum + 64) >> 7, bd);
+        }
+    } else {
+        // Initial part.
+        for (x = 0, y = offset + 128; x < x1; ++x, y += delta) {
+            intPel = y >> 14;
+            subPel = (y >> 8) & 63;
+            const std::int16_t* filter = &interpFilters[subPel * 8];
+            sum = 0;
+            for (k = 0; k < 8; ++k) {
+                const int pk = intPel - 8 / 2 + 1 + k;
+                sum += filter[k] * input[pk < 0 ? 0 : pk];
+            }
+            *optr++ = clipPixelHbd((sum + 64) >> 7, bd);
+        }
+        // Middle part.
+        for (; x <= x2; ++x, y += delta) {
+            intPel = y >> 14;
+            subPel = (y >> 8) & 63;
+            const std::int16_t* filter = &interpFilters[subPel * 8];
+            sum = 0;
+            for (k = 0; k < 8; ++k) {
+                sum += filter[k] * input[intPel - 8 / 2 + 1 + k];
+            }
+            *optr++ = clipPixelHbd((sum + 64) >> 7, bd);
+        }
+        // End part.
+        for (; x < outLength; ++x, y += delta) {
+            intPel = y >> 14;
+            subPel = (y >> 8) & 63;
+            const std::int16_t* filter = &interpFilters[subPel * 8];
+            sum = 0;
+            for (k = 0; k < 8; ++k) {
+                const int pk = intPel - 8 / 2 + 1 + k;
+                sum += filter[k] * input[pk > inLength - 1 ? inLength - 1 : pk];
+            }
+            *optr++ = clipPixelHbd((sum + 64) >> 7, bd);
+        }
+    }
+}
 
 // choose_interp_filter resize.c:272
 const std::int16_t* chooseInterpFilter(int inLength, int outLength) {
@@ -356,6 +443,239 @@ bool resizePlaneHorizontal(const std::uint8_t* input, int height, int width, int
     tmpbuf = new std::uint8_t[(width > height ? width : height)];
     for (i = 0; i < height; ++i) {
         resizeMultistep(input + inStride * i, width, output + outStride * i, width2, tmpbuf);
+    }
+
+    delete[] tmpbuf;
+
+    return true;
+}
+
+// highbd_interpolate resize.c:562
+void hbdInterpolate(const std::uint16_t* input, int inLength, std::uint16_t* output, int outLength, int bd) {
+    hbdInterpolateCore(input, inLength, output, outLength, bd, chooseInterpFilter(inLength, outLength));
+}
+
+// svt_av1_highbd_down2_symeven_c resize.c:568
+void hbdDown2Symeven(const std::uint16_t* input, int length, std::uint16_t* output, int bd) {
+    // Actual filter len = 2 * filter_len_half. Same fixed coefficients and
+    // FILTER_BITS shift as the 8-bit twin; the ONLY bd dependence is
+    // clipPixelHbd (:586/:596/:605/:614).
+    const std::int16_t* filterLenHalf = kDown2SymevenHalfFilter;
+    const int halfLen = sizeof(kDown2SymevenHalfFilter) / sizeof(kDown2SymevenHalfFilter[0]);
+    int i, j;
+    std::uint16_t* optr = output;
+    int l1 = halfLen;
+    int l2 = (length - halfLen);
+    l1 += (l1 & 1);
+    l2 += (l2 & 1);
+    if (l1 > l2) {
+        // Short input length.
+        for (i = 0; i < length; i += 2) {
+            int sum = (1 << (kFilterBits - 1));
+            for (j = 0; j < halfLen; ++j) {
+                sum += (input[i - j < 0 ? 0 : i - j] + input[i + 1 + j > length - 1 ? length - 1 : i + 1 + j]) * filterLenHalf[j];
+            }
+            sum >>= kFilterBits;
+            *optr++ = clipPixelHbd(sum, bd);
+        }
+    } else {
+        // Initial part.
+        for (i = 0; i < l1; i += 2) {
+            int sum = (1 << (kFilterBits - 1));
+            for (j = 0; j < halfLen; ++j) {
+                sum += (input[i - j < 0 ? 0 : i - j] + input[i + 1 + j]) * filterLenHalf[j];
+            }
+            sum >>= kFilterBits;
+            *optr++ = clipPixelHbd(sum, bd);
+        }
+        // Middle part.
+        for (; i < l2; i += 2) {
+            int sum = (1 << (kFilterBits - 1));
+            for (j = 0; j < halfLen; ++j) {
+                sum += (input[i - j] + input[i + 1 + j]) * filterLenHalf[j];
+            }
+            sum >>= kFilterBits;
+            *optr++ = clipPixelHbd(sum, bd);
+        }
+        // End part.
+        for (; i < length; i += 2) {
+            int sum = (1 << (kFilterBits - 1));
+            for (j = 0; j < halfLen; ++j) {
+                sum += (input[i - j] + input[i + 1 + j > length - 1 ? length - 1 : i + 1 + j]) * filterLenHalf[j];
+            }
+            sum >>= kFilterBits;
+            *optr++ = clipPixelHbd(sum, bd);
+        }
+    }
+}
+
+// highbd_down2_symodd resize.c:619
+void hbdDown2Symodd(const std::uint16_t* input, int length, std::uint16_t* output, int bd) {
+    // Actual filter len = 2 * filter_len_half - 1. Same fixed coefficients
+    // and FILTER_BITS shift as the 8-bit twin; bd only in clipPixelHbd.
+    const std::int16_t* filterLenHalf = kDown2SymoddHalfFilter;
+    const int halfLen = sizeof(kDown2SymoddHalfFilter) / sizeof(kDown2SymoddHalfFilter[0]);
+    int i, j;
+    std::uint16_t* optr = output;
+    int l1 = halfLen - 1;
+    int l2 = (length - halfLen + 1);
+    l1 += (l1 & 1);
+    l2 += (l2 & 1);
+    if (l1 > l2) {
+        // Short input length.
+        for (i = 0; i < length; i += 2) {
+            int sum = (1 << (kFilterBits - 1)) + input[i] * filterLenHalf[0];
+            for (j = 1; j < halfLen; ++j) {
+                sum += (input[i - j < 0 ? 0 : i - j] + input[i + j >= length ? length - 1 : i + j]) * filterLenHalf[j];
+            }
+            sum >>= kFilterBits;
+            *optr++ = clipPixelHbd(sum, bd);
+        }
+    } else {
+        // Initial part.
+        for (i = 0; i < l1; i += 2) {
+            int sum = (1 << (kFilterBits - 1)) + input[i] * filterLenHalf[0];
+            for (j = 1; j < halfLen; ++j) {
+                sum += (input[i - j < 0 ? 0 : i - j] + input[i + j]) * filterLenHalf[j];
+            }
+            sum >>= kFilterBits;
+            *optr++ = clipPixelHbd(sum, bd);
+        }
+        // Middle part.
+        for (; i < l2; i += 2) {
+            int sum = (1 << (kFilterBits - 1)) + input[i] * filterLenHalf[0];
+            for (j = 1; j < halfLen; ++j) {
+                sum += (input[i - j] + input[i + j]) * filterLenHalf[j];
+            }
+            sum >>= kFilterBits;
+            *optr++ = clipPixelHbd(sum, bd);
+        }
+        // End part.
+        for (; i < length; i += 2) {
+            int sum = (1 << (kFilterBits - 1)) + input[i] * filterLenHalf[0];
+            for (j = 1; j < halfLen; ++j) {
+                sum += (input[i - j] + input[i + j >= length ? length - 1 : i + j]) * filterLenHalf[j];
+            }
+            sum >>= kFilterBits;
+            *optr++ = clipPixelHbd(sum, bd);
+        }
+    }
+}
+
+// highbd_resize_multistep resize.c:670
+void hbdResizeMultistep(const std::uint16_t* input, int length, std::uint16_t* output, int olength,
+                        std::uint16_t* otmp, int bd) {
+    if (length == olength) {
+        memcpy(output, input, sizeof(output[0]) * length);
+        return;
+    }
+    const int steps = getDown2Steps(length, olength);
+
+    if (steps > 0) {
+        // only denom 16 will come here and steps equals to 1
+        std::uint16_t* out            = NULL;
+        int      filteredlength = length;
+
+        assert(otmp != NULL);
+        std::uint16_t* otmp2 = otmp + getDown2Length(length, 1);
+        for (int s = 0; s < steps; ++s) {
+            const int projFilteredlength = getDown2Length(filteredlength, 1);
+            const std::uint16_t* in       = (s == 0 ? input : out);
+            if (s == steps - 1 && projFilteredlength == olength) {
+                out = output;
+            } else {
+                out = (s & 1) ? otmp2 : otmp;
+            }
+            if (filteredlength & 1) {
+                hbdDown2Symodd(in, filteredlength, out, bd);
+            } else {
+                hbdDown2Symeven(in, filteredlength, out, bd);
+            }
+            filteredlength = projFilteredlength;
+        }
+        if (filteredlength != olength) {
+            hbdInterpolate(out, filteredlength, output, olength, bd);
+        }
+    } else {
+        // denom 9~15 comes here
+        hbdInterpolate(input, length, output, olength, bd);
+    }
+}
+
+// highbd_fill_col_to_arr resize.c:707
+void hbdFillColToArr(std::uint16_t* img, int stride, int len, std::uint16_t* arr) {
+    int i;
+    std::uint16_t* iptr = img;
+    std::uint16_t* aptr = arr;
+    for (i = 0; i < len; ++i, iptr += stride) {
+        *aptr++ = *iptr;
+    }
+}
+
+// highbd_fill_arr_to_col resize.c:716
+void hbdFillArrToCol(std::uint16_t* img, int stride, int len, const std::uint16_t* arr) {
+    int i;
+    std::uint16_t* iptr = img;
+    const std::uint16_t* aptr = arr;
+    for (i = 0; i < len; ++i, iptr += stride) {
+        *iptr = *aptr++;
+    }
+}
+
+// svt_av1_highbd_resize_plane_c resize.c:725
+bool hbdResizePlaneC(const std::uint16_t* input, int height, int width, int inStride, std::uint16_t* output,
+                     int height2, int width2, int outStride, int bd) {
+    int i;
+    std::uint16_t *intbuf, *tmpbuf, *arrbuf, *arrbuf2;
+
+    assert(width > 0);
+    assert(height > 0);
+    assert(width2 > 0);
+    assert(height2 > 0);
+
+    intbuf  = new std::uint16_t[width2 * height];
+    tmpbuf  = new std::uint16_t[(width > height ? width : height)];
+    arrbuf  = new std::uint16_t[height];
+    arrbuf2 = new std::uint16_t[height2];
+    for (i = 0; i < height; ++i) {
+        hbdResizeMultistep(input + inStride * i, width, intbuf + width2 * i, width2, tmpbuf, bd);
+    }
+
+    for (i = 0; i < width2; ++i) {
+        // column to array conversion
+        hbdFillColToArr(intbuf + i, width2, height, arrbuf);
+        // resize 'arrbuf' from height to height2 and store the result to arrbuf2
+        hbdResizeMultistep(arrbuf, height, arrbuf2, height2, tmpbuf, bd);
+        // array to column conversion
+        hbdFillArrToCol(output + i, outStride, height2, arrbuf2);
+    }
+
+    delete[] intbuf;
+    delete[] tmpbuf;
+    delete[] arrbuf;
+    delete[] arrbuf2;
+
+    return true;
+}
+
+// svt_av1_highbd_resize_plane_horizontal resize.c:761
+bool hbdResizePlaneHorizontal(const std::uint16_t* input, int height, int width, int inStride, std::uint16_t* output,
+                              int height2, int width2, int outStride, int bd) {
+    int i;
+    std::uint16_t* tmpbuf;
+
+    assert(width > 0);
+    assert(height > 0);
+    assert(width2 > 0);
+    assert(height2 == height);
+    (void)height2;
+
+    // Deviation: the reference passes sizeof(uint16_t) * AOMMAX(width, height)
+    // as the EB_MALLOC_ARRAY COUNT (:769), a harmless 2x over-allocation; the
+    // port allocates the needed entry count.
+    tmpbuf = new std::uint16_t[(width > height ? width : height)];
+    for (i = 0; i < height; ++i) {
+        hbdResizeMultistep(input + inStride * i, width, output + outStride * i, width2, tmpbuf, bd);
     }
 
     delete[] tmpbuf;

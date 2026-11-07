@@ -333,6 +333,309 @@ TEST_CASE("down2Symeven range enumeration over lengths") {
     }
 }
 
+TEST_CASE("hbdInterpolateCore identity 2 to 2 bd 8") {
+    const std::uint16_t in[2] = {100, 200};
+    std::uint16_t out[2] = {0};
+    resize::hbdInterpolateCore(in, 2, out, 2, 8, resize::chooseInterpFilter(2, 2));
+    CHECK(out[0] == 100);
+}
+
+TEST_CASE("hbdInterpolateCore derivation bd8 == 8-bit interpolateCore") {
+    // Primary oracle (HB1 pattern): the hbd twin at bd 8 must be elementwise
+    // equal to the landed mutation-proven 8-bit twin on uint8-range inputs,
+    // for every branch: 16->13 (three-part middle), 4->16 (x1 > x2 all-clamp).
+    std::uint16_t wide16[16];
+    for (int i = 0; i < 16; ++i) {
+        wide16[i] = kRamp16[i];
+    }
+    std::uint8_t out8bit[16] = {0};
+    std::uint16_t outHbd[16] = {0};
+    resize::interpolateCore(kRamp16, 16, out8bit, 13, resize::chooseInterpFilter(16, 13));
+    resize::hbdInterpolateCore(wide16, 16, outHbd, 13, 8, resize::chooseInterpFilter(16, 13));
+    for (int i = 0; i < 13; ++i) {
+        CHECK(outHbd[i] == out8bit[i]);
+    }
+    std::uint16_t wide4[4];
+    for (int i = 0; i < 4; ++i) {
+        wide4[i] = kRamp4[i];
+    }
+    std::uint16_t outHbd16[16] = {0};
+    resize::interpolateCore(kRamp4, 4, out8bit, 16, resize::chooseInterpFilter(4, 16));
+    resize::hbdInterpolateCore(wide4, 4, outHbd16, 16, 8, resize::chooseInterpFilter(4, 16));
+    for (int i = 0; i < 16; ++i) {
+        CHECK(outHbd16[i] == out8bit[i]);
+    }
+    // Edge-contrast input (M3 killer): the initial part clamps negative taps
+    // to input[0]; a flip to the wrong boundary (input[in-1]) shifts the x=0
+    // sum by (in[15]-in[0])*(f0+f1+f2) = 255 for the 875 row 7 shape, which
+    // crosses the rounding boundary the kRamp16 fixture (delta 43) did not.
+    const std::uint8_t edgeRamp[16] = {0, 48, 85, 122, 159, 196, 233, 14, 51, 88, 125, 162, 199, 236, 17, 255};
+    std::uint16_t wideEdge[16];
+    for (int i = 0; i < 16; ++i) {
+        wideEdge[i] = edgeRamp[i];
+    }
+    std::uint16_t outHbdEdge[13] = {0};
+    resize::interpolateCore(edgeRamp, 16, out8bit, 13, resize::chooseInterpFilter(16, 13));
+    resize::hbdInterpolateCore(wideEdge, 16, outHbdEdge, 13, 8, resize::chooseInterpFilter(16, 13));
+    for (int i = 0; i < 13; ++i) {
+        CHECK(outHbdEdge[i] == out8bit[i]);
+    }
+}
+
+TEST_CASE("hbdInterpolateCore bd10/bd12 absolute fixtures, upper clip fires") {
+    // Hand-derived from resize.c:489-560 + clip_pixel_highbd
+    // (definitions.h:704-714). in=8, out=4 -> delta 32768, offset 8192,
+    // x1=2 > x2=1 (the all-clamped branch), y walk 8320/41088/73856/106624,
+    // sub_pel 32 at every x -> 500-table row 32 {-1,-4,14,55,55,14,-4,-1}
+    // (measured on disk; NOTE: a text-editor read of resize.cpp once rendered
+    // rows 30-63 shifted by one row - the byte-level table diff ref-vs-port
+    // is the authority, 64 rows, 0 diffs). Fixture v1 was derived from the
+    // misrendered row and FAILED RED against the correct implementation; the
+    // corrected fixture v2 below. Input puts max under the positive taps and
+    // 0 under the negative taps at x=1, so sum = 138*M + 64 -> bd 10: 1103 ->
+    // clip 1023; bd 12: 4415 -> clip 4095. At x=0/x=2 sum = 64*M + 64
+    // (512 at bd 10, 2048 at bd 12 - unclipped). The 8-bit twin on
+    // uint8-range inputs clips the same shape at 255, so this fixture is NOT
+    // covered by the derivation test.
+    const std::uint16_t in10[8] = {0, 1023, 1023, 1023, 1023, 0, 0, 0};
+    std::uint16_t out[4] = {0};
+    resize::hbdInterpolateCore(in10, 8, out, 4, 10, resize::chooseInterpFilter(8, 4));
+    CHECK(out[0] == 512);
+    CHECK(out[1] == 1023);
+    CHECK(out[2] == 512);
+    CHECK(out[3] == 0);
+    const std::uint16_t in12[8] = {0, 4095, 4095, 4095, 4095, 0, 0, 0};
+    std::uint16_t out12[4] = {0};
+    resize::hbdInterpolateCore(in12, 8, out12, 4, 12, resize::chooseInterpFilter(8, 4));
+    CHECK(out12[0] == 2048);
+    CHECK(out12[1] == 4095);
+    CHECK(out12[2] == 2048);
+    CHECK(out12[3] == 0);
+}
+
+TEST_CASE("hbdInterpolate wrapper matches core with chosen filter") {
+    const std::uint16_t in10[8] = {0, 1023, 1023, 1023, 1023, 0, 0, 0};
+    std::uint16_t viaWrapper[4] = {0};
+    std::uint16_t viaCore[4] = {0};
+    resize::hbdInterpolate(in10, 8, viaWrapper, 4, 10);
+    resize::hbdInterpolateCore(in10, 8, viaCore, 4, 10, resize::chooseInterpFilter(8, 4));
+    for (int i = 0; i < 4; ++i) {
+        CHECK(viaWrapper[i] == viaCore[i]);
+    }
+}
+
+TEST_CASE("hbdDown2Symeven derivation bd8 == 8-bit down2Symeven") {
+    // Range-condition audit (rule 6): every length class exercised - short
+    // (4, l1 > l2), initial/middle/end splits (5..9, 12), odd (17), and the
+    // long pair (31, 32); the landed 8-bit twin is mutation-proven.
+    const int lens[] = {4, 5, 6, 7, 8, 9, 12, 16, 17, 31, 32};
+    const std::uint8_t* ins[] = {kRamp4, kRamp5, kRamp6, kRamp7, kRamp8, kRamp9, kRamp12, kRamp16, kRamp17, kRamp31, kRamp32};
+    const int outLens[] = {2, 3, 3, 4, 4, 5, 6, 8, 9, 16, 16};
+    std::uint8_t out8[17] = {0};
+    std::uint16_t wide[32];
+    std::uint16_t outH[17] = {0};
+    for (int idx = 0; idx < 11; ++idx) {
+        resize::down2Symeven(ins[idx], lens[idx], out8);
+        for (int i = 0; i < lens[idx]; ++i) {
+            wide[i] = ins[idx][i];
+        }
+        resize::hbdDown2Symeven(wide, lens[idx], outH, 8);
+        for (int i = 0; i < outLens[idx]; ++i) {
+            CHECK(outH[i] == out8[i]);
+        }
+    }
+}
+
+TEST_CASE("hbdDown2Symeven bd10 absolute fixture, upper clip fires") {
+    // Hand-derived from resize.c:568-617, input length 12 (l1=4, l2=8:
+    // initial i=0,2 / middle i=4,6 / end i=8,10), filter {56,12,-3,-1},
+    // bd 10 -> clip_pixel_highbd bound 1023 (definitions.h:709-710).
+    // out[2]: sum = 64 + 2046*56 + 2046*12 - 1023 = 138169 >> 7 = 1079 ->
+    // clip 1023. out[4]: sum = 64 - 3069 - 1023 = -4028 >> 7 -> clip 0
+    // (lower bound, bd-independent). out[3]: sum = 65536 >> 7 = 512 exact.
+    const std::uint16_t in[12] = {0, 1023, 0, 1023, 1023, 1023, 1023, 0, 0, 0, 0, 0};
+    std::uint16_t out[6] = {0};
+    resize::hbdDown2Symeven(in, 12, out, 10);
+    CHECK(out[0] == 416);
+    CHECK(out[1] == 607);
+    CHECK(out[2] == 1023);
+    CHECK(out[3] == 512);
+    CHECK(out[4] == 0);
+    CHECK(out[5] == 0);
+}
+
+TEST_CASE("hbdDown2Symodd derivation bd8 == 8-bit down2Symodd") {
+    const int lens[] = {4, 5, 6, 7, 8, 9, 12, 16, 17, 31, 32};
+    const std::uint8_t* ins[] = {kRamp4, kRamp5, kRamp6, kRamp7, kRamp8, kRamp9, kRamp12, kRamp16, kRamp17, kRamp31, kRamp32};
+    const int outLens[] = {2, 3, 3, 4, 4, 5, 6, 8, 9, 16, 16};
+    std::uint8_t out8[17] = {0};
+    std::uint16_t wide[32];
+    std::uint16_t outH[17] = {0};
+    for (int idx = 0; idx < 11; ++idx) {
+        resize::down2Symodd(ins[idx], lens[idx], out8);
+        for (int i = 0; i < lens[idx]; ++i) {
+            wide[i] = ins[idx][i];
+        }
+        resize::hbdDown2Symodd(wide, lens[idx], outH, 8);
+        for (int i = 0; i < outLens[idx]; ++i) {
+            CHECK(outH[i] == out8[i]);
+        }
+    }
+}
+
+TEST_CASE("hbdDown2Symodd bd10 absolute fixture, upper clip fires") {
+    // Hand-derived from resize.c:619-668, input length 11 (l1=4, l2=8:
+    // initial i=0,2 / middle i=4,6 / end i=8,10), filter {64,35,0,-3},
+    // bd 10. out[2]: sum = 64 + 1023*64 + 2046*35 = 137146 >> 7 = 1071 ->
+    // clip 1023. out[0]/out[4]: sum = 64 - 3069 < 0 -> clip 0.
+    const std::uint16_t in[11] = {0, 0, 0, 1023, 1023, 1023, 0, 0, 0, 0, 0};
+    std::uint16_t out[6] = {0};
+    resize::hbdDown2Symodd(in, 11, out, 10);
+    CHECK(out[0] == 0);
+    CHECK(out[1] == 256);
+    CHECK(out[2] == 1023);
+    CHECK(out[3] == 256);
+    CHECK(out[4] == 0);
+    CHECK(out[5] == 0);
+}
+
+TEST_CASE("hbdResizeMultistep derivation bd8 == 8-bit resizeMultistep") {
+    // Every branch: memcpy (16->16), one down2 step (16->8), two steps with
+    // the otmp/otmp2 ping-pong (16->4), steps==0 interpolate-only (16->13),
+    // down2-then-interpolate (12->5), odd symodd chain (9->2).
+    struct Case { int inLen; int outLen; const std::uint8_t* in; };
+    const Case cases[] = {
+        {16, 8, kRamp16}, {16, 4, kRamp16}, {16, 13, kRamp16}, {12, 5, kRamp12}, {9, 2, kRamp9},
+    };
+    std::uint8_t out8[17] = {0};
+    std::uint8_t otmp8[17] = {0};
+    std::uint16_t wide[17];
+    std::uint16_t outH[17] = {0};
+    std::uint16_t otmpH[17] = {0};
+    for (const auto& c : cases) {
+        resize::resizeMultistep(c.in, c.inLen, out8, c.outLen, otmp8);
+        for (int i = 0; i < c.inLen; ++i) {
+            wide[i] = c.in[i];
+        }
+        resize::hbdResizeMultistep(wide, c.inLen, outH, c.outLen, otmpH, 8);
+        for (int i = 0; i < c.outLen; ++i) {
+            CHECK(outH[i] == out8[i]);
+        }
+    }
+    // memcpy branch: in == out length.
+    std::uint16_t out16[16] = {0};
+    for (int i = 0; i < 16; ++i) {
+        wide[i] = kRamp16[i];
+    }
+    resize::hbdResizeMultistep(wide, 16, out16, 16, otmpH, 8);
+    for (int i = 0; i < 16; ++i) {
+        CHECK(out16[i] == wide[i]);
+    }
+}
+
+TEST_CASE("hbdResizeMultistep bd10 composition equalities") {
+    // 12->6 at bd 10: steps == 1, the final step writes output directly; the
+    // composition must equal a direct hbdDown2Symeven call on the same
+    // bd-10-range input (fixture-A input, carrying values the 8-bit domain
+    // cannot hold).
+    const std::uint16_t in[12] = {0, 1023, 0, 1023, 1023, 1023, 1023, 0, 0, 0, 0, 0};
+    std::uint16_t direct[6] = {0};
+    std::uint16_t out[6] = {0};
+    std::uint16_t otmp[12] = {0};
+    resize::hbdDown2Symeven(in, 12, direct, 10);
+    resize::hbdResizeMultistep(in, 12, out, 6, otmp, 10);
+    for (int i = 0; i < 6; ++i) {
+        CHECK(out[i] == direct[i]);
+    }
+    // 16->13 at bd 10: steps == 0, the hbdInterpolate-only branch; equal to
+    // hbdInterpolate directly.
+    const std::uint16_t wide16[16] = {11, 48, 85, 122, 159, 196, 233, 14, 51, 88, 125, 162, 199, 236, 17, 54};
+    std::uint16_t direct13[13] = {0};
+    std::uint16_t out13[13] = {0};
+    std::uint16_t otmp16[16] = {0};
+    resize::hbdInterpolate(wide16, 16, direct13, 13, 10);
+    resize::hbdResizeMultistep(wide16, 16, out13, 13, otmp16, 10);
+    for (int i = 0; i < 13; ++i) {
+        CHECK(out13[i] == direct13[i]);
+    }
+}
+
+TEST_CASE("hbdFill pair strided round trip") {
+    std::uint16_t img[20];
+    for (int i = 0; i < 20; ++i) {
+        img[i] = (std::uint16_t)(i + 1);
+    }
+    std::uint16_t arr[4] = {0};
+    resize::hbdFillColToArr(img, 5, 4, arr);
+    CHECK(arr[0] == 1);
+    CHECK(arr[1] == 6);
+    CHECK(arr[2] == 11);
+    CHECK(arr[3] == 16);
+    std::uint16_t img2[20] = {0};
+    std::uint16_t arr2[4] = {2, 7, 12, 17};
+    resize::hbdFillArrToCol(img2, 5, 4, arr2);
+    CHECK(img2[0] == 2);
+    CHECK(img2[5] == 7);
+    CHECK(img2[10] == 12);
+    CHECK(img2[15] == 17);
+}
+
+TEST_CASE("hbdResizePlaneC derivation bd8 == 8-bit resizePlaneC, bd threading") {
+    // Padded strides (in 12, out 7): the staging transposes must not read or
+    // write the padding. bd8 derivation vs the landed 8-bit twin; then bd 10
+    // on the same 8-bit-range input must be identical (the only bd-dependent
+    // step is the clip bound, and no unclamped intermediate exceeds 255 on
+    // this input, so the wider bound cannot change anything - the assertion
+    // pins that the bd argument actually threads through every call).
+    std::uint8_t in8[4 * 12] = {0};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 8; ++c) {
+            in8[r * 12 + c] = kPlane84[r][c];
+        }
+    }
+    std::uint8_t out8[2 * 7] = {0};
+    CHECK(resize::resizePlaneC(in8, 4, 8, 12, out8, 2, 4, 7));
+    std::uint16_t wide[4 * 12] = {0};
+    for (int i = 0; i < 4 * 12; ++i) {
+        wide[i] = in8[i];
+    }
+    std::uint16_t outH8[2 * 7] = {0};
+    std::uint16_t outH10[2 * 7] = {0};
+    CHECK(resize::hbdResizePlaneC(wide, 4, 8, 12, outH8, 2, 4, 7, 8));
+    CHECK(resize::hbdResizePlaneC(wide, 4, 8, 12, outH10, 2, 4, 7, 10));
+    for (int r = 0; r < 2; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            CHECK(outH8[r * 7 + c] == out8[r * 7 + c]);
+            CHECK(outH10[r * 7 + c] == out8[r * 7 + c]);
+        }
+    }
+}
+
+TEST_CASE("hbdResizePlaneHorizontal derivation bd8 == 8-bit, bd threading") {
+    std::uint8_t in8[4 * 12] = {0};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 8; ++c) {
+            in8[r * 12 + c] = kPlane84[r][c];
+        }
+    }
+    std::uint8_t out8[4 * 7] = {0};
+    CHECK(resize::resizePlaneHorizontal(in8, 4, 8, 12, out8, 4, 4, 7));
+    std::uint16_t wide[4 * 12] = {0};
+    for (int i = 0; i < 4 * 12; ++i) {
+        wide[i] = in8[i];
+    }
+    std::uint16_t outH8[4 * 7] = {0};
+    std::uint16_t outH10[4 * 7] = {0};
+    CHECK(resize::hbdResizePlaneHorizontal(wide, 4, 8, 12, outH8, 4, 4, 7, 8));
+    CHECK(resize::hbdResizePlaneHorizontal(wide, 4, 8, 12, outH10, 4, 4, 7, 10));
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            CHECK(outH8[r * 7 + c] == out8[r * 7 + c]);
+            CHECK(outH10[r * 7 + c] == out8[r * 7 + c]);
+        }
+    }
+}
+
 TEST_CASE("down2Symeven 16 ramp fixture") {
     std::uint8_t out[8] = {0};
     resize::down2Symeven(kRamp16, 16, out);
