@@ -35,6 +35,7 @@ if(BUILD_TESTING)
   add_subdirectory(src/l13_palette)
   add_subdirectory(src/l14_utility)
   add_subdirectory(src/l15_rc)
+  add_subdirectory(src/l16_rdo)
 endif()
 
 # benchmark tool: own target, not a ctest (tools/bench/README notes inside
