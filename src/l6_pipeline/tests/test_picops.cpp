@@ -366,3 +366,95 @@ TEST_CASE("copyWxh8bit/16bit copy rows honoring strides") {
     CHECK(dst16[5] == 60000); // beyond w, untouched
     CHECK(dst16[7] == 2000);  // row 1
 }
+
+// HB1: the hadamard hbd family (C_DEFAULT/picture_operators_c.c):
+// hadamard_highbd_col8_first_pass (:176-203, int16, the landed col8
+// shape), hadamard_highbd_col8_second_pass (:207-234, int32 - the 8-bit
+// second pass would overflow here), and svt_aom_highbd_hadamard_8x8_c
+// (:238-262). The hbd signature is EXACTLY the landed hadamard8x8's:
+// (const int16_t* src_diff, ptrdiff_t src_stride, int32_t* coeff).
+// Folding-shift oracle: the first pass writes fp(slot s, col c) to
+// buffer[8*c + s]; the second pass group idx reads buffer[idx + 8k] =
+// fp(slot idx, col k), so
+//   coeff[8*fslot + j] = sum_k S[j][k] * fp(fslot, k)
+//                      = sum_k sum_r S[j][k] * S[fslot][r] * src[r][k]
+// with the butterfly sign table S below (independent arithmetic; the x8
+// index is the FIRST-PASS SLOT and the sum runs over COLUMNS - the
+// 8*idx + j of buffer2 pairs idx with the first-pass slot).
+TEST_CASE("highbdHadamard8x8 equals the 8-bit transform on small inputs") {
+    // |values| <= 100 keeps BOTH paths inside int16 in the second pass,
+    // so the hbd and 8-bit results must be bit-identical.
+    std::int16_t src[8 * 10];
+    for (int i = 0; i < 80; ++i) {
+        src[i] = static_cast<std::int16_t>(((i * 37) % 201) - 100);
+    }
+    std::int32_t coeffHbd[64] = {0};
+    std::int32_t coeff8[64] = {0};
+    picops::highbdHadamard8x8(src, 8, coeffHbd);
+    picops::hadamard8x8(src, 8, coeff8);
+    bool allOk = true;
+    int firstDiff = -1;
+    for (int i = 0; i < 64; ++i) {
+        if (coeffHbd[i] != coeff8[i] && firstDiff < 0) {
+            firstDiff = i;
+        }
+        allOk = allOk && (coeffHbd[i] == coeff8[i]);
+    }
+    CHECK(firstDiff < 0);
+    CHECK(allOk);
+}
+
+TEST_CASE("highbdHadamard8x8 matches the folding-shift oracle at 13-bit range") {
+    static const int S[8][8] = {
+        {1, 1, 1, 1, 1, 1, 1, 1},
+        {1, 1, -1, -1, -1, -1, 1, 1},
+        {1, 1, 1, 1, -1, -1, -1, -1},
+        {1, 1, -1, -1, 1, 1, -1, -1},
+        {1, -1, -1, 1, 1, -1, -1, 1},
+        {1, -1, -1, 1, -1, 1, 1, -1},
+        {1, -1, 1, -1, -1, 1, -1, 1},
+        {1, -1, 1, -1, 1, -1, 1, -1},
+    };
+    // stride 10 rows over 8 columns - the stride gap columns are never read
+    std::int16_t src[8 * 10];
+    for (int r = 0; r < 8; ++r) {
+        for (int c = 0; c < 8; ++c) {
+            src[r * 10 + c] = static_cast<std::int16_t>(((r * 173 + c * 941) % 8191) - 4095);
+        }
+    }
+    std::int32_t coeff[64] = {0};
+    picops::highbdHadamard8x8(src, 10, coeff);
+    bool allOk = true;
+    for (int fslot = 0; fslot < 8; ++fslot) {
+        for (int j = 0; j < 8; ++j) {
+            std::int64_t o = 0;
+            for (int k = 0; k < 8; ++k) {
+                for (int r = 0; r < 8; ++r) {
+                    o += static_cast<std::int64_t>(S[j][k]) * S[fslot][r] * src[r * 10 + k];
+                }
+            }
+            allOk = allOk && (coeff[8 * fslot + j] == o);
+        }
+    }
+    CHECK(allOk);
+    // the documented dynamic range pin: all-4095 input -> coeff[0] = 262080
+    // (int32); the 8-bit second pass would overflow int16 long before.
+    std::int16_t maxSrc[64];
+    for (int i = 0; i < 64; ++i) {
+        maxSrc[i] = 4095;
+    }
+    std::int32_t maxCoeff[64] = {0};
+    picops::highbdHadamard8x8(maxSrc, 8, maxCoeff);
+    CHECK(maxCoeff[0] == 262080);
+    // single-impulse overflow pin: src[0][0] = 4096 -> every coefficient
+    // 4096 (S[j][0] = 1 for all j); an int16 second pass would wrap these
+    // to -32768 once the accumulated magnitude crosses it - the fold-shift
+    // point the int32 pass exists for.
+    std::int16_t impulse[64] = {0};
+    impulse[0] = 4096;
+    std::int32_t impCoeff[64] = {0};
+    picops::highbdHadamard8x8(impulse, 8, impCoeff);
+    CHECK(impCoeff[0] == 4096);
+    CHECK(impCoeff[8] == 4096);
+    CHECK(impCoeff[63] == 4096);
+}

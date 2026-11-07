@@ -472,3 +472,94 @@ void pipeline::picops::hadamard4x4(const std::int16_t* srcDiff, std::ptrdiff_t s
         }
     }
 }
+
+// hadamard_highbd_col8_first_pass (C_DEFAULT/picture_operators_c.c:176-203,
+// verbatim; HB1 resolved the 8-bit-discipline park). int16 arithmetic, the
+// landed hadamardCol8 shape without its no->>1 difference - identical body.
+static void hadamardHighbdCol8FirstPass(const std::int16_t* srcDiff, std::ptrdiff_t srcStride,
+                                        std::int16_t* coeff) {
+    const std::int16_t b0 = srcDiff[0 * srcStride] + srcDiff[1 * srcStride];
+    const std::int16_t b1 = srcDiff[0 * srcStride] - srcDiff[1 * srcStride];
+    const std::int16_t b2 = srcDiff[2 * srcStride] + srcDiff[3 * srcStride];
+    const std::int16_t b3 = srcDiff[2 * srcStride] - srcDiff[3 * srcStride];
+    const std::int16_t b4 = srcDiff[4 * srcStride] + srcDiff[5 * srcStride];
+    const std::int16_t b5 = srcDiff[4 * srcStride] - srcDiff[5 * srcStride];
+    const std::int16_t b6 = srcDiff[6 * srcStride] + srcDiff[7 * srcStride];
+    const std::int16_t b7 = srcDiff[6 * srcStride] - srcDiff[7 * srcStride];
+
+    const std::int16_t c0 = b0 + b2;
+    const std::int16_t c1 = b1 + b3;
+    const std::int16_t c2 = b0 - b2;
+    const std::int16_t c3 = b1 - b3;
+    const std::int16_t c4 = b4 + b6;
+    const std::int16_t c5 = b5 + b7;
+    const std::int16_t c6 = b4 - b6;
+    const std::int16_t c7 = b5 - b7;
+
+    coeff[0] = c0 + c4;
+    coeff[7] = c1 + c5;
+    coeff[3] = c2 + c6;
+    coeff[4] = c3 + c7;
+    coeff[2] = c0 - c4;
+    coeff[6] = c1 - c5;
+    coeff[1] = c2 - c6;
+    coeff[5] = c3 - c7;
+}
+
+// hadamard_highbd_col8_second_pass (C_DEFAULT/picture_operators_c.c:
+// 207-234, verbatim). INT32 arithmetic - the first-pass output is 16-bit
+// ([-32760, 32760]) and the 8-bit int16 second pass would overflow.
+static void hadamardHighbdCol8SecondPass(const std::int16_t* srcDiff, std::ptrdiff_t srcStride,
+                                         std::int32_t* coeff) {
+    const std::int32_t b0 = srcDiff[0 * srcStride] + srcDiff[1 * srcStride];
+    const std::int32_t b1 = srcDiff[0 * srcStride] - srcDiff[1 * srcStride];
+    const std::int32_t b2 = srcDiff[2 * srcStride] + srcDiff[3 * srcStride];
+    const std::int32_t b3 = srcDiff[2 * srcStride] - srcDiff[3 * srcStride];
+    const std::int32_t b4 = srcDiff[4 * srcStride] + srcDiff[5 * srcStride];
+    const std::int32_t b5 = srcDiff[4 * srcStride] - srcDiff[5 * srcStride];
+    const std::int32_t b6 = srcDiff[6 * srcStride] + srcDiff[7 * srcStride];
+    const std::int32_t b7 = srcDiff[6 * srcStride] - srcDiff[7 * srcStride];
+
+    const std::int32_t c0 = b0 + b2;
+    const std::int32_t c1 = b1 + b3;
+    const std::int32_t c2 = b0 - b2;
+    const std::int32_t c3 = b1 - b3;
+    const std::int32_t c4 = b4 + b6;
+    const std::int32_t c5 = b5 + b7;
+    const std::int32_t c6 = b4 - b6;
+    const std::int32_t c7 = b5 - b7;
+
+    coeff[0] = c0 + c4;
+    coeff[7] = c1 + c5;
+    coeff[3] = c2 + c6;
+    coeff[4] = c3 + c7;
+    coeff[2] = c0 - c4;
+    coeff[6] = c1 - c5;
+    coeff[1] = c2 - c6;
+    coeff[5] = c3 - c7;
+}
+
+// svt_aom_highbd_hadamard_8x8_c (C_DEFAULT/picture_operators_c.c:238-262,
+// verbatim). Same signature as hadamard8x8; the second pass is the int32
+// twin above.
+void pipeline::picops::highbdHadamard8x8(const std::int16_t* srcDiff, std::ptrdiff_t srcStride,
+                                         std::int32_t* coeff) {
+    std::int16_t buffer[64];
+    std::int32_t buffer2[64];
+    std::int16_t* tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 8; ++idx) {
+        hadamardHighbdCol8FirstPass(srcDiff, srcStride, tmpBuf);
+        tmpBuf += 8;
+        ++srcDiff;
+    }
+
+    tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 8; ++idx) {
+        hadamardHighbdCol8SecondPass(tmpBuf, 8, buffer2 + 8 * idx);
+        ++tmpBuf;
+    }
+
+    for (int idx = 0; idx < 64; ++idx) {
+        coeff[idx] = static_cast<std::int32_t>(buffer2[idx]);
+    }
+}

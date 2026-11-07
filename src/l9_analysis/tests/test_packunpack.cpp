@@ -416,3 +416,99 @@ TEST_CASE("diffwtdMaskD16 builds 38 and inverted masks from clamped m") {
     CHECK(maskInv[2] == 22);
     CHECK(maskInv[3] == 0);
 }
+
+// HB1: svt_aom_variance_highbd_c (C_DEFAULT/variance.c:162-181), the hbd
+// twin of the landed varianceCore shape: sad + sse accumulate over int
+// diffs, return *sse - ((int64_t)sad*sad)/(w*h). Hand oracle on 4x4,
+// a_stride 5, b_stride 7, b = constant 5 (so diff = a - 5):
+//   diffs {5,15,25,35 | 10,20,30,40 | 0,10,20,30 | 7,17,27,37}
+//   sum = 328, sse = 8936, 328*328/16 = 6724 -> var = 2212.
+// The uint16 inputs are 10-bit values (<= 1023); no bd parameter exists in
+// the reference - the 10/12-bit distinction is the input VALUE range.
+TEST_CASE("varianceHighbd matches the sum-of-squares oracle at 10 and 12 bit") {
+    const std::uint16_t a[20] = {10, 20, 30, 40, 1023, 15, 25, 35, 45, 1022,
+                                 5,  15, 25, 35, 1021, 12, 22, 32, 42, 1020};
+    const std::uint16_t b[28] = {5, 5, 5, 5, 0, 0, 9, 5, 5, 5, 5, 0, 0, 9,
+                                 5, 5, 5, 5, 0, 0, 9, 5, 5, 5, 5, 0, 0, 9};
+    std::uint32_t sse = 0;
+    const std::uint32_t var = analysis::packunpack::varianceHighbd(a, 5, b, 7, 4, 4, &sse);
+    CHECK(sse == 8936);
+    CHECK(var == 2212);
+
+    // independent uint64 re-derivation at 10-bit values (all <= 1023)
+    std::vector<std::uint16_t> a10(8 * 11), b10(8 * 11);
+    for (int r = 0; r < 8; ++r) {
+        for (int c = 0; c < 10; ++c) {
+            a10[r * 11 + c] = static_cast<std::uint16_t>((r * 91 + c * 137) % 1024);
+            b10[r * 11 + c] = static_cast<std::uint16_t>((r * 53 + c * 7 + 5) % 1024);
+        }
+    }
+    std::uint32_t sse10 = 0;
+    const std::uint32_t var10 = analysis::packunpack::varianceHighbd(a10.data(), 11, b10.data(), 11, 10, 8, &sse10);
+    std::uint64_t osum = 0, osse = 0;
+    for (int r = 0; r < 8; ++r) {
+        for (int c = 0; c < 10; ++c) {
+            const std::int64_t d = static_cast<std::int64_t>(a10[r * 11 + c]) - b10[r * 11 + c];
+            osum += d;
+            osse += static_cast<std::uint64_t>(d) * static_cast<std::uint64_t>(d);
+        }
+    }
+    CHECK(sse10 == static_cast<std::uint32_t>(osse));
+    CHECK(var10 == static_cast<std::uint32_t>(osse - osum * osum / 80));
+
+    // 12-bit values (all <= 4095)
+    std::vector<std::uint16_t> a12(16 * 6), b12(16 * 6);
+    for (int r = 0; r < 16; ++r) {
+        for (int c = 0; c < 5; ++c) {
+            a12[r * 6 + c] = static_cast<std::uint16_t>((r * 401 + c * 1297) % 4096);
+            b12[r * 6 + c] = static_cast<std::uint16_t>((r * 977 + c * 301) % 4096);
+        }
+    }
+    std::uint32_t sse12 = 0;
+    const std::uint32_t var12 = analysis::packunpack::varianceHighbd(a12.data(), 6, b12.data(), 6, 5, 16, &sse12);
+    osum = 0;
+    osse = 0;
+    for (int r = 0; r < 16; ++r) {
+        for (int c = 0; c < 5; ++c) {
+            const std::int64_t d = static_cast<std::int64_t>(a12[r * 6 + c]) - b12[r * 6 + c];
+            osum += d;
+            osse += static_cast<std::uint64_t>(d) * static_cast<std::uint64_t>(d);
+        }
+    }
+    CHECK(sse12 == static_cast<std::uint32_t>(osse));
+    CHECK(var12 == static_cast<std::uint32_t>(osse - osum * osum / 80));
+}
+
+// HB1: svt_aom_highbd_mse16x16_c (C_DEFAULT/variance.c:337-352). The
+// reference takes uint8_t* + CONVERT_TO_SHORTPTR staging; the port takes
+// plain uint16 params (the CS1/LR1 precedent) - that signature difference
+// is pinned by this test compiling without any staging. 16x16 fixed, the
+// accumulation is uint64 with a (uint32_t) cast at the return.
+// Hand oracle: src = constant 100, ref = constant 90 -> 256 diffs of 10
+// -> tsse = 256 * 100 = 25600. Strides 17/19 read past each row's 16.
+TEST_CASE("highbdMse16x16 matches the 256-element diff oracle with uint16 params") {
+    std::vector<std::uint16_t> src(16 * 17 + 3), ref(16 * 19 + 3);
+    for (int r = 0; r < 16; ++r) {
+        for (int c = 0; c < 16; ++c) {
+            src[r * 17 + c] = 100;
+            ref[r * 19 + c] = 90;
+        }
+    }
+    CHECK(analysis::packunpack::highbdMse16x16(src.data(), 17, ref.data(), 19) == 25600);
+
+    // independent 256-element re-derivation at 12-bit values
+    for (int r = 0; r < 16; ++r) {
+        for (int c = 0; c < 16; ++c) {
+            src[r * 17 + c] = static_cast<std::uint16_t>((r * 703 + c * 1541) % 4096);
+            ref[r * 19 + c] = static_cast<std::uint16_t>((r * 1237 + c * 667) % 4096);
+        }
+    }
+    std::uint64_t osse = 0;
+    for (int r = 0; r < 16; ++r) {
+        for (int c = 0; c < 16; ++c) {
+            const std::int64_t d = static_cast<std::int64_t>(src[r * 17 + c]) - ref[r * 19 + c];
+            osse += static_cast<std::uint64_t>(d) * static_cast<std::uint64_t>(d);
+        }
+    }
+    CHECK(analysis::packunpack::highbdMse16x16(src.data(), 17, ref.data(), 19) == static_cast<std::uint32_t>(osse));
+}

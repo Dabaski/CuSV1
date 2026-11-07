@@ -2605,3 +2605,172 @@ TEST_CASE("cflPredictLbd scales ac by alpha and adds dc pred") {
     CHECK(dst[0] == 104);
     CHECK(dst[1] == 96);
 }
+
+// HB1: svt_cfl_predict_hbd_c (C_DEFAULT/cfl_c.c:46-59), the hbd twin of
+// the landed cflPredictLbd: uint16 pred + dst, the same signed q0 scaling
+// (get_scaled_luma_q0, :17-20) and clip_pixel_highbd(.., bd). One alpha
+// per call (the reference signature). Two-row fixture, pred/dst stride 6,
+// the q3 buffer advancing by CFL_BUF_LINE (32), not predStride,
+// alpha_q3 = -4 throughout:
+//   row 0 buf {64, -64, 32, -32} -> scaled {-4, 4, -2, 2}
+//        pred {100, 90, 200, 50} -> dst {96, 94, 198, 52}
+//   row 1 buf {64, -64, 16, -16} -> scaled {-4, 4, -1, 1}
+//        pred {90, 100, 60, 70}  -> dst {86, 104, 59, 71}
+TEST_CASE("cflPredictHbd at bd 8 equals cflPredictLbd on the same inputs") {
+    std::int16_t buf[64] = {0};
+    buf[0] = 64;  buf[1] = -64; buf[2] = 32;  buf[3] = -32;
+    buf[32] = 64; buf[33] = -64; buf[34] = 16; buf[35] = -16;
+    std::uint16_t pred[12] = {100, 90, 200, 50, 777, 888,
+                              90, 100, 60, 70, 777, 888};
+    std::uint16_t dstHbd[12] = {0, 0, 0, 0, 777, 888, 0, 0, 0, 0, 777, 888};
+    intra::cflPredictHbd(buf, pred, 6, dstHbd, 6, -4, 8, 4, 2);
+    CHECK(dstHbd[0] == 96);
+    CHECK(dstHbd[1] == 94);
+    CHECK(dstHbd[2] == 198);
+    CHECK(dstHbd[3] == 52);
+    CHECK(dstHbd[6] == 86);
+    CHECK(dstHbd[7] == 104);
+    CHECK(dstHbd[8] == 59);
+    CHECK(dstHbd[9] == 71);
+    CHECK(dstHbd[4] == 777);   // the dst stride gaps are untouched
+    CHECK(dstHbd[5] == 888);
+    CHECK(dstHbd[10] == 777);
+    CHECK(dstHbd[11] == 888);
+
+    // the derivation-relationship fixture (the CDEF1 pattern): same pred
+    // values below 256, same alpha, bd 8 - the hbd result must equal the
+    // landed lbd result element for element.
+    std::uint8_t pred8[12] = {100, 90, 200, 50, 77, 88, 90, 100, 60, 70, 77, 88};
+    std::uint8_t dstLbd[12] = {0};
+    intra::cflPredictLbd(buf, pred8, 6, dstLbd, 6, -4, 8, 4, 2);
+    // the written pixels only (the gaps differ by construction: the hbd
+    // fixture pre-seeds them, the lbd one zero-fills)
+    for (int i = 0; i < 4; ++i) {
+        CHECK(dstHbd[i] == dstLbd[i]);
+        CHECK(dstHbd[6 + i] == dstLbd[6 + i]);
+    }
+}
+
+// HB1: the 10-bit absolute fixture. alpha_q3 = 4: buf 64 -> scaled 4.
+// pred 1000 -> 1004 (<= 1023, kept); pred 1023 with alpha_q3 = 8 ->
+// scaled 8 -> 1031 > 1023 -> clipped to 1023.
+TEST_CASE("cflPredictHbd scales into the 10-bit range and clips at bd") {
+    std::int16_t buf[64] = {0};
+    buf[0] = 64;
+    buf[32] = 64;
+    std::uint16_t pred[2] = {1000, 1023};
+    std::uint16_t dst[2] = {0, 0};
+    intra::cflPredictHbd(buf, pred, 1, dst, 1, 4, 10, 1, 2);
+    CHECK(dst[0] == 1004);
+    std::uint16_t pred2[2] = {1023, 0};
+    std::uint16_t dst2[2] = {0, 0};
+    intra::cflPredictHbd(buf, pred2, 1, dst2, 1, 8, 10, 1, 2);
+    CHECK(dst2[0] == 1023);
+    CHECK(dst2[1] == 8);
+}
+
+// HB1: svt_av1_upsample_intra_edge_high_c
+// (C_DEFAULT/intra_prediction_c.c:15-37), the hbd twin of the landed
+// upsampleIntraEdge: uint16 edge, the (s+8)>>4 kernel, and
+// clip_pixel_highbd(s, bd) (MAX_UPSAMPLE_SZ = 16, definitions.h:1208).
+// Hand oracle, sz 4, p[-1] = 2, edge {10, 20, 30, 40}, bd 8:
+//   in = {2, 2, 10, 20, 30, 40, 40}
+//   p[-2] = 2;  s0 = -2+18+90-20 = 86 -> (86+8)>>4 = 5   -> p[-1] = 5
+//   s1 = -2+90+180-30 = 238 -> 246>>4 = 15 -> p[1] = 15; p[0] = 10
+//   s2 = -10+180+270-40 = 400 -> 408>>4 = 25 -> p[3] = 25; p[2] = 20
+//   s3 = -20+270+360-40 = 570 -> 578>>4 = 36 -> p[5] = 36; p[4] = 30
+//   p[6] = 40.
+TEST_CASE("upsampleIntraEdgeHigh at bd 8 equals the 8-bit upsample widened") {
+    std::uint16_t buf[9] = {0, 2, 10, 20, 30, 40, 111, 111, 111};
+    std::uint16_t* p = buf + 2;
+    intra::upsampleIntraEdgeHigh(p, 4, 8);
+    CHECK(p[-2] == 2);
+    CHECK(p[-1] == 5);
+    CHECK(p[0] == 10);
+    CHECK(p[1] == 15);
+    CHECK(p[2] == 20);
+    CHECK(p[3] == 25);
+    CHECK(p[4] == 30);
+    CHECK(p[5] == 36);
+    CHECK(p[6] == 40);
+
+    // the derivation-relationship fixture (the CDEF1 pattern): the same
+    // edge below 256 at bd 8 must equal the landed 8-bit upsample.
+    std::uint8_t buf8[9] = {0, 2, 10, 20, 30, 40, 111, 111, 111};
+    std::uint8_t* p8 = buf8 + 2;
+    intra::upsampleIntraEdge(p8, 4);
+    for (int i = -2; i <= 6; ++i) {
+        CHECK(p[i] == p8[i]);
+    }
+}
+
+// HB1: the 10-bit fixture - a constant 300 edge stays 300 (the 8-bit twin
+// clamps the same edge to 255). sz 4, all 300.
+TEST_CASE("upsampleIntraEdgeHigh preserves 10-bit values the 8-bit twin clamps") {
+    std::uint16_t buf[9] = {0, 300, 300, 300, 300, 300, 111, 111, 111};
+    std::uint16_t* p = buf + 2;
+    intra::upsampleIntraEdgeHigh(p, 4, 10);
+    CHECK(p[-2] == 300);
+    CHECK(p[-1] == 300);
+    CHECK(p[0] == 300);
+    CHECK(p[1] == 300);
+    CHECK(p[2] == 300);
+    CHECK(p[3] == 300);
+    CHECK(p[4] == 300);
+    CHECK(p[5] == 300);
+    CHECK(p[6] == 300);
+}
+
+// HB1: svt_av1_highbd_dr_prediction_z3_c
+// (C_DEFAULT/intra_prediction_c.c:64-92), the hbd twin of the landed
+// drZ3: uint16 dst/above/left, clip_pixel_highbd(val, bd). The kernel
+// contract is dx == 1, dy > 0; zone 3 dy values are the nonzero entries
+// of drIntraDerivative (intra.cpp:337-366, getDy: dy = der[270-angle]),
+// enumerated here COMPLETELY - 27 values - with upsampleLeft 0 and 1.
+// At bd 8 the hbd result must equal the landed 8-bit drZ3 on every pair
+// (the derivation-relationship fixture, the CDEF1 pattern).
+TEST_CASE("hbdDrZ3 at bd 8 equals drZ3 over the full enumerated dy surface") {
+    const int dys[27] = {1023, 547, 372, 273, 215, 178, 151, 132, 116, 102,
+                         90,  80,  71,  64,  57,  51,  45,  40,  35,  31,
+                         27,  23,  19,  15,  11,  7,   3};
+    std::uint8_t left8[15];
+    std::uint16_t left16[15];
+    for (int i = 0; i < 15; ++i) {
+        left8[i] = static_cast<std::uint8_t>((i * 37 + 11) & 0xFF);
+        left16[i] = left8[i];
+    }
+    bool allOk = true;
+    for (int up = 0; up <= 1; ++up) {
+        for (int k = 0; k < 27; ++k) {
+            std::uint8_t dst8[16] = {0};
+            std::uint16_t dst16[16] = {0};
+            intra::drZ3(dst8, 4, 4, 4, nullptr, left8, up, 1, dys[k]);
+            intra::hbdDrZ3(dst16, 4, 4, 4, nullptr, left16, up, 1, dys[k], 8);
+            for (int i = 0; i < 16; ++i) {
+                allOk = allOk && (dst16[i] == dst8[i]);
+            }
+        }
+    }
+    CHECK(allOk);
+}
+
+// HB1: the 10-bit absolute fixture. dy = 64: shift = 0, so the
+// interpolation returns left[base] exactly: dst[r][c] = left[c + 1 + r]
+// while base < max_base_y (4x4: max_base_y = 7), else left[7]:
+//   row 0 {300, 500, 900, 1023}  row 1 {500, 900, 1023, 200}
+//   row 2 {900, 1023, 200, 300}  row 3 {1023, 200, 300, 400}
+// 10-bit left values pass through unclamped; the 8-bit twin clamps them.
+TEST_CASE("hbdDrZ3 preserves 10-bit left values the 8-bit twin clamps") {
+    const std::uint16_t left[9] = {10, 300, 500, 900, 1023, 200, 300, 400, 0};
+    std::uint16_t dst[16] = {0};
+    intra::hbdDrZ3(dst, 4, 4, 4, nullptr, left, 0, 1, 64, 10);
+    CHECK(dst[0] == 300);
+    CHECK(dst[1] == 500);
+    CHECK(dst[3] == 1023);
+    CHECK(dst[4] == 500);
+    CHECK(dst[6] == 1023);
+    CHECK(dst[9] == 1023);
+    CHECK(dst[10] == 200);
+    CHECK(dst[13] == 200);
+    CHECK(dst[15] == 400);
+}

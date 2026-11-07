@@ -117,6 +117,12 @@ void filterIntraEdge(std::uint8_t* p, int sz, int strength);
 
 void upsampleIntraEdge(std::uint8_t* p, int sz);
 
+// svt_av1_upsample_intra_edge_high_c
+// (C_DEFAULT/intra_prediction_c.c:15-37), the hbd twin: uint16 edge, the
+// same (s + 8) >> 4 kernel, clip_pixel_highbd(s, bd).
+// (HB1 resolved the 8-bit-discipline park.)
+void upsampleIntraEdgeHigh(std::uint16_t* p, int sz, int bd);
+
 void drZ1(std::uint8_t* dst, int stride, int bw, int bh, const std::uint8_t* above, const std::uint8_t* left,
           int upsampleAbove, int dx, int dy);
 
@@ -125,6 +131,12 @@ void drZ2(std::uint8_t* dst, int stride, int bw, int bh, const std::uint8_t* abo
 
 void drZ3(std::uint8_t* dst, int stride, int bw, int bh, const std::uint8_t* above, const std::uint8_t* left,
           int upsampleLeft, int dx, int dy);
+
+// svt_av1_highbd_dr_prediction_z3_c
+// (C_DEFAULT/intra_prediction_c.c:64-92), the hbd twin: uint16 dst/left,
+// clip_pixel_highbd(val, bd). (HB1 resolved the 8-bit-discipline park.)
+void hbdDrZ3(std::uint16_t* dst, std::ptrdiff_t stride, int bw, int bh, const std::uint16_t* above,
+             const std::uint16_t* left, int upsampleLeft, int dx, int dy, int bd);
 
 int getDx(int angle);
 
@@ -144,9 +156,14 @@ void drPredictor(std::uint8_t* dst, int stride, int bw, int bh, const std::uint8
 
 // svt_cfl_predict_lbd_c (C_DEFAULT/cfl_c.c:26-40): CFL prediction by
 // multiplying alpha (q3) to ac values (q3) and adding the dc chroma pred.
-// predBufQ3 advances by CFL_BUF_LINE (32) per row. The hbd variant
-// (svt_cfl_predict_hbd_c) is parked per 8-bit discipline.
+// predBufQ3 advances by CFL_BUF_LINE (32) per row.
 void cflPredictLbd(const std::int16_t* predBufQ3, const std::uint8_t* pred, int predStride, std::uint8_t* dst,
+                   int dstStride, int alphaQ3, int bitDepth, int width, int height);
+
+// svt_cfl_predict_hbd_c (C_DEFAULT/cfl_c.c:46-59), the hbd twin: uint16
+// pred + dst, the same signed q0 scaling and clip_pixel_highbd(.., bd).
+// (HB1 resolved the 8-bit-discipline park.)
+void cflPredictHbd(const std::int16_t* predBufQ3, const std::uint16_t* pred, int predStride, std::uint16_t* dst,
                    int dstStride, int alphaQ3, int bitDepth, int width, int height);
 
 }  // namespace intra

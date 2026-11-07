@@ -202,5 +202,47 @@ void blendA64Vmask16bit(std::uint16_t* dst, int dstStride,
     }
 }
 
+// HB1: 1:1 port of svt_aom_variance_highbd_c
+// (C_DEFAULT/variance.c:162-181). The CONVERT_TO_SHORTPTR staging is not
+// present in THIS function (it takes uint16 directly); the hbd mse twin
+// (variance.c:337-352) carries that staging and lands with plain uint16
+// params per the CS1/LR1 precedent.
+std::uint32_t varianceHighbd(const std::uint16_t* a, int aStride, const std::uint16_t* b, int bStride, int w, int h,
+                             std::uint32_t* sse) {
+    int sad = 0;
+    *sse = 0;
+
+    for (int i = 0; i < h; ++i) {
+        for (int j = 0; j < w; ++j) {
+            const int diff = a[j] - b[j];
+            sad += diff;
+            *sse += diff * diff;
+        }
+
+        a += aStride;
+        b += bStride;
+    }
+
+    return *sse - (static_cast<std::uint32_t>((static_cast<std::int64_t>(sad) * sad) / (w * h)));
+}
+
+// HB1: 1:1 port of svt_aom_highbd_mse16x16_c
+// (C_DEFAULT/variance.c:337-352). CONVERT_TO_SHORTPTR staging replaced by
+// plain uint16 params (the CS1/LR1 precedent, named in the header).
+std::uint32_t highbdMse16x16(const std::uint16_t* src, std::int32_t srcStride, const std::uint16_t* ref,
+                             std::int32_t refStride) {
+    std::uint64_t tsse = 0;
+
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 16; ++j) {
+            const int diff = src[j] - ref[j];
+            tsse += static_cast<std::uint32_t>(diff * diff);
+        }
+        src += srcStride;
+        ref += refStride;
+    }
+    return static_cast<std::uint32_t>(tsse);
+}
+
 }
 }

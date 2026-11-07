@@ -311,6 +311,37 @@ void drZ3(std::uint8_t* dst, int stride, int bw, int bh, const std::uint8_t* abo
     }
 }
 
+// svt_av1_highbd_dr_prediction_z3_c
+// (C_DEFAULT/intra_prediction_c.c:64-92, verbatim; HB1 resolved the
+// 8-bit-discipline park). uint16 dst/left; the reference's (void)above and
+// (void)dx casts kept, its asserts (dx == 1, dy > 0) and (void)bd dropped -
+// named deviation, same as the 8-bit twin.
+void hbdDrZ3(std::uint16_t* dst, std::ptrdiff_t stride, int bw, int bh, const std::uint16_t* above,
+             const std::uint16_t* left, int upsampleLeft, int dx, int dy, int bd) {
+    (void)above;
+    (void)dx;
+
+    const int maxBaseY = (bw + bh - 1) << upsampleLeft;
+    const int fracBits = 6 - upsampleLeft;
+    const int baseInc  = 1 << upsampleLeft;
+    for (int c = 0, y = dy; c < bw; ++c, y += dy) {
+        int base = y >> fracBits, shift = ((y << upsampleLeft) & 0x3F) >> 1;
+
+        for (int r = 0; r < bh; ++r, base += baseInc) {
+            if (base < maxBaseY) {
+                int val = left[base] * (32 - shift) + left[base + 1] * shift;
+                val     = roundPowerOfTwo(val, 5);
+                dst[r * stride + c] = static_cast<std::uint16_t>(clipPixelHighbd(val, bd));
+            } else {
+                for (; r < bh; ++r) {
+                    dst[r * stride + c] = left[maxBaseY];
+                }
+                break;
+            }
+        }
+    }
+}
+
 namespace {
 
 const std::uint8_t smWeightArrays[128] = {
@@ -833,6 +864,30 @@ void upsampleIntraEdge(std::uint8_t* p, int sz) {
             s = 255;
         }
         p[2 * i - 1] = (std::uint8_t)s;
+        p[2 * i]     = in[i + 2];
+    }
+}
+
+// svt_av1_upsample_intra_edge_high_c
+// (C_DEFAULT/intra_prediction_c.c:15-37, verbatim; HB1 resolved the
+// 8-bit-discipline park). uint16 edge, clip_pixel_highbd(s, bd); the
+// reference's assert(sz <= MAX_UPSAMPLE_SZ) with MAX_UPSAMPLE_SZ = 16
+// (definitions.h:1208) is dropped - named deviation, same as the 8-bit twin.
+void upsampleIntraEdgeHigh(std::uint16_t* p, int sz, int bd) {
+    std::uint16_t in[16 + 3];
+    in[0] = p[-1];
+    in[1] = p[-1];
+    for (int i = 0; i < sz; i++) {
+        in[i + 2] = p[i];
+    }
+    in[sz + 2] = p[sz - 1];
+
+    p[-2] = in[0];
+    for (int i = 0; i < sz; i++) {
+        int s = -in[i] + (9 * in[i + 1]) + (9 * in[i + 2]) - in[i + 3];
+        s     = (s + 8) >> 4;
+        s     = clipPixelHighbd(s, bd);
+        p[2 * i - 1] = static_cast<std::uint16_t>(s);
         p[2 * i]     = in[i + 2];
     }
 }
@@ -3452,6 +3507,24 @@ void cflPredictLbd(const std::int16_t* predBufQ3, const std::uint8_t* pred, int 
     for (int j = 0; j < height; j++) {
         for (int i = 0; i < width; i++) {
             dst[i] = static_cast<std::uint8_t>(
+                clipPixelHighbd(getScaledLumaQ0(alphaQ3, predBufQ3[i]) + static_cast<std::int16_t>(pred[i]),
+                                bitDepth));
+        }
+        dst += dstStride;
+        pred += predStride;
+        predBufQ3 += kCflBufLine;
+    }
+}
+
+// svt_cfl_predict_hbd_c (C_DEFAULT/cfl_c.c:46-59, verbatim; HB1 resolved
+// the 8-bit-discipline park). The pred/dst pointers are uint16; the
+// (int16_t) cast on pred[i] is kept exactly as the reference casts it.
+void cflPredictHbd(const std::int16_t* predBufQ3, const std::uint16_t* pred, int predStride, std::uint16_t* dst,
+                   int dstStride, int alphaQ3, int bitDepth, int width, int height) {
+    const int kCflBufLine = 32;  // CFL_BUF_LINE
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            dst[i] = static_cast<std::uint16_t>(
                 clipPixelHighbd(getScaledLumaQ0(alphaQ3, predBufQ3[i]) + static_cast<std::int16_t>(pred[i]),
                                 bitDepth));
         }

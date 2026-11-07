@@ -82,6 +82,14 @@ void hadamard4x4(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int
 // col8 butterfly passes (no >>1), no final transpose.
 void hadamard8x8(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff);
 
+// svt_aom_highbd_hadamard_8x8_c (C_DEFAULT/picture_operators_c.c:238-262),
+// the hbd twin: the SAME signature, an int16 first pass
+// (hadamard_highbd_col8_first_pass, :176-203) and an INT32 second pass
+// (hadamard_highbd_col8_second_pass, :207-234) - the 8-bit second pass
+// would overflow int16 at the hbd 13-bit input range.
+// (HB1 resolved the 8-bit-discipline park.)
+void highbdHadamard8x8(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff);
+
 // svt_aom_hadamard_16x16_c (C_DEFAULT/picture_operators_c.c:265-292): four
 // 8x8 quadrant transforms, then a fold over offsets {0,64,128,192} with >>1.
 void hadamard16x16(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff);

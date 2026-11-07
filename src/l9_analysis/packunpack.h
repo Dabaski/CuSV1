@@ -77,13 +77,29 @@ void convert16bitTo8bit(const std::uint16_t* src, std::uint32_t srcStride,
 // ROUND_BITS = 6, :1247-1248). NAMED JUDGMENT: the kernel carries "highbd"
 // in its reference name but is struct-free and the brief assigns the file
 // for a 1:1 port with a blend fixture, so it is ported here; the genuinely
-// highbd variance/mse wrappers of variance.c stay parked. The (void)bd
+// highbd variance/mse wrappers of variance.c landed below in HB1
+// (varianceHighbd, highbdMse16x16 - the park is resolved). The (void)bd
 // parameter (:18) is dropped (it participates in no arithmetic) and the
 // debug asserts (:21-:29) are dropped - named deviations.
 void blendA64Vmask16bit(std::uint16_t* dst, int dstStride,
                         const std::uint16_t* src0, int src0Stride,
                         const std::uint16_t* src1, int src1Stride,
                         const std::uint8_t* mask, int w, int h);
+
+// HB1: svt_aom_variance_highbd_c (C_DEFAULT/variance.c:162-181), the hbd
+// twin of varianceCore: sad + sse accumulate the int16-range diffs, the
+// return is *sse - ((int64_t)sad*sad)/(w*h) (the population variance).
+// No bd parameter exists in the reference - callers feed 10/12-bit VALUES.
+std::uint32_t varianceHighbd(const std::uint16_t* a, int aStride, const std::uint16_t* b, int bStride, int w, int h,
+                             std::uint32_t* sse);
+
+// HB1: svt_aom_highbd_mse16x16_c (C_DEFAULT/variance.c:337-352), the hbd
+// twin of the mse entry: 16x16 fixed, uint64 tsse accumulation, the
+// (uint32_t) cast at the return. DEVIATION (named, the CS1/LR1 precedent):
+// the reference takes uint8_t* + CONVERT_TO_SHORTPTR staging; the port
+// takes plain uint16 params - no staging, same arithmetic.
+std::uint32_t highbdMse16x16(const std::uint16_t* src, std::int32_t srcStride, const std::uint16_t* ref,
+                             std::int32_t refStride);
 
 }
 }
