@@ -3,6 +3,7 @@
 #include <motion.h>
 #include <hash_motion.h>
 #include <global_motion.h>
+#include <vector>
 
 TEST_CASE("sad8x8 of reversed ramps across two strides is 2048") {
     std::uint8_t a[8 * 8] = {0};
@@ -497,6 +498,247 @@ TEST_CASE("frame hash roundtrip: walk inserts every block into its bucket") {
     for (const auto& bucket : t.buckets) total += static_cast<int>(bucket.size());
     CHECK(total == 25);
     motion::hashTableDestroy(&t);
+}
+
+// SW1: the sadMxN macro instances (C_DEFAULT/compute_sad_c.c:103-106 +
+// the instance lines :118-193). sadMxN(m, n) = the nxm helper called with
+// (height=n, width=m), m = width, n = height. Hand-checked absolute:
+// src row y all (y+1) at stride 8, ref zero, 4x8 (w=4 h=8):
+// sum over 8 rows of 4*(y+1) = 4*(1+..+8) = 4*36 = 144. The distinct row
+// values + stride 8 > width 4 make a height/width swap or a stride
+// break visible (the transposed 8x4 shape sums 80, see its fixture).
+TEST_CASE("sad4x8 rows-of-increasing vs zero at stride 8 is 144") {
+    std::uint8_t src[8 * 8] = {0};
+    std::uint8_t ref[8 * 4] = {0};
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 4; ++x) src[y * 8 + x] = static_cast<std::uint8_t>(y + 1);
+    }
+    CHECK(motion::sad4x8(src, 8, ref, 4) == 144);
+}
+
+// SW1: the transposed shape pins the argument order - 8x4 (w=8 h=4)
+// sums 8*(1+2+3+4) = 80 where 4x8 sums 144. A helper called with the
+// height/width pair swapped fails exactly here.
+TEST_CASE("sad8x4 rows-of-increasing vs zero at stride 8 is 80") {
+    std::uint8_t src[8 * 4] = {0};
+    std::uint8_t ref[8 * 4] = {0};
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 8; ++x) src[y * 8 + x] = static_cast<std::uint8_t>(y + 1);
+    }
+    CHECK(motion::sad8x4(src, 8, ref, 8) == 80);
+}
+
+// SW1 fixture helper: deterministic pseudo-random byte fill (LCG), so
+// every sweep fixture is reproducible without hand-typing 16 KB.
+static void fillPseudoRandom(std::uint8_t* p, std::size_t n, std::uint32_t seed) {
+    std::uint32_t s = seed;
+    for (std::size_t i = 0; i < n; ++i) {
+        s = s * 1664525u + 1013904223u;
+        p[i] = static_cast<std::uint8_t>((s >> 16) & 0xff);
+    }
+}
+
+// SW1 (a): sadMxN at a NON-landed size == a direct composition oracle.
+// The macro's own composition is the nxm helper; the landed
+// sadLoopKernel at a 1x1 search area computes exactly that SAD at offset
+// (0,0) (searchAreaWidth = searchAreaHeight = 1). Cross-checked against
+// a SECOND landed composition: 1024 landed sad4x4 tiles summed (128x128
+// is 4-multiples in both dims). Strides 133/131 differ from the widths
+// so a stride break cannot hide.
+TEST_CASE("sad128x128 equals the sadLoopKernel 1x1 and tiled sad4x4 compositions") {
+    const int w = 128, h = 128;
+    const int srcStride = 133, refStride = 131;
+    std::vector<std::uint8_t> src(static_cast<std::size_t>(h * srcStride));
+    std::vector<std::uint8_t> ref(static_cast<std::size_t>(h * refStride));
+    fillPseudoRandom(src.data(), src.size(), 1);
+    fillPseudoRandom(ref.data(), ref.size(), 2);
+
+    std::uint64_t best = 0;
+    std::int16_t xs = 0, ys = 0;
+    motion::sadLoopKernel(src.data(), srcStride, ref.data(), refStride, h, w, &best, &xs, &ys,
+                          srcStride, 0, 1, 1);
+    CHECK(best <= 0xffffffffu);
+
+    std::uint32_t tiled = 0;
+    for (int y = 0; y < h; y += 4) {
+        for (int x = 0; x < w; x += 4) {
+            tiled += motion::sad4x4(src.data() + y * srcStride + x, srcStride,
+                                    ref.data() + y * refStride + x, refStride);
+        }
+    }
+    CHECK(tiled == best);
+    CHECK(motion::sad128x128(src.data(), srcStride, ref.data(), refStride) == best);
+}
+
+// SW1 (d) sweep pin: the reference's own instance enumeration,
+// transcribed from compute_sad_c.c:118-193 in file order (m = width,
+// n = height; sadMxN(m,n) and sadMxNx4D(m,n) and OBMCSADMxN(m,n) all
+// share it - sad_av1.c:43-64 is the same size list in the same order).
+// 22 sizes; the sweep below exercises EVERY (macro, size) pair. The
+// landed five route to the landed sad4x4/8x8/16x16/32x32/64x64 (which
+// ARE the macro instances at those sizes); the rest to the SW1 wrappers.
+struct SadSize {
+    int m, n;
+};
+static const SadSize kSadSizes[22] = {
+    {128, 128}, {128, 64}, {64, 128}, {64, 64}, {64, 32}, {32, 64}, {32, 32}, {32, 16},
+    {16, 32},   {16, 16},  {16, 8},   {8, 16},  {8, 8},   {8, 4},   {4, 8},   {4, 4},
+    {4, 16},    {16, 4},   {8, 32},   {32, 8},  {16, 64}, {64, 16},
+};
+
+static std::uint32_t sadMxNInstance(int m, int n, const std::uint8_t* src, std::uint32_t srcStride,
+                                    const std::uint8_t* ref, std::uint32_t refStride) {
+    if (m == 128 && n == 128) return motion::sad128x128(src, srcStride, ref, refStride);
+    if (m == 128 && n == 64) return motion::sad128x64(src, srcStride, ref, refStride);
+    if (m == 64 && n == 128) return motion::sad64x128(src, srcStride, ref, refStride);
+    if (m == 64 && n == 64) return motion::sad64x64(src, srcStride, ref, refStride);
+    if (m == 64 && n == 32) return motion::sad64x32(src, srcStride, ref, refStride);
+    if (m == 32 && n == 64) return motion::sad32x64(src, srcStride, ref, refStride);
+    if (m == 32 && n == 32) return motion::sad32x32(src, srcStride, ref, refStride);
+    if (m == 32 && n == 16) return motion::sad32x16(src, srcStride, ref, refStride);
+    if (m == 16 && n == 32) return motion::sad16x32(src, srcStride, ref, refStride);
+    if (m == 16 && n == 16) return motion::sad16x16(src, srcStride, ref, refStride);
+    if (m == 16 && n == 8) return motion::sad16x8(src, srcStride, ref, refStride);
+    if (m == 8 && n == 16) return motion::sad8x16(src, srcStride, ref, refStride);
+    if (m == 8 && n == 8) return motion::sad8x8(src, srcStride, ref, refStride);
+    if (m == 8 && n == 4) return motion::sad8x4(src, srcStride, ref, refStride);
+    if (m == 4 && n == 8) return motion::sad4x8(src, srcStride, ref, refStride);
+    if (m == 4 && n == 4) return motion::sad4x4(src, srcStride, ref, refStride);
+    if (m == 4 && n == 16) return motion::sad4x16(src, srcStride, ref, refStride);
+    if (m == 16 && n == 4) return motion::sad16x4(src, srcStride, ref, refStride);
+    if (m == 8 && n == 32) return motion::sad8x32(src, srcStride, ref, refStride);
+    if (m == 32 && n == 8) return motion::sad32x8(src, srcStride, ref, refStride);
+    if (m == 16 && n == 64) return motion::sad16x64(src, srcStride, ref, refStride);
+    if (m == 64 && n == 16) return motion::sad64x16(src, srcStride, ref, refStride);
+    return 0;
+}
+
+// SW1 (d): the 22-size sadMxN sweep. Each instance is checked against
+// the sadLoopKernel 1x1 composition oracle (the macro's own composition)
+// at distinct non-square strides, pseudo-random data.
+TEST_CASE("every sadMxN instance matches the sadLoopKernel 1x1 composition") {
+    std::vector<std::uint8_t> src(static_cast<std::size_t>(128 * 133));
+    std::vector<std::uint8_t> ref(static_cast<std::size_t>(128 * 131));
+    fillPseudoRandom(src.data(), src.size(), 10);
+    fillPseudoRandom(ref.data(), ref.size(), 11);
+    for (int s = 0; s < 22; ++s) {
+        const int m = kSadSizes[s].m, n = kSadSizes[s].n;
+        const std::uint32_t srcStride = static_cast<std::uint32_t>(m + 5);
+        const std::uint32_t refStride = static_cast<std::uint32_t>(m + 3);
+        std::uint64_t best = 0;
+        std::int16_t xs = 0, ys = 0;
+        motion::sadLoopKernel(src.data(), srcStride, ref.data(), refStride,
+                              static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(m), &best,
+                              &xs, &ys, srcStride, 0, 1, 1);
+        CHECK(best <= 0xffffffffu);
+        CHECK(sadMxNInstance(m, n, src.data(), srcStride, ref.data(), refStride) == best);
+    }
+}
+
+// SW1 (b): the sadMxNx4D macro (compute_sad_c.c:109-116): sad_array[i]
+// is the sadMxN instance on ref_array[i] - the four SADs land in the
+// reference's index order. Dispatch over all 22 sizes (macro, size)
+// pairs; the landed five route to the landed functions.
+static void sadMxNx4DInstance(int m, int n, const std::uint8_t* src, std::uint32_t srcStride,
+                              const std::uint8_t* const refArray[4], std::uint32_t refStride,
+                              std::uint32_t* sadArray) {
+    if (m == 128 && n == 128) return motion::sad128x128x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 128 && n == 64) return motion::sad128x64x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 64 && n == 128) return motion::sad64x128x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 64 && n == 64) return motion::sad64x64x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 64 && n == 32) return motion::sad64x32x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 32 && n == 64) return motion::sad32x64x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 32 && n == 32) return motion::sad32x32x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 32 && n == 16) return motion::sad32x16x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 16 && n == 32) return motion::sad16x32x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 16 && n == 16) return motion::sad16x16x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 16 && n == 8) return motion::sad16x8x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 8 && n == 16) return motion::sad8x16x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 8 && n == 8) return motion::sad8x8x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 8 && n == 4) return motion::sad8x4x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 4 && n == 8) return motion::sad4x8x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 4 && n == 4) return motion::sad4x4x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 4 && n == 16) return motion::sad4x16x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 16 && n == 4) return motion::sad16x4x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 8 && n == 32) return motion::sad8x32x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 32 && n == 8) return motion::sad32x8x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 16 && n == 64) return motion::sad16x64x4d(src, srcStride, refArray, refStride, sadArray);
+    if (m == 64 && n == 16) return motion::sad64x16x4d(src, srcStride, refArray, refStride, sadArray);
+}
+
+// SW1 (b): the 22-size sadMxNx4D sweep. Four distinct refs (constant
+// offsets 0/1/2/3 added to distinct planes); the output array must equal
+// the four individual sadMxN SADs IN THE REFERENCE'S INDEX ORDER - a
+// permuted output index fails wherever the four SADs differ.
+TEST_CASE("every sadMxNx4D instance equals the four individual SADs in index order") {
+    std::vector<std::uint8_t> src(static_cast<std::size_t>(128 * 133));
+    std::vector<std::uint8_t> refBase(static_cast<std::size_t>(4 * 128 * 131));
+    fillPseudoRandom(src.data(), src.size(), 20);
+    fillPseudoRandom(refBase.data(), refBase.size(), 21);
+    for (int s = 0; s < 22; ++s) {
+        const int m = kSadSizes[s].m, n = kSadSizes[s].n;
+        const std::uint32_t srcStride = static_cast<std::uint32_t>(m + 5);
+        const std::uint32_t refStride = static_cast<std::uint32_t>(m + 3);
+        const std::size_t plane = static_cast<std::size_t>(n) * refStride;
+        const std::uint8_t* refArray[4] = {refBase.data(), refBase.data() + plane,
+                                           refBase.data() + 2 * plane, refBase.data() + 3 * plane};
+        std::uint32_t got[4] = {0, 0, 0, 0};
+        sadMxNx4DInstance(m, n, src.data(), srcStride, refArray, refStride, got);
+        for (int i = 0; i < 4; ++i) {
+            CHECK(got[i] == sadMxNInstance(m, n, src.data(), srcStride, refArray[i], refStride));
+        }
+    }
+}
+
+// SW1 (c): the OBMCSADMxN macro (C_DEFAULT/sad_av1.c:36-40 + the
+// instance lines :43-64). The macro body is obmc_sad(ref, ref_stride,
+// wsrc, mask, m, n) - m = width, n = height. Dispatch over all 22
+// sizes; every instance forwards to the landed obmcSad core.
+static std::uint32_t obmcSadInstance(int m, int n, const std::uint8_t* ref, int refStride,
+                                     const std::int32_t* wsrc, const std::int32_t* mask) {
+    if (m == 128 && n == 128) return motion::obmcSad128x128(ref, refStride, wsrc, mask);
+    if (m == 128 && n == 64) return motion::obmcSad128x64(ref, refStride, wsrc, mask);
+    if (m == 64 && n == 128) return motion::obmcSad64x128(ref, refStride, wsrc, mask);
+    if (m == 64 && n == 64) return motion::obmcSad64x64(ref, refStride, wsrc, mask);
+    if (m == 64 && n == 32) return motion::obmcSad64x32(ref, refStride, wsrc, mask);
+    if (m == 32 && n == 64) return motion::obmcSad32x64(ref, refStride, wsrc, mask);
+    if (m == 32 && n == 32) return motion::obmcSad32x32(ref, refStride, wsrc, mask);
+    if (m == 32 && n == 16) return motion::obmcSad32x16(ref, refStride, wsrc, mask);
+    if (m == 16 && n == 32) return motion::obmcSad16x32(ref, refStride, wsrc, mask);
+    if (m == 16 && n == 16) return motion::obmcSad16x16(ref, refStride, wsrc, mask);
+    if (m == 16 && n == 8) return motion::obmcSad16x8(ref, refStride, wsrc, mask);
+    if (m == 8 && n == 16) return motion::obmcSad8x16(ref, refStride, wsrc, mask);
+    if (m == 8 && n == 8) return motion::obmcSad8x8(ref, refStride, wsrc, mask);
+    if (m == 8 && n == 4) return motion::obmcSad8x4(ref, refStride, wsrc, mask);
+    if (m == 4 && n == 8) return motion::obmcSad4x8(ref, refStride, wsrc, mask);
+    if (m == 4 && n == 4) return motion::obmcSad4x4(ref, refStride, wsrc, mask);
+    if (m == 4 && n == 16) return motion::obmcSad4x16(ref, refStride, wsrc, mask);
+    if (m == 16 && n == 4) return motion::obmcSad16x4(ref, refStride, wsrc, mask);
+    if (m == 8 && n == 32) return motion::obmcSad8x32(ref, refStride, wsrc, mask);
+    if (m == 32 && n == 8) return motion::obmcSad32x8(ref, refStride, wsrc, mask);
+    if (m == 16 && n == 64) return motion::obmcSad16x64(ref, refStride, wsrc, mask);
+    if (m == 64 && n == 16) return motion::obmcSad64x16(ref, refStride, wsrc, mask);
+    return 0;
+}
+
+// SW1 (c): the 22-size OBMCSADMxN sweep. The wrapper must equal the
+// landed obmcSad core at the same (m, n) - the macro's own composition.
+// wsrc and mask are DIFFERENT arrays (asymmetric values) so a wrapper
+// that swaps them fails; refStride differs from the widths so a stride
+// break fails. 128x128 and 4x16 are in the enumerated set.
+TEST_CASE("every OBMCSADMxN instance equals the obmcSad core at its size") {
+    std::vector<std::uint8_t> ref(static_cast<std::size_t>(128 * 133));
+    std::vector<std::int32_t> wsrc(static_cast<std::size_t>(128 * 128));
+    std::vector<std::int32_t> mask(static_cast<std::size_t>(128 * 128));
+    fillPseudoRandom(ref.data(), ref.size(), 30);
+    fillPseudoRandom(reinterpret_cast<std::uint8_t*>(wsrc.data()), wsrc.size() * 4, 31);
+    fillPseudoRandom(reinterpret_cast<std::uint8_t*>(mask.data()), mask.size() * 4, 32);
+    for (int s = 0; s < 22; ++s) {
+        const int m = kSadSizes[s].m, n = kSadSizes[s].n;
+        const int refStride = m + 7;
+        CHECK(obmcSadInstance(m, n, ref.data(), refStride, wsrc.data(), mask.data()) ==
+              motion::obmcSad(ref.data(), refStride, wsrc.data(), mask.data(), m, n));
+    }
 }
 
 // GM1: convert_to_params (global_motion.c:36-49). Identity params
