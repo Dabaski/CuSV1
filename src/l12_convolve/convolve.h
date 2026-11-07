@@ -1,4 +1,5 @@
-// l12_convolve - the convolve.c kernel family (A13, CV1).
+// l12_convolve - the convolve.c kernel family (A13, CV1) PLUS the IP1
+// interp-filter-params machinery + upsampled_pred (A3/A14, this slice).
 // Reference: third_party/SVT-AV1/Source/Lib/Codec/convolve.c (277 nb).
 // LANDED: svt_aom_horz_scalar_product :30-:36 (exported, deviation),
 // svt_aom_get_filter_base :54-:57, svt_aom_get_filter_offset :59-:61,
@@ -23,6 +24,31 @@
 // svt_aom_highbd_horz_scalar_product :38-:44 (unreachable at 8-bit).
 // svt_memcpy does not appear in the ported spans (no memcpy sites); the
 // wiener temp zeroing uses std::memset 1:1 with convolve.c:126.
+//
+// IP1 additions (the interp-filter-params machinery + the subpel upsample
+// driver, transcribed 1:1, diff-verified in tests/test_interpfilters.cpp):
+// - the five remaining InterpKernel tables: sub_pel_filters_4
+//   (inter_prediction.c:257-:272), sub_pel_filters_8sharp (:1133-:1148),
+//   sub_pel_filters_8smooth (:1150-:1165), bilinear_filters
+//   (:1166-:1181), sub_pel_filters_4smooth (:1182-:1197) - joining the
+//   CV1 sub_pel_filters_8 (:241-:256).
+// - InterpFilter (definitions.h:818-:827), SubpelSearchType
+//   (definitions.h:834-:839), InterpFilterParams (definitions.h:849-:854),
+//   interpFilterParamsList (inter_prediction.h:80-:84), interp4tap
+//   (:124-:126, taps stays 8 - the reference's zero-padded 4-tap quirk),
+//   extractInterpFilter (filter.h:60-:62), makeInterpFilters
+//   (filter.h:64-:68), getInterpFilterSubpelKernel (filter.h:77-:80),
+//   getInterpFilterParamsWithBlockSize (inter_prediction.h:128-:137),
+//   getConvolveFilterParams (:139-:145).
+// - getFilter (variance.c:71-:85, exported, DF1 precedent) and
+//   upsampledPred (variance.c:88-:137; the brief's span map said
+//   inter_prediction.c :88-:141 - WRONG FILE, the definition is in
+//   C_DEFAULT/variance.c; its xd/cm/mi_row/mi_col/mv struct params are
+//   kept as void* call-shape slots and voided, named deviation).
+// The interp tables are consumed ONLY via the convolve8_* path (which
+// takes kernel pointers directly), so the 256-byte alignment is kept for
+// 1:1 fidelity with the reference's DECLARE_ALIGNED(256), not for the
+// getFilterBase trick.
 #pragma once
 
 #include <cstddef>
@@ -48,6 +74,102 @@ using InterpKernel = std::int16_t[8];
 // table is carried: it is the row set the convolve8_* dispatch path
 // consumes in the reference.
 alignas(256) extern const InterpKernel subPelFilters8[16];
+
+// sub_pel_filters_4 (inter_prediction.c:257-:272), transcribed. Same
+// TRANSCRIPTION CAVEAT as subPelFilters8 above; diff-verified in
+// tests/test_interpfilters.cpp.
+alignas(256) extern const InterpKernel subPelFilters4[16];
+
+// sub_pel_filters_8sharp (inter_prediction.c:1133-:1148), transcribed.
+alignas(256) extern const InterpKernel subPelFilters8sharp[16];
+
+// sub_pel_filters_8smooth (inter_prediction.c:1150-:1165), transcribed.
+alignas(256) extern const InterpKernel subPelFilters8smooth[16];
+
+// bilinear_filters (inter_prediction.c:1166-:1181), transcribed.
+alignas(256) extern const InterpKernel bilinearFilters[16];
+
+// sub_pel_filters_4smooth (inter_prediction.c:1182-:1197), transcribed.
+alignas(256) extern const InterpKernel subPelFilters4smooth[16];
+
+// definitions.h:818-:827, verbatim order (the enum values are the
+// reference's; the params list indexes by them).
+enum class InterpFilter {
+    EIGHTTAP_REGULAR,
+    EIGHTTAP_SMOOTH,
+    MULTITAP_SHARP,
+    BILINEAR,
+    INTERP_FILTERS_ALL,
+    SWITCHABLE_FILTERS = BILINEAR,
+    SWITCHABLE = SWITCHABLE_FILTERS + 1,
+    EXTRA_FILTERS = INTERP_FILTERS_ALL - SWITCHABLE_FILTERS,
+};
+
+// definitions.h:834-:839, the SUBPEL_SEARCH_TYPE list consumed by getFilter.
+enum class SubpelSearchType {
+    USE_2_TAPS_ORIG = 0,
+    USE_2_TAPS,
+    USE_4_TAPS,
+    USE_8_TAPS,
+};
+
+// definitions.h:849-:854.
+struct InterpFilterParams {
+    const std::int16_t* filterPtr;
+    std::uint16_t taps;
+    std::uint16_t subpelShifts;
+    InterpFilter interpFilter;
+};
+
+// The reference's inline array bound SWITCHABLE_FILTERS + 1
+// (inter_prediction.h:80), named so callers and tests share it.
+constexpr int interpFilterParamsListSize = static_cast<int>(InterpFilter::SWITCHABLE_FILTERS) + 1;
+
+// inter_prediction.h:80-:84 (static const per TU in the reference; one
+// shared const definition here, named deviation).
+extern const InterpFilterParams interpFilterParamsList[interpFilterParamsListSize];
+
+// inter_prediction.h:124-:126. NOTE the reference's own quirk, kept: the
+// two 4-tap entries carry taps = SUBPEL_TAPS = 8 (the tables are
+// zero-padded to the 8-tap row stride).
+extern const InterpFilterParams interp4tap[2];
+
+// filter.h:60-:62. The packed InterpFilters uint32: y in the low 16 bits,
+// x in the high 16 (av1_make_interp_filters, filter.h:64-:68); a nonzero
+// x_filter selects the high half.
+InterpFilter extractInterpFilter(std::uint32_t filters, std::int32_t xFilter);
+
+// filter.h:77-:80. No SUBPEL_MASK here - the caller's phase index is used
+// as-is (the reference's own unmasked pointer arithmetic).
+const std::int16_t* getInterpFilterSubpelKernel(const InterpFilterParams filterParams, std::int32_t subpel);
+
+// inter_prediction.h:128-:137. At w <= 4 REGULAR/SHARP return the 4-tap
+// REGULAR entry, SMOOTH the 4-tap SMOOTH entry; BILINEAR falls through to
+// its 8-tap params_list entry (no 4-tap bilinear branch in the reference).
+InterpFilterParams getInterpFilterParamsWithBlockSize(InterpFilter interpFilter, std::int32_t w);
+
+// filter.h:64-:68: y in the low 16 bits, x in the high 16.
+std::uint32_t makeInterpFilters(InterpFilter yFilter, InterpFilter xFilter);
+
+// inter_prediction.h:139-:145. x is the high half of the packed filters,
+// y the low half; params_x gates on w, params_y on h.
+void getConvolveFilterParams(std::uint32_t interpFilters, InterpFilterParams* paramsX, InterpFilterParams* paramsY,
+                             std::int32_t w, std::int32_t h);
+
+// variance.c:71-:85 (static INLINE file-local in the reference; exported
+// for testability, DF1 cdefSign precedent). Asserts subpelSearch >=
+// USE_2_TAPS; USE_2_TAPS_ORIG returns nullptr after the reference's
+// assert(0).
+const InterpFilterParams* getFilter(std::int32_t subpelSearch);
+
+// variance.c:88-:137 (svt_aom_upsampled_pred_c; the brief's span map named
+// inter_prediction.c :88-:141 - WRONG FILE, the definition lives in
+// C_DEFAULT/variance.c). The reference's xd/cm/mi_row/mi_col/mv struct
+// params are kept as call-shape slots and (void)ed - the body voids all
+// of them too; they are struct-walled, named deviation.
+void upsampledPred(void* xd, void* cm, std::int32_t miRow, std::int32_t miCol, void* mv, std::uint8_t* compPred,
+                   std::int32_t width, std::int32_t height, std::int32_t subpelXQ3, std::int32_t subpelYQ3,
+                   const std::uint8_t* ref, std::int32_t refStride, std::int32_t subpelSearch);
 
 // convolve.c:54-:57: assumes a 256-byte aligned filter table.
 const InterpKernel* getFilterBase(const std::int16_t* filter);
