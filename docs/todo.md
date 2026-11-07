@@ -2112,6 +2112,52 @@ A0. SLICE-LEVEL STATE (the live register)
 |    path (the SVT writer SVT_ERRORs on it, entropy_coding.c:
 |    :4895-:4903), write_palette_colors_uv (does not exist in the
 |    pinned encoder).
+|  - [x] **A3+A13+A14/IP1 (2026-11-07, PERRY-IP1, ff-merged 3205c8e):
+|    the interp filter-params machinery + upsampled_pred land** in
+|    src/l12_convolve - the five filter tables (sub_pel_filters_4
+|    inter_prediction.c :257-:272 + _8sharp/_8smooth/bilinear/_4smooth
+|    :1133-:1197, 80 nb, mechanically transcribed + diff-verified), the
+|    params/getters surface (A3 +105), the enums/struct (A13 +34) and
+|    av1_get_filter + svt_aom_upsampled_pred_c from C_DEFAULT/variance.c
+|    :71-:137 (A14 +64 - BRIEF CORRECTION: the brief misplaced
+|    upsampled_pred in inter_prediction.c; grep 0 hits there; the body
+|    (void)s every struct param and carries four paths). 33 TEST_CASEs /
+|    1,941 assertions; 7 mutations: 6 killed + M2 (intermediate_height
+|    +1) SURVIVES BY CONSTRUCTION (a dead staged row is
+|    output-invisible - genuine reference-side equivalence, sharpened to
+|    a killed M2b); M7 FINDING: composition tests are BLIND to
+|    shared-selection mutations - the enumeration tests discriminate.
+|    Writer run 16/16 (273.07 s), GATE byte-identical 884,851 B.
+|  - [x] **A14/SUB1 (2026-11-07, PERRY-SUB1, cherry-picked 16cfad2):
+|    the subpel variance family lands** in src/l9_analysis/subpel
+|    (namespace analysis::subpel) - the bilinear 2-tap pair + table,
+|    the SUBPIX_VAR macro + 22 instances, the obmc core + OBMC_VAR/
+|    OBMC_SUBPIX_VAR + 22 pairs = 149 nb new-to-the-port. FOUR BRIEF
+|    CORRECTIONS by measurement: bilinear_filters_2t is [8][2] with
+|    row 0 = {128, 0} (the {128-16i, 16i} oracle 0-mismatch), the
+|    rounding is (sum + 64) >> 7, the counts are 22/22/22, the offset
+|    grid is 0..7 per axis (the composition pinned over the FULL
+|    64-offset grid). 15 TEST_CASEs, 7 mutations killed (M3's
+|    second-pass dims swap needed a fatal-abort overrun to die). Two
+|    mutant reverts were silent no-ops - final state grep-verified
+|    clean, 219/219 (the stale-exe lesson again, in mutation
+|    discipline). Writer run 16/16 (272.35 s), GATE byte-identical
+|    884,851 B.
+|  - [x] **JUDGE OPS ENTRY (the red scaffold + the silent-drop edit)**:
+|    the wave-7 scaffold commit cfff19d landed RED (LNK2019 on
+|    analysis::buildCompoundDiffwtdMaskD16) because the judge built the
+|    l9 CMake edit from a stale read of the file and the edit tool
+|    tolerated the mismatch, silently REPLACING cdefault_extra.cpp with
+|    subpel.cpp on the shared add_library line. Fixed forward at
+|    4f52507 (both lines kept); full suite green again (269.97 s).
+|    LESSON: re-read shared build files IMMEDIATELY before editing;
+|    a scaffold commit is a real commit needing the same GREEN gate.
+|  - [x] **WAVE-7 CLOSE (judge, post-merge re-measure on master)**: full
+|    ctest 16/16 (267.78 s after the power cut interrupted a first
+|    attempt; the GATE run survived and was re-run byte-identical
+|    884,851 B diff 0), coverage 20.8% (32,731/157,718): A3 6% (1,006),
+|    A13 17% (889), A14 77% (1,135). A14's remaining 331 nb: the hbd
+|    twins (named-parked) + the per-size SAD wrappers.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------

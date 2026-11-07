@@ -336,7 +336,7 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-05, the 20% line crossed)
+### Last measured state (2026-11-07, the wave-7 close)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
@@ -368,14 +368,14 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 20.1%** (see the completion metric section;
-  re-measured 2026-11-05 at the 20% line: 31,693 of 157,718 non-blank
-  lines, +750 from 30,943 at the wave-4 close - HM1 +473 in A3 (the
-  motion-hash + global-motion surface; judge-charge, spans named in the
-  register) and RC1 +278 in A9 (rc_tables.h, mechanically extracted,
-  the transcription caveat STATED); all span-measured, register entries
-  in docs/todo.md section A0; A3 prints 5% (901 of 17,738), A9 prints
-  5% (278 of 5,951). PARSE-BUG EPISODE (recorded, wave 4): an embedded
+- **Portable-C coverage: 20.8%** (see the completion metric section;
+  re-measured 2026-11-07 at the wave-7 close: 32,731 of 157,718 non-blank
+  lines, +1,038 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
+  SYM1 +436 in A5 + +45 in A12) and wave 7 (IP1 +203 across A3/A13/A14,
+  SUB1 +149 in A14 - all span-measured; register entries in docs/todo.md
+  section A0); A3 prints 6% (1,006 of 17,738), A13 prints 17% (889 of
+  5,357), A14 prints 77% (1,135 of 1,466). All of it is
+  PARSE-BUG EPISODE (recorded, wave 4): an embedded
   pipe in a prose sentence (get_msb(x|1)) split the A12 row's 5 fields
   and the tool silently printed A12 as 0 files/0 lines - caught by the
   -13 total move, fixed by rewriting the sentence; the areas rows are
@@ -964,9 +964,20 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-05 (the wave-6 close): 20.5%**
-(32,379 of 157,718 non-blank lines - the covered count moved +686 from
-31,693 at the 20% line: TX2 +205 in A1 (0.3643 -> 0.3719; the slice's
+**THE NUMBER, as measured 2026-11-07 (the wave-7 close): 20.8%**
+(32,731 of 157,718 non-blank lines - the covered count moved +352 from
+32,379 at the wave-6 close: IP1 +203 (the interp filter-params machinery +
+upsampled_pred in src/l12_convolve: A3 +105 the five filter tables +
+params/getters, A13 +34 the enums/struct, A14 +64 av1_get_filter +
+upsampled_pred - the BRIEF MISPLACED upsampled_pred in inter_prediction.c,
+grep 0 hits, it lives in C_DEFAULT/variance.c :71-:137) and SUB1 +149
+(the subpel variance family in src/l9_analysis/subpel: the bilinear
+2-tap pair + table, the SUBPIX_VAR macro + 22 instances, the obmc core
++ OBMC pairs 22/22/22; the brief's four errors all corrected by
+measurement - the table is [8][2] row 0 {128, 0}, rounding (sum+64)>>7,
+counts 22/22/22, offsets 0..7), so A14 prints 1,135 of 1,466 (77%), A3
+1,006 of 17,738 (6%), A13 889 of 5,357 (17%). The wave-6 movement
+was +686 from 31,693 at the 20% line: TX2 +205 in A1 (0.3643 -> 0.3719; the slice's
 span count is 204 nb - the full 16-TxType surface: flips + identity,
 l3_transforms) and SYM1 +436 in A5 + +45 in A12 (the palette +
 segmentation symbol surface, SVT-side 634 nb of which 481
@@ -1069,7 +1080,7 @@ newly added reference file lowers the percentage loudly rather than silently.
 |---|---|---|---|---|---|
 | A1 | Transform/TX | 9 | 27,008 | 37% | 10,044 |
 | A2 | Intra prediction | 4 | 3,478 | 91% | 3,156 |
-| A3 | Inter prediction + motion estimation | 44 | 17,738 | 5% | 901 |
+| A3 | Inter prediction + motion estimation | 44 | 17,738 | 6% | 1,006 |
 | A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 3% | 933 |
 | A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 60% | 5,089 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 12% | 1,734 |
@@ -1079,10 +1090,10 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
 | A11 | Content analysis + temporal filtering | 16 | 12,028 | 35% | 4,152 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 34% | 550 |
-| A13 | Utility + platform + core headers | 24 | 5,357 | 16% | 855 |
-| A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 63% | 922 |
+| A13 | Utility + platform + core headers | 24 | 5,357 | 17% | 889 |
+| A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 77% | 1,135 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **32,379** |
+| | **TOTAL** | **254** | **157,718** | | **32,731** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

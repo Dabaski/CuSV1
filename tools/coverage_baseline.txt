@@ -13,25 +13,25 @@
 # The number itself is also printed by every plain run, together with the
 # inputs that produced it, so this file is a convenience and never the
 # only place the figure exists.
-generated  : 2026-11-05
+generated  : 2026-11-07
 reference  : third_party/SVT-AV1 pinned snapshot, CHANGELOG 4.2.0
-areas file : 52908 B, sha256:C778EDCBCC1D0115
+areas file : 57303 B, sha256:24314B55AF27F686
 surface    : 254 files, 157718 non-blank lines
-coverage   : 20.1%  (31,693 covered, 157,718 denominator)
+coverage   : 20.8%  (32,731 covered, 157,718 denominator)
 
-A1    Transform/TX                                    9   27008      36%     9839
+A1    Transform/TX                                    9   27008      37%    10044
 A2    Intra prediction                                4    3478      91%     3156
-A3    Inter prediction + motion estimation           44   17738       5%      901
+A3    Inter prediction + motion estimation           44   17738       6%     1006
 A4    Mode decision + RDO + pc_tree                  18   31088       3%      933
-A5    Entropy coding (CABAC/OD)                      11    8460      55%     4653
+A5    Entropy coding (CABAC/OD)                      11    8460      60%     5089
 A6    Coding loop + PCS + block structures           22   13928      12%     1734
 A7    Bitstream + OBU + headers                       5    1436      40%      574
 A8    Post-filters (deblock/CDEF/restoration/grain)     27   10600      30%     3191
 A9    Rate control                                   17    5951       5%      278
 A10   Picture management + threading                 30    9662       0%        0
 A11   Content analysis + temporal filtering          16   12028      35%     4152
-A12   Palette + segmentation + misc                   8    1612      31%      505
-A13   Utility + platform + core headers              24    5357      16%      855
-A14   C_DEFAULT portable reference kernels           15    1466      63%      922
+A12   Palette + segmentation + misc                   8    1612      34%      550
+A13   Utility + platform + core headers              24    5357      17%      889
+A14   C_DEFAULT portable reference kernels           15    1466      77%     1135
 --    unassigned (drift detector)                     0       0       0%        0
 --    excluded: *_rtcd.* dispatch                     4    7906       0%        0

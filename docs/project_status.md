@@ -7,8 +7,8 @@ building blocks to CUDA 12.2 for NVIDIA Pascal (`sm_61`). Host reference
 implementations are ported from the pinned SVT-AV1 snapshot; CUDA kernels are
 JIT-compiled with NVRTC.
 
-**Portable-C coverage: 20.5%**, measured 2026-11-06 by
-`powershell -File tools\coverage.ps1` (32,379 of 157,718 non-blank reference
+**Portable-C coverage: 20.8%**, measured 2026-11-07 by
+`powershell -File tools\coverage.ps1` (32,731 of 157,718 non-blank reference
 lines). This is a source-coverage progress measure, not an overall completion
 or production-readiness claim. The denominator, exclusions, per-area
 judgements, and paired conformance measure are documented by the coverage
