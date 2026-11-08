@@ -336,7 +336,7 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-07, the wave-10 close: the A4 campaign opened)
+### Last measured state (2026-11-08, the wave-11 close: the trellis landed)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
@@ -368,13 +368,13 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 21.7%** (see the completion metric section;
-  re-measured 2026-11-07 at the wave-10 close: 34,207 of 157,718 non-blank
-  lines, +2,513 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
+- **Portable-C coverage: 22.5%** (see the completion metric section;
+  re-measured 2026-11-08 at the wave-11 close: 35,428 of 157,718 non-blank
+  lines, +3,735 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
   SYM1 +436 in A5 + +45 in A12) and wave 7 (IP1 +203 across A3/A13/A14,
   SUB1 +149 in A14) and wave 8 (SW1 +119 the SAD wrapper instances, HB1
-  +168 the hbd twins) and wave 9 (RS2 +273 the hbd resize 1D family - the hbd park resolves, AM1+AN20 +386 the vmaf activity-masking family + the preprocessing statistics + the firstpass pure pair - the A4 RDO input side) and wave 10 (RE1 +485 in A4 - the rate-estimation core, the campaign's foundation slice, conformance-free - all span-measured; register entries in docs/todo.md
-  section A0); A4 prints 5% (1,418 of 31,088), A11 prints 40% (4,812 of 12,028), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is
+  +168 the hbd twins) and wave 9 (RS2 +273 the hbd resize 1D family - the hbd park resolves, AM1+AN20 +386 the vmaf activity-masking family + the preprocessing statistics + the firstpass pure pair - the A4 RDO input side) and wave 10 (RE1 +485 in A4 - the rate-estimation core, the campaign's foundation slice, conformance-free) and wave 11 (RE2 +1,222 the optimize_b trellis + the scan/tx carries + the nz-map LUT carry - charged A1+A4+A5+A13; the JUDGE'S J3 SURVIVOR sharpened - the fast-path zbin-trim had no boundary fixture) - all span-measured; register entries in docs/todo.md
+  section A0); A1 prints 41% (11,087 of 27,008), A4 prints 5% (1,452 of 31,088), A5 prints 60% (5,117 of 8,460), A13 prints 19% (1,005 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is
   PARSE-BUG EPISODE (recorded, wave 4): an embedded
   pipe in a prose sentence (get_msb(x|1)) split the A12 row's 5 fields
   and the tool silently printed A12 as 0 files/0 lines - caught by the
@@ -964,9 +964,17 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-07 (the wave-10 close, the A4 campaign
-opened): 21.7%**
-(34,207 of 157,718 non-blank lines - the covered count moved +485 from
+**THE NUMBER, as measured 2026-11-08 (the wave-11 close): 22.5%**
+(35,428 of 157,718 non-blank lines - the covered count moved +1,221 from
+34,207 at the wave-10 close: RE2 +1,222 in A1+A4+A5+A13 (the optimize_b
+trellis of full_loop.c :613-:1236 in src/l16_rdo + the scan/tx carries
++ the court-ordered nz-map LUT carry; 611,254 assertions; the JUDGE'S
+J3 SURVIVOR sharpened by the addendum 4f6e4d1 - the fast-path
+zbin-trim had no boundary fixture, the flip band absCoeff in [29,56]
+at shift 0 was unreachable for the writer's >=137 jumps), so A1
+prints 11,087 of 27,008 (41%), A4 1,452 of 31,088 (5%), A5 5,117 of
+8,460 (60%), A13 1,005 of 5,357 (19%). The wave-10 movement
+was +485 from
 33,722 at the wave-9 close: RE1 +485 in A4 (the rate-estimation core of
 md_rate_estimation.c in src/l16_rdo - the cdf->cost core, the syntax
 INTRA surface, the nmv/token cost tables, the interintra helpers, the
@@ -1111,8 +1119,8 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A1 | Transform/TX | 9 | 27,008 | 37% | 10,044 |
 | A2 | Intra prediction | 4 | 3,478 | 91% | 3,156 |
 | A3 | Inter prediction + motion estimation | 44 | 17,738 | 6% | 1,006 |
-| A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 5% | 1,418 |
-| A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 60% | 5,089 |
+| A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 5% | 1,452 |
+| A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 60% | 5,117 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 12% | 1,734 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 30% | 3,191 |
@@ -1123,7 +1131,7 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A13 | Utility + platform + core headers | 24 | 5,357 | 17% | 889 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 100% | 1,466 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **34,207** |
+| | **TOTAL** | **254** | **157,718** | | **35,428** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported
