@@ -13,6 +13,740 @@
 
 namespace l16_rdo {
 
+// ---------------------------------------------------------------------------
+// RE2: the optimize_b trellis carries (full_loop.c:622-1252 + its
+// dependency set; the l7-l13 duplication precedent - l16_rdo cannot link
+// l7_entropy). Measurements and citations are per-span in the commit
+// message; the charge is A1 (full_loop.c's file).
+// ---------------------------------------------------------------------------
+// get_msb is defined below (definitions.h:628-644 portable body); forward
+// declaration so the carries above it can use it.
+static std::int32_t getMsb(std::uint32_t n);
+
+// set_levels (common_utils.h:92-98, verbatim).
+std::uint8_t* setLevels(std::uint8_t* levelsBuf, std::int32_t width, std::int32_t height) {
+    const std::int32_t stride = width + TX_PAD_HOR;
+    return levelsBuf + LEVELS_TAIL_OFFSET - height * stride;
+}
+
+// get_padded_idx (coefficients.h:129-131, verbatim). TX_PAD_HOR_LOG2 = 2
+// (definitions.h:417).
+std::int32_t getPaddedIdx(std::int32_t idx, std::int32_t bwl) {
+    return idx + ((idx >> bwl) << 2);
+}
+
+// get_nz_mag (coefficients.h:133-155, verbatim).
+std::int32_t getNzMag(const std::uint8_t* levels, std::int32_t bwl, TxClass txClass) {
+    std::int32_t mag;
+    mag = levels[1] > 3 ? 3 : levels[1];
+    mag += levels[(1 << bwl) + TX_PAD_HOR] > 3 ? 3 : levels[(1 << bwl) + TX_PAD_HOR];
+    if (txClass == TX_CLASS_2D) {
+        mag += levels[(1 << bwl) + TX_PAD_HOR + 1] > 3 ? 3 : levels[(1 << bwl) + TX_PAD_HOR + 1];
+        mag += levels[2] > 3 ? 3 : levels[2];
+        mag += levels[(2 << bwl) + (2 << 2)] > 3 ? 3 : levels[(2 << bwl) + (2 << 2)];
+    } else if (txClass == TX_CLASS_VERT) {
+        mag += levels[(2 << bwl) + (2 << 2)] > 3 ? 3 : levels[(2 << bwl) + (2 << 2)];
+        mag += levels[(3 << bwl) + (3 << 2)] > 3 ? 3 : levels[(3 << bwl) + (3 << 2)];
+        mag += levels[(4 << bwl) + (4 << 2)] > 3 ? 3 : levels[(4 << bwl) + (4 << 2)];
+    } else {
+        mag += levels[2] > 3 ? 3 : levels[2];
+        mag += levels[3] > 3 ? 3 : levels[3];
+        mag += levels[4] > 3 ? 3 : levels[4];
+    }
+    return mag;
+}
+
+// tx_type_to_class (cabac_context_model.c:15-32, verbatim).
+const TxClass txTypeToClass[16] = {
+    TX_CLASS_2D,   // DCT_DCT
+    TX_CLASS_2D,   // ADST_DCT
+    TX_CLASS_2D,   // DCT_ADST
+    TX_CLASS_2D,   // ADST_ADST
+    TX_CLASS_2D,   // FLIPADST_DCT
+    TX_CLASS_2D,   // DCT_FLIPADST
+    TX_CLASS_2D,   // FLIPADST_FLIPADST
+    TX_CLASS_2D,   // ADST_FLIPADST
+    TX_CLASS_2D,   // FLIPADST_ADST
+    TX_CLASS_2D,   // IDTX
+    TX_CLASS_VERT, // V_DCT
+    TX_CLASS_HORIZ,// H_DCT
+    TX_CLASS_VERT, // V_ADST
+    TX_CLASS_HORIZ,// H_ADST
+    TX_CLASS_VERT, // V_FLIPADST
+    TX_CLASS_HORIZ,// H_FLIPADST
+};
+
+// get_br_ctx_eob (coefficients.h:69-81, verbatim).
+std::int32_t getBrCtxEob(std::int32_t c, std::int32_t bwl, TxClass txClass) {
+    const std::int32_t row = c >> bwl;
+    const std::int32_t col = c - (row << bwl);
+    if (c == 0) return 0;
+    if ((txClass == TX_CLASS_2D && row < 2 && col < 2) || (txClass == TX_CLASS_HORIZ && col == 0) ||
+        (txClass == TX_CLASS_VERT && row == 0))
+        return 7;
+    return 14;
+}
+
+// get_br_ctx (coefficients.h:83-127, verbatim).
+std::int32_t getBrCtx(const std::uint8_t* levels, std::int32_t c, std::int32_t bwl, TxClass txClass) {
+    const std::int32_t row = c >> bwl;
+    const std::int32_t col = c - (row << bwl);
+    const std::int32_t stride = (1 << bwl) + TX_PAD_HOR;
+    const std::int32_t pos = row * stride + col;
+    std::int32_t mag = levels[pos + 1];
+    mag += levels[pos + stride];
+    switch (txClass) {
+    case TX_CLASS_2D:
+        mag += levels[pos + stride + 1];
+        mag = ((mag + 1) >> 1) > 6 ? 6 : (mag + 1) >> 1;
+        if (c == 0) return mag;
+        if (row < 2 && col < 2) return mag + 7;
+        break;
+    case TX_CLASS_HORIZ:
+        mag += levels[pos + 2];
+        mag = ((mag + 1) >> 1) > 6 ? 6 : (mag + 1) >> 1;
+        if (c == 0) return mag;
+        if (col == 0) return mag + 7;
+        break;
+    case TX_CLASS_VERT:
+        mag += levels[pos + (stride << 1)];
+        mag = ((mag + 1) >> 1) > 6 ? 6 : (mag + 1) >> 1;
+        if (c == 0) return mag;
+        if (row == 0) return mag + 7;
+        break;
+    default:
+        break;
+    }
+    return mag + 14;
+}
+
+// get_lower_levels_ctx_eob (coefficients.h:56-67, verbatim).
+std::int32_t getLowerLevelsCtxEob(std::int32_t bwl, std::int32_t height, std::int32_t scanIdx) {
+    if (scanIdx == 0) return 0;
+    if (scanIdx <= (height << bwl) / 8) return 1;
+    if (scanIdx <= (height << bwl) / 4) return 2;
+    return 3;
+}
+
+// ---------------------------------------------------------------------------
+// The scan-order machinery (coefficients.h:36-46 + coefficients.c:19 and
+// :314-:374, verbatim). The pools are computed, not transcribed: the pinned
+// reference replaced the static scan tables with this generator. Deviation
+// (named): the reference initializes via an explicit svt_aom_init_iscan()
+// call; the port guards lazily inside getScanOrder/scanOrders as well.
+// ---------------------------------------------------------------------------
+// The TxSize indexes the generator names (definitions.h:955-974 enum order;
+// the l3_transforms TxSize enum class carries the same values - the int
+// spell avoids rate_est.h's TX_4X4/TX_32X32 macros colliding with its
+// enumerators).
+enum { kTxSizesAll = 19, kTx64X64 = 4, kTx32X64 = 11, kTx64X32 = 12, kTx16X64 = 17, kTx64X16 = 18 };
+
+// tx_size_2d (coefficients.h:44-46, verbatim).
+static const std::int32_t kTxSize2d[kTxSizesAll] = {
+    16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024,
+};
+// tx_size_wide / tx_size_high (common_utils.c:116-122, verbatim).
+static const std::int32_t kTxSizeWide[kTxSizesAll] = {
+    4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64,
+};
+static const std::int32_t kTxSizeHigh[kTxSizesAll] = {
+    4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16,
+};
+
+// tx_type_to_scan_index (coefficients.c:19, verbatim).
+const std::int8_t txTypeToScanIndex[TX_TYPES] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 2};
+
+// The pools (coefficients.c:320-:323 shapes): 1024 entries per tx size and
+// class; the identity scan is shared.
+static std::int16_t kIscanPool[kTxSizesAll][3][1024];
+static std::int16_t kMcolPool[kTxSizesAll][1024];
+static std::int16_t kDefPool[kTxSizesAll][1024];
+static std::int16_t kIdScan[1024];
+static ScanOrder kScanOrders[kTxSizesAll][3];
+static bool kScansInitialized = false;
+
+// svt_aom_init_iscan (coefficients.c:325-374, verbatim).
+void initScans(void) {
+    for (int i = 0; i < 1024; ++i) kIdScan[i] = (std::int16_t)i;
+    for (int ts = 0; ts < kTxSizesAll; ++ts) {
+        int n = kTxSize2d[ts];
+        if (ts == kTx64X64 || ts == kTx64X32 || ts == kTx32X64) {
+            n = 1024;
+        } else if (ts == kTx16X64 || ts == kTx64X16) {
+            n = 512;
+        }
+        const int W = kTxSizeWide[ts] < 32 ? kTxSizeWide[ts] : 32;
+        const int H = kTxSizeHigh[ts] < 32 ? kTxSizeHigh[ts] : 32;
+        // mrow = identity (row-major)
+        kScanOrders[ts][1].scan = kIdScan;
+        // mcol = column-major
+        for (int k = 0; k < n; ++k) kMcolPool[ts][k] = (std::int16_t)((k % H) * W + (k / H));
+        kScanOrders[ts][2].scan = kMcolPool[ts];
+        // default = up-right diagonal: tall(H>W) r-increasing, wide(W>H)
+        // r-decreasing, square alternating (odd diag r-incr, even r-decr)
+        {
+            int idx = 0;
+            for (int d = 0; d < W + H - 1; ++d) {
+                const int rlo = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
+                const int rhi = d < (H - 1) ? d : (H - 1);
+                const int incr = (H > W) ? 1 : (W > H) ? 0 : (d & 1);
+                if (incr) {
+                    for (int r = rlo; r <= rhi; ++r) kDefPool[ts][idx++] = (std::int16_t)(r * W + (d - r));
+                } else {
+                    for (int r = rhi; r >= rlo; --r) kDefPool[ts][idx++] = (std::int16_t)(r * W + (d - r));
+                }
+            }
+        }
+        kScanOrders[ts][0].scan = kDefPool[ts];
+        for (int v = 0; v < 3; ++v) {
+            const std::int16_t* sc = kScanOrders[ts][v].scan;
+            std::int16_t* is = kIscanPool[ts][v];
+            for (int i = 0; i < n; ++i) is[sc[i]] = (std::int16_t)i;
+            kScanOrders[ts][v].iscan = is;
+        }
+    }
+    kScansInitialized = true;
+}
+
+static void ensureScansInitialized(void) {
+    if (!kScansInitialized) initScans();
+}
+
+const ScanOrder (*scanOrders(void))[3] {
+    ensureScansInitialized();
+    return kScanOrders;
+}
+
+const ScanOrder& getScanOrder(std::int32_t txSize, std::int32_t txType) {
+    ensureScansInitialized();
+    return kScanOrders[txSize][txTypeToScanIndex[txType]];
+}
+
+// get_eob_pos_token (entropy_coding.h:94-102, verbatim).
+std::int32_t getEobPosToken(std::int32_t eob, std::int32_t* extra) {
+    if (eob < 3) {
+        *extra = 0;
+        return eob;
+    }
+    const std::int32_t t = getMsb((std::uint32_t)(eob - 1));
+    *extra = eob - 1 - (1 << t);
+    return t + 2;
+}
+
+// get_eob_cost (rd_cost.c:198-211, verbatim).
+std::int32_t getEobCost(std::int32_t eob, const LvMapEobCost* txbEobCosts, const LvMapCoeffCost* txbCosts,
+                        TxClass txClass) {
+    std::int32_t eobExtra;
+    const std::int32_t eobPt = getEobPosToken(eob, &eobExtra);
+    const std::int32_t eobMultiCtx = (txClass == TX_CLASS_2D) ? 0 : 1;
+    std::int32_t eobCost = txbEobCosts->eobCost[eobMultiCtx][eobPt - 1];
+    if (eobPt > 2) {
+        const std::int32_t cnt = eobPt - 3;
+        const std::int32_t bit = (eobExtra >> cnt) & 1;
+        eobCost += txbCosts->eobExtraCost[cnt][bit];
+        eobCost += av1_cost_literal(cnt);
+    }
+    return eobCost;
+}
+
+// svt_av1_txb_init_levels_c (rd_cost.c:93-105, verbatim).
+void txbInitLevels(const std::int32_t* coeff, std::int32_t width, std::int32_t height, std::uint8_t* levels) {
+    std::uint8_t* ls = levels;
+    for (std::int32_t i = 0; i < height; i++) {
+        for (std::int32_t j = 0; j < width; j++) {
+            const std::int32_t a = coeff[i * width + j] < 0 ? -coeff[i * width + j] : coeff[i * width + j];
+            *ls++ = (std::uint8_t)(a > 127 ? 127 : (a < 0 ? 0 : a));
+        }
+        for (std::int32_t j = 0; j < TX_PAD_HOR; j++) {
+            *ls++ = 0;
+        }
+    }
+}
+
+// (The A9 RED was captured with this block transiently #if 0-disabled;
+// restored now. Evidence quoted in the commit message.)
+// txsize_sqr_map (common_utils.c:150-170, verbatim).
+const std::int8_t txsizeSqrMap[19] = {0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2};
+// txsize_sqr_up_map (common_utils.c:172-192, verbatim).
+const std::int8_t txsizeSqrUpMap[19] = {0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4};
+// txsize_log2_minus4 (inv_transforms.h:341-361, verbatim).
+const std::int8_t txsizeLog2Minus4[19] = {0, 2, 4, 6, 6, 1, 1, 3, 3, 5, 5, 6, 6, 2, 2, 4, 4, 5, 5};
+// tx_size_wide_log2 (common_utils.c:125-127, verbatim).
+static const std::int8_t kTxSizeWideLog2Tbl[19] = {2, 3, 4, 5, 6, 2, 3, 3, 4, 4, 5, 5, 6, 2, 4, 3, 5, 4, 6};
+// av1_get_tx_scale_tab (full_loop.c:22, verbatim).
+const std::int8_t av1GetTxScaleTab[19] = {0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 1, 2, 2, 0, 0, 0, 0, 1, 1};
+
+// get_txsize_entropy_ctx (entropy_coding.h:110-112, verbatim arithmetic).
+std::int32_t getTxsizeEntropyCtx(std::int32_t txsize) {
+    return (txsizeSqrMap[txsize] + txsizeSqrUpMap[txsize] + 1) >> 1;
+}
+
+// nz_map_ctx_offset_1d (coefficients.h:28-34, verbatim; NZ_MAP_CTX_0 =
+// SIG_COEF_CONTEXTS_2D = 26, +5, +10 per coefficients.h:24-26).
+static const std::int32_t nzMapCtxOffset1d[32] = {
+    26, 31, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36,
+    36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36,
+};
+// eb_av1_nz_map_ctx_offset (coefficients.c:24-303, verbatim): the
+// court-approved verbatim carry of src/l7_entropy/nz_map_ctx_offset.inc
+// (l16_rdo cannot link l7_entropy; the l7-l13 duplication precedent; the
+// twin byte-identity is fixture-checked against both the l7 copy and the
+// reference text).
+#include "nz_map_ctx_offset.inc"
+
+// get_nz_map_ctx_from_stats (coefficients.h:157-194, verbatim).
+std::int32_t getNzMapCtxFromStats(std::int32_t stats, std::int32_t coeffIdx, std::int32_t bwl,
+                                   std::int32_t txSize, TxClass txClass) {
+    // tx_class == 0(TX_CLASS_2D)
+    if ((txClass | coeffIdx) == 0) {
+        return 0;
+    }
+    std::int32_t ctx = (stats + 1) >> 1;
+    ctx = ctx < 4 ? ctx : 4;
+    switch (txClass) {
+    case TX_CLASS_2D: {
+        return ctx + eb_av1_nz_map_ctx_offset[txSize][coeffIdx];
+    }
+    case TX_CLASS_HORIZ: {
+        const std::int32_t row = coeffIdx >> bwl;
+        const std::int32_t col = coeffIdx - (row << bwl);
+        return ctx + nzMapCtxOffset1d[col];
+    }
+    case TX_CLASS_VERT: {
+        const std::int32_t row = coeffIdx >> bwl;
+        return ctx + nzMapCtxOffset1d[row];
+    }
+    default:
+        break;
+    }
+    return 0;
+}
+
+// get_lower_levels_ctx (coefficients.h:196-200, verbatim).
+std::int32_t getLowerLevelsCtx(const std::uint8_t* levels, std::int32_t coeffIdx, std::int32_t bwl,
+                                std::int32_t txSize, TxClass txClass) {
+    const std::int32_t stats = getNzMag(levels + getPaddedIdx(coeffIdx, bwl), bwl, txClass);
+    return getNzMapCtxFromStats(stats, coeffIdx, bwl, txSize, txClass);
+}
+
+// get_golomb_cost (full_loop.c:613-620, verbatim).
+std::int32_t getGolombCost(std::int32_t absQc) {
+    if (absQc >= 1 + NUM_BASE_LEVELS + COEFF_BASE_RANGE) {
+        const std::int32_t r = absQc - COEFF_BASE_RANGE - NUM_BASE_LEVELS;
+        const std::int32_t length = getMsb((std::uint32_t)r) + 1;
+        return av1_cost_literal(2 * length - 1);
+    }
+    return 0;
+}
+
+// get_br_cost (full_loop.c:622-626, verbatim).
+std::int32_t getBrCost(std::int32_t level, const std::int32_t* coeffLps) {
+    std::int32_t baseRange = (level - 1 - NUM_BASE_LEVELS) < COEFF_BASE_RANGE ? (level - 1 - NUM_BASE_LEVELS) : COEFF_BASE_RANGE;
+    return coeffLps[baseRange] + getGolombCost(level);
+}
+
+// The golomb tables (full_loop.c:668-673, verbatim).
+const std::int32_t golombBitsCost[32] = {0,       512,     512 * 3, 512 * 3, 512 * 5, 512 * 5, 512 * 5, 512 * 5,
+                                         512 * 7, 512 * 7, 512 * 7, 512 * 7, 512 * 7, 512 * 7, 512 * 7, 512 * 7,
+                                         512 * 9, 512 * 9, 512 * 9, 512 * 9, 512 * 9, 512 * 9, 512 * 9, 512 * 9,
+                                         512 * 9, 512 * 9, 512 * 9, 512 * 9, 512 * 9, 512 * 9, 512 * 9, 512 * 9};
+const std::int32_t golombCostDiff[32] = {0,       512, 512 * 2, 0, 512 * 2, 0, 0, 0, 512 * 2, 0, 0, 0, 0, 0, 0, 0,
+                                         512 * 2, 0,   0,       0, 0,       0, 0, 0, 0,       0, 0, 0, 0, 0, 0, 0};
+
+// get_br_cost_with_diff (full_loop.c:675-694, verbatim).
+std::int32_t getBrCostWithDiff(std::int32_t level, const std::int32_t* coeffLps, std::int32_t* diff) {
+    const std::int32_t baseRange =
+        (level - 1 - NUM_BASE_LEVELS) < COEFF_BASE_RANGE ? (level - 1 - NUM_BASE_LEVELS) : COEFF_BASE_RANGE;
+    std::int32_t golombBits = 0;
+    if (level <= COEFF_BASE_RANGE + 1 + NUM_BASE_LEVELS) {
+        *diff += coeffLps[baseRange + COEFF_BASE_RANGE + 1];
+    }
+    if (level >= COEFF_BASE_RANGE + 1 + NUM_BASE_LEVELS) {
+        const std::int32_t r = level - COEFF_BASE_RANGE - NUM_BASE_LEVELS;
+        if (r < 32) {
+            golombBits = golombBitsCost[r];
+            *diff += golombCostDiff[r];
+        } else {
+            golombBits = getGolombCost(level);
+            *diff += (r & (r - 1)) == 0 ? 1024 : 0;
+        }
+    }
+    return coeffLps[baseRange] + golombBits;
+}
+
+// get_qc_dqc_low (full_loop.c:659-666, verbatim; the asserts fold into the
+// derived identities the tests pin).
+void getQcDqcLow(std::int32_t absQc, std::int32_t sign, std::int32_t dqv, std::int32_t shift,
+                  std::int32_t* qcLow, std::int32_t* dqcLow) {
+    const std::int32_t absQcLow = absQc - 1;
+    *qcLow = (-sign ^ absQcLow) + sign;
+    const std::int32_t absDqcLow = (absQcLow * dqv) >> shift;
+    *dqcLow = (-sign ^ absDqcLow) + sign;
+}
+
+// get_coeff_dist (full_loop.c:655-657, verbatim; SQR (utility.h:107)).
+std::int64_t getCoeffDist(std::int32_t tcoeff, std::int32_t dqcoeff, std::int32_t shift) {
+    const std::int64_t d = ((std::int64_t)tcoeff - dqcoeff) * (std::int64_t)(1llu << shift);
+    return d * d;
+}
+
+// get_coeff_cost_general (full_loop.c:627-653, verbatim).
+std::int32_t getCoeffCostGeneral(std::int32_t isLast, std::int32_t ci, std::int32_t absQc, std::int32_t sign,
+                                  std::int32_t coeffCtx, std::int32_t dcSignCtx, const LvMapCoeffCost* txbCosts,
+                                  std::int32_t bwl, TxClass txClass, const std::uint8_t* levels) {
+    std::int32_t cost = 0;
+    if (isLast) {
+        cost += txbCosts->baseEobCost[coeffCtx][absQc < 3 ? absQc : 3];
+    } else {
+        cost += txbCosts->baseCost[coeffCtx][absQc < 3 ? absQc : 3];
+    }
+    if (absQc != 0) {
+        if (ci == 0) {
+            cost += txbCosts->dcSignCost[dcSignCtx][sign];
+        } else {
+            cost += av1_cost_literal(1);
+        }
+        if (absQc > NUM_BASE_LEVELS) {
+            std::int32_t brCtx;
+            if (isLast) {
+                brCtx = getBrCtxEob(ci, bwl, txClass);
+            } else {
+                brCtx = getBrCtx(levels, ci, bwl, txClass);
+            }
+            cost += getBrCost(absQc, txbCosts->lpsCost[brCtx]);
+        }
+    }
+    return cost;
+}
+
+// get_two_coeff_cost_simple (full_loop.c:696-720, verbatim; the caller
+// guarantees ci > 0 - the reference asserts it).
+std::int32_t getTwoCoeffCostSimple(std::int32_t ci, std::int32_t absQc, std::int32_t coeffCtx,
+                                    const LvMapCoeffCost* txbCosts, std::int32_t bwl, TxClass txClass,
+                                    const std::uint8_t* levels, std::int32_t* costLow) {
+    std::int32_t cost = txbCosts->baseCost[coeffCtx][absQc < 3 ? absQc : 3];
+    std::int32_t diff = 0;
+    if (absQc <= 3) {
+        diff = txbCosts->baseCost[coeffCtx][absQc + 4];
+    }
+    if (absQc) {
+        cost += av1_cost_literal(1);
+        if (absQc > NUM_BASE_LEVELS) {
+            const std::int32_t brCtx = getBrCtx(levels, ci, bwl, txClass);
+            std::int32_t brcostDiff = 0;
+            cost += getBrCostWithDiff(absQc, txbCosts->lpsCost[brCtx], &brcostDiff);
+            diff += brcostDiff;
+        }
+    }
+    *costLow = cost - diff;
+    return cost;
+}
+
+// get_coeff_cost_eob (full_loop.c:722-739, verbatim).
+std::int32_t getCoeffCostEob(std::int32_t ci, std::int32_t absQc, std::int32_t sign, std::int32_t coeffCtx,
+                              std::int32_t dcSignCtx, const LvMapCoeffCost* txbCosts, std::int32_t bwl,
+                              TxClass txClass) {
+    std::int32_t cost = 0;
+    cost += txbCosts->baseEobCost[coeffCtx][absQc < 3 ? absQc : 3];
+    if (absQc != 0) {
+        if (ci == 0) {
+            cost += txbCosts->dcSignCost[dcSignCtx][sign];
+        } else {
+            cost += av1_cost_literal(1);
+        }
+        if (absQc > NUM_BASE_LEVELS) {
+            const std::int32_t brCtx = getBrCtxEob(ci, bwl, txClass);
+            cost += getBrCost(absQc, txbCosts->lpsCost[brCtx]);
+        }
+    }
+    return cost;
+}
+
+// get_dqv (full_loop.c:741-747, verbatim; AOM_QM_BITS = 5, inv_transforms.
+// h:27 - NOT aom's 7).
+std::int32_t getDqv(const std::int16_t* dequant, std::int32_t coeffIdx, const std::uint8_t* iqmPtr) {
+    std::int32_t dqv = dequant[coeffIdx != 0 ? 1 : 0];
+    if (iqmPtr != nullptr) {
+        dqv = ((iqmPtr[coeffIdx] * dqv) + (1 << (5 - 1))) >> 5;
+    }
+    return dqv;
+}
+
+// RDCOST (rd_cost.h:36-38) with ROUND_POWER_OF_TWO (definitions.h:457) and
+// RDDIV_BITS 7 (rd_cost.h:34). The trellis never passes negative rates or
+// rdmults, so the unsigned-bias shift is exact here (named deviation: a
+// helper, not a macro).
+static std::int64_t rdCost(std::int64_t rate, std::int64_t rdmult, std::int64_t dist) {
+    return (((rate * rdmult) + (1 << 8)) >> 9) + dist * (1 << 7);
+}
+
+// get_lower_levels_ctx_general (full_loop.c:596-611, verbatim).
+std::int32_t getLowerLevelsCtxGeneral(std::int32_t isLast, std::int32_t scanIdx, std::int32_t bwl,
+                                       std::int32_t height, const std::uint8_t* levels, std::int32_t coeffIdx,
+                                       std::int32_t txSize, TxClass txClass) {
+    if (isLast) {
+        if (scanIdx == 0) {
+            return 0;
+        }
+        if (scanIdx <= (height << bwl) >> 3) {
+            return 1;
+        }
+        if (scanIdx <= (height << bwl) >> 2) {
+            return 2;
+        }
+        return 3;
+    }
+    return getLowerLevelsCtx(levels, coeffIdx, bwl, txSize, txClass);
+}
+
+// update_coeff_general (full_loop.c:851-902, verbatim).
+void updateCoeffGeneral(std::int32_t* accuRate, std::int64_t* accuDist, std::int32_t si, std::int32_t eob,
+                         std::int32_t txSize, TxClass txClass, std::int32_t bwl, std::int32_t height,
+                         std::int64_t rdmult, std::int32_t shift, std::int32_t dcSignCtx,
+                         const std::int16_t* dequant, const std::int16_t* scan, const LvMapCoeffCost* txbCosts,
+                         const std::int32_t* tcoeff, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                         std::uint8_t* levels, const std::uint8_t* iqmPtr) {
+    const std::int32_t ci = scan[si];
+    const std::int32_t dqv = getDqv(dequant, ci, iqmPtr);
+    const std::int32_t qc = qcoeff[ci];
+    const std::int32_t isLast = si == (eob - 1);
+    const std::int32_t coeffCtx =
+        getLowerLevelsCtxGeneral(isLast, si, bwl, height, levels, ci, txSize, txClass);
+    if (qc == 0) {
+        *accuRate += txbCosts->baseCost[coeffCtx][0];
+    } else {
+        const std::int32_t sign = (qc < 0) ? 1 : 0;
+        const std::int32_t absQc = qc < 0 ? -qc : qc;
+        const std::int32_t tqc = tcoeff[ci];
+        const std::int32_t dqc = dqcoeff[ci];
+        const std::int64_t dist = getCoeffDist(tqc, dqc, shift);
+        const std::int64_t dist0 = getCoeffDist(tqc, 0, shift);
+        const std::int32_t rate = getCoeffCostGeneral(isLast, ci, absQc, sign, coeffCtx, dcSignCtx, txbCosts,
+                                                       bwl, txClass, levels);
+        const std::int64_t rd = rdCost(rate, rdmult, dist);
+
+        std::int32_t qcLow, dqcLow, absQcLow;
+        std::int64_t distLow, rdLow;
+        std::int32_t rateLow;
+        if (absQc == 1) {
+            absQcLow = qcLow = dqcLow = 0;
+            distLow = dist0;
+            rateLow = txbCosts->baseCost[coeffCtx][0];
+        } else {
+            getQcDqcLow(absQc, sign, dqv, shift, &qcLow, &dqcLow);
+            absQcLow = absQc - 1;
+            distLow = getCoeffDist(tqc, dqcLow, shift);
+            rateLow = getCoeffCostGeneral(isLast, ci, absQcLow, sign, coeffCtx, dcSignCtx, txbCosts, bwl,
+                                           txClass, levels);
+        }
+
+        rdLow = rdCost(rateLow, rdmult, distLow);
+        if (rdLow < rd) {
+            qcoeff[ci] = qcLow;
+            dqcoeff[ci] = dqcLow;
+            levels[getPaddedIdx(ci, bwl)] = (std::uint8_t)(absQcLow > 127 ? 127 : absQcLow);
+            *accuRate += rateLow;
+            *accuDist += distLow - dist0;
+        } else {
+            *accuRate += rate;
+            *accuDist += dist - dist0;
+        }
+    }
+}
+
+// update_skip (full_loop.c:951-966, verbatim).
+void updateSkip(std::int32_t* accuRate, std::int64_t accuDist, std::uint16_t* eob, std::int32_t nzNum,
+                 const std::int32_t* nzCi, std::int64_t rdmult, std::int32_t skipCost, std::int32_t nonSkipCost,
+                 std::int32_t* qcoeff, std::int32_t* dqcoeff, std::int32_t sharpness) {
+    const std::int64_t rd = rdCost((std::int64_t)*accuRate + nonSkipCost, rdmult, accuDist);
+    const std::int64_t rdNewEob = rdCost(skipCost, rdmult, 0);
+    if (sharpness == 0 && rdNewEob < rd) {
+        for (std::int32_t i = 0; i < nzNum; ++i) {
+            const std::int32_t ci = nzCi[i];
+            qcoeff[ci] = 0;
+            dqcoeff[ci] = 0;
+            // no need to set up levels because this is the last step
+            // levels[get_padded_idx(ci, bwl)] = 0;
+        }
+        *accuRate = 0;
+        *eob = 0;
+    }
+}
+
+// update_coeff_eob_fast (full_loop.c:1006-1026, verbatim).
+void updateCoeffEobFast(std::uint16_t* eob, std::int32_t shift, const std::int16_t* dequant,
+                         const std::int16_t* scan, const std::int32_t* coeffPtr, std::int32_t* qcoeffPtr,
+                         std::int32_t* dqcoeffPtr) {
+    std::int32_t eobOut = *eob;
+    const std::int32_t zbin[2] = {dequant[0] + ROUND_POWER_OF_TWO(dequant[0] * 70, 7),
+                                  dequant[1] + ROUND_POWER_OF_TWO(dequant[1] * 70, 7)};
+    for (std::int32_t i = *eob - 1; i >= 0; --i) {
+        const std::int32_t rc = scan[i];
+        const std::int32_t qcoeff = qcoeffPtr[rc];
+        const std::int32_t coeff = coeffPtr[rc];
+        const std::int32_t coeffSign = -(coeff < 0);
+        std::int64_t absCoeff = (coeff ^ coeffSign) - coeffSign;
+        if (((absCoeff << (1 + shift)) < zbin[rc != 0]) || (qcoeff == 0)) {
+            eobOut--;
+            qcoeffPtr[rc] = 0;
+            dqcoeffPtr[rc] = 0;
+        } else {
+            break;
+        }
+    }
+    *eob = (std::uint16_t)eobOut;
+}
+
+// update_coeff_eob (full_loop.c:749-849, verbatim).
+void updateCoeffEob(std::int32_t* accuRate, std::int64_t* accuDist, std::uint16_t* eob, std::int32_t* nzNum,
+                     std::int32_t* nzCi, std::int32_t si, std::int32_t txSize, TxClass txClass,
+                     std::int32_t bwl, std::int32_t height, std::int32_t dcSignCtx, std::int64_t rdmult,
+                     std::int32_t shift, const std::int16_t* dequant, const std::int16_t* scan,
+                     const LvMapEobCost* txbEobCosts, const LvMapCoeffCost* txbCosts, const std::int32_t* tcoeff,
+                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint8_t* levels,
+                     std::int32_t sharpness, const std::uint8_t* iqmPtr) {
+    const std::int32_t ci = scan[si];
+    const std::int32_t dqv = getDqv(dequant, ci, iqmPtr);
+    const std::int32_t qc = qcoeff[ci];
+    const std::int32_t coeffCtx = getLowerLevelsCtx(levels, ci, bwl, txSize, txClass);
+    if (qc == 0) {
+        *accuRate += txbCosts->baseCost[coeffCtx][0];
+    } else {
+        std::int32_t lowerLevel = 0;
+        const std::int32_t absQc = qc < 0 ? -qc : qc;
+        const std::int32_t tqc = tcoeff[ci];
+        const std::int32_t dqc = dqcoeff[ci];
+        const std::int32_t sign = (qc < 0) ? 1 : 0;
+        const std::int64_t dist0 = getCoeffDist(tqc, 0, shift);
+        std::int64_t dist = getCoeffDist(tqc, dqc, shift) - dist0;
+        std::int32_t rate = getCoeffCostGeneral(0, ci, absQc, sign, coeffCtx, dcSignCtx, txbCosts, bwl, txClass,
+                                                 levels);
+        std::int64_t rd = rdCost((std::int64_t)*accuRate + rate, rdmult, *accuDist + dist);
+
+        std::int32_t qcLow, dqcLow, absQcLow;
+        std::int64_t distLow, rdLow;
+        std::int32_t rateLow;
+        if (absQc == 1) {
+            absQcLow = 0;
+            dqcLow = qcLow = 0;
+            distLow = 0;
+            rateLow = txbCosts->baseCost[coeffCtx][0];
+            rdLow = rdCost((std::int64_t)*accuRate + rateLow, rdmult, *accuDist);
+        } else {
+            getQcDqcLow(absQc, sign, dqv, shift, &qcLow, &dqcLow);
+            absQcLow = absQc - 1;
+            distLow = getCoeffDist(tqc, dqcLow, shift) - dist0;
+            rateLow = getCoeffCostGeneral(0, ci, absQcLow, sign, coeffCtx, dcSignCtx, txbCosts, bwl, txClass,
+                                           levels);
+            rdLow = rdCost((std::int64_t)*accuRate + rateLow, rdmult, *accuDist + distLow);
+        }
+
+        std::int32_t lowerLevelNewEob = 0;
+        const std::int32_t newEob = si + 1;
+        const std::int32_t coeffCtxNewEob = getLowerLevelsCtxEob(bwl, height, si);
+        const std::int32_t newEobCost = getEobCost(newEob, txbEobCosts, txbCosts, txClass);
+        std::int32_t rateCoeffEob =
+            newEobCost + getCoeffCostEob(ci, absQc, sign, coeffCtxNewEob, dcSignCtx, txbCosts, bwl, txClass);
+        std::int64_t distNewEob = dist;
+        std::int64_t rdNewEob = rdCost(rateCoeffEob, rdmult, distNewEob);
+
+        if (absQcLow > 0) {
+            const std::int32_t rateCoeffEobLow =
+                newEobCost + getCoeffCostEob(ci, absQcLow, sign, coeffCtxNewEob, dcSignCtx, txbCosts, bwl, txClass);
+            const std::int64_t distNewEobLow = distLow;
+            const std::int64_t rdNewEobLow = rdCost(rateCoeffEobLow, rdmult, distNewEobLow);
+            if (rdNewEobLow < rdNewEob) {
+                lowerLevelNewEob = 1;
+                rdNewEob = rdNewEobLow;
+                rateCoeffEob = rateCoeffEobLow;
+                distNewEob = distNewEobLow;
+            }
+        }
+
+        if (rdLow < rd) {
+            lowerLevel = 1;
+            rd = rdLow;
+            rate = rateLow;
+            dist = distLow;
+        }
+
+        if (sharpness == 0 && rdNewEob < rd) {
+            for (std::int32_t ni = 0; ni < *nzNum; ++ni) {
+                const std::int32_t lastCi = nzCi[ni];
+                levels[getPaddedIdx(lastCi, bwl)] = 0;
+                qcoeff[lastCi] = 0;
+                dqcoeff[lastCi] = 0;
+            }
+            *eob = (std::uint16_t)newEob;
+            *nzNum = 0;
+            *accuRate = rateCoeffEob;
+            *accuDist = distNewEob;
+            lowerLevel = lowerLevelNewEob;
+        } else {
+            *accuRate += rate;
+            *accuDist += dist;
+        }
+
+        if (lowerLevel) {
+            qcoeff[ci] = qcLow;
+            dqcoeff[ci] = dqcLow;
+            levels[getPaddedIdx(ci, bwl)] = (std::uint8_t)(absQcLow > 127 ? 127 : absQcLow);
+        }
+        if (qcoeff[ci]) {
+            nzCi[*nzNum] = ci;
+            ++*nzNum;
+        }
+    }
+}
+
+// update_coeff_simple (full_loop.c:904-949, verbatim).
+void updateCoeffSimple(std::int32_t* accuRate, std::int32_t si, std::int32_t eob, std::int32_t txSize,
+                        TxClass txClass, std::int32_t bwl, std::int64_t rdmult, std::int32_t shift,
+                        const std::int16_t* dequant, const std::int16_t* scan, const LvMapCoeffCost* txbCosts,
+                        const std::int32_t* tcoeff, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                        std::uint8_t* levels, const std::uint8_t* iqmPtr) {
+    (void)eob;  // the reference voids it (full_loop.c:910)
+    const std::int32_t dqv = getDqv(dequant, scan[si], iqmPtr);
+    const std::int32_t ci = scan[si];
+    const std::int32_t qc = qcoeff[ci];
+    const std::int32_t coeffCtx = getLowerLevelsCtx(levels, ci, bwl, txSize, txClass);
+    if (qc == 0) {
+        *accuRate += txbCosts->baseCost[coeffCtx][0];
+    } else {
+        const std::int32_t absQc = qc < 0 ? -qc : qc;
+        const std::int32_t tci = tcoeff[ci];
+        const std::int32_t absTqc = tci < 0 ? -tci : tci;
+        const std::int32_t dqci = dqcoeff[ci];
+        const std::int32_t absDqc = dqci < 0 ? -dqci : dqci;
+        std::int32_t rateLow = 0;
+        const std::int32_t rate = getTwoCoeffCostSimple(ci, absQc, coeffCtx, txbCosts, bwl, txClass, levels,
+                                                         &rateLow);
+        if (absDqc < absTqc) {
+            *accuRate += rate;
+            return;
+        }
+
+        const std::int64_t dist = getCoeffDist(absTqc, absDqc, shift);
+        const std::int64_t rd = rdCost(rate, rdmult, dist);
+
+        const std::int32_t absQcLow = absQc - 1;
+        const std::int32_t absDqcLow = (absQcLow * dqv) >> shift;
+        const std::int64_t distLow = getCoeffDist(absTqc, absDqcLow, shift);
+        const std::int64_t rdLow = rdCost(rateLow, rdmult, distLow);
+
+        if (rdLow < rd) {
+            const std::int32_t sign = (qc < 0) ? 1 : 0;
+            qcoeff[ci] = (-sign ^ absQcLow) + sign;
+            dqcoeff[ci] = (-sign ^ absDqcLow) + sign;
+            levels[getPaddedIdx(ci, bwl)] = (std::uint8_t)(absQcLow > 127 ? 127 : absQcLow);
+            *accuRate += rateLow;
+        } else {
+            *accuRate += rate;
+        }
+    }
+}
+
+
 // clamp (definitions.h:989-993, verbatim semantics; used by av1_cost_symbol
 // md_rate_estimation.c:39).
 static inline std::int32_t clampI32(std::int32_t v, std::int32_t lo, std::int32_t hi) {
@@ -473,6 +1207,173 @@ void estimateSyntaxRate(MdRateEstimationContext* me, std::uint8_t pic_filter_int
     }
     if (allow_intrabc) {
         getSyntaxRateFromCdf(me->intrabcFacBits, fc->intrabc_cdf, nullptr);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D: the drivers (full_loop.c:994-:999 tables, :1028-:1236).
+// ---------------------------------------------------------------------------
+
+// plane_rd_mult (full_loop.c:994-999, TUNE_CHROMA_SSIM off, verbatim).
+static const std::int32_t kPlaneRdMult[2][2][2] = {{{17, 20}, {16, 20}}, {{17, 13}, {16, 10}}};
+
+// quantizer_to_qindex (md_process.c:20-23, verbatim).
+static const std::uint8_t kQuantizerToQindex[64] = {
+    0,   4,   8,   12,  16,  20,  24,  28,  32,  36,  40,  44,  48,  52,  56,  60,  64,  68,  72,  76,  80,  84,
+    88,  92,  96,  100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172,
+    176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 249, 255};
+
+// The txb geometry helpers (common_utils.h:100-128, verbatim).
+static std::int32_t av1GetAdjustedTxSize(std::int32_t txSize) {
+    switch (txSize) {
+    case 4:   // TX_64X64
+    case 11:  // TX_32X64
+    case 12:  // TX_64X32
+        return 3;  // TX_32X32
+    case 17:  // TX_16X64
+        return 9;  // TX_16X32
+    case 18:  // TX_64X16
+        return 10;  // TX_32X16
+    default:
+        return txSize;
+    }
+}
+std::int32_t getTxbBwl(std::int32_t txSize) {
+    txSize = av1GetAdjustedTxSize(txSize);
+    return kTxSizeWideLog2Tbl[txSize];
+}
+std::int32_t getTxbWide(std::int32_t txSize) {
+    txSize = av1GetAdjustedTxSize(txSize);
+    return kTxSizeWide[txSize];
+}
+std::int32_t getTxbHigh(std::int32_t txSize) {
+    txSize = av1GetAdjustedTxSize(txSize);
+    return kTxSizeHigh[txSize];
+}
+
+// svt_fast_optimize_b (full_loop.c:1028-1036, verbatim; the walls thread
+// as parameters).
+void fastOptimizeB(const std::int32_t* coeffPtr, const std::int16_t* dequant, std::int32_t* qcoeffPtr,
+                    std::int32_t* dqcoeffPtr, std::uint16_t* eob, std::int32_t txSize, std::int32_t txType) {
+    const ScanOrder* const scanOrder = &scanOrders()[txSize][txTypeToScanIndex[txType]];
+    const std::int16_t* scan = scanOrder->scan;
+    const std::int32_t shift = av1GetTxScaleTab[txSize];
+    updateCoeffEobFast(eob, shift, dequant, scan, coeffPtr, qcoeffPtr, dqcoeffPtr);
+}
+
+// The rdmult/sharpness setup (full_loop.c:1046 + :1064-:1075): factored for
+// testability (named deviation), arithmetic verbatim.
+OptimizeBRdSetup optimizeBRdSetup(bool allintraRtc, bool isInter, std::int32_t planeType,
+                                   std::uint32_t lambda, bool useSharpness, bool deltaQPresent,
+                                   std::int32_t plane, std::int32_t sbQindex, std::int32_t pictureQp,
+                                   std::int32_t sharpnessCfg) {
+    OptimizeBRdSetup out;
+    std::int32_t sharpness = 0;  // No Sharpness (:1046)
+    std::int32_t rweight = 100;
+    const std::int32_t sharpnessVal = sharpnessCfg < 0 ? 0 : (sharpnessCfg > 7 ? 7 : sharpnessCfg);
+    const std::int32_t rshift = 2 > sharpnessVal ? 2 : sharpnessVal;
+    if (useSharpness && deltaQPresent && plane == 0) {
+        const std::int32_t diff = sbQindex - kQuantizerToQindex[pictureQp];
+        if (diff < 0) {
+            sharpness = 1;
+            rweight = 0;
+        }
+    }
+    out.rdmult = (((((std::int64_t)lambda * kPlaneRdMult[allintraRtc ? 1 : 0][isInter ? 1 : 0][planeType]) *
+                     rweight) / 100) + 2) >> rshift;
+    out.sharpness = sharpness;
+    return out;
+}
+
+// svt_av1_optimize_b (full_loop.c:1038-1236, verbatim; the pcs/ctx walls
+// thread as parameters).
+void optimizeB(const OptimizeBArgs& a) {
+    const ScanOrder* const scanOrder = &scanOrders()[a.txSize][txTypeToScanIndex[a.txType]];
+    const std::int16_t* scan = scanOrder->scan;
+    const std::int32_t shift = av1GetTxScaleTab[a.txSize];
+    const std::int32_t planeType = a.plane;
+    const std::int32_t txsCtx = getTxsizeEntropyCtx(a.txSize);
+    const TxClass txClass = txTypeToClass[a.txType];
+    const std::int32_t bwl = getTxbBwl(a.txSize);
+    const std::int32_t width = getTxbWide(a.txSize);
+    const std::int32_t height = getTxbHigh(a.txSize);
+    // (The reference asserts width == (1 << bwl) and txs_ctx < TX_SIZES -
+    // full_loop.c:1056-:1057.)
+    const LvMapCoeffCost* txbCosts = &a.me->coeffFacBits[txsCtx][planeType];
+    const std::int32_t eobMultiSize = txsizeLog2Minus4[a.txSize];
+    const LvMapEobCost* txbEobCosts = &a.me->eobFracBits[eobMultiSize][planeType];
+    const std::int32_t nonSkipCost = txbCosts->txbSkipCost[a.txbSkipContext][0];
+    const std::int32_t skipCost = txbCosts->txbSkipCost[a.txbSkipContext][1];
+    const std::int32_t eobCost = getEobCost(*a.eob, txbEobCosts, txbCosts, txClass);
+    const OptimizeBRdSetup setup =
+        optimizeBRdSetup(a.allintraRtc, a.isInter, planeType, a.lambda, a.useSharpness, a.deltaQPresent,
+                          a.plane, a.sbQindex, a.pictureQp, a.sharpnessCfg);
+    const std::int64_t rdmult = setup.rdmult;
+    const std::int32_t sharpness = setup.sharpness;
+    std::uint8_t* const levels = setLevels(a.levelsBuf, width, height);
+
+    if (*a.eob > 1) {
+        txbInitLevels(a.qcoeff, width, height, levels);
+    }
+    std::int32_t accuRate = eobCost;
+
+    std::int64_t accuDist = 0;
+    std::int32_t si = *a.eob - 1;
+    const std::int32_t ci = scan[si];
+    const std::int32_t qc = a.qcoeff[ci];
+    const std::int32_t absQc = qc < 0 ? -qc : qc;
+    const std::int32_t sign = qc < 0;
+    const std::int32_t maxNzNum = 4;
+    std::int32_t nzNum = 1;
+    std::int32_t nzCi[5] = {ci, 0, 0, 0, 0};
+    if (absQc >= 2) {
+        updateCoeffGeneral(&accuRate, &accuDist, si, *a.eob, a.txSize, txClass, bwl, height, rdmult, shift,
+                            a.dcSignContext, a.dequant, scan, txbCosts, a.coeff, a.qcoeff, a.dqcoeff, levels,
+                            a.iqm);
+        --si;
+    } else {
+        // (The reference asserts abs_qc == 1 here - full_loop.c:1114.)
+        const std::int32_t coeffCtx = getLowerLevelsCtxEob(bwl, height, si);
+        accuRate += getCoeffCostEob(ci, absQc, sign, coeffCtx, a.dcSignContext, txbCosts, bwl, txClass);
+
+        const std::int32_t tqc = a.coeff[ci];
+        const std::int32_t dqc = a.dqcoeff[ci];
+        const std::int64_t dist = getCoeffDist(tqc, dqc, shift);
+        const std::int64_t dist0 = getCoeffDist(tqc, 0, shift);
+        accuDist += dist - dist0;
+        --si;
+    }
+    for (; si >= 0 && nzNum <= maxNzNum; --si) {
+        updateCoeffEob(&accuRate, &accuDist, a.eob, &nzNum, nzCi, si, a.txSize, txClass, bwl, height,
+                        a.dcSignContext, rdmult, shift, a.dequant, scan, txbEobCosts, txbCosts, a.coeff,
+                        a.qcoeff, a.dqcoeff, levels, sharpness, a.iqm);
+    }
+
+    if (si == -1 && nzNum <= maxNzNum) {
+        updateSkip(&accuRate, accuDist, a.eob, nzNum, nzCi, rdmult, skipCost, nonSkipCost, a.qcoeff, a.dqcoeff,
+                    sharpness);
+    }
+
+    std::int32_t siEnd = 1;  // default: full RDOQ
+    if (a.cutOffNum) {
+        const std::int32_t cutOffCoeff =
+            ((width * height) >> 7) > ((*a.eob * a.cutOffNum) / a.cutOffDenum)
+                ? ((width * height) >> 7)
+                : ((*a.eob * a.cutOffNum) / a.cutOffDenum);
+        siEnd = 1 > (*a.eob - cutOffCoeff) ? 1 : (*a.eob - cutOffCoeff);
+    }
+    for (; si >= siEnd; --si) {
+        updateCoeffSimple(&accuRate, si, *a.eob, a.txSize, txClass, bwl, rdmult, shift, a.dequant, scan,
+                           txbCosts, a.coeff, a.qcoeff, a.dqcoeff, levels, a.iqm);
+    }
+
+    // DC position
+    if (si == 0) {
+        // no need to update accu_dist because it's not used after this point
+        std::int64_t dummyDist = 0;
+        updateCoeffGeneral(&accuRate, &dummyDist, si, *a.eob, a.txSize, txClass, bwl, height, rdmult, shift,
+                            a.dcSignContext, a.dequant, scan, txbCosts, a.coeff, a.qcoeff, a.dqcoeff, levels,
+                            a.iqm);
     }
 }
 

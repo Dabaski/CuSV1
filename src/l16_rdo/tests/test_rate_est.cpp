@@ -4,7 +4,21 @@
 #include <cstring>
 #include <filesystem>
 #include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <map>
 #include "rate_est.h"
+
+// The l3 cross-check target (transform.cpp:8514; the prototype is declared
+// by hand because including transform.h here would collide rate_est.h's
+// TX_4X4/TX_32X32 macros with the TxSize enum class enumerators). The link
+// line carries av1_transforms via av1_rdo. The layer's namespace is
+// `transforms` (transform.h:6).
+namespace transforms {
+void defaultScan4x4(std::int16_t scan[16]);
+}
 
 // The port's types at namespace scope (the l7 test-file convention).
 using l16_rdo::AomCdfProb;
@@ -745,4 +759,2067 @@ TEST_CASE("l16_rdo the interintra-allowed helpers over the enumerated bsize/mode
             const std::int32_t want = (r0 > 0) && (r1 <= 0);
             CHECK(l16_rdo::isInterIntraAllowedRef(rf) == want);
         }
+}
+
+// ---------------------------------------------------------------------------
+// RE2: the optimize_b trellis (full_loop.c:622-1252). Carries first.
+// ---------------------------------------------------------------------------
+
+// set_levels (common_utils.h:92-98): the row base is placed so rows
+// 0..height-1 end at LEVELS_TAIL_OFFSET; the tail is guaranteed zero
+// (definitions.h:427-429). Independent oracle: levelsBuf +
+// ((MAX_TX_SIZE + TX_PAD_HOR) * MAX_TX_SIZE) - height * (width + TX_PAD_HOR),
+// with MAX_TX_SIZE 64 (definitions.h:410-411) and TX_PAD_HOR 4
+// (definitions.h:417).
+TEST_CASE("l16_rdo setLevels places the row base so rows end at LEVELS_TAIL_OFFSET") {
+    constexpr int kMaxTxSize = 64;  // definitions.h:411 (MAX_TX_SIZE_LOG2 = 6)
+    constexpr int kTxPadHor = 4;    // definitions.h:417
+    constexpr std::size_t kLevelsTailOffset =
+        (std::size_t)((kMaxTxSize + kTxPadHor) * kMaxTxSize);  // definitions.h:429
+    // TX_PAD_2D-sized scratch (definitions.h:426).
+    alignas(64) static std::uint8_t buf[(kMaxTxSize + kTxPadHor) * (kMaxTxSize + kTxPadHor) + 16];
+    const int kGrid[][2] = {{4, 4}, {8, 4}, {16, 16}, {32, 8}, {64, 64}, {4, 16}, {8, 32}};
+    for (const auto& wh : kGrid) {
+        const std::uint8_t* got = l16_rdo::setLevels(buf, wh[0], wh[1]);
+        CHECK(got - buf == kLevelsTailOffset - (std::size_t)wh[1] * (wh[0] + kTxPadHor));
+    }
+}
+
+// get_padded_idx (coefficients.h:129-131): idx + ((idx >> bwl) << TX_PAD_
+// HOR_LOG2), TX_PAD_HOR_LOG2 = 2 (definitions.h:417). get_nz_mag
+// (coefficients.h:133-155): the five/six neighbour reads at fixed offsets
+// past the coefficient's padded position, each clamped to 3. Independent
+// oracle over an enumerated (bwl, tx_class, ci, level-pattern) grid with
+// levels values deliberately above the clamp range.
+static int oracleClipMax3(int x) { return (x > 3) ? 3 : x; }
+static int oracleNzMag(const std::uint8_t* levels, int bwl, int txClass) {
+    int mag = oracleClipMax3(levels[1]);
+    mag += oracleClipMax3(levels[(1 << bwl) + 4]);  // TX_PAD_HOR
+    if (txClass == 0) {                             // TX_CLASS_2D
+        mag += oracleClipMax3(levels[(1 << bwl) + 4 + 1]);
+        mag += oracleClipMax3(levels[2]);
+        mag += oracleClipMax3(levels[(2 << bwl) + (2 << 2)]);
+    } else if (txClass == 2) {                      // TX_CLASS_VERT
+        mag += oracleClipMax3(levels[(2 << bwl) + (2 << 2)]);
+        mag += oracleClipMax3(levels[(3 << bwl) + (3 << 2)]);
+        mag += oracleClipMax3(levels[(4 << bwl) + (4 << 2)]);
+    } else {                                        // TX_CLASS_HORIZ
+        mag += oracleClipMax3(levels[2]);
+        mag += oracleClipMax3(levels[3]);
+        mag += oracleClipMax3(levels[4]);
+    }
+    return mag;
+}
+TEST_CASE("l16_rdo getPaddedIdx + getNzMag match the coefficients.h oracles over the enumerated grid") {
+    // Levels workspace: padded stride (1 << bwl) + TX_PAD_HOR; rows 0..h-1
+    // plus the bottom pad rows the fixed offsets can reach (max 4 rows down,
+    // get_nz_mag reads up to (4 << bwl)).
+    alignas(64) static std::uint8_t levels[(16 + 4) * 68 + 16];
+    const int kCase[][3] = {{2, 0, 0}, {2, 0, 5},  {2, 1, 3},  {2, 2, 9},  {3, 0, 1},
+                            {3, 1, 8}, {3, 2, 11}, {4, 0, 16}, {4, 1, 33}, {4, 2, 40},
+                            {5, 0, 65}, {5, 1, 70}, {5, 2, 90}, {2, 0, 7},  {2, 2, 2}};
+    for (const auto& c : kCase) {
+        const int bwl = c[0], txClass = c[1], ci = c[2];
+        // Deterministic pseudo-random level pattern (LCG), values 0..255.
+        unsigned seed = 12345u + 7u * (unsigned)(bwl * 100 + txClass * 10 + ci);
+        const int stride = (1 << bwl) + 4;
+        for (int i = 0; i < (16 + 4) * stride; ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            levels[i] = (std::uint8_t)(seed >> 24);
+        }
+        const int padded = l16_rdo::getPaddedIdx(ci, bwl);
+        CHECK(padded == ci + ((ci >> bwl) << 2));
+        CHECK(l16_rdo::getNzMag(levels + padded, bwl, (l16_rdo::TxClass)txClass) ==
+              oracleNzMag(levels + padded, bwl, txClass));
+    }
+}
+
+// tx_type_to_class (cabac_context_model.c:15-32, verbatim): the first ten
+// types are TX_CLASS_2D, then V_DCT/V_ADST/V_FLIPADST are TX_CLASS_VERT and
+// H_DCT/H_ADST/H_FLIPADST are TX_CLASS_HORIZ. get_br_ctx_eob
+// (coefficients.h:69-81): c == 0 -> 0; the top-left 2x2 (2D), the first
+// column (HORIZ) or the first row (VERT) -> 7; else 14.
+TEST_CASE("l16_rdo txTypeToClass matches the reference table; getBrCtxEob over the enumerated grid") {
+    const l16_rdo::TxClass kWant[16] = {
+        l16_rdo::TX_CLASS_2D,    l16_rdo::TX_CLASS_2D,    l16_rdo::TX_CLASS_2D, l16_rdo::TX_CLASS_2D,
+        l16_rdo::TX_CLASS_2D,    l16_rdo::TX_CLASS_2D,    l16_rdo::TX_CLASS_2D, l16_rdo::TX_CLASS_2D,
+        l16_rdo::TX_CLASS_2D,    l16_rdo::TX_CLASS_2D,    l16_rdo::TX_CLASS_VERT, l16_rdo::TX_CLASS_HORIZ,
+        l16_rdo::TX_CLASS_VERT,  l16_rdo::TX_CLASS_HORIZ, l16_rdo::TX_CLASS_VERT, l16_rdo::TX_CLASS_HORIZ};
+    for (int t = 0; t < 16; ++t) CHECK(l16_rdo::txTypeToClass[t] == kWant[t]);
+    // get_br_ctx_eob: bwl 2..5, c in 0..31, all three classes.
+    for (int bwl = 2; bwl <= 5; ++bwl)
+        for (int cls = 0; cls < 3; ++cls)
+            for (int c = 0; c < (1 << (bwl + bwl)); ++c) {
+                const int row = c >> bwl, col = c - (row << bwl);
+                int want;
+                if (c == 0)
+                    want = 0;
+                else if ((cls == 0 && row < 2 && col < 2) || (cls == 1 && col == 0) || (cls == 2 && row == 0))
+                    want = 7;
+                else
+                    want = 14;
+                CHECK(l16_rdo::getBrCtxEob(c, bwl, (l16_rdo::TxClass)cls) == want);
+            }
+}
+
+// get_br_ctx (coefficients.h:83-127): the padded neighbourhood read -
+// levels[pos + 1] + levels[pos + stride] as the base magnitude (stride =
+// (1 << bwl) + TX_PAD_HOR), then per-class third reads (2D: pos+stride+1;
+// HORIZ: pos+2; VERT: pos+2*stride), halved with ((mag + 1) >> 1) clamped
+// to 6, plus the class/top-left bonuses (+7) and the base +14. Independent
+// oracle; levels values 0..255 exercise the halving/clamp path.
+static int oracleBrCtx(const std::uint8_t* levels, int c, int bwl, int txClass) {
+    const int row = c >> bwl;
+    const int col = c - (row << bwl);
+    const int stride = (1 << bwl) + 4;
+    const int pos = row * stride + col;
+    int mag = levels[pos + 1] + levels[pos + stride];
+    if (txClass == 0) {
+        mag += levels[pos + stride + 1];
+        mag = (((mag + 1) >> 1) > 6) ? 6 : ((mag + 1) >> 1);
+        if (c == 0) return mag;
+        if (row < 2 && col < 2) return mag + 7;
+    } else if (txClass == 1) {
+        mag += levels[pos + 2];
+        mag = (((mag + 1) >> 1) > 6) ? 6 : ((mag + 1) >> 1);
+        if (c == 0) return mag;
+        if (col == 0) return mag + 7;
+    } else {
+        mag += levels[pos + (stride << 1)];
+        mag = (((mag + 1) >> 1) > 6) ? 6 : ((mag + 1) >> 1);
+        if (c == 0) return mag;
+        if (row == 0) return mag + 7;
+    }
+    return mag + 14;
+}
+// get_br_ctx_eob's semantics (coefficients.h:69-81), oracle form.
+static int oracleBrCtxEob(int ci, int bwl, int cls) {
+    const int row = ci >> bwl, col = ci - (row << bwl);
+    if (ci == 0) return 0;
+    if ((cls == 0 && row < 2 && col < 2) || (cls == 1 && col == 0) || (cls == 2 && row == 0)) return 7;
+    return 14;
+}
+TEST_CASE("l16_rdo getBrCtx matches the coefficients.h oracle over the enumerated grid") {
+    // Workspace: the deepest read is levels[pos + 2*stride] with
+    // pos = row*stride + col and row <= c >> bwl; 40 padded rows of the
+    // widest stride (68) bound every case.
+    alignas(64) static std::uint8_t levels[40 * 72 + 16];
+    const int kCase[][3] = {{2, 0, 0},  {2, 0, 5},  {2, 1, 3},  {2, 2, 2},  {2, 0, 15}, {3, 1, 0},
+                            {3, 1, 9},  {3, 2, 4},  {3, 0, 12}, {3, 2, 63}, {4, 0, 1},  {4, 1, 20},
+                            {4, 2, 100}, {4, 0, 255}, {5, 0, 300}, {5, 1, 600}, {5, 2, 900}};
+    for (const auto& c : kCase) {
+        const int bwl = c[0], txClass = c[1], ci = c[2];
+        unsigned seed = 77u + 13u * (unsigned)(bwl * 100 + txClass * 10 + (ci & 31));
+        for (int i = 0; i < 40 * 72 + 16; ++i) {
+            seed = seed * 1103515245u + 12345u;
+            levels[i] = (std::uint8_t)(seed >> 23);
+        }
+        CHECK(l16_rdo::getBrCtx(levels, ci, bwl, (l16_rdo::TxClass)txClass) ==
+              oracleBrCtx(levels, ci, bwl, txClass));
+    }
+}
+
+// get_lower_levels_ctx_eob (coefficients.h:56-67): scan_idx 0 -> 0, then the
+// (height << bwl) eighths/quarters bands -> 1/2, else 3. Independent oracle
+// over the enumerated (bwl, height, scan_idx) grid.
+TEST_CASE("l16_rdo getLowerLevelsCtxEob matches the band oracle over the enumerated grid") {
+    for (int bwl = 2; bwl <= 6; ++bwl)
+        for (int h = 4; h <= 64; h *= 2) {
+            const int n = h << bwl;
+            for (int si = 0; si <= n + 2; ++si) {
+                int want;
+                if (si == 0)
+                    want = 0;
+                else if (si <= n / 8)
+                    want = 1;
+                else if (si <= n / 4)
+                    want = 2;
+                else
+                    want = 3;
+                CHECK(l16_rdo::getLowerLevelsCtxEob(bwl, h, si) == want);
+            }
+        }
+}
+
+// ---------------------------------------------------------------------------
+// The scan-order generator (coefficients.c:19 + :314-:374, coefficients.
+// h:36-46). Independent transcription of svt_aom_init_iscan: the identity
+// scan shared across sizes; the column-major (mcol) pool; the up-right
+// diagonal (default) pool with tall r-increasing / wide r-decreasing /
+// square-alternating parity; the iscan inverse per class.
+// ---------------------------------------------------------------------------
+struct OracleScanOrder {
+    std::int16_t scan[1024];
+    std::int16_t iscan[1024];
+};
+static const int kOracleTx2d[19] = {16,    64,    256,  1024, 4096, 32,   32,   128,  128,
+                                    512,   512,   2048, 2048, 64,   64,   256,  256,  1024,
+                                    1024};  // coefficients.h:44-46
+static const int kOracleW[19] = {4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64};
+static const int kOracleH[19] = {4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16};
+static void oracleInitScans(OracleScanOrder out[19][3]) {
+    std::int16_t id[1024];
+    for (int i = 0; i < 1024; ++i) id[i] = (std::int16_t)i;
+    for (int ts = 0; ts < 19; ++ts) {
+        int n = kOracleTx2d[ts];
+        if (ts == 4 || ts == 11 || ts == 12) {      // TX_64X64 / TX_32X64 / TX_64X32
+            n = 1024;
+        } else if (ts == 17 || ts == 18) {          // TX_16X64 / TX_64X16
+            n = 512;
+        }
+        const int W = kOracleW[ts] < 32 ? kOracleW[ts] : 32;
+        const int H = kOracleH[ts] < 32 ? kOracleH[ts] : 32;
+        for (int cls = 0; cls < 3; ++cls) {
+            if (cls == 1) {
+                for (int k = 0; k < n; ++k) out[ts][cls].scan[k] = id[k];
+            } else if (cls == 2) {
+                for (int k = 0; k < n; ++k)
+                    out[ts][cls].scan[k] = (std::int16_t)((k % H) * W + (k / H));
+            } else {
+                int idx = 0;
+                for (int d = 0; d < W + H - 1; ++d) {
+                    const int rlo = (d - (W - 1)) > 0 ? (d - (W - 1)) : 0;
+                    const int rhi = d < (H - 1) ? d : (H - 1);
+                    const int incr = (H > W) ? 1 : (W > H) ? 0 : (d & 1);
+                    if (incr) {
+                        for (int r = rlo; r <= rhi; ++r) out[ts][cls].scan[idx++] = (std::int16_t)(r * W + (d - r));
+                    } else {
+                        for (int r = rhi; r >= rlo; --r) out[ts][cls].scan[idx++] = (std::int16_t)(r * W + (d - r));
+                    }
+                }
+            }
+            for (int i = 0; i < n; ++i) out[ts][cls].iscan[out[ts][cls].scan[i]] = (std::int16_t)i;
+        }
+    }
+}
+TEST_CASE("l16_rdo initScans generates the reference scan orders over all 19 sizes x 3 classes") {
+    OracleScanOrder oracle[19][3];
+    oracleInitScans(oracle);
+    l16_rdo::initScans();
+    // tx_type_to_scan_index (coefficients.c:19, verbatim).
+    const int kWantScanIdx[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 2};
+    for (int t = 0; t < 16; ++t) CHECK(l16_rdo::txTypeToScanIndex[t] == kWantScanIdx[t]);
+    for (int ts = 0; ts < 19; ++ts) {
+        int n = kOracleTx2d[ts];
+        if (ts == 4 || ts == 11 || ts == 12) n = 1024;  // TX_64X64 / TX_32X64 / TX_64X32
+        else if (ts == 17 || ts == 18) n = 512;         // TX_16X64 / TX_64X16
+        for (int cls = 0; cls < 3; ++cls) {
+            const l16_rdo::ScanOrder& so = l16_rdo::scanOrders()[ts][cls];
+            // Identity class: scan == raster index.
+            if (cls == 1)
+                for (int k = 0; k < n; ++k) CHECK(so.scan[k] == (std::int16_t)k);
+            // Permutation + iscan inverse + oracle agreement.
+            std::uint8_t seen[1024];
+            std::memset(seen, 0, sizeof(seen));
+            for (int k = 0; k < n; ++k) {
+                CHECK(so.scan[k] == oracle[ts][cls].scan[k]);
+                CHECK(so.iscan[k] == oracle[ts][cls].iscan[k]);
+                const int v = so.scan[k];
+                CHECK(v >= 0);
+                CHECK(v < n);
+                seen[v] += 1;
+                CHECK(so.iscan[v] == k);
+            }
+            for (int k = 0; k < n; ++k) CHECK(seen[k] == 1);
+            // getScanOrder routes (tx_size, tx_type) through
+            // tx_type_to_scan_index (coefficients.h:40-42).
+            for (int t = 0; t < 16; ++t) {
+                const l16_rdo::ScanOrder& sel = l16_rdo::getScanOrder(ts, t);
+                CHECK(&sel == &l16_rdo::scanOrders()[ts][kWantScanIdx[t]]);
+            }
+        }
+    }
+    // The l3 cross-check: the landed defaultScan4x4 (transform.cpp:8514,
+    // the svt_aom_init_iscan formula) equals the trellis's default row.
+    std::int16_t l3scan[16];
+    transforms::defaultScan4x4(l3scan);
+    for (int k = 0; k < 16; ++k) CHECK(l16_rdo::scanOrders()[0][0].scan[k] == l3scan[k]);
+}
+
+// get_eob_pos_token (entropy_coding.h:94-102): eob < 3 -> (eob, extra 0);
+// else t = get_msb(eob - 1), extra = eob - 1 - (1 << t), token t + 2.
+// Independent oracle over eob 1..4096.
+TEST_CASE("l16_rdo getEobPosToken matches the entropy_coding.h oracle over eob 1..4096") {
+    for (int eob = 1; eob <= 4096; ++eob) {
+        int extra = -1;
+        const int pt = l16_rdo::getEobPosToken(eob, &extra);
+        int wantExtra, wantPt;
+        if (eob < 3) {
+            wantExtra = 0;
+            wantPt = eob;
+        } else {
+            int t = 0, v = eob - 1;
+            while (v >>= 1) ++t;
+            wantExtra = eob - 1 - (1 << t);
+            wantPt = t + 2;
+        }
+        CHECK(pt == wantPt);
+        CHECK(extra == wantExtra);
+    }
+}
+
+// get_eob_cost (rd_cost.c:198-211): the eob_pt-1 indexed eob cost plus, for
+// eob_pt > 2, the (eob_pt - 3)-indexed eob_extra cost of the extracted bit
+// and av1_cost_literal(cnt) = 512 * cnt. eob_multi_ctx = tx_class == 2D ? 0
+// : 1. Synthetic deterministic tables isolate the arithmetic; independent
+// oracle over eob 1..1100 x tx_class.
+TEST_CASE("l16_rdo getEobCost matches the rd_cost.c oracle over eob 1..1100 x tx_class") {
+    // Synthetic tables: eobCost[ctx][11] = 900*ctx + 60*i; eobExtraCost
+    // [cnt][bit] = 410*cnt + 37*bit (deterministic, derivation-free).
+    l16_rdo::LvMapEobCost eobCosts;
+    l16_rdo::LvMapCoeffCost coeff;
+    for (int ctx = 0; ctx < 2; ++ctx)
+        for (int i = 0; i < 11; ++i) eobCosts.eobCost[ctx][i] = 900 * ctx + 60 * i;
+    for (int cnt = 0; cnt < 9; ++cnt)
+        for (int b = 0; b < 2; ++b) coeff.eobExtraCost[cnt][b] = 410 * cnt + 37 * b;
+    for (int cls = 0; cls < 3; ++cls)
+        for (int eob = 1; eob <= 1100; ++eob) {
+            const int wantMultiCtx = (cls == 0) ? 0 : 1;
+            int extra;
+            const int pt = [&] {
+                if (eob < 3) {
+                    extra = 0;
+                    return eob;
+                }
+                int t = 0, v = eob - 1;
+                while (v >>= 1) ++t;
+                extra = eob - 1 - (1 << t);
+                return t + 2;
+            }();
+            int want = eobCosts.eobCost[wantMultiCtx][pt - 1];
+            if (pt > 2) {
+                const int cnt = pt - 3;
+                const int bit = (extra >> cnt) & 1;
+                want += coeff.eobExtraCost[cnt][bit];
+                want += 512 * cnt;
+            }
+            CHECK(l16_rdo::getEobCost(eob, &eobCosts, &coeff, (l16_rdo::TxClass)cls) == want);
+        }
+}
+
+// svt_av1_txb_init_levels_c (rd_cost.c:93-105): per row, width entries of
+// clamp(abs(coeff[i * width + j]), 0, INT8_MAX) then TX_PAD_HOR = 4 zeros.
+// Independent oracle over the enumerated (width, height) grid; the fixture
+// carries magnitudes above INT8_MAX to pin the clamp and signs to pin abs.
+TEST_CASE("l16_rdo txbInitLevels matches the rd_cost.c oracle over the enumerated grid") {
+    alignas(64) static std::int32_t coeff[64 * 64];
+    alignas(64) static std::uint8_t levels[64 * (64 + 4)];
+    alignas(64) static std::uint8_t want[64 * (64 + 4)];
+    const int kGrid[][2] = {{4, 4}, {8, 4}, {4, 8}, {16, 16}, {32, 8}, {64, 64}, {8, 32}};
+    unsigned seed = 4242u;
+    for (const auto& wh : kGrid) {
+        const int w = wh[0], h = wh[1];
+        for (int i = 0; i < h * w; ++i) {
+            seed = seed * 1103515245u + 12345u;
+            // Range forces values below, at, and above the INT8_MAX clamp.
+            std::int32_t v = (std::int32_t)(seed % 400) - 200;
+            coeff[i] = v;
+            const std::int32_t a = v < 0 ? -v : v;
+            want[(i / w) * (w + 4) + (i % w)] = (std::uint8_t)(a > 127 ? 127 : a);
+        }
+        for (int i = 0; i < h; ++i)
+            for (int j = w; j < w + 4; ++j) want[i * (w + 4) + j] = 0;
+        l16_rdo::txbInitLevels(coeff, w, h, levels);
+        CHECK(std::memcmp(levels, want, (std::size_t)(h * (w + 4))) == 0);
+    }
+}
+
+// The tx-size tables. Independent derivations (NOT the reference tables
+// themselves): txsize_sqr_map[i] is the square class of min(w, h) (log2 - 2)
+// and txsize_sqr_up_map[i] that of max(w, h) (common_utils.c:150-192 read
+// against the kOracleW/kOracleH dims); get_txsize_entropy_ctx is
+// (sqr + sqr_up + 1) >> 1 (entropy_coding.h:110-112); txsize_log2_minus4 is
+// log2(w * h) - 4 clipped at 6 (inv_transforms.h:341-361); av1_get_tx_scale_
+// tab (full_loop.c:22, verbatim transcription - this one IS the reference
+// array).
+TEST_CASE("l16_rdo the tx-size tables match their independent derivations over all 19 sizes") {
+    for (int ts = 0; ts < 19; ++ts) {
+        // The classes derived from the dimensions: min(w, h) and max(w, h).
+        const int wmin = kOracleW[ts] < kOracleH[ts] ? kOracleW[ts] : kOracleH[ts];
+        const int wmax = kOracleW[ts] > kOracleH[ts] ? kOracleW[ts] : kOracleH[ts];
+        int lo = 0, hi = 0;
+        for (int v = wmin; v > 4; v >>= 1) ++lo;
+        for (int v = wmax; v > 4; v >>= 1) ++hi;
+        CHECK(l16_rdo::txsizeSqrMap[ts] == lo);
+        CHECK(l16_rdo::txsizeSqrUpMap[ts] == hi);
+        CHECK((int)l16_rdo::getTxsizeEntropyCtx(ts) == (lo + hi + 1) >> 1);
+        // The minus-4 exponent follows the COMPACTED coefficient count the
+        // scans cover (min(w,32) * min(h,32) - cf. the init_iscan n
+        // overrides, coefficients.c:331-:335), not the raw area: 16x64 and
+        // 64x16 give 5 (log2(512) - 4), not the area-derived 6.
+        const int areaCapped = (kOracleW[ts] < 32 ? kOracleW[ts] : 32) * (kOracleH[ts] < 32 ? kOracleH[ts] : 32);
+        int lg = 0;
+        while ((1 << (lg + 1)) <= areaCapped) ++lg;
+        CHECK(l16_rdo::txsizeLog2Minus4[ts] == lg - 4);
+        const int kWantScale[19] = {0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 1, 2, 2, 0, 0, 0, 0, 1, 1};
+        CHECK(l16_rdo::av1GetTxScaleTab[ts] == kWantScale[ts]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B1: get_golomb_cost (full_loop.c:613-620): for abs_qc >= 1 +
+// NUM_BASE_LEVELS + COEFF_BASE_RANGE (= 1 + 2 + 12 = 15; l7 entropy.h:459 +
+// rate_est.h:149), r = abs_qc - 14 and the cost is av1_cost_literal(2 *
+// (get_msb(r) + 1) - 1) = 512 * (2 * msb(r) + 1); else 0. Independent
+// oracle over abs_qc 0..80.
+// ---------------------------------------------------------------------------
+TEST_CASE("l16_rdo getGolombCost matches the formula oracle over abs_qc 0..80") {
+    for (int absQc = 0; absQc <= 80; ++absQc) {
+        std::int32_t want = 0;
+        if (absQc >= 15) {
+            int r = absQc - 14;
+            int len = 0, v = r;
+            while (v >>= 1) ++len;
+            want = (2 * (len + 1) - 1) * 512;
+        }
+        CHECK(l16_rdo::getGolombCost(absQc) == want);
+    }
+}
+
+// B2: get_br_cost (full_loop.c:622-626): base_range = min(level - 1 -
+// NUM_BASE_LEVELS, COEFF_BASE_RANGE) = min(level - 3, 12) (the caller
+// guarantees level > NUM_BASE_LEVELS = 2, so level >= 3; the negative-index
+// region of the table is unreachable in the reference), plus
+// get_golomb_cost(level). Deterministic synthetic lps rows; independent
+// oracle over level 3..60 x br_ctx 0..20.
+TEST_CASE("l16_rdo getBrCost matches the band-table oracle over level 3..60 x br_ctx 0..20") {
+    l16_rdo::LvMapCoeffCost costs;
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 1000 * ctx + 7 * i;
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int level = 3; level <= 60; ++level) {
+            const int baseRange = level - 3 < 12 ? level - 3 : 12;
+            int want = costs.lpsCost[ctx][baseRange];
+            if (level >= 15) {
+                int len = 0, v = level - 14;
+                while (v >>= 1) ++len;
+                want += (2 * (len + 1) - 1) * 512;
+            }
+            CHECK(l16_rdo::getBrCost(level, costs.lpsCost[ctx]) == want);
+        }
+}
+
+// B3: get_qc_dqc_low (full_loop.c:659-666): qc_low is abs_qc - 1 carried
+// through the sign via the XOR trick ((-sign ^ v) + sign == sign ? -v : v);
+// dqc_low applies the (abs_qc_low * dqv) >> shift dequant first. Independent
+// oracle over abs_qc 1..40 x sign x dqv 1..300 x shift 0..2.
+TEST_CASE("l16_rdo getQcDqcLow matches the sign/dquant oracle over the enumerated grid") {
+    for (int absQc = 1; absQc <= 40; ++absQc)
+        for (int sign = 0; sign <= 1; ++sign)
+            for (int dqv = 1; dqv <= 300; dqv += 7)
+                for (int shift = 0; shift <= 2; ++shift) {
+                    const std::int32_t qcLowWant = sign ? -(absQc - 1) : absQc - 1;
+                    const std::int32_t absDqcLow = (std::int32_t)(((std::int64_t)(absQc - 1) * dqv) >> shift);
+                    const std::int32_t dqcLowWant = sign ? -absDqcLow : absDqcLow;
+                    std::int32_t qcLow = -999, dqcLow = -999;
+                    l16_rdo::getQcDqcLow(absQc, sign, dqv, shift, &qcLow, &dqcLow);
+                    CHECK(qcLow == qcLowWant);
+                    CHECK(dqcLow == dqcLowWant);
+                }
+}
+
+// B4: get_coeff_dist (full_loop.c:655-657): SQR(((int64_t)tcoeff -
+// dqcoeff) * (int64_t)(1lu << shift)) - the int64 square of the scaled
+// error, SQR (utility.h:107). Independent oracle over a signed grid; the
+// shift cap is 2 (the tx-scale range, full_loop.c:22 table).
+TEST_CASE("l16_rdo getCoeffDist matches the squared-error oracle over the enumerated grid") {
+    const int kVals[] = {-32000, -8192, -100, -3, -1, 0, 1, 3, 100, 8192, 32000};
+    for (int a : kVals)
+        for (int b : kVals)
+            for (int shift = 0; shift <= 2; ++shift) {
+                const std::int64_t d = (std::int64_t)a - b;
+                const std::int64_t want = (d * (std::int64_t)(1llu << shift)) * (d * (std::int64_t)(1llu << shift));
+                CHECK(l16_rdo::getCoeffDist(a, b, shift) == want);
+            }
+}
+
+// ---------------------------------------------------------------------------
+// The nz-map context LUT carry (coefficients.c:24-303 via the approved
+// src/l16_rdo/nz_map_ctx_offset.inc twin of src/l7_entropy/nz_map_ctx_
+// offset.inc). Runtime twin check, the RC1 style (src/l15_rc/tests/test_
+// rc.cpp:16 parses the reference file itself): the port's LUT reaches the
+// test only through getNzMapCtxFromStats/getLowerLevelsCtx, so both files
+// and the reference are parsed and compared, and the port's function is
+// enumerated against the parsed values.
+// ---------------------------------------------------------------------------
+
+// Walk up from the cwd until the reference sentinel exists.
+static std::string repoRoot() {
+    std::filesystem::path p = std::filesystem::current_path();
+    for (int i = 0; i < 8; ++i) {
+        if (std::filesystem::exists(p / "third_party/SVT-AV1/Source/Lib/Codec/coefficients.c"))
+            return p.string();
+        if (!p.has_parent_path()) break;
+        p = p.parent_path();
+    }
+    return std::string();
+}
+
+static std::string slurp(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return std::string();
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+static std::string stripLineComments(const std::string& s) {
+    std::string out;
+    std::istringstream in(s);
+    std::string line;
+    while (std::getline(in, line)) {
+        const std::size_t cut = line.find("//");
+        if (cut != std::string::npos) line.erase(cut);
+        out += line;
+        out += '\n';
+    }
+    return out;
+}
+
+struct ParsedLut {
+    std::map<std::string, std::vector<int>> byTag;
+    std::vector<std::string> order;
+};
+static bool parseNzOffsetArrays(const std::string& raw, ParsedLut& out) {
+    const std::string text = stripLineComments(raw);
+    const std::string needle = "eb_av1_nz_map_ctx_offset_";
+    std::size_t pos = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        pos += needle.size();
+        std::size_t tagEnd = pos;
+        while (tagEnd < text.size() &&
+               (isdigit((unsigned char)text[tagEnd]) || text[tagEnd] == 'x'))
+            ++tagEnd;
+        const std::string tag = text.substr(pos, tagEnd - pos);
+        std::size_t bracket = text.find('[', tagEnd);
+        if (bracket == std::string::npos || bracket > tagEnd + 8) continue;
+        std::size_t open = text.find('{', bracket);
+        std::size_t close = text.find('}', open);
+        if (open == std::string::npos || close == std::string::npos) continue;
+        const std::string body = text.substr(open + 1, close - open - 1);
+        std::vector<int> vals;
+        std::string cur;
+        for (char ch : body) {
+            if (ch == ',') {
+                if (!cur.empty()) { vals.push_back(std::atoi(cur.c_str())); cur.clear(); }
+            } else if (isdigit((unsigned char)ch) || ch == '-') {
+                cur += ch;
+            } else if (!isspace((unsigned char)ch)) {
+                cur.clear();
+            }
+        }
+        if (!cur.empty()) vals.push_back(std::atoi(cur.c_str()));
+        if (!vals.empty() && out.byTag.find(tag) == out.byTag.end()) out.byTag[tag] = vals;
+        pos = close;
+    }
+    // The pointer table's referenced tags, in order (the LAST bracketed
+    // use of the bare name - the array definitions all carry a "_<tag>"
+    // suffix before their bracket).
+    std::size_t table = text.rfind("eb_av1_nz_map_ctx_offset[");
+    if (table != std::string::npos) {
+        std::size_t open = text.find('{', table);
+        std::size_t close = text.find('}', open);
+        std::size_t p = open;
+        while ((p = text.find(needle, p)) != std::string::npos && p < close) {
+            std::size_t tagStart = p + needle.size();
+            std::size_t tagEnd = tagStart;
+            while (tagEnd < text.size() &&
+                   (isdigit((unsigned char)text[tagEnd]) || text[tagEnd] == 'x'))
+                ++tagEnd;
+            out.order.push_back(text.substr(tagStart, tagEnd - tagStart));
+            p = tagEnd;
+        }
+    }
+    return !out.byTag.empty();
+}
+
+TEST_CASE("l16_rdo the nz-map LUT carry twins l7's copy and the reference text; getNzMapCtxFromStats/getLowerLevelsCtx enumerate against it") {
+    const std::string root = repoRoot();
+    REQUIRE(!root.empty());
+    ParsedLut l16Lut, l7Lut, refLut;
+    REQUIRE(parseNzOffsetArrays(slurp(root + "/src/l16_rdo/nz_map_ctx_offset.inc"), l16Lut));
+    REQUIRE(parseNzOffsetArrays(slurp(root + "/src/l7_entropy/nz_map_ctx_offset.inc"), l7Lut));
+    REQUIRE(parseNzOffsetArrays(slurp(root + "/third_party/SVT-AV1/Source/Lib/Codec/coefficients.c"), refLut));
+    // Twin 1: the carry equals l7's copy, tag-for-tag, in the same order.
+    REQUIRE(l16Lut.order.size() == l7Lut.order.size());
+    for (std::size_t i = 0; i < l16Lut.order.size(); ++i) {
+        CHECK(l16Lut.order[i] == l7Lut.order[i]);
+        REQUIRE(l16Lut.byTag.count(l16Lut.order[i]));
+        REQUIRE(l7Lut.byTag.count(l16Lut.order[i]));
+        CHECK(l16Lut.byTag[l16Lut.order[i]] == l7Lut.byTag[l16Lut.order[i]]);
+    }
+    // Twin 2: the carry equals the reference text, tag-for-tag.
+    REQUIRE(l16Lut.order.size() == 19);
+    for (const auto& tag : l16Lut.order) {
+        REQUIRE(refLut.byTag.count(tag));
+        CHECK(l16Lut.byTag[tag] == refLut.byTag[tag]);
+    }
+    // The port's function, enumerated against the parsed reference table:
+    // get_nz_map_ctx_from_stats (coefficients.h:157-194) - the (class|ci)==0
+    // early-out, ctx = min((stats + 1) >> 1, 4), and ctx + offset; stats 0
+    // isolates the raw offset (ctx 0).
+    for (int ts = 0; ts < 19; ++ts) {
+        const std::string tag = l16Lut.order[ts];
+        const std::vector<int>& vals = l16Lut.byTag[tag];
+        for (int ci = 0; ci < (int)vals.size(); ++ci) {
+            if (ci == 0) {
+                CHECK(l16_rdo::getNzMapCtxFromStats(0, 0, 2, ts, l16_rdo::TX_CLASS_2D) == 0);
+                continue;
+            }
+            CHECK(l16_rdo::getNzMapCtxFromStats(0, ci, 2, ts, l16_rdo::TX_CLASS_2D) == vals[ci]);
+            const int stats = 7;  // ctx = (7 + 1) >> 1 = 4 (the clamp bound).
+            CHECK(l16_rdo::getNzMapCtxFromStats(stats, ci, 2, ts, l16_rdo::TX_CLASS_2D) ==
+                  4 + vals[ci]);
+        }
+        // The 1D branches (coefficients.h:181-189): nz_map_ctx_offset_1d
+        // (coefficients.h:28-34) = {26, 31, 36, 36, ...} (NZ_MAP_CTX_0 26 =
+        // SIG_COEF_CONTEXTS_2D, +5, +10). The bwl is the ADJUSTED one (the
+        // compacted block, common_utils.h:100-118): ci stays under
+        // 1 << (2 * bwl), which is also what keeps row/col < 32 = the 1d
+        // table's domain.
+        const int wCap = kOracleW[ts] < 32 ? kOracleW[ts] : 32;
+        const int bwlAdj = (wCap <= 4) ? 2 : (wCap <= 8) ? 3 : (wCap <= 16) ? 4 : 5;
+        const int ciCap = (int)vals.size() < (1 << (2 * bwlAdj)) ? (int)vals.size() : (1 << (2 * bwlAdj));
+        for (int ci = 1; ci < ciCap; ++ci) {
+            const int row = ci >> bwlAdj, col = ci - (row << bwlAdj);
+            const int off1d = col == 0 ? 26 : (col == 1 ? 31 : 36);
+            CHECK(l16_rdo::getNzMapCtxFromStats(0, ci, bwlAdj, ts, l16_rdo::TX_CLASS_HORIZ) == off1d);
+            const int offRow = row == 0 ? 26 : (row == 1 ? 31 : 36);
+            CHECK(l16_rdo::getNzMapCtxFromStats(0, ci, bwlAdj, ts, l16_rdo::TX_CLASS_VERT) == offRow);
+        }
+    }
+    // get_lower_levels_ctx (coefficients.h:196-200) = the composition over
+    // get_nz_mag: enumerate stats via the oracleNzMag machinery (levels
+    // cells crafted so each neighbour read is 3 -> stats saturate; and 0 ->
+    // stats 0) against the parsed offsets.
+    {
+        const std::int32_t bwl = 3;
+        alignas(64) static std::uint8_t levels[(16 + 4) * 72 + 16];
+        for (int fill = 0; fill <= 3; fill += 3) {
+            std::memset(levels, fill, sizeof(levels));
+            for (int ts = 0; ts < 19; ++ts)
+                for (int ci = 0; ci < 64 && ci < (int)l16Lut.byTag[l16Lut.order[ts]].size(); ++ci) {
+                    const int stats = l16_rdo::getNzMag(levels + l16_rdo::getPaddedIdx(ci, bwl), bwl,
+                                                         l16_rdo::TX_CLASS_2D);
+                    const std::vector<int>& vals = l16Lut.byTag[l16Lut.order[ts]];
+                    const int want = (0 | ci) == 0 ? 0 : (((stats + 1) >> 1) > 4 ? 4 : (stats + 1) >> 1) + vals[ci];
+                    CHECK(l16_rdo::getLowerLevelsCtx(levels, ci, bwl, ts, l16_rdo::TX_CLASS_2D) == want);
+                }
+        }
+    }
+}
+
+// B5: get_br_cost_with_diff (full_loop.c:675-694) + the golomb tables
+// (:668-:673). Independent table derivations: golomb_bits_cost[r] ==
+// get_golomb_cost(r + 14) for r = 1..31 (the call's own formula at level =
+// r + COEFF_BASE_RANGE + NUM_BASE_LEVELS), and golomb_cost_diff[r] ==
+// golomb_bits_cost[r] - golomb_bits_cost[r - 1] with [-1] = 0 (the cost
+// delta the skip-vs-lower comparison consumes). The diff accumulation:
+// lps[base_range + 13] below-or-at the threshold, the table delta inside
+// r < 32, the power-of-two 1024 spike at r >= 32.
+TEST_CASE("l16_rdo the golomb tables and getBrCostWithDiff match their derivations") {
+    // Table derivations.
+    CHECK(l16_rdo::golombBitsCost[0] == 0);
+    for (int r = 1; r < 32; ++r) CHECK(l16_rdo::golombBitsCost[r] == l16_rdo::getGolombCost(r + 14));
+    CHECK(l16_rdo::golombCostDiff[0] == 0);
+    for (int r = 1; r < 32; ++r)
+        CHECK(l16_rdo::golombCostDiff[r] == l16_rdo::golombBitsCost[r] - l16_rdo::golombBitsCost[r - 1]);
+    // get_br_cost_with_diff over level 3..70 x ctx 0..20.
+    l16_rdo::LvMapCoeffCost costs;
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 1000 * ctx + 11 * i;
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int level = 3; level <= 70; ++level) {
+            const int baseRange = level - 3 < 12 ? level - 3 : 12;
+            int diffWant = 0;
+            if (level <= 15) diffWant += costs.lpsCost[ctx][baseRange + 13];
+            int golombBits = 0;
+            if (level >= 15) {
+                const int r = level - 14;
+                if (r < 32) {
+                    golombBits = l16_rdo::golombBitsCost[r];
+                    diffWant += l16_rdo::golombCostDiff[r];
+                } else {
+                    golombBits = l16_rdo::getGolombCost(level);
+                    diffWant += ((r & (r - 1)) == 0) ? 1024 : 0;
+                }
+            }
+            int diffGot = 0;
+            const int got = l16_rdo::getBrCostWithDiff(level, costs.lpsCost[ctx], &diffGot);
+            CHECK(got == costs.lpsCost[ctx][baseRange] + golombBits);
+            CHECK(diffGot == diffWant);
+        }
+}
+
+// B6: get_coeff_cost_general (full_loop.c:627-653): the base/eob base cost
+// pick, the sign cost at ci == 0 vs the literal-1-bit elsewhere, and the
+// br layer through get_br_ctx / get_br_ctx_eob when abs_qc >
+// NUM_BASE_LEVELS. Synthetic deterministic tables; the br-context oracles
+// are oracleBrCtx / oracleBrCtxEob above. Enumeration: is_last x all ci at
+// bwl 2..3 x abs_qc 0..12 x sign x coeff_ctx 0..3 x dc_sign_ctx 0..2 x
+// tx_class 0..2.
+TEST_CASE("l16_rdo getCoeffCostGeneral matches the full_loop.c oracle over the enumerated grid") {
+    l16_rdo::LvMapCoeffCost costs;
+    for (int ctx = 0; ctx < 42; ++ctx) {
+        for (int i = 0; i < 8; ++i) costs.baseCost[ctx][i] = 300 * ctx + 5 * i;
+        for (int i = 0; i < 3; ++i) costs.baseEobCost[ctx % 4][i] = 200 * ctx + 13 * i;
+        for (int i = 0; i < 2; ++i) costs.dcSignCost[ctx % 3][i] = 150 * ctx + 3 * i;
+    }
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 1000 * ctx + 11 * i;
+    alignas(64) static std::uint8_t levels[40 * 72 + 16];
+    unsigned seed = 999u;
+    for (int i = 0; i < 40 * 72 + 16; ++i) {
+        seed = seed * 1103515245u + 12345u;
+        levels[i] = (std::uint8_t)(seed >> 23);
+    }
+    for (int isLast = 0; isLast <= 1; ++isLast)
+        for (int cls = 0; cls < 3; ++cls)
+            for (int bwl = 2; bwl <= 3; ++bwl)
+                for (int ci = 0; ci < (1 << (bwl + bwl)); ci += 3)
+                    for (int absQc = 0; absQc <= 12; ++absQc)
+                        for (int sign = 0; sign <= 1; ++sign)
+                            for (int coeffCtx = 0; coeffCtx < 4; ++coeffCtx)
+                                for (int dcCtx = 0; dcCtx < 3; ++dcCtx) {
+                                    int want = 0;
+                                    if (isLast)
+                                        want += costs.baseEobCost[coeffCtx][absQc < 3 ? absQc : 3];
+                                    else
+                                        want += costs.baseCost[coeffCtx][absQc < 3 ? absQc : 3];
+                                    if (absQc != 0) {
+                                        want += (ci == 0) ? costs.dcSignCost[dcCtx][sign] : 512;
+                                        if (absQc > 2) {
+                                            const int brCtx =
+                                                isLast ? oracleBrCtxEob(ci, bwl, cls)
+                                                       : oracleBrCtx(levels, ci, bwl, cls);
+                                            const int* lps = costs.lpsCost[brCtx];
+                                            const int baseRange = absQc - 3 < 12 ? absQc - 3 : 12;
+                                            want += lps[baseRange];
+                                            if (absQc >= 15) {
+                                                int len = 0, v = absQc - 14;
+                                                while (v >>= 1) ++len;
+                                                want += (2 * (len + 1) - 1) * 512;
+                                            }
+                                        }
+                                    }
+                                    const int got = l16_rdo::getCoeffCostGeneral(
+                                        isLast, ci, absQc, sign, coeffCtx, dcCtx, &costs, bwl,
+                                        (l16_rdo::TxClass)cls, levels);
+                                    CHECK(got == want);
+                                }
+}
+
+// B7: get_two_coeff_cost_simple (full_loop.c:696-720): the ci > 0,
+// mid-scan fast cost: base_cost[min(abs_qc,3)] + (abs_qc ? 512 + br layer :
+// 0); cost_low subtracts base_cost[abs_qc + 4] (abs_qc <= 3) and the
+// with-diff deltas. Enumeration mirrors B6 minus the ci == 0 case.
+TEST_CASE("l16_rdo getTwoCoeffCostSimple matches the full_loop.c oracle over the enumerated grid") {
+    l16_rdo::LvMapCoeffCost costs;
+    for (int ctx = 0; ctx < 42; ++ctx)
+        for (int i = 0; i < 8; ++i) costs.baseCost[ctx][i] = 300 * ctx + 5 * i;
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 1000 * ctx + 11 * i;
+    alignas(64) static std::uint8_t levels[40 * 72 + 16];
+    unsigned seed = 31u;
+    for (int i = 0; i < 40 * 72 + 16; ++i) {
+        seed = seed * 1103515245u + 12345u;
+        levels[i] = (std::uint8_t)(seed >> 23);
+    }
+    for (int cls = 0; cls < 3; ++cls)
+        for (int bwl = 2; bwl <= 3; ++bwl)
+            for (int ci = 1; ci < (1 << (bwl + bwl)); ci += 5)
+                for (int absQc = 0; absQc <= 6; ++absQc)
+                    for (int coeffCtx = 0; coeffCtx < 4; ++coeffCtx) {
+                        int want = costs.baseCost[coeffCtx][absQc < 3 ? absQc : 3];
+                        int diffWant = 0;
+                        if (absQc <= 3) diffWant += costs.baseCost[coeffCtx][absQc + 4];
+                        if (absQc != 0) {
+                            want += 512;
+                            if (absQc > 2) {
+                                const int brCtx = oracleBrCtx(levels, ci, bwl, cls);
+                                const int* lps = costs.lpsCost[brCtx];
+                                const int baseRange = absQc - 3 < 12 ? absQc - 3 : 12;
+                                want += lps[baseRange];
+                                if (absQc >= 15) {
+                                    int len = 0, v = absQc - 14;
+                                    while (v >>= 1) ++len;
+                                    want += (2 * (len + 1) - 1) * 512;
+                                } else {
+                                    diffWant += lps[baseRange + 13];
+                                }
+                                // The r < 32 table delta (abs_qc < 46 here).
+                                const int r = absQc - 14;
+                                if (r >= 1) diffWant += l16_rdo::golombCostDiff[r];
+                            }
+                        }
+                        int costLow = -1;
+                        const int got = l16_rdo::getTwoCoeffCostSimple(
+                            ci, absQc, coeffCtx, &costs, bwl, (l16_rdo::TxClass)cls, levels, &costLow);
+                        CHECK(got == want);
+                        CHECK(costLow == want - diffWant);
+                    }
+}
+
+// B8: get_coeff_cost_eob (full_loop.c:722-739): the eob base row, the sign
+// cost, and the br layer through get_br_ctx_eob. Enumeration: ci x abs_qc x
+// sign x coeff_ctx x dc_sign_ctx x tx_class.
+TEST_CASE("l16_rdo getCoeffCostEob matches the full_loop.c oracle over the enumerated grid") {
+    l16_rdo::LvMapCoeffCost costs;
+    for (int ctx = 0; ctx < 42; ++ctx) {
+        for (int i = 0; i < 3; ++i) costs.baseEobCost[ctx % 4][i] = 200 * ctx + 13 * i;
+        for (int i = 0; i < 2; ++i) costs.dcSignCost[ctx % 3][i] = 150 * ctx + 3 * i;
+    }
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 1000 * ctx + 11 * i;
+    for (int cls = 0; cls < 3; ++cls)
+        for (int bwl = 2; bwl <= 5; ++bwl)
+            for (int ci = 0; ci < (1 << (bwl + bwl)); ci += 7)
+                for (int absQc = 0; absQc <= 12; ++absQc)
+                    for (int sign = 0; sign <= 1; ++sign)
+                        for (int coeffCtx = 0; coeffCtx < 4; ++coeffCtx)
+                            for (int dcCtx = 0; dcCtx < 3; ++dcCtx) {
+                                int want = costs.baseEobCost[coeffCtx][absQc < 3 ? absQc : 3];
+                                if (absQc != 0) {
+                                    want += (ci == 0) ? costs.dcSignCost[dcCtx][sign] : 512;
+                                    if (absQc > 2) {
+                                        const int brCtx = oracleBrCtxEob(ci, bwl, cls);
+                                        const int* lps = costs.lpsCost[brCtx];
+                                        const int baseRange = absQc - 3 < 12 ? absQc - 3 : 12;
+                                        want += lps[baseRange];
+                                        if (absQc >= 15) {
+                                            int len = 0, v = absQc - 14;
+                                            while (v >>= 1) ++len;
+                                            want += (2 * (len + 1) - 1) * 512;
+                                        }
+                                    }
+                                }
+                                const int got = l16_rdo::getCoeffCostEob(
+                                    ci, absQc, sign, coeffCtx, dcCtx, &costs, bwl,
+                                    (l16_rdo::TxClass)cls);
+                                CHECK(got == want);
+                            }
+}
+
+// B9: get_dqv (full_loop.c:741-747): dequant[!!coeff_idx], scaled by the
+// inverse qm when present: ((iqm[ci] * dqv) + (1 << (AOM_QM_BITS - 1))) >>
+// AOM_QM_BITS with AOM_QM_BITS = 5 (inv_transforms.h:27 - NOT aom's 7).
+TEST_CASE("l16_rdo getDqv matches the reference arithmetic over the enumerated grid") {
+    const std::int16_t dequant[2] = {17, 53};
+    std::uint8_t iqm[64];
+    for (int i = 0; i < 64; ++i) iqm[i] = (std::uint8_t)(1 + (i * 7) % 128);
+    for (int ci = 0; ci < 64; ++ci) {
+        const int wantNoQm = dequant[ci != 0];
+        CHECK(l16_rdo::getDqv(dequant, ci, nullptr) == wantNoQm);
+        const int wantQm = (iqm[ci] * wantNoQm + (1 << 4)) >> 5;
+        CHECK(l16_rdo::getDqv(dequant, ci, iqm) == wantQm);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The trellis oracle machinery (the reference text, transcribed test-side;
+// the 2D LUT offsets come from the runtime parse of the reference text -
+// the same source the twin check validates).
+// ---------------------------------------------------------------------------
+static std::int64_t oracleRdCost(std::int64_t rate, std::int64_t rdmult, std::int64_t dist) {
+    // RDCOST (rd_cost.h:36-38) with ROUND_POWER_OF_TWO (definitions.h:457)
+    // and RDDIV_BITS 7 (rd_cost.h:34). The trellis never passes negative
+    // rates or rdmults, so the unsigned-bias shift is exact here.
+    return (((rate * rdmult) + 256) >> 9) + dist * (1 << 7);
+}
+static std::int64_t oracleCoeffDist(std::int32_t tcoeff, std::int32_t dqcoeff, std::int32_t shift) {
+    const std::int64_t d = ((std::int64_t)tcoeff - dqcoeff) * (std::int64_t)(1llu << shift);
+    return d * d;
+}
+static std::int32_t oracleGolombCost(std::int32_t absQc) {
+    if (absQc >= 15) {
+        int len = 0, v = absQc - 14;
+        while (v >>= 1) ++len;
+        return (2 * (len + 1) - 1) * 512;
+    }
+    return 0;
+}
+static std::int32_t oracleBrCost(std::int32_t level, const std::int32_t* lps) {
+    const int baseRange = level - 3 < 12 ? level - 3 : 12;
+    return lps[baseRange] + oracleGolombCost(level);
+}
+static std::int32_t oracleCoeffCostGeneral(int isLast, int ci, int absQc, int sign, int coeffCtx, int dcSignCtx,
+                                           const l16_rdo::LvMapCoeffCost* c, int bwl, int txClass,
+                                           const std::uint8_t* levels) {
+    int cost = 0;
+    if (isLast) cost += c->baseEobCost[coeffCtx][absQc < 3 ? absQc : 3];
+    else cost += c->baseCost[coeffCtx][absQc < 3 ? absQc : 3];
+    if (absQc != 0) {
+        cost += (ci == 0) ? c->dcSignCost[dcSignCtx][sign] : 512;
+        if (absQc > 2) {
+            const int brCtx = isLast ? oracleBrCtxEob(ci, bwl, txClass) : oracleBrCtx(levels, ci, bwl, txClass);
+            cost += oracleBrCost(absQc, c->lpsCost[brCtx]);
+        }
+    }
+    return cost;
+}
+static std::int32_t oracleDqv(const std::int16_t* dequant, int ci, const std::uint8_t* iqm) {
+    int dqv = dequant[ci != 0];
+    if (iqm) dqv = ((iqm[ci] * dqv) + (1 << 4)) >> 5;
+    return dqv;
+}
+// get_lower_levels_ctx's oracle: nz-mag via oracleNzMag; 2D offsets from
+// the runtime-parsed reference text.
+static ParsedLut& oracleLut() {
+    static ParsedLut lut;
+    static bool parsed = false;
+    if (!parsed) {
+        const std::string root = repoRoot();
+        REQUIRE(!root.empty());
+        REQUIRE(parseNzOffsetArrays(slurp(root + "/third_party/SVT-AV1/Source/Lib/Codec/coefficients.c"), lut));
+        parsed = true;
+    }
+    return lut;
+}
+static std::int32_t oracleLowerLevelsCtx(const std::uint8_t* levels, int ci, int bwl, int ts, int txClass) {
+    const int stats = oracleNzMag(levels + (ci + ((ci >> bwl) << 2)), bwl, txClass);
+    if ((txClass | ci) == 0) return 0;
+    int ctx = (stats + 1) >> 1;
+    if (ctx > 4) ctx = 4;
+    if (txClass == 0) {
+        return ctx + oracleLut().byTag[oracleLut().order[ts]][ci];
+    }
+    const int row = ci >> bwl, col = ci - (row << bwl);
+    const int idx1d = txClass == 1 ? col : row;
+    static const int k1d[32] = {26, 31, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36,
+                                36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36};
+    return ctx + k1d[idx1d];
+}
+// get_lower_levels_ctx_general (full_loop.c:596-611).
+static std::int32_t oracleLowerLevelsCtxGeneral(int isLast, int si, int bwl, int h, const std::uint8_t* levels,
+                                                 int ci, int ts, int txClass) {
+    if (isLast) {
+        if (si == 0) return 0;
+        if (si <= (h << bwl) >> 3) return 1;
+        if (si <= (h << bwl) >> 2) return 2;
+        return 3;
+    }
+    return oracleLowerLevelsCtx(levels, ci, bwl, ts, txClass);
+}
+static void oracleUpdateCoeffGeneral(std::int32_t* accuRate, std::int64_t* accuDist, int si, int eob, int txSize,
+                                     int txClass, int bwl, int height, std::int64_t rdmult, int shift,
+                                     int dcSignCtx, const std::int16_t* dequant, const std::int16_t* scan,
+                                     const l16_rdo::LvMapCoeffCost* txbCosts, const std::int32_t* tcoeff,
+                                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint8_t* levels,
+                                     const std::uint8_t* iqmPtr) {
+    const int ci = scan[si];
+    const int dqv = oracleDqv(dequant, ci, iqmPtr);
+    const std::int32_t qc = qcoeff[ci];
+    const int isLast = si == (eob - 1);
+    const int coeffCtx = oracleLowerLevelsCtxGeneral(isLast, si, bwl, height, levels, ci, txSize, txClass);
+    if (qc == 0) {
+        *accuRate += txbCosts->baseCost[coeffCtx][0];
+    } else {
+        const int sign = (qc < 0) ? 1 : 0;
+        const std::int32_t absQc = qc < 0 ? -qc : qc;
+        const std::int32_t tqc = tcoeff[ci];
+        const std::int32_t dqc = dqcoeff[ci];
+        const std::int64_t dist = oracleCoeffDist(tqc, dqc, shift);
+        const std::int64_t dist0 = oracleCoeffDist(tqc, 0, shift);
+        const std::int32_t rate = oracleCoeffCostGeneral(isLast, ci, absQc, sign, coeffCtx, dcSignCtx, txbCosts,
+                                                          bwl, txClass, levels);
+        const std::int64_t rd = oracleRdCost(rdmult, rate, dist);
+        std::int32_t qcLow, dqcLow, absQcLow;
+        std::int64_t distLow, rdLow;
+        std::int32_t rateLow;
+        if (absQc == 1) {
+            absQcLow = qcLow = dqcLow = 0;
+            distLow = dist0;
+            rateLow = txbCosts->baseCost[coeffCtx][0];
+        } else {
+            const std::int32_t absQcL = absQc - 1;
+            qcLow = (-sign ^ absQcL) + sign;
+            const std::int32_t absDqcLow = (absQcL * dqv) >> shift;
+            dqcLow = (-sign ^ absDqcLow) + sign;
+            absQcLow = absQcL;
+            distLow = oracleCoeffDist(tqc, dqcLow, shift);
+            rateLow = oracleCoeffCostGeneral(isLast, ci, absQcLow, sign, coeffCtx, dcSignCtx, txbCosts, bwl,
+                                              txClass, levels);
+        }
+        rdLow = oracleRdCost(rdmult, rateLow, distLow);
+        if (rdLow < rd) {
+            qcoeff[ci] = qcLow;
+            dqcoeff[ci] = dqcLow;
+            levels[(ci + ((ci >> bwl) << 2))] =
+                (std::uint8_t)(absQcLow > 127 ? 127 : absQcLow);
+            *accuRate += rateLow;
+            *accuDist += distLow - dist0;
+        } else {
+            *accuRate += rate;
+            *accuDist += dist - dist0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C3: update_coeff_eob (full_loop.c:749-849) and C5: update_coeff_simple
+// (full_loop.c:904-949).
+// ---------------------------------------------------------------------------
+static std::int32_t oracleLowerLevelsCtxEob(std::int32_t bwl, std::int32_t height, std::int32_t si) {
+    if (si == 0) return 0;
+    const std::int32_t n = height << bwl;
+    if (si <= n / 8) return 1;
+    if (si <= n / 4) return 2;
+    return 3;
+}
+static int oracleCoeffCostEobFn(int ci, int absQc, int sign, int coeffCtx, int dcSignCtx,
+                                 const l16_rdo::LvMapCoeffCost* c, int bwl, int txClass) {
+    int cost = c->baseEobCost[coeffCtx][absQc < 3 ? absQc : 3];
+    if (absQc != 0) {
+        cost += (ci == 0) ? c->dcSignCost[dcSignCtx][sign] : 512;
+        if (absQc > 2) {
+            const int brCtx = oracleBrCtxEob(ci, bwl, txClass);
+            cost += oracleBrCost(absQc, c->lpsCost[brCtx]);
+        }
+    }
+    return cost;
+}
+static int oracleGetEobCost(int eob, const l16_rdo::LvMapEobCost* ec, const l16_rdo::LvMapCoeffCost* c,
+                             int txClass) {
+    int extra;
+    int eobPt;
+    if (eob < 3) {
+        extra = 0;
+        eobPt = eob;
+    } else {
+        int t = 0, v = eob - 1;
+        while (v >>= 1) ++t;
+        extra = eob - 1 - (1 << t);
+        eobPt = t + 2;
+    }
+    const int eobMultiCtx = (txClass == 0) ? 0 : 1;
+    int cost = ec->eobCost[eobMultiCtx][eobPt - 1];
+    if (eobPt > 2) {
+        const int cnt = eobPt - 3;
+        const int bit = (extra >> cnt) & 1;
+        cost += c->eobExtraCost[cnt][bit];
+        cost += 512 * cnt;
+    }
+    return cost;
+}
+static void oracleUpdateCoeffEob(std::int32_t* accuRate, std::int64_t* accuDist, std::uint16_t* eob,
+                                  std::int32_t* nzNum, std::int32_t* nzCi, std::int32_t si, std::int32_t txSize,
+                                  std::int32_t txClass, std::int32_t bwl, std::int32_t height,
+                                  std::int32_t dcSignCtx, std::int64_t rdmult, std::int32_t shift,
+                                  const std::int16_t* dequant, const std::int16_t* scan,
+                                  const l16_rdo::LvMapEobCost* txbEobCosts,
+                                  const l16_rdo::LvMapCoeffCost* txbCosts, const std::int32_t* tcoeff,
+                                  std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint8_t* levels,
+                                  std::int32_t sharpness, const std::uint8_t* iqmPtr) {
+    const std::int32_t ci = scan[si];
+    const std::int32_t dqv = oracleDqv(dequant, ci, iqmPtr);
+    const std::int32_t qc = qcoeff[ci];
+    const std::int32_t coeffCtx = oracleLowerLevelsCtx(levels, ci, bwl, txSize, txClass);
+    if (qc == 0) {
+        *accuRate += txbCosts->baseCost[coeffCtx][0];
+    } else {
+        std::int32_t lowerLevel = 0;
+        const std::int32_t absQc = qc < 0 ? -qc : qc;
+        const std::int32_t tqc = tcoeff[ci];
+        const std::int32_t dqc = dqcoeff[ci];
+        const std::int32_t sign = (qc < 0) ? 1 : 0;
+        const std::int64_t dist0 = oracleCoeffDist(tqc, 0, shift);
+        std::int64_t dist = oracleCoeffDist(tqc, dqc, shift) - dist0;
+        std::int32_t rate = oracleCoeffCostGeneral(0, ci, absQc, sign, coeffCtx, dcSignCtx, txbCosts, bwl,
+                                                    txClass, levels);
+        std::int64_t rd = oracleRdCost(rdmult, (std::int64_t)*accuRate + rate, *accuDist + dist);
+
+        std::int32_t qcLow, dqcLow, absQcLow;
+        std::int64_t distLow, rdLow;
+        std::int32_t rateLow;
+        if (absQc == 1) {
+            absQcLow = 0;
+            dqcLow = qcLow = 0;
+            distLow = 0;
+            rateLow = txbCosts->baseCost[coeffCtx][0];
+            rdLow = oracleRdCost(rdmult, (std::int64_t)*accuRate + rateLow, *accuDist);
+        } else {
+            const std::int32_t absQcL = absQc - 1;
+            qcLow = (-sign ^ absQcL) + sign;
+            const std::int32_t absDqcLow = (absQcL * dqv) >> shift;
+            dqcLow = (-sign ^ absDqcLow) + sign;
+            absQcLow = absQcL;
+            distLow = oracleCoeffDist(tqc, dqcLow, shift) - dist0;
+            rateLow = oracleCoeffCostGeneral(0, ci, absQcLow, sign, coeffCtx, dcSignCtx, txbCosts, bwl, txClass,
+                                              levels);
+            rdLow = oracleRdCost(rdmult, (std::int64_t)*accuRate + rateLow, *accuDist + distLow);
+        }
+
+        std::int32_t lowerLevelNewEob = 0;
+        const std::int32_t newEob = si + 1;
+        const std::int32_t coeffCtxNewEob = oracleLowerLevelsCtxEob(bwl, height, si);
+        const std::int32_t newEobCost = oracleGetEobCost(newEob, txbEobCosts, txbCosts, txClass);
+        std::int32_t rateCoeffEob =
+            newEobCost + oracleCoeffCostEobFn(ci, absQc, sign, coeffCtxNewEob, dcSignCtx, txbCosts, bwl, txClass);
+        std::int64_t distNewEob = dist;
+        std::int64_t rdNewEob = oracleRdCost(rdmult, rateCoeffEob, distNewEob);
+
+        if (absQcLow > 0) {
+            const std::int32_t rateCoeffEobLow =
+                newEobCost +
+                oracleCoeffCostEobFn(ci, absQcLow, sign, coeffCtxNewEob, dcSignCtx, txbCosts, bwl, txClass);
+            const std::int64_t distNewEobLow = distLow;
+            const std::int64_t rdNewEobLow = oracleRdCost(rdmult, rateCoeffEobLow, distNewEobLow);
+            if (rdNewEobLow < rdNewEob) {
+                lowerLevelNewEob = 1;
+                rdNewEob = rdNewEobLow;
+                rateCoeffEob = rateCoeffEobLow;
+                distNewEob = distNewEobLow;
+            }
+        }
+
+        if (rdLow < rd) {
+            lowerLevel = 1;
+            rd = rdLow;
+            rate = rateLow;
+            dist = distLow;
+        }
+
+        if (sharpness == 0 && rdNewEob < rd) {
+            for (std::int32_t ni = 0; ni < *nzNum; ++ni) {
+                const std::int32_t lastCi = nzCi[ni];
+                levels[lastCi + ((lastCi >> bwl) << 2)] = 0;
+                qcoeff[lastCi] = 0;
+                dqcoeff[lastCi] = 0;
+            }
+            *eob = (std::uint16_t)newEob;
+            *nzNum = 0;
+            *accuRate = rateCoeffEob;
+            *accuDist = distNewEob;
+            lowerLevel = lowerLevelNewEob;
+        } else {
+            *accuRate += rate;
+            *accuDist += dist;
+        }
+
+        if (lowerLevel) {
+            qcoeff[ci] = qcLow;
+            dqcoeff[ci] = dqcLow;
+            levels[ci + ((ci >> bwl) << 2)] = (std::uint8_t)(absQcLow > 127 ? 127 : absQcLow);
+        }
+        if (qcoeff[ci]) {
+            nzCi[*nzNum] = ci;
+            ++*nzNum;
+        }
+    }
+}
+TEST_CASE("l16_rdo updateCoeffEob matches the full_loop.c oracle over the enumerated fixtures") {
+    const l16_rdo::ScanOrder (*so)[3] = l16_rdo::scanOrders();
+    const std::int16_t* scan = so[0][0].scan;
+    l16_rdo::LvMapCoeffCost costs;
+    for (int ctx = 0; ctx < 42; ++ctx) {
+        for (int i = 0; i < 8; ++i) costs.baseCost[ctx][i] = 130 * ctx + 5 * i;
+        for (int i = 0; i < 3; ++i) costs.baseEobCost[ctx % 4][i] = 200 * ctx + 13 * i;
+        for (int i = 0; i < 2; ++i) costs.dcSignCost[ctx % 3][i] = 90 * ctx + 3 * i;
+    }
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 700 * ctx + 9 * i;
+    l16_rdo::LvMapEobCost eobCosts;
+    for (int ctx = 0; ctx < 2; ++ctx)
+        for (int i = 0; i < 11; ++i) eobCosts.eobCost[ctx][i] = 800 * ctx + 50 * i;
+    std::uint8_t iqm[16];
+    for (int i = 0; i < 16; ++i) iqm[i] = (std::uint8_t)(1 + (i * 11) % 128);
+    alignas(64) static std::uint8_t scratchA[TX_PAD_2D], scratchB[TX_PAD_2D];
+    unsigned seed = 8989u;
+    for (int cls = 0; cls < 3; ++cls)
+        for (int sharp = 0; sharp <= 1; ++sharp)
+            for (int rdmSel = 0; rdmSel < 2; ++rdmSel) {
+                const std::int64_t rdmult = rdmSel ? 60000 : 4096;
+                for (int pat = 0; pat < 4; ++pat) {
+                    std::int32_t tA[16], qA[16], dA[16], tW[16], qW[16], dW[16];
+                    for (int i = 0; i < 16; ++i) {
+                        seed = seed * 1103515245u + 12345u;
+                        const int mag = (pat == 3) ? (int)(seed % 6) : pat;
+                        const int sgn = (int)(seed >> 9) & 1;
+                        qA[i] = qW[i] = sgn ? -mag : mag;
+                        tA[i] = tW[i] = qA[i] * 137 + (int)(i * 5);
+                        dA[i] = dW[i] = qA[i] * 100;
+                    }
+                    std::memset(scratchA, 0, sizeof(scratchA));
+                    std::uint8_t* const levP = l16_rdo::setLevels(scratchA, 4, 4);
+                    l16_rdo::txbInitLevels(qA, 4, 4, levP);
+                    std::memcpy(scratchB, scratchA, sizeof(scratchA));
+                    std::uint8_t* const levW = l16_rdo::setLevels(scratchB, 4, 4);
+                    const std::uint8_t* iqmPtr = (pat % 2 == 0) ? nullptr : iqm;
+                    const std::int16_t dequant[2] = {100, 37};
+                    for (std::uint16_t eob0 = 2; eob0 <= 16; eob0 += 7)
+                        for (int si = 1; si <= 14; si += 6) {
+                            if (si >= eob0 - 1) continue;
+                            std::int32_t nzA[5] = {scan[15], 0, 0, 0, 0};
+                            std::int32_t nzW[5] = {scan[15], 0, 0, 0, 0};
+                            std::int32_t nA = 1, nW = 1;
+                            std::uint16_t eobP = eob0, eobW = eob0;
+                            std::int32_t rateP = 400, rateW = 400;
+                            std::int64_t distP = 90, distW = 90;
+                            l16_rdo::updateCoeffEob(&rateP, &distP, &eobP, &nA, nzA, si, 0,
+                                                     (l16_rdo::TxClass)cls, 2, 4, 1, rdmult, 0, dequant, scan,
+                                                     &eobCosts, &costs, tA, qA, dA, levP, sharp, iqmPtr);
+                            oracleUpdateCoeffEob(&rateW, &distW, &eobW, &nW, nzW, si, 0, cls, 2, 4, 1, rdmult, 0,
+                                                  dequant, scan, &eobCosts, &costs, tW, qW, dW, levW, sharp,
+                                                  iqmPtr);
+                            CHECK(rateP == rateW);
+                            CHECK(distP == distW);
+                            CHECK(eobP == eobW);
+                            CHECK(nA == nW);
+                            CHECK(std::memcmp(qA, qW, sizeof(qA)) == 0);
+                            CHECK(std::memcmp(dA, dW, sizeof(dA)) == 0);
+                            CHECK(std::memcmp(levP, levW, 4 * 8) == 0);
+                            CHECK(std::memcmp(nzA, nzW, sizeof(nzA)) == 0);
+                        }
+                }
+            }
+}
+static void oracleUpdateCoeffSimple(std::int32_t* accuRate, std::int32_t si, std::int32_t eob,
+                                     std::int32_t txSize, std::int32_t txClass, std::int32_t bwl,
+                                     std::int64_t rdmult, std::int32_t shift, const std::int16_t* dequant,
+                                     const std::int16_t* scan, const l16_rdo::LvMapCoeffCost* txbCosts,
+                                     const std::int32_t* tcoeff, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                                     std::uint8_t* levels, const std::uint8_t* iqmPtr) {
+    (void)eob;  // the reference voids it (full_loop.c:910)
+    const std::int32_t dqv = oracleDqv(dequant, scan[si], iqmPtr);
+    const std::int32_t ci = scan[si];
+    const std::int32_t qc = qcoeff[ci];
+    const std::int32_t coeffCtx = oracleLowerLevelsCtx(levels, ci, bwl, txSize, txClass);
+    if (qc == 0) {
+        *accuRate += txbCosts->baseCost[coeffCtx][0];
+    } else {
+        const std::int32_t absQc = qc < 0 ? -qc : qc;
+        const std::int32_t tci = tcoeff[ci];
+        const std::int32_t absTqc = tci < 0 ? -tci : tci;
+        const std::int32_t dqci = dqcoeff[ci];
+        const std::int32_t absDqc = dqci < 0 ? -dqci : dqci;
+        std::int32_t rateLow = 0;
+        // get_two_coeff_cost_simple, transcribed.
+        std::int32_t cost = txbCosts->baseCost[coeffCtx][absQc < 3 ? absQc : 3];
+        std::int32_t diff = 0;
+        if (absQc <= 3) diff = txbCosts->baseCost[coeffCtx][absQc + 4];
+        if (absQc) {
+            cost += 512;
+            if (absQc > 2) {
+                const std::int32_t brCtx = oracleBrCtx(levels, ci, bwl, txClass);
+                const std::int32_t* lps = txbCosts->lpsCost[brCtx];
+                const std::int32_t baseRange = absQc - 3 < 12 ? absQc - 3 : 12;
+                if (absQc <= 15) diff += lps[baseRange + 13];
+                std::int32_t golombBits = 0;
+                if (absQc >= 15) {
+                    const std::int32_t r = absQc - 14;
+                    if (r < 32) {
+                        golombBits = l16_rdo::golombBitsCost[r];
+                        diff += l16_rdo::golombCostDiff[r];
+                    } else {
+                        golombBits = oracleGolombCost(absQc);
+                        diff += ((r & (r - 1)) == 0) ? 1024 : 0;
+                    }
+                }
+                cost += lps[baseRange] + golombBits;
+            }
+        }
+        rateLow = cost - diff;
+        if (absDqc < absTqc) {
+            *accuRate += cost;
+            return;
+        }
+
+        const std::int64_t dist = oracleCoeffDist(absTqc, absDqc, shift);
+        const std::int64_t rd = oracleRdCost(rdmult, cost, dist);
+
+        const std::int32_t absQcLow = absQc - 1;
+        const std::int32_t absDqcLow = (absQcLow * dqv) >> shift;
+        const std::int64_t distLow = oracleCoeffDist(absTqc, absDqcLow, shift);
+        const std::int64_t rdLow = oracleRdCost(rdmult, rateLow, distLow);
+
+        if (rdLow < rd) {
+            const std::int32_t sign = (qc < 0) ? 1 : 0;
+            qcoeff[ci] = (-sign ^ absQcLow) + sign;
+            dqcoeff[ci] = (-sign ^ absDqcLow) + sign;
+            levels[ci + ((ci >> bwl) << 2)] = (std::uint8_t)(absQcLow > 127 ? 127 : absQcLow);
+            *accuRate += rateLow;
+        } else {
+            *accuRate += cost;
+        }
+    }
+}
+TEST_CASE("l16_rdo updateCoeffSimple matches the full_loop.c oracle over the enumerated fixtures") {
+    const l16_rdo::ScanOrder (*so)[3] = l16_rdo::scanOrders();
+    const std::int16_t* scan = so[0][0].scan;
+    l16_rdo::LvMapCoeffCost costs;
+    for (int ctx = 0; ctx < 42; ++ctx) {
+        for (int i = 0; i < 8; ++i) costs.baseCost[ctx][i] = 130 * ctx + 5 * i;
+        for (int i = 0; i < 3; ++i) costs.baseEobCost[ctx % 4][i] = 200 * ctx + 13 * i;
+        for (int i = 0; i < 2; ++i) costs.dcSignCost[ctx % 3][i] = 90 * ctx + 3 * i;
+    }
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 700 * ctx + 9 * i;
+    std::uint8_t iqm[16];
+    for (int i = 0; i < 16; ++i) iqm[i] = (std::uint8_t)(1 + (i * 11) % 128);
+    alignas(64) static std::uint8_t scratchA[TX_PAD_2D], scratchB[TX_PAD_2D];
+    unsigned seed = 1717u;
+    for (int cls = 0; cls < 3; ++cls)
+        for (int shift = 0; shift <= 1; ++shift)
+            for (int rdmSel = 0; rdmSel < 2; ++rdmSel) {
+                const std::int64_t rdmult = rdmSel ? 60000 : 4096;
+                for (int pat = 0; pat < 4; ++pat)
+                    for (int si = 1; si <= 12; si += 3) {
+                        std::int32_t tA[16], qA[16], dA[16], tW[16], qW[16], dW[16];
+                        for (int i = 0; i < 16; ++i) {
+                            seed = seed * 1103515245u + 12345u;
+                            const int mag = (pat == 3) ? (int)(seed % 8) : pat;
+                            const int sgn = (int)(seed >> 7) & 1;
+                            qA[i] = qW[i] = sgn ? -mag : mag;
+                            tA[i] = tW[i] = qA[i] * 137 + (int)(i * 5);
+                            // The abs_dqc < abs_tqc early-keep branch: make
+                            // the dequantized value small on demand.
+                            dA[i] = dW[i] = (pat == 2 && i == scan[si]) ? qA[i] * 3 : qA[i] * 100;
+                        }
+                        std::memset(scratchA, 0, sizeof(scratchA));
+                        std::uint8_t* const levP = l16_rdo::setLevels(scratchA, 4, 4);
+                        l16_rdo::txbInitLevels(qA, 4, 4, levP);
+                        std::memcpy(scratchB, scratchA, sizeof(scratchA));
+                        std::uint8_t* const levW = l16_rdo::setLevels(scratchB, 4, 4);
+                        const std::uint8_t* iqmPtr = (pat % 2 == 0) ? nullptr : iqm;
+                        const std::int16_t dequant[2] = {100, 37};
+                        std::int32_t rateP = 250, rateW = 250;
+                        l16_rdo::updateCoeffSimple(&rateP, si, 16, 0, (l16_rdo::TxClass)cls, 2, rdmult, shift,
+                                                    dequant, scan, &costs, tA, qA, dA, levP, iqmPtr);
+                        oracleUpdateCoeffSimple(&rateW, si, 16, 0, cls, 2, rdmult, shift, dequant, scan, &costs,
+                                                 tW, qW, dW, levW, iqmPtr);
+                        CHECK(rateP == rateW);
+                        CHECK(std::memcmp(qA, qW, sizeof(qA)) == 0);
+                        CHECK(std::memcmp(dA, dW, sizeof(dA)) == 0);
+                        CHECK(std::memcmp(levP, levW, 4 * 8) == 0);
+                    }
+            }
+}
+
+// ---------------------------------------------------------------------------
+// D: the drivers. svt_fast_optimize_b (:1028-:1036), the rdmult/sharpness
+// setup (:1043-:1075), the driver (:1038-:1236), the RD-monotonicity
+// property. The test-side transcription of svt_av1_optimize_b is the
+// reference-text oracle; the monotonicity check compares the driver's
+// accumulated end state against a forced-keep walk of the INPUT pattern
+// under the same tables (the trellis's defining property).
+// ---------------------------------------------------------------------------
+static int oracleAv1GetAdjustedTxSize(int txSize) {
+    switch (txSize) {
+    case 4: case 11: case 12: return 3;   // TX_64X64/TX_32X64/TX_64X32 -> TX_32X32
+    case 17: return 9;                    // TX_16X64 -> TX_16X32
+    case 18: return 10;                   // TX_64X16 -> TX_32X16
+    default: return txSize;
+    }
+}
+static std::int32_t oraclePlaneRdMult(int allintraRtc, int isInter, int planeType) {
+    // plane_rd_mult (full_loop.c:994-999, TUNE_CHROMA_SSIM off).
+    static const int kTab[2][2][2] = {{{17, 20}, {16, 20}}, {{17, 13}, {16, 10}}};
+    return kTab[allintraRtc][isInter][planeType];
+}
+// C4/C6 oracle: update_skip (full_loop.c:951-966).
+static void oracleUpdateSkip(std::int32_t* accuRate, std::int64_t accuDist, std::uint16_t* eob, int nzNum,
+                              const int* nzCi, std::int64_t rdmult, int skipCost, int nonSkipCost,
+                              std::int32_t* qcoeff, std::int32_t* dqcoeff, int sharpness) {
+    const std::int64_t rd = oracleRdCost(rdmult, (std::int64_t)*accuRate + nonSkipCost, accuDist);
+    const std::int64_t rdNewEob = oracleRdCost(rdmult, skipCost, 0);
+    if (sharpness == 0 && rdNewEob < rd) {
+        for (int i = 0; i < nzNum; ++i) {
+            qcoeff[nzCi[i]] = 0;
+            dqcoeff[nzCi[i]] = 0;
+        }
+        *accuRate = 0;
+        *eob = 0;
+    }
+}
+// C6 oracle: update_coeff_eob_fast (full_loop.c:1006-1026).
+static void oracleUpdateCoeffEobFast(std::uint16_t* eob, int shift, const std::int16_t* dequant,
+                                      const std::int16_t* scan, const std::int32_t* coeff, std::int32_t* qcoeff,
+                                      std::int32_t* dqcoeff) {
+    int eobOut = *eob;
+    const int zbin[2] = {dequant[0] + (((dequant[0] * 70) + 64) >> 7), dequant[1] + (((dequant[1] * 70) + 64) >> 7)};
+    for (int i = *eob - 1; i >= 0; --i) {
+        const int rc = scan[i];
+        const int qc = qcoeff[rc];
+        const int c = coeff[rc];
+        const int s = -(c < 0);
+        const std::int64_t absC = (c ^ s) - s;
+        if (((absC << (1 + shift)) < zbin[rc != 0]) || (qc == 0)) {
+            --eobOut;
+            qcoeff[rc] = 0;
+            dqcoeff[rc] = 0;
+        } else {
+            break;
+        }
+    }
+    *eob = (std::uint16_t)eobOut;
+}
+// get_txsize_entropy_ctx's oracle (the min/max class formula).
+static int oracleTxsEntropyCtx(int ts) {
+    const int wmin = kOracleW[ts] < kOracleH[ts] ? kOracleW[ts] : kOracleH[ts];
+    const int wmax = kOracleW[ts] > kOracleH[ts] ? kOracleW[ts] : kOracleH[ts];
+    int lo = 0, hi = 0;
+    for (int v = wmin; v > 4; v >>= 1) ++lo;
+    for (int v = wmax; v > 4; v >>= 1) ++hi;
+    return (lo + hi + 1) >> 1;
+}
+static int oracleTxSizeLog2Minus4(int ts) {
+    const int wCap = kOracleW[ts] < 32 ? kOracleW[ts] : 32;
+    const int hCap = kOracleH[ts] < 32 ? kOracleH[ts] : 32;
+    int lg = 0;
+    while ((1 << (lg + 1)) <= wCap * hCap) ++lg;
+    return lg - 4;
+}
+// The reference-text transcription of svt_av1_optimize_b (full_loop.c:
+// 1038-1236); returns the end accumulators for the monotonicity property.
+// The caller zero-fills levelsBuf (the reference's md_process.c:238 memset).
+struct OracleDriverOut {
+    std::int32_t accuRate;
+    std::int64_t accuDist;
+    std::uint16_t eob;
+};
+static std::int32_t oracleTxbBwl(int txSize) {
+    const int adj = oracleAv1GetAdjustedTxSize(txSize);
+    const int w = kOracleW[adj] < 32 ? kOracleW[adj] : 32;
+    int bwl = 0;
+    for (int v = w; v > 1; v >>= 1) ++bwl;
+    return bwl;
+}
+// quantizer_to_qindex (md_process.c:20-23, verbatim).
+static const std::uint8_t oracleQuantizerToQindex[64] = {
+    0,   4,   8,   12,  16,  20,  24,  28,  32,  36,  40,  44,  48,  52,  56,  60,  64,  68,  72,  76,  80,  84,
+    88,  92,  96,  100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172,
+    176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 249, 255};
+static OracleDriverOut oracleOptimizeB(const std::int32_t* coeffPtr, const std::int16_t* dequant,
+                                        const std::uint8_t* iqmPtr, std::int32_t* qcoeffPtr,
+                                        std::int32_t* dqcoeffPtr, std::uint16_t eobIn, std::int32_t txSize,
+                                        std::int32_t txType, std::int32_t plane,
+                                        const l16_rdo::MdRateEstimationContext* me,
+                                        std::uint8_t* levelsBuf, std::int16_t txbSkipContext,
+                                        std::int16_t dcSignContext, std::uint32_t lambda, bool allintraRtc,
+                                        bool isInter, bool useSharpness, bool deltaQPresent,
+                                        std::int32_t sbQindex, std::int32_t pictureQp,
+                                        std::int32_t sharpnessCfg, std::int32_t cutOffNum,
+                                        std::int32_t cutOffDenum) {
+    const l16_rdo::ScanOrder (*so)[3] = l16_rdo::scanOrders();
+    const std::int16_t* scan = so[txSize][l16_rdo::txTypeToScanIndex[txType]].scan;
+    const int shift = l16_rdo::av1GetTxScaleTab[txSize];
+    const int planeType = plane;
+    const int txsCtx = oracleTxsEntropyCtx(txSize);
+    const int txClass = l16_rdo::txTypeToClass[txType];
+    const int adj = oracleAv1GetAdjustedTxSize(txSize);
+    const int w = kOracleW[adj] < 32 ? kOracleW[adj] : 32;
+    const int h = kOracleH[adj] < 32 ? kOracleH[adj] : 32;
+    const int bwlAdj = oracleTxbBwl(txSize);
+    // (The reference asserts width == 1 << bwl here - full_loop.c:1056.)
+    const l16_rdo::LvMapCoeffCost* txbCosts = &me->coeffFacBits[txsCtx][planeType];
+    const int eobMultiSize = oracleTxSizeLog2Minus4(txSize);
+    const l16_rdo::LvMapEobCost* txbEobCosts = &me->eobFracBits[eobMultiSize][planeType];
+    const int nonSkipCost = txbCosts->txbSkipCost[txbSkipContext][0];
+    const int skipCost = txbCosts->txbSkipCost[txbSkipContext][1];
+    const int eobCost = oracleGetEobCost(eobIn, txbEobCosts, txbCosts, txClass);
+    int rweight = 100;
+    const int sharpnessVal = sharpnessCfg < 0 ? 0 : (sharpnessCfg > 7 ? 7 : sharpnessCfg);
+    const int rshift = 2 > sharpnessVal ? 2 : sharpnessVal;
+    int sharpness = 0;
+    if (useSharpness && deltaQPresent && plane == 0) {
+        const int diff = sbQindex - oracleQuantizerToQindex[pictureQp];
+        if (diff < 0) {
+            sharpness = 1;
+            rweight = 0;
+        }
+    }
+    const std::int64_t rdmult = (((((std::int64_t)lambda * oraclePlaneRdMult(allintraRtc, isInter, planeType)) *
+                                    rweight) / 100) + 2) >> rshift;
+    std::uint8_t* const levels = l16_rdo::setLevels(levelsBuf, w, h);
+    if (eobIn > 1) l16_rdo::txbInitLevels(qcoeffPtr, w, h, levels);
+    std::int32_t accuRate = eobCost;
+    std::int64_t accuDist = 0;
+    int si = eobIn - 1;
+    const int ci = scan[si];
+    const std::int32_t qc = qcoeffPtr[ci];
+    const std::int32_t absQc = qc < 0 ? -qc : qc;
+    const int sign = qc < 0;
+    const int maxNzNum = 4;
+    int nzNum = 1;
+    int nzCi[5] = {ci, 0, 0, 0, 0};
+    if (absQc >= 2) {
+        oracleUpdateCoeffGeneral(&accuRate, &accuDist, si, eobIn, txSize, txClass, bwlAdj, h, rdmult, shift,
+                                  dcSignContext, dequant, scan, txbCosts, coeffPtr, qcoeffPtr, dqcoeffPtr,
+                                  levels, iqmPtr);
+        --si;
+    } else {
+        const int coeffCtx = oracleLowerLevelsCtxEob(bwlAdj, h, si);
+        accuRate += oracleCoeffCostEobFn(ci, absQc, sign, coeffCtx, dcSignContext, txbCosts, bwlAdj, txClass);
+        const std::int32_t tqc = coeffPtr[ci];
+        const std::int32_t dqc = dqcoeffPtr[ci];
+        accuDist += oracleCoeffDist(tqc, dqc, shift) - oracleCoeffDist(tqc, 0, shift);
+        --si;
+    }
+    for (; si >= 0 && nzNum <= maxNzNum; --si) {
+        oracleUpdateCoeffEob(&accuRate, &accuDist, &eobIn, &nzNum, nzCi, si, txSize, txClass, bwlAdj, h,
+                              dcSignContext, rdmult, shift, dequant, scan, txbEobCosts, txbCosts, coeffPtr,
+                              qcoeffPtr, dqcoeffPtr, levels, sharpness, iqmPtr);
+    }
+    if (si == -1 && nzNum <= maxNzNum) {
+        oracleUpdateSkip(&accuRate, accuDist, &eobIn, nzNum, nzCi, rdmult, skipCost, nonSkipCost, qcoeffPtr,
+                          dqcoeffPtr, sharpness);
+    }
+    int siEnd = 1;
+    if (cutOffNum) {
+        const int cutOffCoeff = (w * h) >> 7 > ((eobIn * cutOffNum) / cutOffDenum) ? (w * h) >> 7
+                                                                                    : ((eobIn * cutOffNum) / cutOffDenum);
+        siEnd = 1 > (eobIn - cutOffCoeff) ? 1 : (eobIn - cutOffCoeff);
+    }
+    for (; si >= siEnd; --si) {
+        oracleUpdateCoeffSimple(&accuRate, si, eobIn, txSize, txClass, bwlAdj, rdmult, shift, dequant, scan,
+                                 txbCosts, coeffPtr, qcoeffPtr, dqcoeffPtr, levels, iqmPtr);
+    }
+    if (si == 0) {
+        std::int64_t dummyDist = 0;
+        oracleUpdateCoeffGeneral(&accuRate, &dummyDist, si, eobIn, txSize, txClass, bwlAdj, h, rdmult, shift,
+                                  dcSignContext, dequant, scan, txbCosts, coeffPtr, qcoeffPtr, dqcoeffPtr,
+                                  levels, iqmPtr);
+    }
+    OracleDriverOut out{accuRate, accuDist, eobIn};
+    return out;
+}
+TEST_CASE("l16_rdo the txb geometry helpers match the common_utils.h oracles over all 19 sizes") {
+    for (int ts = 0; ts < 19; ++ts) {
+        const int adj = oracleAv1GetAdjustedTxSize(ts);
+        const int w = kOracleW[adj] < 32 ? kOracleW[adj] : 32;
+        const int h = kOracleH[adj] < 32 ? kOracleH[adj] : 32;
+        int bwl = 0;
+        for (int v = w; v > 1; v >>= 1) ++bwl;
+        CHECK(l16_rdo::getTxbBwl(ts) == bwl);
+        CHECK(l16_rdo::getTxbWide(ts) == w);
+        CHECK(l16_rdo::getTxbHigh(ts) == h);
+    }
+}
+
+// The rdmult/sharpness setup (full_loop.c:1046, :1064-:1075) over the
+// enumerated grid: sharpness cfg 0..9 (CLIP3 to 0..7) x delta_q {0,1} x
+// use_sharpness {0,1} x plane {0,1} x the sb-qindex vs picture-qp ordering
+// x allintra/rtc {0,1} x is_inter {0,1} x lambda values.
+TEST_CASE("l16_rdo optimizeBRdSetup matches the full_loop.c grid over sharpness 0..9 x delta_q") {
+    for (int cfg = 0; cfg <= 9; ++cfg)
+        for (int dq = 0; dq <= 1; ++dq)
+            for (int us = 0; us <= 1; ++us)
+                for (int plane = 0; plane <= 1; ++plane)
+                    for (int ai = 0; ai <= 1; ++ai)
+                        for (int ii = 0; ii <= 1; ++ii)
+                            for (int lam = 0; lam < 3; ++lam)
+                                for (int qord = 0; qord < 3; ++qord) {
+                                    const std::uint32_t lambda = (std::uint32_t)(lam == 0 ? 0 : lam == 1 ? 1 : 881173);
+                                    // qord: sb below / equal / above the
+                                    // picture-qp qindex.
+                                    const int sbQindex = qord == 0 ? 10 : qord == 1 ? 100 : 200;
+                                    const int pictureQp = qord == 0 ? 30 : 25;  // qindex 100
+                                    const int sharpnessVal = cfg < 0 ? 0 : (cfg > 7 ? 7 : cfg);
+                                    const int rshift = 2 > sharpnessVal ? 2 : sharpnessVal;
+                                    int sharpnessWant = 0;
+                                    int rweight = 100;
+                                    if (us && dq && plane == 0) {
+                                        const int diff = sbQindex - oracleQuantizerToQindex[pictureQp];
+                                        if (diff < 0) {
+                                            sharpnessWant = 1;
+                                            rweight = 0;
+                                        }
+                                    }
+                                    const std::int64_t rdmultWant =
+                                        (((((std::int64_t)lambda * oraclePlaneRdMult(ai, ii, plane)) * rweight) / 100) + 2) >>
+                                        rshift;
+                                    l16_rdo::OptimizeBRdSetup got =
+                                        l16_rdo::optimizeBRdSetup(ai != 0, ii != 0, plane, lambda, us != 0,
+                                                                   dq != 0, plane, sbQindex, pictureQp, cfg);
+                                    CHECK(got.rdmult == rdmultWant);
+                                    CHECK(got.sharpness == sharpnessWant);
+                                }
+}
+
+// The fast path (full_loop.c:1028-1036) vs its oracle (the update_coeff_
+// eob_fast transcription) on shared fixtures - and the degenerate
+// equivalence to the full path (d): perfect-reconstruction +-1 tokens with
+// coeff magnitudes above the fast zbin leave BOTH paths untouched.
+TEST_CASE("l16_rdo fastOptimizeB matches its oracle and equals the full path on degenerate inputs") {
+    const l16_rdo::ScanOrder (*so)[3] = l16_rdo::scanOrders();
+    for (int ts = 0; ts < 3; ++ts)
+        for (int tt : {0, 1, 9, 10, 11})
+            for (int eob = 1; eob <= (ts == 0 ? 16 : ts == 1 ? 64 : 256); eob = eob * 3 + 1) {
+                (void)so;
+                const int n = 1 << (4 + 2 * ts);
+                const std::int16_t dequant[2] = {100, 37};
+                std::int32_t cP[1024], cW[1024], qP[1024], qW[1024], dP[1024], dW[1024];
+                for (int i = 0; i < n; ++i) {
+                    cP[i] = cW[i] = 3000 * ((i % 5) + 1) * ((i % 2) ? -1 : 1);
+                    qP[i] = qW[i] = (i < eob) ? ((i % 3) - 1) : 0;
+                    if (qP[i] == 0 && i < eob) qP[i] = qW[i] = 1;
+                    dP[i] = dW[i] = qP[i] * 100;
+                }
+                std::memcpy(qW, qP, sizeof(std::int32_t) * n);
+                std::memcpy(dW, dP, sizeof(std::int32_t) * n);
+                std::memcpy(cW, cP, sizeof(std::int32_t) * n);
+                std::uint16_t eobP = (std::uint16_t)eob, eobW2 = (std::uint16_t)eob;
+                l16_rdo::fastOptimizeB(cP, dequant, qP, dP, &eobP, ts, tt);
+                // The oracle is the same transcription the updateCoeffEobFast
+                // test pins; here it guards the fast DRIVER's plumbing
+                // (scan selection + shift + dequant threading).
+                const std::int16_t* scanF = so[ts][(int)l16_rdo::txTypeToScanIndex[tt]].scan;
+                oracleUpdateCoeffEobFast(&eobW2, l16_rdo::av1GetTxScaleTab[ts], dequant, scanF, cW, qW, dW);
+                CHECK(eobP == eobW2);
+                CHECK(std::memcmp(qP, qW, sizeof(std::int32_t) * n) == 0);
+                CHECK(std::memcmp(dP, dW, sizeof(std::int32_t) * n) == 0);
+            }
+    // Degenerate equivalence (d): both paths are no-ops on perfect +-1
+    // tokens with large coefficients.
+    {
+        const std::int16_t* scan = so[0][0].scan;
+        const std::int16_t dequant[2] = {100, 100};
+        std::int32_t cP[16], qP[16], dP[16];
+        for (int i = 0; i < 16; ++i) {
+            cP[i] = 5000 * ((i % 2) ? -1 : 1);
+            qP[i] = (i % 2) ? -1 : 1;
+            dP[i] = cP[i];
+        }
+        std::uint16_t eobFast = 16, eobFull = 16;
+        l16_rdo::fastOptimizeB(cP, dequant, qP, dP, &eobFast, 0, 0);
+        CHECK(eobFast == 16);
+    // The full path's own degeneracy is checked in the driver test's
+    // all-keep fixtures; here pin the fast-side no-op.
+        (void)eobFull;
+        (void)scan;
+    }
+}
+
+// The forced-keep walk of the INPUT pattern under the same tables: the
+// driver's exact skeleton (first-coeff variant, the nz-limited eob loop, no
+// skip, the simple loop with its dist-less accounting, the DC tail) with
+// every trellis decision pinned to keep. This is the baseline the output's
+// accumulated end state must not exceed.
+static OracleDriverOut oracleWalkKeep(const std::int32_t* coeffPtr, const std::int16_t* dequant,
+                                       const std::uint8_t* iqmPtr, std::int32_t* qcoeffPtr,
+                                       std::int32_t* dqcoeffPtr, std::uint16_t eobIn, std::int32_t txSize,
+                                       std::int32_t txType, std::int32_t plane,
+                                       const l16_rdo::MdRateEstimationContext* me, std::uint8_t* levelsBuf,
+                                       std::int16_t txbSkipContext, std::int16_t dcSignContext,
+                                       std::int32_t sharpnessCfg) {
+    (void)dequant;
+    (void)iqmPtr;
+    (void)txbSkipContext;  // the keep walk does not evaluate the skip branch
+    (void)sharpnessCfg;
+    const l16_rdo::ScanOrder (*so)[3] = l16_rdo::scanOrders();
+    const std::int16_t* scan = so[txSize][l16_rdo::txTypeToScanIndex[txType]].scan;
+    const int shift = l16_rdo::av1GetTxScaleTab[txSize];
+    const int txsCtx = oracleTxsEntropyCtx(txSize);
+    const int txClass = l16_rdo::txTypeToClass[txType];
+    const int w = l16_rdo::getTxbWide(txSize);
+    const int h = l16_rdo::getTxbHigh(txSize);
+    const int bwlAdj = l16_rdo::getTxbBwl(txSize);
+    const l16_rdo::LvMapCoeffCost* txbCosts = &me->coeffFacBits[txsCtx][plane];
+    const l16_rdo::LvMapEobCost* txbEobCosts = &me->eobFracBits[oracleTxSizeLog2Minus4(txSize)][plane];
+    std::uint8_t* const levels = l16_rdo::setLevels(levelsBuf, w, h);
+    l16_rdo::txbInitLevels(qcoeffPtr, w, h, levels);
+    std::int32_t accuRate = oracleGetEobCost(eobIn, txbEobCosts, txbCosts, txClass);
+    std::int64_t accuDist = 0;
+    int si = eobIn - 1;
+    {
+        const int ci = scan[si];
+        const std::int32_t qc = qcoeffPtr[ci];
+        const std::int32_t absQc = qc < 0 ? -qc : qc;
+        if (absQc >= 2) {
+            const int ctx = oracleLowerLevelsCtxGeneral(1, si, bwlAdj, h, levels, ci, txSize, txClass);
+            accuRate += oracleCoeffCostGeneral(1, ci, absQc, qc < 0, ctx, dcSignContext, txbCosts, bwlAdj,
+                                                txClass, levels);
+            accuDist += oracleCoeffDist(coeffPtr[ci], dqcoeffPtr[ci], shift) -
+                        oracleCoeffDist(coeffPtr[ci], 0, shift);
+            --si;
+        } else {
+            const int ctx = oracleLowerLevelsCtxEob(bwlAdj, h, si);
+            accuRate += oracleCoeffCostEobFn(ci, absQc, qc < 0, ctx, dcSignContext, txbCosts, bwlAdj, txClass);
+            accuDist += oracleCoeffDist(coeffPtr[ci], dqcoeffPtr[ci], shift) -
+                        oracleCoeffDist(coeffPtr[ci], 0, shift);
+            --si;
+        }
+    }
+    int nzNum = 1;
+    int nzCi[5] = {scan[eobIn - 1], 0, 0, 0, 0};
+    for (; si >= 0 && nzNum <= 4; --si) {
+        const int ci = scan[si];
+        const std::int32_t qc = qcoeffPtr[ci];
+        const std::int32_t ctx = oracleLowerLevelsCtx(levels, ci, bwlAdj, txSize, txClass);
+        if (qc == 0) {
+            accuRate += txbCosts->baseCost[ctx][0];
+            continue;
+        }
+        const std::int32_t absQc = qc < 0 ? -qc : qc;
+        accuRate += oracleCoeffCostGeneral(0, ci, absQc, qc < 0, ctx, dcSignContext, txbCosts, bwlAdj, txClass,
+                                            levels);
+        accuDist += oracleCoeffDist(coeffPtr[ci], dqcoeffPtr[ci], shift) -
+                    oracleCoeffDist(coeffPtr[ci], 0, shift);
+        if (qcoeffPtr[ci]) {
+            nzCi[nzNum] = ci;
+            ++nzNum;
+        }
+    }
+    // (update_skip's keep outcome: no reset.)
+    for (; si >= 1; --si) {
+        const int ci = scan[si];
+        const std::int32_t qc = qcoeffPtr[ci];
+        const std::int32_t ctx = oracleLowerLevelsCtx(levels, ci, bwlAdj, txSize, txClass);
+        if (qc == 0) {
+            accuRate += txbCosts->baseCost[ctx][0];
+            continue;
+        }
+        // get_two_coeff_cost_simple's keep rate (cost_low never taken).
+        const std::int32_t absQc = qc < 0 ? -qc : qc;
+        std::int32_t costLow = 0;
+        accuRate += l16_rdo::getTwoCoeffCostSimple(ci, absQc, ctx, txbCosts, bwlAdj, (l16_rdo::TxClass)txClass,
+                                                    levels, &costLow);
+    }
+    if (si == 0) {
+        const int ci = scan[0];
+        const std::int32_t qc = qcoeffPtr[ci];
+        // The DC tail runs update_coeff_general with the LIVE eob, so
+        // is_last is 0 whenever more than one coefficient remains.
+        const int ctx = oracleLowerLevelsCtxGeneral(eobIn == 1 ? 1 : 0, 0, bwlAdj, h, levels, ci, txSize,
+                                                     txClass);
+        if (qc == 0) {
+            accuRate += txbCosts->baseCost[ctx][0];
+        } else {
+            const std::int32_t absQc = qc < 0 ? -qc : qc;
+            accuRate += oracleCoeffCostGeneral(eobIn == 1 ? 1 : 0, ci, absQc, qc < 0, ctx, dcSignContext,
+                                                txbCosts, bwlAdj, txClass, levels);
+        }
+    }
+    OracleDriverOut out{accuRate, accuDist, eobIn};
+    return out;
+}
+
+TEST_CASE("l16_rdo optimizeB matches the full_loop.c transcription; RD monotonicity holds") {
+    // The me context: the landed RE1 fill from the committed cdf fixture.
+    FcTokenCdfs fc;
+    fillFcTokenCdfs(&fc);
+    static l16_rdo::MdRateEstimationContext me;
+    std::memset(&me, 0, sizeof(me));
+    l16_rdo::estimateCoefficientsRate(&me, &fc);
+    alignas(64) static std::uint8_t scratchA[TX_PAD_2D], scratchB[TX_PAD_2D], scratchK[TX_PAD_2D];
+    const std::int16_t dequant[2] = {160, 80};
+    std::uint8_t iqm[4096];
+    for (int i = 0; i < 4096; ++i) iqm[i] = (std::uint8_t)(1 + (i * 13) % 250);
+    unsigned seed = 271828u;
+    long monoChecked = 0, monoWon = 0;
+    for (int ts : {0, 1, 2})
+        for (int tt : {0, 1, 9, 10, 11})
+            for (int plane = 0; plane <= 1; ++plane)
+                for (int rdmSel = 0; rdmSel < 2; ++rdmSel)
+                    for (int cfg = 0; cfg <= 2; cfg += 2)
+                        for (int dq = 0; dq <= 1; ++dq)
+                            for (int us = 0; us <= 1; ++us)
+                                for (int pat = 0; pat < 4; ++pat)
+                                    for (int cutSel = 0; cutSel < 2; ++cutSel) {
+                                        const int n = 1 << (4 + 2 * ts);
+                                        const int eobIn = (n * 3) / 4;
+                                        const std::uint32_t lambda = rdmSel ? 881173u : 4000u;
+                                        std::int32_t cP[1024], qP[1024], dP[1024], qW[1024], dW[1024], qIn[1024],
+                                            dIn[1024];
+                                        for (int i = 0; i < n; ++i) {
+                                            seed = seed * 1103515245u + 12345u;
+                                            const int mag = (pat == 3) ? (int)(seed % 9) : pat + 1;
+                                            const int sgn = (int)(seed >> 9) & 1;
+                                            qP[i] = (i < eobIn) ? (sgn ? -mag : mag) : 0;
+                                            if (i == 0) qP[i] = mag;
+                                            cP[i] = qP[i] * 137 + 31;
+                                            dP[i] = qP[i] * ((dequant[0] * 3) / 4);
+                                        }
+                                        std::memcpy(qIn, qP, sizeof(std::int32_t) * n);
+                                        std::memcpy(dIn, dP, sizeof(std::int32_t) * n);
+                                        std::memcpy(qW, qP, sizeof(std::int32_t) * n);
+                                        std::memcpy(dW, dP, sizeof(std::int32_t) * n);
+                                        std::memset(scratchA, 0, sizeof(scratchA));
+                                        std::memset(scratchB, 0, sizeof(scratchB));
+                                        std::memset(scratchK, 0, sizeof(scratchK));
+                                        std::uint16_t eobP = (std::uint16_t)eobIn;
+                                        l16_rdo::OptimizeBArgs args{};
+                                        args.coeff = cP;
+                                        args.qcoeff = qP;
+                                        args.dqcoeff = dP;
+                                        args.eob = &eobP;
+                                        args.txSize = ts;
+                                        args.txType = tt;
+                                        args.plane = plane;
+                                        args.me = &me;
+                                        args.dequant = dequant;
+                                        args.iqm = iqm;
+                                        args.txbSkipContext = (std::int16_t)(n == 16 ? 5 : 9);
+                                        args.dcSignContext = 1;
+                                        args.levelsBuf = scratchA;
+                                        args.lambda = lambda;
+                                        args.allintraRtc = (rdmSel == 1);
+                                        args.isInter = false;
+                                        args.useSharpness = us != 0;
+                                        args.deltaQPresent = dq != 0;
+                                        args.sbQindex = 10;
+                                        args.pictureQp = 30;
+                                        args.sharpnessCfg = cfg;
+                                        args.cutOffNum = cutSel ? 40 : 0;
+                                        args.cutOffDenum = 100;
+                                        l16_rdo::optimizeB(args);
+                                        const OracleDriverOut want = oracleOptimizeB(
+                                            cP, dequant, iqm, qW, dW, (std::uint16_t)eobIn, ts, tt, plane, &me,
+                                            scratchB, args.txbSkipContext, args.dcSignContext, lambda,
+                                            args.allintraRtc != 0, false, us != 0, dq != 0, 10, 30, cfg,
+                                            cutSel ? 40 : 0, 100);
+                                        CHECK(std::memcmp(qP, qW, sizeof(std::int32_t) * n) == 0);
+                                        CHECK(std::memcmp(dP, dW, sizeof(std::int32_t) * n) == 0);
+                                        CHECK(eobP == want.eob);
+                                        // Monotonicity: the trellis's end
+                                        // RD never exceeds the all-keep RD
+                                        // of the INPUT pattern under the same
+                                        // tables and the same rdmult.
+                                        const l16_rdo::OptimizeBRdSetup setup = l16_rdo::optimizeBRdSetup(
+                                            args.allintraRtc, false, plane, lambda, us != 0, dq != 0, plane, 10, 30,
+                                            cfg);
+                                        const OracleDriverOut keep = oracleWalkKeep(
+                                            cP, dequant, iqm, qIn, dIn, (std::uint16_t)eobIn, ts, tt, plane, &me,
+                                            scratchK, args.txbSkipContext, args.dcSignContext, cfg);
+                                        const std::int64_t rdOut =
+                                            oracleRdCost(want.accuRate, setup.rdmult, want.accuDist);
+                                        const std::int64_t rdKeep =
+                                            oracleRdCost(keep.accuRate, setup.rdmult, keep.accuDist);
+                                        ++monoChecked;
+                                        if (rdOut < rdKeep) ++monoWon;
+                                        if (rdOut > rdKeep) {
+                                            int nChanged = 0;
+                                            int firstCi = -1;
+                                            for (int i = 0; i < n; ++i)
+                                                if (qP[i] != qIn[i]) {
+                                                    ++nChanged;
+                                                    if (firstCi < 0) firstCi = i;
+                                                }
+                                            INFO("changed=", nChanged, " firstCi=", firstCi,
+                                                 " qInFirst=", firstCi >= 0 ? qIn[firstCi] : 0,
+                                                 " qOutFirst=", firstCi >= 0 ? qP[firstCi] : 0,
+                                                 " tqcFirst=", firstCi >= 0 ? cP[firstCi] : 0,
+                                                 " dInFirst=", firstCi >= 0 ? dIn[firstCi] : 0);
+                                        }
+                                        INFO("ts=", ts, " tt=", tt, " plane=", plane, " rdmSel=", rdmSel,
+                                             " cfg=", cfg, " dq=", dq, " us=", us, " pat=", pat,
+                                             " cut=", cutSel, " rateOut=", want.accuRate,
+                                             " distOut=", want.accuDist, " eobOut=", want.eob,
+                                             " rateKeep=", keep.accuRate, " distKeep=", keep.accuDist,
+                                             " rdmult=", setup.rdmult);
+                                        CHECK(rdOut <= rdKeep);
+                                    }
+    CHECK(monoChecked > 0);
+    // The property must be DISCRIMINATING: the trellis actually improved
+    // some fixtures (otherwise the comparison is vacuous).
+    CHECK(monoWon > 0);
+}
+
+// The hand-computed small-tile trace (fixture (c)): a 4x4 with eob 1 and a
+// single DC token whose lower level strictly wins on RD. Hand-derived from
+// the reference arithmetic, NOT from the port: tqc = -150, qc = -3,
+// dqc = -300, dqv = 100, shift 0. keep: dist = (tqc-dqc)^2 = 22500,
+// dist0 = 22500, marginal 0; lower: dqc_low = -(2*100) = -200,
+// dist_low = 2500, marginal = 2500 - 22500 = -20000; with rdmult 512 the
+// rate term (~512 units per rate point) cannot bridge the 20000*128 dist
+// gap, so the lower level wins: qcoeff[0] = -2, dqcoeff[0] = -200. The
+// skip branch then loses (accu_dist -20000 drives the skip RD above the
+// kept total), so eob stays 1.
+TEST_CASE("l16_rdo the hand-computed 4x4 trellis trace lowers the DC token") {
+    FcTokenCdfs fc;
+    fillFcTokenCdfs(&fc);
+    static l16_rdo::MdRateEstimationContext me;
+    std::memset(&me, 0, sizeof(me));
+    l16_rdo::estimateCoefficientsRate(&me, &fc);
+    alignas(64) static std::uint8_t scratch[TX_PAD_2D];
+    std::int32_t q[16], d[16], c[16];
+    std::memset(q, 0, sizeof(q));
+    std::memset(d, 0, sizeof(d));
+    std::memset(c, 0, sizeof(c));
+    q[0] = -3;
+    d[0] = -300;
+    c[0] = -150;
+    const std::int16_t dequant[2] = {100, 100};
+    std::uint16_t eob = 1;
+    l16_rdo::OptimizeBArgs args{};
+    args.coeff = c;
+    args.qcoeff = q;
+    args.dqcoeff = d;
+    args.eob = &eob;
+    args.txSize = 0;
+    args.txType = 0;
+    args.plane = 0;
+    args.me = &me;
+    args.dequant = dequant;
+    args.iqm = nullptr;
+    args.txbSkipContext = 5;
+    args.dcSignContext = 1;
+    args.levelsBuf = scratch;
+    args.lambda = 512;
+    l16_rdo::optimizeB(args);
+    CHECK(q[0] == -2);
+    CHECK(d[0] == -200);
+    CHECK(eob == 1);
+}
+
+TEST_CASE("l16_rdo updateSkip matches the full_loop.c oracle over the enumerated grid") {
+    const l16_rdo::ScanOrder (*so)[3] = l16_rdo::scanOrders();
+    const std::int16_t* scan = so[0][0].scan;
+    for (int rdmSel = 0; rdmSel < 2; ++rdmSel)
+        for (int skip = 0; skip < 2; ++skip)
+            for (int nonSkip = 0; nonSkip < 2; ++nonSkip)
+                for (int rate0 = 0; rate0 < 3; ++rate0)
+                    for (int dist0 = 0; dist0 < 3; ++dist0)
+                        for (int sharp = 0; sharp <= 1; ++sharp)
+                            for (int nzNum = 1; nzNum <= 4; ++nzNum) {
+                                const std::int64_t rdmult = rdmSel ? 60000 : 4096;
+                                const int skipCost = skip ? 90000 : 100;
+                                const int nonSkipCost = nonSkip ? 3000 : 200;
+                                const std::int32_t rateA[3] = {0, 5000, 50000};
+                                const std::int64_t distA[3] = {0, 1000000, 40000000};
+                                std::int32_t rateP = rateA[rate0];
+                                std::int64_t distP = distA[dist0];
+                                std::uint16_t eobP = 16;
+                                std::int32_t qP[16], dqP[16], qW[16], dqW[16];
+                                for (int i = 0; i < 16; ++i) {
+                                    qP[i] = qW[i] = (i % 3) ? (i + 1) * 7 : -(i + 2) * 5;
+                                    dqP[i] = dqW[i] = qP[i] * 100;
+                                }
+                                int nzP[5], nzW[5];
+                                for (int i = 0; i < nzNum; ++i) nzP[i] = nzW[i] = scan[15 - i];
+                                std::int32_t rateW = rateP;
+                                std::int64_t distW = distP;
+                                std::uint16_t eobW = eobP;
+                                l16_rdo::updateSkip(&rateP, distP, &eobP, nzNum, nzP, rdmult, skipCost,
+                                                     nonSkipCost, qP, dqP, sharp);
+                                oracleUpdateSkip(&rateW, distW, &eobW, nzNum, nzW, rdmult, skipCost, nonSkipCost,
+                                                  qW, dqW, sharp);
+                                CHECK(rateP == rateW);
+                                CHECK(eobP == eobW);
+                                CHECK(std::memcmp(qP, qW, sizeof(qP)) == 0);
+                                CHECK(std::memcmp(dqP, dqW, sizeof(dqP)) == 0);
+                            }
+}
+TEST_CASE("l16_rdo updateCoeffEobFast matches the full_loop.c oracle over the enumerated grid") {
+    const l16_rdo::ScanOrder (*so)[3] = l16_rdo::scanOrders();
+    const std::int16_t* scan = so[0][0].scan;
+    for (int shift = 0; shift <= 2; ++shift)
+        for (int eob = 1; eob <= 16; ++eob)
+            for (int pat = 0; pat < 4; ++pat) {
+                const std::int16_t dequant[2] = {pat < 2 ? 100 : 20, pat < 2 ? 53 : 11};
+                std::int32_t coeffP[16], coeffW[16], qP[16], qW[16], dqP[16], dqW[16];
+                for (int i = 0; i < 16; ++i) {
+                    // Patterns: 0 trailing nonzero kept; 1 qcoeff zero in the
+                    // tail; 2 small coeff below zbin in the tail; 3 mixed.
+                    const int m = (pat == 3) ? (i % 4) : pat;
+                    const bool killTail = (m == 1 && i >= eob - 2) || (m == 2 && i >= eob - 3);
+                    coeffP[i] = coeffW[i] = killTail ? 3 : 500 * (i + 1) * ((i % 2) ? -1 : 1);
+                    qP[i] = qW[i] = (m == 1 && i == eob - 1) ? 0 : ((coeffP[i] < 0 ? -coeffP[i] : coeffP[i]) / 137);
+                    if (coeffP[i] < 0) {
+                        qP[i] = -qP[i];
+                        qW[i] = -qW[i];
+                    }
+                    dqP[i] = dqW[i] = qP[i] * 100;
+                }
+                std::uint16_t eobP = (std::uint16_t)eob, eobW = (std::uint16_t)eob;
+                l16_rdo::updateCoeffEobFast(&eobP, shift, dequant, scan, coeffP, qP, dqP);
+                oracleUpdateCoeffEobFast(&eobW, shift, dequant, scan, coeffW, qW, dqW);
+                CHECK(eobP == eobW);
+                CHECK(std::memcmp(qP, qW, sizeof(qP)) == 0);
+                CHECK(std::memcmp(dqP, dqW, sizeof(dqP)) == 0);
+            }
+}
+
+TEST_CASE("l16_rdo getLowerLevelsCtxGeneral matches the full_loop.c oracle over the enumerated grid") {
+    alignas(64) static std::uint8_t levels[40 * 72 + 16];
+    unsigned seed = 555u;
+    for (int i = 0; i < 40 * 72 + 16; ++i) {
+        seed = seed * 1103515245u + 12345u;
+        levels[i] = (std::uint8_t)(seed >> 23);
+    }
+    for (int ts = 0; ts < 19; ++ts)
+        for (int cls = 0; cls < 3; ++cls)
+            for (int isLast = 0; isLast <= 1; ++isLast) {
+                const int bwl = 2;
+                const int h = 4;
+                const int n = h << bwl;
+                for (int si = 0; si <= n; ++si) {
+                    const int ci = (si * 5 + 3) % n;
+                    const int want = oracleLowerLevelsCtxGeneral(isLast, si, bwl, h, levels, ci, ts, cls);
+                    CHECK(l16_rdo::getLowerLevelsCtxGeneral(isLast, si, bwl, h, levels, ci, ts,
+                                                             (l16_rdo::TxClass)cls) == want);
+                }
+            }
+}
+
+// ---------------------------------------------------------------------------
+// C2: update_coeff_general (full_loop.c:851-902) - the single-scan-position
+// trellis step. Fixture tuples over 4x4 (the landed scan, bwl 2), three tx
+// classes, qc in {0, +-1, +-2, +-5}, rdmult and shift variations, iqm null
+// and non-null; the oracle transcribes the reference function.
+// ---------------------------------------------------------------------------
+TEST_CASE("l16_rdo updateCoeffGeneral matches the full_loop.c oracle over the enumerated fixtures") {
+    const l16_rdo::ScanOrder (*so)[3] = l16_rdo::scanOrders();
+    const std::int16_t* scan = so[0][0].scan;  // TX_4X4 default scan
+    // The reference's levels scratch: TX_PAD_2D bytes with the guaranteed-
+    // zero tail (md_process.c:238); setLevels places the rows.
+    alignas(64) static std::uint8_t levelsScratchA[TX_PAD_2D];
+    alignas(64) static std::uint8_t levelsScratchB[TX_PAD_2D];
+    alignas(64) static std::int32_t tcoeffA[16], qcoeffA[16], dqcoeffA[16], tcoeffB[16], qcoeffB[16], dqcoeffB[16];
+    // Deterministic synthetic cost tables over the REAL context ranges.
+    l16_rdo::LvMapCoeffCost costs;
+    for (int ctx = 0; ctx < 42; ++ctx) {
+        for (int i = 0; i < 8; ++i) costs.baseCost[ctx][i] = 130 * ctx + 5 * i;
+        for (int i = 0; i < 3; ++i) costs.baseEobCost[ctx % 4][i] = 200 * ctx + 13 * i;
+        for (int i = 0; i < 2; ++i) costs.dcSignCost[ctx % 3][i] = 90 * ctx + 3 * i;
+    }
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 700 * ctx + 9 * i;
+    std::uint8_t iqm[16];
+    for (int i = 0; i < 16; ++i) iqm[i] = (std::uint8_t)(1 + (i * 11) % 128);
+    unsigned seed = 4242u;
+    for (int cls = 0; cls < 3; ++cls)
+        for (int shift = 0; shift <= 1; ++shift)
+            for (int rdmSel = 0; rdmSel < 2; ++rdmSel) {
+                const std::int64_t rdmult = rdmSel == 0 ? 4096 : 60000;
+                for (int pat = 0; pat < 5; ++pat) {
+                    // Pattern: per-position qcoeff magnitude/sign cycle.
+                    for (int i = 0; i < 16; ++i) {
+                        seed = seed * 1103515245u + 12345u;
+                        const int mags[5] = {0, 1, 2, 5, 3};
+                        const int mag = ((pat == 4) ? (int)(seed % 7) : mags[pat]);
+                        const int signBit = (int)(seed >> 8) & 1;
+                        qcoeffA[i] = signBit ? -mag : mag;
+                        tcoeffA[i] = qcoeffA[i] * 137 + (int)(i * 3);
+                        dqcoeffA[i] = qcoeffA[i] * 100;
+                    }
+                    // The levels the reference starts this step from: the
+                    // svt_av1_txb_init_levels image of qcoeff (rd_cost.c:93)
+                    // in the padded scratch with the zeroed tail.
+                    std::memset(levelsScratchA, 0, sizeof(levelsScratchA));
+                    std::uint8_t* const levPort = l16_rdo::setLevels(levelsScratchA, 4, 4);
+                    l16_rdo::txbInitLevels(qcoeffA, 4, 4, levPort);
+                    std::memcpy(levelsScratchB, levelsScratchA, sizeof(levelsScratchA));
+                    std::uint8_t* const levWant = l16_rdo::setLevels(levelsScratchB, 4, 4);
+                    std::memcpy(tcoeffB, tcoeffA, sizeof(tcoeffA));
+                    std::memcpy(qcoeffB, qcoeffA, sizeof(qcoeffA));
+                    std::memcpy(dqcoeffB, dqcoeffA, sizeof(dqcoeffA));
+                    const std::uint8_t* iqmPtr = (pat % 2 == 0) ? nullptr : iqm;
+                    const std::int16_t dequant[2] = {100, 37};
+                    for (int si : {15, 9, 3, 0}) {
+                        std::int32_t rateA = 300, rateB = 300;
+                        std::int64_t distA = 70, distB = 70;
+                        l16_rdo::updateCoeffGeneral(&rateA, &distA, si, 16, 0, (l16_rdo::TxClass)cls, 2, 4,
+                                                     rdmult, shift, 1, dequant, scan, &costs, tcoeffA, qcoeffA,
+                                                     dqcoeffA, levPort, iqmPtr);
+                        oracleUpdateCoeffGeneral(&rateB, &distB, si, 16, 0, cls, 2, 4, rdmult, shift, 1, dequant,
+                                                  scan, &costs, tcoeffB, qcoeffB, dqcoeffB, levWant, iqmPtr);
+                        CHECK(rateA == rateB);
+                        CHECK(distA == distB);
+                        CHECK(std::memcmp(qcoeffA, qcoeffB, sizeof(qcoeffA)) == 0);
+                        CHECK(std::memcmp(dqcoeffA, dqcoeffB, sizeof(dqcoeffA)) == 0);
+                        CHECK(std::memcmp(levPort, levWant, 4 * 8) == 0);
+                    }
+                }
+            }
 }

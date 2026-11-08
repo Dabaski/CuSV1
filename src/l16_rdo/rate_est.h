@@ -147,6 +147,7 @@ void buildNmvComponentCostTable(std::int32_t* mvcost, const NmvComponent* mvcomp
 #define LEVEL_CONTEXTS 21         // cabac_context_model.h
 #define BR_CDF_SIZE 4             // cabac_context_model.h
 #define COEFF_BASE_RANGE (4 * (BR_CDF_SIZE - 1))  // :12
+#define NUM_BASE_LEVELS 2         // cabac_context_model.h (l7 entropy.h:459)
 
 // LvMapEobCost (md_rate_estimation.h:33-35, verbatim layout).
 struct LvMapEobCost {
@@ -432,5 +433,221 @@ void estimateCoefficientsRate(MdRateEstimationContext* me, const FcTokenCdfs* fc
 void estimateSyntaxRate(MdRateEstimationContext* me, std::uint8_t pic_filter_intra_level,
                         std::uint8_t allow_screen_content_tools, std::uint8_t enable_restoration,
                         std::uint8_t allow_intrabc, const FcSyntaxCdfs* fc);
+
+// ---------------------------------------------------------------------------
+// RE2: the optimize_b trellis (full_loop.c:622-1252). Module-boundary
+// carries first (l16_rdo cannot link l7_entropy; the l7-l13 duplication
+// precedent). Levels-buffer plumbing (definitions.h:410-429 + common_
+// utils.h:92-98), verbatim values.
+// ---------------------------------------------------------------------------
+#define MAX_TX_SIZE 64          // definitions.h:411 (MAX_TX_SIZE_LOG2 = 6)
+// definitions.h:457, verbatim (the trellis uses it at n = 7 only).
+#define ROUND_POWER_OF_TWO(value, n) (((value) + (((1 << (n)) >> 1))) >> (n))
+#define TX_PAD_HOR 4            // definitions.h:417
+#define TX_PAD_VER (0 + 4)      // definitions.h:419-423 (TX_PAD_TOP 0)
+#define TX_PAD_END 16           // definitions.h:425
+#define LEVELS_TAIL_OFFSET ((MAX_TX_SIZE + TX_PAD_HOR) * MAX_TX_SIZE)  // :429
+#define TX_PAD_2D \
+    ((MAX_TX_SIZE + TX_PAD_HOR) * (MAX_TX_SIZE + TX_PAD_VER) + TX_PAD_END)  // :426
+
+// set_levels (common_utils.h:92-98): places the rows 0..height-1 so they end
+// at LEVELS_TAIL_OFFSET; the tail is never written by txbInitLevels and
+// serves as bottom padding for all block sizes.
+std::uint8_t* setLevels(std::uint8_t* levelsBuf, std::int32_t width, std::int32_t height);
+
+// TX_CLASS (definitions.h:989-994, verbatim order). The 2D/1D context
+// families branch on it.
+enum TxClass { TX_CLASS_2D = 0, TX_CLASS_HORIZ = 1, TX_CLASS_VERT = 2 };
+
+// get_padded_idx (coefficients.h:129-131).
+std::int32_t getPaddedIdx(std::int32_t idx, std::int32_t bwl);
+// get_nz_mag (coefficients.h:133-155): the caller passes
+// levels + getPaddedIdx(coeff_idx, bwl).
+std::int32_t getNzMag(const std::uint8_t* levels, std::int32_t bwl, TxClass txClass);
+
+// tx_type_to_class (cabac_context_model.c:15-32, verbatim).
+extern const TxClass txTypeToClass[16];
+// get_br_ctx_eob (coefficients.h:69-81): c is the RASTER coefficient
+// position.
+std::int32_t getBrCtxEob(std::int32_t c, std::int32_t bwl, TxClass txClass);
+// get_br_ctx (coefficients.h:83-127): levels is the levels-array BASE (the
+// padded position is derived inside).
+std::int32_t getBrCtx(const std::uint8_t* levels, std::int32_t c, std::int32_t bwl, TxClass txClass);
+// get_lower_levels_ctx_eob (coefficients.h:56-67).
+std::int32_t getLowerLevelsCtxEob(std::int32_t bwl, std::int32_t height, std::int32_t scanIdx);
+
+// The scan-order machinery (coefficients.h:36-42 + coefficients.c:19 and
+// :314-:374). ScanOrder verbatim (coefficients.h:22-24); the tx indexes are
+// the 19-shape TxSize order of definitions.h:955-974 (the l3_transforms
+// enum class carries the same order; no header is included here because
+// rate_est.h's TX_4X4/TX_32X32 macros would poison its enumerators - the
+// trellis APIs therefore index by int, matching get_scan_order's own
+// signature).
+struct ScanOrder {
+    const std::int16_t* scan;
+    const std::int16_t* iscan;
+};
+// svt_aom_init_iscan (coefficients.c:325-374): fills the pools. Idempotent.
+void initScans(void);
+// The filled table (TX_SIZES_ALL = 19 x 3 classes); initScans() first.
+const ScanOrder (*scanOrders(void))[3];
+// get_scan_order (coefficients.h:40-42).
+const ScanOrder& getScanOrder(std::int32_t txSize, std::int32_t txType);
+// tx_type_to_scan_index (coefficients.c:19, verbatim).
+extern const std::int8_t txTypeToScanIndex[16];
+
+// get_eob_pos_token (entropy_coding.h:94-102).
+std::int32_t getEobPosToken(std::int32_t eob, std::int32_t* extra);
+// get_eob_cost (rd_cost.c:198-211).
+std::int32_t getEobCost(std::int32_t eob, const LvMapEobCost* txbEobCosts, const LvMapCoeffCost* txbCosts,
+                        TxClass txClass);
+// svt_av1_txb_init_levels_c (rd_cost.c:93-105).
+void txbInitLevels(const std::int32_t* coeff, std::int32_t width, std::int32_t height, std::uint8_t* levels);
+
+// The tx-size tables (TxSize = the 19-shape definitions.h:955-974 order).
+// txsize_sqr_map / txsize_sqr_up_map (common_utils.c:150-192, verbatim);
+// txsize_log2_minus4 (inv_transforms.h:341-361, verbatim); av1_get_tx_scale_
+// tab (full_loop.c:22, verbatim - the only span charged directly to
+// full_loop.c's own table).
+extern const std::int8_t txsizeSqrMap[19];
+extern const std::int8_t txsizeSqrUpMap[19];
+extern const std::int8_t txsizeLog2Minus4[19];
+extern const std::int8_t av1GetTxScaleTab[19];
+// get_txsize_entropy_ctx (entropy_coding.h:110-112).
+std::int32_t getTxsizeEntropyCtx(std::int32_t txsize);
+
+// get_br_ctx / get_br_ctx_eob feeding helpers and the nz-map context
+// selectors (coefficients.h:157-200): stats-driven context derivation.
+std::int32_t getNzMapCtxFromStats(std::int32_t stats, std::int32_t coeffIdx, std::int32_t bwl,
+                                   std::int32_t txSize, TxClass txClass);
+// get_lower_levels_ctx (coefficients.h:196-200): the caller passes the
+// levels-array BASE.
+std::int32_t getLowerLevelsCtx(const std::uint8_t* levels, std::int32_t coeffIdx, std::int32_t bwl,
+                                std::int32_t txSize, TxClass txClass);
+
+// get_golomb_cost (full_loop.c:613-620).
+std::int32_t getGolombCost(std::int32_t absQc);
+// The golomb tables (full_loop.c:668-673, verbatim).
+extern const std::int32_t golombBitsCost[32];
+extern const std::int32_t golombCostDiff[32];
+// get_br_cost_with_diff (full_loop.c:675-694).
+std::int32_t getBrCostWithDiff(std::int32_t level, const std::int32_t* coeffLps, std::int32_t* diff);
+// get_coeff_cost_general (full_loop.c:627-653).
+std::int32_t getCoeffCostGeneral(std::int32_t isLast, std::int32_t ci, std::int32_t absQc, std::int32_t sign,
+                                  std::int32_t coeffCtx, std::int32_t dcSignCtx, const LvMapCoeffCost* txbCosts,
+                                  std::int32_t bwl, TxClass txClass, const std::uint8_t* levels);
+// get_two_coeff_cost_simple (full_loop.c:696-720).
+std::int32_t getTwoCoeffCostSimple(std::int32_t ci, std::int32_t absQc, std::int32_t coeffCtx,
+                                    const LvMapCoeffCost* txbCosts, std::int32_t bwl, TxClass txClass,
+                                    const std::uint8_t* levels, std::int32_t* costLow);
+// get_coeff_cost_eob (full_loop.c:722-739).
+std::int32_t getCoeffCostEob(std::int32_t ci, std::int32_t absQc, std::int32_t sign, std::int32_t coeffCtx,
+                              std::int32_t dcSignCtx, const LvMapCoeffCost* txbCosts, std::int32_t bwl,
+                              TxClass txClass);
+// get_dqv (full_loop.c:741-747); QmVal = uint8_t (definitions.h:987).
+std::int32_t getDqv(const std::int16_t* dequant, std::int32_t coeffIdx, const std::uint8_t* iqmPtr);
+
+// get_lower_levels_ctx_general (full_loop.c:596-611).
+std::int32_t getLowerLevelsCtxGeneral(std::int32_t isLast, std::int32_t scanIdx, std::int32_t bwl,
+                                       std::int32_t height, const std::uint8_t* levels, std::int32_t coeffIdx,
+                                       std::int32_t txSize, TxClass txClass);
+
+// The trellis state updaters (full_loop.c:749-:1026). The pcs/ctx walls
+// (rdmult, dequant, iqm, sharpness, scan, the LvMap tables) are threaded as
+// parameters per the campaign pattern.
+// update_coeff_general (full_loop.c:851-902).
+void updateCoeffGeneral(std::int32_t* accuRate, std::int64_t* accuDist, std::int32_t si, std::int32_t eob,
+                         std::int32_t txSize, TxClass txClass, std::int32_t bwl, std::int32_t height,
+                         std::int64_t rdmult, std::int32_t shift, std::int32_t dcSignCtx,
+                         const std::int16_t* dequant, const std::int16_t* scan, const LvMapCoeffCost* txbCosts,
+                         const std::int32_t* tcoeff, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                         std::uint8_t* levels, const std::uint8_t* iqmPtr);
+// update_skip (full_loop.c:951-966).
+void updateSkip(std::int32_t* accuRate, std::int64_t accuDist, std::uint16_t* eob, std::int32_t nzNum,
+                 const std::int32_t* nzCi, std::int64_t rdmult, std::int32_t skipCost, std::int32_t nonSkipCost,
+                 std::int32_t* qcoeff, std::int32_t* dqcoeff, std::int32_t sharpness);
+// update_coeff_eob_fast (full_loop.c:1006-1026).
+void updateCoeffEobFast(std::uint16_t* eob, std::int32_t shift, const std::int16_t* dequant,
+                         const std::int16_t* scan, const std::int32_t* coeffPtr, std::int32_t* qcoeffPtr,
+                         std::int32_t* dqcoeffPtr);
+// update_coeff_eob (full_loop.c:749-849).
+void updateCoeffEob(std::int32_t* accuRate, std::int64_t* accuDist, std::uint16_t* eob, std::int32_t* nzNum,
+                     std::int32_t* nzCi, std::int32_t si, std::int32_t txSize, TxClass txClass,
+                     std::int32_t bwl, std::int32_t height, std::int32_t dcSignCtx, std::int64_t rdmult,
+                     std::int32_t shift, const std::int16_t* dequant, const std::int16_t* scan,
+                     const LvMapEobCost* txbEobCosts, const LvMapCoeffCost* txbCosts, const std::int32_t* tcoeff,
+                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint8_t* levels,
+                     std::int32_t sharpness, const std::uint8_t* iqmPtr);
+// update_coeff_simple (full_loop.c:904-949); the caller guarantees si > 0
+// and si != eob - 1 (the reference asserts them).
+void updateCoeffSimple(std::int32_t* accuRate, std::int32_t si, std::int32_t eob, std::int32_t txSize,
+                        TxClass txClass, std::int32_t bwl, std::int64_t rdmult, std::int32_t shift,
+                        const std::int16_t* dequant, const std::int16_t* scan, const LvMapCoeffCost* txbCosts,
+                        const std::int32_t* tcoeff, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                        std::uint8_t* levels, const std::uint8_t* iqmPtr);
+
+// The txb geometry helpers (common_utils.h:100-128, verbatim; the ADJUSTED
+// size folds 64-participating shapes to their <= 32x32 equivalent).
+std::int32_t getTxbBwl(std::int32_t txSize);
+std::int32_t getTxbWide(std::int32_t txSize);
+std::int32_t getTxbHigh(std::int32_t txSize);
+
+// svt_fast_optimize_b (full_loop.c:1028-1036).
+void fastOptimizeB(const std::int32_t* coeffPtr, const std::int16_t* dequant, std::int32_t* qcoeffPtr,
+                    std::int32_t* dqcoeffPtr, std::uint16_t* eob, std::int32_t txSize, std::int32_t txType);
+
+// The rdmult/sharpness setup (full_loop.c:1046 + :1064-:1075): NAMED
+// DEVIATION - factored out of the driver for testability; the arithmetic is
+// the reference's verbatim (CLIP3 0..7, rshift = max(2, sharpness), the
+// delta_q rweight=0/sharpness=1 branch, the plane_rd_mult/rweight/100
+// composition + 2 >> rshift).
+struct OptimizeBRdSetup {
+    std::int64_t rdmult;
+    std::int32_t sharpness;
+};
+OptimizeBRdSetup optimizeBRdSetup(bool allintraRtc, bool isInter, std::int32_t planeType,
+                                   std::uint32_t lambda, bool useSharpness, bool deltaQPresent,
+                                   std::int32_t plane, std::int32_t sbQindex, std::int32_t pictureQp,
+                                   std::int32_t sharpnessCfg);
+
+// svt_av1_optimize_b (full_loop.c:1038-1236): the pcs/ctx walls threaded as
+// parameters per the campaign pattern. The caller zero-fills levelsBuf
+// (the md_process.c:238 memset) and passes a TX_PAD_2D-byte scratch.
+// Precondition: *eob >= 1 (the reference is called only with eob >= 1;
+// get_eob_cost would read eob_cost[-1] at 0).
+struct OptimizeBArgs {
+    const std::int32_t* coeff;
+    std::int32_t* qcoeff;
+    std::int32_t* dqcoeff;
+    std::uint16_t* eob;
+    std::int32_t txSize;
+    std::int32_t txType;
+    std::int32_t plane;
+    const MdRateEstimationContext* me;
+    const std::int16_t* dequant;
+    const std::uint8_t* iqm;
+    std::int16_t txbSkipContext;
+    std::int16_t dcSignContext;
+    std::uint8_t* levelsBuf;
+    std::uint32_t lambda;
+    bool allintraRtc;
+    bool isInter;
+    bool useSharpness;
+    bool deltaQPresent;
+    std::int32_t sbQindex;
+    std::int32_t pictureQp;
+    std::int32_t sharpnessCfg;
+    std::int32_t cutOffNum;
+    std::int32_t cutOffDenum;
+};
+void optimizeB(const OptimizeBArgs& a);
+// get_br_cost (full_loop.c:622-626); the caller guarantees level >
+// NUM_BASE_LEVELS (the coeff_lps row pointer is lpsCost[br_ctx]).
+std::int32_t getBrCost(std::int32_t level, const std::int32_t* coeffLps);
+// get_qc_dqc_low (full_loop.c:659-666).
+void getQcDqcLow(std::int32_t absQc, std::int32_t sign, std::int32_t dqv, std::int32_t shift,
+                  std::int32_t* qcLow, std::int32_t* dqcLow);
+// get_coeff_dist (full_loop.c:655-657).
+std::int64_t getCoeffDist(std::int32_t tcoeff, std::int32_t dqcoeff, std::int32_t shift);
 
 }
