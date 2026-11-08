@@ -2153,6 +2153,34 @@ static void oracleUpdateCoeffEobFast(std::uint16_t* eob, int shift, const std::i
     }
     *eob = (std::uint16_t)eobOut;
 }
+
+// JUDGE ADDENDUM (the J3 survivor sharpened): the FAST path's
+// trailing-zero zbin-trim loop had no boundary fixture - the writer's
+// coefficient magnitudes jump by >=137 and never land in the flip band
+// at shift 0, absCoeff in [zbin/2+1, zbin-1] = [29, 56] for zbin[1] = 57
+// (dequant {100, 37}). This case pins the boundary: absCoeff 40 at the
+// eob-1 scan position survives the trim unmutated (40<<1 = 80 >= 57) and
+// is trimmed under the recorded J3 mutation (40<<0 = 40 < 57).
+// RED under the mutation, GREEN at HEAD.
+TEST_CASE("l16_rdo updateCoeffEobFast zbin-trim boundary coeff is kept at the shift boundary") {
+    const std::int16_t* scan = l16_rdo::scanOrders()[0][0].scan;
+    std::int32_t tP[16] = {0}, qP[16] = {0}, dP[16] = {0};
+    std::int32_t tW[16] = {0}, qW[16] = {0}, dW[16] = {0};
+    qP[15] = 1;
+    tP[15] = 40;  // absCoeff 40 at shift 0: 40<<1 = 80 >= zbin[1] 57 -> kept; mutated 40<<0 = 40 < 57 -> trimmed
+    qW[15] = 1;
+    tW[15] = 40;
+    dP[15] = dW[15] = 100;
+    const std::int16_t dequant[2] = {100, 37};  // zbin = {155, 57}
+    std::uint16_t eobP = 16, eobW = 16;
+    l16_rdo::updateCoeffEobFast(&eobP, 0, dequant, scan, tP, qP, dP);
+    oracleUpdateCoeffEobFast(&eobW, 0, dequant, scan, tW, qW, dW);
+    CHECK(eobP == eobW);
+    CHECK(std::memcmp(qP, qW, sizeof(qP)) == 0);
+    CHECK(std::memcmp(dP, dW, sizeof(dP)) == 0);
+    CHECK(eobP == 16);  // the boundary coeff survives the unmutated trim
+}
+
 // get_txsize_entropy_ctx's oracle (the min/max class formula).
 static int oracleTxsEntropyCtx(int ts) {
     const int wmin = kOracleW[ts] < kOracleH[ts] ? kOracleW[ts] : kOracleH[ts];
