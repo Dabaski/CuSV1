@@ -2851,3 +2851,1070 @@ TEST_CASE("l16_rdo updateCoeffGeneral matches the full_loop.c oracle over the en
                 }
             }
 }
+
+// ---------------------------------------------------------------------------
+// RE3: the rd_cost.c symbol-cost surface (2026-11-08). Reference:
+// third_party/SVT-AV1/Source/Lib/Codec/rd_cost.c (1,660 nb). The ported
+// spans charge A4; the consumed helpers carry with citations at each
+// site. Independent oracles below, never shared with the port.
+// ---------------------------------------------------------------------------
+
+// update_cdf, independent transcription (cabac_context_model.h:76-105).
+static void oracleUpdateCdfR3(std::uint16_t* cdf, int val, int nsymbs) {
+    const int count = cdf[nsymbs];
+    if (count < 32) cdf[nsymbs]++;
+    const int rate = 4 + (count >> 4) + (nsymbs > 3 ? 1 : 0);
+    int i = 0;
+    for (; i < val; ++i) cdf[i] += (l16_rdo::AomCdfProb)((CDF_PROB_TOP - cdf[i]) >> rate);
+    for (; i < nsymbs - 1; ++i) cdf[i] -= (l16_rdo::AomCdfProb)(cdf[i] >> rate);
+}
+
+TEST_CASE("l16_rdo updateCdf first adaptation matches the reference formula") {
+    std::uint16_t cdf[CDF_SIZE(2)] = {AOM_ICDF(16000), 0, 0};
+    l16_rdo::updateCdf(cdf, 1, 2);
+    CHECK(cdf[0] == AOM_ICDF(16000) + ((CDF_PROB_TOP - AOM_ICDF(16000)) >> 4));
+}
+
+TEST_CASE("l16_rdo updateCdf rate saturates at count 32 and bumps past nsymbs 3") {
+    std::uint16_t cdf[CDF_SIZE(7)] = {AOM_ICDF(1000), AOM_ICDF(4000), AOM_ICDF(8000), AOM_ICDF(12000),
+                                      AOM_ICDF(20000), AOM_ICDF(28000), 0, 32};
+    l16_rdo::updateCdf(cdf, 2, 7);
+    // rate = 4 + (32 >> 4) + 1 = 7; val=2: cdf[0..1] += (TOP-cdf)>>7; cdf[2..5] -= cdf>>7.
+    CHECK(cdf[0] == AOM_ICDF(1000) + ((CDF_PROB_TOP - AOM_ICDF(1000)) >> 7));
+    CHECK(cdf[1] == AOM_ICDF(4000) + ((CDF_PROB_TOP - AOM_ICDF(4000)) >> 7));
+    CHECK(cdf[2] == AOM_ICDF(8000) - (AOM_ICDF(8000) >> 7));
+    CHECK(cdf[7] == 32);
+    // The oracle agreement over every val/nsymbs pair the callers admit.
+    unsigned seed = 91u;
+    for (int nsymbs = 2; nsymbs <= 11; ++nsymbs) {
+        for (int val = 0; val < nsymbs; ++val) {
+            std::uint16_t a[CDF_SIZE(11)] = {0}, b[CDF_SIZE(11)] = {0};
+            for (int i = 0; i < nsymbs; ++i) {
+                seed = seed * 1103515245u + 12345u;
+                // Icdf-form entries with the terminator at nsymbs-1.
+                a[i] = (i == nsymbs - 1) ? 0 : (l16_rdo::AomCdfProb)(1 + (seed >> 17) % 32767);
+                b[i] = a[i];
+            }
+            a[nsymbs] = b[nsymbs] = (l16_rdo::AomCdfProb)(seed % 33);
+            l16_rdo::updateCdf(a, val, nsymbs);
+            oracleUpdateCdfR3(b, val, nsymbs);
+            CHECK(std::memcmp(a, b, sizeof(std::uint16_t) * (nsymbs + 1)) == 0);
+        }
+    }
+}
+
+TEST_CASE("l16_rdo transformTypeRateEstimation returns 0 at DCT-only shapes") {
+    l16_rdo::MdRateEstimationContext me;
+    l16_rdo::FcSyntaxCdfs fc;
+    std::memset(&me, 0, sizeof(me));
+    std::memset(&fc, 0, sizeof(fc));
+    // 4x4 intra DCT_DCT: the walk proceeds (7 types at DTT4_IDTX_1DDCT) and
+    // reads the zeroed DCT_DCT row.
+    CHECK(l16_rdo::transformTypeRateEstimation(&me, 0, &fc, false, 0 /* TX_4X4 */, 0 /* DCT_DCT */, false,
+                                                0 /* DC_PRED */, 7 /* FILTER_INTRA_MODES */) == 0);
+}
+
+TEST_CASE("l16_rdo transformTypeRateEstimation reads the intra tx-type table") {
+    l16_rdo::MdRateEstimationContext me;
+    l16_rdo::FcSyntaxCdfs fc;
+    std::memset(&me, 0, sizeof(me));
+    std::memset(&fc, 0, sizeof(fc));
+    // TX_16X16 intra, non-reduced: ext_tx_set = 2 (DTT4_IDTX), square = 2,
+    // intra_dir = DC_PRED fold.
+    me.intraTxTypeFacBits[2][2][0][1] = 1234;
+    CHECK(l16_rdo::transformTypeRateEstimation(&me, 0, &fc, false, 2 /* TX_16X16 */, 1 /* ADST_ADST */, false,
+                                                0 /* DC_PRED */, 7 /* FILTER_INTRA_MODES */) == 1234);
+}
+
+TEST_CASE("l16_rdo transformTypeRateEstimation updates the intra ext-tx cdf") {
+    l16_rdo::MdRateEstimationContext me;
+    l16_rdo::FcSyntaxCdfs fc;
+    std::memset(&me, 0, sizeof(me));
+    std::memset(&fc, 0, sizeof(fc));
+    // TX_16X16 intra ADST_ADST: set 2 (DTT4_IDTX), nsymbs 5, symbol
+    // av1ExtTxInd[2][1] = 3 -> slots [0..2] increase, [3] terminator.
+    fc.intra_ext_tx_cdf[2][2][0][0] = AOM_ICDF(1000);
+    fc.intra_ext_tx_cdf[2][2][0][1] = AOM_ICDF(2000);
+    fc.intra_ext_tx_cdf[2][2][0][2] = AOM_ICDF(3000);
+    fc.intra_ext_tx_cdf[2][2][0][3] = 0;
+    fc.intra_ext_tx_cdf[2][2][0][5] = 0;
+    l16_rdo::transformTypeRateEstimation(&me, 1, &fc, false, 2, 1, false, 0, 7);
+    // val=3: cdf[2] takes the increase branch; only exact val==3 produces it.
+    CHECK(fc.intra_ext_tx_cdf[2][2][0][2] == AOM_ICDF(3000) + ((CDF_PROB_TOP - AOM_ICDF(3000)) >> 5));
+    CHECK(fc.intra_ext_tx_cdf[2][2][0][5] == 1);
+}
+
+// The tx-type walk oracle: an independent transcription of rd_cost.c:107-:153
+// plus its consumed tables (get_ext_tx_set_type/get_ext_tx_set/get_ext_tx_
+// types, av1_num_ext_tx_set, ext_tx_set_index, av1_ext_tx_ind,
+// fimode_to_intradir, txsize_sqr_map, txsize_sqr_up_map) and update_cdf.
+static std::int32_t oracleTxTypeRateR3(l16_rdo::MdRateEstimationContext* me, std::uint8_t allowUpdateCdf,
+                                       l16_rdo::FcSyntaxCdfs* fc, int isInter, int txSize, int txType, int reduced,
+                                       int lumaMode, int fiMode) {
+    static const int txsizeSqrMap[19] = {0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2};
+    static const int txsizeSqrUpMap[19] = {0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4};
+    static const int numExtTxSet[6] = {1, 2, 5, 7, 12, 16};
+    static const int extTxSetIndex[2][6] = {{0, -1, 2, 1, -1, -1}, {0, 3, -1, -1, 2, 1}};
+    static const int extTxInd[6][16] = {
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 3, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 5, 6, 4, 0, 0, 0, 0, 0, 0, 2, 3, 0, 0, 0, 0},
+        {3, 4, 5, 8, 6, 7, 9, 10, 11, 0, 1, 2, 0, 0, 0, 0},
+        {7, 8, 9, 12, 10, 11, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6},
+    };
+    static const int fimodeToIntradir[7] = {0, 1, 2, 6, 0, 0, 0};
+    int sqrUp = txsizeSqrUpMap[txSize];
+    int setType;
+    if (sqrUp > 3) {
+        setType = 0;  // EXT_TX_SET_DCTONLY
+    } else if (sqrUp == 3) {
+        setType = isInter ? 1 : 0;  // DCT_IDTX : DCTONLY
+    } else if (reduced) {
+        setType = isInter ? 1 : 2;  // DCT_IDTX : DTT4_IDTX
+    } else if (isInter) {
+        setType = (txsizeSqrMap[txSize] == 2) ? 4 : 5;  // DTT9_IDTX_1DDCT : ALL16
+    } else {
+        setType = (txsizeSqrMap[txSize] == 2) ? 2 : 3;  // DTT4_IDTX : DTT4_IDTX_1DDCT
+    }
+    if (numExtTxSet[setType] <= 1) return 0;
+    int square = txsizeSqrMap[txSize];
+    int set = extTxSetIndex[isInter][setType];
+    if (set <= 0) return 0;
+    if (isInter) {
+        if (allowUpdateCdf) oracleUpdateCdfR3(fc->inter_ext_tx_cdf[set][square], extTxInd[setType][txType],
+                                              numExtTxSet[setType]);
+        return me->interTxTypeFacBits[set][square][txType];
+    } else {
+        int dir = (fiMode != 7) ? fimodeToIntradir[fiMode] : lumaMode;
+        if (allowUpdateCdf) oracleUpdateCdfR3(fc->intra_ext_tx_cdf[set][square][dir], extTxInd[setType][txType],
+                                              numExtTxSet[setType]);
+        return me->intraTxTypeFacBits[set][square][dir][txType];
+    }
+}
+
+TEST_CASE("l16_rdo transformTypeRateEstimation matches the reference transcription over the enumerated set") {
+    l16_rdo::MdRateEstimationContext meA, meB;
+    l16_rdo::FcSyntaxCdfs fcA, fcB;
+    unsigned seed = 7001u;
+    for (int reduced = 0; reduced <= 1; ++reduced)
+        for (int isInter = 0; isInter <= 1; ++isInter)
+            for (int txSize = 0; txSize < 19; ++txSize)
+                for (int txType = 0; txType < 16; ++txType)
+                    for (int fi = 7; fi <= 7; ++fi) {
+                        std::memset(&meA, 0, sizeof(meA));
+                        std::memset(&meB, 0, sizeof(meB));
+                        std::memset(&fcA, 0, sizeof(fcA));
+                        std::memset(&fcB, 0, sizeof(fcB));
+                        // Deterministic non-zero cost rows over the admissible
+                        // dims; distinct per index so a swap cannot alias.
+                        for (int s = 0; s < 3; ++s)
+                            for (int i = 0; i < 4; ++i)
+                                for (int d = 0; d < 13; ++d)
+                                    for (int t = 0; t < 16; ++t)
+                                        meA.intraTxTypeFacBits[s][i][d][t] = meB.intraTxTypeFacBits[s][i][d][t] =
+                                            97 * s + 31 * i + 7 * d + t;
+                        for (int s = 0; s < 4; ++s)
+                            for (int i = 0; i < 4; ++i)
+                                for (int t = 0; t < 16; ++t)
+                                    meA.interTxTypeFacBits[s][i][t] = meB.interTxTypeFacBits[s][i][t] =
+                                        53 * s + 29 * i + 3 * t;
+                        for (int s = 0; s < 3; ++s)
+                            for (int i = 0; i < 4; ++i)
+                                for (int d = 0; d < 13; ++d)
+                                    for (int k = 0; k < 17; ++k) {
+                                        seed = seed * 1103515245u + 12345u;
+                                        fcA.intra_ext_tx_cdf[s][i][d][k] = fcB.intra_ext_tx_cdf[s][i][d][k] =
+                                            (l16_rdo::AomCdfProb)(seed % 32768);
+                                    }
+                        for (int s = 0; s < 4; ++s)
+                            for (int i = 0; i < 4; ++i)
+                                for (int k = 0; k < 17; ++k) {
+                                    seed = seed * 1103515245u + 12345u;
+                                    fcA.inter_ext_tx_cdf[s][i][k] = fcB.inter_ext_tx_cdf[s][i][k] =
+                                        (l16_rdo::AomCdfProb)(seed % 32768);
+                                }
+                        const int lumaMode = (int)(seed % 13);
+                        const int want = oracleTxTypeRateR3(&meB, 1, &fcB, isInter, txSize, txType, reduced,
+                                                            lumaMode, fi);
+                        const int got = l16_rdo::transformTypeRateEstimation(&meA, 1, &fcA, isInter != 0, txSize,
+                                                                              txType, reduced != 0, lumaMode, fi);
+                        CHECK(got == want);
+                        CHECK(std::memcmp(fcA.intra_ext_tx_cdf, fcB.intra_ext_tx_cdf,
+                                          sizeof(fcA.intra_ext_tx_cdf)) == 0);
+                        CHECK(std::memcmp(fcA.inter_ext_tx_cdf, fcB.inter_ext_tx_cdf,
+                                          sizeof(fcA.inter_ext_tx_cdf)) == 0);
+                    }
+}
+
+// update_eob_context oracle (rd_cost.c:157-:195 + entropy_coding.h:94-102
+// transcription, independent of the port).
+static std::int32_t oracleGetEobPosTokenR3(int eob, int* extra) {
+    if (eob < 3) {
+        *extra = 0;
+        return eob;
+    }
+    const int t = oracleGetMsb((unsigned)(eob - 1));
+    *extra = eob - 1 - (1 << t);
+    return t + 2;
+}
+
+static void oracleUpdateEobContextR3(l16_rdo::FcTokenCdfs* ec, int eob, int txSize, int txClass, int plane) {
+    static const int txsizeSqrMap[19] = {0, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2};
+    static const int txsizeSqrUpMap[19] = {0, 1, 2, 3, 4, 1, 1, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4};
+    static const int txsizeLog2Minus4[19] = {0, 2, 4, 6, 6, 1, 1, 3, 3, 5, 5, 6, 6, 2, 2, 4, 4, 5, 5};
+    int eobExtra;
+    const int eobPt = oracleGetEobPosTokenR3(eob, &eobExtra);
+    const int txsCtx = (txsizeSqrMap[txSize] + txsizeSqrUpMap[txSize] + 1) >> 1;
+    const int eobMultiSize = txsizeLog2Minus4[txSize];
+    const int eobMultiCtx = (txClass == 0) ? 0 : 1;
+    static const int nsymbs[7] = {5, 6, 7, 8, 9, 10, 11};
+    l16_rdo::AomCdfProb* cdf;
+    switch (eobMultiSize >= 6 ? 6 : eobMultiSize) {
+    case 0: cdf = ec->eobFlagCdf16[plane][eobMultiCtx]; break;
+    case 1: cdf = ec->eobFlagCdf32[plane][eobMultiCtx]; break;
+    case 2: cdf = ec->eobFlagCdf64[plane][eobMultiCtx]; break;
+    case 3: cdf = ec->eobFlagCdf128[plane][eobMultiCtx]; break;
+    case 4: cdf = ec->eobFlagCdf256[plane][eobMultiCtx]; break;
+    case 5: cdf = ec->eobFlagCdf512[plane][eobMultiCtx]; break;
+    default: cdf = ec->eobFlagCdf1024[plane][eobMultiCtx]; break;
+    }
+    oracleUpdateCdfR3(cdf, eobPt - 1, nsymbs[eobMultiSize >= 6 ? 6 : eobMultiSize]);
+    if (eobPt > 2) {
+        const int cnt = eobPt - 3;
+        const int bit = (eobExtra >> cnt) & 1;
+        oracleUpdateCdfR3(ec->eobExtraCdf[txsCtx][plane][cnt], bit, 2);
+    }
+}
+
+TEST_CASE("l16_rdo updateEobContext updates the eob_flag cdf at 4x4") {
+    l16_rdo::FcTokenCdfs fc;
+    std::memset(&fc, 0, sizeof(fc));
+    fc.eobFlagCdf16[0][0][0] = AOM_ICDF(1000);
+    fc.eobFlagCdf16[0][0][1] = AOM_ICDF(2000);
+    fc.eobFlagCdf16[0][0][2] = AOM_ICDF(3000);
+    fc.eobFlagCdf16[0][0][3] = AOM_ICDF(4000);
+    fc.eobFlagCdf16[0][0][4] = 0;
+    // eob=1 -> eob_pt=1, symbol 0; TX_4X4 -> eob_multi_size 0.
+    l16_rdo::updateEobContext(1, 0, l16_rdo::TX_CLASS_2D, 0, &fc);
+    CHECK(fc.eobFlagCdf16[0][0][5] == 1);
+    CHECK(fc.eobFlagCdf16[0][0][0] == AOM_ICDF(1000) - (AOM_ICDF(1000) >> 5));
+}
+
+TEST_CASE("l16_rdo updateEobContext matches the reference transcription over the enumerated grid") {
+    unsigned seed = 8801u;
+    static const int eobs[] = {1, 2, 3, 4, 5, 8, 9, 16, 17, 32, 33, 64, 65, 128, 129, 256, 257, 512, 513, 1024, 1025};
+    for (int plane = 0; plane < 2; ++plane)
+        for (int cls = 0; cls < 3; ++cls)
+            for (int txSize = 0; txSize < 19; ++txSize)
+                for (int e : eobs) {
+                    l16_rdo::FcTokenCdfs a, b;
+                    std::memset(&a, 0, sizeof(a));
+                    std::memset(&b, 0, sizeof(b));
+                    for (int i = 0; i < 7; ++i) {
+                        seed = seed * 1103515245u + 12345u;
+                        a.eobFlagCdf16[plane][0][i] = a.eobFlagCdf16[plane][1][i] =
+                        b.eobFlagCdf16[plane][0][i] = b.eobFlagCdf16[plane][1][i] =
+                            (l16_rdo::AomCdfProb)(seed % 32768);
+                        seed = seed * 1103515245u + 12345u;
+                        a.eobFlagCdf32[plane][0][i] = a.eobFlagCdf32[plane][1][i] =
+                        b.eobFlagCdf32[plane][0][i] = b.eobFlagCdf32[plane][1][i] =
+                            (l16_rdo::AomCdfProb)(seed % 32768);
+                        seed = seed * 1103515245u + 12345u;
+                        a.eobFlagCdf64[plane][0][i] = a.eobFlagCdf64[plane][1][i] =
+                        b.eobFlagCdf64[plane][0][i] = b.eobFlagCdf64[plane][1][i] =
+                            (l16_rdo::AomCdfProb)(seed % 32768);
+                        seed = seed * 1103515245u + 12345u;
+                        a.eobFlagCdf128[plane][0][i] = a.eobFlagCdf128[plane][1][i] =
+                        b.eobFlagCdf128[plane][0][i] = b.eobFlagCdf128[plane][1][i] =
+                            (l16_rdo::AomCdfProb)(seed % 32768);
+                        seed = seed * 1103515245u + 12345u;
+                        a.eobFlagCdf256[plane][0][i] = a.eobFlagCdf256[plane][1][i] =
+                        b.eobFlagCdf256[plane][0][i] = b.eobFlagCdf256[plane][1][i] =
+                            (l16_rdo::AomCdfProb)(seed % 32768);
+                        seed = seed * 1103515245u + 12345u;
+                        a.eobFlagCdf512[plane][0][i] = a.eobFlagCdf512[plane][1][i] =
+                        b.eobFlagCdf512[plane][0][i] = b.eobFlagCdf512[plane][1][i] =
+                            (l16_rdo::AomCdfProb)(seed % 32768);
+                        seed = seed * 1103515245u + 12345u;
+                        a.eobFlagCdf1024[plane][0][i] = a.eobFlagCdf1024[plane][1][i] =
+                        b.eobFlagCdf1024[plane][0][i] = b.eobFlagCdf1024[plane][1][i] =
+                            (l16_rdo::AomCdfProb)(seed % 32768);
+                    }
+                    for (int txs = 0; txs < 4; ++txs)
+                        for (int cnt = 0; cnt < 9; ++cnt) {
+                            seed = seed * 1103515245u + 12345u;
+                            a.eobExtraCdf[txs][plane][cnt][0] = b.eobExtraCdf[txs][plane][cnt][0] =
+                                (l16_rdo::AomCdfProb)(seed % 32768);
+                            seed = seed * 1103515245u + 12345u;
+                            a.eobExtraCdf[txs][plane][cnt][1] = b.eobExtraCdf[txs][plane][cnt][1] =
+                                (l16_rdo::AomCdfProb)(seed % 32768);
+                            a.eobExtraCdf[txs][plane][cnt][2] = b.eobExtraCdf[txs][plane][cnt][2] = 0;
+                        }
+                    l16_rdo::updateEobContext(e, txSize, (l16_rdo::TxClass)cls, plane, &a);
+                    oracleUpdateEobContextR3(&b, e, txSize, cls, plane);
+                    CHECK(std::memcmp(&a, &b, sizeof(a)) == 0);
+                }
+}
+
+TEST_CASE("l16_rdo costSkipTxb reads the skip cost and updates the skip cdf") {
+    l16_rdo::MdRateEstimationContext me;
+    l16_rdo::FcTokenCdfs fc;
+    std::memset(&me, 0, sizeof(me));
+    std::memset(&fc, 0, sizeof(fc));
+    // TX_4X4 -> txs_ctx 0; the walk reads coeffFacBits[0][plane].txbSkipCost.
+    me.coeffFacBits[0][0].txbSkipCost[5][1] = 777;
+    CHECK(l16_rdo::costSkipTxb(&me, 0, &fc, 0 /* TX_4X4 */, 0 /* Y */, 5) == 777);
+    me.coeffFacBits[0][1].txbSkipCost[7][1] = 888;
+    CHECK(l16_rdo::costSkipTxb(&me, 0, &fc, 0 /* TX_4X4 */, 1 /* UV */, 7) == 888);
+    // TX_16X16 -> txs_ctx 2.
+    me.coeffFacBits[2][0].txbSkipCost[3][1] = 999;
+    CHECK(l16_rdo::costSkipTxb(&me, 0, &fc, 2 /* TX_16X16 */, 0, 3) == 999);
+}
+
+TEST_CASE("l16_rdo costSkipTxb updates the txb_skip cdf") {
+    l16_rdo::MdRateEstimationContext me;
+    l16_rdo::FcTokenCdfs fc;
+    std::memset(&me, 0, sizeof(me));
+    std::memset(&fc, 0, sizeof(fc));
+    fc.txbSkipCdf[0][5][0] = AOM_ICDF(30000);
+    // skip symbol 1, nsymbs 2, count 0 -> rate 4; the increase branch only.
+    l16_rdo::costSkipTxb(&me, 1, &fc, 0 /* TX_4X4 */, 0, 5);
+    CHECK(fc.txbSkipCdf[0][5][2] == 1);
+    CHECK(fc.txbSkipCdf[0][5][0] == AOM_ICDF(30000) + ((CDF_PROB_TOP - AOM_ICDF(30000)) >> 4));
+}
+
+TEST_CASE("l16_rdo costCoeffsOneEob matches the reference walk at level 1") {
+    l16_rdo::LvMapCoeffCost costs;
+    std::memset(&costs, 0, sizeof(costs));
+    costs.baseEobCost[2][0] = 100;
+    costs.dcSignCost[1][0] = 10;
+    costs.dcSignCost[1][1] = 11;
+    const std::int32_t qcoeff[4] = {1, 0, 0, 0};
+    const std::int8_t ctxs[4] = {2, 0, 0, 0};
+    // level 1: base_eob + sign(0); level <= NUM_BASE_LEVELS -> no br/golomb.
+    CHECK(l16_rdo::costCoeffsOneEob(qcoeff, ctxs, &costs, 1) == 110);
+}
+
+TEST_CASE("l16_rdo costCoeffsOneEob adds the br cost above the base range") {
+    l16_rdo::LvMapCoeffCost costs;
+    std::memset(&costs, 0, sizeof(costs));
+    costs.baseEobCost[2][2] = 100;  // AOMMIN(level,3)-1 = 2 at level 5
+    costs.dcSignCost[1][1] = 10;    // v < 0 -> sign 1
+    costs.lpsCost[0][2] = 7;        // base_range = 5-1-2 = 2
+    const std::int32_t qcoeff[4] = {-5, 0, 0, 0};
+    const std::int8_t ctxs[4] = {2, 0, 0, 0};
+    // level 5: base_eob + sign(1) + lps[0][2]; no golomb (5 < 15).
+    CHECK(l16_rdo::costCoeffsOneEob(qcoeff, ctxs, &costs, 1) == 117);
+}
+
+TEST_CASE("l16_rdo costCoeffsOneEob adds the golomb cost at the boundary") {
+    l16_rdo::LvMapCoeffCost costs;
+    std::memset(&costs, 0, sizeof(costs));
+    costs.baseEobCost[0][2] = 100;
+    costs.dcSignCost[0][0] = 10;
+    costs.lpsCost[0][12] = 20;  // base_range 12 clamps to COEFF_BASE_RANGE
+    const std::int32_t qcoeff[4] = {15, 0, 0, 0};
+    const std::int8_t ctxs[4] = {0, 0, 0, 0};
+    // level 15: base + sign(0) + lps[0][12] + golomb(15): r=1, length=1,
+    // av1_cost_literal(1) = 512.
+    CHECK(l16_rdo::costCoeffsOneEob(qcoeff, ctxs, &costs, 0) == 642);
+}
+
+TEST_CASE("l16_rdo costCoeffsEob matches the reference walk at eob 2") {
+    l16_rdo::LvMapCoeffCost costs;
+    std::memset(&costs, 0, sizeof(costs));
+    costs.baseEobCost[4][0] = 100;  // first index: ctx 4, AOMMIN(1,3)-1 = 0
+    costs.baseCost[6][3] = 200;     // last index: ctx 6, AOMMIN(3,3) = 3
+    costs.dcSignCost[1][0] = 30;    // v=3 -> sign 0
+    costs.lpsCost[1][0] = 5;        // get_br_ctx at c=0: mag 1
+    // Identity scan (the walk takes scan as a parameter); eob=2 covers
+    // positions 1 and 0; the fast middle loop is empty at c_start = 0.
+    const std::int16_t scan[4] = {0, 1, 2, 3};
+    // The full 16-position block (the init reads all 4x4 positions).
+    const std::int32_t qcoeff[16] = {3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::int8_t ctxs[16] = {6, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    alignas(64) static std::uint8_t levelsBuf[TX_PAD_2D];
+    std::memset(levelsBuf, 0, sizeof(levelsBuf));
+    std::uint8_t* lev = l16_rdo::setLevels(levelsBuf, 4, 4);
+    l16_rdo::txbInitLevels(qcoeff, 4, 4, lev);
+    // 100 + 512 (cost_literal) + 200 + 30 + 5 = 847.
+    CHECK(l16_rdo::costCoeffsEob(qcoeff, 2, scan, ctxs, &costs, 1, lev, 2, 0 /* DCT_DCT */,
+                                  4 /* fast_coeff_est_level */, 0 /* subres_step */) == 847);
+}
+
+TEST_CASE("l16_rdo costCoeffsEob walks the fast middle loop at eob 4") {
+    l16_rdo::LvMapCoeffCost costs;
+    std::memset(&costs, 0, sizeof(costs));
+    costs.baseEobCost[3][2] = 300;  // first index: ctx 3, level 4 -> AOMMIN-1 = 2
+    costs.lpsCost[14][1] = 6;       // get_br_ctx at pos 3: row0 col3 -> mag+14 = 14
+    costs.baseCost[7][2] = 400;     // last index: ctx 7, level 2
+    costs.dcSignCost[1][0] = 30;    // v=2 -> sign 0
+    costs.baseCost[5][1] = 550;     // middle c=1: ctx 5, level 1 (else branch)
+    const std::int16_t scan[4] = {0, 1, 2, 3};
+    const std::int32_t qcoeff[16] = {2, 1, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::int8_t ctxs[16] = {7, 5, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    alignas(64) static std::uint8_t levelsBuf[TX_PAD_2D];
+    std::memset(levelsBuf, 0, sizeof(levelsBuf));
+    std::uint8_t* lev = l16_rdo::setLevels(levelsBuf, 4, 4);
+    l16_rdo::txbInitLevels(qcoeff, 4, 4, lev);
+    // c_start = MIN(2, 4/4) = 1: one middle position (c=1). First 300+512+6,
+    // last 400+30, middle 550 + cost_literal_cnt(1)*512 = 2310.
+    CHECK(l16_rdo::costCoeffsEob(qcoeff, 4, scan, ctxs, &costs, 1, lev, 2, 0, 4, 0) == 2310);
+}
+
+// The coefficient-cost oracle: independent transcriptions of rd_cost.c
+// :84-:91 (get_golomb_cost), :224-:253 (one_eob), :255-:352 (the eob walk),
+// coefficients.h:83-:127 (get_br_ctx), :129-:131 (get_padded_idx) and
+// common_utils.h:92-:98 + rd_cost.c:93-:105 (the levels image).
+static std::int32_t oracleGetBrCtxR3(const std::uint8_t* levels, int c, int bwl, int txClass) {
+    const int row = c >> bwl;
+    const int col = c - (row << bwl);
+    const int stride = (1 << bwl) + 4;
+    const int pos = row * stride + col;
+    int mag = levels[pos + 1];
+    mag += levels[pos + stride];
+    if (txClass == 0) {
+        mag += levels[pos + stride + 1];
+        mag = ((mag + 1) >> 1) > 6 ? 6 : ((mag + 1) >> 1);
+        if (c == 0) return mag;
+        if (row < 2 && col < 2) return mag + 7;
+    } else if (txClass == 1) {
+        mag += levels[pos + 2];
+        mag = ((mag + 1) >> 1) > 6 ? 6 : ((mag + 1) >> 1);
+        if (c == 0) return mag;
+        if (col == 0) return mag + 7;
+    } else {
+        mag += levels[pos + (stride << 1)];
+        mag = ((mag + 1) >> 1) > 6 ? 6 : ((mag + 1) >> 1);
+        if (c == 0) return mag;
+        if (row == 0) return mag + 7;
+    }
+    return mag + 14;
+}
+
+static std::int32_t oracleGolombR3(int absQc) {
+    if (absQc >= 1 + 2 + 12) {
+        const int r = absQc - 12 - 2;
+        const int length = oracleGetMsb((unsigned)r) + 1;
+        return (2 * length - 1) << 9;
+    }
+    return 0;
+}
+
+static std::int32_t oracleOneEobR3(const std::int32_t* qcoeff, const std::int8_t* coeffContexts,
+                                    const l16_rdo::LvMapCoeffCost* costs, int dcSignCtx) {
+    const int v = qcoeff[0];
+    const int level = (v < 0) ? -v : v;
+    const int coeffCtx = coeffContexts[0];
+    int cost = costs->baseEobCost[coeffCtx][(level < 3 ? level : 3) - 1];
+    if (v != 0) {
+        const int sign = (v < 0) ? 1 : 0;
+        cost += costs->dcSignCost[dcSignCtx][sign];
+        if (level > 2) {
+            const int baseRange = level - 1 - 2;
+            cost += (baseRange < 12) ? costs->lpsCost[0][baseRange] : costs->lpsCost[0][12];
+            if (level >= 15) cost += oracleGolombR3(level);
+        }
+    }
+    return cost;
+}
+
+static std::int32_t oracleCostCoeffsEobR3(const std::int32_t* qcoeff, int eob, const std::int16_t* scan,
+                                           const std::int8_t* coeffContexts, const l16_rdo::LvMapCoeffCost* costs,
+                                           int dcSignCtx, const std::uint8_t* levels, int bwl, int txClass,
+                                           int fastLevel, int subresStep) {
+    const int costLiteral = 1 << 9;
+    int cost = 0;
+    if (eob == 1) {
+        return oracleOneEobR3(qcoeff, coeffContexts, costs, dcSignCtx);
+    }
+    {
+        const int pos = scan[eob - 1];
+        const int v = qcoeff[pos];
+        const int level = (v < 0) ? -v : v;
+        const int coeffCtx = coeffContexts[pos];
+        cost += costs->baseEobCost[coeffCtx][(level < 3 ? level : 3) - 1];
+        if (v != 0) {
+            cost += costLiteral;
+            if (level > 2) {
+                const int br = oracleGetBrCtxR3(levels, pos, bwl, txClass);
+                const int baseRange = level - 1 - 2;
+                cost += (baseRange < 12) ? costs->lpsCost[br][baseRange] : costs->lpsCost[br][12];
+                if (level >= 15) cost += oracleGolombR3(level);
+            }
+        }
+    }
+    {
+        const int v = qcoeff[0];
+        const int level = (v < 0) ? -v : v;
+        const int coeffCtx = coeffContexts[0];
+        cost += costs->baseCost[coeffCtx][(level < 3 ? level : 3)];
+        if (v != 0) {
+            const int sign = (v < 0) ? 1 : 0;
+            cost += costs->dcSignCost[dcSignCtx][sign];
+            if (level > 2) {
+                const int br = oracleGetBrCtxR3(levels, 0, bwl, txClass);
+                const int baseRange = level - 1 - 2;
+                cost += (baseRange < 12) ? costs->lpsCost[br][baseRange] : costs->lpsCost[br][12];
+                if (level >= 15) cost += oracleGolombR3(level);
+            }
+        }
+    }
+    const int divisor = (fastLevel - subresStep) > 1 ? (fastLevel - subresStep) : 1;
+    const int cStart = ((eob - 2) < (eob / divisor)) ? (eob - 2) : (eob / divisor);
+    unsigned cnt = 0;
+    for (int c = cStart; c >= 1; --c) {
+        const int pos = scan[c];
+        cnt += !!(qcoeff[pos]);
+        const int level = (qcoeff[pos] < 0) ? -qcoeff[pos] : qcoeff[pos];
+        if (level > 2) {
+            const int br = oracleGetBrCtxR3(levels, pos, bwl, txClass);
+            const int baseRange = level - 1 - 2;
+            cost += costs->baseCost[coeffContexts[pos]][3];
+            if (baseRange < 12) {
+                cost += costs->lpsCost[br][baseRange];
+            } else {
+                cost += oracleGolombR3(level) + costs->lpsCost[br][12];
+            }
+        } else {
+            cost += costs->baseCost[coeffContexts[pos]][level];
+        }
+    }
+    cost += (int)cnt * costLiteral;
+    return cost;
+}
+
+TEST_CASE("l16_rdo costCoeffsEob matches the reference transcription over the enumerated grid") {
+    l16_rdo::LvMapCoeffCost costs;
+    std::memset(&costs, 0, sizeof(costs));
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 13 * ctx + 3 * i + 5;
+    for (int ctx = 0; ctx < 42; ++ctx)
+        for (int i = 0; i < 8; ++i) costs.baseCost[ctx][i] = 17 * ctx + 11 * i + 3;
+    for (int ctx = 0; ctx < 4; ++ctx)
+        for (int i = 0; i < 3; ++i) costs.baseEobCost[ctx][i] = 19 * ctx + 7 * i + 2;
+    for (int ctx = 0; ctx < 3; ++ctx)
+        for (int i = 0; i < 2; ++i) costs.dcSignCost[ctx][i] = 23 * ctx + 5 * i + 1;
+    static const int levelsMag[8] = {0, 1, 2, 3, 5, 12, 15, 20};
+    const std::int16_t scanA[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    const std::int16_t scanB[16] = {0, 3, 1, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14};
+    unsigned seed = 9901u;
+    for (int bwlSel = 0; bwlSel < 2; ++bwlSel) {
+        const int bwl = 2 + bwlSel;
+        const int n = 1 << (bwl + 2);
+        for (int cls = 0; cls < 3; ++cls)
+            for (int fastSel = 0; fastSel < 3; ++fastSel) {
+                const int fastLevel = (fastSel == 0) ? 4 : (fastSel == 1 ? 2 : 3);
+                const int subresStep = (fastSel == 2) ? 1 : 0;
+                for (int eob = 1; eob <= 8; ++eob)
+                    for (int pat = 0; pat < 4; ++pat) {
+                        const std::int16_t* scan = (pat & 1) ? scanB : scanA;
+                        std::int32_t qcoeff[64];
+                        std::int8_t ctxs[64];
+                        for (int i = 0; i < n; ++i) {
+                            seed = seed * 1103515245u + 12345u;
+                            const int lvl = (pat >= 2) ? levelsMag[(int)(seed % 8)] : ((int)(seed >> 13) % 9);
+                            const int signBit = (int)(seed >> 7) & 1;
+                            qcoeff[i] = signBit ? -lvl : lvl;
+                            ctxs[i] = (std::int8_t)((int)(seed >> 19) % 4);
+                        }
+                        alignas(64) static std::uint8_t levelsBuf[TX_PAD_2D];
+                        std::memset(levelsBuf, 0, sizeof(levelsBuf));
+                        // Independent levels image (set_levels + init_levels).
+                        std::uint8_t* levW = levelsBuf + ((64 + 4) * 64) - n * (bwl + 4);
+                        {
+                            std::uint8_t* ls = levW;
+                            for (int i = 0; i < (1 << bwl); ++i) {
+                                for (int j = 0; j < n >> bwl; ++j) {
+                                    const int v = qcoeff[i * (n >> bwl) + j];
+                                    const int a = (v < 0) ? -v : v;
+                                    *ls++ = (std::uint8_t)(a > 127 ? 127 : a);
+                                }
+                                for (int j = 0; j < 4; ++j) *ls++ = 0;
+                            }
+                        }
+                        std::uint8_t* levP = l16_rdo::setLevels(levelsBuf, n >> bwl, 1 << bwl);
+                        l16_rdo::txbInitLevels(qcoeff, n >> bwl, 1 << bwl, levP);
+                        // The class -> txType mapping (tx_type_to_class rows:
+                        // DCT_DCT -> 2D; H_DCT -> HORIZ; V_DCT -> VERT).
+                        static const int clsToType[3] = {0, 11, 10};
+                        const int want = oracleCostCoeffsEobR3(qcoeff, eob, scan, ctxs, &costs, 1, levW, bwl, cls,
+                                                                fastLevel, subresStep);
+                        const int got = l16_rdo::costCoeffsEob(qcoeff, (std::uint16_t)eob, scan, ctxs, &costs, 1,
+                                                                levP, bwl, clsToType[cls], fastLevel, subresStep);
+                        CHECK(got == want);
+                    }
+            }
+    }
+}
+
+TEST_CASE("l16_rdo costCoeffsEob equals costCoeffsOneEob at eob 1 (composition)") {
+    l16_rdo::LvMapCoeffCost costs;
+    std::memset(&costs, 0, sizeof(costs));
+    for (int ctx = 0; ctx < 21; ++ctx)
+        for (int i = 0; i < 26; ++i) costs.lpsCost[ctx][i] = 11 * ctx + 2 * i + 4;
+    for (int ctx = 0; ctx < 4; ++ctx)
+        for (int i = 0; i < 3; ++i) costs.baseEobCost[ctx][i] = 29 * ctx + 9 * i + 6;
+    for (int ctx = 0; ctx < 3; ++ctx)
+        for (int i = 0; i < 2; ++i) costs.dcSignCost[ctx][i] = 37 * ctx + 4 * i + 2;
+    unsigned seed = 4400u;
+    for (int pat = 0; pat < 16; ++pat) {
+        const std::int32_t qcoeff[16] = {(int)(seed % 21) - 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        const std::int8_t ctxs[16] = {(std::int8_t)(pat % 4), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        const std::int16_t scan[4] = {0, 1, 2, 3};
+        alignas(64) static std::uint8_t levelsBuf[TX_PAD_2D];
+        std::memset(levelsBuf, 0, sizeof(levelsBuf));
+        std::uint8_t* lev = l16_rdo::setLevels(levelsBuf, 4, 4);
+        l16_rdo::txbInitLevels(qcoeff, 4, 4, lev);
+        seed = seed * 1103515245u + 12345u;
+        const int want = l16_rdo::costCoeffsOneEob(qcoeff, ctxs, &costs, (int)(seed % 3));
+        const int got = l16_rdo::costCoeffsEob(qcoeff, 1, scan, ctxs, &costs, (int)(seed % 3), lev, 2, 0, 4, 0);
+        CHECK(got == want);
+    }
+}
+
+TEST_CASE("l16_rdo getNzMapContexts fills the coefficient contexts at 4x4") {
+    const std::int16_t scan[4] = {0, 1, 2, 3};
+    const std::int32_t qcoeff[16] = {2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    alignas(64) static std::uint8_t levelsBuf[TX_PAD_2D];
+    std::memset(levelsBuf, 0, sizeof(levelsBuf));
+    std::uint8_t* lev = l16_rdo::setLevels(levelsBuf, 4, 4);
+    l16_rdo::txbInitLevels(qcoeff, 4, 4, lev);
+    std::int8_t ctxs[16];
+    std::memset(ctxs, -1, sizeof(ctxs));
+    // eob=2: i=0 (stats path at pos 0 hits the (txClass|coeffIdx)==0
+    // early-out -> 0); i=1 (eob path: scan_idx 1 <= 16/8=2 -> 1).
+    l16_rdo::getNzMapContexts(lev, scan, 2, 0 /* TX_4X4 */, l16_rdo::TX_CLASS_2D, ctxs);
+    CHECK(ctxs[0] == 0);
+    CHECK(ctxs[1] == 1);
+    CHECK(ctxs[2] == -1);  // positions beyond eob are untouched
+}
+
+TEST_CASE("l16_rdo costCoeffsTxb composes the walk at eob 2") {
+    l16_rdo::MdRateEstimationContext me;
+    l16_rdo::FcTokenCdfs fc;
+    l16_rdo::FcSyntaxCdfs fcSyntax;
+    std::memset(&me, 0, sizeof(me));
+    std::memset(&fc, 0, sizeof(fc));
+    std::memset(&fcSyntax, 0, sizeof(fcSyntax));
+    me.coeffFacBits[0][0].txbSkipCost[5][0] = 100;   // skip=0 symbol
+    me.eobFracBits[0][0].eobCost[0][1] = 200;        // eob_pt 2, ctx 0
+    me.coeffFacBits[0][0].baseEobCost[1][0] = 10;    // first: ctx 1, level 1
+    me.coeffFacBits[0][0].baseCost[0][3] = 20;       // last: ctx 0, level 3
+    me.coeffFacBits[0][0].dcSignCost[1][0] = 30;     // v=3 -> sign 0
+    me.coeffFacBits[0][0].lpsCost[1][0] = 5;         // get_br_ctx at c=0: 1
+    const std::int16_t scan[4] = {0, 1, 2, 3};
+    const std::int32_t qcoeff[16] = {3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    alignas(64) static std::uint8_t levelsBuf[TX_PAD_2D];
+    std::memset(levelsBuf, 0, sizeof(levelsBuf));
+    std::int8_t ctxs[16];
+    std::memset(ctxs, -1, sizeof(ctxs));
+    l16_rdo::CostCoeffsTxbArgs a;
+    std::memset(&a, 0, sizeof(a));
+    a.me = &me;
+    a.allowUpdateCdf = 0;
+    a.fc = &fc;
+    a.fcSyntax = &fcSyntax;
+    a.isInter = false;
+    a.lumaMode = 0;
+    a.filterIntraMode = 7;
+    a.qcoeff = qcoeff;
+    a.eob = 2;
+    a.planeType = 0;
+    a.transformSize = 0;
+    a.transformType = 0;
+    a.txbSkipCtx = 5;
+    a.dcSignCtx = 1;
+    a.reducedTxSet = false;
+    a.levelsBuf = levelsBuf;
+    a.coeffContexts = ctxs;
+    // skip 100 + tx-type 0 + eob 200 + first (10+512) + last (20+30+5) = 877.
+    CHECK(l16_rdo::costCoeffsTxb(a) == 877);
+}
+
+TEST_CASE("l16_rdo costCoeffsTxb updates the token cdfs and returns 0") {
+    l16_rdo::MdRateEstimationContext me;
+    l16_rdo::FcTokenCdfs fc;
+    l16_rdo::FcSyntaxCdfs fcSyntax;
+    std::memset(&me, 0, sizeof(me));
+    std::memset(&fc, 0, sizeof(fc));
+    std::memset(&fcSyntax, 0, sizeof(fcSyntax));
+    const std::int16_t scan[4] = {0, 1, 2, 3};
+    const std::int32_t qcoeff[16] = {3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    alignas(64) static std::uint8_t levelsBuf[TX_PAD_2D];
+    std::memset(levelsBuf, 0, sizeof(levelsBuf));
+    std::int8_t ctxs[16];
+    std::memset(ctxs, -1, sizeof(ctxs));
+    l16_rdo::CostCoeffsTxbArgs a;
+    std::memset(&a, 0, sizeof(a));
+    a.me = &me;
+    a.allowUpdateCdf = 1;
+    a.fc = &fc;
+    a.fcSyntax = &fcSyntax;
+    a.isInter = false;
+    a.lumaMode = 0;
+    a.filterIntraMode = 7;
+    a.qcoeff = qcoeff;
+    a.eob = 2;
+    a.planeType = 0;
+    a.transformSize = 0;
+    a.transformType = 0;
+    a.txbSkipCtx = 5;
+    a.dcSignCtx = 1;
+    a.reducedTxSet = false;
+    a.levelsBuf = levelsBuf;
+    a.coeffContexts = ctxs;
+    a.fastCoeffEstLevel = 4;
+    a.subresStep = 0;
+    CHECK(l16_rdo::costCoeffsTxb(a) == 0);
+    // c=1 (eob slot): base_eob ctx 1, symbol AOMMIN(1,3)-1 = 0, nsymbs 3.
+    CHECK(fc.coeffBaseEobCdf[0][0][1][3] == 1);
+    // c=0: base ctx 0, symbol AOMMIN(3,3) = 3, nsymbs 4.
+    CHECK(fc.coeffBaseCdf[0][0][0][4] == 1);
+    // br: eob != 1 -> get_br_ctx(levels, 0) = 1; k = AOMMIN(0, 3) = 0.
+    CHECK(fc.coeffBrCdf[0][0][1][4] == 1);
+    // dc_sign: qcoeff[0] > 0 -> symbol 0, nsymbs 2.
+    CHECK(fc.dcSignCdf[0][1][2] == 1);
+    // txb_skip: update_cdf(txb_skip_cdf, eob == 0, 2) -> val 0 at eob 2;
+    // the zero-initialized cdf[0] decreases by 0.
+    CHECK(fc.txbSkipCdf[0][5][2] == 1);
+    CHECK(fc.txbSkipCdf[0][5][0] == 0);
+}
+
+TEST_CASE("l16_rdo getIntraUvFastRate reads the uv mode cost") {
+    l16_rdo::MdRateEstimationContext me;
+    std::memset(&me, 0, sizeof(me));
+    me.intraUvModeFacBits[1][0][0] = 111;  // cfl-allowed, luma DC, chroma DC
+    l16_rdo::IntraFastCandidate cand;
+    std::memset(&cand, 0, sizeof(cand));
+    cand.paletteSize[0] = cand.paletteSize[1] = -1;
+    // 16x16: is_cfl_allowed = 1; UV_DC_PRED, non-directional, no CFL, no
+    // palette (allow_screen_content_tools 0).
+    CHECK(l16_rdo::getIntraUvFastRate(&me, cand, 6 /* BLOCK_16X16 */, 16, 16, 0, 0, false, 0, 0) == 111);
+}
+
+TEST_CASE("l16_rdo getIntraUvFastRate adds the chroma angle delta") {
+    l16_rdo::MdRateEstimationContext me;
+    std::memset(&me, 0, sizeof(me));
+    me.intraUvModeFacBits[1][0][1] = 111;  // cfl-allowed, luma DC, chroma V
+    me.angleDeltaFacBits[0][4] = 55;       // chroma V (V_PRED-1=0), delta +1
+    l16_rdo::IntraFastCandidate cand;
+    std::memset(&cand, 0, sizeof(cand));
+    cand.uvMode = 1 /* UV_V_PRED */;
+    cand.angleDelta[1] = 1;
+    cand.paletteSize[0] = cand.paletteSize[1] = -1;
+    // 16x16, UV_V_PRED directional: 111 + 55 = 166.
+    CHECK(l16_rdo::getIntraUvFastRate(&me, cand, 6 /* BLOCK_16X16 */, 16, 16, 0, 0, false, 0, 0) == 166);
+}
+
+TEST_CASE("l16_rdo getIntraUvFastRate folds CFL to DC before the alphas land") {
+    l16_rdo::MdRateEstimationContext me;
+    std::memset(&me, 0, sizeof(me));
+    // useAccurateCfl=0: UV_CFL_PRED folds to UV_DC_PRED; no alpha bits.
+    me.intraUvModeFacBits[1][0][0] = 111;  // the DC row (the fold target)
+    me.intraUvModeFacBits[1][0][13] = 999; // the CFL row must NOT be read
+    me.cflAlphaFacBits[0][0][3] = 500;
+    l16_rdo::IntraFastCandidate cand;
+    std::memset(&cand, 0, sizeof(cand));
+    cand.uvMode = 13 /* UV_CFL_PRED */;
+    cand.cflAlphaSigns = 0;
+    cand.cflAlphaIdx = 0x30;  // CFL_IDX_U = 3 (the high nibble), V = 0
+    cand.paletteSize[0] = cand.paletteSize[1] = -1;
+    CHECK(l16_rdo::getIntraUvFastRate(&me, cand, 6, 16, 16, 0, 0, false, 0, 0) == 111);
+    // useAccurateCfl=1: the CFL row (999) + the U alpha (500) + the V alpha
+    // (0, zeroed) = 1499.
+    CHECK(l16_rdo::getIntraUvFastRate(&me, cand, 6, 16, 16, 0, 0, true, 0, 0) == 1499);
+}
+
+TEST_CASE("l16_rdo getIntraUvFastRate reads the uv palette mode cost") {
+    l16_rdo::MdRateEstimationContext me;
+    std::memset(&me, 0, sizeof(me));
+    me.intraUvModeFacBits[1][0][0] = 111;
+    me.paletteUvModeFacBits[1][0] = 77;  // use_palette_y=1, use_palette_uv=0
+    l16_rdo::IntraFastCandidate cand;
+    std::memset(&cand, 0, sizeof(cand));
+    cand.paletteSize[0] = 4;   // palette_info present, y size > 0
+    cand.paletteSize[1] = 0;   // uv size 0
+    // 32x32 (still cfl-allowed), mi (0,0): chroma reference at 4:2:0. The
+    // enablePalette=1 run reads the palette row; 111 + 77 = 188.
+    CHECK(l16_rdo::getIntraUvFastRate(&me, cand, 6, 32, 32, 0, 0, false, 1, 1) == 188);
+    // enablePalette=0 (the pinned build): the branch is dead -> 111.
+    CHECK(l16_rdo::getIntraUvFastRate(&me, cand, 6, 32, 32, 0, 0, false, 1, 0) == 111);
+}
+
+TEST_CASE("l16_rdo getIntraUvFastRate matches the reference transcription over the uv mode set") {
+    l16_rdo::MdRateEstimationContext meA, meB;
+    std::memset(&meA, 0, sizeof(meA));
+    std::memcpy(&meB, &meA, sizeof(meB));
+    unsigned seed = 6101u;
+    for (int cfl = 0; cfl < 2; ++cfl)
+        for (int m = 0; m < 13; ++m)
+            for (int uv = 0; uv < 14; ++uv) {
+                seed = seed * 1103515245u + 12345u;
+                meA.intraUvModeFacBits[cfl][m][uv] = meB.intraUvModeFacBits[cfl][m][uv] =
+                    (std::int32_t)(seed % 5000);
+            }
+    for (int js = 0; js < 8; ++js)
+        for (int p = 0; p < 2; ++p)
+            for (int a = 0; a < 16; ++a) {
+                seed = seed * 1103515245u + 12345u;
+                meA.cflAlphaFacBits[js][p][a] = meB.cflAlphaFacBits[js][p][a] = (std::int32_t)(seed % 3000);
+            }
+    for (int i = 0; i < 8; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            meA.paletteUvModeFacBits[i][j] = meB.paletteUvModeFacBits[i][j] = 400 + i * 10 + j;
+        }
+    }
+    for (int d = 0; d < 8; ++d)
+        for (int k = 0; k < 7; ++k) meA.angleDeltaFacBits[d][k] = meB.angleDeltaFacBits[d][k] = 50 * d + k;
+    unsigned seed2 = 6607u;
+    // The oracle transcription of rd_cost.c:476-:524 (walls threaded).
+    auto oracle = [&](const l16_rdo::MdRateEstimationContext* meR, const l16_rdo::IntraFastCandidate& c,
+                      int bsize, int bwidth, int bheight, int blkOrgX, int blkOrgY, bool useAccurateCfl,
+                      int asct, int enablePalette) -> std::int64_t {
+        const int isCflAllowed = (bwidth <= 32 && bheight <= 32) ? 1 : 0;
+        const int chromaMode = (c.uvMode == 13 && !useAccurateCfl) ? 0 : c.uvMode;
+        const int miRow = blkOrgY >> 2, miCol = blkOrgX >> 2;
+        std::int64_t rate = 0;
+        rate += meR->intraUvModeFacBits[isCflAllowed][c.mode][chromaMode];
+        static const int miSizeWideR[22] = {1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16};
+        static const int miSizeHighR[22] = {1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4};
+        static const int uv2y[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 0, 0};
+        const int bw = miSizeWideR[bsize], bh = miSizeHighR[bsize];
+        const bool chromaRef = ((miRow & 1) || !(bh & 1)) && ((miCol & 1) || !(bw & 1));
+        if (bsize >= 3 && uv2y[chromaMode] >= 1 && uv2y[chromaMode] <= 8) {
+            rate += meR->angleDeltaFacBits[chromaMode - 1][3 + c.angleDelta[1]];
+        }
+        if (chromaMode == 13) {
+            rate += meR->cflAlphaFacBits[c.cflAlphaSigns][0][c.cflAlphaIdx >> 4] +
+                    meR->cflAlphaFacBits[c.cflAlphaSigns][1][c.cflAlphaIdx & 15];
+        }
+        if (chromaMode == 0 && enablePalette && asct && bwidth <= 64 && bheight <= 64 && bsize >= 3 && chromaRef) {
+            const int useY = (c.paletteSize[0] >= 0) && (c.paletteSize[0] > 0);
+            const int useUv = (c.paletteSize[1] >= 0) && (c.paletteSize[1] > 0);
+            rate += meR->paletteUvModeFacBits[useY][useUv];
+        }
+        return rate;
+    };
+    for (int bs = 3; bs <= 12; ++bs)
+        for (int uvMode = 0; uvMode < 14; ++uvMode)
+            for (int acc = 0; acc <= 1; ++acc)
+                for (int asct = 0; asct <= 1; ++asct)
+                    for (int pal = 0; pal <= 1; ++pal) {
+                        l16_rdo::IntraFastCandidate c;
+                        std::memset(&c, 0, sizeof(c));
+                        seed2 = seed2 * 1103515245u + 12345u;
+                        c.mode = (int)(seed2 % 13);
+                        c.uvMode = uvMode;
+                        c.angleDelta[1] = (int)(seed2 % 7) - 3;
+                        c.cflAlphaSigns = (int)(seed2 >> 9) % 8;
+                        c.cflAlphaIdx = (int)(seed2 >> 13) % 256;
+                        c.paletteSize[0] = pal ? (int)(seed2 >> 17) % 5 : -1;
+                        c.paletteSize[1] = pal ? (int)(seed2 >> 21) % 5 : -1;
+                        const int bwidth = l16_rdo::blockSizeWide[bs];
+                        const int bheight = l16_rdo::blockSizeHigh[bs];
+                        const std::int64_t want = oracle(&meB, c, bs, bwidth, bheight, 64, 32, acc != 0, asct, pal);
+                        const std::int32_t got = l16_rdo::getIntraUvFastRate(&meA, c, bs, bwidth, bheight, 64, 32,
+                                                                              acc != 0, asct, pal);
+                        CHECK(got == want);
+                    }
+}
+
+TEST_CASE("l16_rdo mvBitCost composes joint and component costs") {
+    static const std::int32_t jointCost[4] = {10, 20, 30, 40};
+    static const std::int32_t dvY[8] = {0, 7, 0, 0, 0, 0, 0, 0};
+    static const std::int32_t dvX[8] = {0, 0, 9, 0, 0, 0, 0, 0};
+    const std::int32_t* compCost[2] = {dvY, dvX};
+    // mv (3, -2), ref (1, -3): diff (2, 1), both nonzero -> HNZVNZ.
+    const std::int32_t mv = (std::int32_t)((0x0000FFFFu & (std::uint32_t)3) | ((std::uint32_t)(std::uint16_t)-2 << 16));
+    const std::int32_t ref = (std::int32_t)((0x0000FFFFu & (std::uint32_t)1) | ((std::uint32_t)(std::uint16_t)-3 << 16));
+    // 40 + dvY[1] + dvX[2] = 56; ROUND_POWER_OF_TWO(56 * 120, 7) = 53.
+    CHECK(l16_rdo::mvBitCost(mv, ref, jointCost, compCost, 120) == 53);
+    CHECK(l16_rdo::getMvJoint(0) == 0);
+    CHECK(l16_rdo::getMvJoint((std::int32_t)5u) == 1);
+    CHECK(l16_rdo::getMvJoint((std::int32_t)(5u << 16)) == 2);
+    CHECK(l16_rdo::getMvJoint((std::int32_t)((5u << 16) | 5u)) == 3);
+}
+
+TEST_CASE("l16_rdo buildNmvCostTable composes the joint and component fills") {
+    // A valid synthetic NmvContext: every cdf row is a proper icdf row
+    // (increasing with the 0 terminator) so the rate walks terminate.
+    auto fillValid = [](l16_rdo::AomCdfProb* cdf, int nsymbs) {
+        for (int i = 0; i < nsymbs - 1; ++i) cdf[i] = (l16_rdo::AomCdfProb)AOM_ICDF((((i + 1) * 32768) / nsymbs));
+        cdf[nsymbs - 1] = 0;
+    };
+    l16_rdo::NmvContext ctx;
+    std::memset(&ctx, 0, sizeof(ctx));
+    fillValid(ctx.joints_cdf, CDF_SIZE(MV_JOINTS));
+    for (int c = 0; c < 2; ++c) {
+        fillValid(ctx.comps[c].classes_cdf, CDF_SIZE(MV_CLASSES));
+        fillValid(ctx.comps[c].fp_cdf, CDF_SIZE(MV_FP_SIZE));
+        fillValid(ctx.comps[c].sign_cdf, CDF_SIZE(2));
+        fillValid(ctx.comps[c].class0_hp_cdf, CDF_SIZE(2));
+        fillValid(ctx.comps[c].hp_cdf, CDF_SIZE(2));
+        fillValid(ctx.comps[c].class0_cdf, CDF_SIZE(CLASS0_SIZE));
+        for (int i = 0; i < CLASS0_SIZE; ++i)
+            fillValid(ctx.comps[c].class0_fp_cdf[i], CDF_SIZE(MV_FP_SIZE));
+        for (int i = 0; i < MV_OFFSET_BITS; ++i)
+            fillValid(ctx.comps[c].bits_cdf[i], CDF_SIZE(2));
+    }
+    static std::int32_t joint[CDF_SIZE(MV_JOINTS)];
+    static std::int32_t row0[3 * MV_MAX + 1];
+    static std::int32_t row1[3 * MV_MAX + 1];
+    std::int32_t* compCost[2] = {&row0[MV_MAX], &row1[MV_MAX]};
+    l16_rdo::buildNmvCostTable(joint, compCost, &ctx, l16_rdo::MvSubpelNone);
+    // The joints fill is the plain icdf cost; the components are the
+    // build_nmv_component_cost_table fills at precision -1.
+    std::int32_t wantJoint[CDF_SIZE(MV_JOINTS)];
+    l16_rdo::getSyntaxRateFromCdf(wantJoint, ctx.joints_cdf, nullptr);
+    CHECK(std::memcmp(joint, wantJoint, sizeof(wantJoint)) == 0);
+    // The component row is the landed per-component table: verify against a
+    // direct call on the same component.
+    static std::int32_t want0[3 * MV_MAX + 1];
+    l16_rdo::buildNmvComponentCostTable(&want0[MV_MAX], &ctx.comps[0], l16_rdo::MvSubpelNone);
+    CHECK(std::memcmp(row0, want0, sizeof(row0)) == 0);
+}
+
+// The intra fast cost oracle: an independent transcription of
+// rd_cost.c:526-:640 (the branches the port carries) plus its consumed
+// helpers (av1_is_directional_mode, is_comp_ref_allowed, filter_intra_
+// allowed, allow_palette, get_uv_mode fold, the mv trio, RDCOST).
+TEST_CASE("l16_rdo intraFastCost composes the I-slice luma path") {
+    l16_rdo::MdRateEstimationContext me;
+    std::memset(&me, 0, sizeof(me));
+    me.yModeFacBits[2][3][0] = 100;  // kf luma DC at (top 2, left 3)
+    l16_rdo::IntraFastCandidate cand;
+    std::memset(&cand, 0, sizeof(cand));
+    cand.mode = 0;      // DC_PRED
+    cand.uvMode = 0;    // UV_DC_PRED
+    cand.filterIntraMode = 7;
+    cand.paletteSize[0] = cand.paletteSize[1] = -1;
+    l16_rdo::IntraFastCostArgs a;
+    std::memset(&a, 0, sizeof(a));
+    a.me = &me;
+    a.cand = &cand;
+    a.bsize = 6;   // BLOCK_16X16
+    a.bwidth = 16;
+    a.bheight = 16;
+    a.lambda = 256;
+    a.lumaDistortion = 0;
+    std::uint32_t fl = 0, fc = 0;
+    a.fastLumaRate = &fl;
+    a.fastChromaRate = &fc;
+    a.skipModeCtx = 1;
+    a.intraLumaTopCtx = 2;
+    a.intraLumaLeftCtx = 3;
+    a.isInterCtx = 0;
+    a.hasUv = false;
+    a.paletteModeCtx = 0;
+    a.isISlice = true;
+    a.skipModeFlag = false;
+    a.filterIntraLevel = 0;
+    a.allowScreenContentTools = 0;
+    a.frameAllowIntrabc = false;
+    a.enablePalette = 0;
+    a.dvJointCost = nullptr;
+    a.blkOrgX = 0;
+    a.blkOrgY = 0;
+    // luma = y_mode 100; rate = 100; RDCOST(256, 100, 0) = (100*256)>>9 = 50.
+    CHECK(l16_rdo::intraFastCost(a) == 50);
+    CHECK(fl == 100);
+    CHECK(fc == 0);
+}
+
+TEST_CASE("l16_rdo intraFastCost composes the non-I-slice path and the uv chain") {
+    l16_rdo::MdRateEstimationContext me;
+    std::memset(&me, 0, sizeof(me));
+    me.mbModeFacBits[2][0] = 21;          // 16x16 group, DC_PRED
+    me.skipModeFacBits[1][0] = 13;        // skip ctx 1, symbol 0
+    me.intraInterFacBits[3][0] = 9;       // intra/inter flag
+    me.intraUvModeFacBits[1][0][0] = 37;  // chroma DC at cfl-allowed
+    l16_rdo::IntraFastCandidate cand;
+    std::memset(&cand, 0, sizeof(cand));
+    cand.mode = 0;
+    cand.uvMode = 0;
+    cand.filterIntraMode = 7;
+    cand.paletteSize[0] = cand.paletteSize[1] = -1;
+    l16_rdo::IntraFastCostArgs a;
+    std::memset(&a, 0, sizeof(a));
+    a.me = &me;
+    a.cand = &cand;
+    a.bsize = 6;
+    a.bwidth = 16;
+    a.bheight = 16;
+    a.lambda = 1;
+    a.lumaDistortion = 0;
+    std::uint32_t fl = 0, fc = 0;
+    a.fastLumaRate = &fl;
+    a.fastChromaRate = &fc;
+    a.skipModeCtx = 1;
+    a.intraLumaTopCtx = 2;
+    a.intraLumaLeftCtx = 3;
+    a.isInterCtx = 3;
+    a.hasUv = true;
+    a.isISlice = false;
+    a.skipModeFlag = true;
+    a.filterIntraLevel = 0;
+    a.allowScreenContentTools = 0;
+    a.frameAllowIntrabc = false;
+    a.enablePalette = 0;
+    a.blkOrgX = 0;
+    a.blkOrgY = 0;
+    // luma = 21 + 13 + 9 = 43; chroma = 37; rate = 80; lambda 1 -> RDCOST = 0.
+    CHECK(l16_rdo::intraFastCost(a) == 0);
+    CHECK(fl == 43);
+    CHECK(fc == 37);
+    // The bookkeeping property the reference's own structure guarantees:
+    // the out-params sum to the rate inside the RDCOST.
+    const std::int64_t want = ROUND_POWER_OF_TWO((std::int64_t)(fl + fc) * (std::int64_t)a.lambda, 9) +
+                              (std::int64_t)a.lumaDistortion * 128;
+    CHECK(l16_rdo::intraFastCost(a) == want);
+}
+
+TEST_CASE("l16_rdo intraFastCost routes the intrabc branch through the mv cost") {
+    l16_rdo::MdRateEstimationContext me;
+    std::memset(&me, 0, sizeof(me));
+    me.intrabcFacBits[1] = 15;
+    l16_rdo::IntraFastCandidate cand;
+    std::memset(&cand, 0, sizeof(cand));
+    cand.mode = 0;
+    cand.uvMode = 0;
+    cand.filterIntraMode = 7;
+    cand.paletteSize[0] = cand.paletteSize[1] = -1;
+    cand.useIntrabc = true;
+    // mv (10, -2), pred (2, -5): diff (8, 3), HNZVNZ joint 3.
+    cand.mv = (std::int32_t)(10u | ((std::uint32_t)(std::uint16_t)-2 << 16));
+    cand.predMv = (std::int32_t)(2u | ((std::uint32_t)(std::uint16_t)-5 << 16));
+    // The dv tables: the joint row and the two component rows at [MV_MAX].
+    static const std::int32_t joint[4] = {0, 6, 11, 19};
+    static std::int32_t rowY[3 * MV_MAX + 1];
+    static std::int32_t rowX[3 * MV_MAX + 1];
+    std::memset((void*)rowY, 0, sizeof(rowY));
+    std::memset((void*)rowX, 0, sizeof(rowX));
+    rowY[MV_MAX + 3] = 4;  // y diff 3
+    rowX[MV_MAX + 8] = 7;  // x diff 8
+    const std::int32_t* dvRows[2] = {&rowY[MV_MAX], &rowX[MV_MAX]};
+    l16_rdo::IntraFastCostArgs a;
+    std::memset(&a, 0, sizeof(a));
+    a.me = &me;
+    a.cand = &cand;
+    a.bsize = 6;
+    a.bwidth = 16;
+    a.bheight = 16;
+    a.lambda = 2;
+    a.lumaDistortion = 3;
+    std::uint32_t fl = 0, fc = 0;
+    a.fastLumaRate = &fl;
+    a.fastChromaRate = &fc;
+    a.frameAllowIntrabc = true;
+    a.dvJointCost = joint;
+    a.dvCostRow[0] = &rowY[MV_MAX];
+    a.dvCostRow[1] = &rowX[MV_MAX];
+    // mv rate = ROUND_POWER_OF_TWO(30 * 120, 7) = 28; rate = 28 + intrabc
+    // 15 = 43.
+    CHECK(l16_rdo::intraFastCost(a) == 384);
+    CHECK(fl == 43);
+    CHECK(fc == 0);
+}
+

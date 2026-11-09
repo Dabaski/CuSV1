@@ -136,6 +136,7 @@ void buildNmvComponentCostTable(std::int32_t* mvcost, const NmvComponent* mvcomp
 #define TX_SIZES 4          // cabac_context_model.h (TX_4X4..TX_32X32 + 1)
 #define TX_32X32 3          // the [TX_32X32 + 1] br-cdf clamp bound
 #define TX_4X4 0            // the ext-tx walk's start bound (definitions.h:955)
+#define TX_16X16 2          // the ext-tx set-type fork (common_utils.h:73/:75)
 #define PLANE_TYPES 2       // l7 entropy.h:496 PlaneType enum
 #define TXB_SKIP_CONTEXTS 13      // cabac_context_model.h
 #define SIG_COEF_CONTEXTS_2D 26   // cabac_context_model.h:113
@@ -220,6 +221,8 @@ struct FcTokenCdfs {
 // The single-inter mode block (definitions.h:1198-1199): isInterIntraAllowedMode's range.
 #define SINGLE_INTER_MODE_START NEARESTMV
 #define SINGLE_INTER_MODE_END NEAREST_NEARESTMV
+// The compound-inter block end (definitions.h:1202): isInterMode's bound.
+#define COMP_INTER_MODE_END MB_MODE_COUNT
 
 // BLOCK_SIZES_ALL (definitions.h:883-905, verbatim order; the l7_entropy
 // port carries the same 22-entry enum, entropy.h:180-203).
@@ -287,6 +290,9 @@ std::int32_t allowIntrabc(std::int32_t allowScreenContentTools, std::int32_t all
 // as the parameter (named deviation; the pinned build's behavior is the
 // enable=0 case).
 std::int32_t allowPalette(std::int32_t enable, std::int32_t allowScreenContentTools, BlockSize bsize);
+// eb_size_group_lookup (common_utils.c:36-37, verbatim; consumed by the
+// fast cost's non-I-slice mb-mode read).
+extern const std::uint8_t ebSizeGroupLookup[BLOCK_SIZES_ALL];
 // svt_aom_get_palette_bsize_ctx (entropy_coding.c:4224-4226).
 std::int32_t getPaletteBsizeCtx(BlockSize bsize);
 
@@ -369,6 +375,12 @@ struct MdRateEstimationContext {
     std::int32_t wienerRestoreFacBits[2];
     std::int32_t sgrprojRestoreFacBits[2];
     std::int32_t intrabcFacBits[2];
+    // RE3 extension (md_rate_estimation.c:310-:312): the intra/inter flag
+    // family. The reference fills it inside the !is_i_slice block that RE1
+    // parked; the ported svt_aom_intra_fast_cost (rd_cost.c:624-:626)
+    // consumes it, so the family and its fill (estimateIntraInterRate)
+    // are extracted here.
+    std::int32_t intraInterFacBits[INTRA_INTER_CONTEXTS][2];
     bool         initialized;
 };
 
@@ -388,6 +400,10 @@ struct FcSyntaxCdfs {
     AomCdfProb skip_cdfs[SKIP_CONTEXTS][CDF_SIZE(2)];
     AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
     AomCdfProb y_mode_cdf[4][CDF_SIZE(INTRA_MODES)];   // BlockSize_GROUPS
+    // RE3 extension (md_rate_estimation.c:311): the intra/inter cdf family
+    // (the reference reads it inside the parked inter block; the ported
+    // intra fast cost consumes its rate table).
+    AomCdfProb intra_inter_cdf[INTRA_INTER_CONTEXTS][CDF_SIZE(2)];
     AomCdfProb uv_mode_cdf[CFL_ALLOWED_TYPES][INTRA_MODES][CDF_SIZE(UV_INTRA_MODES)];
     AomCdfProb switchable_interp_cdf[SWITCHABLE_FILTER_CONTEXTS][CDF_SIZE(SWITCHABLE_FILTERS)];
     AomCdfProb cfl_sign_cdf[CDF_SIZE(CFL_JOINT_SIGNS)];
@@ -433,6 +449,12 @@ void estimateCoefficientsRate(MdRateEstimationContext* me, const FcTokenCdfs* fc
 void estimateSyntaxRate(MdRateEstimationContext* me, std::uint8_t pic_filter_intra_level,
                         std::uint8_t allow_screen_content_tools, std::uint8_t enable_restoration,
                         std::uint8_t allow_intrabc, const FcSyntaxCdfs* fc);
+
+// The intra_inter fill (md_rate_estimation.c:310-:312), extracted from the
+// parked inter block: the ported intra fast cost (rd_cost.c:624-:626)
+// consumes intra_inter_fac_bits when slice_type != I_SLICE. The FcSyntaxCdfs
+// carry gained intra_inter_cdf for it.
+void estimateIntraInterRate(MdRateEstimationContext* me, const FcSyntaxCdfs* fc);
 
 // ---------------------------------------------------------------------------
 // RE2: the optimize_b trellis (full_loop.c:622-1252). Module-boundary
@@ -644,6 +666,239 @@ void optimizeB(const OptimizeBArgs& a);
 // get_br_cost (full_loop.c:622-626); the caller guarantees level >
 // NUM_BASE_LEVELS (the coeff_lps row pointer is lpsCost[br_ctx]).
 std::int32_t getBrCost(std::int32_t level, const std::int32_t* coeffLps);
+
+// get_nz_map_ctx + svt_av1_get_nz_map_contexts_c (C_DEFAULT/encode_txb_ref_
+// c.c:17-:43, verbatim composition over the landed RE2 pieces). Carried
+// because the cost_coeffs_txb driver (rd_cost.c:412-:417) consumes it and
+// l16_rdo cannot link l7_entropy (the l7-l13 duplication precedent).
+std::int32_t getNzMapCtx(const std::uint8_t* levels, std::int32_t coeffIdx, std::int32_t bwl, std::int32_t height,
+                          std::int32_t scanIdx, std::int32_t isEob, std::int32_t txSize, TxClass txClass);
+void getNzMapContexts(const std::uint8_t* levels, const std::int16_t* scan, std::uint16_t eob,
+                       std::int32_t txSize, TxClass txClass, std::int8_t* coeffContexts);
+
+// ---------------------------------------------------------------------------
+// RE3: the rd_cost.c symbol-cost surface (2026-11-08). The carries below
+// are consumed by the ported spans (rd_cost.c:107-:640, 459 nb); each
+// carries with its reference file + line citation. The landed RE1/RE2
+// surface above is untouched.
+// ---------------------------------------------------------------------------
+
+// update_cdf (cabac_context_model.h:76-105, verbatim): the adaptation-rate
+// formula. The landed l7 twin is updateCdf (l7_entropy/entropy.cpp); l16_rdo
+// cannot link l7_entropy, so the twin is carried (the l7-l13 duplication
+// precedent). cdf is the nsymbs+1-entry AOM_ICDF array whose last slot is
+// the adaptation count.
+void updateCdf(AomCdfProb* cdf, std::int32_t val, std::int32_t nsymbs);
+
+// The ext-tx plumbing (common_utils.h:59-90 + common_utils.c:195/:206-208,
+// verbatim): the getters and the two index tables. Carried because the
+// tx-type walk (rd_cost.c:107-:153) composes them.
+std::int32_t getExtTxSetType(std::int32_t txSize, std::int32_t isInter, std::int32_t useReducedSet);
+std::int32_t getExtTxTypes(std::int32_t txSize, std::int32_t isInter, std::int32_t useReducedSet);
+std::int32_t getExtTxSet(std::int32_t txSize, std::int32_t isInter, std::int32_t useReducedSet);
+extern const std::int32_t av1NumExtTxSet[EXT_TX_SET_TYPES];
+extern const std::int32_t extTxSetIndex[2][EXT_TX_SET_TYPES];
+// av1_ext_tx_ind (cabac_context_model.c:34-42, verbatim).
+extern const std::int32_t av1ExtTxInd[EXT_TX_SET_TYPES][TX_TYPES];
+// fimode_to_intradir (common_utils.c:33, verbatim).
+extern const PredictionMode fimodeToIntradir[FILTER_INTRA_MODES];
+
+// av1_transform_type_rate_estimation (rd_cost.c:107-:153): the tx-type
+// cost walk. The walls are threaded per the campaign pattern: the
+// candidate's luma mode + filter-intra mode (the intra_dir fold at
+// :134-:138) and is_inter arrive as scalars.
+std::int32_t transformTypeRateEstimation(const MdRateEstimationContext* me, std::uint8_t allowUpdateCdf,
+                                          FcSyntaxCdfs* fc, bool isInter, std::int32_t transformSize,
+                                          std::int32_t transformType, bool reducedTxSetUsed,
+                                          std::int32_t lumaMode, std::int32_t filterIntraMode);
+
+// update_eob_context (rd_cost.c:157-:195): the eob-related cdf update walk.
+// txSize is the 19-shape TxSize order; plane 0 = Y, 1 = UV (l7 entropy.h:496
+// PlaneType order).
+void updateEobContext(std::int32_t eob, std::int32_t txSize, TxClass txClass, std::int32_t plane,
+                       FcTokenCdfs* ecCtx);
+
+// av1_cost_skip_txb (rd_cost.c:213-:222): the skip cost + the skip-cdf
+// update. txbSkipCtx is the 13-entry context.
+std::int32_t costSkipTxb(const MdRateEstimationContext* me, std::uint8_t allowUpdateCdf, FcTokenCdfs* ecCtx,
+                          std::int32_t transformSize, std::int32_t planeType, std::int32_t txbSkipCtx);
+
+// av1_cost_coeffs_txb_loop_cost_one_eob (rd_cost.c:224-:253): the eob==1
+// fast walk (dc_sign gated on v != 0).
+std::int32_t costCoeffsOneEob(const std::int32_t* qcoeff, const std::int8_t* coeffContexts,
+                               const LvMapCoeffCost* coeffCosts, std::int32_t dcSignCtx);
+
+// av1_cost_coeffs_txb_loop_cost_eob (rd_cost.c:255-:352): the general
+// coefficient-cost walk. The md_ctx walls (mds_fast_coeff_est_level,
+// mds_subres_step) are threaded as the last two scalars (the c_start
+// formula at :329); transformType folds through tx_type_to_class for the
+// get_br_ctx calls.
+std::int32_t costCoeffsEob(const std::int32_t* qcoeff, std::uint16_t eob, const std::int16_t* scan,
+                            const std::int8_t* coeffContexts, const LvMapCoeffCost* coeffCosts,
+                            std::int32_t dcSignCtx, const std::uint8_t* levels, std::int32_t bwl,
+                            std::int32_t transformType, std::int32_t fastCoeffEstLevel,
+                            std::int32_t subresStep);
+
+// svt_av1_cost_coeffs_txb (rd_cost.c:355-:474): the driver. The cand/ctx
+// walls are threaded per the campaign pattern: is_inter + the luma fold
+// arrive as scalars, the levels/coeff-context scratches as buffers, and
+// the fast_coeff_est_level/subres_step pair for the middle walk. When
+// allowUpdateCdf the function updates the token cdfs and returns 0 (the
+// reference's :419-:469 walk).
+struct CostCoeffsTxbArgs {
+    const MdRateEstimationContext* me;
+    std::uint8_t allowUpdateCdf;
+    FcTokenCdfs* fc;
+    FcSyntaxCdfs* fcSyntax;  // the tx-type update target (the landed RE1 split)
+    bool isInter;
+    std::int32_t lumaMode;
+    std::int32_t filterIntraMode;
+    const std::int32_t* qcoeff;
+    std::uint16_t eob;
+    std::int32_t planeType;
+    std::int32_t transformSize;
+    std::int32_t transformType;
+    std::int16_t txbSkipCtx;
+    std::int16_t dcSignCtx;
+    bool reducedTxSet;
+    std::uint8_t* levelsBuf;
+    std::int8_t* coeffContexts;
+    std::int32_t fastCoeffEstLevel;
+    std::int32_t subresStep;
+};
+std::int32_t costCoeffsTxb(const CostCoeffsTxbArgs& a);
+
+// MI_SIZE_LOG2 (definitions.h:353).
+#define MI_SIZE_LOG2 2
+
+// ---------------------------------------------------------------------------
+// RE3: the intra fast-cost pair (rd_cost.c:476-:640). The candidate/ctx
+// walls thread per the campaign pattern: the consumed candidate fields
+// become a minimal carry struct, the pcs/ctx/blk_geom fields scalars.
+// ---------------------------------------------------------------------------
+// UvPredictionMode (definitions.h:1210-1227, verbatim order; the count
+// slot UV_INTRA_MODES = 14 is the landed macro above, so the enum carries
+// the 14 mode constants only).
+enum UvPredictionMode {
+    UV_DC_PRED, UV_V_PRED, UV_H_PRED, UV_D45_PRED, UV_D135_PRED, UV_D113_PRED,
+    UV_D157_PRED, UV_D203_PRED, UV_D67_PRED, UV_SMOOTH_PRED, UV_SMOOTH_V_PRED,
+    UV_SMOOTH_H_PRED, UV_PAETH_PRED, UV_CFL_PRED,
+};
+// g_uv2y (common_utils.c:14-28, verbatim; 16 entries, the trailing
+// INTRA_INVALID slots carry 0 in the port).
+extern const std::int32_t gUv2y[16];
+// get_uv_mode (common_utils.h:130-133).
+std::int32_t getUvMode(std::int32_t uvMode);
+// mi_size_wide/high (common_utils.c:292-293, verbatim).
+extern const std::uint8_t miSizeWide[BLOCK_SIZES_ALL];
+extern const std::uint8_t miSizeHigh[BLOCK_SIZES_ALL];
+// is_chroma_reference (common_utils.h:315-320).
+bool isChromaReference(std::int32_t miRow, std::int32_t miCol, BlockSize bsize, std::int32_t ssX,
+                        std::int32_t ssY);
+// av1_is_directional_mode (intra_prediction.h:206-208).
+std::int32_t av1IsDirectionalMode(std::int32_t mode);
+// is_inter_mode (definitions.h:1599-1601).
+std::int32_t isInterMode(std::int32_t mode);
+// is_comp_ref_allowed (inter_prediction.h:255-257).
+std::int32_t isCompRefAllowed(BlockSize bsize);
+// get_unsigned_bits + svt_aom_write_uniform_cost (entropy_coding.c:4286-:4292
+// + :4304-:4315).
+std::int32_t getUnsignedBits(std::int32_t n);
+std::int32_t writeUniformCost(std::int32_t n, std::int32_t v);
+// svt_aom_filter_intra_allowed (mode_decision.c:115-120): the CONFIG guard
+// threads as enableFilterIntra (the pinned build's 0).
+std::int32_t filterIntraAllowed(std::int32_t enableFilterIntra, BlockSize bsize, std::int32_t paletteSize,
+                                 std::int32_t mode);
+// MV_COST_WEIGHT (rd_cost.c:26) / MV_COST_WEIGHT_SUB (md_rate_estimation.h:24)
+// / ZERO_COST (lambda_rate_tables.h:22).
+#define MV_COST_WEIGHT 108
+#define MV_COST_WEIGHT_SUB 120
+#define ZERO_COST 0
+#define RDDIV_BITS 7
+// MV_IN_USE_BITS/MV_UPP/MV_LOW (cabac_context_model.h:197-199, verbatim).
+#define MV_IN_USE_BITS 14
+#define MV_UPP (1 << MV_IN_USE_BITS)
+#define MV_LOW (-(1 << MV_IN_USE_BITS))
+// MvJointType (cabac_context_model.h:155-160, verbatim order).
+enum MvJointType { MV_JOINT_ZERO = 0, MV_JOINT_HNZVZ, MV_JOINT_HZVNZ, MV_JOINT_HNZVNZ };
+// RDCOST (rd_cost.h:36-38, verbatim).
+#define RDCOST(RM, R, D) (ROUND_POWER_OF_TWO(((std::int64_t)(R)) * ((std::int64_t)(RM)), AV1_PROB_COST_SHIFT) + \
+                          ((std::int64_t)(D) * ((std::int64_t)1 << RDDIV_BITS)))
+
+// The minimal ModeDecisionCandidate carry: exactly the fields the fast-cost
+// pair reads (rd_cost.c:479-:519 + :530-:631). The packed Mv halves travel
+// as their as_int forms (the intrabc branch unpacks y<<16|x).
+struct IntraFastCandidate {
+    std::int32_t mode;              // block_mi.mode
+    std::int32_t uvMode;            // block_mi.uv_mode
+    std::int32_t angleDelta[2];     // block_mi.angle_delta[PLANE_TYPE_Y / _UV]
+    std::int32_t filterIntraMode;   // block_mi.filter_intra_mode
+    std::int32_t cflAlphaSigns;     // block_mi.cfl_alpha_signs
+    std::int32_t cflAlphaIdx;       // block_mi.cfl_alpha_idx
+    bool useIntrabc;                // block_mi.use_intrabc
+    std::int32_t mv;                // block_mi.mv[0].as_int
+    std::int32_t predMv;            // cand->pred_mv[0].as_int
+    std::int32_t paletteSize[2];    // cand->palette_size[0/1]; -1 = no palette_info
+};
+
+// svt_aom_get_intra_uv_fast_rate (rd_cost.c:476-:524): the chroma fast
+// rate. enablePalette threads the CONFIG_ENABLE_PALETTE guard (the pinned
+// build's 0; the reference const-folds inside svt_aom_allow_palette).
+std::int32_t getIntraUvFastRate(const MdRateEstimationContext* me, const IntraFastCandidate& cand,
+                                 std::int32_t bsize, std::int32_t bwidth, std::int32_t bheight,
+                                 std::int32_t blkOrgX, std::int32_t blkOrgY, bool useAccurateCfl,
+                                 std::int32_t allowScreenContentTools, std::int32_t enablePalette);
+
+// The mv trio subset the intrabc branch composes (rd_cost.c:47-:53 get_mv_
+// joint + :55-:60 mv_cost + :70-:81 svt_av1_mv_bit_cost, verbatim). NAMED
+// DEVIATION: the brief parked this trio as inter walls; the intrabc branch
+// of the ported intra fast cost requires the arithmetic, so the minimal
+// subset is carried with the walls threaded (mv_bit_cost_light :62-:68 has
+// no ported consumer and stays parked). Mv travels as its packed as_int
+// form (x | y << 16, little-endian mv.h:42-:49).
+std::int32_t getMvJoint(std::int32_t mvPacked);
+std::int32_t mvCost(std::int32_t mvPacked, const std::int32_t* jointCost, const std::int32_t* const compCost[2]);
+std::int32_t mvBitCost(std::int32_t mvPacked, std::int32_t refPacked, const std::int32_t* jointCost,
+                        const std::int32_t* const compCost[2], std::int32_t weight);
+
+// svt_aom_build_nmv_cost_table (md_rate_estimation.c:437-:442): the
+// joint+component fill wrapper over the landed getSyntaxRateFromCdf +
+// buildNmvComponentCostTable. Consumed by the intrabc branch's dv tables.
+void buildNmvCostTable(std::int32_t* jointCost, std::int32_t* compCost[2], const NmvContext* ctx,
+                        MvSubpelPrecision precision);
+
+// svt_aom_intra_fast_cost (rd_cost.c:526-:640): the luma+chroma fast
+// cost. Every wall threads per the campaign pattern; the intrabc dv
+// tables arrive as the three pointers the reference composes (the joint
+// row + the two component rows at [MV_MAX]).
+struct IntraFastCostArgs {
+    const MdRateEstimationContext* me;
+    const IntraFastCandidate* cand;
+    std::int32_t bsize;
+    std::int32_t bwidth;
+    std::int32_t bheight;
+    std::uint32_t lambda;
+    std::uint64_t lumaDistortion;
+    std::uint32_t* fastLumaRate;
+    std::uint32_t* fastChromaRate;
+    std::uint8_t skipModeCtx;
+    std::int32_t intraLumaTopCtx;
+    std::int32_t intraLumaLeftCtx;
+    std::int32_t isInterCtx;
+    bool hasUv;
+    std::int32_t paletteModeCtx;
+    bool isISlice;
+    bool skipModeFlag;
+    std::int32_t filterIntraLevel;
+    std::int32_t allowScreenContentTools;
+    bool frameAllowIntrabc;
+    std::int32_t enablePalette;
+    const std::int32_t* dvJointCost;
+    const std::int32_t* dvCostRow[2];
+    std::int32_t blkOrgX;
+    std::int32_t blkOrgY;
+};
+std::int64_t intraFastCost(const IntraFastCostArgs& a);
 // get_qc_dqc_low (full_loop.c:659-666).
 void getQcDqcLow(std::int32_t absQc, std::int32_t sign, std::int32_t dqv, std::int32_t shift,
                   std::int32_t* qcLow, std::int32_t* dqcLow);

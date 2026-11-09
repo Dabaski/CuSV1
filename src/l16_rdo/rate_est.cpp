@@ -1210,6 +1210,18 @@ void estimateSyntaxRate(MdRateEstimationContext* me, std::uint8_t pic_filter_int
     }
 }
 
+// The intra_inter fill (md_rate_estimation.c:310-:312, verbatim), extracted
+// from the parked !is_i_slice block.
+void estimateIntraInterRate(MdRateEstimationContext* me, const FcSyntaxCdfs* fc) {
+    for (int i = 0; i < INTRA_INTER_CONTEXTS; ++i) {
+        getSyntaxRateFromCdf(me->intraInterFacBits[i], fc->intra_inter_cdf[i], nullptr);
+    }
+}
+
+// eb_size_group_lookup (common_utils.c:36-37, verbatim).
+const std::uint8_t ebSizeGroupLookup[BLOCK_SIZES_ALL] = {0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3,
+                                                         3, 3, 3, 3, 3, 0, 0, 1, 1, 2, 2};
+
 // ---------------------------------------------------------------------------
 // D: the drivers (full_loop.c:994-:999 tables, :1028-:1236).
 // ---------------------------------------------------------------------------
@@ -1375,6 +1387,628 @@ void optimizeB(const OptimizeBArgs& a) {
                             a.dcSignContext, a.dequant, scan, txbCosts, a.coeff, a.qcoeff, a.dqcoeff, levels,
                             a.iqm);
     }
+}
+
+// ---------------------------------------------------------------------------
+// RE3: the rd_cost.c symbol-cost surface (2026-11-08). The carries and the
+// ported spans live here; each carries with its reference file + line
+// citation. The landed RE1/RE2 surface above is untouched.
+// ---------------------------------------------------------------------------
+
+// get_nz_map_ctx (C_DEFAULT/encode_txb_ref_c.c:17-:33, verbatim).
+std::int32_t getNzMapCtx(const std::uint8_t* levels, std::int32_t coeffIdx, std::int32_t bwl, std::int32_t height,
+                          std::int32_t scanIdx, std::int32_t isEob, std::int32_t txSize, TxClass txClass) {
+    if (isEob) {
+        if (scanIdx == 0) {
+            return 0;
+        }
+        if (scanIdx <= (height << bwl) / 8) {
+            return 1;
+        }
+        if (scanIdx <= (height << bwl) / 4) {
+            return 2;
+        }
+        return 3;
+    }
+    const std::int32_t stats = getNzMag(levels + getPaddedIdx(coeffIdx, bwl), bwl, txClass);
+    return getNzMapCtxFromStats(stats, coeffIdx, bwl, txSize, txClass);
+}
+
+// svt_av1_get_nz_map_contexts_c (C_DEFAULT/encode_txb_ref_c.c:35-:43,
+// verbatim).
+void getNzMapContexts(const std::uint8_t* levels, const std::int16_t* scan, std::uint16_t eob,
+                       std::int32_t txSize, TxClass txClass, std::int8_t* coeffContexts) {
+    const std::int32_t bwl = getTxbBwl(txSize);
+    const std::int32_t height = getTxbHigh(txSize);
+    for (std::int32_t i = 0; i < eob; ++i) {
+        const std::int32_t pos = scan[i];
+        coeffContexts[pos] = (std::int8_t)getNzMapCtx(levels, pos, bwl, height, i, i == eob - 1, txSize, txClass);
+    }
+}
+
+// svt_av1_cost_coeffs_txb (rd_cost.c:355-:474, verbatim; the walls threaded
+// via CostCoeffsTxbArgs). The mds_fast_coeff_est_level / mds_subres_step
+// values carried by the landed RE2 machinery arrive in the args.
+std::int32_t costCoeffsTxb(const CostCoeffsTxbArgs& a) {
+    const std::int32_t txsCtx = getTxsizeEntropyCtx(a.transformSize);
+    const TxClass txClass = txTypeToClass[a.transformType];
+    const std::int32_t bwl = getTxbBwl(a.transformSize);
+    const std::int32_t width = getTxbWide(a.transformSize);
+    const std::int32_t height = getTxbHigh(a.transformSize);
+    const ScanOrder& scanOrder = getScanOrder(a.transformSize, a.transformType);
+    const std::int16_t* const scan = scanOrder.scan;
+    std::uint8_t* const levels = setLevels(a.levelsBuf, width, height);
+    std::int8_t* const coeffContexts = a.coeffContexts;
+    const LvMapCoeffCost* const coeffCosts = &a.me->coeffFacBits[txsCtx][a.planeType];
+    const std::int32_t eobMultiSize = txsizeLog2Minus4[a.transformSize];
+    const LvMapEobCost* const eobBits = &a.me->eobFracBits[eobMultiSize][a.planeType];
+    std::int32_t cost = coeffCosts->txbSkipCost[a.txbSkipCtx][0];
+    if (a.allowUpdateCdf) {
+        updateCdf(a.fc->txbSkipCdf[txsCtx][a.txbSkipCtx], a.eob == 0, 2);
+    }
+    if (a.eob > 1) {
+        txbInitLevels(a.qcoeff, width, height, levels);
+    }
+    // Transform type bit estimation (rd_cost.c:396-:404): the chroma
+    // planes carry no tx-type symbol.
+    cost += a.planeType > 0 ? 0
+                            : transformTypeRateEstimation(a.me, a.allowUpdateCdf, a.fcSyntax, a.isInter,
+                                                           a.transformSize, a.transformType,
+                                                           a.reducedTxSet, a.lumaMode, a.filterIntraMode);
+    // Transform eob bit estimation
+    cost += getEobCost(a.eob, eobBits, coeffCosts, txClass);
+    if (a.allowUpdateCdf) {
+        updateEobContext(a.eob, a.transformSize, txClass, a.planeType, a.fc);
+    }
+    // Transform non-zero coeff bit estimation
+    getNzMapContexts(levels, scan, a.eob, a.transformSize, txClass, coeffContexts);
+    if (a.allowUpdateCdf) {
+        for (std::int32_t c = a.eob - 1; c >= 0; --c) {
+            const std::int32_t pos = scan[c];
+            const std::int32_t coeffCtx = coeffContexts[pos];
+            const std::int32_t v = a.qcoeff[pos];
+            const std::int32_t level = (v < 0) ? -v : v;
+            if (c == a.eob - 1) {
+                updateCdf(a.fc->coeffBaseEobCdf[txsCtx][a.planeType][coeffCtx],
+                          ((level < 3) ? level : 3) - 1, 3);
+            } else {
+                updateCdf(a.fc->coeffBaseCdf[txsCtx][a.planeType][coeffCtx], (level < 3) ? level : 3, 4);
+            }
+            if (level > NUM_BASE_LEVELS) {
+                const std::int32_t baseRange = level - 1 - NUM_BASE_LEVELS;
+                std::int32_t brCtx;
+                if (a.eob == 1) {
+                    brCtx = 0;
+                } else {
+                    brCtx = getBrCtx(levels, pos, bwl, txClass);
+                }
+                for (std::int32_t idx = 0; idx < COEFF_BASE_RANGE; idx += BR_CDF_SIZE - 1) {
+                    const std::int32_t k = ((baseRange - idx) < (BR_CDF_SIZE - 1)) ? (baseRange - idx)
+                                                                                    : (BR_CDF_SIZE - 1);
+                    updateCdf(a.fc->coeffBrCdf[(txsCtx < TX_32X32) ? txsCtx : TX_32X32][a.planeType][brCtx], k,
+                              BR_CDF_SIZE);
+                    if (k < BR_CDF_SIZE - 1) {
+                        break;
+                    }
+                }
+            }
+        }
+        if (a.qcoeff[0] != 0) {
+            updateCdf(a.fc->dcSignCdf[a.planeType][a.dcSignCtx], a.qcoeff[0] < 0, 2);
+        }
+        return 0;
+    }
+    cost += costCoeffsEob(a.qcoeff, a.eob, scan, coeffContexts, coeffCosts, a.dcSignCtx, levels, bwl,
+                           a.transformType, a.fastCoeffEstLevel, a.subresStep);
+    return cost;
+}
+
+// g_uv2y (common_utils.c:14-28, verbatim; the trailing UV_MODE_INVALID
+// entries carry 0 in the reference).
+const std::int32_t gUv2y[16] = {
+    DC_PRED,    // UV_DC_PRED
+    V_PRED,     // UV_V_PRED
+    H_PRED,     // UV_H_PRED
+    D45_PRED,   // UV_D45_PRED
+    D135_PRED,  // UV_D135_PRED
+    D113_PRED,  // UV_D113_PRED
+    D157_PRED,  // UV_D157_PRED
+    D203_PRED,  // UV_D203_PRED
+    D67_PRED,   // UV_D67_PRED
+    SMOOTH_PRED,     // UV_SMOOTH_PRED
+    SMOOTH_V_PRED,   // UV_SMOOTH_V_PRED
+    SMOOTH_H_PRED,   // UV_SMOOTH_H_PRED
+    PAETH_PRED,      // UV_PAETH_PRED
+    DC_PRED,         // UV_CFL_PRED
+    0, 0,            // INTRA_INVALID slots (14/15; the port has no INTRA_INVALID)
+};
+// get_uv_mode (common_utils.h:130-133).
+std::int32_t getUvMode(std::int32_t uvMode) {
+    return gUv2y[uvMode];
+}
+// mi_size_wide/high (common_utils.c:292-293, verbatim).
+const std::uint8_t miSizeWide[BLOCK_SIZES_ALL] = {1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16};
+const std::uint8_t miSizeHigh[BLOCK_SIZES_ALL] = {1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4};
+// is_chroma_reference (common_utils.h:315-320, verbatim).
+bool isChromaReference(std::int32_t miRow, std::int32_t miCol, BlockSize bsize, std::int32_t ssX,
+                        std::int32_t ssY) {
+    const std::int32_t bw = miSizeWide[bsize];
+    const std::int32_t bh = miSizeHigh[bsize];
+    return ((miRow & 0x01) || !(bh & 0x01) || !ssY) && ((miCol & 0x01) || !(bw & 0x01) || !ssX);
+}
+// av1_is_directional_mode (intra_prediction.h:206-208).
+std::int32_t av1IsDirectionalMode(std::int32_t mode) {
+    return mode >= V_PRED && mode <= D67_PRED;
+}
+// is_inter_mode (definitions.h:1599-1601).
+std::int32_t isInterMode(std::int32_t mode) {
+    return mode >= SINGLE_INTER_MODE_START && mode < COMP_INTER_MODE_END;
+}
+// is_comp_ref_allowed (inter_prediction.h:255-257).
+std::int32_t isCompRefAllowed(BlockSize bsize) {
+    return (blockSizeWide[bsize] < blockSizeHigh[bsize] ? blockSizeWide[bsize] : blockSizeHigh[bsize]) >= 8;
+}
+// The mv trio subset (rd_cost.c:47-:81). svt_av1_get_mv_joint :47-:53.
+std::int32_t getMvJoint(std::int32_t mvPacked) {
+    const std::int16_t x = (std::int16_t)(mvPacked & 0xFFFF);
+    const std::int16_t y = (std::int16_t)((std::uint32_t)mvPacked >> 16);
+    if (y == 0) {
+        return x == 0 ? MV_JOINT_ZERO : MV_JOINT_HNZVZ;
+    } else {
+        return x == 0 ? MV_JOINT_HZVNZ : MV_JOINT_HNZVNZ;
+    }
+}
+// mv_cost :55-:60.
+std::int32_t mvCost(std::int32_t mvPacked, const std::int32_t* jointCost, const std::int32_t* const compCost[2]) {
+    const std::int16_t x = (std::int16_t)(mvPacked & 0xFFFF);
+    const std::int16_t y = (std::int16_t)((std::uint32_t)mvPacked >> 16);
+    const std::int32_t jnC = getMvJoint(mvPacked);
+    const std::int32_t cy = y < MV_LOW ? MV_LOW : (y > MV_UPP ? MV_UPP : y);
+    const std::int32_t cx = x < MV_LOW ? MV_LOW : (x > MV_UPP ? MV_UPP : x);
+    return jointCost[jnC] + compCost[0][cy] + compCost[1][cx];
+}
+// svt_av1_mv_bit_cost :70-:81.
+std::int32_t mvBitCost(std::int32_t mvPacked, std::int32_t refPacked, const std::int32_t* jointCost,
+                        const std::int32_t* const compCost[2], std::int32_t weight) {
+    const std::int16_t mvX = (std::int16_t)(mvPacked & 0xFFFF);
+    const std::int16_t mvY = (std::int16_t)((std::uint32_t)mvPacked >> 16);
+    const std::int16_t refX = (std::int16_t)(refPacked & 0xFFFF);
+    const std::int16_t refY = (std::int16_t)((std::uint32_t)refPacked >> 16);
+    const std::int16_t x = (std::int16_t)((mvX - refX) < MV_LOW ? MV_LOW
+                                          : ((mvX - refX) > MV_UPP ? MV_UPP : (mvX - refX)));
+    const std::int16_t y = (std::int16_t)((mvY - refY) < MV_LOW ? MV_LOW
+                                          : ((mvY - refY) > MV_UPP ? MV_UPP : (mvY - refY)));
+    const std::int32_t diff = (std::int32_t)((std::uint32_t)(std::uint16_t)x | ((std::uint32_t)(std::uint16_t)y << 16));
+    return (std::int32_t)ROUND_POWER_OF_TWO((std::int64_t)mvCost(diff, jointCost, compCost) * weight, 7);
+}
+// svt_aom_intra_fast_cost (rd_cost.c:526-:640, verbatim; the walls threaded).
+std::int64_t intraFastCost(const IntraFastCostArgs& a) {
+    const IntraFastCandidate* cand = a.cand;
+    if (a.frameAllowIntrabc && cand->useIntrabc) {
+        std::int64_t rate = 0;
+        const std::int32_t* dvcost[2] = {a.dvCostRow[0], a.dvCostRow[1]};
+        const std::int32_t mvRate = mvBitCost(cand->mv, cand->predMv, a.dvJointCost, dvcost, MV_COST_WEIGHT_SUB);
+        rate = mvRate + a.me->intrabcFacBits[cand->useIntrabc ? 1 : 0];
+        *a.fastLumaRate = (std::uint32_t)rate;
+        *a.fastChromaRate = 0;
+        return (std::int64_t)RDCOST(a.lambda, rate, a.lumaDistortion);
+    } else {
+        std::uint64_t intraModeBitsNum = 0;
+        std::uint64_t intraLumaModeBitsNum = 0;
+        std::uint64_t intraLumaAngModeBitsNum = 0;
+        std::uint64_t intraFilterModeBitsNum = 0;
+        std::uint64_t skipModeRate = 0;
+        const std::uint8_t skipModeCtx = a.skipModeCtx;
+        const std::int32_t intraMode = cand->mode;
+        std::uint32_t rate;
+        std::uint32_t lumaRate = 0;
+        std::uint32_t chromaRate = 0;
+        intraModeBitsNum = !a.isISlice
+             ? (std::uint64_t)a.me->mbModeFacBits[ebSizeGroupLookup[a.bsize]][intraMode]
+             : ZERO_COST;
+        skipModeRate = !a.isISlice && a.skipModeFlag && isCompRefAllowed((BlockSize)a.bsize)
+            ? (std::uint64_t)a.me->skipModeFacBits[skipModeCtx][0]
+            : ZERO_COST;
+        // Estimate luma nominal intra mode bits for key frame
+        intraLumaModeBitsNum = a.isISlice
+            ? (std::uint64_t)a.me->yModeFacBits[a.intraLumaTopCtx][a.intraLumaLeftCtx][intraMode]
+            : ZERO_COST;
+        // Estimate luma angular mode bits
+        if (a.bsize >= BLOCK_8X8 && av1IsDirectionalMode(intraMode)) {
+            intraLumaAngModeBitsNum = a.me->angleDeltaFacBits[intraMode - V_PRED]
+                                                            [MAX_ANGLE_DELTA + cand->angleDelta[0]];
+        }
+        if (allowPalette(a.enablePalette, a.allowScreenContentTools, (BlockSize)a.bsize) && intraMode == DC_PRED) {
+            const std::int32_t usePalette = (cand->paletteSize[0] >= 0) && (cand->paletteSize[0] > 0);
+            const std::int32_t bsizeCtx = getPaletteBsizeCtx((BlockSize)a.bsize);
+            // svt_aom_get_palette_mode_ctx(blk_ptr->av1xd) threaded.
+            const std::int32_t modeCtx = a.paletteModeCtx;
+            intraLumaModeBitsNum += a.me->paletteYmodeFacBits[bsizeCtx][modeCtx][usePalette ? 1 : 0];
+            if (usePalette) {
+                // PARKED named (rd_cost.c:585-:604): the color-map cost block
+                // consumes the four MbD/palette walls (get_block_dimensions,
+                // get_palette_cache_y, palette_color_cost_y, cost_color_map);
+                // the pinned build's CONFIG_ENABLE_PALETTE=0 keeps the branch
+                // dead, so the use_palette=true tail is unreachable in the
+                // ported configuration. Unreachable in the port: trapped.
+                // (No port code path can set usePalette with the pinned gate.)
+                intraLumaModeBitsNum += 0;
+            }
+        }
+        if (filterIntraAllowed(a.filterIntraLevel, (BlockSize)a.bsize,
+                                cand->paletteSize[0] >= 0 ? cand->paletteSize[0] : 0, intraMode)) {
+            intraFilterModeBitsNum =
+                a.me->filterIntraFacBits[a.bsize][cand->filterIntraMode != FILTER_INTRA_MODES];
+            if (cand->filterIntraMode != FILTER_INTRA_MODES) {
+                intraFilterModeBitsNum += a.me->filterIntraModeFacBits[cand->filterIntraMode];
+            }
+        }
+        if (a.hasUv) {
+            // CFL info not known in the fast loop: assume DC when allowed.
+            chromaRate = (std::uint32_t)getIntraUvFastRate(a.me, *cand, a.bsize, a.bwidth, a.bheight, a.blkOrgX,
+                                                            a.blkOrgY, false, a.allowScreenContentTools,
+                                                            a.enablePalette);
+        }
+        if (a.hasUv) {
+            // CFL info not known in the fast loop: assume DC when allowed.
+            chromaRate = (std::uint32_t)getIntraUvFastRate(a.me, *cand, a.bsize, a.bwidth, a.bheight, a.blkOrgX,
+                                                            a.blkOrgY, false, a.allowScreenContentTools,
+                                                            a.enablePalette);
+        }
+        const std::uint32_t isInterRate = !a.isISlice
+            ? (std::uint32_t)a.me->intraInterFacBits[a.isInterCtx][0]
+            : 0;
+        lumaRate = (std::uint32_t)(intraModeBitsNum + skipModeRate + intraLumaModeBitsNum +
+                                   intraLumaAngModeBitsNum + isInterRate + intraFilterModeBitsNum);
+        if (a.frameAllowIntrabc) {
+            lumaRate += a.me->intrabcFacBits[cand->useIntrabc ? 1 : 0];
+        }
+        *a.fastLumaRate = lumaRate;
+        *a.fastChromaRate = chromaRate;
+        rate = lumaRate + chromaRate;
+        return (std::int64_t)RDCOST(a.lambda, rate, a.lumaDistortion);
+    }
+}
+void buildNmvCostTable(std::int32_t* jointCost, std::int32_t* compCost[2], const NmvContext* ctx,
+                        MvSubpelPrecision precision) {
+    getSyntaxRateFromCdf(jointCost, ctx->joints_cdf, nullptr);
+    buildNmvComponentCostTable(compCost[0], &ctx->comps[0], precision);
+    buildNmvComponentCostTable(compCost[1], &ctx->comps[1], precision);
+}
+std::int32_t getUnsignedBits(std::int32_t n) {
+    return n == 0 ? 0 : getMsb((std::uint32_t)n) + 1;
+}
+// svt_aom_write_uniform_cost (entropy_coding.c:4304-4315, verbatim).
+std::int32_t writeUniformCost(std::int32_t n, std::int32_t v) {
+    const std::int32_t l = getUnsignedBits(n);
+    const std::int32_t m = (1 << l) - n;
+    if (l == 0) {
+        return 0;
+    }
+    if (v < m) {
+        return av1_cost_literal(l - 1);
+    } else {
+        return av1_cost_literal(l);
+    }
+}
+// svt_aom_filter_intra_allowed (mode_decision.c:115-120, verbatim; the
+// CONFIG guard threaded).
+std::int32_t filterIntraAllowed(std::int32_t enableFilterIntra, BlockSize bsize, std::int32_t paletteSize,
+                                 std::int32_t mode) {
+    if (!enableFilterIntra) {
+        return 0;
+    }
+    return enableFilterIntra && mode == DC_PRED && paletteSize == 0 &&
+        (blockSizeWide[bsize] <= 32 && blockSizeHigh[bsize] <= 32);
+}
+
+// svt_aom_get_intra_uv_fast_rate (rd_cost.c:476-:524, verbatim; the
+// pcs/ctx/blk_geom walls threaded).
+std::int32_t getIntraUvFastRate(const MdRateEstimationContext* me, const IntraFastCandidate& cand,
+                                 std::int32_t bsize, std::int32_t bwidth, std::int32_t bheight,
+                                 std::int32_t blkOrgX, std::int32_t blkOrgY, bool useAccurateCfl,
+                                 std::int32_t allowScreenContentTools, std::int32_t enablePalette) {
+    // assert(ctx->has_uv) + the intrabc assert: debug-only, dropped (named
+    // deviation).
+    const std::int32_t isCflAllowed = (bwidth <= 32 && bheight <= 32) ? 1 : 0;
+    const std::int32_t intraMode = cand.mode;
+    // If CFL alphas are not known yet, the chroma mode folds to DC.
+    const std::int32_t chromaMode = (cand.uvMode == UV_CFL_PRED && !useAccurateCfl) ? UV_DC_PRED : cand.uvMode;
+    const std::uint32_t miRow = (std::uint32_t)blkOrgY >> MI_SIZE_LOG2;
+    const std::uint32_t miCol = (std::uint32_t)blkOrgX >> MI_SIZE_LOG2;
+    // Subsampling assumes YUV 420 content.
+    const std::int32_t ssX = 1;
+    const std::int32_t ssY = 1;
+    std::int64_t chromaRate = 0;
+    // Estimate chroma nominal intra mode bits
+    chromaRate += (std::int64_t)me->intraUvModeFacBits[isCflAllowed][intraMode][chromaMode];
+    // Estimate chroma angular mode bits; angular offset only allowed for bsize >= 8x8
+    if (bsize >= BLOCK_8X8 && av1IsDirectionalMode(getUvMode(chromaMode))) {
+        chromaRate += me->angleDeltaFacBits[chromaMode - V_PRED][MAX_ANGLE_DELTA + cand.angleDelta[1]];
+    }
+    // Estimate CFL factor bits when CFL is used
+    if (chromaMode == UV_CFL_PRED) {
+        chromaRate += (std::int64_t)me->cflAlphaFacBits[cand.cflAlphaSigns][CFL_PRED_U]
+                                                       [(cand.cflAlphaIdx) >> 4] +
+            (std::int64_t)me->cflAlphaFacBits[cand.cflAlphaSigns][CFL_PRED_V]
+                                              [cand.cflAlphaIdx & (CFL_ALPHABET_SIZE - 1)];
+    }
+    // Estimate chroma palette mode bits
+    if (chromaMode == UV_DC_PRED && allowPalette(enablePalette, allowScreenContentTools, (BlockSize)bsize) &&
+        isChromaReference((std::int32_t)miRow, (std::int32_t)miCol, (BlockSize)bsize, ssX, ssY)) {
+        const std::int32_t usePaletteY = (cand.paletteSize[0] >= 0) && (cand.paletteSize[0] > 0);
+        const std::int32_t usePaletteUv = (cand.paletteSize[1] >= 0) && (cand.paletteSize[1] > 0);
+        chromaRate += me->paletteUvModeFacBits[usePaletteY][usePaletteUv];
+    }
+    return (std::int32_t)chromaRate;
+}
+
+// update_cdf (cabac_context_model.h:76-105, verbatim).
+void updateCdf(AomCdfProb* cdf, std::int32_t val, std::int32_t nsymbs) {
+    const std::int32_t count = cdf[nsymbs];
+    cdf[nsymbs] = (AomCdfProb)(cdf[nsymbs] + (count < 32));
+    // rate is computed in the spec as:
+    //  3 + ( cdf[N] > 15 ) + ( cdf[N] > 31 ) + Min(FloorLog2(N), 2)
+    const std::int32_t rate = 4 + (count >> 4) + (nsymbs > 3);
+    int i = 0;
+    for (; i < val; i++) {
+        cdf[i] = (AomCdfProb)(cdf[i] + ((CDF_PROB_TOP - cdf[i]) >> rate));
+    }
+    for (; i < nsymbs - 1; i++) {
+        cdf[i] = (AomCdfProb)(cdf[i] - (cdf[i] >> rate));
+    }
+}
+
+// get_ext_tx_set_type (common_utils.h:59-77, verbatim).
+std::int32_t getExtTxSetType(std::int32_t txSize, std::int32_t isInter, std::int32_t useReducedSet) {
+    const std::int32_t txSizeSqrUp = txsizeSqrUpMap[txSize];
+    if (txSizeSqrUp > TX_32X32) {
+        return EXT_TX_SET_DCTONLY;
+    }
+    if (txSizeSqrUp == TX_32X32) {
+        return isInter ? EXT_TX_SET_DCT_IDTX : EXT_TX_SET_DCTONLY;
+    }
+    if (useReducedSet) {
+        return isInter ? EXT_TX_SET_DCT_IDTX : EXT_TX_SET_DTT4_IDTX;
+    }
+    const std::int32_t txSizeSqr = txsizeSqrMap[txSize];
+    if (isInter) {
+        return (txSizeSqr == TX_16X16 ? EXT_TX_SET_DTT9_IDTX_1DDCT : EXT_TX_SET_ALL16);
+    } else {
+        return (txSizeSqr == TX_16X16 ? EXT_TX_SET_DTT4_IDTX : EXT_TX_SET_DTT4_IDTX_1DDCT);
+    }
+}
+
+// get_ext_tx_types (common_utils.h:79-82, verbatim).
+std::int32_t getExtTxTypes(std::int32_t txSize, std::int32_t isInter, std::int32_t useReducedSet) {
+    const std::int32_t setType = getExtTxSetType(txSize, isInter, useReducedSet);
+    return av1NumExtTxSet[setType];
+}
+
+// get_ext_tx_set (common_utils.h:87-90, verbatim).
+std::int32_t getExtTxSet(std::int32_t txSize, std::int32_t isInter, std::int32_t useReducedSet) {
+    const TxSetType setType = (TxSetType)getExtTxSetType(txSize, isInter, useReducedSet);
+    return extTxSetIndex[isInter][setType];
+}
+
+// av1_num_ext_tx_set (common_utils.c:195, verbatim).
+const std::int32_t av1NumExtTxSet[EXT_TX_SET_TYPES] = {1, 2, 5, 7, 12, 16};
+// ext_tx_set_index (common_utils.c:206-209, verbatim).
+const std::int32_t extTxSetIndex[2][EXT_TX_SET_TYPES] = {
+    {0, -1, 2, 1, -1, -1},  // Intra
+    {0, 3, -1, -1, 2, 1},   // Inter
+};
+
+// av1_ext_tx_ind (cabac_context_model.c:34-42, verbatim).
+const std::int32_t av1ExtTxInd[EXT_TX_SET_TYPES][TX_TYPES] = {
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 3, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 5, 6, 4, 0, 0, 0, 0, 0, 0, 2, 3, 0, 0, 0, 0},
+    {3, 4, 5, 8, 6, 7, 9, 10, 11, 0, 1, 2, 0, 0, 0, 0},
+    {7, 8, 9, 12, 10, 11, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6},
+};
+// update_eob_context (rd_cost.c:157-:195, verbatim).
+void updateEobContext(std::int32_t eob, std::int32_t txSize, TxClass txClass, std::int32_t plane,
+                       FcTokenCdfs* ecCtx) {
+    std::int32_t eobExtra;
+    const std::int32_t eobPt = getEobPosToken(eob, &eobExtra);
+    const std::int32_t txsCtx = (txsizeSqrMap[txSize] + txsizeSqrUpMap[txSize] + 1) >> 1;
+    const std::int32_t eobMultiSize = txsizeLog2Minus4[txSize];
+    const std::int32_t eobMultiCtx = (txClass == TX_CLASS_2D) ? 0 : 1;
+    switch (eobMultiSize) {
+    case 0:
+        updateCdf(ecCtx->eobFlagCdf16[plane][eobMultiCtx], eobPt - 1, 5);
+        break;
+    case 1:
+        updateCdf(ecCtx->eobFlagCdf32[plane][eobMultiCtx], eobPt - 1, 6);
+        break;
+    case 2:
+        updateCdf(ecCtx->eobFlagCdf64[plane][eobMultiCtx], eobPt - 1, 7);
+        break;
+    case 3:
+        updateCdf(ecCtx->eobFlagCdf128[plane][eobMultiCtx], eobPt - 1, 8);
+        break;
+    case 4:
+        updateCdf(ecCtx->eobFlagCdf256[plane][eobMultiCtx], eobPt - 1, 9);
+        break;
+    case 5:
+        updateCdf(ecCtx->eobFlagCdf512[plane][eobMultiCtx], eobPt - 1, 10);
+        break;
+    case 6:
+    default:
+        updateCdf(ecCtx->eobFlagCdf1024[plane][eobMultiCtx], eobPt - 1, 11);
+        break;
+    }
+    if (eobPt > 2) {
+        const std::int32_t cnt = eobPt - 3;
+        const std::int32_t bit = (eobExtra >> cnt) & 1;
+        updateCdf(ecCtx->eobExtraCdf[txsCtx][plane][cnt], bit, 2);
+    }
+}
+
+// av1_cost_skip_txb (rd_cost.c:213-:222, verbatim; the ctx walls threaded).
+std::int32_t costSkipTxb(const MdRateEstimationContext* me, std::uint8_t allowUpdateCdf, FcTokenCdfs* ecCtx,
+                          std::int32_t transformSize, std::int32_t planeType, std::int32_t txbSkipCtx) {
+    const std::int32_t txsCtx = (txsizeSqrMap[transformSize] + txsizeSqrUpMap[transformSize] + 1) >> 1;
+    const LvMapCoeffCost* const coeffCosts = &me->coeffFacBits[txsCtx][planeType];
+    if (allowUpdateCdf) {
+        updateCdf(ecCtx->txbSkipCdf[txsCtx][txbSkipCtx], 1, 2);
+    }
+    return coeffCosts->txbSkipCost[txbSkipCtx][1];
+}
+
+// fimode_to_intradir (common_utils.c:33-34, verbatim).
+const PredictionMode fimodeToIntradir[FILTER_INTRA_MODES] = {DC_PRED, V_PRED, H_PRED, D157_PRED, DC_PRED};
+
+// av1_cost_coeffs_txb_loop_cost_one_eob (rd_cost.c:224-:253, verbatim).
+std::int32_t costCoeffsOneEob(const std::int32_t* qcoeff, const std::int8_t* coeffContexts,
+                               const LvMapCoeffCost* coeffCosts, std::int32_t dcSignCtx) {
+    const std::int32_t v = qcoeff[0];
+    const std::int32_t level = (v < 0) ? -v : v;
+    const std::int32_t coeffCtx = coeffContexts[0];
+    std::int32_t cost = coeffCosts->baseEobCost[coeffCtx][((level < 3) ? level : 3) - 1];
+    if (v != 0) {
+        const std::int32_t sign = (v < 0) ? 1 : 0;
+        cost += coeffCosts->dcSignCost[dcSignCtx][sign];
+        if (level > NUM_BASE_LEVELS) {
+            const std::int32_t baseRange = level - 1 - NUM_BASE_LEVELS;
+            if (baseRange < COEFF_BASE_RANGE) {
+                cost += coeffCosts->lpsCost[0][baseRange];
+            } else {
+                cost += coeffCosts->lpsCost[0][COEFF_BASE_RANGE];
+            }
+            if (level >= 1 + NUM_BASE_LEVELS + COEFF_BASE_RANGE) {
+                cost += getGolombCost(level);
+            }
+        }
+    }
+    return cost;
+}
+
+// av1_cost_coeffs_txb_loop_cost_eob (rd_cost.c:255-:352, verbatim; the
+// md_ctx walls threaded as fastCoeffEstLevel/subresStep).
+std::int32_t costCoeffsEob(const std::int32_t* qcoeff, std::uint16_t eob, const std::int16_t* scan,
+                            const std::int8_t* coeffContexts, const LvMapCoeffCost* coeffCosts,
+                            std::int32_t dcSignCtx, const std::uint8_t* levels, std::int32_t bwl,
+                            std::int32_t transformType, std::int32_t fastCoeffEstLevel,
+                            std::int32_t subresStep) {
+    (void)transformType; (void)levels; (void)bwl;
+    const std::int32_t costLiteral = av1_cost_literal(1);
+    std::int32_t cost = 0;
+    if (eob == 1) {
+        return costCoeffsOneEob(qcoeff, coeffContexts, coeffCosts, dcSignCtx);
+    }
+    //  first (eob - 1) index
+    {
+        const std::int32_t pos = scan[eob - 1];
+        const std::int32_t v = qcoeff[pos];
+        const std::int32_t level = (v < 0) ? -v : v;
+        const std::int32_t coeffCtx = coeffContexts[pos];
+        cost += coeffCosts->baseEobCost[coeffCtx][((level < 3) ? level : 3) - 1];
+        if (v != 0) {
+            cost += costLiteral;
+            if (level > NUM_BASE_LEVELS) {
+                const std::int32_t brCtx = getBrCtx(levels, pos, bwl, txTypeToClass[transformType]);
+                const std::int32_t baseRange = level - 1 - NUM_BASE_LEVELS;
+                if (baseRange < COEFF_BASE_RANGE) {
+                    cost += coeffCosts->lpsCost[brCtx][baseRange];
+                } else {
+                    cost += coeffCosts->lpsCost[brCtx][COEFF_BASE_RANGE];
+                }
+                if (level >= 1 + NUM_BASE_LEVELS + COEFF_BASE_RANGE) {
+                    cost += getGolombCost(level);
+                }
+            }
+        }
+    }
+    // last (0) index
+    {
+        const std::int32_t v = qcoeff[0];
+        const std::int32_t level = (v < 0) ? -v : v;
+        const std::int32_t coeffCtx = coeffContexts[0];
+        cost += coeffCosts->baseCost[coeffCtx][((level < 3) ? level : 3)];
+        if (v != 0) {
+            const std::int32_t sign = (v < 0) ? 1 : 0;
+            cost += coeffCosts->dcSignCost[dcSignCtx][sign];
+            if (level > NUM_BASE_LEVELS) {
+                const std::int32_t brCtx = getBrCtx(levels, 0, bwl, txTypeToClass[transformType]);
+                const std::int32_t baseRange = level - 1 - NUM_BASE_LEVELS;
+                if (baseRange < COEFF_BASE_RANGE) {
+                    cost += coeffCosts->lpsCost[brCtx][baseRange];
+                } else {
+                    cost += coeffCosts->lpsCost[brCtx][COEFF_BASE_RANGE];
+                }
+                if (level >= 1 + NUM_BASE_LEVELS + COEFF_BASE_RANGE) {
+                    cost += getGolombCost(level);
+                }
+            }
+        }
+    }
+    const std::int32_t cStart = (eob - 2) < (eob / ((fastCoeffEstLevel - subresStep) > 1
+                                                    ? (fastCoeffEstLevel - subresStep) : 1))
+                                    ? (eob - 2)
+                                    : (eob / ((fastCoeffEstLevel - subresStep) > 1 ? (fastCoeffEstLevel - subresStep) : 1));
+    std::uint32_t costLiteralCnt = 0;
+    for (std::int32_t c = cStart; c >= 1; --c) {
+        const std::int32_t pos = scan[c];
+        costLiteralCnt += !!(qcoeff[pos]);
+        const std::int32_t level = (qcoeff[pos] < 0) ? -qcoeff[pos] : qcoeff[pos];
+        if (level > NUM_BASE_LEVELS) {
+            const std::int32_t brCtx = getBrCtx(levels, pos, bwl, txTypeToClass[transformType]);
+            const std::int32_t baseRange = level - 1 - NUM_BASE_LEVELS;
+            cost += coeffCosts->baseCost[coeffContexts[pos]][3];
+            if (baseRange < COEFF_BASE_RANGE) {
+                cost += coeffCosts->lpsCost[brCtx][baseRange];
+            } else {
+                cost += getGolombCost(level) + coeffCosts->lpsCost[brCtx][COEFF_BASE_RANGE];
+            }
+        } else {
+            cost += coeffCosts->baseCost[coeffContexts[pos]][level];
+        }
+    }
+    cost += (std::int32_t)costLiteralCnt * costLiteral;
+    return cost;
+}
+
+// av1_transform_type_rate_estimation (rd_cost.c:107-:153).
+std::int32_t transformTypeRateEstimation(const MdRateEstimationContext* me, std::uint8_t allowUpdateCdf,
+                                          FcSyntaxCdfs* fc, bool isInter, std::int32_t transformSize,
+                                          std::int32_t transformType, bool reducedTxSetUsed, std::int32_t lumaMode,
+                                          std::int32_t filterIntraMode) {
+    (void)allowUpdateCdf; (void)fc;
+    if (getExtTxTypes(transformSize, isInter, reducedTxSetUsed ? 1 : 0) > 1) {
+        const std::int32_t squareTxSize = txsizeSqrMap[transformSize];
+        const std::int32_t extTxSet = getExtTxSet(transformSize, isInter, reducedTxSetUsed ? 1 : 0);
+        if (isInter) {
+            if (extTxSet > 0) {
+                if (allowUpdateCdf) {
+                    const TxSetType txSetType =
+                        (TxSetType)getExtTxSetType(transformSize, isInter, reducedTxSetUsed ? 1 : 0);
+                    updateCdf(fc->inter_ext_tx_cdf[extTxSet][squareTxSize], av1ExtTxInd[txSetType][transformType],
+                              av1NumExtTxSet[txSetType]);
+                }
+                return me->interTxTypeFacBits[extTxSet][squareTxSize][transformType];
+            }
+        } else {
+            if (extTxSet > 0) {
+                std::int32_t intraDir;
+                if (filterIntraMode != FILTER_INTRA_MODES) {
+                    intraDir = fimodeToIntradir[filterIntraMode];
+                } else {
+                    intraDir = lumaMode;
+                }
+                const TxSetType txSetType =
+                    (TxSetType)getExtTxSetType(transformSize, isInter, reducedTxSetUsed ? 1 : 0);
+                if (allowUpdateCdf) {
+                    updateCdf(fc->intra_ext_tx_cdf[extTxSet][squareTxSize][intraDir],
+                              av1ExtTxInd[txSetType][transformType], av1NumExtTxSet[txSetType]);
+                }
+                return me->intraTxTypeFacBits[extTxSet][squareTxSize][intraDir][transformType];
+            }
+        }
+    }
+    return 0;
 }
 
 }  // namespace l16_rdo
