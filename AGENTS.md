@@ -336,7 +336,7 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-09, the wave-13 close: the candidate-injection family landed)
+### Last measured state (2026-11-09, the wave-14 partial: TF2 landed; RE5 the golden event in flight)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
@@ -368,13 +368,13 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 23.1%** (see the completion metric section;
-  re-measured 2026-11-09 at the wave-13 close: 36,480 of 157,718 non-blank
-  lines, +4,787 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
+- **Portable-C coverage: 23.3%** (see the completion metric section;
+  re-measured 2026-11-09 at the TF2 landing: 36,715 of 157,718 non-blank
+  lines, +5,022 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
   SYM1 +436 in A5 + +45 in A12) and wave 7 (IP1 +203 across A3/A13/A14,
   SUB1 +149 in A14) and wave 8 (SW1 +119 the SAD wrapper instances, HB1
-  +168 the hbd twins) and wave 9 (RS2 +273 the hbd resize 1D family - the hbd park resolves, AM1+AN20 +386 the vmaf activity-masking family + the preprocessing statistics + the firstpass pure pair - the A4 RDO input side) and wave 10 (RE1 +485 in A4 - the rate-estimation core, the campaign's foundation slice, conformance-free) and wave 11 (RE2 +1,222 the optimize_b trellis + the scan/tx carries + the nz-map LUT carry - charged A1+A4+A5+A13; the JUDGE'S J3 SURVIVOR sharpened - the fast-path zbin-trim had no boundary fixture) and wave 12 (RE3 +576 the rd_cost.c symbol-cost surface - three carry double-counts struck at merge, three judge probes all killed) and wave 13 (RE4 +476 the ac_bias psy-distortion family + the intra candidate-injection family + the FI ERRATA - FILTER_INTRA_MODES 7 -> 5 with the mis-citation fixed and the fimodeToIntradir content corrected) - all span-measured; register entries in docs/todo.md
-  section A0); A1 prints 41% (11,087 of 27,008), A4 prints 8% (2,419 of 31,088), A5 prints 61% (5,167 of 8,460), A13 prints 19% (1,037 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is
+  +168 the hbd twins) and wave 9 (RS2 +273 the hbd resize 1D family - the hbd park resolves, AM1+AN20 +386 the vmaf activity-masking family + the preprocessing statistics + the firstpass pure pair - the A4 RDO input side) and wave 10 (RE1 +485 in A4 - the rate-estimation core, the campaign's foundation slice, conformance-free) and wave 11 (RE2 +1,222 the optimize_b trellis + the scan/tx carries + the nz-map LUT carry - charged A1+A4+A5+A13; the JUDGE'S J3 SURVIVOR sharpened - the fast-path zbin-trim had no boundary fixture) and wave 12 (RE3 +576 the rd_cost.c symbol-cost surface - three carry double-counts struck at merge, three judge probes all killed) and wave 13 (RE4 +476 the ac_bias psy-distortion family + the intra candidate-injection family + the FI ERRATA - FILTER_INTRA_MODES 7 -> 5 with the mis-citation fixed and the fimodeToIntradir content corrected) and wave 14-partial (TF2 +234 the temporal-filtering hbd twins - the TF1 park resolves; the block-error pre-shifts are HARD-CODED >>4/>>6 at hbd, not bd-parameterized) - all span-measured; register entries in docs/todo.md
+  section A0); A1 prints 41% (11,087 of 27,008), A4 prints 8% (2,419 of 31,088), A5 prints 61% (5,167 of 8,460), A11 prints 42% (5,047 of 12,028), A13 prints 19% (1,037 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is
   PARSE-BUG EPISODE (recorded, wave 4): an embedded
   pipe in a prose sentence (get_msb(x|1)) split the A12 row's 5 fields
   and the tool silently printed A12 as 0 files/0 lines - caught by the
@@ -1211,12 +1211,12 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 30% | 3,191 |
 | A9 | Rate control | 17 | 5,951 | 5% | 278 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
-| A11 | Content analysis + temporal filtering | 16 | 12,028 | 40% | 4,812 |
+| A11 | Content analysis + temporal filtering | 16 | 12,028 | 42% | 5,047 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 34% | 550 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 17% | 889 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 100% | 1,466 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **36,480** |
+| | **TOTAL** | **254** | **157,718** | | **36,715** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported

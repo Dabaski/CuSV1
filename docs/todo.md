@@ -2332,7 +2332,38 @@ A0. SLICE-LEVEL STATE (the live register)
 |    corruption; the driver's not-skip base-cost swap). PARKED named:
 |    the inter surfaces (~1,074 nb) + the in-body palette tail. Writer
 |    run 17/17 (297.53 s), GATE byte-identical 884,851 B.
-|    CONFORMANCE-FREE.
+|    CONFORMANCE-FREE.|  - [x] **A11/TF2 (2026-11-09, PERRY-TF2, cherry-picked 6e0359e): the
+|    temporal-filtering hbd twins land** in src/l9_analysis/temporal_filter
+|    - temporal_filtering.c :710-:720 + :832-:912 + :1105-:1267 = 234 nb
+|    (judge re-measured span-by-span), resolving the TF1 8-bit-discipline
+|    park (the RS2/HB1 pattern). BD FINDINGS: the zz hbd partial (void)s
+|    bd (no bd arithmetic, the weight table identical to 8-bit); the
+|    non-zz consumes bd ONLY as shift_factor = (bd-8)*2 into the SSE
+|    reduction; the block-error pre-shifts are HARD-CODED >> 4/>> 6 at
+|    hbd vs >> 0/>> 2 at 8-bit - NOT bd-parameterized (hbd == 8-bit twin
+|    iff caller errors are x16 - pinned); the accumulators do NOT widen
+|    (the count wrap pinned at 65200+500). 12 new TEST_CASEs (263 cases /
+|    43,479 assertions); 7 mutations killed, no survivors. INCIDENT (the
+|    looks-like-success family's fourth): an M5 edit silently deleted
+|    three definitions - LNK2019 surfaced it, restored, redone with
+|    unique anchoring. OPS: the LF renormalization commit (41cd451)
+|    preceded this landing - the cherry-pick hit line-ending conflicts
+|    on the touched files, resolved by taking theirs (the new
+|    .gitattributes stores the blobs LF); l10's exit-crash recurred
+|    post-cherry-pick and cleared on the re-run (the known artifact).
+|    17/17 (284.35 s), GATE byte-identical 884,851 B. Coverage-only.
+|  - [ ] **RE5 IN FLIGHT (PERRY-RE5, the gated golden event)**: the
+|    RD-lite wiring rung - the D2 ranking composes the landed 1:1
+|    surfaces (the l9 varianceCore for the distortion - the JUDGE
+|    CORRECTED the brief's psyDistortion claim: the fast-path distortion
+|    is the variance kernel, product_coding_loop.c:1008-:1016, psyDistortion
+|    only enters with ac_bias != 0; the RE3 intraFastCost for the rate;
+|    the RE2 RDCOST macro; the RE1 rate context initialized per frame
+|    from the l7 bucket cdfs). Chroma UV stays SAD-only this rung
+|    (named). The generator gains the md_rate_estimation cost
+|    primitives as verbatim extracts + the decision rewire; the nine
+|    .obu artifacts + the gate regenerate IN THE SLICE; the decoder
+|    gate re-runs for all nine.
 |  - [x] **A4/RE4 (2026-11-09, PERRY-RE4, cherry-picked b453a78 + the
 |    judge errata 9e999ef): ac_bias + the intra candidate-injection
 |    family lands** in src/l16_rdo - ac_bias.c 117 nb (the
@@ -2361,7 +2392,38 @@ A0. SLICE-LEVEL STATE (the live register)
 |    sframe/me candidates :3478-:3560 (79, inter), the psy hbd twin
 |    (33), the decision loops (the wiring rung). 17/17 (277.95 s judge
 |    post-merge re-measure), GATE byte-identical 884,851 B.
-|    CONFORMANCE-FREE.
+|    CONFORMANCE-FREE.|  - [x] **A11/TF2 (2026-11-09, PERRY-TF2, cherry-picked 6e0359e): the
+|    temporal-filtering hbd twins land** in src/l9_analysis/temporal_filter
+|    - temporal_filtering.c :710-:720 + :832-:912 + :1105-:1267 = 234 nb
+|    (judge re-measured span-by-span), resolving the TF1 8-bit-discipline
+|    park (the RS2/HB1 pattern). BD FINDINGS: the zz hbd partial (void)s
+|    bd (no bd arithmetic, the weight table identical to 8-bit); the
+|    non-zz consumes bd ONLY as shift_factor = (bd-8)*2 into the SSE
+|    reduction; the block-error pre-shifts are HARD-CODED >> 4/>> 6 at
+|    hbd vs >> 0/>> 2 at 8-bit - NOT bd-parameterized (hbd == 8-bit twin
+|    iff caller errors are x16 - pinned); the accumulators do NOT widen
+|    (the count wrap pinned at 65200+500). 12 new TEST_CASEs (263 cases /
+|    43,479 assertions); 7 mutations killed, no survivors. INCIDENT (the
+|    looks-like-success family's fourth): an M5 edit silently deleted
+|    three definitions - LNK2019 surfaced it, restored, redone with
+|    unique anchoring. OPS: the LF renormalization commit (41cd451)
+|    preceded this landing - the cherry-pick hit line-ending conflicts
+|    on the touched files, resolved by taking theirs (the new
+|    .gitattributes stores the blobs LF); l10's exit-crash recurred
+|    post-cherry-pick and cleared on the re-run (the known artifact).
+|    17/17 (284.35 s), GATE byte-identical 884,851 B. Coverage-only.
+|  - [ ] **RE5 IN FLIGHT (PERRY-RE5, the gated golden event)**: the
+|    RD-lite wiring rung - the D2 ranking composes the landed 1:1
+|    surfaces (the l9 varianceCore for the distortion - the JUDGE
+|    CORRECTED the brief's psyDistortion claim: the fast-path distortion
+|    is the variance kernel, product_coding_loop.c:1008-:1016, psyDistortion
+|    only enters with ac_bias != 0; the RE3 intraFastCost for the rate;
+|    the RE2 RDCOST macro; the RE1 rate context initialized per frame
+|    from the l7 bucket cdfs). Chroma UV stays SAD-only this rung
+|    (named). The generator gains the md_rate_estimation cost
+|    primitives as verbatim extracts + the decision rewire; the nine
+|    .obu artifacts + the gate regenerate IN THE SLICE; the decoder
+|    gate re-runs for all nine.
 |  - [x] **WAVE-13 CLOSE (judge, post-merge re-measure on master)**:
 |    full rebuild + ctest 17/17 (277.95 s), GATE byte-identical
 |    884,851 B diff 0, coverage 23.1% (36,480/157,718): A4 8% (2,419).
