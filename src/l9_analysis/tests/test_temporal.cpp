@@ -11,6 +11,36 @@ TEST_CASE("l9 temporal scaffold boots") {
     CHECK(true);
 }
 
+// TF2 S1: calculate_squared_errors_sum_highbd (temporal_filtering.c:710-720).
+// Raw int-arithmetic SSE over the window, then ONE shift by shift_factor
+// at the end (:719). bd-10 fixture: shift_factor = (10-8)*2 = 4; diffs
+// -4 and 10 -> sum 116 -> 116 >> 4 = 7.
+TEST_CASE("l9 temporal calculateSquaredErrorsSumHbd bd-10 shift") {
+    using analysis::temporal::calculateSquaredErrorsSumHbd;
+    const uint16_t s[] = {100, 200};
+    const uint16_t p[] = {104, 190};
+    CHECK_EQ(calculateSquaredErrorsSumHbd(s, 2, p, 2, 2, 1, 4), 7u);
+}
+
+// TF2 S2: at shift_factor 0 (encoder_bit_depth 8, :1113) the highbd SSE
+// equals the landed 8-bit calculateSquaredErrorsSum on identical pixel
+// values, and strides are respected (the TF1 S10 3x2-in-5 fixture
+// widened; its SSE is 53).
+TEST_CASE("l9 temporal calculateSquaredErrorsSumHbd shift-0 equals 8-bit twin with strides") {
+    using analysis::temporal::calculateSquaredErrorsSum;
+    using analysis::temporal::calculateSquaredErrorsSumHbd;
+    const uint16_t s[] = {10, 20, 30, 99, 99,
+                          40, 5,  8,  99, 99};
+    const uint16_t p[] = {12, 18, 30, 0, 0,
+                          44, 0,  10, 0, 0};
+    CHECK_EQ(calculateSquaredErrorsSumHbd(s, 5, p, 5, 3, 2, 0), 53u);
+    const uint8_t s8[] = {10, 20, 30, 99, 99,
+                          40, 5,  8,  99, 99};
+    const uint8_t p8[] = {12, 18, 30, 0, 0,
+                          44, 0,  10, 0, 0};
+    CHECK_EQ(calculateSquaredErrorsSumHbd(s, 5, p, 5, 3, 2, 0), calculateSquaredErrorsSum(s8, 5, p8, 5, 3, 2));
+}
+
 // TF1 S1: the noise_log1p_fp16 underflow branch. base_fp16 = 65536 +
 // noise_level_fp16 <= 0 returns INT32_MIN (temporal_filtering.c:569-572).
 TEST_CASE("l9 temporal noiseLog1pFp16 base<=0 returns int32 min") {
@@ -1129,4 +1159,466 @@ TEST_CASE("l9 temporal vmafEstimateNoiseFp16 single delta hand value plus branch
     }
     d25[2 * 6 + 2] = 125;
     CHECK_EQ(analysis::temporal::vmafEstimateNoiseFp16(d25, 6, 6, 6), -65536);
+}
+// TF2: the uint16 twin of ZzFixture - identical uint8-range values
+// widened to uint16, zero accum/count.
+struct HbdZzFixture {
+    static const int kStride = 16;
+    static const int kDim = 8;
+    uint16_t pre[kStride * 12];
+    uint32_t accum[kStride * 12];
+    uint16_t count[kStride * 12];
+
+    HbdZzFixture() {
+        for (int i = 0; i < kStride * 12; ++i) {
+            pre[i] = static_cast<uint16_t>((i * 7 + 3) & 0xFF);
+            accum[i] = 0;
+            count[i] = 0;
+        }
+    }
+};
+
+// TF2 S3: svt_av1_apply_zz_based_temporal_filter_planewise_medium_hbd_
+// partial_c (temporal_filtering.c:832-874). MEASURED bd findings, pinned
+// by this fixture set:
+//  - the kernel (void)s encoder_bit_depth (:839): NO bd arithmetic at
+//    all; the weight is (expf_tab_fp16[scaled_diff16] * 1000) >> 17
+//    (:860), identical to the 8-bit twin (:767). The tables are NOT
+//    bd-scaled (the RS2 lesson: verified per span, not assumed).
+//  - the block-error pre-shifts are HARD-CODED >> 4 (16x16, :845) and
+//    >> 6 (32x32, :849) - NOT bd-parameterized; the 8-bit twin uses
+//    >> 0 (:752) and >> 2 (:756). So the hbd kernel equals the 8-bit
+//    twin on identical uint8-range pixels iff the caller's block errors
+//    are 16x (2^4) the 8-bit ones - that scaling is this fixture's
+//    input contract, and the elementwise equality is the oracle.
+//  - accumulator/count types are NOT widened at hbd: uint32_t* y_accum,
+//    uint16_t* y_count (:834).
+// Threading (named): splitFlag, blockError16x16[4], blockError32x32
+// thread the MeContext fields as in the 8-bit twin; the reference's
+// dead encoder_bit_depth parameter is DROPPED (named deviation).
+TEST_CASE("l9 temporal zz hbd partial derivation equals the 8-bit twin at errors x16") {
+    using analysis::temporal::applyZzBasedTemporalFilterPlanewiseMediumPartial;
+    using analysis::temporal::applyZzBasedTemporalFilterPlanewiseMediumPartialHbd;
+    const int stride = ZzFixture::kStride;
+    const int dim = ZzFixture::kDim;
+    // 8-bit twin on uint8 pixels, raw errors.
+    ZzFixture f8;
+    const uint64_t err8[4] = {4, 8, 12, 16};
+    applyZzBasedTemporalFilterPlanewiseMediumPartial(true, err8, 0, f8.pre, stride, dim, dim, f8.accum, f8.count,
+                                                     1u << 10);
+    // hbd twin on the SAME uint8-range pixels widened to uint16, block
+    // errors 16x (the input contract compensating the hard-coded >> 4).
+    uint16_t pre16[stride * 12];
+    for (int i = 0; i < stride * 12; ++i) {
+        pre16[i] = f8.pre[i];
+    }
+    uint32_t accumHbd[stride * 12] = {0};
+    uint16_t countHbd[stride * 12] = {0};
+    const uint64_t errHbd[4] = {64, 128, 192, 256};  // err8 * 16
+    applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(true, errHbd, 0, pre16, stride, dim, dim, accumHbd, countHbd,
+                                                        1u << 10);
+    for (int i = 0; i < stride * 12; ++i) {
+        CHECK_EQ(countHbd[i], f8.count[i]);
+        CHECK_EQ(accumHbd[i], f8.accum[i]);
+    }
+    // calibration: the derivation is not vacuous - avg_err_fp10 =
+    // err8 << 2 = {16,32,48,64} with divisor 1, so the four subblock
+    // weights (= the per-pixel counts) are pairwise distinct; pick one
+    // pixel from each of three different subblocks (subblock 0 covers
+    // rows 0..3/cols 0..3, subblock 1 starts at col 4, subblock 2 at
+    // row 4).
+    CHECK_NE(f8.count[0], f8.count[4]);
+    CHECK_NE(f8.count[0], f8.count[4 * stride]);
+}
+
+// TF2 S4: the zz hbd NON-SPLIT branch: 8-bit uses (err32 >> 2) (:756),
+// hbd uses (err32_hbd >> 6) (:849); with err32_hbd = err32 * 16 the two
+// coincide. Pins the hard-coded >> 6.
+TEST_CASE("l9 temporal zz hbd partial non-split derivation equals the 8-bit twin at err32 x16") {
+    using analysis::temporal::applyZzBasedTemporalFilterPlanewiseMediumPartial;
+    using analysis::temporal::applyZzBasedTemporalFilterPlanewiseMediumPartialHbd;
+    const int stride = ZzFixture::kStride;
+    const int dim = ZzFixture::kDim;
+    ZzFixture f8;
+    const uint64_t err16Ignore[4] = {99, 99, 99, 99};
+    applyZzBasedTemporalFilterPlanewiseMediumPartial(false, err16Ignore, 12, f8.pre, stride, dim, dim, f8.accum,
+                                                     f8.count, 1u << 10);
+    uint16_t pre16[stride * 12];
+    for (int i = 0; i < stride * 12; ++i) {
+        pre16[i] = f8.pre[i];
+    }
+    uint32_t accumHbd[stride * 12] = {0};
+    uint16_t countHbd[stride * 12] = {0};
+    applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(false, err16Ignore, 192, pre16, stride, dim, dim, accumHbd,
+                                                        countHbd, 1u << 10);  // 12 * 16 = 192
+    for (int i = 0; i < stride * 12; ++i) {
+        CHECK_EQ(countHbd[i], f8.count[i]);
+        CHECK_EQ(accumHbd[i], f8.accum[i]);
+    }
+    // calibration: one weight for every pixel = (12 >> 2) << 2 = 12 ->
+    // scaled_diff16 = 12, weight = (expfTabFp16[12] * 1000) >> 17.
+    const uint32_t w =
+        static_cast<uint32_t>((static_cast<uint64_t>(analysis::temporal::expfTabFp16[12]) * 1000) >> 17);
+    CHECK_EQ(f8.count[0], static_cast<uint16_t>(w));
+}
+
+// TF2 S5: svt_av1_apply_zz_based_temporal_filter_planewise_medium_hbd_c
+// (temporal_filtering.c:876-912). Threads tfDecayFactorFp16[3] (Y/U/V)
+// and tfChroma as parameters (the 8-bit wrapper's shape); chroma dims
+// are blockWidth >> ss_x, blockHeight >> ss_y (:895-896, :905-906).
+// encoder_bit_depth is threaded by the reference (:880) only to a
+// (void)ed parameter - DROPPED (named deviation, the S3 finding).
+TEST_CASE("l9 temporal zz hbd medium wrapper luma only when chroma disabled") {
+    using analysis::temporal::applyZzBasedTemporalFilterPlanewiseMediumHbd;
+    const int stride = ZzFixture::kStride;
+    const int dim = ZzFixture::kDim;
+    HbdZzFixture f, u, v;
+    const uint64_t errHbd[4] = {64, 128, 192, 256};
+    const uint32_t decay[3] = {1u << 10, 1u << 11, 1u << 12};
+    applyZzBasedTemporalFilterPlanewiseMediumHbd(true, errHbd, 0, f.pre, stride, u.pre, v.pre, stride, dim, dim, 1, 1,
+                                                 f.accum, f.count, u.accum, u.count, v.accum, v.count, decay,
+                                                 false);
+    // luma processed with decay[0]: reproduce via the partial.
+    HbdZzFixture o;
+    analysis::temporal::applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(true, errHbd, 0, o.pre, stride, dim, dim,
+                                                                            o.accum, o.count, decay[0]);
+    for (int i = 0; i < stride * 12; ++i) {
+        CHECK_EQ(f.count[i], o.count[i]);
+        CHECK_EQ(f.accum[i], o.accum[i]);
+        CHECK_EQ(u.accum[i], 0u);  // chroma untouched
+        CHECK_EQ(v.accum[i], 0u);
+    }
+}
+
+// TF2: the uint16 twin of NonZzFixture - identical uint8-range values
+// widened to uint16, the same quadrant error pattern.
+struct HbdNonZzFixture {
+    static const int kStride = 16;
+    static const int kDim = 8;
+    uint16_t src[kStride * 12];
+    uint16_t pre[kStride * 12];
+    uint32_t accum[kStride * 12];
+    uint16_t count[kStride * 12];
+
+    HbdNonZzFixture() {
+        NonZzFixture f8;
+        for (int i = 0; i < kStride * 12; ++i) {
+            pre[i] = f8.pre[i];
+            src[i] = f8.src[i];
+            accum[i] = 0;
+            count[i] = 0;
+        }
+    }
+};
+
+// TF2 S6: svt_av1_apply_temporal_filter_planewise_medium_hbd_partial_c
+// (temporal_filtering.c:1105-1214) - the DERIVATION fixture at bd 8.
+// MEASURED bd findings:
+//  - shift_factor = (encoder_bit_depth - 8) * 2 (:1113) is consumed ONLY
+//    by the four calculate_squared_errors_sum_highbd calls (:1153-1176);
+//    at bd 8 it is 0, so the window errors equal the 8-bit twin's on
+//    identical pixels.
+//  - the block-error pre-shifts are HARD-CODED >> 4 (:1133) / >> 6
+//    (:1147) vs the 8-bit twin's >> 0 (:958) / >> 2 (:972): the hbd
+//    kernel equals the 8-bit twin iff the caller's errors are 16x.
+//  - the weight is (expf_tab_fp16[scaled_diff16] * 1000) >> 16 (:1200),
+//    identical to the 8-bit twin (:1023); tables NOT bd-scaled.
+//  - accumulator/count NOT widened (:1107-1108).
+TEST_CASE("l9 temporal non-zz hbd partial derivation equals the 8-bit twin at bd 8") {
+    using analysis::temporal::applyTemporalFilterPlanewiseMediumPartial;
+    using analysis::temporal::applyTemporalFilterPlanewiseMediumPartialHbd;
+    const int stride = HbdNonZzFixture::kStride;
+    const int dim = HbdNonZzFixture::kDim;
+    const int16_t mvX[4] = {3, 0, 6, 2};
+    const int16_t mvY[4] = {0, 0, 0, 2};
+    const uint64_t err8[4] = {210, 400, 790, 1560};
+    const uint64_t errHbd[4] = {3360, 6400, 12640, 24960};  // err8 * 16
+    NonZzFixture f8;
+    uint32_t luma8[4] = {0, 0, 0, 0};
+    applyTemporalFilterPlanewiseMediumPartial(15, true, mvX, mvY, err8, 0, 0, 0, f8.src, NonZzFixture::kStride,
+                                              f8.pre, NonZzFixture::kStride, NonZzFixture::kDim,
+                                              NonZzFixture::kDim, f8.accum, f8.count, 1u << 16, luma8, false);
+    HbdNonZzFixture fH;
+    uint32_t lumaH[4] = {0, 0, 0, 0};
+    applyTemporalFilterPlanewiseMediumPartialHbd(15, true, mvX, mvY, errHbd, 0, 0, 0, fH.src, stride, fH.pre, stride,
+                                                 dim, dim, fH.accum, fH.count, 1u << 16, lumaH, false, 8);
+    for (int i = 0; i < stride * 12; ++i) {
+        CHECK_EQ(fH.count[i], f8.count[i]);
+        CHECK_EQ(fH.accum[i], f8.accum[i]);
+    }
+    for (int i = 0; i < 4; ++i) {
+        CHECK_EQ(lumaH[i], luma8[i]);
+        CHECK_EQ(lumaH[i], 16u * static_cast<uint32_t>(i + 1));  // the S13 calibration
+    }
+}
+
+// TF2 S7: non-zz hbd partial, bd-10 ABSOLUTE fixture (hand-derived,
+// no oracle - every number below is worked from the reference
+// arithmetic). Block 4x4 (bw_half = bh_half = 2), stride 8, pre = 512
+// everywhere, quadrant diffs d = {1,3,5,7} (src = pre + d). Non-split,
+// mv (0,0), mvDistTh 15, decay 1<<16, block_error_32x32 = 2048.
+//
+// shift_factor = (10-8)*2 = 4 (:1113). Per quadrant q:
+//   sum_q = 4*d^2 -> SSE_hbd = sum >> 4 = {0, 2, 6, 12}
+//   window_q = ((sum_h << 4)/2 << 4)/2 = sum_h * 64 = {0, 128, 384, 768}
+//   distance_threshold_fp16 = (15<<16)/10 = 98304; d_factor = 256
+//     (mv (0,0) -> sqrt_fast(0) = 0 -> 0 << 12 / 384 = 0 -> clamp 1<<8)
+//   decay doubles (non-split, :1136): 1<<17 -> divisor = 128
+//   combined_q = (window*5 + (2048>>6))/6 = (window*5 + 32)/6
+//              = {5, 112, 325, 645}
+//   avg_err_fp10 = (combined >> 3) * (256 >> 3) = {0, 448, 1280, 2560}
+//   scaled_diff16 = min(avg/128, 112) = {0, 3, 10, 20}
+//   weight = (expf_tab_fp16[sd] * 1000) >> 16
+//          = {65536, 54331, 35078, 18776} * 1000 >> 16 = {1000, 829, 535, 286}
+//   count = weight, accum = weight * 512 per quadrant pixel.
+TEST_CASE("l9 temporal non-zz hbd partial bd-10 absolute fixture") {
+    using analysis::temporal::applyTemporalFilterPlanewiseMediumPartialHbd;
+    const int stride = 8;
+    uint16_t pre[8 * 6];
+    uint16_t src[8 * 6];
+    for (int i = 0; i < 8 * 6; ++i) {
+        pre[i] = 512;
+        src[i] = 512;
+    }
+    const int d[4] = {1, 3, 5, 7};
+    for (int q = 0; q < 4; ++q) {
+        for (int r = 0; r < 2; ++r) {
+            for (int c = 0; c < 2; ++c) {
+                src[(q / 2) * 2 * stride + (q % 2) * 2 + r * stride + c] =
+                    static_cast<uint16_t>(512 + d[q]);
+            }
+        }
+    }
+    uint32_t accum[8 * 6] = {0};
+    uint16_t count[8 * 6] = {0};
+    uint32_t lumaWindow[4] = {0, 0, 0, 0};
+    applyTemporalFilterPlanewiseMediumPartialHbd(15, false, nullptr, nullptr, nullptr, 0, 0, 2048, src, stride, pre,
+                                                 stride, 4, 4, accum, count, 1u << 16, lumaWindow, false, 10);
+    const uint32_t wExpect[4] = {1000, 829, 535, 286};
+    CHECK_EQ(lumaWindow[0], 0u);
+    CHECK_EQ(lumaWindow[1], 128u);
+    CHECK_EQ(lumaWindow[2], 384u);
+    CHECK_EQ(lumaWindow[3], 768u);
+    for (int q = 0; q < 4; ++q) {
+        for (int r = 0; r < 2; ++r) {
+            for (int c = 0; c < 2; ++c) {
+                const int k = (q / 2) * 2 * stride + (q % 2) * 2 + r * stride + c;
+                CHECK_EQ(count[k], static_cast<uint16_t>(wExpect[q]));
+                CHECK_EQ(accum[k], wExpect[q] * 512u);
+            }
+        }
+    }
+    // untouched padding cells stay zero
+    CHECK_EQ(count[4], 0u);
+    CHECK_EQ(count[8 + 4], 0u);
+}
+
+// TF2 S8: non-zz hbd partial, bd-12 ABSOLUTE fixture (hand-derived).
+// shift_factor = (12-8)*2 = 8. Same geometry as S7, pre = 512,
+// quadrant diffs d = {16, 32, 48, 64}, block_error_32x32 = 2048,
+// mv (0,0), decay 1<<16 (doubles to 1<<17, divisor 128).
+//   sum_q = 4*d^2 = {1024, 4096, 9216, 16384} -> >> 8 = {4, 16, 36, 64}
+//   window_q = sum_h * 64 = {256, 1024, 2304, 4096}
+//   combined_q = (window*5 + 32)/6 = {218, 858, 1925, 3418}
+//   avg_err_fp10 = (combined >> 3) * 32 = {864, 3424, 7680, 13664}
+//   scaled_diff16 = avg/128 = {6, 26, 60, 106} (all uncapped)
+//   weight = {45042, 12904, 1541, 86} * 1000 >> 16 = {687, 196, 23, 1}
+//   (T[26] = 12904: the expf row layout puts 13737 at index 25.)
+TEST_CASE("l9 temporal non-zz hbd partial bd-12 absolute fixture") {
+    using analysis::temporal::applyTemporalFilterPlanewiseMediumPartialHbd;
+    const int stride = 8;
+    uint16_t pre[8 * 6];
+    uint16_t src[8 * 6];
+    for (int i = 0; i < 8 * 6; ++i) {
+        pre[i] = 512;
+        src[i] = 512;
+    }
+    const int d[4] = {16, 32, 48, 64};
+    for (int q = 0; q < 4; ++q) {
+        for (int r = 0; r < 2; ++r) {
+            for (int c = 0; c < 2; ++c) {
+                src[(q / 2) * 2 * stride + (q % 2) * 2 + r * stride + c] =
+                    static_cast<uint16_t>(512 + d[q]);
+            }
+        }
+    }
+    uint32_t accum[8 * 6] = {0};
+    uint16_t count[8 * 6] = {0};
+    uint32_t lumaWindow[4] = {0, 0, 0, 0};
+    applyTemporalFilterPlanewiseMediumPartialHbd(15, false, nullptr, nullptr, nullptr, 0, 0, 2048, src, stride, pre,
+                                                 stride, 4, 4, accum, count, 1u << 16, lumaWindow, false, 12);
+    const uint32_t wExpect[4] = {687, 196, 23, 1};
+    CHECK_EQ(lumaWindow[0], 256u);
+    CHECK_EQ(lumaWindow[1], 1024u);
+    CHECK_EQ(lumaWindow[2], 2304u);
+    CHECK_EQ(lumaWindow[3], 4096u);
+    for (int q = 0; q < 4; ++q) {
+        for (int r = 0; r < 2; ++r) {
+            for (int c = 0; c < 2; ++c) {
+                const int k = (q / 2) * 2 * stride + (q % 2) * 2 + r * stride + c;
+                CHECK_EQ(count[k], static_cast<uint16_t>(wExpect[q]));
+                CHECK_EQ(accum[k], wExpect[q] * 512u);
+            }
+        }
+    }
+}
+
+// TF2 S9: the weight-table INDEX RANGE at bd 10, enumerated (brief item
+// d). Split path with src == pre: window errors are 0 for ANY bd, so
+// combined = (err >> 4) / 6 exactly and the fixture is bd-blind by
+// construction (encoderBitDepth = 10 is still passed). err16 = 49152
+// (>>4 = 3072, /6 = 512, >>3 = 64, avg = 64*32 = 2048):
+//   decay>>10 = 19 -> scaled = 2048/19 = 107 -> T[107] = 81 -> weight 1
+//   decay>>10 = 18 -> scaled = 2048/18 = 113 -> CAPPED at 112 -> T[112]
+//     = 59 -> weight 0 (the pixel is untouched: no count, no accum)
+// err16 = 51504 (>>4 = 3219, /6 = 536, >>3 = 67, avg = 2144):
+//   decay>>10 = 19 -> scaled = 2144/19 = 112 EXACTLY -> weight 0
+TEST_CASE("l9 temporal non-zz hbd partial weight index range at bd 10") {
+    using analysis::temporal::applyTemporalFilterPlanewiseMediumPartialHbd;
+    const int stride = 8;
+    uint16_t pre[8 * 6];
+    uint16_t src[8 * 6];
+    for (int i = 0; i < 8 * 6; ++i) {
+        pre[i] = 512;
+        src[i] = 512;
+    }
+    const int16_t mvZero[4] = {0, 0, 0, 0};
+    const uint64_t err[4] = {49152, 49152, 49152, 49152};
+    // scaled 107 -> weight 1
+    {
+        uint32_t accum[8 * 6] = {0};
+        uint16_t count[8 * 6] = {0};
+        uint32_t lumaWindow[4] = {0, 0, 0, 0};
+        applyTemporalFilterPlanewiseMediumPartialHbd(15, true, mvZero, mvZero, err, 0, 0, 0, src, stride, pre,
+                                                     stride, 4, 4, accum, count, 19u << 10, lumaWindow, false, 10);
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                CHECK_EQ(count[r * stride + c], 1u);
+                CHECK_EQ(accum[r * stride + c], 512u);
+            }
+        }
+    }
+    // scaled 113 -> capped 112 -> weight 0: untouched
+    {
+        uint32_t accum[8 * 6] = {0};
+        uint16_t count[8 * 6] = {0};
+        uint32_t lumaWindow[4] = {0, 0, 0, 0};
+        applyTemporalFilterPlanewiseMediumPartialHbd(15, true, mvZero, mvZero, err, 0, 0, 0, src, stride, pre,
+                                                     stride, 4, 4, accum, count, 18u << 10, lumaWindow, false, 10);
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                CHECK_EQ(count[r * stride + c], 0u);
+                CHECK_EQ(accum[r * stride + c], 0u);
+            }
+        }
+    }
+    // scaled exactly 112 -> weight 0: untouched
+    {
+        const uint64_t err112[4] = {51504, 51504, 51504, 51504};
+        uint32_t accum[8 * 6] = {0};
+        uint16_t count[8 * 6] = {0};
+        uint32_t lumaWindow[4] = {0, 0, 0, 0};
+        applyTemporalFilterPlanewiseMediumPartialHbd(15, true, mvZero, mvZero, err112, 0, 0, 0, src, stride, pre,
+                                                     stride, 4, 4, accum, count, 19u << 10, lumaWindow, false, 10);
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                CHECK_EQ(count[r * stride + c], 0u);
+                CHECK_EQ(accum[r * stride + c], 0u);
+            }
+        }
+    }
+}
+
+// TF2 S10: zz hbd partial ABSOLUTE fixture (hand-derived; the kernel is
+// bd-BLIND - encoder_bit_depth is (void)ed at :839 - so there is one
+// fixture, not per-bd variants). Split, err16 = {64, 128, 192, 256} ->
+// blockErrorFp8 = >>4 = {4, 8, 12, 16}, avg = <<2 = {16, 32, 48, 64},
+// decay 1<<10 (divisor 1) -> scaled = {16, 32, 48, 64},
+// weight = {24109, 8869, 3262, 1200} * 1000 >> 17 = {183, 67, 24, 9}.
+// pre = 300; count = weight, accum = weight * 300.
+TEST_CASE("l9 temporal zz hbd partial absolute fixture") {
+    using analysis::temporal::applyZzBasedTemporalFilterPlanewiseMediumPartialHbd;
+    const int stride = 8;
+    uint16_t pre[8 * 6];
+    for (int i = 0; i < 8 * 6; ++i) {
+        pre[i] = 300;
+    }
+    uint32_t accum[8 * 6] = {0};
+    uint16_t count[8 * 6] = {0};
+    const uint64_t err[4] = {64, 128, 192, 256};
+    applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(true, err, 0, pre, stride, 4, 4, accum, count, 1u << 10);
+    const uint32_t wExpect[4] = {183, 67, 24, 9};
+    for (int q = 0; q < 4; ++q) {
+        for (int r = 0; r < 2; ++r) {
+            for (int c = 0; c < 2; ++c) {
+                const int k = (q / 2) * 2 * stride + (q % 2) * 2 + r * stride + c;
+                CHECK_EQ(count[k], static_cast<uint16_t>(wExpect[q]));
+                CHECK_EQ(accum[k], wExpect[q] * 300u);
+            }
+        }
+    }
+}
+
+// TF2 S11: the accumulator/count SEMANTICS at hbd (brief item c): the
+// reference does NOT widen the types - uint32_t* y_accum, uint16_t*
+// y_count (:834) - so the count WRAPS at 16 bits and the accumulator
+// stays 32-bit. zz kernel, err 0 -> weight = 65536*1000 >> 17 = 500,
+// pre = 300: count 65200 + 500 = 65700 wraps to 164; accum
+// 7 + 500*300 = 150007 exceeds 16 bits and must NOT wrap.
+TEST_CASE("l9 temporal zz hbd count wraps uint16 and accum stays uint32") {
+    using analysis::temporal::applyZzBasedTemporalFilterPlanewiseMediumPartialHbd;
+    const int stride = 8;
+    uint16_t pre[8 * 6];
+    for (int i = 0; i < 8 * 6; ++i) {
+        pre[i] = 300;
+    }
+    uint32_t accum[8 * 6];
+    uint16_t count[8 * 6];
+    for (int i = 0; i < 8 * 6; ++i) {
+        accum[i] = 7;
+        count[i] = 65200;
+    }
+    const uint64_t err[4] = {0, 0, 0, 0};
+    applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(true, err, 0, pre, stride, 4, 4, accum, count, 1u << 10);
+    CHECK_EQ(count[0], 164u);
+    CHECK_EQ(accum[0], 150007u);
+    CHECK_EQ(count[3 * stride + 3], 164u);
+    CHECK_EQ(accum[3 * stride + 3], 150007u);
+}
+
+// TF2 S12: svt_av1_apply_temporal_filter_planewise_medium_hbd_c
+// (:1216-1267): the wrapper owns the shared luma window array (:1222)
+// and threads encoder_bit_depth to every partial (:1236, :1251, :1265).
+// Derivation at bd 8 (errors x16) against the landed, mutation-proven
+// 8-bit wrapper, all three planes.
+TEST_CASE("l9 temporal non-zz hbd medium wrapper derivation equals the 8-bit twin") {
+    using analysis::temporal::applyTemporalFilterPlanewiseMedium;
+    using analysis::temporal::applyTemporalFilterPlanewiseMediumHbd;
+    const int stride = HbdNonZzFixture::kStride;
+    const int dim = HbdNonZzFixture::kDim;
+    const int16_t mvX[4] = {3, 0, 6, 2};
+    const int16_t mvY[4] = {0, 0, 0, 2};
+    const uint64_t err8[4] = {210, 400, 790, 1560};
+    const uint64_t errHbd[4] = {3360, 6400, 12640, 24960};
+    const uint32_t decay[3] = {1u << 16, 1u << 17, 1u << 18};
+    NonZzFixture f8, u8, v8;
+    applyTemporalFilterPlanewiseMedium(15, true, mvX, mvY, err8, 0, 0, 0, f8.src, NonZzFixture::kStride, f8.pre,
+                                        NonZzFixture::kStride, u8.src, v8.src, NonZzFixture::kStride, u8.pre, v8.pre,
+                                        NonZzFixture::kStride, NonZzFixture::kDim, NonZzFixture::kDim, 1, 1, f8.accum,
+                                        f8.count, u8.accum, u8.count, v8.accum, v8.count, decay, true);
+    HbdNonZzFixture fH, uH, vH;
+    applyTemporalFilterPlanewiseMediumHbd(15, true, mvX, mvY, errHbd, 0, 0, 0, fH.src, stride, fH.pre, stride, uH.src,
+                                          vH.src, stride, uH.pre, vH.pre, stride, dim, dim, 1, 1, fH.accum, fH.count,
+                                          uH.accum, uH.count, vH.accum, vH.count, decay, true, 8);
+    for (int i = 0; i < stride * 12; ++i) {
+        CHECK_EQ(fH.count[i], f8.count[i]);
+        CHECK_EQ(fH.accum[i], f8.accum[i]);
+        CHECK_EQ(uH.count[i], u8.count[i]);
+        CHECK_EQ(uH.accum[i], u8.accum[i]);
+        CHECK_EQ(vH.count[i], v8.count[i]);
+        CHECK_EQ(vH.accum[i], v8.accum[i]);
+    }
+    // calibration: the chroma blend makes chroma weights differ from
+    // luma (the S14 finding, now through the hbd wrapper).
+    CHECK_NE(uH.count[0], fH.count[0]);
 }

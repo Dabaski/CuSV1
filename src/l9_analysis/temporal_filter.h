@@ -114,6 +114,14 @@ void calculateDecayFactor(uint32_t tfDecayFactorFp16[3], int32_t nDecayFp10, uin
 uint32_t calculateSquaredErrorsSum(const uint8_t* s, int sStride, const uint8_t* p, int pStride,
                                    unsigned int w, unsigned int h);
 
+// TF2: 1:1 port of calculate_squared_errors_sum_highbd
+// (temporal_filtering.c:710-720). The SSE accumulates in int arithmetic
+// (SQR(x) = (x)*(x), utility.h:107) and shift_factor is applied ONCE at
+// the end (:719), not per pixel; shift_factor = (encoder_bit_depth - 8)
+// * 2 is the caller's derivation (:1113).
+uint32_t calculateSquaredErrorsSumHbd(const uint16_t* s, int sStride, const uint16_t* p, int pStride,
+                                      unsigned int w, unsigned int h, int shiftFactor);
+
 // 1:1 port of svt_av1_apply_zz_based_temporal_filter_planewise_medium_
 // partial_c (temporal_filtering.c:738-781). Threading: the consumed
 // MeContext fields are threaded as resolved per-call values - splitFlag
@@ -140,6 +148,34 @@ void applyZzBasedTemporalFilterPlanewiseMedium(bool splitFlag, const uint64_t* b
                                                int ssY, uint32_t* yAccum, uint16_t* yCount, uint32_t* uAccum,
                                                uint16_t* uCount, uint32_t* vAccum, uint16_t* vCount,
                                                const uint32_t* tfDecayFactorFp16, bool tfChroma);
+
+// TF2: 1:1 port of svt_av1_apply_zz_based_temporal_filter_planewise_
+// medium_hbd_partial_c (temporal_filtering.c:832-874). The kernel
+// (void)s encoder_bit_depth (:839) so the parameter is DROPPED (named
+// deviation); the block-error pre-shifts are HARD-CODED >> 4 / >> 6
+// (:845, :849), NOT bd-parameterized; the weight is
+// (expf_tab_fp16[scaled_diff16] * TF_WEIGHT_SCALE) >> 17 (:860) with the
+// tables NOT bd-scaled; accumulator/count types are NOT widened
+// (uint32_t* y_accum, uint16_t* y_count, :834). Threading identical to
+// the 8-bit twin.
+void applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(bool splitFlag, const uint64_t* blockError16x16,
+                                                         uint64_t blockError32x32, const uint16_t* yPre,
+                                                         int yPreStride, unsigned int blockWidth,
+                                                         unsigned int blockHeight, uint32_t* yAccum,
+                                                         uint16_t* yCount, uint32_t tfDecayFactorFp16);
+
+// TF2: 1:1 port of svt_av1_apply_zz_based_temporal_filter_planewise_
+// medium_hbd_c (temporal_filtering.c:876-912). Same threading as the
+// 8-bit wrapper (:783-814); the reference threads encoder_bit_depth
+// only into the (void)ed partial parameter, so it is DROPPED here too
+// (named deviation).
+void applyZzBasedTemporalFilterPlanewiseMediumHbd(bool splitFlag, const uint64_t* blockError16x16,
+                                                  uint64_t blockError32x32, const uint16_t* yPre, int yPreStride,
+                                                  const uint16_t* uPre, const uint16_t* vPre, int uvPreStride,
+                                                  unsigned int blockWidth, unsigned int blockHeight, int ssX,
+                                                  int ssY, uint32_t* yAccum, uint16_t* yCount, uint32_t* uAccum,
+                                                  uint16_t* uCount, uint32_t* vAccum, uint16_t* vCount,
+                                                  const uint32_t* tfDecayFactorFp16, bool tfChroma);
 
 // 1:1 port of svt_av1_apply_temporal_filter_planewise_medium_partial_c
 // (temporal_filtering.c:930-1037). Threading: mvDistTh (MeContext
@@ -173,5 +209,39 @@ void applyTemporalFilterPlanewiseMedium(uint16_t mvDistTh, bool splitFlag, const
                                         uint32_t* yAccum, uint16_t* yCount, uint32_t* uAccum, uint16_t* uCount,
                                         uint32_t* vAccum, uint16_t* vCount, const uint32_t* tfDecayFactorFp16,
                                         bool tfChroma);
+
+// TF2: 1:1 port of svt_av1_apply_temporal_filter_planewise_medium_hbd_
+// partial_c (temporal_filtering.c:1105-1214). Threading: the same
+// resolved per-call block-error/mv fields as the 8-bit partial plus
+// encoderBitDepth, which is consumed ONLY as shift_factor =
+// (encoder_bit_depth - 8) * 2 (:1113) fed to the four
+// calculate_squared_errors_sum_highbd calls (:1153-1176). The
+// block-error pre-shifts are HARD-CODED >> 4 / >> 6 (:1133, :1147); the
+// weight is (expf_tab_fp16[scaled_diff16] * TF_WEIGHT_SCALE) >> 16
+// (:1200); accumulator/count types are NOT widened (:1107-1108).
+void applyTemporalFilterPlanewiseMediumPartialHbd(uint16_t mvDistTh, bool splitFlag, const int16_t* mv16x16X,
+                                                  const int16_t* mv16x16Y, const uint64_t* blockError16x16,
+                                                  int16_t mv32x32X, int16_t mv32x32Y, uint64_t blockError32x32,
+                                                  const uint16_t* ySrc, int ySrcStride, const uint16_t* yPre,
+                                                  int yPreStride, unsigned int blockWidth, unsigned int blockHeight,
+                                                  uint32_t* yAccum, uint16_t* yCount, uint32_t tfDecayFactorFp16,
+                                                  uint32_t lumaWindowErrorQuadFp8[4], bool isChroma,
+                                                  uint32_t encoderBitDepth);
+
+// TF2: 1:1 port of svt_av1_apply_temporal_filter_planewise_medium_hbd_c
+// (temporal_filtering.c:1216-1267). The wrapper owns the shared luma
+// window-error array (:1222) and threads encoder_bit_depth to every
+// partial call (:1236, :1251, :1265).
+void applyTemporalFilterPlanewiseMediumHbd(uint16_t mvDistTh, bool splitFlag, const int16_t* mv16x16X,
+                                           const int16_t* mv16x16Y, const uint64_t* blockError16x16,
+                                           int16_t mv32x32X, int16_t mv32x32Y, uint64_t blockError32x32,
+                                           const uint16_t* ySrc, int ySrcStride, const uint16_t* yPre,
+                                           int yPreStride, const uint16_t* uSrc, const uint16_t* vSrc,
+                                           int uvSrcStride, const uint16_t* uPre, const uint16_t* vPre,
+                                           int uvPreStride, unsigned int blockWidth, unsigned int blockHeight,
+                                           int ssX, int ssY, uint32_t* yAccum, uint16_t* yCount, uint32_t* uAccum,
+                                           uint16_t* uCount, uint32_t* vAccum, uint16_t* vCount,
+                                           const uint32_t* tfDecayFactorFp16, bool tfChroma,
+                                            uint32_t encoderBitDepth);
 }
 }

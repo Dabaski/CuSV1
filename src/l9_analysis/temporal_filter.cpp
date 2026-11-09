@@ -165,6 +165,21 @@ uint32_t calculateSquaredErrorsSum(const uint8_t* s, int sStride, const uint8_t*
     return sum;
 }
 
+// TF2: 1:1 port of calculate_squared_errors_sum_highbd
+// (temporal_filtering.c:710-720); SQR(x) = (x)*(x) (utility.h:107) in
+// int arithmetic, the shift applied once at the end (:719).
+uint32_t calculateSquaredErrorsSumHbd(const uint16_t* s, int sStride, const uint16_t* p, int pStride,
+                                      unsigned int w, unsigned int h, int shiftFactor) {
+    uint32_t sum = 0;
+    for (unsigned int i = 0; i < h; i++) {
+        for (unsigned int j = 0; j < w; j++) {
+            const int diff = static_cast<int>(s[i * sStride + j]) - static_cast<int>(p[i * pStride + j]);
+            sum += static_cast<uint32_t>(diff * diff);
+        }
+    }
+    return (sum >> shiftFactor);
+}
+
 namespace {
 
 // 1:1 with the reference weight math (temporal_filtering.c:764-767 and
@@ -244,6 +259,70 @@ void applyZzBasedTemporalFilterPlanewiseMedium(bool splitFlag, const uint64_t* b
         applyZzBasedTemporalFilterPlanewiseMediumPartial(splitFlag, blockError16x16, blockError32x32, vPre,
                                                          uvPreStride, blockWidth >> ssX, blockHeight >> ssY,
                                                          vAccum, vCount, tfDecayFactorFp16[2 /*PLANE_V*/]);
+    }
+}
+
+// TF2: 1:1 port of svt_av1_apply_zz_based_temporal_filter_planewise_
+// medium_hbd_partial_c (temporal_filtering.c:832-874). encoder_bit_depth
+// is (void)ed by the reference (:839) and dropped here; the block-error
+// pre-shifts >> 4 / >> 6 (:845, :849) are hard-coded, and the weight
+// shift >> 17 (:860) matches the 8-bit twin.
+void applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(bool splitFlag, const uint64_t* blockError16x16,
+                                                         uint64_t blockError32x32, const uint16_t* yPre,
+                                                         int yPreStride, unsigned int blockWidth,
+                                                         unsigned int blockHeight, uint32_t* yAccum,
+                                                         uint16_t* yCount, uint32_t tfDecayFactorFp16) {
+    uint32_t blockErrorFp8[4];
+
+    if (splitFlag) {
+        for (int i = 0; i < 4; ++i) {
+            blockErrorFp8[i] = static_cast<uint32_t>(blockError16x16[i] >> 4);
+        }
+    } else {
+        blockErrorFp8[0] = blockErrorFp8[1] = blockErrorFp8[2] = blockErrorFp8[3] =
+            static_cast<uint32_t>(blockError32x32 >> 6);
+    }
+
+    // Calculation for every quarter
+    for (unsigned int subblockIdx = 0; subblockIdx < 4; subblockIdx++) {
+        uint32_t avgErrFp10 = blockErrorFp8[subblockIdx] << 2;
+
+        uint32_t adjustedWeight = tfWeight(avgErrFp10, tfDecayFactorFp16, 17);
+
+        int xOffset = static_cast<int>((subblockIdx % 2) * blockWidth / 2);
+        int yOffset = static_cast<int>((subblockIdx / 2) * blockHeight / 2);
+
+        for (unsigned int i = 0; i < blockHeight / 2; i++) {
+            for (unsigned int j = 0; j < blockWidth / 2; j++) {
+                const int k = static_cast<int>((i + yOffset) * yPreStride + j + xOffset);
+                const int pixelValue = yPre[k];
+                yCount[k] = static_cast<uint16_t>(yCount[k] + adjustedWeight);
+                yAccum[k] += adjustedWeight * static_cast<uint32_t>(pixelValue);
+            }
+        }
+    }
+}
+
+// TF2: 1:1 port of svt_av1_apply_zz_based_temporal_filter_planewise_
+// medium_hbd_c (temporal_filtering.c:876-912).
+void applyZzBasedTemporalFilterPlanewiseMediumHbd(bool splitFlag, const uint64_t* blockError16x16,
+                                                  uint64_t blockError32x32, const uint16_t* yPre, int yPreStride,
+                                                  const uint16_t* uPre, const uint16_t* vPre, int uvPreStride,
+                                                  unsigned int blockWidth, unsigned int blockHeight, int ssX,
+                                                  int ssY, uint32_t* yAccum, uint16_t* yCount, uint32_t* uAccum,
+                                                  uint16_t* uCount, uint32_t* vAccum, uint16_t* vCount,
+                                                  const uint32_t* tfDecayFactorFp16, bool tfChroma) {
+    applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(splitFlag, blockError16x16, blockError32x32, yPre, yPreStride,
+                                                        blockWidth, blockHeight, yAccum, yCount,
+                                                        tfDecayFactorFp16[0 /*PLANE_Y*/]);
+    if (tfChroma) {
+        applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(splitFlag, blockError16x16, blockError32x32, uPre,
+                                                            uvPreStride, blockWidth >> ssX, blockHeight >> ssY,
+                                                            uAccum, uCount, tfDecayFactorFp16[1 /*PLANE_U*/]);
+
+        applyZzBasedTemporalFilterPlanewiseMediumPartialHbd(splitFlag, blockError16x16, blockError32x32, vPre,
+                                                            uvPreStride, blockWidth >> ssX, blockHeight >> ssY,
+                                                            vAccum, vCount, tfDecayFactorFp16[2 /*PLANE_V*/]);
     }
 }
 
@@ -363,6 +442,136 @@ void applyTemporalFilterPlanewiseMedium(uint16_t mvDistTh, bool splitFlag, const
                                                   mv32x32Y, blockError32x32, vSrc, uvSrcStride, vPre, uvPreStride,
                                                   blockWidth >> ssX, blockHeight >> ssY, vAccum, vCount,
                                                   tfDecayFactorFp16[2 /*PLANE_V*/], lumaWindowErrorQuadFp8, true);
+    }
+}
+
+// TF2: 1:1 port of svt_av1_apply_temporal_filter_planewise_medium_hbd_
+// partial_c (temporal_filtering.c:1105-1214). shift_factor =
+// (encoder_bit_depth - 8) * 2 (:1113) feeds ONLY the highbd SSE calls;
+// the block-error pre-shifts >> 4 / >> 6 (:1133, :1147) are hard-coded;
+// the weight shift >> 16 (:1200) matches the 8-bit twin.
+void applyTemporalFilterPlanewiseMediumPartialHbd(uint16_t mvDistTh, bool splitFlag, const int16_t* mv16x16X,
+                                                  const int16_t* mv16x16Y, const uint64_t* blockError16x16,
+                                                  int16_t mv32x32X, int16_t mv32x32Y, uint64_t blockError32x32,
+                                                  const uint16_t* ySrc, int ySrcStride, const uint16_t* yPre,
+                                                  int yPreStride, unsigned int blockWidth, unsigned int blockHeight,
+                                                  uint32_t* yAccum, uint16_t* yCount, uint32_t tfDecayFactorFp16,
+                                                  uint32_t lumaWindowErrorQuadFp8[4], bool isChroma,
+                                                  uint32_t encoderBitDepth) {
+    const int shiftFactor = static_cast<int>((encoderBitDepth - 8) * 2);
+
+    uint32_t distanceThresholdFp16 = (static_cast<uint32_t>(mvDistTh) << 16) / 10;
+    if (distanceThresholdFp16 < (1u << 16)) {
+        distanceThresholdFp16 = 1u << 16;
+    }
+
+    // Calculation for every quarter
+    uint32_t dFactorFp8[4];
+    uint32_t blockErrorFp8[4];
+    uint32_t chromaWindowErrorQuadFp8[4];
+    uint32_t* windowErrorQuadFp8 = isChroma ? chromaWindowErrorQuadFp8 : lumaWindowErrorQuadFp8;
+
+    if (splitFlag) {
+        for (int i = 0; i < 4; ++i) {
+            const int32_t col = mv16x16X[i];
+            const int32_t row = mv16x16Y[i];
+            const uint32_t distanceFp4 = sqrtFast(static_cast<uint32_t>(col * col + row * row) << 8);
+            uint32_t d = (distanceFp4 << 12) / (distanceThresholdFp16 >> 8);
+            dFactorFp8[i] = d < (1u << 8) ? (1u << 8) : d;
+            blockErrorFp8[i] = static_cast<uint32_t>(blockError16x16[i] >> 4);
+        }
+    } else {
+        tfDecayFactorFp16 <<= 1;
+        const int32_t col = mv32x32X;
+        const int32_t row = mv32x32Y;
+
+        const uint32_t distanceFp4 = sqrtFast(static_cast<uint32_t>(col * col + row * row) << 8);
+        uint32_t d = (distanceFp4 << 12) / (distanceThresholdFp16 >> 8);
+        d = d < (1u << 8) ? (1u << 8) : d;
+        dFactorFp8[0] = dFactorFp8[1] = dFactorFp8[2] = dFactorFp8[3] = d;
+        blockErrorFp8[0] = blockErrorFp8[1] = blockErrorFp8[2] = blockErrorFp8[3] =
+            static_cast<uint32_t>(blockError32x32 >> 6);
+    }
+    const uint32_t bwHalf = blockWidth >> 1;
+    const uint32_t bhHalf = blockHeight >> 1;
+    uint32_t sum;
+    sum = calculateSquaredErrorsSumHbd(ySrc, ySrcStride, yPre, yPreStride, bwHalf, bhHalf, shiftFactor);
+    windowErrorQuadFp8[0] = (((sum << 4) / bwHalf) << 4) / bhHalf;
+
+    sum = calculateSquaredErrorsSumHbd(ySrc + bwHalf, ySrcStride, yPre + bwHalf, yPreStride, bwHalf, bhHalf,
+                                       shiftFactor);
+    windowErrorQuadFp8[1] = (((sum << 4) / bwHalf) << 4) / bhHalf;
+
+    sum = calculateSquaredErrorsSumHbd(ySrc + ySrcStride * bhHalf, ySrcStride, yPre + yPreStride * bhHalf, yPreStride,
+                                       bwHalf, bhHalf, shiftFactor);
+    windowErrorQuadFp8[2] = (((sum << 4) / bwHalf) << 4) / bhHalf;
+
+    sum = calculateSquaredErrorsSumHbd(ySrc + ySrcStride * bhHalf + bwHalf, ySrcStride,
+                                       yPre + yPreStride * bhHalf + bwHalf, yPreStride, bwHalf, bhHalf, shiftFactor);
+    windowErrorQuadFp8[3] = (((sum << 4) / bwHalf) << 4) / bhHalf;
+
+    if (isChroma) {
+        for (int i = 0; i < 4; ++i) {
+            windowErrorQuadFp8[i] = (windowErrorQuadFp8[i] * 5 + lumaWindowErrorQuadFp8[i]) / 6;
+        }
+    }
+
+    // Calculation for every quarter
+    for (unsigned int subblockIdx = 0; subblockIdx < 4; subblockIdx++) {
+        uint32_t combinedErrorFp8 =
+            (windowErrorQuadFp8[subblockIdx] * 5u /*TF_WINDOW_BLOCK_BALANCE_WEIGHT*/ + blockErrorFp8[subblockIdx]) /
+            (5u + 1);
+
+        uint64_t avgErrFp10 =
+            static_cast<uint64_t>(combinedErrorFp8 >> 3) * static_cast<uint64_t>(dFactorFp8[subblockIdx] >> 3);
+        uint32_t adjustedWeight = tfWeight(avgErrFp10, tfDecayFactorFp16, 16);
+
+        int xOffset = static_cast<int>((subblockIdx % 2) * blockWidth / 2);
+        int yOffset = static_cast<int>((subblockIdx / 2) * blockHeight / 2);
+
+        for (unsigned int i = 0; i < blockHeight / 2; i++) {
+            for (unsigned int j = 0; j < blockWidth / 2; j++) {
+                const int k = static_cast<int>((i + yOffset) * yPreStride + j + xOffset);
+                const int pixelValue = yPre[k];
+                yCount[k] = static_cast<uint16_t>(yCount[k] + adjustedWeight);
+                yAccum[k] += adjustedWeight * static_cast<uint32_t>(pixelValue);
+            }
+        }
+    }
+}
+
+// TF2: 1:1 port of svt_av1_apply_temporal_filter_planewise_medium_hbd_c
+// (temporal_filtering.c:1216-1267).
+void applyTemporalFilterPlanewiseMediumHbd(uint16_t mvDistTh, bool splitFlag, const int16_t* mv16x16X,
+                                           const int16_t* mv16x16Y, const uint64_t* blockError16x16,
+                                           int16_t mv32x32X, int16_t mv32x32Y, uint64_t blockError32x32,
+                                           const uint16_t* ySrc, int ySrcStride, const uint16_t* yPre,
+                                           int yPreStride, const uint16_t* uSrc, const uint16_t* vSrc,
+                                           int uvSrcStride, const uint16_t* uPre, const uint16_t* vPre,
+                                           int uvPreStride, unsigned int blockWidth, unsigned int blockHeight,
+                                           int ssX, int ssY, uint32_t* yAccum, uint16_t* yCount, uint32_t* uAccum,
+                                           uint16_t* uCount, uint32_t* vAccum, uint16_t* vCount,
+                                           const uint32_t* tfDecayFactorFp16, bool tfChroma,
+                                           uint32_t encoderBitDepth) {
+    uint32_t lumaWindowErrorQuadFp8[4];
+
+    applyTemporalFilterPlanewiseMediumPartialHbd(mvDistTh, splitFlag, mv16x16X, mv16x16Y, blockError16x16, mv32x32X,
+                                                 mv32x32Y, blockError32x32, ySrc, ySrcStride, yPre, yPreStride,
+                                                 blockWidth, blockHeight, yAccum, yCount,
+                                                 tfDecayFactorFp16[0 /*PLANE_Y*/], lumaWindowErrorQuadFp8, false,
+                                                 encoderBitDepth);
+    if (tfChroma) {
+        applyTemporalFilterPlanewiseMediumPartialHbd(mvDistTh, splitFlag, mv16x16X, mv16x16Y, blockError16x16,
+                                                     mv32x32X, mv32x32Y, blockError32x32, uSrc, uvSrcStride, uPre,
+                                                     uvPreStride, blockWidth >> ssX, blockHeight >> ssY, uAccum,
+                                                     uCount, tfDecayFactorFp16[1 /*PLANE_U*/],
+                                                     lumaWindowErrorQuadFp8, true, encoderBitDepth);
+
+        applyTemporalFilterPlanewiseMediumPartialHbd(mvDistTh, splitFlag, mv16x16X, mv16x16Y, blockError16x16,
+                                                     mv32x32X, mv32x32Y, blockError32x32, vSrc, uvSrcStride, vPre,
+                                                     uvPreStride, blockWidth >> ssX, blockHeight >> ssY, vAccum,
+                                                     vCount, tfDecayFactorFp16[2 /*PLANE_V*/],
+                                                     lumaWindowErrorQuadFp8, true, encoderBitDepth);
     }
 }
 
