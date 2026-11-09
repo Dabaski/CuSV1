@@ -15,15 +15,15 @@
 # only place the figure exists.
 generated  : 2026-11-08
 reference  : third_party/SVT-AV1 pinned snapshot, CHANGELOG 4.2.0
-areas file : 63248 B, sha256:B9FA55032E1C36C9
+areas file : 64540 B, sha256:FD46C83A463C743F
 surface    : 254 files, 157718 non-blank lines
-coverage   : 22.5%  (35,428 covered, 157,718 denominator)
+coverage   : 22.8%  (36,004 covered, 157,718 denominator)
 
 A1    Transform/TX                                    9   27008      41%    11087
 A2    Intra prediction                                4    3478      91%     3156
-A3    Inter prediction + motion estimation           44   17738       6%     1006
-A4    Mode decision + RDO + pc_tree                  18   31088       5%     1452
-A5    Entropy coding (CABAC/OD)                      11    8460      60%     5117
+A3    Inter prediction + motion estimation           44   17738       6%     1009
+A4    Mode decision + RDO + pc_tree                  18   31088       6%     1943
+A5    Entropy coding (CABAC/OD)                      11    8460      61%     5167
 A6    Coding loop + PCS + block structures           22   13928      12%     1734
 A7    Bitstream + OBU + headers                       5    1436      40%      574
 A8    Post-filters (deblock/CDEF/restoration/grain)     27   10600      30%     3191
@@ -31,7 +31,7 @@ A9    Rate control                                   17    5951       5%      27
 A10   Picture management + threading                 30    9662       0%        0
 A11   Content analysis + temporal filtering          16   12028      40%     4812
 A12   Palette + segmentation + misc                   8    1612      34%      550
-A13   Utility + platform + core headers              24    5357      19%     1005
+A13   Utility + platform + core headers              24    5357      19%     1037
 A14   C_DEFAULT portable reference kernels           15    1466     100%     1466
 --    unassigned (drift detector)                     0       0       0%        0
 --    excluded: *_rtcd.* dispatch                     4    7906       0%        0

@@ -2430,9 +2430,9 @@ last and label it as table transcription, not encoder progress.
 [x] Docs: README, AGENTS.md layer map + completion metric,
     provenance.md, decode_conformance.md, bitstream.md, color.md,
     layers.md, emission.md, cs5c_deltas.md, this file
-[x] MEASURED 2026-11-08 (wave-11 close): ctest 17/17 (295.11 s), GATE
-    421/421 diff 0 (884,851 B), portable-C coverage 22.5%
-    (35,428/157,718), 9 committed .obu artifacts (all content-1:1 on
+[x] MEASURED 2026-11-09 (wave-12 close): ctest 17/17 (292.08 s), GATE
+    421/421 diff 0 (884,851 B), portable-C coverage 22.8%
+    (36,004/157,718), 9 committed .obu artifacts (all content-1:1 on
     every plane)
 
 ------------------------------------------------------------
