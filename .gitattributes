@@ -1,0 +1,17 @@
+# Normalize line endings at commit time regardless of what any agent's
+# editor writes. The Edit-tool CRLF insertions cost a fix cycle every
+# session (the todo.md re-pollution saga); this ends the defect class.
+* text=auto
+
+# Source + docs + data: LF everywhere (the repo's committed state is LF).
+*.md   text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
+*.cpp  text eol=lf
+*.inc  text eol=lf
+*.txt  text eol=lf
+*.ps1  text eol=lf
+
+# The committed golden artifacts are BINARY - text normalization would
+# corrupt them. Never let git touch these.
+*.obu  binary
