@@ -1861,7 +1861,7 @@ std::int32_t costSkipTxb(const MdRateEstimationContext* me, std::uint8_t allowUp
 }
 
 // fimode_to_intradir (common_utils.c:33-34, verbatim).
-const PredictionMode fimodeToIntradir[FILTER_INTRA_MODES] = {DC_PRED, V_PRED, H_PRED, D157_PRED, DC_PRED};
+const PredictionMode fimodeToIntradir[FILTER_INTRA_MODES] = {DC_PRED, V_PRED, H_PRED, D157_PRED, PAETH_PRED};
 
 // av1_cost_coeffs_txb_loop_cost_one_eob (rd_cost.c:224-:253, verbatim).
 std::int32_t costCoeffsOneEob(const std::int32_t* qcoeff, const std::int8_t* coeffContexts,

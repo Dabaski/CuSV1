@@ -323,7 +323,7 @@ std::int32_t getPaletteBsizeCtx(BlockSize bsize);
 #define EXT_TX_SET_TYPES 6         // definitions.h:1084
 #define TX_TYPES 16                // definitions.h (the 16-type list)
 #define UV_INTRA_MODES 14          // definitions.h:1225 (13 UV modes + UV_CFL_PRED)
-#define FILTER_INTRA_MODES 7       // definitions.h:1361 enum
+#define FILTER_INTRA_MODES 5       // definitions.h:1295-:1302 (the count; the enum is FILTER_DC/V/H/D157/PAETH)
 #define PALETTE_SIZES 7            // definitions.h:1137-1147 (TWO..EIGHT)
 #define PALETTE_Y_MODE_CONTEXTS 3  // cabac_context_model.h:246
 #define PALETTE_UV_MODE_CONTEXTS 2 // cabac_context_model.h

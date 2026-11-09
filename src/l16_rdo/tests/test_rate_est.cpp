@@ -2911,7 +2911,7 @@ TEST_CASE("l16_rdo transformTypeRateEstimation returns 0 at DCT-only shapes") {
     // 4x4 intra DCT_DCT: the walk proceeds (7 types at DTT4_IDTX_1DDCT) and
     // reads the zeroed DCT_DCT row.
     CHECK(l16_rdo::transformTypeRateEstimation(&me, 0, &fc, false, 0 /* TX_4X4 */, 0 /* DCT_DCT */, false,
-                                                0 /* DC_PRED */, 7 /* FILTER_INTRA_MODES */) == 0);
+                                                0 /* DC_PRED */, 5 /* FILTER_INTRA_MODES */) == 0);
 }
 
 TEST_CASE("l16_rdo transformTypeRateEstimation reads the intra tx-type table") {
@@ -2923,7 +2923,7 @@ TEST_CASE("l16_rdo transformTypeRateEstimation reads the intra tx-type table") {
     // intra_dir = DC_PRED fold.
     me.intraTxTypeFacBits[2][2][0][1] = 1234;
     CHECK(l16_rdo::transformTypeRateEstimation(&me, 0, &fc, false, 2 /* TX_16X16 */, 1 /* ADST_ADST */, false,
-                                                0 /* DC_PRED */, 7 /* FILTER_INTRA_MODES */) == 1234);
+                                                0 /* DC_PRED */, 5 /* FILTER_INTRA_MODES */) == 1234);
 }
 
 TEST_CASE("l16_rdo transformTypeRateEstimation updates the intra ext-tx cdf") {
@@ -2963,7 +2963,7 @@ static std::int32_t oracleTxTypeRateR3(l16_rdo::MdRateEstimationContext* me, std
         {3, 4, 5, 8, 6, 7, 9, 10, 11, 0, 1, 2, 0, 0, 0, 0},
         {7, 8, 9, 12, 10, 11, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6},
     };
-    static const int fimodeToIntradir[7] = {0, 1, 2, 6, 0, 0, 0};
+    static const int fimodeToIntradir[5] = {0, 1, 2, 6, 12};
     int sqrUp = txsizeSqrUpMap[txSize];
     int setType;
     if (sqrUp > 3) {
@@ -2986,7 +2986,7 @@ static std::int32_t oracleTxTypeRateR3(l16_rdo::MdRateEstimationContext* me, std
                                               numExtTxSet[setType]);
         return me->interTxTypeFacBits[set][square][txType];
     } else {
-        int dir = (fiMode != 7) ? fimodeToIntradir[fiMode] : lumaMode;
+        int dir = (fiMode != 5) ? fimodeToIntradir[fiMode] : lumaMode;
         if (allowUpdateCdf) oracleUpdateCdfR3(fc->intra_ext_tx_cdf[set][square][dir], extTxInd[setType][txType],
                                               numExtTxSet[setType]);
         return me->intraTxTypeFacBits[set][square][dir][txType];
