@@ -956,6 +956,83 @@ are partly right and I re-measured rather than restated them:
   extracted, the runtime diff-verify test parses the reference file
   itself; the PAIRED-METRIC CAVEAT STATED (transcription, not
   algorithm - the AN14 OD_DIVU precedent). Host only.
+- l16_rdo - the RE-series (A4 machinery, the golden-regeneration
+  campaign's foundation; scaffold bef6904 links av1_transforms; all
+  four slices CONFORMANCE-FREE - no emission change, no golden churn;
+  the wiring rung opens next):
+  RE1 (2b9ff79) the rate-estimation core of md_rate_estimation.c -
+  485 nb judge-charged (the writer's 645 struck: the parked inter
+  block 90 + the 69-nb struct carry per the AN17 precedent): the
+  cdf->cost core, the estimate_syntax_rate INTRA surface :76-:269,
+  the mv class + nmv cost tables, the coefficient-rate estimator
+  :486-:607, the interintra-allowed helpers + the header tables
+  (av1_prob_cost 8, ext-tx 26); the cfl sign-cost quirk verbatim
+  (the oracle caught the first draft's sign_fac_bits on both planes);
+  110,035 assertions, 10 mutations killed; M3's LESSON: an oracle
+  that reads the same fixture as the port cannot see a substitution
+  bug (the fixture was made divergent); parked named: update_stats
+  (BlkStruct-walled), update_part_stats (pcs-walled), the inter
+  block.
+  RE2 (485f478 + the judge addendum 4f6e4d1) the optimize_b trellis
+  of full_loop.c :613-:1236 (562 nb + verified carries = 1,222 nb
+  charged across A1 +1,043 / A4 +33 / A5 +30 / A13 +116): the cost
+  helpers, the three trellis updaters + update_skip +
+  update_coeff_eob_fast, svt_fast_optimize_b, the driver with the
+  pcs/ctx walls threaded as OptimizeBArgs; the GENERATED
+  eb_av1_scan_orders (svt_aom_init_iscan coefficients.c:314-:374),
+  the tx-size tables, get_eob_pos_token + get_txsize_entropy_ctx,
+  cabac + rd_cost carries, and the court-ordered
+  nz_map_ctx_offset.inc byte-copy (runtime twin-checked against BOTH
+  the l7 copy and third_party coefficients.c); 17 TEST_CASEs /
+  611,254 assertions incl. the RD-MONOTONICITY property over the full
+  grid + the full test-side transcription oracle; 9 writer mutations
+  + the judge's J3 survivor sharpened by the addendum (the fast
+  path's zbin-trim had no boundary fixture - the flip band absCoeff
+  in [29,56] at shift 0); BRIEF CORRECTIONS (measured): the span map
+  drifted, "scan tables landed in l3" was WRONG (l3 has only the
+  iscan formulas - the scan ORDERS are generated), the tx-helper
+  family lives in l7 (unlinkable).
+  RE3 (d11678a) the rd_cost.c symbol-cost surface - 576 nb
+  judge-charged (the writer's 583 minus THREE merge-time
+  double-counts: build_nmv = RE1's :437-:448, get_qc_dqc/
+  get_coeff_dist = RE2's spans, the nz-map twin = the RE2 .inc
+  re-listed): transform_type_rate_estimation :107-:153,
+  update_eob_context :157-:195 (the cdf state-comparing grid),
+  cost_skip_txb :213-:222, the one_eob + eob_loop + cost_coeffs_txb
+  driver :224-:474, the uv fast rate + intra fast cost :476-:640 +
+  the carries (mv trio 24 -> A4, av1_ext_tx_ind 8 + update_cdf 27 +
+  get_unsigned_bits/write_uniform_cost 14 -> A5, ext-tx getters 32 ->
+  A13, is_comp_ref_allowed 3 -> A3); 24 TEST_CASEs incl. the
+  19-shape x 16-type tx-type grid; 8 writer mutations + THREE JUDGE
+  PROBES all killed (the eobFlag cdf16 adaptation nsymbs corruption
+  caught by BOTH the state assert and the memcmp grid; the CFL
+  high-nibble corruption; the driver's not-skip base-cost swap);
+  parked named: the inter surfaces (~1,074 nb) + the in-body palette
+  tail.
+  RE4 (b453a78 + the judge errata 9e999ef) ac_bias + the intra
+  candidate-injection family - 462 nb judge-verified (117 + 201 + 14
+  + 144; the InjectedCandidate carry uncharged per the AN17
+  precedent): ac_bias.c 117 nb (the psy-distortion family; the
+  brief's 'ac_bias tables' do not exist - corrected; the hbd twin
+  parked) + the injectors 201 nb (the candidate-set CONSTRUCTION
+  over the enumerated intra modes + the angle_delta counter walk -
+  the search's definition) + is_valid_mv_diff 14 + the classified
+  support carries 144; 39 TEST_CASEs (114 total, 644,596
+  assertions); 9 mutations killed (M9 the psyFullDist llrint
+  SURVIVED its first fixture - sharpened with a half-to-even
+  discriminator, the RE2 J3 pattern); THE ERRATA (the writer's
+  finding, judge-adjudicated): FILTER_INTRA_MODES was 7 in the
+  landed RE1 surface with a MIS-CITATION to definitions.h:1361 (the
+  frame-type enum) - the reference's count is 5
+  (definitions.h:1295-:1302); AND fimodeToIntradir's 5th entry was
+  DC_PRED where the reference's fimode_to_intramode
+  (definitions.h:1304) has PAETH_PRED (=12) - a latent semantic bug
+  (an FI PAETH candidate folded to DC); the test oracle mirrored
+  both errors; fixed: the constant, the array content, the oracle,
+  the sentinel pins; latent-safe (the FI costs are not wired);
+  parked named: the palette injection :3404-:3476 (68), the
+  sframe/me candidates :3478-:3560 (79, inter), the psy hbd twin
+  (33), the decision loops (the wiring rung).
 
 ## Completion metric (the portable-C coverage number)
 

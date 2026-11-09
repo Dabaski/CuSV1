@@ -28,6 +28,8 @@ l12_convolve    convolution + interp filters (host; CV1/IP1)
 l13_palette     palette + k-means + segmentation (host; PAL1/SEG1)
 l14_utility     block geometry + utilities (host; U1)
 l15_rc          rate-control qindex tables (host; RC1)
+l16_rdo         rate-estimation + trellis + symbol costs
+                                          (host; RE1-RE4, not wired)
                           |
              tools/golden_gen (the gate)
              tools/bench (perf)
@@ -326,6 +328,15 @@ yet. The families:
   packunpack - the 8-bit-discipline parks resolve for A14's
   completion, with derivation-relationship fixtures throughout (hbd ==
   lbd widened at bd 8).
+- Activity masking + preprocessing (AM1+AN20): the nine vmaf
+  calculators + box blur + unsharp + the preprocess driver (the
+  pa_ctx/pcs walls threaded), the preprocessing statistics
+  (histogram bins + spatial statistics + gathering), the
+  temporal_filtering.c helpers (`estimate_noise_fp16`, `avg_mad`,
+  gradient coherence, the unsharp+blur row kernels) and the firstpass
+  pure accumulation pair - the INPUT side for the A4 RDO campaign.
+  The `gate_start +1` off-by-one is recorded as UNOBSERVABLE under
+  the committed float bands, not faked.
 
 ## l10_filters - post-filter kernels (DF/CDEF/LR/GR)
 
@@ -377,9 +388,14 @@ move no conformance count - see the paired-metric caveat in
 The resize family of `resize.c` (`resize.c:147-489`, 328 nb): the
 1D resampling kernels generic over the filter phase plus the four
 interpolation tables (`resize.c:36-137`) and the 1000-set from
-`super_res.c` (charged to A8). Host only; the highbd half of the
-file, `save_YUV`, the highbd pack/unpack helpers and the
-`EbPictureBufferDesc` resize driver stay parked.
+`super_res.c` (charged to A8). RS2 landed the hbd half
+(`resize.c:489-779`, 273 nb: the highbd interpolate cores, the symmetric
+even/odd downsamplers, the multistep resampler, the plane drivers) -
+the only bd dependence is `clip_pixel_highbd` (measured; the hbd path
+does NOT scale filter coefficients by bd), with the hbd@bd8 == 8-bit-twin
+sweep over the enumerated length set. `save_YUV`, the highbd
+pack/unpack helpers and the `EbPictureBufferDesc` resize driver stay
+parked. Host only.
 
 ## l12_convolve - convolution kernels (CV1)
 
@@ -433,6 +449,48 @@ with a runtime diff-verify test that parses the reference file itself.
 The paired-metric caveat is stated: this block moves the coverage
 number by transcription, not by algorithm (the AN14 OD_DIVU
 precedent). Host only.
+
+## l16_rdo - rate estimation + trellis + symbol costs (RE-series)
+
+The A4 golden-regeneration campaign's machinery rungs, in
+`src/l16_rdo` (namespace `l16_rdo`; the scaffold links av1_transforms).
+All four slices are CONFORMANCE-FREE: no emission change, no golden
+churn - the wiring rung (which changes the emission and regenerates
+all nine artifacts as the planned gated event) opens next.
+
+- RE1, the rate-estimation core of `md_rate_estimation.c` (485 nb
+  judge-charged): the cdf->cost core, the estimate_syntax_rate INTRA
+  surface, the mv class + nmv cost tables, the coefficient-rate
+  estimator, the interintra-allowed helpers and the header tables
+  (av1_prob_cost, ext-tx). The cfl sign-cost quirk transcribed
+  verbatim (the oracle caught the first draft's sign_fac_bits on both
+  planes). Parks named: update_stats (BlkStruct-walled),
+  update_part_stats (pcs-walled), the inter block.
+- RE2, the optimize_b trellis of `full_loop.c` (562 nb + verified
+  carries; 1,222 nb total charged across A1/A4/A5/A13): the cost
+  helpers, the three trellis updaters + update_skip +
+  update_coeff_eob_fast, `svt_fast_optimize_b`, and the driver with
+  the pcs/ctx walls threaded as OptimizeBArgs; the GENERATED scan
+  orders (via svt_aom_init_iscan), the tx-size tables, and the
+  court-ordered nz_map_ctx_offset.inc byte-copy runtime twin-checked
+  against both the l7 copy and the reference. The RD-monotonicity
+  property over the full grid; the fast path's zbin-trim boundary
+  fixture sharpened by the judge addendum.
+- RE3, the `rd_cost.c` symbol-cost surface (576 nb judge-charged,
+  three merge-time double-counts struck): transform-type rate
+  estimation, update_eob_context (the cdf state-comparing grid), the
+  cost_coeffs_txb driver chain and the uv/intra fast costs. Three
+  judge probes all killed.
+- RE4, ac_bias + the intra candidate-injection family (462 nb
+  judge-verified): the psy-distortion family (the brief's "ac_bias
+  tables" do not exist - corrected), the candidate-set CONSTRUCTION
+  over the enumerated intra modes + the angle-delta counter walk
+  (the search's definition), `is_valid_mv_diff` and the classified
+  support carries. THE ERRATA (judge-adjudicated):
+  FILTER_INTRA_MODES 7 -> 5 with the definitions.h mis-citation
+  fixed, and fimodeToIntradir's 5th entry DC_PRED -> PAETH_PRED - a
+  latent semantic bug (an FI PAETH candidate folded to DC), latent
+  safe because the FI costs are not wired.
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 
@@ -488,13 +546,13 @@ hand-traces:
 
 ## Test suite map
 
-Sixteen doctest targets (l0_core, l1_pixels, l2_gpurt, l3_transforms,
+Seventeen doctest targets (l0_core, l1_pixels, l2_gpurt, l3_transforms,
 l4_intra, l5_motion, l7_entropy, l6_pipeline, l8_bitstream,
 l9_analysis, l10_filters, l11_resize, l12_convolve, l13_palette,
-l14_utility, l15_rc), each with
+l14_utility, l15_rc, l16_rdo), each with
 a "test runner boots" guard plus real test files. GPU-required tests
 skip with a `SKIP:`-prefixed message when no CUDA device is present.
-`ctest --test-dir build` runs all sixteen.
+`ctest --test-dir build` runs all seventeen.
 
 ## Where the deep detail lives
 
