@@ -9,6 +9,8 @@
 // Constants cited verbatim; deviations named at each site.
 #include "rate_est.h"
 
+#include <cstddef>
+#include <cmath>
 #include <cstring>
 
 namespace l16_rdo {
@@ -2009,6 +2011,652 @@ std::int32_t transformTypeRateEstimation(const MdRateEstimationContext* me, std:
         }
     }
     return 0;
+}
+
+// RE4: get_effective_ac_bias (ac_bias.c:197-211).
+double getEffectiveAcBias(double acBias, bool isIslice, std::uint8_t temporalLayerIndex) {
+    if (isIslice) {
+        return acBias * 0.3;
+    }
+    switch (temporalLayerIndex) {
+    case 0: return acBias * 0.6;
+    case 1: return acBias * 0.8;
+    case 2: return acBias * 0.9;
+    default: return acBias;
+    }
+}
+
+// RE4: svt_aom_satd_c (common_dsp_rtcd.c:48-54) - the ac_bias.c callee
+// (ac_bias.c:44/:56/:79/:91). The source file is an excluded *_rtcd file, so
+// the carry is uncharged in the coverage metric.
+std::int32_t satd(const std::int32_t* coeff, std::int32_t length) {
+    std::int32_t satd = 0;
+    for (std::int32_t i = 0; i < length; ++i) satd += coeff[i] < 0 ? -coeff[i] : coeff[i];
+    // satd: 26 bits, dynamic range [-32640 * 1024, 32640 * 1024]
+    return satd;
+}
+
+// RE4: hadamard_col4 (C_DEFAULT/picture_operators_c.c:73-83) + svt_aom_
+// hadamard_4x4_c (:85-115) - the ac_bias.c callee (ac_bias.c:77/:89).
+// Carried as the l7-l13 duplication precedent (the landed l6 twin lives in
+// l6_pipeline/picops.cpp and l16_rdo cannot link l6).
+static void hadamardCol4(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int16_t* coeff) {
+    std::int16_t b0 = (std::int16_t)((srcDiff[0 * srcStride] + srcDiff[1 * srcStride]) >> 1);
+    std::int16_t b1 = (std::int16_t)((srcDiff[0 * srcStride] - srcDiff[1 * srcStride]) >> 1);
+    std::int16_t b2 = (std::int16_t)((srcDiff[2 * srcStride] + srcDiff[3 * srcStride]) >> 1);
+    std::int16_t b3 = (std::int16_t)((srcDiff[2 * srcStride] - srcDiff[3 * srcStride]) >> 1);
+
+    coeff[0] = b0 + b2;
+    coeff[1] = b1 + b3;
+    coeff[2] = b0 - b2;
+    coeff[3] = b1 - b3;
+}
+
+void hadamard4x4(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff) {
+    std::int16_t buffer[16];
+    std::int16_t buffer2[16];
+    std::int16_t* tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 4; ++idx) {
+        hadamardCol4(srcDiff, srcStride, tmpBuf);
+        tmpBuf += 4;
+        ++srcDiff;
+    }
+
+    tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 4; ++idx) {
+        hadamardCol4(tmpBuf, 4, buffer2 + 4 * idx);
+        ++tmpBuf;
+    }
+
+    // Extra transpose to match SSE2 behavior(i.e., svt_aom_hadamard_4x4_sse2).
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            coeff[i * 4 + j] = (std::int32_t)buffer2[j * 4 + i];
+        }
+    }
+}
+
+// RE4: hadamard_col8 (C_DEFAULT/picture_operators_c.c:119-146) + svt_aom_
+// hadamard_8x8_c (:150-174) - the ac_bias.c callee (ac_bias.c:42/:54).
+static void hadamardCol8(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int16_t* coeff) {
+    std::int16_t b0 = srcDiff[0 * srcStride] + srcDiff[1 * srcStride];
+    std::int16_t b1 = srcDiff[0 * srcStride] - srcDiff[1 * srcStride];
+    std::int16_t b2 = srcDiff[2 * srcStride] + srcDiff[3 * srcStride];
+    std::int16_t b3 = srcDiff[2 * srcStride] - srcDiff[3 * srcStride];
+    std::int16_t b4 = srcDiff[4 * srcStride] + srcDiff[5 * srcStride];
+    std::int16_t b5 = srcDiff[4 * srcStride] - srcDiff[5 * srcStride];
+    std::int16_t b6 = srcDiff[6 * srcStride] + srcDiff[7 * srcStride];
+    std::int16_t b7 = srcDiff[6 * srcStride] - srcDiff[7 * srcStride];
+
+    std::int16_t c0 = b0 + b2;
+    std::int16_t c1 = b1 + b3;
+    std::int16_t c2 = b0 - b2;
+    std::int16_t c3 = b1 - b3;
+    std::int16_t c4 = b4 + b6;
+    std::int16_t c5 = b5 + b7;
+    std::int16_t c6 = b4 - b6;
+    std::int16_t c7 = b5 - b7;
+
+    coeff[0] = c0 + c4;
+    coeff[7] = c1 + c5;
+    coeff[3] = c2 + c6;
+    coeff[4] = c3 + c7;
+    coeff[2] = c0 - c4;
+    coeff[6] = c1 - c5;
+    coeff[1] = c2 - c6;
+    coeff[5] = c3 - c7;
+}
+
+void hadamard8x8(const std::int16_t* srcDiff, std::ptrdiff_t srcStride, std::int32_t* coeff) {
+    std::int16_t buffer[64];
+    std::int16_t buffer2[64];
+    std::int16_t* tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 8; ++idx) {
+        hadamardCol8(srcDiff, srcStride, tmpBuf);
+        tmpBuf += 8;
+        ++srcDiff;
+    }
+
+    tmpBuf = &buffer[0];
+    for (int idx = 0; idx < 8; ++idx) {
+        hadamardCol8(tmpBuf, 8, buffer2 + 8 * idx);
+        ++tmpBuf;
+    }
+
+    for (int idx = 0; idx < 64; ++idx) {
+        coeff[idx] = static_cast<std::int32_t>(buffer2[idx]);
+    }
+}
+
+// RE4: svt_psy_distortion (ac_bias.c:22-99) - the 8-bit "AC Bias" energy-gap
+// distortion. The hadamard/satd callees are the carried twins above.
+std::uint64_t psyDistortion(const std::uint8_t* input, std::uint32_t inputStride, const std::uint8_t* recon,
+                             std::uint32_t reconStride, std::uint32_t width, std::uint32_t height) {
+    std::uint64_t energyGap = 0;
+
+    if (width >= 8 && height >= 8) { /* >8x8 */
+        for (std::uint32_t j = 0; j < height; j += 8) {
+            for (std::uint32_t i = 0; i < width; i += 8) {
+                std::int32_t coeffs[64];
+                std::int16_t blockAs16bit[64];
+                const std::uint8_t* blockInput = input + j * inputStride + i;
+                const std::uint8_t* reconInput = recon + j * reconStride + i;
+
+                for (int h = 0; h < 8; h++) {
+                    for (int w = 0; w < 8; w++) {
+                        blockAs16bit[h * 8 + w] = blockInput[w];
+                    }
+
+                    blockInput += inputStride;
+                }
+
+                hadamard8x8(blockAs16bit, 8, coeffs);
+
+                std::int32_t inputEnergy = ((satd(coeffs, 64) + 2) >> 2) - ((coeffs[0] + 2) >> 2);
+
+                for (int h = 0; h < 8; h++) {
+                    for (int w = 0; w < 8; w++) {
+                        blockAs16bit[h * 8 + w] = reconInput[w];
+                    }
+
+                    reconInput += reconStride;
+                }
+
+                hadamard8x8(blockAs16bit, 8, coeffs);
+
+                std::int32_t reconEnergy = ((satd(coeffs, 64) + 2) >> 2) - ((coeffs[0] + 2) >> 2);
+
+                energyGap += inputEnergy > reconEnergy ? (std::uint64_t)(inputEnergy - reconEnergy)
+                                                       : (std::uint64_t)(reconEnergy - inputEnergy);
+            }
+        }
+    } else {
+        for (std::uint32_t j = 0; j < height; j += 4) { /* 4x4, 4x8, 4x16, 8x4, and 16x4 */
+            for (std::uint32_t i = 0; i < width; i += 4) {
+                std::int32_t coeffs[16];
+                std::int16_t blockAs16bit[16];
+                const std::uint8_t* blockInput = input + j * inputStride + i;
+                const std::uint8_t* reconInput = recon + j * reconStride + i;
+
+                for (int h = 0; h < 4; h++) {
+                    for (int w = 0; w < 4; w++) {
+                        blockAs16bit[h * 4 + w] = blockInput[w];
+                    }
+
+                    blockInput += inputStride;
+                }
+
+                hadamard4x4(blockAs16bit, 4, coeffs);
+
+                std::int32_t inputEnergy = (satd(coeffs, 16) << 1) - coeffs[0];
+
+                for (int h = 0; h < 4; h++) {
+                    for (int w = 0; w < 4; w++) {
+                        blockAs16bit[h * 4 + w] = reconInput[w];
+                    }
+
+                    reconInput += reconStride;
+                }
+
+                hadamard4x4(blockAs16bit, 4, coeffs);
+
+                std::int32_t reconEnergy = (satd(coeffs, 16) << 1) - coeffs[0];
+
+                energyGap += inputEnergy > reconEnergy ? (std::uint64_t)(inputEnergy - reconEnergy)
+                                                       : (std::uint64_t)(reconEnergy - inputEnergy);
+            }
+        }
+    }
+
+    return energyGap;
+}
+
+// RE4: get_svt_psy_full_dist (ac_bias.c:147-162). The hbd branch is the
+// pinned build's #else (CONFIG_ENABLE_HIGH_BIT_DEPTH=0): return 0. The
+// svt_psy_distortion_hbd twin (ac_bias.c:101-145, 33 nb) is NAMED-PARKED -
+// dead under the pinned CONFIG.
+std::uint64_t psyFullDist(const void* s, std::uint32_t so, std::uint32_t sp, const void* r, std::uint32_t ro,
+                           std::uint32_t rp, std::uint32_t w, std::uint32_t h, std::uint8_t isHbd,
+                           double acBias) {
+    if (isHbd) {
+        return 0;
+    } else {
+        return (std::uint64_t)std::llrint(psyDistortion((const std::uint8_t*)s + so, sp,
+                                                         (const std::uint8_t*)r + ro, rp, w, h) * acBias);
+    }
+}
+
+// RE4: svt_psy_adjust_rate_light (ac_bias.c:164-195) - the Light-PD rate
+// adjustment over the existing block coefficients.
+std::uint64_t psyAdjustRateLight(const std::int32_t* coeff, std::uint64_t coeffBits, std::uint32_t width,
+                                  std::uint32_t height, double acBias) {
+    std::uint64_t energy = 0;
+    const std::int32_t* buf = coeff;
+
+    for (std::uint32_t j = 0; j < height; j++) {
+        // Skip the DC coefficient from the calculation
+        for (std::uint32_t i = j ? 0 : 1; i < width; i++) {
+            energy += (std::uint64_t)std::llabs((std::int64_t)buf[i]);
+        }
+        buf += width;
+    }
+
+    if (energy > 0) {
+        std::uint64_t coeffBitsAdj = (std::uint64_t)(std::int32_t)(energy * acBias * 100);
+
+        // When the adjustment rate is greater than the rate, keep rate (coeff_bits) positive
+        coeffBits = (coeffBits > coeffBitsAdj) ? (coeffBits - coeffBitsAdj) : 1;
+    }
+
+    return coeffBits;
+}
+
+// RE4: av1_use_angle_delta (intra_prediction.h:214-216).
+std::int32_t useAngleDelta(BlockSize bsize) {
+    return bsize >= BLOCK_8X8;
+}
+
+// RE4: svt_get_ref_frame_type (mode_decision.c:282-284) over to_ref_frame
+// (mode_decision.c:279-280).
+static const MvRefFrameExt toRefFrame[2][4] = {
+    {MVX_LAST_FRAME, MVX_LAST2_FRAME, MVX_LAST3_FRAME, MVX_GOLDEN_FRAME},
+    {MVX_BWDREF_FRAME, MVX_ALTREF2_FRAME, MVX_ALTREF_FRAME, MVX_INVALID_REF},
+};
+std::int32_t getRefFrameType(std::uint8_t list, std::uint8_t refIdx) {
+    return toRefFrame[list][refIdx];
+}
+
+// RE4: svt_aom_ss_size_lookup (common_utils.c:239-263, verbatim).
+const std::uint8_t ssSizeLookup[BLOCK_SIZES_ALL][2][2] = {
+    //  ss_x == 0    ss_x == 0        ss_x == 1      ss_x == 1
+    //  ss_y == 0    ss_y == 1        ss_y == 0      ss_y == 1
+    {{BLOCK_4X4, BLOCK_4X4}, {BLOCK_4X4, BLOCK_4X4}},
+    {{BLOCK_4X8, BLOCK_4X4}, {255, BLOCK_4X4}},
+    {{BLOCK_8X4, 255}, {BLOCK_4X4, BLOCK_4X4}},
+    {{BLOCK_8X8, BLOCK_8X4}, {BLOCK_4X8, BLOCK_4X4}},
+    {{BLOCK_8X16, BLOCK_8X8}, {255, BLOCK_4X8}},
+    {{BLOCK_16X8, 255}, {BLOCK_8X8, BLOCK_8X4}},
+    {{BLOCK_16X16, BLOCK_16X8}, {BLOCK_8X16, BLOCK_8X8}},
+    {{BLOCK_16X32, BLOCK_16X16}, {255, BLOCK_8X16}},
+    {{BLOCK_32X16, 255}, {BLOCK_16X16, BLOCK_16X8}},
+    {{BLOCK_32X32, BLOCK_32X16}, {BLOCK_16X32, BLOCK_16X16}},
+    {{BLOCK_32X64, BLOCK_32X32}, {255, BLOCK_16X32}},
+    {{BLOCK_64X32, 255}, {BLOCK_32X32, BLOCK_32X16}},
+    {{BLOCK_64X64, BLOCK_64X32}, {BLOCK_32X64, BLOCK_32X32}},
+    {{BLOCK_64X128, BLOCK_64X64}, {255, BLOCK_32X64}},
+    {{BLOCK_128X64, 255}, {BLOCK_64X64, BLOCK_64X32}},
+    {{BLOCK_128X128, BLOCK_128X64}, {BLOCK_64X128, BLOCK_64X64}},
+    {{BLOCK_4X16, BLOCK_4X8}, {255, BLOCK_4X8}},
+    {{BLOCK_16X4, 255}, {BLOCK_8X4, BLOCK_8X4}},
+    {{BLOCK_8X32, BLOCK_8X16}, {255, BLOCK_4X16}},
+    {{BLOCK_32X8, 255}, {BLOCK_16X8, BLOCK_16X4}},
+    {{BLOCK_16X64, BLOCK_16X32}, {255, BLOCK_8X32}},
+    {{BLOCK_64X16, 255}, {BLOCK_32X16, BLOCK_32X8}},
+};
+
+// RE4: get_plane_block_size (common_utils.h:135-140).
+std::int32_t getPlaneBlockSize(BlockSize bsize, std::int32_t subsamplingX, std::int32_t subsamplingY) {
+    if (bsize == 255) {  // BLOCK_INVALID, definitions.h:907
+        return 255;
+    }
+    return ssSizeLookup[bsize][subsamplingX][subsamplingY];
+}
+
+// RE4: blocksize_to_txsize (common_utils.c:214-237, verbatim).
+const std::int32_t blocksizeToTxsize[BLOCK_SIZES_ALL] = {
+    TXS_4X4,    // BLOCK_4X4
+    TXS_4X8,    // BLOCK_4X8
+    TXS_8X4,    // BLOCK_8X4
+    TXS_8X8,    // BLOCK_8X8
+    TXS_8X16,   // BLOCK_8X16
+    TXS_16X8,   // BLOCK_16X8
+    TXS_16X16,  // BLOCK_16X16
+    TXS_16X32,  // BLOCK_16X32
+    TXS_32X16,  // BLOCK_32X16
+    TXS_32X32,  // BLOCK_32X32
+    TXS_32X64,  // BLOCK_32X64
+    TXS_64X32,  // BLOCK_64X32
+    TXS_64X64,  // BLOCK_64X64
+    TXS_64X64,  // BLOCK_64X128
+    TXS_64X64,  // BLOCK_128X64
+    TXS_64X64,  // BLOCK_128X128
+    TXS_4X16,   // BLOCK_4X16
+    TXS_16X4,   // BLOCK_16X4
+    TXS_8X32,   // BLOCK_8X32
+    TXS_32X8,   // BLOCK_32X8
+    TXS_16X64,  // BLOCK_16X64
+    TXS_64X16,  // BLOCK_64X16
+};
+
+// RE4: av1_get_adjusted_tx_size (common_utils.h:100-113).
+std::int32_t adjustedTxSize(std::int32_t txSize) {
+    switch (txSize) {
+    case TXS_64X64:
+    case TXS_64X32:
+    case TXS_32X64:
+        return TXS_32X32;
+    case TXS_64X16:
+        return TXS_32X16;
+    case TXS_16X64:
+        return TXS_16X32;
+    default:
+        return txSize;
+    }
+}
+
+// RE4: av1_get_max_uv_txsize (common_utils.h:142-149).
+std::int32_t maxUvTxsize(BlockSize bsize, std::int32_t subsamplingX, std::int32_t subsamplingY) {
+    const std::int32_t planeBsize = getPlaneBlockSize(bsize, subsamplingX, subsamplingY);
+    std::int32_t uvTx = TXS_INVALID;
+    if (planeBsize < BLOCK_SIZES_ALL) {
+        uvTx = blocksizeToTxsize[planeBsize];
+    }
+    return adjustedTxSize(uvTx);
+}
+
+// RE4: av1_ext_tx_used (common_utils.c:197-204, verbatim).
+const std::int32_t av1ExtTxUsed[EXT_TX_SET_TYPES][TX_TYPES] = {
+    {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
+    {1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
+    {1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0},
+    {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0},
+    {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+};
+
+// RE4: g_intra_mode_to_tx_type (mode_decision.c:2959-2973, verbatim; the
+// reference's D117/D153 comments are the legacy names of D113/D157).
+const std::int32_t gIntraModeToTxType[13] = {
+    0,  // DC          DCT_DCT
+    1,  // V           ADST_DCT
+    2,  // H           DCT_ADST
+    0,  // D45         DCT_DCT
+    3,  // D135        ADST_ADST
+    1,  // D113        ADST_DCT
+    2,  // D157        DCT_ADST
+    2,  // D203        DCT_ADST
+    1,  // D67         ADST_DCT
+    3,  // SMOOTH      ADST_ADST
+    1,  // SMOOTH_V    ADST_DCT
+    2,  // SMOOTH_H    DCT_ADST
+    3,  // PAETH       ADST_ADST
+};
+
+// RE4: intra_mode_to_tx_type (mode_decision.c:2975-2979).
+std::int32_t intraModeToTxType(std::int32_t predMode, std::int32_t predModeUv, std::int32_t planeType) {
+    const std::int32_t mode = (planeType == 0) ? predMode : getUvMode(predModeUv);
+    return gIntraModeToTxType[mode];
+}
+
+// RE4: svt_aom_get_intra_uv_tx_type (mode_decision.c:2981-2997).
+std::int32_t getIntraUvTxType(std::int32_t predModeUv, std::int32_t txSize, std::int32_t reducedTxSet) {
+    if (txsizeSqrUpMap[txSize] > TX_32X32) {
+        return 0;  // DCT_DCT
+    }
+
+    const std::int32_t txType = intraModeToTxType(0 /* DC_PRED, unused for UV */, predModeUv, 1 /* PLANE_TYPE_UV */);
+    const std::int32_t txSetType = getExtTxSetType(txSize, /*is_inter*/ 0, reducedTxSet);
+    return !av1ExtTxUsed[txSetType][txType] ? 0 : txType;
+}
+
+// RE4: fimode_to_intramode (definitions.h:1304, verbatim).
+const std::int32_t fimodeToIntraMode[5] = {DC_PRED, V_PRED, H_PRED, D157_PRED, PAETH_PRED};
+
+// RE4: intra_luma_to_chroma (mode_decision.c:42-56, verbatim).
+const std::int32_t intraLumaToChroma[13] = {
+    UV_DC_PRED, UV_V_PRED, UV_H_PRED, UV_D45_PRED, UV_D135_PRED, UV_D113_PRED,
+    UV_D157_PRED, UV_D203_PRED, UV_D67_PRED, UV_SMOOTH_PRED, UV_SMOOTH_V_PRED,
+    UV_SMOOTH_H_PRED, UV_PAETH_PRED,
+};
+
+// RE4: INC_MD_CAND_CNT (mode_decision.c:61-68) - increments cnt only when
+// cnt + 1 < max_can_count; else SVT_ERROR (the count is not incremented;
+// named deviation: the port does not print).
+static inline void incMdCandCnt(std::uint32_t& cnt, std::uint32_t maxCanCount) {
+    if (cnt + 1 < maxCanCount) {
+        ++cnt;
+    }
+}
+
+// RE4: inject_intra_candidates_pd0 (mode_decision.c:3200-3225).
+void injectIntraCandidatesPd0(InjectedCandidate* candArray, std::uint32_t* candidateTotalCnt,
+                               std::uint32_t maxCanCount) {
+    std::uint32_t candTotalCnt = 0;
+    InjectedCandidate* cand = &candArray[candTotalCnt];
+    cand->skipModeAllowed = false;
+    cand->paletteInfo = nullptr;
+    cand->useIntrabc = 0;
+    cand->filterIntraMode = FILTER_INTRA_MODE_COUNT;
+    cand->angleDelta[0] = 0;
+    cand->uvMode = UV_DC_PRED;
+    cand->angleDelta[1] = 0;
+    cand->cflAlphaSigns = 0;
+    cand->cflAlphaIdx = 0;
+    cand->transformType = 0;  // DCT_DCT
+    cand->transformTypeUv = 0;
+    cand->refFrame[0] = MVX_INTRA_FRAME;
+    cand->refFrame[1] = MVX_NONE_FRAME;
+    cand->mode = DC_PRED;
+    cand->motionMode = SIMPLE_TRANSLATION;
+    cand->isInterintraUsed = 0;
+    cand->txDepth = 0;
+    incMdCandCnt(candTotalCnt, maxCanCount);
+    // update the total number of candidates injected
+    (*candidateTotalCnt) = candTotalCnt;
+
+    return;
+}
+
+// RE4: av1_make_interp_filters (filter.h:65-68) + av1_broadcast_interp_
+// filter (:70-72) - the packed InterpFilters encoding (uint32).
+static std::uint32_t broadcastInterpFilter(std::int32_t filter) {
+    const std::uint32_t f16 = (std::uint32_t)(filter & 0xffff);
+    return f16 | (f16 << 16);
+}
+
+// RE4: inject_intra_bc_candidates (mode_decision.c:3163-3198).
+void injectIntraBcCandidates(InjectedCandidate* candArray, std::uint32_t* candidateTotalCnt,
+                              std::uint32_t maxCanCount, const std::int32_t* dvCand, std::uint8_t numDvCand,
+                              std::int32_t refMvStackPred) {
+    std::uint32_t candTotalCnt = *candidateTotalCnt;
+
+    for (std::uint32_t dvI = 0; dvI < numDvCand; dvI++) {
+        InjectedCandidate* cand = &candArray[candTotalCnt];
+        cand->paletteInfo = nullptr;
+        cand->useIntrabc = 1;
+        cand->angleDelta[0] = 0;
+        cand->angleDelta[1] = 0;
+        cand->uvMode = UV_DC_PRED;
+        cand->cflAlphaSigns = 0;
+        cand->cflAlphaIdx = 0;
+        cand->transformType = 0;  // DCT_DCT
+        cand->transformTypeUv = 0;
+        cand->refFrame[0] = MVX_INTRA_FRAME;
+        cand->refFrame[1] = MVX_NONE_FRAME;
+        cand->mode = DC_PRED;
+        cand->filterIntraMode = FILTER_INTRA_MODE_COUNT;
+        // inter related
+        cand->motionMode = SIMPLE_TRANSLATION;
+        cand->isInterintraUsed = 0;
+        cand->skipModeAllowed = false;
+        cand->mv = dvCand[dvI];
+        cand->predMv = refMvStackPred;
+        cand->drlIndex = 0;
+        cand->interpFilters = broadcastInterpFilter(3 /* BILINEAR, definitions.h:822 */);
+        incMdCandCnt(candTotalCnt, maxCanCount);
+    }
+    (*candidateTotalCnt) = candTotalCnt;
+}
+
+// RE4: is_valid_mv_diff (mode_decision.c:803-818). The packed Mv form:
+// x | y << 16 (mv.h as_int layout).
+static std::int32_t mvX(std::int32_t packed) {
+    return (std::int16_t)(packed & 0xffff);
+}
+static std::int32_t mvY(std::int32_t packed) {
+    return (std::int16_t)((unsigned)packed >> 16);
+}
+std::int32_t isValidMvDiff(std::int32_t bestPredMv0, std::int32_t bestPredMv1, std::int32_t mv0,
+                            std::int32_t mv1, std::int32_t isCompound) {
+    const std::uint8_t mvDiffMaxBit = MV_IN_USE_BITS;
+
+    if (std::abs(mvX(mv0) - mvX(bestPredMv0)) > (1 << mvDiffMaxBit) ||
+        std::abs(mvY(mv0) - mvY(bestPredMv0)) > (1 << mvDiffMaxBit)) {
+        return 0;
+    }
+
+    if (isCompound) {
+        if (std::abs(mvX(mv1) - mvX(bestPredMv1)) > (1 << mvDiffMaxBit) ||
+            std::abs(mvY(mv1) - mvY(bestPredMv1)) > (1 << mvDiffMaxBit)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// RE4: inject_zz_backup_candidate (mode_decision.c:3350-3382).
+void injectZzBackupCandidate(InjectedCandidate* candArray, std::uint32_t* candidateTotalCnt,
+                              std::uint32_t maxCanCount, std::int32_t bestPredMv, std::int32_t drlIndex,
+                              bool corruptedMvCheck, std::int32_t numProjRef) {
+    std::uint32_t candTotalCnt = (*candidateTotalCnt);
+    candArray[candTotalCnt].drlIndex = drlIndex;
+    if (!corruptedMvCheck || isValidMvDiff(bestPredMv, 0, 0, 0, 0)) {
+        InjectedCandidate* cand = &candArray[candTotalCnt];
+        cand->useIntrabc = 0;
+        cand->skipModeAllowed = false;
+        cand->mode = NEWMV;
+        cand->motionMode = SIMPLE_TRANSLATION;
+        cand->mv = 0;  // (Mv){{0, 0}}
+        cand->refFrame[0] = getRefFrameType(0 /* REF_LIST_0 */, 0);
+        cand->refFrame[1] = MVX_NONE_FRAME;
+        cand->transformType = 0;  // DCT_DCT
+        cand->transformTypeUv = 0;
+        cand->predMv = bestPredMv;
+        cand->isInterintraUsed = 0;
+        cand->motionMode = SIMPLE_TRANSLATION;
+        cand->numProjRef = numProjRef;
+        incMdCandCnt(candTotalCnt, maxCanCount);
+        // update the total number of candidates injected
+        (*candidateTotalCnt) = candTotalCnt;
+    }
+}
+// RE4: inject_intra_candidates (mode_decision.c:3227-3296).
+void injectIntraCandidates(InjectedCandidate* candArray, std::uint32_t* candidateTotalCnt,
+                            std::uint32_t maxCanCount, bool dcCandOnlyFlag, std::int32_t modeEnd,
+                            std::int32_t angularPredLevel, BlockSize bsize, bool indUvAvail,
+                            const std::int32_t* bestUvMode, const std::int32_t* bestUvAngle,
+                            bool isLosslessSegment, std::int32_t reducedTxSet) {
+    const std::int32_t intraModeStart = DC_PRED;
+    const std::int32_t intraModeEnd = dcCandOnlyFlag ? DC_PRED : modeEnd;
+    std::uint32_t candTotalCnt = *candidateTotalCnt;
+    const bool useDelta = angularPredLevel ? useAngleDelta(bsize) != 0 : false;
+    const bool disableAnglePrediction = (angularPredLevel == 0);
+    std::uint8_t directionalModeSkipMask[INTRA_MODES] = {0};
+    if (angularPredLevel >= 4) {
+        for (std::uint8_t i = D45_PRED; i < INTRA_MODES; i++) {  // INTRA_MODE_END = NEARESTMV
+            directionalModeSkipMask[i] = 1;
+        }
+    }
+    const std::int32_t txSizeUv = maxUvTxsize(bsize, 1, 1);
+
+    for (std::int32_t intraMode = intraModeStart; intraMode <= intraModeEnd; ++intraMode) {
+        if (av1IsDirectionalMode(intraMode) &&
+            (disableAnglePrediction || directionalModeSkipMask[intraMode])) {
+            continue;
+        }
+
+        const std::uint8_t angleDeltaCount =
+            av1IsDirectionalMode(intraMode) && angularPredLevel <= 2 && useDelta ? 7 : 1;
+
+        for (std::uint8_t angleDeltaCounter = 0; angleDeltaCounter < angleDeltaCount; ++angleDeltaCounter) {
+            std::int32_t angleDelta = angleDeltaCount == 1 ? 0 : angleDeltaCounter - MAX_ANGLE_DELTA;
+            if (angleDelta < -(std::int32_t)MAX_ANGLE_DELTA) angleDelta = -(std::int32_t)MAX_ANGLE_DELTA;
+            if (angleDelta > (std::int32_t)MAX_ANGLE_DELTA) angleDelta = (std::int32_t)MAX_ANGLE_DELTA;
+            if ((angularPredLevel >= 2 &&
+                 (angleDelta == -1 || angleDelta == 1 || angleDelta == -2 || angleDelta == 2)) ||
+                (angularPredLevel >= 3 && angleDelta != 0)) {
+                continue;
+            }
+            InjectedCandidate* cand = &candArray[candTotalCnt];
+            cand->skipModeAllowed = false;
+            cand->paletteInfo = nullptr;
+            cand->mode = intraMode;
+            cand->useIntrabc = 0;
+            cand->filterIntraMode = FILTER_INTRA_MODE_COUNT;
+            cand->angleDelta[0] = angleDelta;
+            cand->uvMode = indUvAvail ? bestUvMode[intraMode] : intraLumaToChroma[intraMode];
+            cand->angleDelta[1] = indUvAvail ? bestUvAngle[intraMode] : cand->angleDelta[0];
+            cand->cflAlphaSigns = 0;
+            cand->cflAlphaIdx = 0;
+            cand->transformType = 0;  // DCT_DCT
+            cand->transformTypeUv = getIntraUvTxType(cand->uvMode, txSizeUv, reducedTxSet);
+
+            if (isLosslessSegment && cand->transformTypeUv != 0 /* DCT_DCT */) {
+                continue;
+            }
+            cand->refFrame[0] = MVX_INTRA_FRAME;
+            cand->refFrame[1] = MVX_NONE_FRAME;
+            cand->motionMode = SIMPLE_TRANSLATION;
+            cand->isInterintraUsed = 0;
+            incMdCandCnt(candTotalCnt, maxCanCount);
+        }
+    }
+
+    // update the total number of candidates injected
+    (*candidateTotalCnt) = candTotalCnt;
+
+    return;
+}
+
+// RE4: inject_filter_intra_candidates (mode_decision.c:3298-3348).
+void injectFilterIntraCandidates(InjectedCandidate* candArray, std::uint32_t* candidateTotalCnt,
+                                  std::uint32_t maxCanCount, std::int32_t intraModeEnd,
+                                  std::int32_t maxFilterIntraMode, BlockSize bsize, bool indUvAvail,
+                                  const std::int32_t* bestUvMode, const std::int32_t* bestUvAngle,
+                                  bool isLosslessSegment, std::int32_t reducedTxSet) {
+    std::int32_t fiModeStart = FILTER_DC_PRED;
+    std::int32_t fiModeEnd = intraModeEnd == PAETH_PRED ? FILTER_PAETH_PRED
+        : intraModeEnd >= D157_PRED ? FILTER_D157_PRED
+        : intraModeEnd >= H_PRED ? FILTER_H_PRED
+        : intraModeEnd >= V_PRED ? FILTER_V_PRED
+                                 : FILTER_DC_PRED;
+    if (fiModeEnd > maxFilterIntraMode) fiModeEnd = maxFilterIntraMode;  // MIN
+
+    const std::int32_t txSizeUv = maxUvTxsize(bsize, 1, 1);
+    std::uint32_t candTotalCnt = *candidateTotalCnt;
+
+    for (std::int32_t filterIntraMode = fiModeStart; filterIntraMode <= fiModeEnd; filterIntraMode++) {
+        InjectedCandidate* cand = &candArray[candTotalCnt];
+        cand->skipModeAllowed = false;
+        cand->mode = DC_PRED;
+        cand->useIntrabc = 0;
+        cand->filterIntraMode = filterIntraMode;
+        cand->paletteInfo = nullptr;
+        cand->angleDelta[0] = 0;
+
+        cand->uvMode = indUvAvail ? bestUvMode[fimodeToIntraMode[filterIntraMode]]
+                                  : intraLumaToChroma[fimodeToIntraMode[filterIntraMode]];
+        cand->angleDelta[1] = indUvAvail ? bestUvAngle[fimodeToIntraMode[filterIntraMode]]
+                                         : cand->angleDelta[0];
+
+        cand->cflAlphaSigns = 0;
+        cand->cflAlphaIdx = 0;
+        cand->transformType = 0;  // DCT_DCT
+        cand->transformTypeUv = getIntraUvTxType(cand->uvMode, txSizeUv, reducedTxSet);
+        if (isLosslessSegment && cand->transformTypeUv != 0 /* DCT_DCT */) {
+            continue;
+        }
+        cand->refFrame[0] = MVX_INTRA_FRAME;
+        cand->refFrame[1] = MVX_NONE_FRAME;
+        cand->motionMode = SIMPLE_TRANSLATION;
+        cand->isInterintraUsed = 0;
+        incMdCandCnt(candTotalCnt, maxCanCount);
+    }
+
+    // update the total number of candidates injected
+    (*candidateTotalCnt) = candTotalCnt;
+
+    return;
 }
 
 }  // namespace l16_rdo
