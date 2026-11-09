@@ -5,7 +5,7 @@ encoder building blocks to CUDA 12.2, targeting NVIDIA Pascal (`sm_61`). Host
 reference code follows the project's pinned SVT-AV1 snapshot, and CUDA kernels
 are compiled at runtime with NVRTC.
 
-> **Progress: 22.8% portable-C coverage** (36,004 of 157,718 non-blank
+> **Progress: 23.1% portable-C coverage** (36,480 of 157,718 non-blank
 > reference lines), measured 2026-11-07. This source-coverage metric is not a
 > claim of overall completion or production readiness. The decoder-verified
 > artifacts and current scope are summarized in [project status](docs/project_status.md).

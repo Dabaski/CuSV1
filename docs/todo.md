@@ -2281,6 +2281,92 @@ A0. SLICE-LEVEL STATE (the live register)
 |    target since bef6904), GATE byte-identical 884,851 B diff 0,
 |    coverage 21.7% (34,207/157,718): A4 5% (1,418). The A4 campaign
 |    continues: RE2 next.
+|  - [x] **A1+A4+A5+A13/RE2 (2026-11-08, PERRY-RE2, cherry-picked
+|    485f478 + the judge addendum 4f6e4d1): the optimize_b trellis
+|    lands** in src/l16_rdo - full_loop.c :613-:1236 (562 nb: the cost
+|    helpers, the three trellis updaters + update_skip +
+|    update_coeff_eob_fast, svt_fast_optimize_b, the driver with the
+|    pcs/ctx walls threaded as OptimizeBArgs) + the verified carries
+|    (the GENERATED eb_av1_scan_orders via svt_aom_init_iscan
+|    coefficients.c:314-:374 (59 nb, cross-checked against the landed
+|    defaultScan4x4), the tx-size tables from common_utils (90),
+|    get_eob_pos_token + get_txsize_entropy_ctx from entropy_coding.h
+|    (12), cabac 18, rd_cost 29, md_process 4, definitions/utility 26)
+|    + the court-ordered nz_map_ctx_offset.inc byte-copy (252 nb,
+|    runtime twin-checked against BOTH the l7 copy and third_party
+|    coefficients.c). TOTAL CHARGED 1,222 nb: A1 +1,043 (41%, 11,087),
+|    A4 +33, A5 +30, A13 +116 (the carries verified as function/table
+|    surface, not struct carries, per the AN17 precedent). 17 new
+|    TEST_CASEs / 611,254 assertions incl. THE RD-MONOTONICITY PROPERTY
+|    over the full grid + the full test-side transcription oracle;
+|    9 writer mutations killed + the JUDGE'S J3 SURVIVOR sharpened by
+|    the addendum (the FAST path's zbin-trim had no boundary fixture -
+|    the flip band absCoeff in [29,56] at shift 0 was unreachable for
+|    the writer's >=137 jumps; the boundary case is RED under the
+|    mutation measured on a fresh mutant build, GREEN at HEAD). BRIEF
+|    CORRECTIONS (writer, measured): the span map drifted (~585 vs
+|    ~490); "scan tables landed in l3" was WRONG (l3 has only the
+|    iscan formulas - the scan ORDERS are generated); the tx-helper
+|    family lives in l7 (unlinkable). PROCESS: the writer initially
+|    believed a nonexistent standing instruction blocked builds -
+|    corrected to self-serve; the judge mis-directed one reply to the
+|    stale RE1 event (bounced, resent). Writer run 17/17 (295.18 s),
+|    GATE byte-identical 884,851 B. CONFORMANCE-FREE.
+|  - [x] **A3+A4+A5+A13/RE3 (2026-11-09, PERRY-RE3, cherry-picked
+|    d11678a): the rd_cost.c symbol-cost surface lands** in src/l16_rdo
+|    - 459 nb ported (transform_type_rate_estimation :107-:153 (43),
+|    update_eob_context :157-:195 (37, the cdf state-comparing grid),
+|    cost_skip_txb :213-:222 (10), the one_eob + eob_loop +
+|    cost_coeffs_txb driver :224-:474 (215), the uv fast rate + intra
+|    fast cost :476-:640 (154)) + the verified carries (the mv trio
+|    subset 24 -> A4, av1_ext_tx_ind 8 + update_cdf 27 +
+|    get_unsigned_bits/write_uniform_cost 14 -> A5, the ext-tx getters
+|    32 -> A13, is_comp_ref_allowed 3 -> A3) = 576 nb JUDGE-CHARGED
+|    (the writer's 583 minus three double-counts caught at merge:
+|    build_nmv 6 = RE1's :437-:448, get_qc_dqc/get_coeff_dist = RE2's
+|    spans, the nz-map twin 26 = the RE2 .inc re-listed). 24 TEST_CASEs
+|    incl. the 19-shape x 16-type tx-type grid; 8 writer mutations
+|    killed + THREE JUDGE PROBES all killed (the eobFlag cdf16
+|    adaptation nsymbs corruption - caught by BOTH the state assert
+|    and the state-comparing memcmp grid; the CFL high-nibble index
+|    corruption; the driver's not-skip base-cost swap). PARKED named:
+|    the inter surfaces (~1,074 nb) + the in-body palette tail. Writer
+|    run 17/17 (297.53 s), GATE byte-identical 884,851 B.
+|    CONFORMANCE-FREE.
+|  - [x] **A4/RE4 (2026-11-09, PERRY-RE4, cherry-picked b453a78 + the
+|    judge errata 9e999ef): ac_bias + the intra candidate-injection
+|    family lands** in src/l16_rdo - ac_bias.c 117 nb (the
+|    psy-distortion family; BRIEF CORRECTION: the brief's 'ac_bias
+|    tables' do not exist; the hbd twin parked) + the injectors 201 nb
+|    (the candidate-set CONSTRUCTION over the enumerated intra modes +
+|    the angle_delta counter walk - the search's definition; the
+|    InjectedCandidate carry uncharged per the AN17 precedent) +
+|    is_valid_mv_diff 14 + the classified support carries 144 = 462 nb
+|    (judge-verified span-by-span, all reproduce). 39 new TEST_CASEs
+|    (114 total, 644,596 assertions); 9 mutations killed (M9 the
+|    psyFullDist llrint SURVIVED its first fixture - sharpened with a
+|    half-to-even discriminator, the RE2 J3 pattern). THE ERRATA (the
+|    writer's finding, judge-adjudicated at 9e999ef):
+|    FILTER_INTRA_MODES was 7 in the landed RE1 surface with a
+|    MIS-CITATION to definitions.h:1361 (the frame-type enum) - the
+|    reference's count is 5 (definitions.h:1295-:1302); AND
+|    fimodeToIntradir's 5th entry was DC_PRED where the reference's
+|    fimode_to_intramode (definitions.h:1304) has PAETH_PRED (=12,
+|    definitions.h:1180) - a latent semantic bug (an FI PAETH candidate
+|    folded to DC); the test oracle mirrored both errors. Fixed: the
+|    constant, the array content, the oracle, the sentinel pins; l16
+|    113/113 green, the assertion count unchanged (value-preserving
+|    sentinel routing); latent-safe (the FI costs are not wired).
+|    PARKED named: the palette injection :3404-:3476 (68), the
+|    sframe/me candidates :3478-:3560 (79, inter), the psy hbd twin
+|    (33), the decision loops (the wiring rung). 17/17 (277.95 s judge
+|    post-merge re-measure), GATE byte-identical 884,851 B.
+|    CONFORMANCE-FREE.
+|  - [x] **WAVE-13 CLOSE (judge, post-merge re-measure on master)**:
+|    full rebuild + ctest 17/17 (277.95 s), GATE byte-identical
+|    884,851 B diff 0, coverage 23.1% (36,480/157,718): A4 8% (2,419).
+|    The A4 campaign's machinery rungs are complete (RE1-RE4 = 2,759
+|    nb); the wiring rung (the golden event) opens next.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
@@ -2430,9 +2516,9 @@ last and label it as table transcription, not encoder progress.
 [x] Docs: README, AGENTS.md layer map + completion metric,
     provenance.md, decode_conformance.md, bitstream.md, color.md,
     layers.md, emission.md, cs5c_deltas.md, this file
-[x] MEASURED 2026-11-09 (wave-12 close): ctest 17/17 (292.08 s), GATE
-    421/421 diff 0 (884,851 B), portable-C coverage 22.8%
-    (36,004/157,718), 9 committed .obu artifacts (all content-1:1 on
+[x] MEASURED 2026-11-09 (wave-13 close): ctest 17/17 (277.95 s), GATE
+    421/421 diff 0 (884,851 B), portable-C coverage 23.1%
+    (36,480/157,718), 9 committed .obu artifacts (all content-1:1 on
     every plane)
 
 ------------------------------------------------------------
