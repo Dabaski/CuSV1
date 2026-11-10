@@ -2477,6 +2477,42 @@ A0. SLICE-LEVEL STATE (the live register)
 |    23.3% (36,715/157,718 - RE5 is product+wiring work: the coverage
 |    moves at the next 1:1 rung). NEXT: the angle-delta wiring rung
 |    (the second gated event), then the tx-type rung.
+|  - [x] **l6/RE6 (2026-11-10, the second gated golden event, commit
+|    050e8da cherry-picked 81b8349): the angle-delta wiring rung LANDS** -
+|    the emission's delta=0 park (pipeline.h:156) RESOLVES: rdliteDecide
+|    enumerates angleDelta over {-3..+3} for directional candidates
+|    (av1_is_directional_mode V_PRED..D67_PRED; the av1_use_angle_delta
+|    bsize >= 8X8 gate - at 4x4 no variants), the angular-pred-level
+|    policy = 1 (the full 7-delta set; ours, named), ModeDecision gains
+|    the angleDelta field; 11 predictor sites predict at the CHOSEN
+|    delta and 7 writeKfLumaMode sites emit it (the l7 gate unchanged:
+|    directional at bsize >= 8X8 only); UV delta stays 0 (the chroma
+|    rung boundary); the mirror's svtd_rdlite_decide gains the same
+|    enumeration (17 call sites) + the CS4 read-back twin checks the
+|    chosen delta. NEW gate fixtures: the bsf1q_* set (the Q emission's
+|    chosen delta with QUANTIZED-recon feedback: raw 4 vs the lossless
+|    bsf1's raw 5) + bsf3v2_deltas (0 1 0 0). ARTIFACT MATRIX (old ->
+|    new): d4/d8/d16/d64 byte-identical (no 4x4 deltas; the others'
+|    winners unchanged), d32 49->50 (+1), color4 199->209 (+10),
+|    color8 147->146 (-1), color16 136->136 (bytes moved). GATE
+|    884,651 -> 884,897 B (+246, 427 lines). 6 mutations: 4 killed +
+|    M3 and M5 SURVIVED their first forms and were SHARPENED (the
+|    distortion-dominance blind spot -> the direct rate-consumption
+|    pin; the no-delta-3-fixture blind spot -> the written-symbol
+|    off-by-one kill). JUDGE VERIFICATION (all measured on the merged
+|    master): suite 17/17 (281.91 s), GATE byte-identical 884,897,
+|    d4+d32 decode content-1:1 re-measured, AND the judge probe (the
+|    emission delta-symbol arithmetic +1 off) KILLED by the l7
+|    gate-byte fixture (:703). 17/17 (299.78 s worktree run). The
+|    paired conformance count re-verified 9/9.
+|  - [x] **WAVE-15 CLOSE (judge, post-merge re-measure on master)**:
+|    full rebuild + ctest 17/17 (281.91 s), GATE byte-identical
+|    884,897 B (427 lines) diff 0, decode gate content-1:1 (the
+|    spot-verified geometries + the writer's full 9/9), coverage
+|    23.3% (36,715/157,718 - the wiring rung moves the conformance
+|    count; the coverage moves at the next 1:1 rung). NEXT: the
+|    tx-type wiring rung (RE7, the third gated event) - the emission's
+|    DCT_DCT-fixed tx-type search.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------
