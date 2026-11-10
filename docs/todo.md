@@ -2513,6 +2513,49 @@ A0. SLICE-LEVEL STATE (the live register)
 |    count; the coverage moves at the next 1:1 rung). NEXT: the
 |    tx-type wiring rung (RE7, the third gated event) - the emission's
 |    DCT_DCT-fixed tx-type search.
+|  - [x] **l6/RE7 (2026-11-10, the THIRD gated golden event, commit
+|    167ca35 cherry-picked a423810): the tx-type rung LANDS** - the
+|    emission's DCT_DCT-fixed park RESOLVES: the per-block type is the
+|    mode-DERIVED type (lumaIntraTxType -> intra_mode_to_tx_type +
+|    the ext-tx-used fold, q0-gated; DCTONLY at 32/64 per the TX2
+|    type_ls table; the chroma type stays derived via intraUvTxType);
+|    the court-ordered GPU per-pass kernel change (the four-type
+|    colAdst/rowAdst selection at 4x4/8x8/16x16 fwd/inv - the old
+|    2-way fold made types 1/3 GPU-identical; ADST_ADST == the old
+|    else branch, verified; the ptxas capture condition NAMED-OPEN -
+|    NVRTC JIT, no offline nvcc in this tree); the fixture-regeneration
+|    FIND: the "port 183/209 gap" dissolved (the doctest values read
+|    the other way; the .inc files were STALE), the missing
+|    tools/golden_gen/emit_ecs4_fixtures.ps1 CREATED (the .inc headers
+|    cited a script that never existed), both .inc files regenerated
+|    from the gate. ARTIFACT MATRIX: d4 31->33, d8 30->30, d16
+|    43->43, d32 50->66, d64 440->440, c4 209->214, c8 146->161, c16
+|    136->136, c32 165->165. GATE 884,897 -> 885,347 B (+450).
+|    ROUND-STORY RED evidence (8 rounds): the guard-removal edge-upload
+|    deletion in the GPU 4x4Q test (found by the stage-dump signature:
+|    pred identical, cb diverged - restored); the writer's own TWO
+|    probe garbage-slice bugs (named); the SHARED-rctx CDF-adaptation
+|    coupling (the test-infra find: a pinned decision test must init
+|    its own rctx); the QW1 premise move (the auto winner V -> D113 via
+|    the 127/129 no-edge fills) + the forced-vs-auto identity proof;
+|    the stale block-0 strided golden slice; the type-1-as-ADST-marker
+|    test collision (four tests, fixed to type 3); the 10 call-site
+|    tails (l8 Q-calls + bench.cpp). L3 RANGE REGRESSIONS added (the
+|    full residual domain -255..255 and the dq-scale +-2400, all four
+|    types). JUDGE VERIFICATION (measured twice): 17/17 suite (371.71 s
+|    on master), GATE byte-identical 885,347 B, the decode gate 9/9
+|    content-1:1 (5 geometries + 4 color). The paired conformance count
+|    re-verified WITH the third wiring rung.
+|  - [x] **WAVE-16 CLOSE (judge, post-merge re-measure on master)**:
+|    full rebuild + ctest 17/17 (371.71 s), GATE byte-identical
+|    885,347 B diff 0, decode gate 9/9 (judge-measured), coverage 23.3%
+|    (36,715/157,718 - held again: the wiring rungs move the
+|    conformance count). THE A4 CAMPAIGN'S THREE GATED RUNGS ARE ALL
+|    LANDED (RE5 RD-lite -> RE6 angle-delta -> RE7 tx-type): the
+|    emission now DERIVES both the delta and the tx-type per block,
+|    exactly the reference's mechanisms. NEXT candidates: the intra
+|    partition search (the fourth rung), the A8 driver wiring, or
+|    A4's remaining walls.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------

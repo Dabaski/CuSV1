@@ -232,7 +232,7 @@ cmake --build build --config Release --target golden_primitives
 $o = & "build\tools\golden_gen\Release\golden_primitives.exe" 2>$null
 [IO.File]::WriteAllText("out.txt", (($o | Out-String) -replace "`r",""),
                         (New-Object Text.UTF8Encoding $false))
-# out.txt must now be 884,897 B and byte-identical to expected_primitives.txt
+# out.txt must now be 885,347 B and byte-identical to expected_primitives.txt
 Compare-Object (Get-Content tools\golden_gen\expected_primitives.txt) `
                   (Get-Content out.txt)     # must print nothing
 ```
@@ -336,12 +336,12 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-10, the RE6 angle-delta rung landed)
+### Last measured state (2026-11-10, the RE7 tx-type rung landed)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 17/17 passed, 0 failed, 281.91 s** (re-measured 2026-11-10 at
-  the RE6 landing; the suite is 17 targets since bef6904 - l16_rdo
+- **ctest: 17/17 passed, 0 failed, 371.71 s** (re-measured 2026-11-10 at
+  the RE7 landing; the suite is 17 targets since bef6904 - l16_rdo
   joined; l4_intra is the slow one; `pipeline` and
   `l3_transforms` next; the rest under 0.5 s.
   Earlier runs of the same tree: the worktree's run 271.27 s, the RE5
@@ -370,11 +370,10 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   261.59 s, the AN5 run 268.30 s, the AN4 run 270.10 s, the AN3 run
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
-- **GATE: 427/427 lines, diff 0.** `expected_primitives.txt` is **884,897
-  bytes**, 427 lines (the RE6 angle-delta regen: +246 B / +6 lines from
-  the RE5 884,651 - the
-  bsf1q_* fixtures + bsf3v2_deltas; rebuilt, and byte-identical to the
-  committed file). History, not a figure to chase:
+- **GATE: 427/427 lines, diff 0.** `expected_primitives.txt` is **885,347
+  bytes**, 427 lines (the RE7 tx-type regen: +450 B from the RE6 884,897 -
+  the derived-type emission's token/tx-type symbols; rebuilt, and
+  byte-identical to the committed file). History, not a figure to chase:
   884,851 B was the value from the RT21 regen through the RE4 landing;
   884,980 B from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
@@ -417,8 +416,8 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   WITH the wiring campaign)
   (color4 was the last divergent one: its V 43/1024 residual was the chroma
   above-right Z-order gap, closed by RT21 at 927e697; color8 closed at CS7,
-  5ce0224). Sizes (2026-11-10, the RE6 angle-delta regen): d4 31 B / d8 30 B / d16 43 B / d32 50 B /
-  d64 440 B / color4 209 B / color8 146 B / color16 136 B / color32 165 B.
+  5ce0224). Sizes (2026-11-10, the RE7 tx-type regen): d4 33 B / d8 30 B / d16 43 B / d32 66 B /
+  d64 440 B / color4 214 B / color8 161 B / color16 136 B / color32 165 B.
   See `docs/decode_conformance.md` for the authoritative matrix rather than
   a summary line, because that matrix is what changes as the RT-series
   lands.
