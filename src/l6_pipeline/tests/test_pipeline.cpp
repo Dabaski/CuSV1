@@ -1,8 +1,17 @@
 #include <doctest.h>
 #include <algorithm>
+#include <limits>
 #include <vector>
 #include <gpurt.h>
 #include <pipeline.h>
+
+// RE5: a shared q100 RD-lite decision context for the unit fixtures (the
+// fixtures' policy pins; frame-level tests construct their own).
+static pipeline::RdliteFrameCtx gRdlite;
+struct RdliteInit {
+    RdliteInit() { pipeline::initRdliteFrameCtx(&gRdlite, 100); }
+};
+static RdliteInit gRdliteInit;
 
 TEST_CASE("pipeline v-mode coeffs match svt composition golden") {
     // golden: build_intra_predictors (V_PRED) -> subtract -> svt_av1_fdct4_new
@@ -430,16 +439,24 @@ TEST_CASE("frame recon 8x8 matches generator composition") {
     CHECK(ok);
 }
 
-TEST_CASE("decide 8x8 picks v for the v fixture (paeth tie broken by index)") {
-    // golden: golden_gen d2_v SAD vector generalized to 8x8 (same policy, sad8x8)
+TEST_CASE("decide 8x8 picks paeth for the v fixture (rd tie-break: rate decides)") {
+    // golden: golden_gen d2_v SAD vector generalized to 8x8 (same policy, sad8x8).
+    // RE5: under RD-lite the tie is NOT broken by index - V_PRED (1) and
+    // PAETH_PRED (12) are BOTH exact on this fixture (no left edge: Paeth
+    // degenerates to copying the above row, variance 0 for both, measured),
+    // and the rd comparison includes the symbol rate, where PAETH is cheaper
+    // at this kf ctx. The strict-< rd comparison keeps first-wins for EQUAL
+    // rd; here the rates differ, so the lower-rate mode wins. Measured
+    // (l6dump): mode 12, sad 0, rd 383 at lambda 100 (q100).
     const std::uint8_t src[64] = {10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40,
                                   10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40,
                                   10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40,
                                   10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40};
     const std::uint8_t above[8] = {10, 20, 30, 40, 10, 20, 30, 40};
-    const auto d = pipeline::decideBlockMode8x8(src, above, 8, 0, nullptr, 0, 0, 0);
-    CHECK(d.mode == intra::V_PRED);
+    const auto d = pipeline::decideBlockMode8x8(src, above, 8, 0, nullptr, 0, 0, 0, intra::NeighborContext(), gRdlite);
+    CHECK(d.mode == intra::PAETH_PRED);
     CHECK(d.sad == 0);
+    CHECK(d.rd == 383);
 }
 
 TEST_CASE("frame auto 8x8 matches the generator policy golden bit-exactly") {
@@ -463,10 +480,12 @@ TEST_CASE("frame auto 8x8 matches the generator policy golden bit-exactly") {
         18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
         22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18};
-    // b7_modes: 1 5 3 0 (V, SMOOTH, D45, DC) - block 2 (the only nTr>0
-    // block) flips D157 -> D45 once D45's zone-1 SAD consumes the REAL
-    // top-right instead of the pre-FR1 fake zeros (FR-series gather).
-    const std::uint8_t goldenModes[4] = {1, 5, 3, 0};
+    // b7_modes: 5 5 6 0 (D113, D113, D157, DC) - the RE5 RD-lite map. The
+    // SAD-era map was 1 5 3 0 (block 2 flipped D157 -> D45 once D45's
+    // zone-1 SAD consumed the REAL top-right, the FR-series gather); under
+    // RD-lite the rate-inclusive ranking picks the smooth/directional set
+    // above. The pin is the regenerated gate line, never hand-typed.
+    const std::uint8_t goldenModes[4] = {5, 5, 6, 0};
 
     pixels::Plane plane(16, 16, 4);
     pixels::Plane recon(16, 16, 4);
@@ -500,17 +519,17 @@ TEST_CASE("frame auto 4x4 with quantization matches the Q2 generator golden") {
                                       7,  13, 5,  1,  25, 4, 6,  18, 15, 4,  25, 2,  12, 9,  30, 3,
                                       18, 5,  7,  13, 14, 2, 20, 8,  6,  24, 3,  9,  11, 17, 5, 19,
                                       22, 1,  8,  15, 4,  29, 7, 13, 10, 16, 6, 12, 3,  25, 11, 9};
-    const std::uint8_t goldenModes[4] = {1, 1, 0, 0};
+    const std::uint8_t goldenModes[4] = {4, 0, 0, 0};
     const std::uint8_t goldenRecon[64] = {
-        16, 7, 0, 9,  19, 4,  7, 18, 11, 15, 0,  8,  11, 21, 0,  22,
-        10, 14, 6, 2,  23, 0,  6, 20, 12, 4,  21, 0,  9,  10, 26, 2,
-        18, 4, 9, 16, 15, 4,  16, 10, 8,  19, 7,  13, 7,  19, 6,  12,
-        23, 0, 10, 18, 1, 28, 5, 11, 13, 13, 8,  15, 1,  25, 13, 6};
+        17, 7, 0, 9, 18, 3, 5, 17, 13, 16, 0, 8, 10, 19, 0, 21,
+        12, 16, 7, 2, 22, 0, 5, 19, 14, 6, 23, 0, 8, 9, 25, 1,
+        17, 3, 8, 15, 17, 6, 18, 12, 7, 18, 6, 12, 9, 21, 8, 14,
+        22, 0, 9, 17, 3, 30, 7, 12, 12, 12, 7, 14, 2, 27, 15, 7};
     const std::int32_t goldenCoeffs[64] = {
         -41, 1, 0, 0, 0, 0, 1, -1, 0, 0, 0, 1, 0, 0, 0, 0,
-        1, 0, 1, 0, 0, 0, 1, -1, 0, 0, -1, 1, 0, 0, 1, 1,
-        1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
-        -1, 0, -1, -1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0};
+        2, 0, 1, 0, 0, 0, 1, -1, 0, 0, -1, 1, 0, 0, 1, 1,
+        0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
+        0, 0, -1, -1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0};
 
     pixels::Plane plane(8, 8, 4);
     pixels::Plane recon(8, 8, 4);
@@ -895,7 +914,7 @@ TEST_CASE("gpu frame auto matches host encodeFrameAuto4x4 (host decides, gpu exe
             }
             const auto d = pipeline::decideBlockMode4x4(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                         leftHost, nLeftPx, 0, (std::uint8_t)alVal,
-                                                        nctx);
+                                                        nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             // GPU EXECUTION of the winner
@@ -999,13 +1018,18 @@ TEST_CASE("gpu frame auto matches host encodeFrameAuto4x4 (host decides, gpu exe
     CHECK(coeffsOk);
 }
 
-TEST_CASE("decide picks vertical for the v fixture (paeth tie broken by index)") {
-    // golden: golden_gen d2_v -" V SAD 0, PAETH SAD 0, everything else > 0;
-    // deterministic tie-break = lowest mode index -> V (1)
+TEST_CASE("decide picks PAETH on the v fixture (the RD-lite tie-break is the rate, not the index)") {
+    // golden: golden_gen d2_v -" V SAD 0, PAETH SAD 0, everything else > 0.
+    // RE5: at zero variance for both the winner is the CHEAPER-RATE
+    // candidate in the kf ctx pair - measured on the q100 rate surface,
+    // PAETH's kf rate is below V's (the old SAD policy's index tie-break
+    // picked V; the RD-lite policy picks PAETH, the reference's own
+    // preference rule product_coding_loop.c:1458 shape).
     const std::uint8_t src[16] = {10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40};
     const std::uint8_t above[4] = {10, 20, 30, 40};
-    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 0, nullptr, 0, 0, 0);
-    CHECK(d.mode == intra::V_PRED);
+    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 0, nullptr, 0, 0, 0,
+                                                intra::NeighborContext(), gRdlite);
+    CHECK(d.mode == intra::PAETH_PRED);
     CHECK(d.sad == 0);
 }
 
@@ -1013,7 +1037,7 @@ TEST_CASE("decide picks horizontal for the h fixture") {
     // golden: golden_gen d2_h -" H SAD 0, PAETH SAD 0, tie -> H (2)
     const std::uint8_t src[16] = {5, 5, 5, 5, 10, 10, 10, 10, 15, 15, 15, 15, 20, 20, 20, 20};
     const std::uint8_t left[4] = {5, 10, 15, 20};
-    const auto d = pipeline::decideBlockMode4x4(src, nullptr, 0, 0, left, 4, 0, 0);
+    const auto d = pipeline::decideBlockMode4x4(src, nullptr, 0, 0, left, 4, 0, 0, intra::NeighborContext(), gRdlite);
     CHECK(d.mode == intra::H_PRED);
     CHECK(d.sad == 0);
 }
@@ -1023,7 +1047,7 @@ TEST_CASE("decide picks dc on a flat block via thirteen-way tie") {
     const std::uint8_t src[16] = {50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50};
     const std::uint8_t above[4] = {50, 50, 50, 50};
     const std::uint8_t left[4] = {50, 50, 50, 50};
-    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 0, left, 4, 0, 50);
+    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 0, left, 4, 0, 50, intra::NeighborContext(), gRdlite);
     CHECK(d.mode == intra::DC_PRED);
     CHECK(d.sad == 0);
 }
@@ -1033,7 +1057,7 @@ TEST_CASE("decide picks d45 for the diagonal fixture") {
     const std::uint8_t src[16] = {10, 20, 30, 40, 20, 30, 40, 50, 30, 40, 50, 60, 40, 50, 60, 70};
     const std::uint8_t above[8] = {0, 10, 20, 30, 40, 50, 60, 70};
     const std::uint8_t left[4] = {0, 10, 20, 30};
-    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 4, left, 4, 0, 0);
+    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 4, left, 4, 0, 0, intra::NeighborContext(), gRdlite);
     CHECK(d.mode == intra::D45_PRED);
     CHECK(d.sad == 0);
 }
@@ -1042,17 +1066,18 @@ TEST_CASE("frame auto matches the generator policy golden bit-exactly") {
     // golden: golden_gen golden_frame (d3_modes / d3_recon / d3_coeffs) -"
     // identical D2 policy over verbatim SVT primitives, decisions evaluated
     // against RECONSTRUCTED neighbor edges, chosen modes feeding filt_type.
-    // modes 1 1 0 7 = V, V, DC, D203.
+    // modes 4 0 0 0 = D45, DC, DC, DC (the RE5 RD-lite map; the SAD-era
+    // map was 1 1 0 7 = V, V, DC, D203).
     const std::uint8_t srcData[64] = {21, 3,  5,  9,  19, 2, 8,  14, 9,  11, 3, 7,  5,  23, 1, 17,
                                       7,  13, 5,  1,  25, 4, 6,  18, 15, 4,  25, 2,  12, 9,  30, 3,
                                       18, 5,  7,  13, 14, 2, 20, 8,  6,  24, 3,  9,  11, 17, 5, 19,
                                       22, 1,  8,  15, 4,  29, 7, 13, 10, 16, 6, 12, 3,  25, 11, 9};
-    const std::uint8_t goldenModes[4] = {1, 1, 0, 7};
+    const std::uint8_t goldenModes[4] = {4, 0, 0, 0};
     const std::int32_t goldenCoeffs[64] = {
-        -3784, 78,  4,   54,  -17, 18,  102, -68, 56,  3,   36,  120, -18, 23, 6,   -22,
-        104,   17,  60,  28,  -37, -5,  85,  -102, -4, -1,  -64, 144, 7,   34, 143, 85,
-        -34,   42,  71,  -50, -6,  9,   6,   5,   -1,  -9,  6,   15,  9,   -3,  125, 131,
-        0,     -9,  -72, -96, -6,  4,   88,  141,  -4, 13,  -35, 116, 6,   1,   -59, 16};
+        -3817, 61, 4, 52, 1, 18, 95, -68, 56, 9, 36, 116, -18, 23, 8, -22,
+        233, 15, 60, 28, -37, -5, 85, -102, -4, -1, -64, 144, 7, 34, 143, 85,
+        -34, 42, 71, -50, -6, 9, 6, 5, -1, -9, 6, 15, 9, -3, 125, 131,
+        -22, -13, -70, -96, -12, -8, 91, 140, -25, 3, -25, 118, -2, 9, -45, 17};
 
     pixels::Plane plane(8, 8, 4);
     pixels::Plane recon(8, 8, 4);
@@ -1104,12 +1129,13 @@ TEST_CASE("frame auto 4x4 gathers real reconstructed top-right (FR-series fixtur
     // rule). Probe (verbatim primitives) under the pre-FR1 zero-fill: D45
     // SADs become 900/1300/1700 for row-1 blocks bx0..bx2 and the winners
     // change (V/D203/D203), so the mode map discriminates the gather.
-    // fr_modes: 1 7 7 7 | 3 3 3 3 | 2 2 2 2 | 0 0 0 0.
+    // fr_modes: 10 7 7 7 3 3 3 9 0 0 0 0 0 0 0 0 (the RE5 RD-lite map; the
+    // SAD-era map was 1 7 7 7 | 3 3 3 3 | 2 2 2 2 | 0 0 0 0).
     // NOTE: recon is NOT the discriminator here (4x4 fwd/inv round trip is
     // exact for every winner, so recon == source under either gather); modes
     // and coeffs carry the discrimination. recon/coeffs are still pinned to
     // the committed gate lines.
-    const std::uint8_t goldenModes[16] = {1, 7, 7, 7, 3, 3, 3, 3, 2, 2, 2, 2, 0, 0, 0, 0};
+    const std::uint8_t goldenModes[16] = {10, 7, 7, 7, 3, 3, 3, 9, 0, 0, 0, 0, 0, 0, 0, 0};
     const std::uint8_t goldenRecon[256] = {
         10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
         20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170,
@@ -1118,17 +1144,32 @@ TEST_CASE("frame auto 4x4 gathers real reconstructed top-right (FR-series fixtur
         50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200,
         60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210,
         70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220,
-        80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230};
+        80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     const std::int32_t goldenCoeffs[256] = {
-        -2785, -356, 0,    -25,  -356, 0,   0,  0,   0,   0,   0,   0,   -25, 0,   0,   0,
-        558,   -257, 5,    -21,  -112, 72,  -1, 5,   74,  -21, -6,  -2,  -25, -8,  16,  0,
-        558,   -257, 5,    -21,  -112, 72,  -1, 5,   74,  -21, -6,  -2,  -25, -8,  16,  0,
-        558,   -257, 5,    -21,  -112, 72,  -1, 5,   74,  -21, -6,  -2,  -25, -8,  16,  0,
-        0,     0,    0,    0,    0,    0,   0,  0,   0,   0,   0,   0,   0,   0,   0,   0,
-        0,     0,    0,    0,    0,    0,   0,  0,   0,   0,   0,   0,   0,   0,   0,   0,
-        0,     0,    0,    0,    0,    0,   0,  0,   0,   0,   0,   0,   0,   0,   0,   0,
-        400,   -268, 40,   -19,  -267, 96,  37, 0,   40,  37,  0,   -15, -19, 0,   -15, -16,
-        -2560, 0,    0,    0,    0,    0,   0,  0,   0,   0,   0,   0,   0,   0,   0,   0};
+        -2816, -356, 0, -25, -337, 0, 0, 0, 0, 0, 0, 0, -17, 0, 0, 0,
+        558, -257, 5, -21, -112, 72, -1, 5, 74, -21, -6, -2, -25, -8, 16, 0,
+        558, -257, 5, -21, -112, 72, -1, 5, 74, -21, -6, -2, -25, -8, 16, 0,
+        558, -257, 5, -21, -112, 72, -1, 5, 74, -21, -6, -2, -25, -8, 16, 0,
+        4, -6, 4, -2, -5, 6, -5, 3, 4, -6, 4, -2, -2, 3, -2, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        578, -190, 23, -15, -190, 100, 11, 5, 22, 11, 2, 2, -14, 5, 1, 1,
+        -3041, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -2175, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -2817, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -3457, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     // blocks 9-15 (all-zero rows: H wins with left zeros, DC tie row) are
     // implicitly zero in the initializer above.
 
@@ -1563,8 +1604,8 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
     // B7 policy loop (8x8 blocks) with the FP quantizer wired in
     // (svtd_quantize_fp_8x8, n_coeffs=64/log_scale 0): qcoeff = coded coeffs,
     // dqcoeff feeds svtd_inv2dadd8x8. Loss feeds back through decisions:
-    // qw8_modes 1 0 3 0 vs lossless b7_modes 1 5 3 0 (FR-series: real
-    // top-right gather flipped both block-2 winners to D45).
+    // qw8_modes 5 5 6 0 == lossless b7_modes 5 5 6 0 under the RE5 RD-lite
+    // map (the SAD-era maps differed: qw8 1 0 3 0 vs b7 1 5 3 0).
     // SCAN POLICY IS OURS: fixed defaultScan8x8 for every block; SVT selects
     // per mode/tx type via get_scan_order (coefficients.h:40).
     const std::uint8_t srcData[256] = {
@@ -1584,38 +1625,38 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
         18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
         22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18};
-    const std::uint8_t goldenModes[4] = {1, 0, 3, 0};
+    const std::uint8_t goldenModes[4] = {5, 5, 6, 0};
     const std::uint8_t goldenRecon[256] = {
-        19, 1, 9, 8, 18, 0, 6, 18, 13, 14, 10, 0, 21, 9, 7, 15,
-        17, 7, 22, 4, 10, 10, 26, 7, 12, 19, 5, 14, 0, 23, 14, 9,
-        19, 6, 5, 8, 13, 7, 15, 9, 10, 26, 0, 8, 13, 17, 5, 17,
-        29, 0, 11, 17, 0, 31, 5, 15, 18, 25, 14, 18, 3, 35, 13, 18,
-        12, 12, 0, 5, 3, 23, 0, 13, 23, 2, 24, 5, 14, 5, 36, 3,
-        11, 20, 12, 4, 2, 29, 10, 10, 20, 4, 8, 8, 18, 0, 21, 8,
-        11, 25, 4, 12, 13, 15, 10, 18, 24, 10, 16, 15, 9, 25, 11, 19,
-        18, 25, 17, 23, 5, 30, 16, 22, 16, 6, 0, 7, 18, 0, 6, 13,
-        10, 15, 6, 0, 23, 1, 3, 20, 18, 8, 19, 4, 11, 6, 33, 2,
-        4, 21, 6, 3, 0, 26, 6, 8, 19, 7, 0, 14, 16, 0, 18, 10,
-        9, 30, 4, 9, 15, 22, 8, 18, 27, 6, 18, 21, 1, 30, 14, 17,
-        15, 24, 11, 21, 3, 28, 13, 20, 16, 11, 4, 11, 5, 20, 0, 17,
-        17, 0, 26, 1, 10, 2, 30, 5, 14, 15, 4, 16, 0, 23, 10, 11,
-        21, 1, 10, 10, 16, 0, 23, 7, 10, 25, 0, 7, 16, 11, 10, 14,
-        26, 2, 9, 20, 5, 16, 12, 14, 15, 31, 10, 19, 1, 39, 9, 20,
-        16, 7, 5, 9, 16, 0, 9, 20, 13, 12, 3, 0, 26, 0, 6, 15};
+        21, 0, 3, 7, 21, 2, 8, 19, 13, 16, 8, 1, 19, 12, 6, 16,
+        15, 7, 22, 0, 9, 15, 31, 6, 12, 19, 6, 14, 0, 23, 15, 10,
+        20, 3, 2, 11, 15, 5, 15, 15, 9, 24, 3, 5, 17, 15, 7, 17,
+        25, 0, 14, 17, 0, 30, 7, 19, 14, 24, 16, 16, 5, 34, 14, 19,
+        8, 12, 0, 6, 1, 22, 0, 17, 17, 3, 23, 7, 13, 7, 35, 4,
+        12, 18, 11, 6, 4, 27, 10, 16, 18, 2, 6, 12, 15, 2, 20, 10,
+        10, 27, 4, 8, 12, 20, 14, 17, 23, 5, 16, 17, 9, 26, 12, 20,
+        21, 24, 13, 22, 8, 33, 18, 23, 15, 1, 0, 5, 22, 0, 8, 13,
+        13, 14, 11, 0, 19, 5, 2, 15, 18, 5, 20, 2, 9, 7, 30, 2,
+        11, 18, 4, 14, 0, 24, 12, 5, 19, 4, 2, 12, 14, 0, 15, 10,
+        9, 25, 0, 8, 12, 17, 4, 17, 27, 3, 19, 19, 0, 31, 11, 17,
+        17, 24, 13, 17, 3, 35, 12, 18, 16, 7, 5, 9, 3, 22, 0, 17,
+        22, 2, 23, 4, 14, 4, 36, 2, 14, 11, 5, 14, 0, 24, 6, 11,
+        20, 4, 8, 7, 18, 0, 21, 8, 10, 22, 1, 5, 14, 13, 7, 14,
+        24, 9, 16, 15, 9, 25, 11, 19, 14, 28, 11, 17, 0, 40, 6, 20,
+        16, 6, 0, 7, 18, 0, 6, 13, 13, 8, 5, 0, 24, 1, 2, 15};
     const std::int32_t goldenCoeffs[256] = {
-        -79, 0, 1, 1, 0, 0, 1, -1, -1, 0, 0, 0, 1, 1, 0, 2,
-        1, 0, 0, -1, 0, 0, -1, 1, -1, 0, 0, 0, 0, -1, 0, 0,
+        -79, -1, 1, 1, 0, 0, 1, -1, -1, 0, 0, 0, 1, 1, 0, 2,
+        1, 0, 0, 0, 0, 0, -1, 1, -1, 0, 0, 0, 0, -1, 0, 0,
         0, 0, 0, 0, 1, 0, 1, -1, 0, 0, 0, 0, 1, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 1, -1, -1, 0,
-        -1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
+        0, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0, 1, -1, -1, 0,
+        -4, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
+        -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1,
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
+        -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+        -6, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
         -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2,
         0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
         -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
-        -1, -2, 1, 0, 0, 0, 0, 0, -2, 0, 1, 0, -1, -2, 0, -1,
-        -1, 1, 0, -1, 1, -1, 0, 0, -1, 0, -1, 0, 1, 1, 0, 2,
-        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, -1,
-        0, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
-        1, 0, 1, 1, 0, 0, 0, -1, 0, 0, 0, 0, 0, 2, 0, 1,
+        1, 0, 1, 1, 0, 0, 1, -1, 0, 0, 0, 0, 0, 2, 0, 1,
         0, 0, 0, 0, 0, 0, -1, 2, 0, 0, 0, 0, -1, 0, -1, 0,
         -1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 0, 1, -1,
         0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 1, 1, -1};
@@ -1866,7 +1907,7 @@ TEST_CASE("gpu frame auto 8x8 with quantization matches host encodeFrameAuto8x8Q
                 for (int x = 0; x < 8; ++x) srcBlk[y * 8 + x] = srcData[(py + y) * 16 + px + x];
             const auto d = pipeline::decideBlockMode8x8(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                         leftHost, nLeftPx, 0,
-                                                        static_cast<std::uint8_t>(alVal), nctx);
+                                                        static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             // GPU EXECUTION of the winner: predict -> subtract -> fwd ->
@@ -2106,7 +2147,7 @@ TEST_CASE("gpu frame auto 8x8 matches host encodeFrameAuto8x8 (host decides, gpu
                 for (int x = 0; x < 8; ++x) srcBlk[y * 8 + x] = srcData[(py + y) * 16 + px + x];
             const auto d = pipeline::decideBlockMode8x8(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                         leftHost, nLeftPx, 0,
-                                                        static_cast<std::uint8_t>(alVal), nctx);
+                                                        static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             // GPU EXECUTION of the winner
@@ -2342,7 +2383,7 @@ TEST_CASE("gpu frame auto 4x4 with quantization matches host encodeFrameAuto4x4Q
             }
             const auto d = pipeline::decideBlockMode4x4(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                         leftHost, nLeftPx, 0,
-                                                        static_cast<std::uint8_t>(alVal), nctx);
+                                                        static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             // GPU EXECUTION of the winner: predict -> subtract -> fwd ->
@@ -2459,8 +2500,9 @@ TEST_CASE("frame auto 16x16 matches the f16 generator golden (real top-right)") 
     // 32767 (ramp continuation vs zero source) and H (16384) wins, under the
     // pre-FR1 zero-fill D45 scores 12673 and would win - the mode map
     // discriminates the gather (probe values, verbatim primitives, C7a).
-    // recon == source: the 16x16 fwd/inv roundtrip is exact.
-    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+    // RE5: recon is pinned to the f16_recon gate line (see below) - the
+    // lossless 16x16 roundtrip exactness was mode-map-specific.
+    const std::uint8_t goldenModes[4] = {10, 7, 0, 0};
 
     pixels::Plane plane(32, 32, 4);
     pixels::Plane recon(32, 32, 4);
@@ -2478,18 +2520,88 @@ TEST_CASE("frame auto 16x16 matches the f16 generator golden (real top-right)") 
     }
     CHECK(modesOk);
 
+    // RE5: recon pinned to the f16_recon gate line. The 16x16 fwd/inv
+    // roundtrip's exactness was a property of the SAD-era mode map's
+    // residuals; under the RD-lite map the D203 block-1 residual loses
+    // 1 LSB at (28,0) (src 116 -> recon 117) and the mirror's f16_recon
+    // carries the SAME value - port == mirror == the reference behavior.
+    static const std::uint8_t goldenRecon[1024] = {
+        4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64,
+        68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 117, 120, 124, 128,
+        8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68,
+        72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132,
+        12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72,
+        76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136,
+        16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76,
+        80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140,
+        20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80,
+        84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+        24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84,
+        88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148,
+        28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88,
+        92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152,
+        32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92,
+        96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156,
+        36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96,
+        100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160,
+        40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100,
+        104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164,
+        44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104,
+        108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168,
+        48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108,
+        112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172,
+        52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112,
+        116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176,
+        56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116,
+        120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180,
+        60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120,
+        124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184,
+        64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124,
+        128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184, 188,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     bool reconOk = true;
     for (int y = 0; y < 32; ++y)
         for (int x = 0; x < 32; ++x)
-            if (recon.at(x, y) != plane.at(x, y)) reconOk = false;
+            if (recon.at(x, y) != goldenRecon[y * 32 + x]) reconOk = false;
     CHECK(reconOk);
 
     // coeff spot pins from the f16_coeffs gate line
     const std::int32_t goldenHeads[4][16] = {
-        {-8063, -2344, 0, -257, 0, -90, 0, -44, 3, -24, 0, -14, 0, -7, 0, -3},
-        {2849, -1605, 56, -181, 9, -66, 8, -29, 6, -30, -12, -4, -8, -4, 3, 4},
-        {-8190, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+        {-8221, -2344, 0, -257, 0, -90, 0, -44, 3, -24, 0, -14, 0, -7, 0, -3},
+        {2854, -1608, 51, -183, 4, -66, 10, -27, 4, -30, -10, -4, -7, -3, 4, 3},
+        {-12025, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {-10113, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
     bool coeffsOk = true;
     for (int b = 0; b < 4; ++b) {
         for (int i = 0; i < 16; ++i) {
@@ -2501,9 +2613,9 @@ TEST_CASE("frame auto 16x16 matches the f16 generator golden (real top-right)") 
 
 TEST_CASE("frame auto 16x16 with quantization matches the f16q generator golden") {
     // golden: golden_gen f16q_modes/f16q_coeffs at qindex 100 (FP quantizer at
-    // n_coeffs=256, log_scale 0). Modes identical to lossless (1 7 2 2);
+    // n_coeffs=256, log_scale 0). Modes identical to lossless (10 7 0 0);
     // quantization loss visible in coeffs.
-    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+    const std::uint8_t goldenModes[4] = {10, 7, 0, 0};
 
     pixels::Plane plane(32, 32, 4);
     pixels::Plane recon(32, 32, 4);
@@ -2521,8 +2633,8 @@ TEST_CASE("frame auto 16x16 with quantization matches the f16q generator golden"
     }
     CHECK(modesOk);
 
-    const std::int32_t goldenBlk0[16] = {-87, -21, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    const std::int32_t goldenBlk2[8] = {-88, 0, 0, 0, 0, 0, 0, 0};
+    const std::int32_t goldenBlk0[16] = {-88, -21, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::int32_t goldenBlk2[8] = {-128, 0, 0, 0, 0, 0, 0, 0};
     bool coeffsOk = true;
     for (int i = 0; i < 16; ++i) {
         if (coeffs[i] != goldenBlk0[i]) coeffsOk = false;
@@ -2533,11 +2645,16 @@ TEST_CASE("frame auto 16x16 with quantization matches the f16q generator golden"
     CHECK(coeffsOk);
 }
 TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
-    // Gate: bsf1_modes 1 7 0 0, bsf1_ctx 0 0 0 1 1 0 4 0,
-    // bsf1_bytes 3 7f f8 b0, bsf1_rt 1 3 7 3 0 0 0 0, bsf1_cdf_eq 1
-    // (tools/golden_gen/main_primitives.c BSF1 block). f16dc fixture: top
+    // Gate: bsf1_modes 10 7 0 0, bsf1_ctx 0 0 0 1 1 0 4 0,
+    // bsf1_bytes 3 e1 37 b0, bsf1_rt 10 7 3 0 0 0 0, bsf1_cdf_eq 1
+    // (tools/golden_gen/main_primitives.c BSF1 block; the RE5 RD-lite map -
+    // the SAD-era values were modes 1 7 0 0 / bytes 3 7f f8 b0 / rt
+    // 1 3 7 3 0 0 0 0, and SMOOTH_H(10) is non-directional so block 0
+    // reads no angle delta, which is why the rt row shrank 8 -> 7).
+    // f16dc fixture: top
     // half = f16 ramp (rows 0-15: 4*(x+y+1)), bottom-left 16x16 flat 94,
-    // bottom-right 16x16 flat 126 - the D2 policy decides {V, D203, DC, DC},
+    // bottom-right 16x16 flat 126 - the D2 policy decides {SMOOTH_H, D203,
+    // DC, DC},
     // covering the FI flag=0 write path (DC blocks) that the f16 fixture
     // lacks. Emission is symbols only per D5: kf y mode
     // (entropy_coding.c:1026-1040 via writeKfLumaMode) + angle delta
@@ -2557,8 +2674,8 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
                 plane.at(x, y) = 126;
         }
 
-    const std::uint8_t goldenModes[4] = {1, 7, 0, 0};
-    const unsigned char goldenBytes[3] = {0x7f, 0xf8, 0xb0};
+    const std::uint8_t goldenModes[4] = {10, 7, 0, 0};
+    const unsigned char goldenBytes[3] = {0xe1, 0x37, 0xb0};
 
     std::int32_t coeffs[1024] = {0};
     std::uint8_t modes[4] = {0};
@@ -2584,7 +2701,7 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
     entropy::AomReader r;
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
     r.allow_update_cdf = 1;
-    static const int wantRt[8] = {1, 3, 7, 3, 0, 0, 0, 0};
+    static const int wantRt[7] = {10, 7, 3, 0, 0, 0, 0};
     int ri = 0;
     for (int b = 0; b < 4; ++b) {
         const int bx = b % 2, by = b / 2;
@@ -2655,7 +2772,7 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
 }
 
 TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
-    // TS3 gate: the 4 f16 blocks (decided modes {1,7,2,2}), skip = 0 for all
+    // TS3 gate: the 4 f16 blocks (decided modes {10,7,0,0}), skip = 0 for all
     // four (no skip decision logic - the residual is coded for every block),
     // q100 real residuals through the full token chain (fwd16x16 ->
     // quantizeFp16x16 q100 -> writeBlockCoeffs with getTxbCtx from the NA
@@ -2669,7 +2786,7 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
         for (int x = 0; x < 32; ++x)
             plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
 
-    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+    const std::uint8_t goldenModes[4] = {10, 7, 0, 0};
 
     std::int32_t coeffs[1024] = {0};
     std::uint8_t modes[4] = {0};
@@ -2694,9 +2811,9 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
     for (int i = 0; i < 4; ++i)
         if (modes[i] != goldenModes[i]) modesOk = false;
     CHECK(modesOk);
-    // measured eobs == gate ecfrm_eobs 21 16 1 0 (scan order)
+    // measured eobs == gate ecfrm_eobs 21 16 1 1 (scan order)
     {
-        const int wantEob[4] = {21, 16, 1, 0};
+        const int wantEob[4] = {21, 16, 1, 1};
         for (int b = 0; b < 4; ++b) {
             std::int32_t ec = 0;
             for (int c = 255; c >= 0; --c) {
@@ -2706,53 +2823,153 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
             CHECK(ec == wantEob[b]);
         }
     }
-    // token byte stream == gate ecfrm_bytes 26 7c e4 69 12 eb 4f fd 9b 5b
-    // dc 58 58 ca c9 83 88 0a 13 81 d7 a2 c0 99 54 ce 3c (TD5b: the q100
-    // bucket, idx 2)
-    REQUIRE(w.pos == 26);
-    static const unsigned char wantBytes[26] = {0x7c, 0xe4, 0x69, 0x12, 0xeb, 0x4f, 0xfd, 0x9b,
-                                                0x5b, 0xdc, 0x58, 0x58, 0xca, 0xc9, 0x83, 0x88,
-                                                0x0a, 0x13, 0x81, 0xd7, 0xa2, 0xc0, 0x99, 0x54,
-                                                0xce, 0x3c};
-    for (int i = 0; i < 26; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+    // token byte stream == gate ecfrm_bytes 29 dd 17 28 cb 39 0f fd 3e 1f
+    // 37 6f 56 f9 de 80 c6 7f 98 c2 be 28 0f 2b 0a e6 ea 0d c5 80 (TD5b:
+    // the q100 bucket, idx 2; RE5: the two DC_PRED blocks emit FI symbols
+    // through the adapting frame-context cdf - the mirror's ts3 drive
+    // gained the same writes, so the stream grew 26 -> 29 bytes)
+    REQUIRE(w.pos == 29);
+    static const unsigned char wantBytes[29] = {0xdd, 0x17, 0x28, 0xcb, 0x39, 0x0f, 0xfd, 0x3e,
+                                                0x1f, 0x37, 0x6f, 0x56, 0xf9, 0xde, 0x80, 0xc6,
+                                                0x7f, 0x98, 0xc2, 0xbe, 0x28, 0x0f, 0x2b, 0x0a,
+                                                0xe6, 0xea, 0x0d, 0xc5, 0x80};
+    for (int i = 0; i < 29; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
     // quantized coefficients == gate ecfrm_coeffs (generator raster order)
-    static const std::int32_t genCoeffs[1024] = {        -87, -21, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        32, -14, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -4, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        -88, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    static const std::int32_t genCoeffs[1024] = {
+        -88, -21, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        32, -15, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -5, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        3, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -109, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     bool coeffsOk = true;
     for (int i = 0; i < 1024; ++i)
         if (coeffs[i] != genCoeffs[i]) coeffsOk = false;
     CHECK(coeffsOk);
     // reconstructed frame == gate ecfrm_recon (generator raster order)
-    static const std::uint8_t genRecon[1024] = {        5, 8, 12, 17, 21, 24, 28, 32, 37, 41, 45, 48, 52, 57, 61, 64, 71, 74, 78, 84, 87, 90, 94, 98, 101, 105, 109, 111, 115, 120, 125, 129, 8, 11, 15, 20, 23, 27, 30, 35, 40, 44, 48, 51, 55, 60, 64, 67, 73, 76, 82, 87, 90, 93, 97, 101, 105, 109, 112, 115, 119, 124, 129, 133,
-        12, 15, 19, 24, 28, 31, 35, 39, 44, 48, 52, 56, 59, 64, 68, 71, 76, 80, 85, 90, 93, 97, 100, 104, 108, 112, 115, 118, 122, 128, 132, 136, 17, 20, 24, 28, 32, 36, 39, 44, 48, 53, 57, 60, 64, 68, 73, 75, 80, 83, 88, 93, 97, 100, 103, 107, 111, 115, 118, 122, 126, 131, 135, 140,
-        21, 23, 28, 32, 36, 39, 43, 47, 52, 57, 60, 64, 68, 72, 76, 79, 83, 87, 92, 97, 100, 104, 107, 111, 116, 120, 123, 126, 130, 135, 139, 142, 24, 27, 31, 35, 39, 43, 46, 51, 56, 60, 64, 67, 71, 75, 80, 83, 87, 91, 96, 101, 104, 109, 112, 116, 120, 124, 127, 130, 133, 138, 143, 147,
-        28, 30, 35, 39, 43, 46, 50, 54, 59, 64, 67, 71, 75, 79, 83, 86, 92, 95, 100, 105, 110, 113, 117, 121, 124, 129, 131, 134, 138, 143, 148, 152, 32, 35, 39, 44, 47, 51, 55, 59, 64, 68, 72, 75, 79, 84, 88, 91, 95, 100, 105, 110, 114, 117, 121, 124, 128, 132, 136, 139, 143, 148, 153, 157,
-        37, 40, 44, 49, 52, 56, 59, 64, 69, 73, 77, 80, 84, 88, 93, 96, 99, 103, 108, 114, 117, 121, 124, 128, 132, 137, 141, 144, 148, 153, 158, 161, 41, 44, 49, 53, 57, 60, 64, 68, 73, 78, 81, 85, 88, 93, 97, 100, 102, 106, 112, 116, 120, 124, 128, 133, 137, 142, 146, 149, 152, 157, 161, 164,
-        45, 48, 52, 57, 61, 64, 68, 72, 77, 81, 85, 88, 92, 97, 101, 104, 105, 109, 114, 120, 123, 128, 132, 137, 142, 146, 149, 152, 155, 160, 164, 166, 48, 51, 56, 60, 64, 67, 71, 75, 80, 85, 88, 92, 95, 100, 104, 107, 109, 112, 118, 124, 128, 133, 137, 142, 146, 150, 153, 156, 159, 163, 167, 169,
-        52, 55, 59, 64, 68, 71, 75, 79, 84, 88, 92, 96, 99, 104, 108, 111, 114, 118, 124, 130, 134, 138, 142, 145, 150, 154, 157, 159, 163, 167, 171, 173, 57, 60, 64, 68, 72, 76, 79, 84, 88, 93, 97, 100, 104, 108, 113, 115, 120, 124, 130, 134, 138, 142, 145, 149, 153, 157, 160, 163, 167, 171, 175, 178,
-        61, 64, 68, 73, 76, 80, 83, 88, 93, 97, 101, 104, 108, 113, 117, 120, 125, 129, 133, 138, 142, 145, 148, 152, 157, 161, 164, 167, 170, 175, 179, 182, 64, 67, 71, 75, 79, 83, 86, 91, 96, 100, 104, 107, 111, 115, 120, 122, 128, 131, 135, 140, 143, 146, 150, 154, 158, 163, 166, 169, 173, 177, 181, 184,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    static const std::uint8_t genRecon[1024] = {
+        6, 9, 13, 17, 21, 24, 28, 33, 37, 42, 46, 49, 53, 57, 62, 64,
+        66, 70, 75, 80, 83, 87, 91, 96, 100, 105, 109, 112, 115, 121, 126, 131,
+        8, 11, 16, 20, 24, 27, 31, 35, 40, 45, 48, 52, 56, 60, 64, 67,
+        70, 73, 79, 84, 88, 91, 95, 100, 104, 109, 112, 114, 119, 125, 130, 134,
+        13, 15, 20, 24, 28, 31, 35, 40, 44, 49, 53, 56, 60, 64, 69, 71,
+        74, 77, 83, 88, 92, 95, 99, 103, 107, 111, 115, 119, 123, 128, 133, 137,
+        18, 21, 25, 30, 33, 37, 40, 45, 50, 54, 58, 61, 65, 70, 74, 77,
+        79, 82, 88, 93, 96, 100, 102, 107, 112, 116, 120, 122, 127, 132, 136, 141,
+        22, 24, 29, 33, 37, 40, 44, 49, 53, 58, 62, 65, 69, 73, 78, 80,
+        84, 87, 93, 97, 100, 104, 108, 112, 116, 120, 124, 126, 131, 136, 140, 145,
+        25, 28, 32, 36, 40, 43, 47, 52, 56, 61, 65, 68, 72, 76, 81, 83,
+        88, 92, 96, 102, 106, 109, 113, 117, 120, 125, 128, 131, 135, 140, 144, 149,
+        28, 31, 35, 40, 44, 47, 51, 55, 60, 64, 68, 71, 75, 80, 84, 87,
+        92, 97, 102, 107, 110, 114, 117, 122, 125, 129, 133, 135, 139, 144, 149, 153,
+        32, 35, 40, 44, 48, 51, 55, 59, 64, 69, 72, 76, 80, 84, 88, 91,
+        97, 100, 106, 111, 114, 118, 121, 126, 129, 133, 137, 140, 144, 149, 153, 157,
+        37, 40, 44, 49, 52, 56, 60, 64, 69, 73, 77, 80, 84, 89, 93, 96,
+        100, 103, 109, 114, 117, 121, 125, 129, 133, 138, 141, 144, 147, 153, 157, 161,
+        42, 45, 49, 54, 58, 61, 65, 69, 74, 79, 82, 86, 89, 94, 98, 101,
+        102, 105, 111, 117, 120, 124, 128, 133, 137, 142, 145, 148, 152, 156, 160, 163,
+        46, 49, 53, 57, 61, 65, 68, 73, 78, 82, 86, 89, 93, 97, 102, 104,
+        105, 108, 114, 120, 124, 128, 132, 137, 141, 145, 149, 152, 155, 159, 163, 166,
+        49, 52, 56, 61, 64, 68, 71, 76, 81, 85, 89, 92, 96, 101, 105, 108,
+        109, 112, 118, 124, 128, 133, 137, 141, 146, 150, 153, 156, 159, 163, 167, 170,
+        53, 55, 60, 64, 68, 71, 75, 80, 84, 89, 93, 96, 100, 104, 109, 111,
+        114, 118, 124, 129, 133, 137, 141, 145, 151, 155, 158, 161, 164, 168, 172, 175,
+        57, 60, 64, 68, 72, 76, 79, 84, 89, 93, 97, 100, 104, 108, 113, 116,
+        119, 124, 129, 134, 138, 142, 146, 150, 155, 159, 163, 166, 170, 174, 178, 181,
+        61, 64, 68, 73, 76, 80, 84, 88, 93, 97, 101, 104, 108, 113, 117, 120,
+        124, 128, 133, 138, 142, 145, 149, 154, 159, 163, 167, 171, 174, 179, 183, 186,
+        64, 67, 71, 75, 79, 83, 86, 91, 96, 100, 104, 107, 111, 115, 120, 122,
+        127, 131, 135, 140, 144, 147, 151, 156, 161, 166, 170, 173, 177, 182, 186, 189,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     bool reconOk = true;
     for (int y = 0; y < 32; ++y)
         for (int x = 0; x < 32; ++x)
@@ -2941,7 +3158,7 @@ gpurt::DeviceBuffer dAbove(32);
             }
             const auto d = pipeline::decideBlockMode16x16(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                           leftHost, nLeftPx, 0,
-                                                          static_cast<std::uint8_t>(alVal), nctx);
+                                                          static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             int modeArg = d.mode;
@@ -3174,7 +3391,7 @@ TEST_CASE("gpu frame auto 16x16 with quantization matches host encodeFrameAuto16
                 for (int x = 0; x < 16; ++x) srcBlk[y * 16 + x] = srcData[(py + y) * 32 + px + x];
             const auto d = pipeline::decideBlockMode16x16(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                           leftHost, nLeftPx, 0,
-                                                          static_cast<std::uint8_t>(alVal), nctx);
+                                                          static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             int modeArg = d.mode;
@@ -3362,7 +3579,7 @@ TEST_CASE("frame auto 32x32 matches the f32 generator golden (real top-right)") 
     // LOSSY (fwd_shift_32x32 sum 2-4+0 = -2, like 8x8) - recon != source
     // (generator probe: 87 single-sample +-1 diffs in rows 0-31, rows 32-63
     // exact zeros); recon is pinned to the f32_recon gate line below.
-    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+    const std::uint8_t goldenModes[4] = {10, 7, 0, 0};
 
     pixels::Plane plane(64, 64, 4);
     pixels::Plane recon(64, 64, 4);
@@ -3384,14 +3601,14 @@ bool modesOk = true;
     // +-1 roundtrip diffs), rows 30-31 (the heaviest diff rows), row 32
     // (zero-region head, exact)
     const std::uint8_t goldenReconRow0[64] = {
-        2,  4,  6,  8,  10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32,
-        34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64,
-        66, 68, 70, 72, 74, 76, 78, 80, 83, 85, 86, 88, 90, 92, 94, 96,
+        3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33,
+        35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 63, 65,
+        66, 68, 70, 72, 75, 76, 78, 80, 83, 85, 86, 88, 90, 92, 94, 96,
         98, 100, 102, 104, 107, 108, 110, 112, 114, 116, 118, 120, 122, 124, 127, 128};
     const std::uint8_t goldenReconRow30[64] = {
-        62, 65, 66, 68, 71, 73, 74, 77, 79, 81, 82, 85, 87, 88, 91, 92,
-        94, 97, 98, 100, 103, 105, 106, 109, 111, 112, 114, 117, 118, 120, 123, 125,
-        127, 129, 130, 133, 135, 136, 139, 141, 142, 144, 146, 149, 151, 153, 155, 157,
+        62, 64, 67, 69, 70, 72, 74, 76, 78, 81, 82, 84, 87, 88, 90, 92,
+        94, 96, 99, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124,
+        126, 128, 130, 132, 135, 136, 138, 141, 142, 144, 146, 149, 151, 153, 155, 157,
         159, 160, 162, 165, 167, 168, 170, 172, 174, 176, 179, 180, 182, 184, 186, 188};
     const std::uint8_t goldenReconRow31[64] = {
         64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94,
@@ -3410,8 +3627,8 @@ bool reconOk = true;
 
 TEST_CASE("frame auto 32x32 with quantization matches the f32q generator golden") {
     // golden: golden_gen f32q_modes at qindex 100 (FP quantizer at
-    // n_coeffs=1024, log_scale 1). Modes identical to lossless (1 7 2 2).
-    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+    // n_coeffs=1024, log_scale 1). Modes identical to lossless (10 7 0 0).
+    const std::uint8_t goldenModes[4] = {10, 7, 0, 0};
 
     pixels::Plane plane(64, 64, 4);
     pixels::Plane recon(64, 64, 4);
@@ -3626,7 +3843,7 @@ TEST_CASE("gpu frame auto 32x32 matches host encodeFrameAuto32x32 (host decides,
                 for (int x = 0; x < 32; ++x) srcBlk[y * 32 + x] = srcData[(py + y) * 64 + px + x];
             const auto d = pipeline::decideBlockMode32x32(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                           leftHost, nLeftPx, 0,
-                                                          static_cast<std::uint8_t>(alVal), nctx);
+                                                          static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             int modeArg = d.mode;
@@ -3859,7 +4076,7 @@ TEST_CASE("gpu frame auto 32x32 with quantization matches host encodeFrameAuto32
                 for (int x = 0; x < 32; ++x) srcBlk[y * 32 + x] = srcData[(py + y) * 64 + px + x];
             const auto d = pipeline::decideBlockMode32x32(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                           leftHost, nLeftPx, 0,
-                                                          static_cast<std::uint8_t>(alVal), nctx);
+                                                          static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             int modeArg = d.mode;
@@ -3976,7 +4193,7 @@ TEST_CASE("frame auto 64x64 matches the f64 generator golden (real top-right)") 
     // net shift 0: recon is LOSSY vs source (generator probe: 371 +-1..3
     // diffs, first idx 64 recon 68 vs src 65) - recon pinned to the f64_recon
     // gate line.
-    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+    const std::uint8_t goldenModes[4] = {10, 7, 0, 0};
 
     pixels::Plane plane(128, 128, 4);
     pixels::Plane recon(128, 128, 4);
@@ -3997,8 +4214,8 @@ TEST_CASE("frame auto 64x64 matches the f64 generator golden (real top-right)") 
 
 TEST_CASE("frame auto 64x64 with quantization matches the f64q generator golden") {
     // golden: golden_gen f64q_modes at qindex 100 (FP quantizer at
-    // n_coeffs=4096, log_scale 2). Modes identical to lossless (1 7 2 2).
-    const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
+    // n_coeffs=4096, log_scale 2). Modes identical to lossless (10 7 0 0).
+    const std::uint8_t goldenModes[4] = {10, 7, 0, 0};
 
     pixels::Plane plane(128, 128, 4);
     pixels::Plane recon(128, 128, 4);
@@ -4202,7 +4419,7 @@ TEST_CASE("gpu frame auto 64x64 matches host encodeFrameAuto64x64 (host decides,
                 for (int x = 0; x < 64; ++x) srcBlk[y * 64 + x] = srcData[(py + y) * 128 + px + x];
             const auto d = pipeline::decideBlockMode64x64(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                           leftHost, nLeftPx, 0,
-                                                          static_cast<std::uint8_t>(alVal), nctx);
+                                                          static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             int modeArg = d.mode;
@@ -4436,7 +4653,7 @@ TEST_CASE("gpu frame auto 64x64 with quantization matches host encodeFrameAuto64
                 for (int x = 0; x < 64; ++x) srcBlk[y * 64 + x] = srcData[(py + y) * 128 + px + x];
             const auto d = pipeline::decideBlockMode64x64(srcBlk, aboveHost, nTopPx, nTopRightPx,
                                                           leftHost, nLeftPx, 0,
-                                                          static_cast<std::uint8_t>(alVal), nctx);
+                                                          static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
 
             int modeArg = d.mode;
@@ -4569,7 +4786,7 @@ TEST_CASE("frame chroma auto 16x16 matches the bcf16 generator golden") {
 
 TEST_CASE("frame auto chroma 16x16 with quantization matches the bcf16q golden") {
     // golden: golden_gen bcf16q_modes at qindex 100 (FP quantizer at
-    // n_coeffs=256, log_scale 0). Modes identical to lossless (1 7 2 2).
+    // n_coeffs=256, log_scale 0). Modes identical to lossless (10 7 0 0).
     const std::uint8_t goldenModes[4] = {1, 7, 2, 2};
 
     pixels::Plane src(32, 32, 4);
@@ -5521,20 +5738,36 @@ TEST_CASE("FI DC-deciding fixture: the FI=1 emission path round-trips content-ex
     // predicts through filterIntraPredictor. No production file changes.
     //
     // Fixture: 8x8 frame, 2x2 grid of 4x4 blocks, q100, DCT_DCT.
-    // b0 = 129 flat: the no-edge fills are above 127 / left 129 / corner 128,
-    // so H_PRED predicts 129-flat exactly and wins the D2 at sad 0 (tie with
-    // D157/D203, lowest index). b1 rows 0-2 = 129 with row 3 =
-    // [150,160,170,180]: with only the left edge [129x4] every one of the 13
-    // candidates predicts 129-flat and ties at sad 144 - tie-break DC_PRED;
-    // the FI table ties too (all 144), so no FI win and the flag=0 branch of
-    // writeFilterIntra is exercised in the same walk. b2 is the transpose and
-    // sees a REAL recon top-right (b1's recon row 3 = [149,158,170,179],
-    // q100 noise) - D67_PRED wins there. b3's source is the FILTER_D157_PRED
-    // prediction of the walk's own recon edges (above = b1's recon row 3 =
-    // [149,158,170,179], left = b2's recon col 3 = [143,156,168,176],
-    // above-left = 129), so its FI_D157 SAD is exactly 0 while DC - the D2
-    // argmin at sad 75 (table 75,159,141,262,209,172,161,153,196,151,153,
-    // 152,148; next best 141) - misses by 75. The override fires on b3 only.
+    // RE5 NAMED DEVIATION: the D2 policy is now RD-lite, and this fixture's
+    // SAD-era decision narrative no longer holds for the PRODUCTION walk.
+    // Measured (l6dump, the production encodeFrameAuto4x4Q): the RD-lite
+    // decisions are {0, 0, 8, 3} = DC, DC, D67, D45 - b3 is NOT DC-decided
+    // any more, so the test-only FI override (which fires only on
+    // DC-decided blocks) cannot fire in the production walk, and no block
+    // of this fixture satisfies (DC-decided AND FI-wins) under RD-lite.
+    // The FI=1 emission-path test therefore stays on Part B's test-only
+    // walk, which RETAINS the SAD scoring as scaffolding (the D2 policy
+    // conformance is owned by the gate-pinned fixtures; this test owns the
+    // FI symbol surface). Part A pins the measured RD-lite production modes
+    // and asserts the FI=0 read-back property policy-agnostically (wherever
+    // the decoder reads an FI symbol, it reads the off sentinel).
+    //
+    // SAD-era narrative (Part B's scaffolding, still true for the in-test
+    // walk): b0 = 129 flat: the no-edge fills are above 127 / left 129 /
+    // corner 128, so H_PRED predicts 129-flat exactly and wins the D2 at
+    // sad 0 (tie with D157/D203, lowest index). b1 rows 0-2 = 129 with
+    // row 3 = [150,160,170,180]: with only the left edge [129x4] every one
+    // of the 13 candidates predicts 129-flat and ties at sad 144 - tie-break
+    // DC_PRED; the FI table ties too (all 144), so no FI win and the flag=0
+    // branch of writeFilterIntra is exercised in the same walk. b2 is the
+    // transpose and sees a REAL recon top-right (b1's recon row 3 =
+    // [149,158,170,179], q100 noise) - D67_PRED wins there. b3's source is
+    // the FILTER_D157_PRED prediction of the walk's own recon edges
+    // (above = b1's recon row 3 = [149,158,170,179], left = b2's recon
+    // col 3 = [143,156,168,176], above-left = 129), so its FI_D157 SAD is
+    // exactly 0 while DC - the D2 argmin at sad 75 (table 75,159,141,262,
+    // 209,172,161,153,196,151,153,152,148; next best 141) - misses by 75.
+    // The override fires on b3 only.
     pixels::Plane plane(8, 8, 4);
     pixels::Plane recon(8, 8, 4);
     for (int y = 0; y < 4; ++y)
@@ -5568,7 +5801,10 @@ TEST_CASE("FI DC-deciding fixture: the FI=1 emission path round-trips content-ex
         memset(&na, 0xFF, sizeof(na));
         pipeline::encodeFrameAuto4x4Q(plane, reconA, coeffs, modes, 100,
                                       transforms::TxType::DCT_DCT, &w, &fc, &na);
-        const std::uint8_t wantModes[4] = {2, 0, 8, 0};
+        // RE5: the RD-lite production decisions on this fixture, MEASURED
+        // (l6dump: modes 0 0 8 3, pos 13) - no gate line exists for this
+        // test-only fixture; the pin is the measured production state.
+        const std::uint8_t wantModes[4] = {0, 0, 8, 3};
         bool modesOk = true;
         for (int i = 0; i < 4; ++i)
             if (modes[i] != wantModes[i]) modesOk = false;
@@ -5840,4 +6076,101 @@ TEST_CASE("FI DC-deciding fixture: the FI=1 emission path round-trips content-ex
     }
     // the writer and reader CDF states agree (the full adaptation replayed)
     CHECK(entropy::ecFrameCdfsEqual(&fc, &fcR) == 1);
+}
+// ---- RE5: the RD-lite wiring rung (the D2 policy gains the RD ranking) ----
+TEST_CASE("RE5 rdliteLambda is 0 at lossless (the named policy lambda: linear in qindex, 0 at q0)") {
+    CHECK(pipeline::rdliteLambda(0) == 0u);
+}
+TEST_CASE("RE5 rdliteLambda is 100 at q100 and monotone across the range") {
+    CHECK(pipeline::rdliteLambda(100) == 100u);
+    for (int q = 1; q <= 255; ++q)
+        CHECK(pipeline::rdliteLambda(q) >= pipeline::rdliteLambda(q - 1));
+}
+TEST_CASE("RE5 initRdliteFrameCtx initializes the RE1 rate estimation surface") {
+    pipeline::RdliteFrameCtx ctx;
+    pipeline::initRdliteFrameCtx(&ctx, 0);
+    CHECK(ctx.me.initialized);
+}
+TEST_CASE("RE5 initRdliteFrameCtx bridges the kf-y rate table from the l7 default cdfs") {
+    // Oracle: the reference's own loop (md_rate_estimation.c:120-:123) over
+    // the l7 frame context the emission itself uses.
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc, 100);
+    pipeline::RdliteFrameCtx ctx;
+    pipeline::initRdliteFrameCtx(&ctx, 100);
+    bool ok = true;
+    for (int i = 0; i < 5; ++i)
+        for (int j = 0; j < 5; ++j) {
+            std::int32_t want[entropy::INTRA_MODES];
+            l16_rdo::getSyntaxRateFromCdf(want, fc.kf_y_cdf[i][j], nullptr);
+            for (int m = 0; m < entropy::INTRA_MODES; ++m)
+                if (ctx.me.yModeFacBits[i][j][m] != want[m]) ok = false;
+        }
+    CHECK(ok);
+}
+TEST_CASE("RE5 initRdliteFrameCtx bridges the angle-delta, uv-mode and token rate tables") {
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc, 100);
+    pipeline::RdliteFrameCtx ctx;
+    pipeline::initRdliteFrameCtx(&ctx, 100);
+    bool angleOk = true, uvOk = true;
+    for (int d = 0; d < 8; ++d) {
+        std::int32_t want[7];  // 2 * MAX_ANGLE_DELTA + 1
+        l16_rdo::getSyntaxRateFromCdf(want, fc.angle_delta_cdf[d], nullptr);
+        for (int i = 0; i < 7; ++i)
+            if (ctx.me.angleDeltaFacBits[d][i] != want[i]) angleOk = false;
+    }
+    for (int c = 0; c < 2; ++c)
+        for (int m = 0; m < 13; ++m) {
+            std::int32_t want[14];
+            l16_rdo::getSyntaxRateFromCdf(want, fc.uv_mode_cdf[c][m], nullptr);
+            for (int u = 0; u < 14; ++u)
+                if (ctx.me.intraUvModeFacBits[c][m][u] != want[u]) uvOk = false;
+        }
+    CHECK(angleOk);
+    CHECK(uvOk);
+    // the token tables: one spot row each from the q100 bucket (the full
+    // enumeration is the l16 estimateCoefficientsRate suite's surface)
+    std::int32_t want[2];
+    l16_rdo::getSyntaxRateFromCdf(want, fc.txb_skip_cdf[0][0], nullptr);
+    CHECK(ctx.me.coeffFacBits[0][0].txbSkipCost[0][0] == want[0]);
+    CHECK(ctx.me.coeffFacBits[0][0].txbSkipCost[0][1] == want[1]);
+    std::int32_t wantEob[11];
+    l16_rdo::getSyntaxRateFromCdf(wantEob, fc.eob_flag_cdf16[0][0], nullptr);
+    CHECK(ctx.me.eobFracBits[0][0].eobCost[0][0] == wantEob[0]);
+    CHECK(ctx.me.eobFracBits[0][0].eobCost[0][4] == wantEob[4]);
+    CHECK(ctx.lambda == pipeline::rdliteLambda(100));
+}
+TEST_CASE("RE5 decideBlockMode4x4 ranks by RD (rate breaks the zero-variance tie the SAD policy lost to index)") {
+    // The v fixture: V and PAETH both reconstruct the block exactly (SAD 0 /
+    // variance 0), so the OLD policy's tie-break picked V by mode index. The
+    // RD-lite ranking replaces the tie-break with the rate: the winner is the
+    // lower-cost candidate in the kf ctx pair, computed here from the same
+    // rate surface (the reference's isISlice luma path, rd_cost.c:624-:631).
+    const std::uint8_t src[16] = {10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40};
+    const std::uint8_t above[4] = {10, 20, 30, 40};
+    pipeline::RdliteFrameCtx rctx;
+    pipeline::initRdliteFrameCtx(&rctx, 100);
+    std::int32_t topCtx = 0, leftCtx = 0;
+    entropy::getKfYModeCtx(0, 0, 0, 0, &topCtx, &leftCtx);
+    int wantMode = -1;
+    std::int64_t wantRd = 0;
+    for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
+        // every candidate on this fixture reconstructs exactly EXCEPT those
+        // whose predictor is not the vertical ramp; compute the SAD-side
+        // truth the same way the ranking does: variance 0 for V and PAETH
+        // (pinned by the d2_v golden), > 0 for the rest.
+        const bool zeroVar = (m == intra::V_PRED || m == intra::PAETH_PRED);
+        const std::int64_t rate = rctx.me.yModeFacBits[topCtx][leftCtx][m];
+        // RDCOST(lambda, rate, 0): (rate*lambda + 256) >> 9, dist 0.
+        const std::int64_t rd = zeroVar ? ((rate * (std::int64_t)rctx.lambda + 256) >> 9)
+                                        : std::numeric_limits<std::int64_t>::max();
+        if (wantMode < 0 || rd < wantRd) {
+            wantMode = m;
+            wantRd = rd;
+        }
+    }
+    const auto d = pipeline::decideBlockMode4x4(src, above, 4, 0, nullptr, 0, 0, 0,
+                                                intra::NeighborContext(), rctx);
+    CHECK((int)d.mode == wantMode);
 }

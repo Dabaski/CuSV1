@@ -200,7 +200,7 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
     std::int32_t coeffs[1024] = {0};
     std::uint8_t modes[4] = {0};
     pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT);
-    static const std::uint8_t wantModes[4] = {1, 7, 2, 2};  // gate ecfrm_modes
+    static const std::uint8_t wantModes[4] = {10, 7, 0, 0};  // gate ecfrm_modes
     bool modesOk = true;
     for (int i = 0; i < 4; ++i)
         if (modes[i] != wantModes[i]) modesOk = false;
@@ -241,6 +241,17 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
                                &topCtx, &leftCtxKf);
         entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
                                  static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, 0);
+        // filter-intra flag: the decoder reads it for DC_PRED blocks at
+        // bsize <= 32x32 (aom reconintra.h:68-80); the symbol is written
+        // exactly when the decoder reads it (mode DC), through the ADAPTING
+        // frame-context cdf (SVT entropy_coding.c:5052). RE5 exposed the
+        // omission: the RD-lite ranking made blocks 2-3 DC_PRED where the
+        // SAD ranking had none. FILTER_INTRA_MODES = the not-used sentinel
+        // (writeFilterIntra emits the use flag 0 and skips the mode symbol).
+        if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0, modes[b])) {
+            entropy::writeFilterIntra(&w, &fc, entropy::BLOCK_16X16,
+                                      entropy::FILTER_INTRA_MODES);
+        }
         std::int32_t ec = 0;
         for (int c = 255; c >= 0; --c) {
             if (coeffs[b * 256 + scan16[c]] != 0) { ec = c + 1; break; }
@@ -252,34 +263,40 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
     }
     entropy::odEcStopEncode(&w);
 
-    // TU v2 == gate tu_bytes_v2 47 (TD5b: the q100 bucket, idx 2)
+    // TU v2 == gate tu_bytes_v2 49 (TD5b: the q100 bucket, idx 2; RE5: the
+    // RD-lite ranking changed the modes to {10,7,0,0} - the two DC_PRED
+    // blocks emit FI symbols - and the same byte count holds: the two FI
+    // symbols fit inside the final byte's padding, the tail re-encodes)
     unsigned char tuBuf[128];
     memset(tuBuf, 0, sizeof(tuBuf));
     const std::uint32_t tuSize =
         bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, w.pos);
-    REQUIRE(tuSize == 47);
-    static const unsigned char wantTu2[47] = {
-        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x20,
-        0x10, 0xd9, 0x00, 0x00, 0x01, 0xbc, 0xb5, 0x86, 0x91, 0x2e, 0xb4, 0xff, 0xd9, 0xb5, 0xbd,
-        0xc5, 0x16, 0x13, 0xec, 0x17, 0x00, 0xe5, 0x21, 0x87, 0x39, 0x1a, 0x0c, 0xa8, 0x0e, 0xdc,
-        0xb0, 0x38};
-    for (int i = 0; i < 47; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
+    REQUIRE(tuSize == 49);
+    static const unsigned char wantTu2[49] = {
+        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x22,
+        0x10, 0xd9, 0x00, 0x00, 0x01, 0xc2, 0xb8, 0xb2, 0x8c, 0xb3, 0x90, 0xff, 0xd3, 0xe1, 0xf3,
+        0x76, 0x74, 0xcc, 0x49, 0x40, 0x31, 0xc3, 0x46, 0xd7, 0x74, 0x60, 0x35, 0x11, 0xdd, 0xf8,
+        0x7a, 0x8e, 0x00, 0x1b};
+    for (int i = 0; i < 49; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
 }
 
 TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate bytes") {
     // TS4 milestone artifact: goldens/structural_keyframe.obu is the
     // gate-pinned tu_bytes_v2 stream (tools/golden_gen expected line:
-    // tu_bytes_v2 47 12 00 0a ... b0 38 - TD5b: the q100 bucket, idx 2),
+    // tu_bytes_v2 49 12 00 0a ... 7a 8e 00 1b - TD5b: the q100 bucket,
+    // idx 2; RE5: the RD-lite ranking changed the modes to {10,7,0,0},
+    // the two DC_PRED blocks emit FI symbols, and the byte count holds:
+    // the two FI symbols fit inside the final byte's padding),
     // produced from the generator
     // output (not hand-typed). The test proves the three-way identity:
     // composed TU (l6 coefficients + l7 tile symbols + l8 assembly) ==
     // committed file == gate bytes. The USER runs the external decode
     // check (aomdec/dav1d/ffmpeg - decode handoff attempt #3).
-    static const unsigned char wantTu2[47] = {
-        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x20,
-        0x10, 0xd9, 0x00, 0x00, 0x01, 0xbc, 0xb5, 0x86, 0x91, 0x2e, 0xb4, 0xff, 0xd9, 0xb5, 0xbd,
-        0xc5, 0x16, 0x13, 0xec, 0x17, 0x00, 0xe5, 0x21, 0x87, 0x39, 0x1a, 0x0c, 0xa8, 0x0e, 0xdc,
-        0xb0, 0x38};
+    static const unsigned char wantTu2[49] = {
+        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x22,
+        0x10, 0xd9, 0x00, 0x00, 0x01, 0xc2, 0xb8, 0xb2, 0x8c, 0xb3, 0x90, 0xff, 0xd3, 0xe1, 0xf3,
+        0x76, 0x74, 0xcc, 0x49, 0x40, 0x31, 0xc3, 0x46, 0xd7, 0x74, 0x60, 0x35, 0x11, 0xdd, 0xf8,
+        0x7a, 0x8e, 0x00, 0x1b};
 
     // composed v2 TU (identical pipeline to the TS4 test)
     pixels::Plane plane(32, 32, 4);
@@ -322,6 +339,13 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
                                &topCtx, &leftCtxKf);
         entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
                                  static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, 0);
+        // the FI symbol: identical surface to the TS4 walk above (the
+        // decoder reads it for DC_PRED blocks at bsize <= 32x32, through
+        // the ADAPTING frame-context cdf)
+        if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0, modes[b])) {
+            entropy::writeFilterIntra(&w, &fc, entropy::BLOCK_16X16,
+                                      entropy::FILTER_INTRA_MODES);
+        }
         std::int32_t ec = 0;
         for (int c = 255; c >= 0; --c) {
             if (coeffs[b * 256 + scan16[c]] != 0) { ec = c + 1; break; }
@@ -335,8 +359,8 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
     unsigned char tuBuf[128];
     memset(tuBuf, 0, sizeof(tuBuf));
     const std::uint32_t tuSize = bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, w.pos);
-    REQUIRE(tuSize == 47);
-    for (int i = 0; i < 47; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
+    REQUIRE(tuSize == 49);
+    for (int i = 0; i < 49; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
 
     // committed artifact identity. The goldens path derives from __FILE__
     // (robust against compile-definition quoting across CMake generators -
@@ -352,8 +376,8 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
     unsigned char fileBytes[64] = {0};
     const size_t n = fread(fileBytes, 1, sizeof(fileBytes), f);
     fclose(f);
-    REQUIRE(n == 47);
-    for (int i = 0; i < 47; ++i) CHECK(fileBytes[i] == wantTu2[i]);
+    REQUIRE(n == 49);
+    for (int i = 0; i < 49; ++i) CHECK(fileBytes[i] == wantTu2[i]);
 }
 
 // ---- FS5b: the per-geometry single-TU v3 artifacts (4/8/16/64) -------------
@@ -681,6 +705,83 @@ TEST_CASE("CS5: the color TU artifacts - three-way identity per size") {
         for (unsigned i = 0; i < tuSize; ++i) CHECK((unsigned)tuBuf[i] == wantTu[i]);
 
         // the committed artifact: composed == file == gate (three-way)
+        char tuFilePath[256];
+        snprintf(tuFilePath, sizeof(tuFilePath),
+                 "%sgoldens/structural_keyframe_color%d.obu", dir.c_str(), S);
+        FILE* fp = nullptr;
+        fopen_s(&fp, tuFilePath, "rb");
+        REQUIRE(fp != nullptr);
+        unsigned char fileBytes[4096] = {0};
+        const size_t rd = fread(fileBytes, 1, sizeof(fileBytes), fp);
+        fclose(fp);
+        REQUIRE(rd == tuSize);
+        for (std::uint32_t i = 0; i < tuSize; ++i) CHECK(fileBytes[i] == tuBuf[i]);
+    }
+}
+
+// CS5 port-composition leg (the port==mirror check): the tile composed by the
+// PORT's chroma walk (pipeline::encodeFrameChromaQ on the CS4 fixture, q100)
+// assembled through TUv3 == the gate tu_colorS == the committed file. The walk
+// stream itself is already byte-exact vs the ecs4S gate lines at l6; this leg
+// closes the composition at l8 (the RE5 color16 localization: the port side
+// cannot diverge from the mirror side at the artifact level without this leg
+// failing here).
+TEST_CASE("CS5: the port-composed color TU - three-way identity per size") {
+    const std::string f = __FILE__;
+    std::string dir = f.substr(0, f.find_last_of("/\\") + 1);
+    static const int sizes[4] = {4, 8, 16, 32};
+    for (int si = 0; si < 4; ++si) {
+        const int S = sizes[si];
+        const int B = 2 * S;
+        pixels::Plane srcY(64, 64, 8), reconY(64, 64, 8);
+        pixels::Plane srcU(32, 32, 8), reconU(32, 32, 8);
+        pixels::Plane srcV(32, 32, 8), reconV(32, 32, 8);
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x)
+                srcY.at(x, y) = (y < 32) ? static_cast<std::uint8_t>(x + y + 1) : 0;
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x) {
+                const std::uint8_t u =
+                    static_cast<std::uint8_t>((y < 16) ? 2 * (x + y + 2) : 0);
+                srcU.at(x, y) = u;
+                srcV.at(x, y) = static_cast<std::uint8_t>(255 - u);
+            }
+        static std::int32_t coeffsY[64 * 4096], coeffsU[64 * 1024], coeffsV[64 * 1024];
+        static std::uint8_t modesY[64], modesU[64], modesV[64];
+        static std::uint16_t eobsY[64], eobsU[64], eobsV[64];
+        memset(coeffsY, 0, sizeof(coeffsY));
+        memset(coeffsU, 0, sizeof(coeffsU));
+        memset(coeffsV, 0, sizeof(coeffsV));
+        memset(modesY, 0, sizeof(modesY));
+        memset(modesU, 0, sizeof(modesU));
+        memset(modesV, 0, sizeof(modesV));
+        memset(eobsY, 0, sizeof(eobsY));
+        memset(eobsU, 0, sizeof(eobsU));
+        memset(eobsV, 0, sizeof(eobsV));
+        entropy::AomWriter w{};
+        static unsigned char tileBuf[32768];
+        memset(tileBuf, 0, sizeof(tileBuf));
+        w.ec.buf = tileBuf;
+        entropy::EcFrameContext fc;
+        entropy::DcSignLevelCoeffNa naY, naU, naV;
+        memset(&naY, 0xFF, sizeof(naY));
+        memset(&naU, 0xFF, sizeof(naU));
+        memset(&naV, 0xFF, sizeof(naV));
+        pipeline::encodeFrameChromaQ(srcY, srcU, srcV, reconY, reconU, reconV, coeffsY,
+                                     coeffsU, coeffsV, modesY, modesU, modesV, eobsY,
+                                     eobsU, eobsV, 100, B, transforms::TxType::DCT_DCT,
+                                     &w, &fc, &naY, &naU, &naV);
+        const unsigned char* wantTu = (S == 4) ? tu_color4 : (S == 8) ? tu_color8
+                                      : (S == 16) ? tu_color16 : tu_color32;
+        const unsigned wantLen = (S == 4) ? sizeof(tu_color4) : (S == 8) ? sizeof(tu_color8)
+                                 : (S == 16) ? sizeof(tu_color16) : sizeof(tu_color32);
+        unsigned char tuBuf[2048];
+        memset(tuBuf, 0, sizeof(tuBuf));
+        const std::uint32_t tuSize =
+            bitstream::assembleStructuralKeyframeTUv3(tuBuf, tileBuf, w.pos, 64);
+        REQUIRE(tuSize == wantLen);
+        for (unsigned i = 0; i < tuSize; ++i) CHECK((unsigned)tuBuf[i] == wantTu[i]);
+
         char tuFilePath[256];
         snprintf(tuFilePath, sizeof(tuFilePath),
                  "%sgoldens/structural_keyframe_color%d.obu", dir.c_str(), S);

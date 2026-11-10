@@ -8,6 +8,7 @@
 #include <motion.h>
 #include <transform.h>
 #include <entropy.h>
+#include "rdlite.h"
 
 namespace pipeline {
 
@@ -155,9 +156,12 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
 // mode index) is documented here and attributed to no one else.
 // angleDelta = 0 and filter-intra off for all candidates (parked).
 // neighbors: chosen neighbor modes for filt_type (default = no history).
+// RE5 UPDATE: the ranking is now RD-lite (see rdlite.h); the sad field stays
+// the SAD bookkeeping value, rd is the winning RDCOST.
 struct ModeDecision {
     intra::PredictionMode mode;
     std::uint32_t sad;
+    std::uint64_t rd;
 };
 
 // ---- CH3: chroma (4:2:0) frame compositions --------------------------------
@@ -267,10 +271,16 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
 // Sum of squared sample differences over the full frame (integer, exact).
 std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b);
 
+// RE5: the RD-lite lambda policy - OURS (the rc-walled svt_aom_compute_rd_mult
+// chain stays parked): lambda(q) = 0 at lossless (q0, the rate term is free),
+// else linear in qindex, 100 at q100. Monotone non-decreasing in qindex.
+std::uint32_t rdliteLambda(std::int32_t qindex);
+
 ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
                                 int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
                                 int nBottomLeftPx, std::uint8_t aboveLeft,
-                                const intra::NeighborContext& neighbors = intra::NeighborContext());
+                                const intra::NeighborContext& neighbors,
+                                const RdliteFrameCtx& rdlite);
 
 // D3 policy generalized to 8x8 blocks: decideBlockMode8x8 scores all 13
 // candidates with motion::sad8x8 (bit-exact with svt_nxm_sad_kernel_helper_c
@@ -278,28 +288,32 @@ ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* abo
 ModeDecision decideBlockMode8x8(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
                                 int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
                                 int nBottomLeftPx, std::uint8_t aboveLeft,
-                                const intra::NeighborContext& neighbors = intra::NeighborContext());
+                                const intra::NeighborContext& neighbors,
+                                const RdliteFrameCtx& rdlite);
 
 // C7 policy generalized to 16x16 blocks: same D2 policy scored with
 // motion::sad16x16 (bit-exact with svt_nxm_sad_kernel_helper_c at 16x16).
 ModeDecision decideBlockMode16x16(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
                                   int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
                                   int nBottomLeftPx, std::uint8_t aboveLeft,
-                                  const intra::NeighborContext& neighbors = intra::NeighborContext());
+                                  const intra::NeighborContext& neighbors,
+                                  const RdliteFrameCtx& rdlite);
 
 // L5 policy generalized to 32x32 blocks: same D2 policy scored with
 // motion::sad32x32 (bit-exact with svt_nxm_sad_kernel_helper_c at 32x32).
 ModeDecision decideBlockMode32x32(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
                                   int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
                                   int nBottomLeftPx, std::uint8_t aboveLeft,
-                                  const intra::NeighborContext& neighbors = intra::NeighborContext());
+                                  const intra::NeighborContext& neighbors,
+                                  const RdliteFrameCtx& rdlite);
 
 // L9 policy generalized to 64x64 blocks: same D2 policy scored with
 // motion::sad64x64 (bit-exact with svt_nxm_sad_kernel_helper_c at 64x64).
 ModeDecision decideBlockMode64x64(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
                                   int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
                                   int nBottomLeftPx, std::uint8_t aboveLeft,
-                                  const intra::NeighborContext& neighbors = intra::NeighborContext());
+                                  const intra::NeighborContext& neighbors,
+                                  const RdliteFrameCtx& rdlite);
 
 void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                         std::uint8_t* modes, transforms::TxType txType);

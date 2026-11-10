@@ -1,5 +1,7 @@
 #include "pipeline.h"
 
+#include <analysis.h>
+#include <cstring>
 #include <string>
 
 namespace pipeline {
@@ -180,29 +182,223 @@ std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b) {
 
 // D2 policy (ours): all 13 PredictionModes, SAD-scored, lowest wins,
 // tie-break = lowest mode index. Primitives are 1:1 SVT.
-ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
-                                int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
-                                int nBottomLeftPx, std::uint8_t aboveLeft,
-                                const intra::NeighborContext& neighbors) {
-    ModeDecision best{intra::DC_PRED, 0};
+//
+// RE5 (the RD-lite wiring rung): the ranking is now RD-lite, composed from
+// the landed 1:1 cost surfaces, in the reference's own fast-path shape:
+//   rd = RDCOST(lambda, intraFastRate, variance << 4)
+// - DISTORTION: the variance kernel, NOT psyDistortion. Cited:
+//   product_coding_loop.c:1008-:1016 - cand_bf->luma_fast_dist =
+//   fn_ptr->vf(...); luma_fast_dist <<= 4. The psy family only enters the
+//   reference's fast path when ac_bias is enabled (psy_adjust_rate_light /
+//   psy_full_dist at product_coding_loop.c:4386/:4778-:4810) and our
+//   ac_bias config is 0. The kernel consumed is l9's varianceCore
+//   (C_DEFAULT/variance.c:141-158, the VAR(W,H) core) + the :189
+//   mean-correction (variance = sse - (sum*sum)/(w*h)), via the court-
+//   ordered av1_pipeline -> av1_analysis link.
+// - RATE: the landed l16 intraFastCost (rd_cost.c:526-:640) with the walls
+//   threaded from the frame configuration: isISlice=true, skipModeCtx=0
+//   (our named skip=0 emission convention), FI/palette/intrabc off (the
+//   pinned CONFIG), the kf ctx pair from the DECIDED neighbor modes via
+//   l7 getKfYModeCtx, angle delta 0 (our emission's convention), hasUv
+//   FALSE for the luma ranking (the chroma D2 stays SAD this rung - the
+//   ratified rung boundary).
+// - LAMBDA: rdliteLambda (ours, named; the rc-walled
+//   svt_aom_compute_rd_mult chain stays parked).
+// - TIE-BREAK: strict < on rd - the reference's candidate preference rule
+//   (product_coding_loop.c:1458: if (*cand_bf->fast_cost <
+//   ctx->mds0_best_cost)), first candidate in the enumeration order wins
+//   ties, which is our lowest-mode-index order.
+// The SAD stays computed as bookkeeping (the ModeDecision::sad field).
+namespace {
+
+// RE5: a valid uniform n-symbol cdf row (the named-deviation fill for the
+// seven syntax families the minimal l7 slice does not carry - see the
+// initRdliteFrameCtx comment).
+void fillUniformCdfRow(l16_rdo::AomCdfProb* row, int n) {
+    const std::int32_t p = CDF_PROB_TOP / n;
+    for (int i = 0; i < n; ++i) {
+        row[i] = (l16_rdo::AomCdfProb)AOM_ICDF(CDF_PROB_TOP - (i + 1) * p);
+    }
+    row[n] = (l16_rdo::AomCdfProb)AOM_ICDF(CDF_PROB_TOP);
+}
+
+int rdliteBsizeEnum(int B) {
+    return B == 4   ? entropy::BLOCK_4X4
+           : B == 8 ? entropy::BLOCK_8X8
+           : B == 16 ? entropy::BLOCK_16X16
+           : B == 32 ? entropy::BLOCK_32X32
+                     : entropy::BLOCK_64X64;
+}
+
+ModeDecision rdliteDecide(const RdliteFrameCtx& rctx, int B, const std::uint8_t* src,
+                          const std::uint8_t* aboveRef, int nTopPx, int nTopRightPx,
+                          const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
+                          std::uint8_t aboveLeft, const intra::NeighborContext& neighbors) {
+    ModeDecision best{intra::DC_PRED, 0, 0};
     bool haveBest = false;
+    const int bsize = rdliteBsizeEnum(B);
     for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
-        std::uint8_t pred[16] = {0};
-        intra::buildIntraPredictors(pred, 4, m, 0, 4, 4, aboveLeft, aboveRef, nTopPx, nTopRightPx,
+        std::uint8_t pred[64 * 64];
+        intra::buildIntraPredictors(pred, B, m, 0, B, B, aboveLeft, aboveRef, nTopPx, nTopRightPx,
                                     leftRef, nLeftPx, nBottomLeftPx, neighbors);
-        const std::uint32_t sad = motion::sad4x4(src, 4, pred, 4);
-        if (!haveBest || sad < best.sad) {
-            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad};
+        std::uint32_t sad = 0;
+        switch (B) {
+        case 4: sad = motion::sad4x4(src, 4, pred, 4); break;
+        case 8: sad = motion::sad8x8(src, 8, pred, 8); break;
+        case 16: sad = motion::sad16x16(src, 16, pred, 16); break;
+        case 32: sad = motion::sad32x32(src, 32, pred, 32); break;
+        default: sad = motion::sad64x64(src, 64, pred, 64); break;
+        }
+
+        std::uint32_t sse = 0;
+        int sum = 0;
+        analysis::varianceCore(src, B, pred, B, B, B, &sse, &sum);
+        const std::uint64_t variance = sse - (std::uint32_t)(((std::int64_t)sum * sum) / (B * B));
+        const std::uint64_t lumaFastDist = variance << 4;
+
+        l16_rdo::IntraFastCandidate cand{};
+        cand.mode = m;
+        cand.uvMode = intra::DC_PRED;
+        cand.angleDelta[0] = 0;
+        cand.angleDelta[1] = 0;
+        cand.filterIntraMode = l6_rdlite::kFilterIntraModes;
+        cand.paletteSize[0] = -1;
+        cand.paletteSize[1] = -1;
+
+        int topCtx = 0, leftCtx = 0;
+        entropy::getKfYModeCtx(nLeftPx > 0 ? 1 : 0, (int)neighbors.leftMode,
+                               nTopPx > 0 ? 1 : 0, (int)neighbors.aboveMode, &topCtx, &leftCtx);
+
+        std::uint32_t lumaRate = 0, chromaRate = 0;
+        l16_rdo::IntraFastCostArgs args{};
+        args.me = &rctx.me;
+        args.cand = &cand;
+        args.bsize = bsize;
+        args.bwidth = B;
+        args.bheight = B;
+        args.lambda = rctx.lambda;
+        args.lumaDistortion = lumaFastDist;
+        args.fastLumaRate = &lumaRate;
+        args.fastChromaRate = &chromaRate;
+        args.skipModeCtx = 0;
+        args.intraLumaTopCtx = topCtx;
+        args.intraLumaLeftCtx = leftCtx;
+        args.isInterCtx = 0;
+        args.hasUv = false;
+        args.paletteModeCtx = 0;
+        args.isISlice = true;
+        args.skipModeFlag = false;
+        args.filterIntraLevel = 0;
+        args.allowScreenContentTools = 0;
+        args.frameAllowIntrabc = false;
+        args.enablePalette = 0;
+        args.dvJointCost = nullptr;
+        args.dvCostRow[0] = nullptr;
+        args.dvCostRow[1] = nullptr;
+        args.blkOrgX = 0;
+        args.blkOrgY = 0;
+        const std::int64_t rd = l16_rdo::intraFastCost(args);
+
+        if (!haveBest || rd < (std::int64_t)best.rd) {
+            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad,
+                                static_cast<std::uint64_t>(rd)};
             haveBest = true;
         }
     }
     return best;
 }
 
+}  // namespace
+
+void initRdliteFrameCtx(RdliteFrameCtx* ctx, std::int32_t qindex) {
+    *ctx = RdliteFrameCtx{};
+
+    entropy::EcFrameContext fc;
+    entropy::initDefaultEcFrameContext(&fc, qindex);
+
+    // The token families (estimateCoefficientsRate, the S7 span): every
+    // family the l7 EcFrameContext carries.
+    l16_rdo::FcTokenCdfs token;
+    std::memcpy(token.eobFlagCdf16, fc.eob_flag_cdf16, sizeof(token.eobFlagCdf16));
+    std::memcpy(token.eobFlagCdf32, fc.eob_flag_cdf32, sizeof(token.eobFlagCdf32));
+    std::memcpy(token.eobFlagCdf64, fc.eob_flag_cdf64, sizeof(token.eobFlagCdf64));
+    std::memcpy(token.eobFlagCdf128, fc.eob_flag_cdf128, sizeof(token.eobFlagCdf128));
+    std::memcpy(token.eobFlagCdf256, fc.eob_flag_cdf256, sizeof(token.eobFlagCdf256));
+    std::memcpy(token.eobFlagCdf512, fc.eob_flag_cdf512, sizeof(token.eobFlagCdf512));
+    std::memcpy(token.eobFlagCdf1024, fc.eob_flag_cdf1024, sizeof(token.eobFlagCdf1024));
+    std::memcpy(token.txbSkipCdf, fc.txb_skip_cdf, sizeof(token.txbSkipCdf));
+    std::memcpy(token.coeffBaseEobCdf, fc.coeff_base_eob_cdf, sizeof(token.coeffBaseEobCdf));
+    std::memcpy(token.coeffBaseCdf, fc.coeff_base_cdf, sizeof(token.coeffBaseCdf));
+    std::memcpy(token.eobExtraCdf, fc.eob_extra_cdf, sizeof(token.eobExtraCdf));
+    std::memcpy(token.dcSignCdf, fc.dc_sign_cdf, sizeof(token.dcSignCdf));
+    std::memcpy(token.coeffBrCdf, fc.coeff_br_cdf, sizeof(token.coeffBrCdf));
+    l16_rdo::estimateCoefficientsRate(&ctx->me, &token);
+
+    // The syntax families (estimateSyntaxRate, the S8 span, the is_i_slice
+    // path at flags 0): the carried families bridged, the seven
+    // non-carried families uniform (the named deviation above).
+    l16_rdo::FcSyntaxCdfs syn;
+    std::memcpy(syn.partition_cdf, fc.partition_cdf, sizeof(syn.partition_cdf));
+    std::memcpy(syn.skip_cdfs, fc.skip_cdfs, sizeof(syn.skip_cdfs));
+    std::memcpy(syn.kf_y_cdf, fc.kf_y_cdf, sizeof(syn.kf_y_cdf));
+    std::memcpy(syn.uv_mode_cdf, fc.uv_mode_cdf, sizeof(syn.uv_mode_cdf));
+    std::memcpy(syn.angle_delta_cdf, fc.angle_delta_cdf, sizeof(syn.angle_delta_cdf));
+    std::memcpy(syn.intra_ext_tx_cdf, fc.intra_ext_tx_cdf, sizeof(syn.intra_ext_tx_cdf));
+    for (int i = 0; i < SKIP_CONTEXTS; ++i) {
+        fillUniformCdfRow(syn.skip_mode_cdfs[i], 2);
+    }
+    for (int i = 0; i < BlockSize_GROUPS; ++i) {
+        fillUniformCdfRow(syn.y_mode_cdf[i], entropy::INTRA_MODES);
+    }
+    for (int i = 0; i < SWITCHABLE_FILTER_CONTEXTS; ++i) {
+        fillUniformCdfRow(syn.switchable_interp_cdf[i], SWITCHABLE_FILTERS);
+    }
+    fillUniformCdfRow(syn.cfl_sign_cdf, CFL_JOINT_SIGNS);
+    for (int i = 0; i < CFL_ALPHA_CONTEXTS; ++i) {
+        fillUniformCdfRow(syn.cfl_alpha_cdf[i], CFL_ALPHABET_SIZE);
+    }
+    for (int i = 0; i < MAX_TX_CATS; ++i) {
+        for (int j = 0; j < TX_SIZE_CONTEXTS; ++j) {
+            fillUniformCdfRow(syn.tx_size_cdf[i][j], MAX_TX_DEPTH + 1);
+        }
+    }
+    for (int i = 0; i < TXFM_PARTITION_CONTEXTS; ++i) {
+        fillUniformCdfRow(syn.txfm_partition_cdf[i], 2);
+    }
+    for (int s = 0; s < EXT_TX_SETS_INTER; ++s) {
+        for (int t = 0; t < EXT_TX_SIZES; ++t) {
+            fillUniformCdfRow(syn.inter_ext_tx_cdf[s][t], TX_TYPES);
+        }
+    }
+    for (int i = 0; i < INTRA_INTER_CONTEXTS; ++i) {
+        fillUniformCdfRow(syn.intra_inter_cdf[i], 2);
+    }
+    l16_rdo::estimateSyntaxRate(&ctx->me, 0, 0, 0, 0, &syn);
+    l16_rdo::estimateIntraInterRate(&ctx->me, &syn);
+    ctx->lambda = rdliteLambda(qindex);
+}
+
+std::uint32_t rdliteLambda(std::int32_t qindex) {
+    return qindex <= 0 ? 0u : (std::uint32_t)qindex;
+}
+
+ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
+                                int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                int nBottomLeftPx, std::uint8_t aboveLeft,
+                                const intra::NeighborContext& neighbors,
+                                const RdliteFrameCtx& rdlite) {
+    return rdliteDecide(rdlite, 4, src, aboveRef, nTopPx, nTopRightPx, leftRef, nLeftPx,
+                        nBottomLeftPx, aboveLeft, neighbors);
+}
+
 void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
                         std::uint8_t* modes, transforms::TxType txType) {
     const int gridW = src.width() / 4;
     const int gridH = src.height() / 4;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, 0);
     for (int by = 0; by < gridH; ++by) {
         for (int bx = 0; bx < gridW; ++bx) {
             const int px = bx * 4;
@@ -248,7 +444,7 @@ void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int
             }
 
             const ModeDecision d = decideBlockMode4x4(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                      nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                      nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::int32_t cb[16] = {0};
@@ -269,20 +465,10 @@ void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int
 ModeDecision decideBlockMode8x8(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
                                 int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
                                 int nBottomLeftPx, std::uint8_t aboveLeft,
-                                const intra::NeighborContext& neighbors) {
-    ModeDecision best{intra::DC_PRED, 0};
-    bool haveBest = false;
-    for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
-        std::uint8_t pred[64] = {0};
-        intra::buildIntraPredictors(pred, 8, m, 0, 8, 8, aboveLeft, aboveRef, nTopPx, nTopRightPx,
-                                    leftRef, nLeftPx, nBottomLeftPx, neighbors);
-        const std::uint32_t sad = motion::sad8x8(src, 8, pred, 8);
-        if (!haveBest || sad < best.sad) {
-            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad};
-            haveBest = true;
-        }
-    }
-    return best;
+                                const intra::NeighborContext& neighbors,
+                                const RdliteFrameCtx& rdlite) {
+    return rdliteDecide(rdlite, 8, src, aboveRef, nTopPx, nTopRightPx, leftRef, nLeftPx,
+                        nBottomLeftPx, aboveLeft, neighbors);
 }
 
 void encodeFrameRecon8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
@@ -339,6 +525,10 @@ void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int
                         std::uint8_t* modes, transforms::TxType txType) {
     const int gridW = src.width() / 8;
     const int gridH = src.height() / 8;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, 0);
     for (int by = 0; by < gridH; ++by) {
         for (int bx = 0; bx < gridW; ++bx) {
             const int px = bx * 8;
@@ -375,7 +565,7 @@ void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int
                 for (int x = 0; x < 8; ++x) srcBlk[y * 8 + x] = src.at(px + x, py + y);
 
             const ModeDecision d = decideBlockMode8x8(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                      nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                      nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[64] = {0};
@@ -414,6 +604,10 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                          entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 4;
     const int gridH = src.height() / 4;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, qindex);
     // FS3: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
     if (w && fc) {
         entropy::initDefaultEcFrameContext(fc, qindex);
@@ -468,7 +662,7 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
             }
 
             const ModeDecision d = decideBlockMode4x4(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                      nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                      nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             // predict -> residual -> fwd -> quantize fp -> inverse on dqcoeff
@@ -506,8 +700,14 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                                          leftCtx, 0);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_4X4, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
-                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_4X4,
-                                              entropy::FILTER_INTRA_MODES);
+                    // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052
+                    // writes through frame_context->filter_intra_cdfs[bsize]):
+                    // every conforming decoder adapts its cdf after each read,
+                    // so a local default cdf diverges on the SECOND FI symbol
+                    // of a frame (the d4/d32 decode-gate failure root cause).
+                    // Default row: cabac_context_model.c:618 AOM_CDF2(4621)
+                    // -> ICDF = 32768 - 4621 = 28147.
+                    entropy::odEcWriteSymbol(w, 0, fc->filter_intra_cdfs[entropy::BLOCK_4X4], 2);
                 }
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_4X4,
                                           entropy::BLOCK_4X4, eob, by, bx, 1,
@@ -596,6 +796,10 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                          entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 8;
     const int gridH = src.height() / 8;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, qindex);
     // FS3: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
     if (w && fc) {
         entropy::initDefaultEcFrameContext(fc, qindex);
@@ -654,7 +858,7 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                 for (int x = 0; x < 8; ++x) srcBlk[y * 8 + x] = src.at(px + x, py + y);
 
             const ModeDecision d = decideBlockMode8x8(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                      nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                      nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[64] = {0};
@@ -692,8 +896,11 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                                          leftCtx, 0);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_8X8, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
-                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_8X8,
-                                              entropy::FILTER_INTRA_MODES);
+                    // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052;
+                    // see the 4x4 site note). Default:
+                    // cabac_context_model.c:618 AOM_CDF2(7866)
+                    // -> ICDF = 32768 - 7866 = 24902.
+                    entropy::odEcWriteSymbol(w, 0, fc->filter_intra_cdfs[entropy::BLOCK_8X8], 2);
                 }
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_8X8,
                                           entropy::BLOCK_8X8, eob, by * 2, bx * 2, 1,
@@ -715,66 +922,36 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
 // (bit-exact with svt_nxm_sad_kernel_helper_c at 16x16), lowest wins,
 // tie-break = lowest mode index. Primitives are 1:1 SVT.
 ModeDecision decideBlockMode16x16(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
-                                  int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
-                                  int nBottomLeftPx, std::uint8_t aboveLeft,
-                                  const intra::NeighborContext& neighbors) {
-    ModeDecision best{intra::DC_PRED, 0};
-    bool haveBest = false;
-    for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
-        std::uint8_t pred[256] = {0};
-        intra::buildIntraPredictors(pred, 16, m, 0, 16, 16, aboveLeft, aboveRef, nTopPx, nTopRightPx,
-                                    leftRef, nLeftPx, nBottomLeftPx, neighbors);
-        const std::uint32_t sad = motion::sad16x16(src, 16, pred, 16);
-        if (!haveBest || sad < best.sad) {
-            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad};
-            haveBest = true;
-        }
-    }
-    return best;
+                                int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                int nBottomLeftPx, std::uint8_t aboveLeft,
+                                const intra::NeighborContext& neighbors,
+                                const RdliteFrameCtx& rdlite) {
+    return rdliteDecide(rdlite, 16, src, aboveRef, nTopPx, nTopRightPx, leftRef, nLeftPx,
+                        nBottomLeftPx, aboveLeft, neighbors);
 }
 
 // L5 policy (32x32): all 13 PredictionModes, sad32x32-scored
 // (bit-exact with svt_nxm_sad_kernel_helper_c at 32x32), lowest wins,
 // tie-break = lowest mode index. Primitives are 1:1 SVT.
 ModeDecision decideBlockMode32x32(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
-                                  int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
-                                  int nBottomLeftPx, std::uint8_t aboveLeft,
-                                  const intra::NeighborContext& neighbors) {
-    ModeDecision best{intra::DC_PRED, 0};
-    bool haveBest = false;
-    for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
-        std::uint8_t pred[1024] = {0};
-        intra::buildIntraPredictors(pred, 32, m, 0, 32, 32, aboveLeft, aboveRef, nTopPx, nTopRightPx,
-                                    leftRef, nLeftPx, nBottomLeftPx, neighbors);
-        const std::uint32_t sad = motion::sad32x32(src, 32, pred, 32);
-        if (!haveBest || sad < best.sad) {
-            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad};
-            haveBest = true;
-        }
-    }
-    return best;
+                                int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                int nBottomLeftPx, std::uint8_t aboveLeft,
+                                const intra::NeighborContext& neighbors,
+                                const RdliteFrameCtx& rdlite) {
+    return rdliteDecide(rdlite, 32, src, aboveRef, nTopPx, nTopRightPx, leftRef, nLeftPx,
+                        nBottomLeftPx, aboveLeft, neighbors);
 }
 
 // L9 policy (64x64): all 13 PredictionModes, sad64x64-scored
 // (bit-exact with svt_nxm_sad_kernel_helper_c at 64x64), lowest wins,
 // tie-break = lowest mode index. Primitives are 1:1 SVT.
 ModeDecision decideBlockMode64x64(const std::uint8_t* src, const std::uint8_t* aboveRef, int nTopPx,
-                                  int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
-                                  int nBottomLeftPx, std::uint8_t aboveLeft,
-                                  const intra::NeighborContext& neighbors) {
-    ModeDecision best{intra::DC_PRED, 0};
-    bool haveBest = false;
-    for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
-        std::uint8_t pred[4096] = {0};
-        intra::buildIntraPredictors(pred, 64, m, 0, 64, 64, aboveLeft, aboveRef, nTopPx, nTopRightPx,
-                                    leftRef, nLeftPx, nBottomLeftPx, neighbors);
-        const std::uint32_t sad = motion::sad64x64(src, 64, pred, 64);
-        if (!haveBest || sad < best.sad) {
-            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad};
-            haveBest = true;
-        }
-    }
-    return best;
+                                int nTopRightPx, const std::uint8_t* leftRef, int nLeftPx,
+                                int nBottomLeftPx, std::uint8_t aboveLeft,
+                                const intra::NeighborContext& neighbors,
+                                const RdliteFrameCtx& rdlite) {
+    return rdliteDecide(rdlite, 64, src, aboveRef, nTopPx, nTopRightPx, leftRef, nLeftPx,
+                        nBottomLeftPx, aboveLeft, neighbors);
 }
 
 // ---- C7: 16x16 frame compositions. M1 availability + REAL recon top-right
@@ -834,6 +1011,10 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
                           entropy::EcFrameContext* fc) {
     const int gridW = src.width() / 16;
     const int gridH = src.height() / 16;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, 0);
     // BSF1 symbol emission (D5): kf y mode + angle delta + FI flag=0 only.
     if (w && fc) {
         // TD5b: the lossless variant carries q0 (CodedLossless) - bucket 0.
@@ -878,7 +1059,7 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
                 for (int x = 0; x < 16; ++x) srcBlk[y * 16 + x] = src.at(px + x, py + y);
 
             const ModeDecision d = decideBlockMode16x16(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             if (w && fc) {
@@ -889,7 +1070,11 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
                                          static_cast<entropy::PredictionMode>(d.mode), topCtx, leftCtx, 0);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
-                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_16X16, entropy::FILTER_INTRA_MODES);
+                    // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052;
+                    // see the 4x4 site note). Default:
+                    // cabac_context_model.c:618 AOM_CDF2(12408)
+                    // -> ICDF = 32768 - 12408 = 20360.
+                    entropy::odEcWriteSymbol(w, 0, fc->filter_intra_cdfs[entropy::BLOCK_16X16], 2);
                 }
             }
 
@@ -985,6 +1170,10 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
                            entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 16;
     const int gridH = src.height() / 16;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, qindex);
     // BSF1 symbol emission (D5): identical surface to the lossless variant.
     if (w && fc) {
         // TD5b: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
@@ -1033,7 +1222,7 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 for (int x = 0; x < 16; ++x) srcBlk[y * 16 + x] = src.at(px + x, py + y);
 
             const ModeDecision d = decideBlockMode16x16(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             if (w && fc) {
@@ -1044,7 +1233,11 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
                                          static_cast<entropy::PredictionMode>(d.mode), topCtx, leftCtx, 0);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
-                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_16X16, entropy::FILTER_INTRA_MODES);
+                    // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052;
+                    // see the 4x4 site note). Default:
+                    // cabac_context_model.c:618 AOM_CDF2(12408)
+                    // -> ICDF = 32768 - 12408 = 20360.
+                    entropy::odEcWriteSymbol(w, 0, fc->filter_intra_cdfs[entropy::BLOCK_16X16], 2);
                 }
             }
 
@@ -1141,6 +1334,10 @@ void encodeFrameAuto32x32(const pixels::Plane& src, pixels::Plane& recon, std::i
                           std::uint8_t* modes, transforms::TxType txType) {
     const int gridW = src.width() / 32;
     const int gridH = src.height() / 32;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, 0);
     for (int by = 0; by < gridH; ++by) {
         for (int bx = 0; bx < gridW; ++bx) {
             const int px = bx * 32;
@@ -1177,7 +1374,7 @@ void encodeFrameAuto32x32(const pixels::Plane& src, pixels::Plane& recon, std::i
                 for (int x = 0; x < 32; ++x) srcBlk[y * 32 + x] = src.at(px + x, py + y);
 
             const ModeDecision d = decideBlockMode32x32(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[1024] = {0};
@@ -1271,6 +1468,10 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
                            entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 32;
     const int gridH = src.height() / 32;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, qindex);
     // FS3: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
     if (w && fc) {
         entropy::initDefaultEcFrameContext(fc, qindex);
@@ -1324,7 +1525,7 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 for (int x = 0; x < 32; ++x) srcBlk[y * 32 + x] = src.at(px + x, py + y);
 
             const ModeDecision d = decideBlockMode32x32(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[1024] = {0};
@@ -1363,8 +1564,11 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
                                          leftCtx, 0);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_32X32, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
-                    entropy::writeFilterIntra(w, fc, entropy::BLOCK_32X32,
-                                              entropy::FILTER_INTRA_MODES);
+                    // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052;
+                    // see the 4x4 site note). Default:
+                    // cabac_context_model.c:618-623 BLOCK_32X32 row
+                    // AOM_CDF2(22343) -> ICDF = 32768 - 22343 = 10425.
+                    entropy::odEcWriteSymbol(w, 0, fc->filter_intra_cdfs[entropy::BLOCK_32X32], 2);
                 }
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_32X32,
                                           entropy::BLOCK_32X32, eob, by * 8, bx * 8, 1,
@@ -1440,6 +1644,10 @@ void encodeFrameAuto64x64(const pixels::Plane& src, pixels::Plane& recon, std::i
                           std::uint8_t* modes, transforms::TxType txType) {
     const int gridW = src.width() / 64;
     const int gridH = src.height() / 64;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, 0);
     for (int by = 0; by < gridH; ++by) {
         for (int bx = 0; bx < gridW; ++bx) {
             const int px = bx * 64;
@@ -1476,7 +1684,7 @@ void encodeFrameAuto64x64(const pixels::Plane& src, pixels::Plane& recon, std::i
                 for (int x = 0; x < 64; ++x) srcBlk[y * 64 + x] = src.at(px + x, py + y);
 
             const ModeDecision d = decideBlockMode64x64(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[4096] = {0};
@@ -1570,6 +1778,10 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
                            entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 64;
     const int gridH = src.height() / 64;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, qindex);
     // FS4: the bucket follows the frame's base_q_idx (spec init_coeff_cdfs).
     if (w && fc) {
         entropy::initDefaultEcFrameContext(fc, qindex);
@@ -1623,7 +1835,7 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 for (int x = 0; x < 64; ++x) srcBlk[y * 64 + x] = src.at(px + x, py + y);
 
             const ModeDecision d = decideBlockMode64x64(srcBlk, above, nTopPx, nTopRightPx, left,
-                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx);
+                                                        nLeftPx, nBottomLeftPx, aboveLeft, nctx, rctx);
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[4096] = {0};
@@ -1793,6 +2005,10 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                         entropy::DcSignLevelCoeffNa* naU, entropy::DcSignLevelCoeffNa* naV) {
     const int uvB = lumaB / 2;
     const int grid = srcY.width() / lumaB;
+    // RE5: one RD-lite decision context per frame, initialized from the
+    // frame's own l7 context (the emission cdfs).
+    RdliteFrameCtx rctx;
+    initRdliteFrameCtx(&rctx, qindex);
     const entropy::TxSize ltxs = (lumaB == 8) ? entropy::TX_8X8
                                : (lumaB == 16) ? entropy::TX_16X16
                                : (lumaB == 32) ? entropy::TX_32X32 : entropy::TX_64X64;
@@ -1906,16 +2122,16 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
             ModeDecision d{intra::DC_PRED, 0};
             if (lumaB == 8)
                 d = decideBlockMode8x8(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
-                                       aboveLeft, nctx);
+                                       aboveLeft, nctx, rctx);
             else if (lumaB == 16)
                 d = decideBlockMode16x16(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
-                                         aboveLeft, nctx);
+                                         aboveLeft, nctx, rctx);
             else if (lumaB == 32)
                 d = decideBlockMode32x32(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
-                                         aboveLeft, nctx);
+                                         aboveLeft, nctx, rctx);
             else
                 d = decideBlockMode64x64(srcBlk, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
-                                         aboveLeft, nctx);
+                                         aboveLeft, nctx, rctx);
             modesY[bidx] = static_cast<std::uint8_t>(d.mode);
             std::uint8_t pred[4096] = {0};
             intra::buildIntraPredictors(pred, lumaB, d.mode, 0, lumaB, lumaB, aboveLeft, above,
@@ -2044,7 +2260,11 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
             if (w && fc &&
                 entropy::filterIntraAllowed(1, lbs, 0,
                                             static_cast<std::uint32_t>(d.mode))) {
-                entropy::writeFilterIntra(w, fc, lbs, entropy::FILTER_INTRA_MODES);
+                // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052;
+                // see the 4x4 site note). Default rows (cabac_context_model.c:618-623):
+                // BLOCK_4X4(28147) BLOCK_8X8(24902) BLOCK_16X16(20360)
+                // BLOCK_32X32(10425).
+                entropy::odEcWriteSymbol(w, 0, fc->filter_intra_cdfs[lbs], 2);
             }
             // ---- the LUMA chain (U BEFORE V: the luma chain first, the
             // ratified CS4 walk order) ----

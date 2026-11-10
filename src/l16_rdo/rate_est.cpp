@@ -9,6 +9,7 @@
 // Constants cited verbatim; deviations named at each site.
 #include "rate_est.h"
 
+#include <cstdio>
 #include <cstddef>
 #include <cmath>
 #include <cstring>
@@ -1103,6 +1104,7 @@ void estimateSyntaxRate(MdRateEstimationContext* me, std::uint8_t pic_filter_int
             me->partitionHorzAlike128FacBits[i][1] = costSymbol(EC_MIN_PROB);
         }
     }
+
     for (i = 0; i < SKIP_CONTEXTS; ++i) {
         getSyntaxRateFromCdf(me->skipModeFacBits[i], fc->skip_mode_cdfs[i], nullptr);
     }
@@ -1151,7 +1153,14 @@ void estimateSyntaxRate(MdRateEstimationContext* me, std::uint8_t pic_filter_int
             }
         }
     }
-    std::int32_t sign_fac_bits[CFL_JOINT_SIGNS];
+    // NAMED DEVIATION (RE5 wiring rung): the reference's local is [CFL_JOINT_SIGNS]
+    // (md_rate_estimation.c:205) while get_syntax_rate_from_cdf writes n+1
+    // entries (the terminator cost included) - a one-past write the reference
+    // gets away with on its own stack layout; under MSVC /GS the port's
+    // transcription kills the process (cookie overwrite, 0xC0000409) at the
+    // function epilogue. The port's local carries the one extra entry; the
+    // asserted VALUES are unchanged (costs[0..CFL_JOINT_SIGNS-1]).
+    std::int32_t sign_fac_bits[CFL_JOINT_SIGNS + 1];
     getSyntaxRateFromCdf(sign_fac_bits, fc->cfl_sign_cdf, nullptr);
     for (int joint_sign = 0; joint_sign < CFL_JOINT_SIGNS; joint_sign++) {
         std::int32_t* fac_bits_u = me->cflAlphaFacBits[joint_sign][CFL_PRED_U];
@@ -1202,6 +1211,7 @@ void estimateSyntaxRate(MdRateEstimationContext* me, std::uint8_t pic_filter_int
     for (i = 0; i < DIRECTIONAL_MODES; ++i) {
         getSyntaxRateFromCdf(me->angleDeltaFacBits[i], fc->angle_delta_cdf[i], nullptr);
     }
+
     if (enable_restoration) {
         getSyntaxRateFromCdf(me->switchableRestoreFacBits, fc->switchable_restore_cdf, nullptr);
         getSyntaxRateFromCdf(me->wienerRestoreFacBits, fc->wiener_restore_cdf, nullptr);

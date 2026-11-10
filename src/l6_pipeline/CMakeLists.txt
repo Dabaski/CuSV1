@@ -1,6 +1,6 @@
 add_library(av1_pipeline STATIC pipeline.cpp picops.cpp)
 target_include_directories(av1_pipeline PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(av1_pipeline PUBLIC av1_pixels av1_transforms av1_intra av1_motion av1_entropy av1_rdo)
+target_link_libraries(av1_pipeline PUBLIC av1_pixels av1_transforms av1_intra av1_motion av1_entropy av1_rdo av1_analysis)
 
 add_executable(av1_l6_pipeline_tests tests/test_harness.cpp tests/test_pipeline.cpp
                                  tests/test_fs3_emission.cpp tests/test_picops.cpp)

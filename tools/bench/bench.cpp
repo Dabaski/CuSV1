@@ -349,31 +349,40 @@ public:
                 std::uint32_t bestSad = 0;
                 int bestMode = -1;
                 if constexpr (B == 4) {
+                    // RE5: one RD-lite decision context per frame.
+                    pipeline::RdliteFrameCtx rctx;
+                    pipeline::initRdliteFrameCtx(&rctx, quantized_ ? kQindex : 0);
                     const auto d = pipeline::decideBlockMode4x4(
                         srcBlk, aboveHost, nTopPx, nTopRightPx, leftHost, nLeftPx, 0,
-                        static_cast<std::uint8_t>(alVal), nctx);
+                        static_cast<std::uint8_t>(alVal), nctx, rctx);
                     bestSad = d.sad;
                     bestMode = d.mode;
                 } else if constexpr (B == 8) {
+                    pipeline::RdliteFrameCtx rctx;
+                    pipeline::initRdliteFrameCtx(&rctx, quantized_ ? kQindex : 0);
                     const auto d = pipeline::decideBlockMode8x8(
                         srcBlk, aboveHost, nTopPx, nTopRightPx, leftHost, nLeftPx, 0,
-                        static_cast<std::uint8_t>(alVal), nctx);
+                        static_cast<std::uint8_t>(alVal), nctx, rctx);
                     bestSad = d.sad;
                     bestMode = d.mode;
                 } else if constexpr (B == 32) {
+                    pipeline::RdliteFrameCtx rctx;
+                    pipeline::initRdliteFrameCtx(&rctx, quantized_ ? kQindex : 0);
                     const auto d = pipeline::decideBlockMode32x32(
                         srcBlk, aboveHost, nTopPx, nTopRightPx, leftHost, nLeftPx, 0,
-                        static_cast<std::uint8_t>(alVal), nctx);
+                        static_cast<std::uint8_t>(alVal), nctx, rctx);
                     bestSad = d.sad;
                     bestMode = d.mode;
                 } else {
+                    pipeline::RdliteFrameCtx rctx;
+                    pipeline::initRdliteFrameCtx(&rctx, quantized_ ? kQindex : 0);
                     const auto d = B == 16
                                        ? pipeline::decideBlockMode16x16(
                                              srcBlk, aboveHost, nTopPx, nTopRightPx, leftHost,
-                                             nLeftPx, 0, static_cast<std::uint8_t>(alVal), nctx)
+                                             nLeftPx, 0, static_cast<std::uint8_t>(alVal), nctx, rctx)
                                        : pipeline::decideBlockMode64x64(
                                              srcBlk, aboveHost, nTopPx, nTopRightPx, leftHost,
-                                             nLeftPx, 0, static_cast<std::uint8_t>(alVal), nctx);
+                                             nLeftPx, 0, static_cast<std::uint8_t>(alVal), nctx, rctx);
                     bestSad = d.sad;
                     bestMode = d.mode;
                 }

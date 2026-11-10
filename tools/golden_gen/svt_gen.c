@@ -9340,3 +9340,82 @@ static void build_intra_predictors(const MacroBlockD* xd, uint8_t* top_neigh_arr
 }
 
 
+
+
+// ==== RE5 (the RD-lite wiring rung): verbatim extracts for the fast-path
+// decision mirror. Provenance cited per block; the l6 composition comment is
+// the authoritative design note. ====
+
+// SVT-AV1 md_rate_estimation.h:131-138 (av1_prob_cost, verbatim extract; the
+// round(-log2(i/256)*(1<<AV1_PROB_COST_SHIFT)) table, i = 128..255).
+static const uint16_t svtd_av1_prob_cost[128] = {
+    512, 506, 501, 495, 489, 484, 478, 473, 467, 462, 456, 451, 446, 441, 435, 430,
+    425, 420, 415, 410, 405, 400, 395, 390, 385, 380, 375, 371, 366, 361, 356, 352,
+    347, 343, 338, 333, 329, 324, 320, 316, 311, 307, 302, 298, 294, 289, 285, 281,
+    277, 273, 268, 264, 260, 256, 252, 248, 244, 240, 236, 232, 228, 224, 220, 216,
+    212, 209, 205, 201, 197, 194, 190, 186, 182, 179, 175, 171, 168, 164, 161, 157,
+    153, 150, 146, 143, 139, 136, 132, 129, 125, 122, 119, 115, 112, 109, 105, 102,
+    99,  95,  92,  89,  86,  82,  79,  76,  73,  70,  66,  63,  60,  57,  54,  51,
+    48,  45,  42,  38,  35,  32,  29,  26,  23,  20,  18,  15,  12,  9,   6,   3,
+};
+#define SVTD_AV1_PROB_COST_SHIFT 9
+#define SVTD_AV1_COST_LITERAL(n) ((n) * (1 << SVTD_AV1_PROB_COST_SHIFT))
+
+// SVT-AV1 cabac_context_model.h:68-75 (get_prob, verbatim arithmetic).
+static INLINE uint8_t svtd_get_prob(unsigned num, unsigned den) {
+    const int p = (int)(((uint64_t)num * 256 + (den >> 1)) / den);
+    const int clipped_prob = p | ((255 - p) >> 23) | (p == 0);
+    return (uint8_t)clipped_prob;
+}
+
+// SVT-AV1 md_rate_estimation.c:35-45 (av1_cost_symbol, verbatim; the clamp
+// is :989-993 definitions.h clamp semantics via svt_gen.c's own clamp).
+static INLINE int32_t svtd_av1_cost_symbol(AomCdfProb p15) {
+    p15 = (AomCdfProb)clamp(p15, 1, CDF_PROB_TOP - 1);
+    const int32_t shift = CDF_PROB_BITS - 1 - get_msb(p15);
+    const int32_t prob  = svtd_get_prob((unsigned)p15 << shift, CDF_PROB_TOP);
+    return svtd_av1_prob_cost[prob - 128] + SVTD_AV1_COST_LITERAL(shift);
+}
+
+// SVT-AV1 md_rate_estimation.c:50-69 (svt_aom_get_syntax_rate_from_cdf,
+// verbatim; both the inv_map and the direct branch).
+static void svtd_get_syntax_rate_from_cdf(int32_t* costs, const AomCdfProb* cdf, const int32_t* inv_map) {
+    int32_t    i;
+    AomCdfProb prev_cdf = 0;
+    for (i = 0;; ++i) {
+        AomCdfProb p15 = AOM_ICDF(cdf[i]) - prev_cdf;
+        p15            = (p15 < EC_MIN_PROB) ? EC_MIN_PROB : p15;
+        prev_cdf       = AOM_ICDF(cdf[i]);
+
+        if (inv_map) {
+            costs[inv_map[i]] = svtd_av1_cost_symbol(p15);
+        } else {
+            costs[i] = svtd_av1_cost_symbol(p15);
+        }
+
+        if (cdf[i] == AOM_ICDF(CDF_PROB_TOP)) {
+            break;
+        }
+    }
+}
+
+// SVT-AV1 C_DEFAULT/variance.c:141-158 (variance_c, verbatim; the static
+// core the VAR(W,H) macro drives).
+static void svtd_variance_c(const uint8_t* a, int a_stride, const uint8_t* b, int b_stride, int w, int h,
+                            uint32_t* sse, int* sum) {
+    int i, j;
+
+    *sum = 0;
+    *sse = 0;
+
+    for (i = 0; i < h; ++i) {
+        for (j = 0; j < w; ++j) {
+            const int diff = a[j] - b[j];
+            *sum += diff;
+            *sse += diff * diff;
+        }
+
+        a += a_stride;
+        b += b_stride;
+    }
+}

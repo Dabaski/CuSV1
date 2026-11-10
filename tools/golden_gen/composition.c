@@ -839,6 +839,78 @@ static void svtd_gather_above(uint8_t* above, const uint8_t* recon, int fstride,
 
 // ---- frame-policy composition (8x8 blocks, 2x2 grid = 16x16 frame) ---------
 // Same D2 policy as the 4x4 version, SAD scored with sad8x8 semantics.
+
+
+// ==== RE5 (the RD-lite wiring rung): the fast-path decision mirror ==========
+// Mirrors the l6 rdliteDecide (see the l6 comment for the design + the
+// reference citations: product_coding_loop.c:1008-:1016 the variance<<4
+// distortion, rd_cost.c:526-:640 the rate, rd_cost.h:36-:38 RDCOST, the
+// strict-< tie product_coding_loop.c:1458). The lambda is the l6 NAMED
+// POLICY rdliteLambda: q == 0 ? 0 : q (the rc-walled svt_aom_compute_rd_mult
+// chain stays parked). Rate ctx = the l6 initRdliteFrameCtx syntax side: the
+// kf-y table from svt_aom_default_kf_y_mode_cdf (md_rate_estimation.c:120-:
+// 123) and the angle-delta table from default_angle_delta_cdf (:232-:234)
+// via svtd_get_syntax_rate_from_cdf. The chroma UV decisions stay SAD this
+// rung (the ratified rung boundary).
+static int32_t svtd_rdlite_yrate[5][5][INTRA_MODES];
+static int32_t svtd_rdlite_anglerate[DIRECTIONAL_MODES][2 * MAX_ANGLE_DELTA + 1];
+static int svtd_rdlite_ready = 0;
+static void svtd_rdlite_init(void) {
+    if (svtd_rdlite_ready) return;
+    for (int i = 0; i < 5; ++i)
+        for (int j = 0; j < 5; ++j)
+            svtd_get_syntax_rate_from_cdf(svtd_rdlite_yrate[i][j], svt_aom_default_kf_y_mode_cdf[i][j], NULL);
+    for (int d = 0; d < DIRECTIONAL_MODES; ++d)
+        svtd_get_syntax_rate_from_cdf(svtd_rdlite_anglerate[d], default_angle_delta_cdf[d], NULL);
+    svtd_rdlite_ready = 1;
+}
+
+// RDCOST (rd_cost.h:36-38) with ROUND_POWER_OF_TWO (definitions.h:457):
+// (rate * rmult + 2^(9-1)) >> 9 + dist << RDDIV_BITS(7).
+static int64_t svtd_rdcost(uint32_t lambda, uint64_t rate, uint64_t dist) {
+    return ((((int64_t)rate * (int64_t)lambda) + 256) >> 9) + ((int64_t)dist << 7);
+}
+
+static int svtd_rdlite_decide(int B, int qindex, const uint8_t* src, const uint8_t* above,
+                              int n_top, int n_topright, const uint8_t* left, int n_left,
+                              int n_bottomleft, uint8_t al, int above_mode, int left_mode,
+                              uint32_t* best_sad_out) {
+    svtd_rdlite_init();
+    const uint32_t lambda = qindex == 0 ? 0 : (uint32_t)qindex;
+    // get_kf_y_mode_ctx shape (entropy_coding.c:1004-1021): unavailable
+    // neighbors arrive as DC_PRED (the caller seeds them).
+    const int top_ctx = intra_mode_context[above_mode];
+    const int left_ctx = intra_mode_context[left_mode];
+    const TxSize ts = B == 4 ? TX_4X4 : B == 8 ? TX_8X8 : B == 16 ? TX_16X16 : B == 32 ? TX_32X32 : TX_64X64;
+    uint32_t best_sad = 0;
+    int64_t best_rd = 0;
+    int best_mode = -1;
+    for (int m = 0; m <= PAETH_PRED; ++m) {
+        uint8_t pred[4096];
+        svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, n_top, n_topright, left,
+                             n_left, n_bottomleft, al, ts);
+        uint32_t sse;
+        int sum;
+        svtd_variance_c(src, B, pred, B, B, B, &sse, &sum);
+        const uint64_t variance = sse - (uint32_t)(((int64_t)sum * sum) / (B * B));
+        const uint64_t luma_fast_dist = variance << 4;
+        uint64_t rate = (uint64_t)svtd_rdlite_yrate[top_ctx][left_ctx][m];
+        if (B >= 8 && m >= V_PRED && m <= D67_PRED) {
+            // the reference's angular-mode cost at delta 0 (rd_cost.c:616-618)
+            rate += (uint64_t)svtd_rdlite_anglerate[m - V_PRED][MAX_ANGLE_DELTA + 0];
+        }
+        const int64_t rd = svtd_rdcost(lambda, rate, luma_fast_dist);
+        // the SAD stays as bookkeeping (the l6 ModeDecision::sad field)
+        const uint32_t sad = svt_nxm_sad_kernel_helper_c(src, B, pred, B, B, B);
+        if (best_mode < 0 || rd < best_rd) {
+            best_rd = rd;
+            best_sad = sad;
+            best_mode = m;
+        }
+    }
+    *best_sad_out = best_sad;
+    return best_mode;
+}
 static void svtd_frame_auto_8x8_blocks(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes) {
     const int fstride = 16;
     const int gridW = 2, gridH = 2;
@@ -872,16 +944,11 @@ static void svtd_frame_auto_8x8_blocks(const uint8_t* src, uint8_t* recon, int32
                 for (int j = 0; j < bsz; ++j)
                     srcblk[i * bsz + j] = src[(py + i) * fstride + px + j];
 
-            // D2 policy: 13 candidates, SAD scored, lowest wins, tie = lowest idx
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. Lossless walk: lambda 0.
             uint32_t best_sad = 0;
-            int mode = -1;
-            for (int m = 0; m <= PAETH_PRED; ++m) {
-                uint8_t pred[64];
-                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
-                                     0, al, TX_8X8);
-                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
-                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-            }
+            const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[64];
@@ -940,11 +1007,12 @@ static void svtd_frame_auto_4x4_16x16(const uint8_t* src, uint8_t* recon, int32_
                 src[(py + 2) * fstride + px + 2], src[(py + 2) * fstride + px + 3],
                 src[(py + 3) * fstride + px + 0], src[(py + 3) * fstride + px + 1],
                 src[(py + 3) * fstride + px + 2], src[(py + 3) * fstride + px + 3]};
-
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. q = 0.
             uint32_t best_sad = 0;
-            const int mode = svtd_decide(srcblk, above, nTop, nTr, left, nLeft, 0, al, &best_sad);
+            const int mode = svtd_rdlite_decide(4, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
-
             uint8_t pred[16];
             svtd_call_builder(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
             int16_t res[16];
@@ -1003,11 +1071,12 @@ static void svtd_frame_auto_4x4_q(const uint8_t* src, uint8_t* recon, int32_t* c
                 src[(py + 2) * fstride + px + 2], src[(py + 2) * fstride + px + 3],
                 src[(py + 3) * fstride + px + 0], src[(py + 3) * fstride + px + 1],
                 src[(py + 3) * fstride + px + 2], src[(py + 3) * fstride + px + 3]};
-
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. q = qindex.
             uint32_t best_sad = 0;
-            const int mode = svtd_decide(srcblk, above, nTop, nTr, left, nLeft, 0, al, &best_sad);
+            const int mode = svtd_rdlite_decide(4, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
-
             uint8_t pred[16];
             svtd_call_builder(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
             int16_t res[16];
@@ -1138,16 +1207,11 @@ static void svtd_frame_auto_8x8_q(const uint8_t* src, uint8_t* recon, int32_t* c
                 for (int j = 0; j < bsz; ++j)
                     srcblk[i * bsz + j] = src[(py + i) * fstride + px + j];
 
-            // D2 policy: 13 candidates, SAD scored, lowest wins, tie = lowest idx
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. Q walk: the drive's qindex.
             uint32_t best_sad = 0;
-            int mode = -1;
-            for (int m = 0; m <= PAETH_PRED; ++m) {
-                uint8_t pred[64];
-                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
-                                     0, al, TX_8X8);
-                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
-                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-            }
+            const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[64];
@@ -1209,16 +1273,11 @@ static void svtd_frame_auto_16x16_blocks(const uint8_t* src, uint8_t* recon, int
                 for (int j = 0; j < bsz; ++j)
                     srcblk[i * bsz + j] = src[(py + i) * fstride + px + j];
 
-            // D2 policy: 13 candidates, SAD scored with the 16x16 sad helper
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. Lossless walk: lambda 0.
             uint32_t best_sad = 0;
-            int mode = -1;
-            for (int m = 0; m <= PAETH_PRED; ++m) {
-                uint8_t pred[256];
-                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
-                                     0, al, TX_16X16);
-                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
-                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-            }
+            const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[256];
@@ -1276,15 +1335,11 @@ static void svtd_frame_auto_16x16_q(const uint8_t* src, uint8_t* recon, int32_t*
                 for (int j = 0; j < bsz; ++j)
                     srcblk[i * bsz + j] = src[(py + i) * 32 + px + j];
 
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. Q walk: the drive's qindex.
             uint32_t best_sad = 0;
-            int mode = -1;
-            for (int m = 0; m <= PAETH_PRED; ++m) {
-                uint8_t pred[256];
-                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
-                                     0, al, TX_16X16);
-                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
-                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-            }
+            const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[256];
@@ -1471,15 +1526,11 @@ static void svtd_frame_auto_32x32_blocks(const uint8_t* src, uint8_t* recon, int
                 for (int j = 0; j < bsz; ++j)
                     srcblk[i * bsz + j] = src[(py + i) * fstride + px + j];
 
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. Lossless walk: lambda 0.
             uint32_t best_sad = 0;
-            int mode = -1;
-            for (int m = 0; m <= PAETH_PRED; ++m) {
-                uint8_t pred[1024];
-                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
-                                     0, al, TX_32X32);
-                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
-                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-            }
+            const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[1024];
@@ -1536,15 +1587,11 @@ static void svtd_frame_auto_32x32_q(const uint8_t* src, uint8_t* recon, int32_t*
                 for (int j = 0; j < bsz; ++j)
                     srcblk[i * bsz + j] = src[(py + i) * 64 + px + j];
 
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. Q walk: the drive's qindex.
             uint32_t best_sad = 0;
-            int mode = -1;
-            for (int m = 0; m <= PAETH_PRED; ++m) {
-                uint8_t pred[1024];
-                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
-                                     0, al, TX_32X32);
-                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
-                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-            }
+            const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[1024];
@@ -2004,15 +2051,11 @@ static void svtd_frame_auto_64x64_blocks(const uint8_t* src, uint8_t* recon, int
                 for (int j = 0; j < bsz; ++j)
                     srcblk[i * bsz + j] = src[(py + i) * fstride + px + j];
 
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. Lossless walk: lambda 0.
             uint32_t best_sad = 0;
-            int mode = -1;
-            for (int m = 0; m <= PAETH_PRED; ++m) {
-                uint8_t pred[4096];
-                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
-                                     0, al, TX_64X64);
-                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
-                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-            }
+            const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[4096];
@@ -2069,15 +2112,11 @@ static void svtd_frame_auto_64x64_q(const uint8_t* src, uint8_t* recon, int32_t*
                 for (int j = 0; j < bsz; ++j)
                     srcblk[i * bsz + j] = src[(py + i) * 128 + px + j];
 
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. Q walk: the drive's qindex.
             uint32_t best_sad = 0;
-            int mode = -1;
-            for (int m = 0; m <= PAETH_PRED; ++m) {
-                uint8_t pred[4096];
-                svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
-                                     0, al, TX_64X64);
-                const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, bsz, pred, bsz, bsz, bsz);
-                if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-            }
+            const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[4096];
@@ -2267,31 +2306,10 @@ static void svtd_frame_v_dct_8x8(const uint8_t* src, uint8_t* recon, int32_t* co
     }
 }
 // ---- frame-policy composition (moved from main_frame.c so both generators emit it) ----
-// SAD 4x4 between the source block and a candidate prediction, both flat
-// 4-strided (the caller materializes the candidate prediction).
-static uint32_t svtd_sad4x4(const uint8_t* src, const uint8_t* pred) {
-    return svt_nxm_sad_kernel_helper_c(src, 4, pred, 4, 4, 4);
-}
+// RE5: the old SAD-only svtd_decide / svtd_sad4x4 pair is RETIRED - the
+// RD-lite ranking (svtd_rdlite_decide above) replaced every caller this
+// rung. The chroma UV decisions stay SAD (the ratified rung boundary).
 
-// D2 policy: pick the mode minimizing SAD; ties go to the lowest mode index.
-static int svtd_decide(const uint8_t* src, const uint8_t* above, int n_top, int n_topright,
-                       const uint8_t* left, int n_left, int n_bottomleft, uint8_t above_left,
-                       uint32_t* best_sad_out) {
-    uint32_t best_sad = 0;
-    int best_mode = -1;
-    for (int m = 0; m <= PAETH_PRED; ++m) {
-        uint8_t pred[16];
-        svtd_call_builder(pred, m, 0, FILTER_INTRA_MODES, 0, above, n_top, n_topright, left, n_left,
-                          n_bottomleft, above_left);
-        const uint32_t sad = svtd_sad4x4(src, pred);
-        if (best_mode < 0 || sad < best_sad) {
-            best_sad = sad;
-            best_mode = m;
-        }
-    }
-    *best_sad_out = best_sad;
-    return best_mode;
-}
 
 static void svtd_frame_auto_8x8(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes) {
     const int fstride = 8;
@@ -2331,11 +2349,12 @@ static void svtd_frame_auto_8x8(const uint8_t* src, uint8_t* recon, int32_t* coe
                 src[(py + 2) * fstride + px + 2], src[(py + 2) * fstride + px + 3],
                 src[(py + 3) * fstride + px + 0], src[(py + 3) * fstride + px + 1],
                 src[(py + 3) * fstride + px + 2], src[(py + 3) * fstride + px + 3]};
-
+            // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
+            // bookkeeping. q = 0.
             uint32_t best_sad = 0;
-            const int mode = svtd_decide(srcblk, above, nTop, nTr, left, nLeft, 0, al, &best_sad);
+            const int mode = svtd_rdlite_decide(4, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad);
             modes[by * gridW + bx] = mode;
-
             uint8_t pred[16];
             svtd_call_builder(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
             int16_t res[16];
@@ -2841,6 +2860,11 @@ typedef struct Ts1FrameContext {
     AomCdfProb intra_ext_tx_cdf[EXT_TX_SETS_INTRA][EXT_TX_SIZES][INTRA_MODES][CDF_SIZE(16)];
     AomCdfProb kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
     AomCdfProb angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+    // RE5: the FI cdf (cabac_context_model.c:618-623) - the ADAPTING
+    // frame-context cdf. The real decoder adapts filter_intra_cdfs after
+    // every read; a local default-memcpy row diverges on the SECOND FI
+    // symbol of a frame (the d4/d32 decode-gate failure root cause).
+    AomCdfProb filter_intra_cdfs[BLOCK_SIZES_ALL][CDF_SIZE(2)];
     // CS1: the uv_mode CDF (cabac_context_model.c:105 verbatim extract).
     // Disallowed rows: 13-symbol (counter at cdf[13]); allowed rows:
     // 14-symbol (counter at cdf[14]).
@@ -2871,6 +2895,7 @@ static void ts1_init(Ts1FrameContext* fc, int base_qindex) {
     memcpy(fc->intra_ext_tx_cdf, default_intra_ext_tx_cdf, sizeof(fc->intra_ext_tx_cdf));
 memcpy(fc->kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(fc->kf_y_cdf));
 memcpy(fc->angle_delta_cdf, default_angle_delta_cdf, sizeof(fc->angle_delta_cdf));
+memcpy(fc->filter_intra_cdfs, default_filter_intra_cdfs, sizeof(fc->filter_intra_cdfs));
 memcpy(fc->uv_mode_cdf, default_uv_mode_cdf, sizeof(fc->uv_mode_cdf));
 }
 
@@ -3308,13 +3333,11 @@ static void svtd_fs2_drive(int S, int emit_lines) {
     static uint8_t srcblk[4096];
     memcpy(srcblk, src, (size_t)n);
     static uint8_t pred[4096];
+    // RE5: the RD-lite ranking (the l6 mirror); single block, no edges,
+    // q100 (the drive's quantizer).
     uint32_t best_sad = 0;
-    int mode = -1;
-    for (int m = 0; m <= PAETH_PRED; ++m) {
-        svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, NULL, 0, 0, NULL, 0, 0, 0, ts);
-        const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, S, pred, S, S, S);
-        if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-    }
+    const int mode = svtd_rdlite_decide(S, 100, srcblk, NULL, 0, 0, NULL, 0,
+                                        0, 0, DC_PRED, DC_PRED, &best_sad);
     svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, NULL, 0, 0, NULL, 0, 0, 0, ts);
     static int16_t res[4096];
     for (int i = 0; i < n; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -3569,6 +3592,7 @@ static void svtd_fs5_grid_drive(void) {
 
     static const int px[4][2] = {{0, 0}, {32, 0}, {0, 32}, {32, 32}};
     uint16_t eobs[4] = {0};
+    const int fs5g_q = 100;  // the drive's qindex (q100, the l6 32x32Q shape)
     static TranLow all_qc[4][1024];
     for (int b = 0; b < 4; ++b) {
         const int bx = b % 2, by = b / 2;
@@ -3596,16 +3620,11 @@ static void svtd_fs5_grid_drive(void) {
         uint8_t srcblk[1024];
         for (int i = 0; i < 32; ++i)
             for (int j = 0; j < 32; ++j) srcblk[i * 32 + j] = src[(r + i) * 64 + c + j];
-        // D2 policy: 13 candidates, SAD scored, lowest wins, tie = lowest idx
+        // RE5: the RD-lite ranking (the l6 mirror); q per the drive (below).
         uint32_t best_sad = 0;
-        int mode = -1;
-        for (int m = 0; m <= PAETH_PRED; ++m) {
-            uint8_t pred[1024];
-            svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge,
-                                 nLeft, 0, al, TX_32X32);
-            const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, 32, pred, 32, 32, 32);
-            if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-        }
+        const int mode = svtd_rdlite_decide(32, fs5g_q, srcblk, above, nTop, nTr, left_edge,
+                                            nLeft, 0, al, aboveMode, leftMode, &best_sad);
+        modes[b] = mode;
         modes[b] = mode;
         uint8_t pred[1024];
         svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge,
@@ -3641,10 +3660,12 @@ static void svtd_fs5_grid_drive(void) {
                              2 * MAX_ANGLE_DELTA + 1);
         }
         if (mode == DC_PRED) {
-            static AomCdfProb fi_cdf[CDF_SIZE(2)];
-            memcpy(fi_cdf, default_filter_intra_cdfs[BLOCK_32X32], sizeof(fi_cdf));
-            svtd_script_row("fi", 0, fi_cdf, 2);
-            aom_write_symbol(&w, 0, fi_cdf, 2);
+            // the ADAPTING frame-context cdf (the decoder adapts
+            // filter_intra_cdfs after each read; the per-block re-init from
+            // default lost the adaptation and desynced the second FI symbol
+            // in the d4/d32 artifacts)
+            svtd_script_row("fi", 0, fc.filter_intra_cdfs[BLOCK_32X32], 2);
+            aom_write_symbol(&w, 0, fc.filter_intra_cdfs[BLOCK_32X32], 2);
         }
         // the token chain: the dc_sign ctx from the RUNNING NA (the ecfrm
         // pattern; tx units 8 for the 32-wide TU)
@@ -3740,9 +3761,7 @@ static void svtd_fs5_grid_drive(void) {
             aom_read_symbol_(&rr, ra, 2 * MAX_ANGLE_DELTA + 1);
         }
         if (rmode == DC_PRED) {
-            static AomCdfProb rfi[CDF_SIZE(2)];
-            memcpy(rfi, default_filter_intra_cdfs[BLOCK_32X32], sizeof(rfi));
-            aom_read_symbol_(&rr, rfi, 2);
+            aom_read_symbol_(&rr, fc_r.filter_intra_cdfs[BLOCK_32X32], 2);
         }
         // dc_sign ctx from the running NA (mirror of the writer)
         uint8_t* above_ptr = &above_na_r[miCol];
@@ -3869,15 +3888,11 @@ static void svtd_fs5_grid4_drive(void) {
         uint8_t srcblk[16];
         for (int i = 0; i < 4; ++i)
             for (int j = 0; j < 4; ++j) srcblk[i * 4 + j] = src[(r + i) * 8 + c + j];
+        // RE5: the RD-lite ranking (the l6 mirror); q100 (the drive's quantizer).
         uint32_t best_sad = 0;
-        int mode = -1;
-        for (int m = 0; m <= PAETH_PRED; ++m) {
-            uint8_t pred[16];
-            svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, hasTop ? 4 : 0,
-                                 nTr, left_edge, hasLeft ? 4 : 0, 0, al, TX_4X4);
-            const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, 4, pred, 4, 4, 4);
-            if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-        }
+        const int mode = svtd_rdlite_decide(4, 100, srcblk, above, hasTop ? 4 : 0, nTr, left_edge,
+                                            hasLeft ? 4 : 0, 0, al, aboveMode, leftMode, &best_sad);
+        modes[b] = mode;
         modes[b] = mode;
         uint8_t pred[16];
         svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, hasTop ? 4 : 0,
@@ -3900,10 +3915,12 @@ static void svtd_fs5_grid4_drive(void) {
         svtd_script_row("mode", mode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
         aom_write_symbol(&w, mode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
         if (mode == DC_PRED) {
-            static AomCdfProb fi_cdf[CDF_SIZE(2)];
-            memcpy(fi_cdf, default_filter_intra_cdfs[BLOCK_4X4], sizeof(fi_cdf));
-            svtd_script_row("fi", 0, fi_cdf, 2);
-            aom_write_symbol(&w, 0, fi_cdf, 2);
+            // the ADAPTING frame-context cdf (the decoder adapts
+            // filter_intra_cdfs after each read; the per-block re-init from
+            // default lost the adaptation and desynced the second FI symbol
+            // in the d4/d32 artifacts)
+            svtd_script_row("fi", 0, fc.filter_intra_cdfs[BLOCK_4X4], 2);
+            aom_write_symbol(&w, 0, fc.filter_intra_cdfs[BLOCK_4X4], 2);
         }
         uint8_t* above_ptr = &above_na[miCol];
         uint8_t* left_ptr = &left_na[miRow];
@@ -3990,9 +4007,7 @@ static void svtd_fs5_grid4_drive(void) {
         const int rmode = aom_read_symbol_(&rr, fc_r.kf_y_cdf[top_ctx2][left_ctx2], INTRA_MODES);
         if (rmode != modes[b]) { fprintf(stderr, "FS5c rt mode %d\n", rmode); break; }
         if (rmode == DC_PRED) {
-            static AomCdfProb rfi[CDF_SIZE(2)];
-            memcpy(rfi, default_filter_intra_cdfs[BLOCK_4X4], sizeof(rfi));
-            aom_read_symbol_(&rr, rfi, 2);
+            aom_read_symbol_(&rr, fc_r.filter_intra_cdfs[BLOCK_4X4], 2);
         }
         uint8_t* above_ptr = &above_na_r[miCol];
         uint8_t* left_ptr = &left_na_r[miRow];
@@ -4197,14 +4212,10 @@ static int svtd_ts3_drive(uint8_t* buf) {
         uint8_t srcblk[256];
         for (int i = 0; i < 16; ++i)
             for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(r + i) * 32 + c + j];
-        // D2 policy
-        uint32_t best_sad = 0; int mode = -1;
-        for (int m = 0; m <= PAETH_PRED; ++m) {
-            uint8_t pred[256];
-            svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
-            const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, 16, pred, 16, 16, 16);
-            if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-        }
+        // RE5: the RD-lite ranking (the l6 mirror); q100 (the drive's quantizer).
+        uint32_t best_sad = 0;
+        const int mode = svtd_rdlite_decide(16, 100, srcblk, above, nTop, nTr, left_edge,
+                                            nLeft, 0, al, aboveMode, leftMode, &best_sad);
         modes[b] = mode;
         // decided-mode predictor (NOT DC=0)
         uint8_t pred[256];
@@ -4271,9 +4282,10 @@ static int svtd_ts3_drive(uint8_t* buf) {
         if (av1_is_directional_mode((PredictionMode)modes[b])) {
             aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[modes[b] - V_PRED], 2 * MAX_ANGLE_DELTA + 1);
         }
+        if (modes[b] == DC_PRED) {
+            aom_write_symbol(&w, 0, fc.filter_intra_cdfs[BLOCK_16X16], 2);
+        }
 
-        // 3. filter-intra: never for {1,7,3,2} (svt_aom_filter_intra_allowed is
-        // DC_PRED-only, mode_decision.c:108-119; no decided mode is DC_PRED)
         // 4. tx-type: emitted INSIDE svtd_write_coeffs_txb (one symbol, after
         // txb_skip, before eob_pt) - mirroring the l7 writeTxbCoeffs structure
 
@@ -4348,6 +4360,15 @@ static int svtd_ts3_drive(uint8_t* buf) {
         // 2. angle delta read
         if (av1_is_directional_mode((PredictionMode)modes[b])) {
             aom_read_symbol_(&r, fc_r.angle_delta_cdf[modes[b] - V_PRED], 2 * MAX_ANGLE_DELTA + 1);
+        }
+
+        // 3. filter-intra read: the decoder reads the FI symbol exactly when
+        // the writer wrote it (DC_PRED blocks at bsize <= 32x32), through the
+        // ADAPTING frame-context cdf.
+        if (modes[b] == DC_PRED) {
+            const int rfi = aom_read_symbol_(&r, fc_r.filter_intra_cdfs[BLOCK_16X16], 2);
+            printf(" %d", rfi);
+            if (rfi != 0) rt_bad = 1;
         }
 
         // 4. tx-type: read INSIDE svtd_read_coeffs_txb (mirrors the write side)
@@ -4516,13 +4537,10 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
         uint8_t srcblk[256];
         for (int i = 0; i < 16; ++i)
             for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(r + i) * 32 + c + j];
-        uint32_t best_sad = 0; int mode = -1;
-        for (int m = 0; m <= PAETH_PRED; ++m) {
-            uint8_t pred[256];
-            svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
-            const uint32_t sad = svt_nxm_sad_kernel_helper_c(srcblk, 16, pred, 16, 16, 16);
-            if (mode < 0 || sad < best_sad) { best_sad = sad; mode = m; }
-        }
+        // RE5: the RD-lite ranking (the l6 mirror); q100 (the drive's quantizer).
+        uint32_t best_sad = 0;
+        const int mode = svtd_rdlite_decide(16, 100, srcblk, above, nTop, nTr, left_edge,
+                                            nLeft, 0, al, aboveMode, leftMode, &best_sad);
         modes[b] = mode;
         uint8_t pred[256];
         svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
@@ -4563,6 +4581,18 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
         if (av1_is_directional_mode((PredictionMode)modes[b])) {
             aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[modes[b] - V_PRED],
                              2 * MAX_ANGLE_DELTA + 1);
+        }
+        // filter-intra flag: read for DC_PRED blocks at bsize <= 32x32 (aom
+        // reconintra.h:68-80; the TD0a probe proved the decoder reads it).
+        // RE5 exposed the omission: the RD-lite ranking made blocks 2-3
+        // DC_PRED where the SAD ranking had none, so the previously latent
+        // missing symbol desynced the decoder. The write goes through the
+        // ADAPTING frame-context cdf (the d4 fix pattern, SVT
+        // entropy_coding.c:5052): ts1_init seeds fc from the defaults and
+        // aom_write_symbol adapts in place, so consecutive FI symbols stay
+        // decoder-synchronized.
+        if (modes[b] == DC_PRED) {
+            aom_write_symbol(&w, 0, fc.filter_intra_cdfs[BLOCK_16X16], 2);
         }
         // token chain (TS1+TS2+TS3): txb_skip_ctx = 0 (whole-block TU),
         // dc_sign_ctx from the NA sweep, intra_dir = the decided mode
@@ -6306,16 +6336,12 @@ static int svtd_cs4_uv_q_drive(int S) {
             static uint8_t lsrc[4096];
             for (int i = 0; i < B; ++i)
                 for (int j = 0; j < B; ++j) lsrc[i * B + j] = y_src[(py + i) * 64 + px + j];
+            // RE5: the RD-lite ranking (the l6 mirror); q100 (the walk's quantizer).
             uint32_t best_sad = 0;
-            int lmode = -1;
-            static uint8_t lpred[4096];
-            for (int m = 0; m <= PAETH_PRED; ++m) {
-                svtd_call_builder_tx(lpred, m, 0, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
-                                     nLeft, nBl, lal, ltxs);
-                const uint32_t sad = svt_nxm_sad_kernel_helper_c(lsrc, B, lpred, B, B, B);
-                if (lmode < 0 || sad < best_sad) { best_sad = sad; lmode = m; }
-            }
+            const int lmode = svtd_rdlite_decide(B, 100, lsrc, labove, nTop, nTr, lleft,
+                                                 nLeft, nBl, lal, laboveMode, lleftMode, &best_sad);
             lmodes[bidx] = lmode;
+            static uint8_t lpred[4096];
             // RT10 step 2 (our side of the diff): dump the left-edge context the
             // builder is handed for the block under test, and derive the
             // bottom-left extension exactly as build_intra_predictors does
