@@ -776,7 +776,7 @@ TEST_CASE("gpu inverse 2d add adst matches host bit-exactly") {
     dCoeffs.uploadFrom(coeffs, sizeof(coeffs));
     dDst.uploadFrom(dst, sizeof(dst));
 
-    int typeArg = 1;
+    int typeArg = 3; // ADST_ADST (the host reference's type; the old 2-way fold made 1 and 3 GPU-identical - RE7's per-pass selection distinguishes them)
     int strideArg = 4;
     gpurt::DeviceBuffer dType(sizeof(typeArg));
     gpurt::DeviceBuffer dStride(sizeof(strideArg));
@@ -931,7 +931,7 @@ TEST_CASE("gpu fwd txfm 2d adst matches host bit-exactly") {
     dIn.uploadFrom(in, sizeof(in));
 
     int strideArg = 4;
-    int typeArg = 1;
+    int typeArg = 3; // ADST_ADST (the host reference's type; the old 2-way fold made 1 and 3 GPU-identical - RE7's per-pass selection distinguishes them)
     gpurt::DeviceBuffer dStride(sizeof(strideArg));
     gpurt::DeviceBuffer dType(sizeof(typeArg));
     dStride.uploadFrom(&strideArg, sizeof(strideArg));
@@ -954,6 +954,126 @@ TEST_CASE("gpu fwd txfm 2d adst matches host bit-exactly") {
         }
     }
     CHECK(ok);
+}
+
+// RE7 (the range rule): the frame path feeds the FULL int16 residual domain
+// into the 2D fwd (pre-scaled *4 by shift[0]) and dq coefficients at the
+// frame scale into the 2D inv. The small-fixture parity tests above cannot
+// see an input-magnitude-conditioned kernel defect, so this pair drives all
+// four admissible luma types at the frame-scale magnitudes.
+TEST_CASE("gpu fwd 4x4 matches host on the frame-residual range (all 4 types)") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    // residual-scale inputs: the full span the encoder's subtract can emit
+    // (uint8 - uint8 never wraps int16, so the exact domain is -255..255),
+    // plus a mid-scale mix.
+    std::int16_t in[16];
+    for (int i = 0; i < 16; ++i) {
+        const int v = (i * 61 + 37) % 511 - 255;  // -255..255, deterministic
+        in[i] = static_cast<std::int16_t>(v);
+    }
+    in[0] = -255;
+    in[15] = 255;
+
+    const std::string ptx = *gpurt::compileToPtx(transforms::fwdTxfmCuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "fwd_txfm_2d_4x4");
+    REQUIRE(it != names.end());
+    gpurt::Kernel k(ptx, *it);
+
+    gpurt::DeviceBuffer dIn(sizeof(in));
+    gpurt::DeviceBuffer dOut(16 * sizeof(std::int32_t));
+    gpurt::DeviceBuffer dStride(sizeof(int));
+    gpurt::DeviceBuffer dType(sizeof(int));
+    int strideArg = 4;
+    dStride.uploadFrom(&strideArg, sizeof(strideArg));
+
+    CUdeviceptr pIn = dIn.get();
+    CUdeviceptr pStride = dStride.get();
+    CUdeviceptr pType = dType.get();
+    CUdeviceptr pOut = dOut.get();
+    void* args[] = {&pIn, &pStride, &pType, &pOut};
+
+    for (int ty = 0; ty < 4; ++ty) {
+        std::int32_t ref[16] = {0};
+        transforms::fwdTxfm2d4x4(in, ref, 4, static_cast<transforms::TxType>(ty));
+        dIn.uploadFrom(in, sizeof(in));
+        int typeArg = ty;
+        dType.uploadFrom(&typeArg, sizeof(typeArg));
+        k.launch(1, 1, 4, 1, args);
+        std::int32_t got[16] = {0};
+        dOut.downloadTo(got, sizeof(got));
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) {
+            if (got[i] != ref[i]) ok = false;
+        }
+        INFO("type " << ty);
+        CHECK(ok);
+    }
+}
+
+TEST_CASE("gpu inv 4x4 add matches host on the frame-scale range (all 4 types)") {
+    if (gpurt::deviceCount() == 0) {
+        MESSAGE("SKIP: no CUDA device");
+        return;
+    }
+    gpurt::GpuContext ctx;
+
+    // dq-scale inputs: the quantized-domain magnitudes the inv sees after a
+    // q100 quantize of frame residuals (dq up to ~255 * dequant at q100),
+    // with both signs exercised.
+    std::int32_t coeffs[16];
+    for (int i = 0; i < 16; ++i) {
+        coeffs[i] = ((i * 91 + 53) % 601 - 300) * 8;  // -2400..2400 step 8
+    }
+    coeffs[0] = -2400;
+    coeffs[15] = 2400;
+
+    const std::string ptx = *gpurt::compileToPtx(transforms::invTxfmCuSource(), "compute_61");
+    const std::vector<std::string> names = gpurt::ptxEntryNames(ptx);
+    const auto it = std::find(names.begin(), names.end(), "inv_txfm_2d_add_4x4");
+    REQUIRE(it != names.end());
+    gpurt::Kernel k(ptx, *it);
+
+    gpurt::DeviceBuffer dCoeffs(sizeof(coeffs));
+    gpurt::DeviceBuffer dDst(16);
+    gpurt::DeviceBuffer dType(sizeof(int));
+    gpurt::DeviceBuffer dStride(sizeof(int));
+    int strideArg = 4;
+    dStride.uploadFrom(&strideArg, sizeof(strideArg));
+
+    CUdeviceptr pCoeffs = dCoeffs.get();
+    CUdeviceptr pType = dType.get();
+    CUdeviceptr pDst = dDst.get();
+    CUdeviceptr pStride = dStride.get();
+    void* args[] = {&pCoeffs, &pType, &pDst, &pStride};
+
+    for (int ty = 0; ty < 4; ++ty) {
+        std::uint8_t pred[16];
+        std::uint8_t refDst[16];
+        for (int i = 0; i < 16; ++i) {
+            pred[i] = static_cast<std::uint8_t>((i * 7 + 3) & 255);
+            refDst[i] = pred[i];
+        }
+        transforms::invTxfm2dAdd4x4(coeffs, refDst, 4, static_cast<transforms::TxType>(ty));
+        dCoeffs.uploadFrom(coeffs, sizeof(coeffs));
+        int typeArg = ty;
+        dType.uploadFrom(&typeArg, sizeof(typeArg));
+        dDst.uploadFrom(pred, 16);
+        k.launch(1, 1, 4, 1, args);
+        std::uint8_t got[16] = {0};
+        dDst.downloadTo(got, 16);
+        bool ok = true;
+        for (int i = 0; i < 16; ++i) {
+            if (got[i] != refDst[i]) ok = false;
+        }
+        INFO("type " << ty);
+        CHECK(ok);
+    }
 }
 
 TEST_CASE("quantizer tables match the Q0 gate at qindex 100") {

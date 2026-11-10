@@ -4823,15 +4823,23 @@ extern "C" __global__ void fwd_txfm_2d_4x4(const short* input, const int* stride
                                            int* output) {
     __shared__ int sbuf[16];
     const int t = threadIdx.x;
+    // RE7 (court order): the per-pass tx-type selection. The forward runs
+    // columns first then rows; ADST_DCT = column ADST + row DCT, DCT_ADST =
+    // the mirror, ADST_ADST = both (inv_transforms.h:45-80 per-pass tabs;
+    // the svtd_is_adst_col/row pair). Types 1/3 take fadst in the column
+    // pass, 2/3 in the row pass; DCT_DCT (0) takes fdct in both, and
+    // ADST_ADST keeps the old else-branch behavior exactly (the l3 goldens).
+    const int colAdst = (*txType == 1) || (*txType == 3);
+    const int rowAdst = (*txType == 2) || (*txType == 3);
     int tmp[4];
     int o[4];
     for (int r = 0; r < 4; ++r) {
         tmp[r] = input[r * (*stride) + t] * 4;
     }
-    if (*txType == 0) {
-        d_fdct4(tmp, o);
-    } else {
+    if (colAdst) {
         d_fadst4(tmp, o);
+    } else {
+        d_fdct4(tmp, o);
     }
     for (int r = 0; r < 4; ++r) {
         sbuf[r * 4 + t] = o[r];
@@ -4840,10 +4848,10 @@ extern "C" __global__ void fwd_txfm_2d_4x4(const short* input, const int* stride
     for (int c = 0; c < 4; ++c) {
         tmp[c] = sbuf[t * 4 + c];
     }
-    if (*txType == 0) {
-        d_fdct4(tmp, o);
-    } else {
+    if (rowAdst) {
         d_fadst4(tmp, o);
+    } else {
+        d_fdct4(tmp, o);
     }
     for (int c = 0; c < 4; ++c) {
         output[t * 4 + c] = o[c];
@@ -4995,15 +5003,18 @@ extern "C" __global__ void fwd_txfm_2d_8x8(const short* input, const int* stride
                                            int* output) {
     __shared__ int sbuf[64];
     const int t = threadIdx.x;
+    // RE7 (court order): the per-pass selection, the fwd 4x4 note.
+    const int colAdst = (*txType == 1) || (*txType == 3);
+    const int rowAdst = (*txType == 2) || (*txType == 3);
     int tmp[8];
     int o[8];
     for (int r = 0; r < 8; ++r) {
         tmp[r] = input[r * (*stride) + t] * 4;
     }
-    if (*txType == 0) {
-        d_fdct8(tmp, o);
-    } else {
+    if (colAdst) {
         d_fadst8(tmp, o);
+    } else {
+        d_fdct8(tmp, o);
     }
     for (int r = 0; r < 8; ++r) {
         sbuf[r * 8 + t] = d_round_shift(o[r], 1);
@@ -5012,10 +5023,10 @@ extern "C" __global__ void fwd_txfm_2d_8x8(const short* input, const int* stride
     for (int c = 0; c < 8; ++c) {
         tmp[c] = sbuf[t * 8 + c];
     }
-    if (*txType == 0) {
-        d_fdct8(tmp, o);
-    } else {
+    if (rowAdst) {
         d_fadst8(tmp, o);
+    } else {
+        d_fdct8(tmp, o);
     }
     for (int c = 0; c < 8; ++c) {
         output[t * 8 + c] = o[c];
@@ -5730,15 +5741,18 @@ extern "C" __global__ void fwd_txfm_2d_16x16(const short* input, const int* stri
                                              int* output) {
     __shared__ int sbuf[256];
     const int t = threadIdx.x;
+    // RE7 (court order): the per-pass selection, the fwd 4x4 note.
+    const int colAdst = (*txType == 1) || (*txType == 3);
+    const int rowAdst = (*txType == 2) || (*txType == 3);
     int tmp[16];
     int o[16];
     for (int r = 0; r < 16; ++r) {
         tmp[r] = input[r * (*stride) + t] * 4;
     }
-    if (*txType == 0) {
-        d_fdct16(tmp, o, 13);
-    } else {
+    if (colAdst) {
         d_fadst16(tmp, o, 13);
+    } else {
+        d_fdct16(tmp, o, 13);
     }
     for (int r = 0; r < 16; ++r) {
         sbuf[r * 16 + t] = d_round_shift(o[r], 2);
@@ -5747,10 +5761,10 @@ extern "C" __global__ void fwd_txfm_2d_16x16(const short* input, const int* stri
     for (int c = 0; c < 16; ++c) {
         tmp[c] = sbuf[t * 16 + c];
     }
-    if (*txType == 0) {
-        d_fdct16(tmp, o, 12);
-    } else {
+    if (rowAdst) {
         d_fadst16(tmp, o, 12);
+    } else {
+        d_fdct16(tmp, o, 12);
     }
     for (int c = 0; c < 16; ++c) {
         output[t * 16 + c] = o[c];
@@ -6683,15 +6697,21 @@ extern "C" __global__ void inv_txfm_2d_add_4x4(const int* coeffs, const int* txT
                                                const int* stride) {
     __shared__ int sbuf[16];
     const int t = threadIdx.x;
+    // RE7 (court order): the per-pass selection. The inverse runs ROWS first
+    // then columns (the landed inv order; the svtd_inv2daddN_t (row, col)
+    // arg order): DCT_ADST = row ADST + column DCT, ADST_DCT = the mirror,
+    // ADST_ADST = both. ADST_ADST keeps the old else-branch behavior exactly.
+    const int rowAdst = (*txType == 2) || (*txType == 3);
+    const int colAdst = (*txType == 1) || (*txType == 3);
     int tmp[4];
     int o[4];
     for (int c = 0; c < 4; ++c) {
         tmp[c] = d_cv(coeffs[t * 4 + c], 16);
     }
-    if (*txType == 0) {
-        d_idct4i(tmp, o);
-    } else {
+    if (rowAdst) {
         d_iadst4i(tmp, o);
+    } else {
+        d_idct4i(tmp, o);
     }
     for (int c = 0; c < 4; ++c) {
         sbuf[t * 4 + c] = o[c];
@@ -6700,10 +6720,10 @@ extern "C" __global__ void inv_txfm_2d_add_4x4(const int* coeffs, const int* txT
     for (int r = 0; r < 4; ++r) {
         tmp[r] = d_cv(sbuf[r * 4 + t], 16);
     }
-    if (*txType == 0) {
-        d_idct4i(tmp, o);
-    } else {
+    if (colAdst) {
         d_iadst4i(tmp, o);
+    } else {
+        d_idct4i(tmp, o);
     }
     for (int r = 0; r < 4; ++r) {
         int v = (int)dst[r * (*stride) + t] + d_round_shift(o[r], 4);
@@ -6841,15 +6861,18 @@ extern "C" __global__ void inv_txfm_2d_add_8x8(const int* coeffs, const int* txT
                                                unsigned char* dst, const int* stride) {
     __shared__ int sbuf[64];
     const int t = threadIdx.x;
+    // RE7 (court order): the per-pass selection, the inv 4x4 note.
+    const int rowAdst = (*txType == 2) || (*txType == 3);
+    const int colAdst = (*txType == 1) || (*txType == 3);
     int tmp[8];
     int o[8];
     for (int c = 0; c < 8; ++c) {
         tmp[c] = d_cv(coeffs[t * 8 + c], 16);
     }
-    if (*txType == 0) {
-        d_idct8i(tmp, o);
-    } else {
+    if (rowAdst) {
         d_iadst8i(tmp, o);
+    } else {
+        d_idct8i(tmp, o);
     }
     for (int c = 0; c < 8; ++c) {
         sbuf[t * 8 + c] = d_round_shift(o[c], 1);
@@ -6858,10 +6881,10 @@ extern "C" __global__ void inv_txfm_2d_add_8x8(const int* coeffs, const int* txT
     for (int r = 0; r < 8; ++r) {
         tmp[r] = d_cv(sbuf[r * 8 + t], 16);
     }
-    if (*txType == 0) {
-        d_idct8i(tmp, o);
-    } else {
+    if (colAdst) {
         d_iadst8i(tmp, o);
+    } else {
+        d_idct8i(tmp, o);
     }
     for (int r = 0; r < 8; ++r) {
         int v = (int)dst[r * (*stride) + t] + d_round_shift(o[r], 4);
@@ -7168,15 +7191,18 @@ extern "C" __global__ void inv_txfm_2d_add_16x16(const int* coeffs, const int* t
                                                  unsigned char* dst, const int* stride) {
     __shared__ int sbuf[256];
     const int t = threadIdx.x;
+    // RE7 (court order): the per-pass selection, the inv 4x4 note.
+    const int rowAdst = (*txType == 2) || (*txType == 3);
+    const int colAdst = (*txType == 1) || (*txType == 3);
     int tmp[16];
     int o[16];
     for (int c = 0; c < 16; ++c) {
         tmp[c] = d_cv(coeffs[t * 16 + c], 16);
     }
-    if (*txType == 0) {
-        d_idct16i(tmp, o);
-    } else {
+    if (rowAdst) {
         d_iadst16i(tmp, o);
+    } else {
+        d_idct16i(tmp, o);
     }
     for (int c = 0; c < 16; ++c) {
         sbuf[t * 16 + c] = d_round_shift(o[c], 2);
@@ -7185,10 +7211,10 @@ extern "C" __global__ void inv_txfm_2d_add_16x16(const int* coeffs, const int* t
     for (int r = 0; r < 16; ++r) {
         tmp[r] = d_cv(sbuf[r * 16 + t], 16);
     }
-    if (*txType == 0) {
-        d_idct16i(tmp, o);
-    } else {
+    if (colAdst) {
         d_iadst16i(tmp, o);
+    } else {
+        d_idct16i(tmp, o);
     }
     for (int r = 0; r < 16; ++r) {
         int v = (int)dst[r * (*stride) + t] + d_round_shift(o[r], 4);

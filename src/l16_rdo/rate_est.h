@@ -993,6 +993,18 @@ std::int32_t intraModeToTxType(std::int32_t predMode, std::int32_t predModeUv, s
 // txsizeSqrUpMap and the set selection the landed getExtTxSetType.
 std::int32_t getIntraUvTxType(std::int32_t predModeUv, std::int32_t txSize, std::int32_t reducedTxSet);
 
+// RE7: the LUMA tx-type derivation the emission composes at - the decoder's
+// compute_tx_type rule (spec 5.11.40; aom av1_get_tx_type blockd.h:1283-1313,
+// the intra branch shape applied to luma): intraModeToTxType
+// (mode_decision.c:2975-2979) + the ext-tx-used fold
+// (av1_ext_tx_used, common_utils.c:197-204) at the frame's reduced_tx_set.
+// The 32x32/64x64 shapes fold to DCT_DCT (the DCTONLY set,
+// get_ext_tx_set_type common_utils.h:62-66); the reference ENCODER'S fast
+// path pins DCT_DCT (product_coding_loop.c:4391) - the DERIVED type is the
+// decoder contract the artifacts must satisfy. predMode is the luma-space
+// intra mode (PLANE_TYPE_Y, plane 0); txSize is the 19-shape TxShape order.
+std::int32_t lumaIntraTxType(std::int32_t predMode, std::int32_t txSize, std::int32_t reducedTxSet);
+
 // RE4: fimode_to_intramode (definitions.h:1304, verbatim). SIZE NOTE: the
 // reference's FilterIntraMode enum (definitions.h:1295-1302) has FIVE modes
 // and FILTER_INTRA_MODES = 5; the landed rate_est.h FILTER_INTRA_MODES

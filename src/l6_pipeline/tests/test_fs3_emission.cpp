@@ -95,16 +95,16 @@ TEST_CASE("FS3: per-size emission walk bit-exact vs the FS2 gate lines (4x4/8x8/
 
         if (S == 4) {
             pipeline::encodeFrameAuto4x4Q(plane, recon, coeffs, modes, 100,
-                                          transforms::TxType::DCT_DCT, &w, &fc, &na);
+                                          &w, &fc, &na);
         } else if (S == 8) {
             pipeline::encodeFrameAuto8x8Q(plane, recon, coeffs, modes, 100,
-                                          transforms::TxType::DCT_DCT, &w, &fc, &na);
+                                          &w, &fc, &na);
         } else if (S == 32) {
             pipeline::encodeFrameAuto32x32Q(plane, recon, coeffs, modes, 100,
-                                            transforms::TxType::DCT_DCT, &w, &fc, &na);
+                                            &w, &fc, &na);
         } else {
             pipeline::encodeFrameAuto64x64Q(plane, recon, coeffs, modes, 100,
-                                            transforms::TxType::DCT_DCT, &w, &fc, &na);
+                                            &w, &fc, &na);
         }
 
         // the modes vs fs2S_modes
@@ -165,7 +165,7 @@ TEST_CASE("FS5: 2x2 grid of 32x32 at 64x64 matches the fs5g32 gate (running part
     memset(&na, 0xFF, sizeof(na));
 
     pipeline::encodeFrameAuto32x32Q(plane, recon, coeffs, modes, 100,
-                                    transforms::TxType::DCT_DCT, &w, &fc, &na);
+                                    &w, &fc, &na);
 
     const Fs2Line wantM = loadGate("fs5g32_modes");
     REQUIRE(wantM.n == 4);

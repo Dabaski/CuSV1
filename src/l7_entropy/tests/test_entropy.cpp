@@ -547,11 +547,11 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     w.pos = 0;
 
     entropy::writeTxbCoeffs(&w, &fc, qc16, scan16, entropy::TX_16X16, eob16, 0, 0, 1, entropy::DC_PRED,
-                            entropy::COMPONENT_LUMA);
+                            entropy::COMPONENT_LUMA, entropy::DCT_DCT, 100);
     entropy::writeTxbCoeffs(&w, &fc, qc8, scan8, entropy::TX_8X8, eob8, 0, 0, 1, entropy::DC_PRED,
-                            entropy::COMPONENT_LUMA);
+                            entropy::COMPONENT_LUMA, entropy::DCT_DCT, 100);
     entropy::writeTxbCoeffs(&w, &fc, qc4, scan4, entropy::TX_4X4, eob4, 0, 0, 1, entropy::DC_PRED,
-                            entropy::COMPONENT_LUMA);
+                            entropy::COMPONENT_LUMA, entropy::DCT_DCT, 100);
     entropy::odEcStopEncode(&w);
     // TD5b: the token tables are the q100 bucket (idx 2) - the bytes follow
     // the regenerated ectok_bytes gate line.
@@ -568,11 +568,14 @@ TEST_CASE("token chain per-TU roundtrip matches gate (16x16/8x8/4x4, q100)") {
     std::int32_t rc8[64] = {0};
     std::int32_t rc4[16] = {0};
     const int reob16 = entropy::readTxbCoeffs(&r, &fcR, rc16, scan16, entropy::TX_16X16, 0, 0, 1,
-                                              entropy::DC_PRED, entropy::COMPONENT_LUMA);
+                                              entropy::DC_PRED, entropy::COMPONENT_LUMA, 100,
+                                              nullptr);
     const int reob8 = entropy::readTxbCoeffs(&r, &fcR, rc8, scan8, entropy::TX_8X8, 0, 0, 1,
-                                             entropy::DC_PRED, entropy::COMPONENT_LUMA);
+                                             entropy::DC_PRED, entropy::COMPONENT_LUMA, 100,
+                                             nullptr);
     const int reob4 = entropy::readTxbCoeffs(&r, &fcR, rc4, scan4, entropy::TX_4X4, 0, 0, 1,
-                                             entropy::DC_PRED, entropy::COMPONENT_LUMA);
+                                             entropy::DC_PRED, entropy::COMPONENT_LUMA, 100,
+                                             nullptr);
     CHECK(reob16 == 21);
     CHECK(reob8 == 10);
     CHECK(reob4 == 0);
@@ -636,7 +639,8 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
     for (int b = 0; b < 4; ++b) {
         entropy::writeBlockCoeffs(&w, &fc, &na, qc[b], scan16, entropy::TX_16X16,
                                   entropy::BLOCK_16X16, eob[b], mi[b][0], mi[b][1], 1,
-                                  entropy::DC_PRED, entropy::COMPONENT_LUMA);
+                                  entropy::DC_PRED, entropy::COMPONENT_LUMA, entropy::DCT_DCT,
+                                  100);
     }
     entropy::odEcStopEncode(&w);
     // TD5b: the token tables are the q100 bucket (idx 2) - the bytes follow
@@ -657,7 +661,8 @@ TEST_CASE("token chain per-block roundtrip matches gate (4x 16x16, q100, NA accu
         std::int32_t rc[256] = {0};
         const int reob = entropy::readBlockCoeffs(&r, &fcR, &naR, rc, scan16, entropy::TX_16X16,
                                                   entropy::BLOCK_16X16, mi[b][0], mi[b][1], 1,
-                                                  entropy::DC_PRED, entropy::COMPONENT_LUMA);
+                                                  entropy::DC_PRED, entropy::COMPONENT_LUMA, 100,
+                                                  nullptr);
         CHECK(reob == (int)eob[b]);
         for (int i = 0; i < 256; ++i) CHECK(rc[i] == qc[b][i]);
     }
@@ -975,7 +980,7 @@ TEST_CASE("chroma token chain per-component per-txs matches gate bytes (CS1b)") 
             w.allow_update_cdf = 1;
             w.pos = 0;
             entropy::writeTxbCoeffs(&w, &fc, qc, scans[t], ts[t], eob, txbSkipCtxs[t], 0, 1,
-                                    entropy::DC_PRED, component);
+                                    entropy::DC_PRED, component, entropy::DCT_DCT, 100);
             entropy::odEcStopEncode(&w);
             REQUIRE(w.pos == wantLen[comp][t]);
             for (int i = 0; i < wantLen[comp][t]; ++i) CHECK((unsigned)buf[i] == wantBytes[comp][t][i]);
@@ -986,7 +991,7 @@ TEST_CASE("chroma token chain per-component per-txs matches gate bytes (CS1b)") 
             std::int32_t rc[1024];
             memset(rc, 0, sizeof(rc));
             const int reob = entropy::readTxbCoeffs(&r, &fcR, rc, scans[t], ts[t], txbSkipCtxs[t], 0, 1,
-                                                     entropy::DC_PRED, component);
+                                                     entropy::DC_PRED, component, 100, nullptr);
             CHECK(reob == eob);
             for (int i = 0; i < n; ++i) CHECK(rc[i] == qc[i]);
             if (entropy::ecFrameCdfsEqual(&fc, &fcR) != 1) cdfBad = 1;
@@ -1004,7 +1009,7 @@ TEST_CASE("chroma token chain per-component per-txs matches gate bytes (CS1b)") 
         w0.allow_update_cdf = 1;
         w0.pos = 0;
         entropy::writeTxbCoeffs(&w0, &fc0, zeroQc, scans[0], entropy::TX_4X4, 0, 8, 0, 1,
-                                entropy::DC_PRED, component);
+                                entropy::DC_PRED, component, entropy::DCT_DCT, 100);
         entropy::odEcStopEncode(&w0);
         REQUIRE(w0.pos == 1);
         CHECK((unsigned)buf0[0] == (comp ? ecuv0V_bytes[0] : ecuv0U_bytes[0]));
@@ -1013,7 +1018,7 @@ TEST_CASE("chroma token chain per-component per-txs matches gate bytes (CS1b)") 
         r0.allow_update_cdf = 1;
         std::int32_t rc0[16] = {0};
         const int reob0 = entropy::readTxbCoeffs(&r0, &fc0R, rc0, scans[0], entropy::TX_4X4, 8, 0, 1,
-                                                 entropy::DC_PRED, component);
+                                                 entropy::DC_PRED, component, 100, nullptr);
         CHECK(reob0 == 0);
         if (entropy::ecFrameCdfsEqual(&fc0, &fc0R) != 1) cdfBad = 1;
     }
@@ -1053,7 +1058,8 @@ TEST_CASE("chroma per-block wrapper derives txb_skip_ctx offset 7 (CS1b)") {
     w.allow_update_cdf = 1;
     w.pos = 0;
     entropy::writeBlockCoeffs(&w, &fcW, &naW, qc, scan4, entropy::TX_4X4, entropy::BLOCK_4X4, eob,
-                              0, 0, 1, entropy::DC_PRED, entropy::COMPONENT_CHROMA);
+                              0, 0, 1, entropy::DC_PRED, entropy::COMPONENT_CHROMA,
+                              entropy::DCT_DCT, 100);
     entropy::odEcStopEncode(&w);
 
     entropy::EcFrameContext fcD;
@@ -1065,7 +1071,7 @@ TEST_CASE("chroma per-block wrapper derives txb_skip_ctx offset 7 (CS1b)") {
     wd.allow_update_cdf = 1;
     wd.pos = 0;
     entropy::writeTxbCoeffs(&wd, &fcD, qc, scan4, entropy::TX_4X4, eob, 8, 0, 1, entropy::DC_PRED,
-                            entropy::COMPONENT_CHROMA);
+                            entropy::COMPONENT_CHROMA, entropy::DCT_DCT, 100);
     entropy::odEcStopEncode(&wd);
     REQUIRE(w.pos == wd.pos);
     for (unsigned i = 0; i < w.pos; ++i) CHECK((unsigned)buf[i] == (unsigned)bufD[i]);
@@ -1083,7 +1089,7 @@ TEST_CASE("chroma per-block wrapper derives txb_skip_ctx offset 7 (CS1b)") {
     std::int32_t rc[16] = {0};
     const int reob = entropy::readBlockCoeffs(&r, &fcR, &naR, rc, scan4, entropy::TX_4X4,
                                               entropy::BLOCK_4X4, 0, 0, 1, entropy::DC_PRED,
-                                              entropy::COMPONENT_CHROMA);
+                                              entropy::COMPONENT_CHROMA, 100, nullptr);
     CHECK(reob == eob);
     for (int i = 0; i < 16; ++i) CHECK(rc[i] == qc[i]);
     CHECK(entropy::ecFrameCdfsEqual(&fcW, &fcR) == 1);
@@ -1100,7 +1106,8 @@ TEST_CASE("chroma per-block wrapper derives txb_skip_ctx offset 7 (CS1b)") {
     wl.allow_update_cdf = 1;
     wl.pos = 0;
     entropy::writeBlockCoeffs(&wl, &fcL, &naL, qc, scan4, entropy::TX_4X4, entropy::BLOCK_4X4, eob,
-                              0, 0, 1, entropy::DC_PRED, entropy::COMPONENT_LUMA);
+                              0, 0, 1, entropy::DC_PRED, entropy::COMPONENT_LUMA, entropy::DCT_DCT,
+                              100);
     entropy::odEcStopEncode(&wl);
     entropy::EcFrameContext fcLD;
     entropy::initDefaultEcFrameContext(&fcLD, 100);
@@ -1111,7 +1118,7 @@ TEST_CASE("chroma per-block wrapper derives txb_skip_ctx offset 7 (CS1b)") {
     wld.allow_update_cdf = 1;
     wld.pos = 0;
     entropy::writeTxbCoeffs(&wld, &fcLD, qc, scan4, entropy::TX_4X4, eob, 0, 0, 1,
-                            entropy::DC_PRED, entropy::COMPONENT_LUMA);
+                            entropy::DC_PRED, entropy::COMPONENT_LUMA, entropy::DCT_DCT, 100);
     entropy::odEcStopEncode(&wld);
     REQUIRE(wl.pos == wld.pos);
     for (unsigned i = 0; i < wl.pos; ++i) CHECK((unsigned)bufL[i] == (unsigned)bufLD[i]);
@@ -1805,4 +1812,87 @@ TEST_CASE("writeSegmentId/readSegmentId block-walk roundtrip") {
     }
     CHECK(memcmp(mapW, mapR, sizeof(mapW)) == 0);
     CHECK(entropy::ecFrameCdfsEqual(&fcW, &fcR) == 1);
+}
+
+// RE7: the tx-type symbol threads the DERIVED type through the token chain
+// and the q0 gate. The symbol value = av1_ext_tx_ind[DTT4_IDTX][tx_type]
+// (cabac_context_model.c:34-41): DCT_DCT->1, ADST_DCT->3; the reader inverts
+// via av1_ext_tx_inv (aom decodetxb.c av1_read_tx_type). The q0 gate:
+// base_q_idx == 0 -> NO symbol either side (aom decodemv.c:638-640), so a
+// (ADST_DCT, q0) stream is byte-identical to a (DCT_DCT, q0) stream.
+TEST_CASE("txb tx-type symbol threads the derived type and the q0 gate (RE7)") {
+    std::int16_t scan4[16];
+    transforms::defaultScan4x4(scan4);
+    std::int32_t qc[16] = {0};
+    qc[scan4[0]] = 3;
+    qc[scan4[1]] = -2;
+    qc[scan4[2]] = 5;
+    qc[scan4[3]] = 2;
+    const std::uint16_t eob = 4;
+
+    // (a) q100 ADST_DCT: the reader returns the type the writer carried.
+    entropy::EcFrameContext fcW;
+    entropy::initDefaultEcFrameContext(&fcW, 100);
+    entropy::AomWriter w{};
+    unsigned char bufA[16] = {0};
+    w.ec.buf = bufA;
+    entropy::odEcEncReset(&w.ec);
+    w.allow_update_cdf = 1;
+    w.pos = 0;
+    entropy::writeTxbCoeffs(&w, &fcW, qc, scan4, entropy::TX_4X4, eob, 0, 0, 1, entropy::DC_PRED,
+                            entropy::COMPONENT_LUMA, entropy::ADST_DCT, 100);
+    entropy::odEcStopEncode(&w);
+
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR, 100);
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, bufA, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    entropy::TxType gotType = entropy::DCT_DCT;
+    std::int32_t rc[16] = {0};
+    const int reob = entropy::readTxbCoeffs(&r, &fcR, rc, scan4, entropy::TX_4X4, 0, 0, 1,
+                                            entropy::DC_PRED, entropy::COMPONENT_LUMA, 100, &gotType);
+    CHECK(reob == (int)eob);
+    CHECK(gotType == entropy::ADST_DCT);
+    for (int i = 0; i < 16; ++i) CHECK(rc[i] == qc[i]);
+    CHECK(entropy::ecFrameCdfsEqual(&fcW, &fcR) == 1);
+
+    // (b) the q0 gate: no symbol either side - the (ADST_DCT, 0) stream is
+    // byte-identical to the (DCT_DCT, 0) stream, and the reader outs DCT_DCT.
+    entropy::EcFrameContext fc0;
+    entropy::initDefaultEcFrameContext(&fc0, 0);
+    entropy::AomWriter w0{};
+    unsigned char buf0[16] = {0};
+    w0.ec.buf = buf0;
+    entropy::odEcEncReset(&w0.ec);
+    w0.allow_update_cdf = 1;
+    w0.pos = 0;
+    entropy::writeTxbCoeffs(&w0, &fc0, qc, scan4, entropy::TX_4X4, eob, 0, 0, 1, entropy::DC_PRED,
+                            entropy::COMPONENT_LUMA, entropy::ADST_DCT, 0);
+    entropy::odEcStopEncode(&w0);
+    entropy::EcFrameContext fc0D;
+    entropy::initDefaultEcFrameContext(&fc0D, 0);
+    entropy::AomWriter w0D{};
+    unsigned char buf0D[16] = {0};
+    w0D.ec.buf = buf0D;
+    entropy::odEcEncReset(&w0D.ec);
+    w0D.allow_update_cdf = 1;
+    w0D.pos = 0;
+    entropy::writeTxbCoeffs(&w0D, &fc0D, qc, scan4, entropy::TX_4X4, eob, 0, 0, 1, entropy::DC_PRED,
+                            entropy::COMPONENT_LUMA, entropy::DCT_DCT, 0);
+    entropy::odEcStopEncode(&w0D);
+    REQUIRE(w0.pos == w0D.pos);
+    for (unsigned i = 0; i < w0.pos; ++i) CHECK((unsigned)buf0[i] == (unsigned)buf0D[i]);
+    entropy::EcFrameContext fc0R;
+    entropy::initDefaultEcFrameContext(&fc0R, 0);
+    entropy::AomReader r0;
+    REQUIRE(entropy::odEcReaderInit(&r0, buf0, w0.pos) == 0);
+    r0.allow_update_cdf = 1;
+    entropy::TxType got0 = entropy::INVALID_TX_TYPE;
+    std::int32_t rc0[16] = {0};
+    const int reob0 = entropy::readTxbCoeffs(&r0, &fc0R, rc0, scan4, entropy::TX_4X4, 0, 0, 1,
+                                             entropy::DC_PRED, entropy::COMPONENT_LUMA, 0, &got0);
+    CHECK(reob0 == (int)eob);
+    CHECK(got0 == entropy::DCT_DCT);
+    for (int i = 0; i < 16; ++i) CHECK(rc0[i] == qc[i]);
 }

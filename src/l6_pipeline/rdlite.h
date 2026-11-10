@@ -39,9 +39,13 @@ namespace pipeline {
 
 // RE5: the frame-level RD-lite decision context: the RE1 rate-estimation
 // surface (one per frame) + the named lambda.
+// RE7: the frame's qindex is carried so the per-candidate tx-type
+// derivation applies the decoder's q0 gate (dav1d recon_tmpl.c:363-365,
+// aom decodemv.c av1_read_tx_type:638-640: qidx == 0 -> DCT_DCT implicit).
 struct RdliteFrameCtx {
     l16_rdo::MdRateEstimationContext me;
     std::uint32_t lambda;
+    std::int32_t qindex;
 };
 
 // Derives me from the frame's l7 context (initDefaultEcFrameContext at the

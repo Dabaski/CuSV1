@@ -193,8 +193,9 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
 // chains; the coefficients come from the pipeline encode
 // (encodeFrameAuto16x16Q - the TS3c-proven bit-exact path)
 // RE6: the emission carries the DECIDED deltas (gate bsf3v2_deltas
-// 0 1 0 0 - the q100 RD-lite decision's chosen angle delta per block).
-static const int wantDeltas[4] = {0, 1, 0, 0};
+// 0 0 0 0 - the q100 RD-lite decision's chosen angle delta per block;
+// RE7: block 1's delta +1 -> 0 through the derived-type recon feedback).
+static const int wantDeltas[4] = {0, 0, 0, 0};
 pixels::Plane plane(32, 32, 4);
     pixels::Plane recon(32, 32, 4);
     for (int y = 0; y < 32; ++y)
@@ -202,7 +203,7 @@ pixels::Plane plane(32, 32, 4);
             plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
     std::int32_t coeffs[1024] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100);
     static const std::uint8_t wantModes[4] = {10, 7, 0, 0};  // gate ecfrm_modes
     bool modesOk = true;
     for (int i = 0; i < 4; ++i)
@@ -262,57 +263,62 @@ static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, wantDeltas[b]
         entropy::writeBlockCoeffs(&w, &fc, &na, coeffs + b * 256, scan16, entropy::TX_16X16,
                                   entropy::BLOCK_16X16, ec, lr[b], lc[b], 1,
                                   static_cast<entropy::PredictionMode>(modes[b]),
-                                  entropy::COMPONENT_LUMA);
+                                  entropy::COMPONENT_LUMA,
+                                  static_cast<entropy::TxType>(l16_rdo::lumaIntraTxType(
+                                      (int)modes[b], (int)entropy::TX_16X16, 1)), 100);
     }
     entropy::odEcStopEncode(&w);
 
-    // TU v2 == gate tu_bytes_v2 49 (TD5b: the q100 bucket, idx 2; RE5: the
-    // RD-lite ranking changed the modes to {10,7,0,0} - the two DC_PRED
-    // blocks emit FI symbols - and the same byte count holds: the two FI
-    // symbols fit inside the final byte's padding, the tail re-encodes)
+    // TU v2 == gate tu_bytes_v2 66 (TD5b: the q100 bucket, idx 2; RE5: the
+    // RD-lite ranking changed the modes to {10,7,0,0}; RE7: the composition
+    // runs at the derived type and every eob>0 luma TU emits the tx-type
+    // symbol - 50 -> 66, the wantTu2 bytes re-read from the gate line)
     unsigned char tuBuf[128];
     memset(tuBuf, 0, sizeof(tuBuf));
     const std::uint32_t tuSize =
         bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, w.pos);
-    REQUIRE(tuSize == 50);
-static const unsigned char wantTu2[50] = {
-    0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x23, 0x10,
-    0xd9, 0x00, 0x00, 0x01, 0xc2, 0xb8, 0xb2, 0x8c, 0xb3, 0x90, 0xff, 0xd3, 0xe1, 0xf3, 0x76, 0x75,
-    0xa8, 0x84, 0x1e, 0x44, 0x62, 0xd6, 0x68, 0xe4, 0x70, 0x56, 0xc5, 0xe1, 0x6c, 0x57, 0xa4, 0xef,
-    0x8e, 0xc0};
-for (int i = 0; i < 50; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
+    REQUIRE(tuSize == 66);
+static const unsigned char wantTu2[66] = {
+    0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x33, 0x10,
+    0xd9, 0x00, 0x00, 0x01, 0xc2, 0xf8, 0x65, 0x6a, 0xa4, 0x9f, 0xf0, 0xa9, 0x68, 0xe0, 0x23, 0x41,
+    0x6b, 0xdd, 0x3f, 0x62, 0xc6, 0x1b, 0x75, 0x6d, 0x6d, 0x56, 0xe0, 0xab, 0x67, 0x74, 0x4f, 0xff,
+    0xff, 0x15, 0x26, 0x29, 0x0e, 0xea, 0x80, 0x3e, 0x99, 0xda, 0xd7, 0x08, 0xdf, 0xa8, 0x91, 0xa0,
+    0x19, 0x02};
+for (int i = 0; i < 66; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
     }
 
 TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate bytes") {
     // TS4 milestone artifact: goldens/structural_keyframe.obu is the
     // gate-pinned tu_bytes_v2 stream (tools/golden_gen expected line:
-    // tu_bytes_v2 49 12 00 0a ... 7a 8e 00 1b - TD5b: the q100 bucket,
-    // idx 2; RE5: the RD-lite ranking changed the modes to {10,7,0,0},
-    // the two DC_PRED blocks emit FI symbols, and the byte count holds:
-    // the two FI symbols fit inside the final byte's padding),
+    // tu_bytes_v2 66 12 00 0a ... a8 91 a0 19 02 - TD5b: the q100 bucket,
+    // idx 2; RE5: the RD-lite ranking changed the modes to {10,7,0,0};
+    // RE7: the composition runs at the derived type and every eob>0 luma
+    // TU emits the tx-type symbol, 50 -> 66 bytes),
     // produced from the generator
     // output (not hand-typed). The test proves the three-way identity:
     // composed TU (l6 coefficients + l7 tile symbols + l8 assembly) ==
     // committed file == gate bytes. The USER runs the external decode
     // check (aomdec/dav1d/ffmpeg - decode handoff attempt #3).
-static const unsigned char wantTu2[50] = {
-    0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x23, 0x10,
-    0xd9, 0x00, 0x00, 0x01, 0xc2, 0xb8, 0xb2, 0x8c, 0xb3, 0x90, 0xff, 0xd3, 0xe1, 0xf3, 0x76, 0x75,
-    0xa8, 0x84, 0x1e, 0x44, 0x62, 0xd6, 0x68, 0xe4, 0x70, 0x56, 0xc5, 0xe1, 0x6c, 0x57, 0xa4, 0xef,
-    0x8e, 0xc0};
+static const unsigned char wantTu2[66] = {
+    0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x33, 0x10,
+    0xd9, 0x00, 0x00, 0x01, 0xc2, 0xf8, 0x65, 0x6a, 0xa4, 0x9f, 0xf0, 0xa9, 0x68, 0xe0, 0x23, 0x41,
+    0x6b, 0xdd, 0x3f, 0x62, 0xc6, 0x1b, 0x75, 0x6d, 0x6d, 0x56, 0xe0, 0xab, 0x67, 0x74, 0x4f, 0xff,
+    0xff, 0x15, 0x26, 0x29, 0x0e, 0xea, 0x80, 0x3e, 0x99, 0xda, 0xd7, 0x08, 0xdf, 0xa8, 0x91, 0xa0,
+    0x19, 0x02};
 
     // composed v2 TU (identical pipeline to the TS4 test)
 // RE6: the emission carries the DECIDED deltas (gate bsf3v2_deltas
-// 0 1 0 0 - the q100 RD-lite decision's chosen angle delta per block).
-static const int wantDeltas[4] = {0, 1, 0, 0};
-    pixels::Plane plane(32, 32, 4);
+// 0 0 0 0 - the q100 RD-lite decision's chosen angle delta per block;
+// RE7: block 1's delta +1 -> 0 through the derived-type recon feedback).
+static const int wantDeltas[4] = {0, 0, 0, 0};
+pixels::Plane plane(32, 32, 4);
     pixels::Plane recon(32, 32, 4);
     for (int y = 0; y < 32; ++y)
         for (int x = 0; x < 32; ++x)
             plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
     std::int32_t coeffs[1024] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100);
     std::int16_t scan16[256];
     transforms::defaultScan16x16(scan16);
     entropy::EcFrameContext fc;
@@ -359,14 +365,16 @@ static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, wantDeltas[b]
         entropy::writeBlockCoeffs(&w, &fc, &na, coeffs + b * 256, scan16, entropy::TX_16X16,
                                   entropy::BLOCK_16X16, ec, lr[b], lc[b], 1,
                                   static_cast<entropy::PredictionMode>(modes[b]),
-                                  entropy::COMPONENT_LUMA);
+                                  entropy::COMPONENT_LUMA,
+                                  static_cast<entropy::TxType>(l16_rdo::lumaIntraTxType(
+                                      (int)modes[b], (int)entropy::TX_16X16, 1)), 100);
     }
     entropy::odEcStopEncode(&w);
     unsigned char tuBuf[128];
     memset(tuBuf, 0, sizeof(tuBuf));
     const std::uint32_t tuSize = bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, w.pos);
-  REQUIRE(tuSize == 50);
-  for (int i = 0; i < 50; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
+  REQUIRE(tuSize == 66);
+  for (int i = 0; i < 66; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
 
     // committed artifact identity. The goldens path derives from __FILE__
     // (robust against compile-definition quoting across CMake generators -
@@ -379,11 +387,11 @@ static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, wantDeltas[b]
     FILE* f = nullptr;
     fopen_s(&f, tuFilePath.c_str(), "rb");
     REQUIRE(f != nullptr);
-    unsigned char fileBytes[64] = {0};
+    unsigned char fileBytes[96] = {0};
     const size_t n = fread(fileBytes, 1, sizeof(fileBytes), f);
     fclose(f);
-  REQUIRE(n == 50);
-  for (int i = 0; i < 50; ++i) CHECK(fileBytes[i] == wantTu2[i]);
+  REQUIRE(n == 66);
+  for (int i = 0; i < 66; ++i) CHECK(fileBytes[i] == wantTu2[i]);
 }
 
 // ---- FS5b: the per-geometry single-TU v3 artifacts (4/8/16/64) -------------
@@ -477,8 +485,7 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
                         static_cast<std::uint8_t>((y < 4) ? (4 * (x + y + 1)) : 0);
             std::int32_t coeffs8[256] = {0};
             std::uint8_t modes8[4] = {0};
-            pipeline::encodeFrameAuto4x4Q(plane8, recon8, coeffs8, modes8, 100,
-                                          transforms::TxType::DCT_DCT);
+            pipeline::encodeFrameAuto4x4Q(plane8, recon8, coeffs8, modes8, 100);
             entropy::EcFrameContext fc;
             entropy::initDefaultEcFrameContext(&fc, 100);
             entropy::AomWriter w{};
@@ -520,13 +527,14 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
                 entropy::writeBlockCoeffs(&w, &fc, &na, coeffs8 + b * 16, scan4, entropy::TX_4X4,
                                           entropy::BLOCK_4X4, eob, lr4[b], lc4[b], 1,
                                           static_cast<entropy::PredictionMode>(modes8[b]),
-                                          entropy::COMPONENT_LUMA);
+                                          entropy::COMPONENT_LUMA,
+                                          static_cast<entropy::TxType>(l16_rdo::lumaIntraTxType(
+                                              (int)modes8[b], (int)entropy::TX_4X4, 1)), 100);
             }
             entropy::odEcStopEncode(&w);
             tilePos = w.pos;
         } else if (S == 16) {
-            pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100,
-                                            transforms::TxType::DCT_DCT);
+            pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100);
             entropy::EcFrameContext fc;
             entropy::initDefaultEcFrameContext(&fc, 100);
             entropy::AomWriter w{};
@@ -561,7 +569,9 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
             entropy::writeBlockCoeffs(&w, &fc, &na, coeffs, scan16, entropy::TX_16X16,
                                       entropy::BLOCK_16X16, eob, 0, 0, 1,
                                       static_cast<entropy::PredictionMode>(modes[0]),
-                                      entropy::COMPONENT_LUMA);
+                                      entropy::COMPONENT_LUMA,
+                                      static_cast<entropy::TxType>(l16_rdo::lumaIntraTxType(
+                                          (int)modes[0], (int)entropy::TX_16X16, 1)), 100);
             entropy::odEcStopEncode(&w);
             tilePos = w.pos;
         } else if (S == 8) {
@@ -571,7 +581,7 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
             entropy::DcSignLevelCoeffNa na;
             memset(&na, 0xFF, sizeof(na));
             pipeline::encodeFrameAuto8x8Q(plane, recon, coeffs, modes, 100,
-                                          transforms::TxType::DCT_DCT, &w, &fc, &na);
+                                          &w, &fc, &na);
             tilePos = w.pos;
         } else {
             entropy::EcFrameContext fc;
@@ -580,7 +590,7 @@ TEST_CASE("FS5b: per-geometry single-TU v3 artifacts (4x4/8x8/16x16/64x64)") {
             entropy::DcSignLevelCoeffNa na;
             memset(&na, 0xFF, sizeof(na));
             pipeline::encodeFrameAuto64x64Q(plane, recon, coeffs, modes, 100,
-                                            transforms::TxType::DCT_DCT, &w, &fc, &na);
+                                            &w, &fc, &na);
             tilePos = w.pos;
         }
 
@@ -775,7 +785,7 @@ TEST_CASE("CS5: the port-composed color TU - three-way identity per size") {
         memset(&naV, 0xFF, sizeof(naV));
         pipeline::encodeFrameChromaQ(srcY, srcU, srcV, reconY, reconU, reconV, coeffsY,
                                      coeffsU, coeffsV, modesY, modesU, modesV, eobsY,
-                                     eobsU, eobsV, 100, B, transforms::TxType::DCT_DCT,
+                                     eobsU, eobsV, 100, B,
                                      &w, &fc, &naY, &naU, &naV);
         const unsigned char* wantTu = (S == 4) ? tu_color4 : (S == 8) ? tu_color8
                                       : (S == 16) ? tu_color16 : tu_color32;

@@ -732,16 +732,25 @@ int readGolomb(AomReader* r);
 // eob_extra, coeff_base_eob, coeff_base, coeff_br - the [PLANE_TYPES] rows)
 // and gates the tx-type symbol LUMA-only (entropy_coding.c:374-376: chroma
 // TUs emit no tx-type symbol).
+// RE7: tx_type = the block's DERIVED transform type
+// (av1_write_coeffs_txb_1d reads blk_ptr->tx_type[txb_index],
+// entropy_coding.c:362-363); base_q_idx threads the av1_write_tx_type gate
+// (entropy_coding.c:321-322). The symbol value =
+// av1_ext_tx_ind[tx_set_type][tx_type] through the landed writeTxType.
 void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
                     const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
                     int dc_sign_ctx, int reduced_tx_set, PredictionMode intra_dir,
-                    ComponentType component_type);
+                    ComponentType component_type, TxType tx_type, int base_q_idx);
 // read twin (aom decodetxb.c read_coeffs_txb, symbol-for-symbol). Fills
 // coeff (raster, signed); returns eob. Same component_type threading.
+// RE7: base_q_idx + tx_type_out mirror the writer's gate - the reader
+// consumes the symbol exactly when the writer emitted it and outs the read
+// type (DCT_DCT when the gate folds: q0 or the DCTONLY set; aom decodemv.c
+// av1_read_tx_type:626-640).
 int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
                   const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx,
                   int reduced_tx_set, PredictionMode intra_dir,
-                  ComponentType component_type);
+                  ComponentType component_type, int base_q_idx, TxType* tx_type_out);
 
 // ---------------------------------------------------------------------------
 // TS3: tx-type surface (entropy_coding.c:317-353, intra path only).
@@ -806,18 +815,28 @@ extern const std::int32_t ebTxSizeHighUnit[TX_SIZES_ALL];
 // Per-block token loop (entropy_coding.c:757-820 tx_depth=0 path): for our
 // whole-block TUs (tx_depth=0, txb_count=1), the loop is:
 //   getTxbCtx -> writeTxbCoeffs -> NA update. The NA update packs
-//   cul_level (clamped to COEFF_CONTEXT_MASK) + set_dc_sign into a uint8_t
-//   and writes it to the above/left arrays over the TU's mi extent.
+// cul_level (clamped to COEFF_CONTEXT_MASK) + set_dc_sign into a uint8_t
+// and writes it to the above/left arrays over the TU's mi extent.
 // CS1b: component_type routes getTxbCtx's plane arg (COMPONENT_CHROMA ->
 // PLANE_TYPE_UV, the :310-314 branch: ctx_base + offset 7) and threads the
 // six component-dim families through the chain. bsize is the PLANE block
 // size (the luma bsize for COMPONENT_LUMA; the UV-plane bsize for
 // COMPONENT_CHROMA).
+// RE7: tx_type = the block's DERIVED transform type (the caller's
+// lumaIntraTxType output; entropy_coding.c:374-376 reads
+// blk_ptr->tx_type[txb_index]); base_q_idx threads the frame header's
+// quantization_params.base_q_idx into the av1_write_tx_type gate
+// (entropy_coding.c:321-322: get_ext_tx_types > 1 AND base_q_idx > 0).
 void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                       const std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
                       BlockSize bsize, int eob, int mi_row, int mi_col,
                       int reduced_tx_set, PredictionMode intra_dir,
-                      ComponentType component_type);
+                      ComponentType component_type, TxType tx_type, int base_q_idx);
+int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
+                    std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
+                    BlockSize bsize, int mi_row, int mi_col,
+                    int reduced_tx_set, PredictionMode intra_dir,
+                    ComponentType component_type, int base_q_idx, TxType* tx_type_out);
 int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                     std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
                     BlockSize bsize, int mi_row, int mi_col,
@@ -830,7 +849,6 @@ int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
 // pair is passed in (SVT derives it inside from blk_ptr->av1xd).
 void writeKfLumaMode(AomWriter* w, EcFrameContext* fc, BlockSize bsize,
                      PredictionMode mode, int above_ctx, int left_ctx, int angle_delta);
-
 // Decode side of the same surface: mode symbol, then the angle-delta symbol
 // indexed by the DECODED mode (delta out as delta + MAX_ANGLE_DELTA).
 PredictionMode readKfLumaMode(AomReader* r, EcFrameContext* fc, BlockSize bsize,

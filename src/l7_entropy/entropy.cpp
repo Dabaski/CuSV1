@@ -2511,7 +2511,7 @@ void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                       const std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
                       BlockSize bsize, int eob, int mi_row, int mi_col,
                       int reduced_tx_set, PredictionMode intra_dir,
-                      ComponentType component_type) {
+                      ComponentType component_type, TxType tx_type, int base_q_idx) {
     const int tx_w_unit = static_cast<int>(ebTxSizeWideUnit[tx_size]);
     const int tx_h_unit = static_cast<int>(ebTxSizeHighUnit[tx_size]);
     int txb_skip_ctx = 0, dc_sign_ctx = 0;
@@ -2520,7 +2520,7 @@ void writeBlockCoeffs(AomWriter* w, EcFrameContext* fc, DcSignLevelCoeffNa* na,
               &txb_skip_ctx, &dc_sign_ctx);
 
     writeTxbCoeffs(w, fc, coeff, scan, tx_size, eob, txb_skip_ctx, dc_sign_ctx, reduced_tx_set,
-                   intra_dir, component_type);
+                   intra_dir, component_type, tx_type, base_q_idx);
 
     // cul_level: sum of abs levels (entropy_coding.c:487/:510 accumulation,
     // clamped at :541), then set_dc_sign (:542). NA update: write the packed
@@ -2540,7 +2540,7 @@ int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
                     std::int32_t* coeff, const std::int16_t* scan, TxSize tx_size,
                     BlockSize bsize, int mi_row, int mi_col,
                     int reduced_tx_set, PredictionMode intra_dir,
-                    ComponentType component_type) {
+                    ComponentType component_type, int base_q_idx, TxType* tx_type_out) {
     const int tx_w_unit = static_cast<int>(ebTxSizeWideUnit[tx_size]);
     const int tx_h_unit = static_cast<int>(ebTxSizeHighUnit[tx_size]);
     int txb_skip_ctx = 0, dc_sign_ctx = 0;
@@ -2549,7 +2549,8 @@ int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
               &txb_skip_ctx, &dc_sign_ctx);
 
     const int eob = readTxbCoeffs(r, fc, coeff, scan, tx_size, txb_skip_ctx, dc_sign_ctx,
-                                  reduced_tx_set, intra_dir, component_type);
+                                  reduced_tx_set, intra_dir, component_type, base_q_idx,
+                                  tx_type_out);
     // NA update: same as the writer (aom read side: av1_set_entropy_contexts)
     int32_t cul_level = 0;
     for (int c = 0; c < eob; ++c) cul_level += std::abs(coeff[scan[c]]);
@@ -2566,8 +2567,7 @@ int readBlockCoeffs(AomReader* r, EcFrameContext* fc, DcSignLevelCoeffNa* na,
 void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
                     const std::int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
                     int dc_sign_ctx, int reduced_tx_set, PredictionMode intra_dir,
-                    ComponentType component_type) {
-    (void)reduced_tx_set;  // FS3-prep: the gate folds use_reduced_set = 1
+                    ComponentType component_type, TxType tx_type, int base_q_idx) {
     const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
     const int    eob_multi_size = txsizeLog2Minus4[tx_size];
     const int    eob_multi_ctx  = 0;  // TX_CLASS_2D (tx_type_to_class[DCT_DCT])
@@ -2575,24 +2575,18 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
     odEcWriteSymbol(w, eob == 0, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     if (eob == 0) return;
 
-// TS3: tx-type emission (entropy_coding.c:374-376), gated by the verbatim
-    // av1_write_tx_type gate (entropy_coding.c:321-322) - FS3-prep
-    // (court-ratified FS0): at TX_32X32/64X64 intra the eset is DCTONLY
-    // (common_utils.h:62-66; 1 type) -> the symbol is NOT written; at
-    // 4x4/8x8/16x16 reduced intra the eset is DTT4_IDTX (5 types) -> the
-    // DCT_DCT index through the 5-symbol set (byte-identical to the
-    // previous ungated emission - the 16x16 gate lines diff-0 prove it).
-    // reduced_tx_set = 1 (the ratified header config); base_q_idx > 0 is
-    // implied by the callers (the lossless paths never enter the chain).
-    // CS1b: LUMA-ONLY (entropy_coding.c:374-376 `if (component_type ==
-    // COMPONENT_LUMA) av1_write_tx_type(...)`) - chroma TUs emit no symbol.
-    {
-        const TxSize tx_size_sqr_up = txsizeSqrUpMap[tx_size];
-        if (component_type == COMPONENT_LUMA && tx_size_sqr_up < TX_32X32) {
-            const TxSize sq = txsizeSqrMap[tx_size];
-            odEcWriteSymbol(w, av1ExtTxInd[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
-                            fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
-        }
+// TS3: tx-type emission (entropy_coding.c:374-376), the landed verbatim
+    // av1_write_tx_type (entropy_coding.c:317-353) consuming the caller's
+    // DERIVED type. RE7 replaces the hard-coded DCT_DCT symbol: the derived
+    // types {DCT_DCT, ADST_DCT, DCT_ADST, ADST_ADST} are all TX_CLASS_2D
+    // (tx_type_to_class cabac_context_model.c:15-35), so the token chain
+    // structure below (eob_multi_ctx 0, the TX_CLASS_2D nz-map contexts, the
+    // default scan - tx_type_to_scan_index[0..3] = 0, coefficients.c:19) is
+    // unchanged; only the symbol VALUE moves. CS1b: LUMA-ONLY
+    // (`if (component_type == COMPONENT_LUMA) av1_write_tx_type(...)`) -
+    // chroma TUs emit no symbol.
+    if (component_type == COMPONENT_LUMA) {
+        writeTxType(w, fc, base_q_idx, reduced_tx_set, intra_dir, tx_type, tx_size);
     }
 
     int eob_extra;
@@ -2685,27 +2679,25 @@ void writeTxbCoeffs(AomWriter* w, EcFrameContext* fc, const std::int32_t* coeff,
 int readTxbCoeffs(AomReader* r, EcFrameContext* fc, std::int32_t* coeff,
                   const std::int16_t* scan, TxSize tx_size, int txb_skip_ctx, int dc_sign_ctx,
                   int reduced_tx_set, PredictionMode intra_dir,
-                  ComponentType component_type) {
-    (void)reduced_tx_set;  // FS3-prep: the gate folds use_reduced_set = 1
+                  ComponentType component_type, int base_q_idx, TxType* tx_type_out) {
     const TxSize txs_ctx        = getTxsizeEntropyCtx(tx_size);
     const int    eob_multi_size = txsizeLog2Minus4[tx_size];
     const int    eob_multi_ctx  = 0;
     memset(coeff, 0, sizeof(std::int32_t) * (getTxbWide(tx_size) * getTxbHigh(tx_size)));
+    if (tx_type_out) *tx_type_out = DCT_DCT;
 
     const int all_zero = odEcReadSymbol(r, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     if (all_zero) return 0;
 
-    // TS3: tx-type read (entropy_coding.c:374-376 mirror), the same verbatim
-    // gate as the writer side (av1_read_tx_type folds it: <= 1 types ->
-    // DCT_DCT implicit, no symbol) - FS3-prep. CS1b: LUMA-ONLY (the writer's
-    // :374-376 gate mirror - chroma reads no tx-type symbol).
-    {
-        const TxSize tx_size_sqr_up = txsizeSqrUpMap[tx_size];
-        if (component_type == COMPONENT_LUMA && tx_size_sqr_up < TX_32X32) {
-            const TxSize sq = txsizeSqrMap[tx_size];
-            const int ttx = odEcReadSymbol(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
-            (void)ttx;  // DCT_DCT-only port
-        }
+    // TS3: tx-type read (entropy_coding.c:374-376 mirror) - the landed
+    // verbatim av1_read_tx_type twin (aom decodemv.c:626-666) consuming the
+    // caller's base_q_idx gate: the reader consumes the symbol exactly when
+    // the writer emitted it and outs the READ type (inverted via
+    // av1_ext_tx_inv). CS1b: LUMA-ONLY - chroma reads no symbol and the
+    // out stays DCT_DCT (the chroma type is derived upstream, never coded).
+    if (component_type == COMPONENT_LUMA) {
+        const TxType ttx = readTxType(r, fc, base_q_idx, reduced_tx_set, intra_dir, tx_size);
+        if (tx_type_out) *tx_type_out = ttx;
     }
 
     int eob_pt;

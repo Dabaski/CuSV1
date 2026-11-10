@@ -516,6 +516,31 @@ static int svtd_intra_uv_tx_type(int mode, int sqr_up) {
     return ext_tx_used[set_row][type] ? type : DCT_DCT;
 }
 
+// RE7: the LUMA tx-type derivation, the twin of the l16 lumaIntraTxType
+// (rate_est.cpp) and the decoder's compute_tx_type luma branch (spec
+// 5.11.40; aom av1_get_tx_type blockd.h:1283-1313 shape applied to luma):
+// g_intra_mode_to_tx_type (mode_decision.c:2959-2973) + the ext-tx-used
+// fold (av1_ext_tx_used, common_utils.c:197-204) at the frame's
+// reduced_tx_set = 1. The same four sources as svtd_intra_uv_tx_type above,
+// duplicated per the generator's standing shape (a separate C program).
+// The REFERENCE ENCODER'S fast path pins DCT_DCT
+// (product_coding_loop.c:4391); the DERIVED type is the decoder contract
+// the artifacts must satisfy. The q0 gate lives at the CALLERS (base_q_idx
+// > 0), matching dav1d's luma branch (recon_tmpl.c:363-365: !qidx ->
+// DCT_DCT implicit).
+static int svtd_intra_luma_tx_type(int mode, TxSize tx_size) {
+    static const uint8_t lut[13] = {
+        DCT_DCT, ADST_DCT, DCT_ADST, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST,
+        DCT_ADST, ADST_DCT, ADST_ADST, ADST_DCT, DCT_ADST, ADST_ADST};
+    static const uint8_t ext_tx_used[2][4] = {
+        {1, 0, 0, 0},  // EXT_TX_SET_DCTONLY   (common_utils.c:198)
+        {1, 1, 1, 1},  // EXT_TX_SET_DTT4_IDTX (common_utils.c:200)
+    };
+    const int type = lut[mode];
+    const int set_row = (txsize_sqr_up_map[tx_size] >= TX_32X32) ? 0 : 1;
+    return ext_tx_used[set_row][type] ? type : DCT_DCT;
+}
+
 // Per-pass 1D selection from vtx_tab/htx_tab (inv_transforms.h:45-62, :63-80):
 // ADST_DCT is ADST in the column pass and DCT in the row pass, DCT_ADST is the
 // mirror. Named by direction, not by side - the forward runs columns first and
@@ -1095,17 +1120,25 @@ static void svtd_frame_auto_4x4_q(const uint8_t* src, uint8_t* recon, int32_t* c
         const int mode = svtd_rdlite_decide(4, qindex, srcblk, above, nTop, nTr, left, nLeft,
                                                 0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
+            // RE7: the composition runs at the DERIVED type, q-gated (the
+            // decoder's q0 rule). The per-pass selection matches the fs2
+            // drive note (ADST_DCT = column ADST + row DCT).
+            const int ltx = (qindex > 0) ? svtd_intra_luma_tx_type(mode, TX_4X4) : DCT_DCT;
+            const int adstCol = (ltx == ADST_DCT || ltx == ADST_ADST);
+            const int adstRow = (ltx == DCT_ADST || ltx == ADST_ADST);
             uint8_t pred[16];
             svtd_call_builder(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
             int16_t res[16];
             for (int i = 0; i < 16; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
             int32_t cb[16];
-            svtd_fwd2d4x4(res, 4, cb, svt_av1_fdct4_new);
+            svtd_fwd2d4x4_t(res, 4, cb, adstCol ? svt_av1_fadst4_new : svt_av1_fdct4_new,
+                            adstRow ? svt_av1_fadst4_new : svt_av1_fdct4_new);
             TranLow qc[16], dq[16];
             uint16_t eob = 0;
             svtd_quantize_fp_4x4(cb, &t, scan, qc, dq, &eob);
             for (int i = 0; i < 16; ++i) coeffs[(by * gridW + bx) * 16 + i] = qc[i];
-            svtd_inv2dadd4x4(dq, pred, 4, svt_av1_idct4_new);
+            svtd_inv2dadd4x4_t(dq, pred, 4, adstRow ? svt_av1_iadst4_new : svt_av1_idct4_new,
+                               adstCol ? svt_av1_iadst4_new : svt_av1_idct4_new);
             for (int i = 0; i < 16; ++i) recon[(py + (i >> 2)) * fstride + px + (i & 3)] = pred[i];
         }
     }
@@ -1233,18 +1266,25 @@ static void svtd_frame_auto_8x8_q(const uint8_t* src, uint8_t* recon, int32_t* c
                                                 0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
 
+            // RE7: the composition runs at the DERIVED type, q-gated (the
+            // decoder's q0 rule; the per-pass note at the fs2 drive).
+            const int ltx = (qindex > 0) ? svtd_intra_luma_tx_type(mode, TX_8X8) : DCT_DCT;
+            const int adstCol = (ltx == ADST_DCT || ltx == ADST_ADST);
+            const int adstRow = (ltx == DCT_ADST || ltx == ADST_ADST);
             uint8_t pred[64];
             svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_8X8);
             int16_t res[64];
             for (int i = 0; i < 64; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
             int32_t cb[64];
-            svtd_fwd2d8x8(res, bsz, cb, svt_av1_fdct8_new);
+            svtd_fwd2d8x8_t(res, bsz, cb, adstCol ? svt_av1_fadst8_new : svt_av1_fdct8_new,
+                            adstRow ? svt_av1_fadst8_new : svt_av1_fdct8_new);
             TranLow qc[64], dq[64];
             uint16_t eob = 0;
             svtd_quantize_fp_8x8(cb, &t, scan8, qc, dq, &eob);
             for (int i = 0; i < 64; ++i) coeffs[(by * gridW + bx) * 64 + i] = qc[i];
-            svtd_inv2dadd8x8(dq, pred, bsz, svt_av1_idct8_new);
+            svtd_inv2dadd8x8_t(dq, pred, bsz, adstRow ? svt_av1_iadst8_new : svt_av1_idct8_new,
+                               adstCol ? svt_av1_iadst8_new : svt_av1_idct8_new);
             for (int i = 0; i < bsz; ++i)
                 for (int j = 0; j < bsz; ++j)
                     recon[(py + i) * fstride + px + j] = pred[i * bsz + j];
@@ -1366,18 +1406,24 @@ static void svtd_frame_auto_16x16_q(const uint8_t* src, uint8_t* recon, int32_t*
             modes[by * gridW + bx] = mode;
             deltas[by * gridW + bx] = bdelta;  // RE6: the chosen delta (the bsf1q emitter reads it)
 
+            // RE7: the composition runs at the DERIVED type, q-gated.
+            const int ltx = (qindex > 0) ? svtd_intra_luma_tx_type(mode, TX_16X16) : DCT_DCT;
+            const int adstCol = (ltx == ADST_DCT || ltx == ADST_ADST);
+            const int adstRow = (ltx == DCT_ADST || ltx == ADST_ADST);
             uint8_t pred[256];
             svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_16X16);
             int16_t res[256];
             for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
             int32_t cb[256];
-            svtd_fwd2d16x16(res, bsz, cb, svt_av1_fdct16_new);
+            svtd_fwd2d16x16_t(res, bsz, cb, adstCol ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                              adstRow ? svt_av1_fadst16_new : svt_av1_fdct16_new);
             TranLow qc[256], dq[256];
             uint16_t eob = 0;
             svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
             for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
-            svtd_inv2dadd16x16(dq, pred, bsz, svt_av1_idct16_new);
+            svtd_inv2dadd16x16_t(dq, pred, bsz, adstRow ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                                 adstCol ? svt_av1_iadst16_new : svt_av1_idct16_new);
             for (int i = 0; i < bsz; ++i)
                 for (int j = 0; j < bsz; ++j)
                     recon[(py + i) * 32 + px + j] = pred[i * bsz + j];
@@ -1453,12 +1499,21 @@ static void svtd_frame_v_dct_16x16_q(const uint8_t* src, uint8_t* recon, int32_t
             for (int i = 0; i < 256; ++i)
                 res[i] = (int16_t)(src[(py + (i >> 4)) * 32 + px + (i & 15)] - pred[i]);
             int32_t cb[256];
-            svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+            // RE7: the forced-V composition derives ADST_DCT at q > 0
+            // (V_PRED's g_intra_mode_to_tx_type row, mode_decision.c:2960);
+            // DCT at q0 (the decoder's q0 rule). The fixture name's "dct"
+            // tail now means the q0 lossless variant only.
+            const int ltx = (qindex > 0) ? svtd_intra_luma_tx_type(V_PRED, TX_16X16) : DCT_DCT;
+            const int adstCol = (ltx == ADST_DCT || ltx == ADST_ADST);
+            const int adstRow = (ltx == DCT_ADST || ltx == ADST_ADST);
+            svtd_fwd2d16x16_t(res, 16, cb, adstCol ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                              adstRow ? svt_av1_fadst16_new : svt_av1_fdct16_new);
             TranLow qc[256], dq[256];
             uint16_t eob = 0;
             svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
             for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = qc[i];
-            svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
+            svtd_inv2dadd16x16_t(dq, pred, 16, adstRow ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                                 adstCol ? svt_av1_iadst16_new : svt_av1_idct16_new);
             for (int i = 0; i < 256; ++i)
                 recon[(py + (i >> 4)) * 32 + px + (i & 15)] = pred[i];
         }
@@ -2975,7 +3030,8 @@ static void svtd_tr(const char* tag, int val, const OdEcEnc* enc) {
 
 static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranLow* coeff,
                                   const int16_t* scan, TxSize tx_size, int eob, int txb_skip_ctx,
-                                  int dc_sign_ctx, PredictionMode intra_dir, int component_type) {
+                                  int dc_sign_ctx, PredictionMode intra_dir, int component_type,
+                                  int tx_type, int base_q_idx) {
     const TxSize txs_ctx        = get_txsize_entropy_ctx(tx_size);
     const int    eob_multi_size = txsize_log2_minus4[tx_size];
     const int    eob_multi_ctx  = 0;  // TX_CLASS_2D
@@ -2991,21 +3047,27 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
 
     // TS3: tx-type emission (entropy_coding.c:374-376), gated by the
     // verbatim av1_write_tx_type gate (entropy_coding.c:321-322) via
-    // svtd_get_ext_tx_types (common_utils.h:59-77 fold): at TX_32X32/64X64
-    // intra the eset is DCTONLY (1 type) -> the symbol is NOT written.
-    // CS1: the tx-type symbol is LUMA-ONLY (entropy_coding.c:374-376:
+    // svtd_get_ext_tx_types (common_utils.h:59-77 fold) AND base_q_idx > 0:
+    // at TX_32X32/64X64 intra the eset is DCTONLY (1 type) -> the symbol is
+    // NOT written; at q0 the decoder reads no symbol either
+    // (aom decodemv.c av1_read_tx_type:638-640). CS1: the tx-type symbol is
+    // LUMA-ONLY (entropy_coding.c:374-376:
     // `if (component_type == COMPONENT_LUMA) av1_write_tx_type(...)`) -
     // chroma TUs emit NO tx-type symbol.
+    // RE7: the symbol value is av1_ext_tx_ind[DTT4_IDTX][tx_type] with the
+    // caller's DERIVED type (the svtd_intra_luma_tx_type output) - no longer
+    // the hard-coded DCT_DCT. The derived set {DCT_DCT, ADST_DCT, DCT_ADST,
+    // ADST_ADST} is all TX_CLASS_2D (tx_type_to_class cabac_context_model.c:
+    // 15-35), so the token chain below is unchanged.
     // The intra_dir is the caller's luma mode (av1_write_tx_type :339-342
-    // folds filter-intra via fimode_to_intradir; DCT_DCT-only port has
-    // filter_intra_mode == FILTER_INTRA_MODES).
-    if (component_type == COMPONENT_LUMA && svtd_get_ext_tx_types(tx_size) > 1) {
+    // folds filter-intra via fimode_to_intradir; our walks never pick FI).
+    if (component_type == COMPONENT_LUMA && svtd_get_ext_tx_types(tx_size) > 1 && base_q_idx > 0) {
         const TxSize sq = txsize_sqr_map[tx_size];
-        svtd_script_row("tx", av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
+        svtd_script_row("tx", av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][tx_type],
                         fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
-        aom_write_symbol(w, av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT],
+        aom_write_symbol(w, av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][tx_type],
                          fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
-        svtd_tr("tx", av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][DCT_DCT], &w->ec);
+        svtd_tr("tx", av1_ext_tx_ind[EXT_TX_SET_DTT4_IDTX][tx_type], &w->ec);
     }
 
     int eob_extra;
@@ -3142,14 +3204,20 @@ static void svtd_write_coeffs_txb(AomWriter* w, Ts1FrameContext* fc, const TranL
 }
 // read twin: mirrors aom read_coeffs_txb (decodetxb.c) symbol-for-symbol.
 // Returns the decoded coefficient count; coeff[] receives levels in raster
-// order (signed).
+// order (signed). RE7: base_q_idx gates the tx-type read (aom decodemv.c
+// av1_read_tx_type:626-640); tx_type_out receives the READ type inverted via
+// av1_ext_tx_inv[DTT4_IDTX] = {9, 0, 3, 1, 2} (the l7 readTxType twin's
+// row; sym 0->IDTX, 1->DCT_DCT, 2->ADST_ADST, 3->ADST_DCT, 4->DCT_ADST),
+// DCT_DCT when the gate folds.
 static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coeff,
                                 const int16_t* scan, TxSize tx_size, int txb_skip_ctx,
-                                int dc_sign_ctx, PredictionMode intra_dir, int component_type) {
+                                int dc_sign_ctx, PredictionMode intra_dir, int component_type,
+                                int base_q_idx, int* tx_type_out) {
     const TxSize txs_ctx        = get_txsize_entropy_ctx(tx_size);
     const int    eob_multi_size = txsize_log2_minus4[tx_size];
     const int    eob_multi_ctx  = 0;
     memset(coeff, 0, sizeof(TranLow) * (get_txb_wide(tx_size) * get_txb_high(tx_size)));
+    if (tx_type_out) *tx_type_out = DCT_DCT;
 
     const int all_zero = aom_read_symbol_(r, fc->txb_skip_cdf[txs_ctx][txb_skip_ctx], 2);
     if (svtd_script) fprintf(stderr, "R %sskip %d\n", svtd_trace_tag, all_zero);
@@ -3157,13 +3225,15 @@ static int svtd_read_coeffs_txb(aom_reader* r, Ts1FrameContext* fc, TranLow* coe
 
     // TS3: tx-type read (between txb_skip and eob_pt, entropy_coding.c:374-376),
     // the same verbatim gate as the writer side (av1_read_tx_type folds it:
-    // <= 1 types -> DCT_DCT implicit, no symbol). CS1: LUMA-ONLY - chroma
-    // reads no tx-type symbol (the writer's :374-376 gate mirror).
-    if (component_type == COMPONENT_LUMA && svtd_get_ext_tx_types(tx_size) > 1) {
+    // <= 1 types -> DCT_DCT implicit, no symbol; q0 -> DCT_DCT implicit,
+    // aom decodemv.c:638-640). CS1: LUMA-ONLY - chroma reads no tx-type
+    // symbol (the writer's :374-376 gate mirror).
+    if (component_type == COMPONENT_LUMA && svtd_get_ext_tx_types(tx_size) > 1 && base_q_idx > 0) {
+        static const int tx_inv[5] = {9, 0, 3, 1, 2};
         const TxSize sq = txsize_sqr_map[tx_size];
-        const int ttx = aom_read_symbol_(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
-        if (svtd_script) fprintf(stderr, "R %stx %d\n", svtd_trace_tag, ttx);
-        (void)ttx;  // DCT_DCT-only port: the read symbol is discarded
+        const int sym = aom_read_symbol_(r, fc->intra_ext_tx_cdf[2][sq][intra_dir], 5);
+        if (svtd_script) fprintf(stderr, "R %stx %d\n", svtd_trace_tag, sym);
+        if (tx_type_out) *tx_type_out = tx_inv[sym];
     }
 
     int eob_pt;
@@ -3378,6 +3448,16 @@ static void svtd_fs2_drive(int S, int emit_lines) {
     memset(qc, 0, sizeof(qc));
     memset(dq, 0, sizeof(dq));
     uint16_t eob = 0;
+    // RE7: the composition runs at the DERIVED type (the decoder contract,
+    // the svtd_intra_luma_tx_type output; the mirror of the l6 d.txType).
+    // The 32x32/64x64 shapes fold to DCT_DCT in the helper, so the fdct32/
+    // fdct64 branches are unchanged. Per-pass selection: ADST_DCT = column
+    // pass ADST + row pass DCT, DCT_ADST = the mirror, ADST_ADST = both
+    // (the svtd_is_adst_col/row pair the chroma walk established,
+    // inv_transforms.h:45-80 per-pass tabs).
+    const int ltx = svtd_intra_luma_tx_type(mode, ts);
+    const int adstCol = (ltx == ADST_DCT || ltx == ADST_ADST);
+    const int adstRow = (ltx == DCT_ADST || ltx == ADST_ADST);
     if (S == 64) {
         // THE TX_64X64 SCAN-CONTRACT (the settle documented at
         // svtd_default_scan_64x64_token): fwd64 (the l3 64-wide facade) ->
@@ -3394,13 +3474,16 @@ static void svtd_fs2_drive(int S, int emit_lines) {
         svtd_fwd2d32x32(res, S, cb, svt_av1_fdct32_new);
         svtd_quantize_fp_32x32(cb, &t, scan, qc, dq, &eob);
     } else if (S == 16) {
-        svtd_fwd2d16x16(res, S, cb, svt_av1_fdct16_new);
+        svtd_fwd2d16x16_t(res, S, cb, adstCol ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                          adstRow ? svt_av1_fadst16_new : svt_av1_fdct16_new);
         svtd_quantize_fp_16x16(cb, &t, scan, qc, dq, &eob);
     } else if (S == 8) {
-        svtd_fwd2d8x8(res, S, cb, svt_av1_fdct8_new);
+        svtd_fwd2d8x8_t(res, S, cb, adstCol ? svt_av1_fadst8_new : svt_av1_fdct8_new,
+                        adstRow ? svt_av1_fadst8_new : svt_av1_fdct8_new);
         svtd_quantize_fp_8x8(cb, &t, scan, qc, dq, &eob);
     } else {
-        svtd_fwd2d4x4(res, S, cb, svt_av1_fdct4_new);
+        svtd_fwd2d4x4_t(res, S, cb, adstCol ? svt_av1_fadst4_new : svt_av1_fdct4_new,
+                        adstRow ? svt_av1_fadst4_new : svt_av1_fdct4_new);
         svtd_quantize_fp_4x4(cb, &t, scan, qc, dq, &eob);
     }
 
@@ -3468,7 +3551,8 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
         aom_write_symbol(&w, 0, fi_cdf, 2);
     }
     // the token chain (the tx-type gate inside is the verbatim FS3-prep fix)
-    svtd_write_coeffs_txb(&w, &fc, qc, scan, ts, eob, 0, 0, (PredictionMode)mode, COMPONENT_LUMA);
+    svtd_write_coeffs_txb(&w, &fc, qc, scan, ts, eob, 0, 0, (PredictionMode)mode, COMPONENT_LUMA,
+                            svtd_intra_luma_tx_type(mode, ts), 100);
     aom_stop_encode(&w);
     // FS5b: the tile capture for the per-geometry TU assembly
     memcpy(svtd_fs2_tile, tile_buf, w.pos);
@@ -3499,11 +3583,14 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
     } else if (S == 32) {
         svtd_inv2dadd32x32(dq, pred, S, svt_av1_idct32_new);
     } else if (S == 16) {
-        svtd_inv2dadd16x16(dq, pred, S, svt_av1_idct16_new);
+        svtd_inv2dadd16x16_t(dq, pred, S, adstRow ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                             adstCol ? svt_av1_iadst16_new : svt_av1_idct16_new);
     } else if (S == 8) {
-        svtd_inv2dadd8x8(dq, pred, S, svt_av1_idct8_new);
+        svtd_inv2dadd8x8_t(dq, pred, S, adstRow ? svt_av1_iadst8_new : svt_av1_idct8_new,
+                           adstCol ? svt_av1_iadst8_new : svt_av1_idct8_new);
     } else {
-        svtd_inv2dadd4x4(dq, pred, S, svt_av1_idct4_new);
+        svtd_inv2dadd4x4_t(dq, pred, S, adstRow ? svt_av1_iadst4_new : svt_av1_idct4_new,
+                           adstCol ? svt_av1_iadst4_new : svt_av1_idct4_new);
     }
     memcpy(rec, pred, (size_t)n);
     if (emit_lines) {
@@ -3551,8 +3638,16 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
     }
 static TranLow rc[4096];
     memset(rc, 0, sizeof(rc));
-    const int reob = svtd_read_coeffs_txb(&r, &fc2, rc, scan, ts, 0, 0, (PredictionMode)mode, COMPONENT_LUMA);
+    int rt_tx = 0;
+    const int reob = svtd_read_coeffs_txb(&r, &fc2, rc, scan, ts, 0, 0, (PredictionMode)mode, COMPONENT_LUMA, 100, &rt_tx);
     int coeff_eq = (reob == (int)eob) ? 1 : 0;
+    // RE7: the read-back type must equal the DERIVED type (the writer's own
+    // derivation input) - a drive-fatal check, not just a gate line.
+    if (rt_tx != svtd_intra_luma_tx_type(mode, ts)) {
+        fprintf(stderr, "FS2 rt tx mismatch S=%d got=%d want=%d\n", S, rt_tx,
+                svtd_intra_luma_tx_type(mode, ts));
+        exit(1);
+    }
     int first_mm = -1;
     int mm_count = 0;
     for (int i = 0; i < n; ++i) {
@@ -3717,7 +3812,8 @@ static void svtd_fs5_grid_drive(void) {
         }
         const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
         svtd_write_coeffs_txb(&w, &fc, qc, scan32, TX_32X32, eob, 0, dc_sign_ctx,
-                              (PredictionMode)mode, COMPONENT_LUMA);
+                              (PredictionMode)mode, COMPONENT_LUMA,
+                              svtd_intra_luma_tx_type(mode, TX_32X32), 100);
         // NA update (the ecfrm pattern: cul_level + set_dc_sign, the TU extent)
         int32_t cul = 0;
         for (int q = 0; q < eob; ++q) cul += abs((int)qc[scan32[q]]);
@@ -3814,7 +3910,7 @@ static void svtd_fs5_grid_drive(void) {
         static TranLow rc[1024];
         memset(rc, 0, sizeof(rc));
         const int reob = svtd_read_coeffs_txb(&rr, &fc_r, rc, scan32, TX_32X32, 0, dc_sign_ctx2,
-                                              (PredictionMode)modes[b], COMPONENT_LUMA);
+                                              (PredictionMode)modes[b], COMPONENT_LUMA, 100, NULL);
         int ok = (reob == (int)eobs[b]);
         for (int q = 0; q < (int)eobs[b]; ++q) {
             if (rc[scan32[q]] != all_qc[b][scan32[q]]) { ok = 0; break; }
@@ -3926,13 +4022,18 @@ static void svtd_fs5_grid4_drive(void) {
                                             hasLeft ? 4 : 0, 0, al, aboveMode, leftMode, &best_sad, &bdelta);
         modes[b] = mode;
         modes[b] = mode;
+        // RE7: the composition runs at the DERIVED type (the fs2 note)
+        const int ltx = svtd_intra_luma_tx_type(mode, TX_4X4);
+        const int adstCol = (ltx == ADST_DCT || ltx == ADST_ADST);
+        const int adstRow = (ltx == DCT_ADST || ltx == ADST_ADST);
         uint8_t pred[16];
         svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, hasTop ? 4 : 0,
                              nTr, left_edge, hasLeft ? 4 : 0, 0, al, TX_4X4);
         int16_t res[16];
         for (int i = 0; i < 16; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
         int32_t cb[16];
-        svtd_fwd2d4x4(res, 4, cb, svt_av1_fdct4_new);
+        svtd_fwd2d4x4_t(res, 4, cb, adstCol ? svt_av1_fadst4_new : svt_av1_fdct4_new,
+                        adstRow ? svt_av1_fadst4_new : svt_av1_fdct4_new);
         TranLow qc[16], dq[16];
         uint16_t eob = 0;
         svtd_quantize_fp_4x4(cb, &t, scan4, qc, dq, &eob);
@@ -3969,7 +4070,8 @@ static void svtd_fs5_grid4_drive(void) {
         }
         const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
         svtd_write_coeffs_txb(&w, &fc, qc, scan4, TX_4X4, eob, 0, dc_sign_ctx,
-                              (PredictionMode)mode, COMPONENT_LUMA);
+                              (PredictionMode)mode, COMPONENT_LUMA,
+                              svtd_intra_luma_tx_type(mode, TX_4X4), 100);
         int32_t cul = 0;
         for (int q = 0; q < eob; ++q) cul += abs((int)qc[scan4[q]]);
         cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
@@ -3980,7 +4082,8 @@ static void svtd_fs5_grid4_drive(void) {
         above_ptr[0] = (uint8_t)cul;
         left_ptr[0] = (uint8_t)cul;
         ecpart_update_ctx(above_pctx, left_pctx, miRow, miCol, BLOCK_4X4);
-        svtd_inv2dadd4x4(dq, pred, 4, svt_av1_idct4_new);
+        svtd_inv2dadd4x4_t(dq, pred, 4, adstRow ? svt_av1_iadst4_new : svt_av1_idct4_new,
+                           adstCol ? svt_av1_iadst4_new : svt_av1_idct4_new);
         for (int i = 0; i < 4; ++i)
             for (int j = 0; j < 4; ++j) recon[(r + i) * 8 + c + j] = pred[i * 4 + j];
     }
@@ -4058,7 +4161,7 @@ static void svtd_fs5_grid4_drive(void) {
         static TranLow rc[16];
         memset(rc, 0, sizeof(rc));
         const int reob = svtd_read_coeffs_txb(&rr, &fc_r, rc, scan4, TX_4X4, 0, dc_sign_ctx2,
-                                              (PredictionMode)modes[b], COMPONENT_LUMA);
+                                              (PredictionMode)modes[b], COMPONENT_LUMA, 100, NULL);
         int ok = (reob == (int)eobs[b]);
         for (int q = 0; q < (int)eobs[b]; ++q) {
             if (rc[scan4[q]] != all_qc[b][scan4[q]]) { ok = 0; break; }
@@ -4138,9 +4241,9 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
     // contexts: our whole-block TUs always have plane_bsize == tx_bsize
     // (svt_aom_get_txb_ctx :298-299) -> txb_skip_ctx = 0; dc_sign_ctx = 0
     // (no coded neighbors yet). TS2 ports the general ctx derivation.
-    svtd_write_coeffs_txb(&w, &fc, qc16, scan16, TX_16X16, eob16, 0, 0, DC_PRED, COMPONENT_LUMA);
-    svtd_write_coeffs_txb(&w, &fc, qc8, scan8, TX_8X8, eob8, 0, 0, DC_PRED, COMPONENT_LUMA);
-    svtd_write_coeffs_txb(&w, &fc, qc4, scan4, TX_4X4, eob4, 0, 0, DC_PRED, COMPONENT_LUMA);
+    svtd_write_coeffs_txb(&w, &fc, qc16, scan16, TX_16X16, eob16, 0, 0, DC_PRED, COMPONENT_LUMA, DCT_DCT, 100);
+    svtd_write_coeffs_txb(&w, &fc, qc8, scan8, TX_8X8, eob8, 0, 0, DC_PRED, COMPONENT_LUMA, DCT_DCT, 100);
+    svtd_write_coeffs_txb(&w, &fc, qc4, scan4, TX_4X4, eob4, 0, 0, DC_PRED, COMPONENT_LUMA, DCT_DCT, 100);
     aom_stop_encode(&w);
 
     if (verbose) {
@@ -4155,9 +4258,9 @@ static int svtd_ts1_drive(uint8_t* buf, int verbose) {
     if (aom_reader_init(&r, buf, w.pos)) return 2;
     r.allow_update_cdf = 1;
     TranLow rc16[256], rc8[64], rc4[16];
-    int reob16 = svtd_read_coeffs_txb(&r, &fc_r, rc16, scan16, TX_16X16, 0, 0, DC_PRED, COMPONENT_LUMA);
-    int reob8 = svtd_read_coeffs_txb(&r, &fc_r, rc8, scan8, TX_8X8, 0, 0, DC_PRED, COMPONENT_LUMA);
-    int reob4 = svtd_read_coeffs_txb(&r, &fc_r, rc4, scan4, TX_4X4, 0, 0, DC_PRED, COMPONENT_LUMA);
+    int reob16 = svtd_read_coeffs_txb(&r, &fc_r, rc16, scan16, TX_16X16, 0, 0, DC_PRED, COMPONENT_LUMA, 100, NULL);
+    int reob8 = svtd_read_coeffs_txb(&r, &fc_r, rc8, scan8, TX_8X8, 0, 0, DC_PRED, COMPONENT_LUMA, 100, NULL);
+    int reob4 = svtd_read_coeffs_txb(&r, &fc_r, rc4, scan4, TX_4X4, 0, 0, DC_PRED, COMPONENT_LUMA, 100, NULL);
     if (verbose) printf("ectok_rt %d %d %d\n", reob16, reob8, reob4);
 
     if (reob16 != (int)eob16 || reob8 != (int)eob8 || reob4 != (int)eob4) {
@@ -4252,20 +4355,26 @@ static int svtd_ts3_drive(uint8_t* buf) {
                                             nLeft, 0, al, aboveMode, leftMode, &best_sad, &bdelta);
         modes[b] = mode;
         bdeltas[b] = bdelta;
+        // RE7: the composition runs at the DERIVED type (the fs2 note)
+        const int ltx = svtd_intra_luma_tx_type(mode, TX_16X16);
+        const int adstCol = (ltx == ADST_DCT || ltx == ADST_ADST);
+        const int adstRow = (ltx == DCT_ADST || ltx == ADST_ADST);
         // decided-mode predictor (NOT DC=0)
         uint8_t pred[256];
         svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
         int16_t res[256];
         for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
         int32_t cb[256];
-        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        svtd_fwd2d16x16_t(res, 16, cb, adstCol ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                          adstRow ? svt_av1_fadst16_new : svt_av1_fdct16_new);
         TranLow qc[256], dq[256];
         uint16_t eob = 0;
         svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
         eobs[b] = eob;
         memcpy(all_qc[b], qc, sizeof(all_qc[b]));
         // recon (LOSSY at q100: quantize -> dequantize -> inverse)
-        svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
+        svtd_inv2dadd16x16_t(dq, pred, 16, adstRow ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                             adstCol ? svt_av1_iadst16_new : svt_av1_idct16_new);
         for (int i = 0; i < 16; ++i)
             for (int j = 0; j < 16; ++j) recon[(r + i) * 32 + c + j] = pred[i * 16 + j];
     }
@@ -4303,7 +4412,10 @@ static int svtd_ts3_drive(uint8_t* buf) {
         int16_t res[256];
         for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
         int32_t cb[256];
-        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        // RE7: the SAME derived type as the decision pass
+        const int ltx2 = svtd_intra_luma_tx_type(modes[b], TX_16X16);
+        svtd_fwd2d16x16_t(res, 16, cb, (ltx2 == ADST_DCT || ltx2 == ADST_ADST) ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                          (ltx2 == DCT_ADST || ltx2 == ADST_ADST) ? svt_av1_fadst16_new : svt_av1_fdct16_new);
         TranLow qc[256], dq[256];
         uint16_t eob = 0;
         svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
@@ -4339,7 +4451,8 @@ static int svtd_ts3_drive(uint8_t* buf) {
         }
         const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
         svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx,
-                              (PredictionMode)modes[b], COMPONENT_LUMA);
+                              (PredictionMode)modes[b], COMPONENT_LUMA,
+                              svtd_intra_luma_tx_type(modes[b], TX_16X16), 100);
 
         // NA update
         int32_t cul = 0;
@@ -4430,17 +4543,23 @@ static int svtd_ts3_drive(uint8_t* buf) {
         int16_t res[256];
         for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
         int32_t cb[256];
-        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        // RE7: the SAME derived type as the decision pass (the read twin's
+        // recomputed chain must equal the written one, symbols included)
+        const int ltxR = svtd_intra_luma_tx_type(modes[b], TX_16X16);
+        svtd_fwd2d16x16_t(res, 16, cb, (ltxR == ADST_DCT || ltxR == ADST_ADST) ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                          (ltxR == DCT_ADST || ltxR == ADST_ADST) ? svt_av1_fadst16_new : svt_av1_fdct16_new);
         TranLow qc[256], dq[256];
         uint16_t eob_q = 0;
         svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob_q);
 
         TranLow rc[256];
         memset(rc, 0, sizeof(rc));
+        int rt_tx = 0;
         const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx,
-                                              (PredictionMode)m, COMPONENT_LUMA);
+                                              (PredictionMode)m, COMPONENT_LUMA, 100, &rt_tx);
         printf(" %d", reob);
         if (reob != (int)eob_q) rt_bad = 1;
+        if (rt_tx != svtd_intra_luma_tx_type(m, TX_16X16)) rt_bad = 1;
         for (int i = 0; i < 256; ++i) if (rc[i] != qc[i]) rt_bad = 1;
 
         // NA update
@@ -4580,18 +4699,24 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
                                             nLeft, 0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[b] = mode;
         bdeltas[b] = bdelta;
+        // RE7: the composition runs at the DERIVED type (the fs2 note)
+        const int ltx = svtd_intra_luma_tx_type(mode, TX_16X16);
+        const int adstCol = (ltx == ADST_DCT || ltx == ADST_ADST);
+        const int adstRow = (ltx == DCT_ADST || ltx == ADST_ADST);
         uint8_t pred[256];
         svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
         int16_t res[256];
         for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
         int32_t cb[256];
-        svtd_fwd2d16x16(res, 16, cb, svt_av1_fdct16_new);
+        svtd_fwd2d16x16_t(res, 16, cb, adstCol ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                          adstRow ? svt_av1_fadst16_new : svt_av1_fdct16_new);
         TranLow qc[256], dq[256];
         uint16_t eob = 0;
         svtd_quantize_fp_16x16(cb, &t, scan16, qc, dq, &eob);
         eobs[b] = eob;
         memcpy(all_qc[b], qc, sizeof(all_qc[b]));
-        svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
+        svtd_inv2dadd16x16_t(dq, pred, 16, adstRow ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                             adstCol ? svt_av1_iadst16_new : svt_av1_idct16_new);
         for (int i = 0; i < 16; ++i)
         for (int j = 0; j < 16; ++j) recon[(r + i) * 32 + c + j] = pred[i * 16 + j];
     }
@@ -4652,7 +4777,8 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
         const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
         const int eob_tok = svtd_eob_from_coeffs(all_qc[b], scan16, TX_16X16);
         svtd_write_coeffs_txb(&w, &fc, all_qc[b], scan16, TX_16X16, eob_tok, 0, dc_sign_ctx,
-                              (PredictionMode)modes[b], COMPONENT_LUMA);
+                              (PredictionMode)modes[b], COMPONENT_LUMA,
+                              svtd_intra_luma_tx_type(modes[b], TX_16X16), 100);
         if (eob_tok != (int)eobs[b]) { fprintf(stderr, "TS4 tile v2 eob mismatch\n"); return 0; }
         // NA update (packed cul_level + dc sign, over the TU MI extent)
         int32_t cul = 0;
@@ -4805,7 +4931,8 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
         const int eob_tok = svtd_eob_from_coeffs(qc, scan, TX_16X16);
         const int wantEob[7] = { 0, 0, 5, 5, 0, 1, 2 };
         if (eob_tok != wantEob[rung]) { fprintf(stderr, "TD0 rung %d eob %d\n", rung, eob_tok); return 0; }
-        svtd_write_coeffs_txb(&w, &fc, qc, scan, TX_16X16, eob_tok, 0, 0, (PredictionMode)mode, COMPONENT_LUMA);
+        svtd_write_coeffs_txb(&w, &fc, qc, scan, TX_16X16, eob_tok, 0, 0, (PredictionMode)mode, COMPONENT_LUMA,
+                              svtd_intra_luma_tx_type(mode, TX_16X16), td0_qidx);
     }
     svtd_trace = 0;
     aom_stop_encode(&w);
@@ -4847,8 +4974,9 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
             memset(left_na2, (int)INVALID_NEIGHBOR_DATA, sizeof(left_na2));
             TranLow rc[256];
             memset(rc, 0, sizeof(rc));
+            int rt_tx = 0;
             const int reob = svtd_read_coeffs_txb(&r, &fc2, rc, scan2, TX_16X16, 0, 0,
-                                                  (PredictionMode)rmode, COMPONENT_LUMA);
+                                                  (PredictionMode)rmode, COMPONENT_LUMA, td0_qidx, &rt_tx);
             fprintf(stderr, " reob=%d", reob);
             for (int c2 = 0; c2 < 5; ++c2) fprintf(stderr, " c%d=%d", c2, (int)rc[scan2[c2]]);
         }
@@ -4860,6 +4988,9 @@ static uint32_t svtd_td0_tile(int rung, uint8_t* dst) {
 // expected decoded picture: the decoder reconstructs pred + inv(dqcoeff)
 // with its normative integer inverse transform and clamps to [0,255]; all
 // rung dqcoeffs stay under the +/-32767 clamp so the IDCT inputs match.
+// RE7: the inverse runs at the DERIVED type of the rung's fixed mode at the
+// lossy header rungs (b..g, q100); rung a/e are q0/skip so dq == 0 and the
+// type is unobservable there.
 static void svtd_td0_expected(int rung, uint8_t* pic) {
     int mode, skip;
     TranLow qc[256];
@@ -4871,7 +5002,11 @@ static void svtd_td0_expected(int rung, uint8_t* pic) {
     svtd_build_quantizer_luma(100, &t);
     TranLow dq[256];
     for (int i = 0; i < 256; ++i) dq[i] = qc[i] * t.dequant[i != 0];
-    svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
+    const int ltx = svtd_intra_luma_tx_type(mode, TX_16X16);
+    const int adstCol = (ltx == ADST_DCT || ltx == ADST_ADST);
+    const int adstRow = (ltx == DCT_ADST || ltx == ADST_ADST);
+    svtd_inv2dadd16x16_t(dq, pred, 16, adstRow ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                         adstCol ? svt_av1_iadst16_new : svt_av1_idct16_new);
     memcpy(pic, pred, 256);
 }
 
@@ -5243,7 +5378,7 @@ static int svtd_ts2_drive(uint8_t* buf) {
         printf(" %d", dc_sign_ctx);
 
         const int eob_tok = svtd_eob_from_coeffs(qc, scan16, TX_16X16);
-        svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx, DC_PRED, COMPONENT_LUMA);
+        svtd_write_coeffs_txb(&w, &fc, qc, scan16, TX_16X16, eob_tok, 0, dc_sign_ctx, DC_PRED, COMPONENT_LUMA, DCT_DCT, 100);
 
         // NA update
         int32_t cul = 0;
@@ -5299,7 +5434,7 @@ static int svtd_ts2_drive(uint8_t* buf) {
 
         TranLow rc[256];
         memset(rc, 0, sizeof(rc));
-        const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx, DC_PRED, COMPONENT_LUMA);
+        const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan16, TX_16X16, 0, dc_sign_ctx, DC_PRED, COMPONENT_LUMA, 100, NULL);
         printf(" %d", reob);
         if (reob != (int)eob_q) rt_bad = 1;
         for (int i = 0; i < 256; ++i) if (rc[i] != qc[i]) rt_bad = 1;
@@ -5503,7 +5638,7 @@ static int svtd_cs1_uv_txb_drive(void) {
             w.pos = 0;
             svtd_write_coeffs_txb(&w, &fc_w[comp][t], qc, scans[t], txs[t], eob,
                                   txb_skip_ctxs[t], 0, DC_PRED,
-                                  comp ? COMPONENT_CHROMA : COMPONENT_LUMA);
+                                  comp ? COMPONENT_CHROMA : COMPONENT_LUMA, DCT_DCT, 100);
             aom_stop_encode(&w);
             printf("ecuv%s%s_bytes %u", tnames[t], comp ? "V" : "U", w.pos);
             for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", buf[i]);
@@ -5515,7 +5650,7 @@ static int svtd_cs1_uv_txb_drive(void) {
             memset(rc, 0, sizeof(rc));
             const int reob = svtd_read_coeffs_txb(&r, &fc_r[comp][t], rc, scans[t], txs[t],
                                                   txb_skip_ctxs[t], 0, DC_PRED,
-                                                  comp ? COMPONENT_CHROMA : COMPONENT_LUMA);
+                                                  comp ? COMPONENT_CHROMA : COMPONENT_LUMA, 100, NULL);
             int rt_bad = (reob != eob);
             for (int i = 0; i < N; ++i) if (rc[i] != qc[i]) rt_bad = 1;
             printf("ecuv%s%s_rt %d\n", tnames[t], comp ? "V" : "U", reob);
@@ -5535,7 +5670,7 @@ static int svtd_cs1_uv_txb_drive(void) {
         w0.allow_update_cdf = 1;
         w0.pos = 0;
         svtd_write_coeffs_txb(&w0, &fc_w[comp][0], zero_qc, scans[0], TX_4X4, 0, 8, 0,
-                              DC_PRED, comp ? COMPONENT_CHROMA : COMPONENT_LUMA);
+                              DC_PRED, comp ? COMPONENT_CHROMA : COMPONENT_LUMA, DCT_DCT, 100);
         aom_stop_encode(&w0);
         printf("ecuv0%s_bytes %u", comp ? "V" : "U", w0.pos);
         for (uint32_t i = 0; i < w0.pos; ++i) printf(" %02x", buf0[i]);
@@ -5546,7 +5681,7 @@ static int svtd_cs1_uv_txb_drive(void) {
         TranLow rc0[16];
         memset(rc0, 0, sizeof(rc0));
         const int reob0 = svtd_read_coeffs_txb(&r0, &fc_r[comp][0], rc0, scans[0], TX_4X4, 8,
-                                               0, DC_PRED, comp ? COMPONENT_CHROMA : COMPONENT_LUMA);
+                                               0, DC_PRED, comp ? COMPONENT_CHROMA : COMPONENT_LUMA, 100, NULL);
         printf("ecuv%s%s_rt %d\n", comp ? "0V" : "0U", "", reob0);
         if (reob0 != 0) {
             fprintf(stderr, "CS1 chroma eob0 roundtrip FAILED\n");
@@ -5750,7 +5885,7 @@ static int svtd_cs2_uv_q_drive(int S) {
                 const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
                 const int txb_skip_ctx = ((leftacc != 0) + (top != 0)) + 7;
                 svtd_write_coeffs_txb(&w, &fc, qc, scan, txs, eob, txb_skip_ctx, dc_sign_ctx,
-                                      DC_PRED, COMPONENT_CHROMA);
+                                      DC_PRED, COMPONENT_CHROMA, ctxt, 100);
                 // NA update (the ecfrm pattern)
                 int32_t cul = 0;
                 for (int q = 0; q < eob; ++q) cul += abs((int)qc[scan[q]]);
@@ -5863,7 +5998,7 @@ static int svtd_cs2_uv_q_drive(int S) {
                 const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
                 const int txb_skip_ctx = ((leftacc != 0) + (top != 0)) + 7;
                 svtd_write_coeffs_txb(&w, &fc, qc, scan, txs, eob, txb_skip_ctx, dc_sign_ctx,
-                                      DC_PRED, COMPONENT_CHROMA);
+                                      DC_PRED, COMPONENT_CHROMA, ctxt, 100);
                 int32_t cul = 0;
                 for (int q = 0; q < eob; ++q) cul += abs((int)qc[scan[q]]);
                 cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
@@ -5933,7 +6068,7 @@ static int svtd_cs2_uv_q_drive(int S) {
                 TranLow rc[1024];
                 memset(rc, 0, sizeof(rc));
                 const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, scan, txs, txb_skip_ctx,
-                                                      dc_sign_ctx, DC_PRED, COMPONENT_CHROMA);
+                                                      dc_sign_ctx, DC_PRED, COMPONENT_CHROMA, 100, NULL);
                 const uint16_t want = comp ? eobs_v[bidx] : eobs_u[bidx];
                 const TranLow* wantc = comp ? coeffs_v[bidx] : coeffs_u[bidx];
                 if (reob != (int)want) { fprintf(stderr, "CS2 rt eob %u %d\n", S, reob); return 3; }
@@ -6542,11 +6677,19 @@ static int svtd_cs4_uv_q_drive(int S) {
             uint16_t leob = 0;
             static int16_t lres[4096];
             for (int i = 0; i < B * B; ++i) lres[i] = (int16_t)(lsrc[i] - lpred[i]);
+            // RE7: the luma chain composes at the DERIVED type (the fs2
+            // note); the 32x32/64x64 shapes fold to DCT_DCT in the helper so
+            // the fdct32/fdct64 branches are unchanged.
+            const int lltx = svtd_intra_luma_tx_type(lmode, ltxs);
+            const int ladstCol = (lltx == ADST_DCT || lltx == ADST_ADST);
+            const int ladstRow = (lltx == DCT_ADST || lltx == ADST_ADST);
             if (B == 8) {
-                svtd_fwd2d8x8(lres, B, lcb, svt_av1_fdct8_new);
+                svtd_fwd2d8x8_t(lres, B, lcb, ladstCol ? svt_av1_fadst8_new : svt_av1_fdct8_new,
+                                ladstRow ? svt_av1_fadst8_new : svt_av1_fdct8_new);
                 svtd_quantize_fp_8x8(lcb, &t, lscan, lqc, ldq, &leob);
             } else if (B == 16) {
-                svtd_fwd2d16x16(lres, B, lcb, svt_av1_fdct16_new);
+                svtd_fwd2d16x16_t(lres, B, lcb, ladstCol ? svt_av1_fadst16_new : svt_av1_fdct16_new,
+                                  ladstRow ? svt_av1_fadst16_new : svt_av1_fdct16_new);
                 svtd_quantize_fp_16x16(lcb, &t, lscan, lqc, ldq, &leob);
             } else if (B == 32) {
                 svtd_fwd2d32x32(lres, B, lcb, svt_av1_fdct32_new);
@@ -6585,7 +6728,8 @@ static int svtd_cs4_uv_q_drive(int S) {
                 // at TX_32X32/64X64 the DCTONLY gate makes it moot)
                 svtd_write_coeffs_txb(&w, &fc, lqc, lscan, ltxs, leob, 0, dc_sign_ctx,
                                       (PredictionMode)lmode,
-                                      COMPONENT_LUMA);
+                                      COMPONENT_LUMA,
+                                      svtd_intra_luma_tx_type(lmode, ltxs), 100);
                 int32_t cul = 0;
                 for (int q = 0; q < leob; ++q) cul += abs((int)lqc[lscan[q]]);
                 cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
@@ -6605,9 +6749,13 @@ static int svtd_cs4_uv_q_drive(int S) {
             } else if (B == 32) {
                 svtd_inv2dadd32x32(ldq, lpred, B, svt_av1_idct32_new);
             } else if (B == 16) {
-                svtd_inv2dadd16x16(ldq, lpred, B, svt_av1_idct16_new);
+                svtd_inv2dadd16x16_t(ldq, lpred, B,
+                                     ladstRow ? svt_av1_iadst16_new : svt_av1_idct16_new,
+                                     ladstCol ? svt_av1_iadst16_new : svt_av1_idct16_new);
             } else {
-                svtd_inv2dadd8x8(ldq, lpred, B, svt_av1_idct8_new);
+                svtd_inv2dadd8x8_t(ldq, lpred, B,
+                                   ladstRow ? svt_av1_iadst8_new : svt_av1_idct8_new,
+                                   ladstCol ? svt_av1_iadst8_new : svt_av1_idct8_new);
             }
             for (int i = 0; i < B; ++i)
                 for (int j = 0; j < B; ++j) recon_y[(py + i) * 64 + px + j] = lpred[i * B + j];
@@ -6861,7 +7009,7 @@ static int svtd_cs4_uv_q_drive(int S) {
                     const int dc_sign_ctx = dc_sign > 0 ? 2 : dc_sign < 0 ? 1 : 0;
                     const int txb_skip_ctx = ((leftacc != 0) + (top != 0)) + 7;
                     svtd_write_coeffs_txb(&w, &fc, cqc, uscan, utxs, ceobv, txb_skip_ctx,
-                                          dc_sign_ctx, DC_PRED, COMPONENT_CHROMA);
+                                          dc_sign_ctx, DC_PRED, COMPONENT_CHROMA, ctxt, 100);
                     int32_t cul = 0;
                     for (int q = 0; q < ceobv; ++q) cul += abs((int)cqc[uscan[q]]);
                     cul = AOMMIN(cul, COEFF_CONTEXT_MASK);
@@ -7025,8 +7173,10 @@ static int svtd_cs4_uv_q_drive(int S) {
                 TranLow rc[4096];
                 memset(rc, 0, sizeof(rc));
                 if (svtd_rt7) svtd_rt7_plane = "Y";
+                int lrt_tx = 0;
                 const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, lscan, ltxs, 0, dc_sign_ctx,
-                                                      (PredictionMode)lmodes[bidx], COMPONENT_LUMA);
+                                                      (PredictionMode)lmodes[bidx], COMPONENT_LUMA, 100, &lrt_tx);
+                if (lrt_tx != svtd_intra_luma_tx_type(lmodes[bidx], ltxs)) { fprintf(stderr, "CS4 rt ltx %d\n", S); return 3; }
                 if (reob != leobs[bidx]) { fprintf(stderr, "CS4 rt leob %d\n", S); return 3; }
                 for (int i = 0; i < B * B; ++i) {
                     if (rc[i] != lcoeffs[bidx][i]) { fprintf(stderr, "CS4 rt lcoeff %d\n", S); return 3; }
@@ -7070,7 +7220,7 @@ static int svtd_cs4_uv_q_drive(int S) {
                     memset(rc, 0, sizeof(rc));
                     if (svtd_rt7) svtd_rt7_plane = "U";
                     const int reob = svtd_read_coeffs_txb(&r, &fc_r, rc, uscan, utxs, txb_skip_ctx,
-                                                          dc_sign_ctx, DC_PRED, COMPONENT_CHROMA);
+                                                          dc_sign_ctx, DC_PRED, COMPONENT_CHROMA, 100, NULL);
                     if (reob != wanteob) { fprintf(stderr, "CS4 rt ceob %d\n", S); return 3; }
                     for (int i = 0; i < S * S; ++i) {
                         if (rc[i] != wantc[i]) { fprintf(stderr, "CS4 rt ccoeff %d\n", S); return 3; }

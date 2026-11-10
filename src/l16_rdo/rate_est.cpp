@@ -2409,6 +2409,15 @@ std::int32_t getIntraUvTxType(std::int32_t predModeUv, std::int32_t txSize, std:
     return !av1ExtTxUsed[txSetType][txType] ? 0 : txType;
 }
 
+// RE7: the luma tx-type derivation - intraModeToTxType at PLANE_TYPE_Y plus
+// the ext-tx-used fold; the 32x32/64x64 shapes hit the DCTONLY set row and
+// fold to DCT_DCT (see the rate_est.h note).
+std::int32_t lumaIntraTxType(std::int32_t predMode, std::int32_t txSize, std::int32_t reducedTxSet) {
+    const std::int32_t txType = intraModeToTxType(predMode, 0, 0 /* PLANE_TYPE_Y */);
+    const std::int32_t txSetType = getExtTxSetType(txSize, /*is_inter*/ 0, reducedTxSet);
+    return !av1ExtTxUsed[txSetType][txType] ? 0 : txType;
+}
+
 // RE4: fimode_to_intramode (definitions.h:1304, verbatim).
 const std::int32_t fimodeToIntraMode[5] = {DC_PRED, V_PRED, H_PRED, D157_PRED, PAETH_PRED};
 

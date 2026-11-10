@@ -38,13 +38,15 @@ void encodeRecon4x4(const pixels::Plane& plane, int px, int py, const std::uint8
 // Availability (see note): above iff by > 0; left iff bx > 0; above-left iff
 // both; top-right iff by > 0 && bx + 1 < gridW; bottom-left NEVER (not yet
 // reconstructed). SVT's full rules live in svt_aom_intra_has_top_right /
-// bottom_left; this raster simplification is M1's scope. Mode/TxType uniform
-// per run. coeffs: 16 per block, row-major block order.
+// bottom_left; this raster simplification is M1's scope. Mode uniform per
+// run; the transform type is DERIVED (RE7: the lossless q0 walk folds to
+// DCT_DCT - the decoder's q0 rule, dav1d recon_tmpl.c:363-365). coeffs: 16
+// per block, row-major block order.
 void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
+                         intra::PredictionMode mode, int angleDelta);
 
 void encodeFrameRecon8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
+                         intra::PredictionMode mode, int angleDelta);
 
 // D3 frame-level mode decision: raster 4x4 loop, each block's mode chosen by
 // decideBlockMode4x4 against RECONSTRUCTED neighbor edges (M1 availability),
@@ -52,13 +54,13 @@ void encodeFrameRecon8x8(const pixels::Plane& src, pixels::Plane& recon, std::in
 // into NeighborContext (filt_type live) for subsequent blocks. coeffs: 16
 // per block, row-major block order; modes: one per block.
 void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                        std::uint8_t* modes, transforms::TxType txType);
+                        std::uint8_t* modes);
 
 // Q2: same D3 loop with the FP quantizer wired at a fixed qindex
 // (quantize_fp_helper_c at log_scale 0): qcoeff = coded coeffs, dqcoeff
 // feeds the inverse, so recon carries real quantization loss.
 void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                         std::uint8_t* modes, std::int32_t qindex,
                          entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
                          entropy::DcSignLevelCoeffNa* na = nullptr);
 
@@ -67,14 +69,13 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
 // av1_get_tx_scale_tab[TX_8X8] = 0). qcoeff = coded coeffs; dqcoeff feeds
 // invTxfm2dAdd8x8 onto the raw predictor.
 void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
-                          transforms::TxType txType);
+                          intra::PredictionMode mode, int angleDelta, std::int32_t qindex);
 
 // QW2: D3 policy loop at 8x8 with the FP quantizer wired at a fixed qindex.
 // SCAN POLICY IS OURS: fixed defaultScan8x8 for every block (see
 // encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
 void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                         std::uint8_t* modes, std::int32_t qindex,
                          entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
                          entropy::DcSignLevelCoeffNa* na = nullptr);
 
@@ -84,7 +85,7 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
 // gather: above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]). The 16x16 fwd/inv
 // roundtrip is exact, so recon == source for every block.
 void encodeFrameRecon16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
+                           intra::PredictionMode mode, int angleDelta);
 
 // BSF1: optional key-frame luma symbol emission (D5: symbols only). When w
 // != null, the frame emits, per block in raster order: the kf y mode symbol
@@ -100,15 +101,14 @@ void encodeFrameRecon16x16(const pixels::Plane& src, pixels::Plane& recon, std::
 // symbols (ECP1/ECP2) and no tile assembly (BSF3/BSF4) at this stage. GPU
 // frame paths are unchanged (host-decision-path bookkeeping only).
 void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          std::uint8_t* modes, transforms::TxType txType,
+                          std::uint8_t* modes,
                           entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr);
 
 void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
-                            transforms::TxType txType);
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex);
 
 void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           std::uint8_t* modes, std::int32_t qindex,
                            entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
                            entropy::DcSignLevelCoeffNa* na = nullptr);
 
@@ -116,17 +116,16 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
 // top-right gather (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]); the
 // 32x32 fwd/inv roundtrip is exact, so recon == source for every block.
 void encodeFrameRecon32x32(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
+                           intra::PredictionMode mode, int angleDelta);
 
 void encodeFrameAuto32x32(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          std::uint8_t* modes, transforms::TxType txType);
+                          std::uint8_t* modes);
 
 void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
-                            transforms::TxType txType);
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex);
 
 void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           std::uint8_t* modes, std::int32_t qindex,
                            entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
                            entropy::DcSignLevelCoeffNa* na = nullptr);
 
@@ -135,17 +134,16 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
 // at 64x64. The 64x64 fwd net shift is 0 (2-2-2) - the roundtrip is lossy
 // like 8x8/32x32 (recon != source).
 void encodeFrameRecon64x64(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType);
+                           intra::PredictionMode mode, int angleDelta);
 
 void encodeFrameAuto64x64(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          std::uint8_t* modes, transforms::TxType txType);
+                          std::uint8_t* modes);
 
 void encodeFrameRecon64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
-                            transforms::TxType txType);
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex);
 
 void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           std::uint8_t* modes, std::int32_t qindex,
                            entropy::AomWriter* w = nullptr, entropy::EcFrameContext* fc = nullptr,
                            entropy::DcSignLevelCoeffNa* na = nullptr);
 
@@ -162,11 +160,20 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
 // non-directional winner and for every 4x4 block (av1_use_angle_delta,
 // intra_prediction.h:214-216 = bsize >= BLOCK_8X8). Consumed by the emission
 // walks (the predict at the delta + the writeKfLumaMode symbol write).
+// RE7 UPDATE: txType is the winner's DERIVED luma transform type
+// (lumaIntraTxType = intra_mode_to_tx_type mode_decision.c:2975-2979 + the
+// ext-tx-used fold; q0 folds DCT_DCT). Consumed by the emission walks (the
+// fwd/quant/inv composition + the writeTxbCoeffs symbol).
 struct ModeDecision {
     intra::PredictionMode mode;
     std::uint32_t sad;
     std::uint64_t rd;
     int angleDelta;
+    // RE7: the winner's DERIVED luma tx type - the emission composes and
+    // signals at it (lumaIntraTxType, rate_est.cpp:2415-2420 = intra_mode_
+    // to_tx_type mode_decision.c:2975-2979 + the ext-tx-used fold). DCT_DCT
+    // at q0 (the decoder's q0 rule, dav1d recon_tmpl.c:363-365).
+    transforms::TxType txType;
 };
 
 // ---- CH3: chroma (4:2:0) frame compositions --------------------------------
@@ -269,7 +276,7 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                         std::int32_t* coeffsV, std::uint8_t* modesY, std::uint8_t* modesU,
                         std::uint8_t* modesV, std::uint16_t* eobsY, std::uint16_t* eobsU,
                         std::uint16_t* eobsV, std::int32_t qindex, int lumaB,
-                        transforms::TxType txType, entropy::AomWriter* w,
+                        entropy::AomWriter* w,
                         entropy::EcFrameContext* fc, entropy::DcSignLevelCoeffNa* naY,
                         entropy::DcSignLevelCoeffNa* naU, entropy::DcSignLevelCoeffNa* naV);
 
@@ -321,7 +328,7 @@ ModeDecision decideBlockMode64x64(const std::uint8_t* src, const std::uint8_t* a
                                   const RdliteFrameCtx& rdlite);
 
 void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                        std::uint8_t* modes, transforms::TxType txType);
+                        std::uint8_t* modes);
 
 std::string subtractCuSource();
 

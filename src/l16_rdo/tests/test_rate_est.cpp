@@ -4660,3 +4660,26 @@ TEST_CASE("l16_rdo injectZzBackupCandidate rejects an out-of-range pred_mv under
     CHECK(cand[0].mode == (int)0xCDCDCDCD);
 }
 
+// RE7: the luma tx-type derivation the emission composes at - the full
+// (mode, shape) domain enumerated. The rule is the decoder's compute_tx_type
+// (spec 5.11.40; aom av1_get_tx_type blockd.h:1283-1313, the intra-UV branch
+// shape applied to luma): the mode-derived table (g_intra_mode_to_tx_type,
+// mode_decision.c:2959-2973) + the ext-tx-used fold
+// (av1_ext_tx_used, common_utils.c:197-204) at the frame's reduced_tx_set.
+// Shape domain: TX_4X4(0) TX_8X8(1) TX_16X16(2) derive; TX_32X32(3) and
+// TX_64X64(4) fold to DCT_DCT (the DCTONLY set: get_ext_tx_set_type
+// common_utils.h:62-66). reduced_tx_set = 1 (the ratified header config).
+TEST_CASE("l16_rdo lumaIntraTxType enumerates the (mode, shape) derivation") {
+    for (int m = 0; m < 13; ++m) {
+        for (int ts = 0; ts < 5; ++ts) {
+            const int want = (ts >= 3) ? 0 : l16_rdo::gIntraModeToTxType[m];
+            CHECK(l16_rdo::lumaIntraTxType(m, ts, 1) == want);
+        }
+    }
+    // the non-reduced set at 4x4: same four derived types stay used
+    // (EXT_TX_SET_DTT4_IDTX_1DDCT row: types 0..3 used).
+    for (int m = 0; m < 13; ++m) {
+        CHECK(l16_rdo::lumaIntraTxType(m, 0, 0) == l16_rdo::gIntraModeToTxType[m]);
+    }
+}
+

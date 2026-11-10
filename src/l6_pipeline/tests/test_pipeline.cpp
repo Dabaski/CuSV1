@@ -337,7 +337,7 @@ TEST_CASE("frame round trip 8x8 recon matches svt composition") {
     }
 
     std::int32_t coeffs[64] = {0};
-    pipeline::encodeFrameRecon4x4(plane, recon, coeffs, intra::V_PRED, 0, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon4x4(plane, recon, coeffs, intra::V_PRED, 0);
 
     bool reconOk = true;
     for (int y = 0; y < 8; ++y) {
@@ -431,7 +431,7 @@ TEST_CASE("frame recon 8x8 matches generator composition") {
         for (int x = 0; x < 16; ++x) plane.at(x, y) = srcData[y * 16 + x];
 
     std::int32_t coeffs[4 * 64] = {0};
-    pipeline::encodeFrameRecon8x8(plane, recon, coeffs, intra::V_PRED, 0, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon8x8(plane, recon, coeffs, intra::V_PRED, 0);
     bool ok = true;
     for (int y = 0; y < 16; ++y)
         for (int x = 0; x < 16; ++x)
@@ -494,7 +494,7 @@ TEST_CASE("frame auto 8x8 matches the generator policy golden bit-exactly") {
 
     std::int32_t coeffs[4 * 64] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto8x8(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto8x8(plane, recon, coeffs, modes);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -520,16 +520,27 @@ TEST_CASE("frame auto 4x4 with quantization matches the Q2 generator golden") {
                                       18, 5,  7,  13, 14, 2, 20, 8,  6,  24, 3,  9,  11, 17, 5, 19,
                                       22, 1,  8,  15, 4,  29, 7, 13, 10, 16, 6, 12, 3,  25, 11, 9};
     const std::uint8_t goldenModes[4] = {4, 0, 0, 0};
+    // goldenRecon/goldenCoeffs re-read from the gate at RE7 (the composition
+    // runs at the derived type: block 0's D135 composes at ADST_ADST, so the
+    // DC coeff -41 -> -37 and the recon moved).
     const std::uint8_t goldenRecon[64] = {
-        17, 7, 0, 9, 18, 3, 5, 17, 13, 16, 0, 8, 10, 19, 0, 21,
-        12, 16, 7, 2, 22, 0, 5, 19, 14, 6, 23, 0, 8, 9, 25, 1,
-        17, 3, 8, 15, 17, 6, 18, 12, 7, 18, 6, 12, 9, 21, 8, 14,
-        22, 0, 9, 17, 3, 30, 7, 12, 12, 12, 7, 14, 2, 27, 15, 7};
+        24, 0, 8, 4, 19, 4, 6, 18,
+        0, 5, 4, 4, 11, 20, 0, 21,
+        5, 12, 8, 0, 23, 0, 6, 20,
+        19, 3, 27, 4, 9, 10, 26, 2,
+        17, 2, 7, 14, 17, 6, 18, 12,
+        7, 17, 5, 12, 9, 21, 8, 14,
+        21, 0, 8, 16, 3, 30, 7, 12,
+        11, 11, 6, 13, 2, 27, 15, 7};
     const std::int32_t goldenCoeffs[64] = {
-        -41, 1, 0, 0, 0, 0, 1, -1, 0, 0, 0, 1, 0, 0, 0, 0,
-        2, 0, 1, 0, 0, 0, 1, -1, 0, 0, -1, 1, 0, 0, 1, 1,
-        0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
-        0, 0, -1, -1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0};
+        -37, -9, -5, -1, -10, -3, -1, -1,
+        -4, -1, 0, 1, -2, 0, 0, 0,
+        3, 0, 1, 0, 0, 0, 1, -1,
+        0, 0, -1, 1, 0, 0, 1, 1,
+        -1, 0, 1, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 1, 1,
+        0, 0, -1, -1, 0, 0, 1, 1,
+        0, 0, 0, 1, 0, 0, 0, 0};
 
     pixels::Plane plane(8, 8, 4);
     pixels::Plane recon(8, 8, 4);
@@ -538,8 +549,7 @@ TEST_CASE("frame auto 4x4 with quantization matches the Q2 generator golden") {
 
     std::int32_t coeffs[64] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto4x4Q(plane, recon, coeffs, modes, 100,
-                                  transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto4x4Q(plane, recon, coeffs, modes, 100);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -580,8 +590,7 @@ TEST_CASE("gpu frame round trip matches host encodeFrameRecon4x4") {
         }
     }
     std::int32_t refCoeffs[64] = {0};
-    pipeline::encodeFrameRecon4x4(plane, reconRef, refCoeffs, intra::V_PRED, 0,
-                                  transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon4x4(plane, reconRef, refCoeffs, intra::V_PRED, 0);
 
     // kernels
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
@@ -800,7 +809,7 @@ TEST_CASE("gpu frame auto matches host encodeFrameAuto4x4 (host decides, gpu exe
     }
     std::int32_t refCoeffs[64] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto4x4(plane, reconRef, refCoeffs, refModes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto4x4(plane, reconRef, refCoeffs, refModes);
 
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
@@ -1094,6 +1103,42 @@ TEST_CASE("decide 8x8 enumerates the angle delta for directional modes (RE6)") {
     CHECK(d.angleDelta == 3);
 }
 
+TEST_CASE("decide reports the winner's derived tx type (RE7)") {
+    // RE7: ModeDecision carries the winner's DERIVED luma tx type
+    // (lumaIntraTxType = intra_mode_to_tx_type mode_decision.c:2975-2979 +
+    // the ext-tx-used fold). PAETH_PRED derives ADST_ADST (the table's 13th
+    // row, mode_decision.c:2972) at 4x4; D45_PRED derives DCT_DCT (the
+    // table's 4th row, :2962) at 8x8 - both discriminators are
+    // mode-indexed, not shape-indexed.
+    // The q0 gate: the decoder composes DCT_DCT implicit at qidx == 0
+    // (dav1d recon_tmpl.c:363-365, aom decodemv.c av1_read_tx_type:638-640).
+    const std::uint8_t srcP[16] = {10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40};
+    const std::uint8_t aboveP[4] = {10, 20, 30, 40};
+    const auto dP100 = pipeline::decideBlockMode4x4(srcP, aboveP, 4, 0, nullptr, 0, 0, 0,
+                                                    intra::NeighborContext(), gRdlite);
+    CHECK(dP100.mode == intra::PAETH_PRED);
+    CHECK(dP100.txType == transforms::TxType::ADST_ADST);
+    pipeline::RdliteFrameCtx rdlite0;
+    pipeline::initRdliteFrameCtx(&rdlite0, 0);
+    // at q0 the rate term is free (lambda 0), so the first zero-variance
+    // candidate in enumeration order wins (V_PRED); whatever wins, the q0
+    // gate keeps the type DCT_DCT.
+    const auto dP0 = pipeline::decideBlockMode4x4(srcP, aboveP, 4, 0, nullptr, 0, 0, 0,
+                                                  intra::NeighborContext(), rdlite0);
+    CHECK(dP0.mode == intra::V_PRED);
+    CHECK(dP0.txType == transforms::TxType::DCT_DCT);
+    // the D45 winner at 8x8 derives DCT_DCT (the table's 4th row)
+    const std::uint8_t above[8] = {0, 10, 20, 30, 40, 50, 60, 70};
+    const std::uint8_t left[8] = {0, 10, 20, 30, 40, 50, 60, 70};
+    std::uint8_t srcD[64];
+    intra::buildIntraPredictors(srcD, 8, intra::D45_PRED, 3, 8, 8, 0, above, 8, 0,
+                                left, 8, 0);
+    const auto dD100 = pipeline::decideBlockMode8x8(srcD, above, 8, 0, left, 8, 0, 0,
+                                                    intra::NeighborContext(), gRdlite);
+    CHECK(dD100.mode == intra::D45_PRED);
+    CHECK(dD100.txType == transforms::TxType::DCT_DCT);
+}
+
 
 TEST_CASE("intraFastCost consumes the chosen angle delta rate (RE6, M3 pin)") {
     // The M3 sharpening: the mutation reversed the angle-delta rate index
@@ -1179,7 +1224,7 @@ TEST_CASE("frame auto matches the generator policy golden bit-exactly") {
 
     std::int32_t coeffs[64] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto4x4(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto4x4(plane, recon, coeffs, modes);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -1273,7 +1318,7 @@ TEST_CASE("frame auto 4x4 gathers real reconstructed top-right (FR-series fixtur
 
     std::int32_t coeffs[256] = {0};
     std::uint8_t modes[16] = {0};
-    pipeline::encodeFrameAuto4x4(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto4x4(plane, recon, coeffs, modes);
 
     bool modesOk = true;
     for (int i = 0; i < 16; ++i) {
@@ -1598,7 +1643,7 @@ TEST_CASE("gpu fwd_txfm_2d_8x8 matches host fwdTxfm2d8x8 (dct + adst)") {
     }
     CHECK(dctOk);
 
-    typeArg = 1;
+    typeArg = 3; // ADST_ADST (the host reference's type; the old 2-way GPU fold made 1 and 3 GPU-identical)
     dType.uploadFrom(&typeArg, sizeof(typeArg));
     kTx.launch(1, 1, 8, 1, argsTx);
     std::int32_t gotAdst[64] = {0};
@@ -1674,7 +1719,7 @@ TEST_CASE("gpu inv_txfm_2d_add_8x8 matches host invTxfm2dAdd8x8 (dct + adst)") {
     }
     CHECK(dctOk);
 
-    typeArg = 1;
+    typeArg = 3; // ADST_ADST (the host reference's type; the old 2-way GPU fold made 1 and 3 GPU-identical)
     dType.uploadFrom(&typeArg, sizeof(typeArg));
     dDst.uploadFrom(predAdst, 64);
     kInv.launch(1, 1, 8, 1, argsInv);
@@ -1694,8 +1739,8 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
     // B7 policy loop (8x8 blocks) with the FP quantizer wired in
     // (svtd_quantize_fp_8x8, n_coeffs=64/log_scale 0): qcoeff = coded coeffs,
     // dqcoeff feeds svtd_inv2dadd8x8. Loss feeds back through decisions:
-    // qw8_modes 5 5 6 0 == lossless b7_modes 5 5 6 0 under the RE5 RD-lite
-    // map (the SAD-era maps differed: qw8 1 0 3 0 vs b7 1 5 3 0).
+    // qw8_modes 5 5 2 0 (RE7: the derived-type composition moved blocks 1-2
+    // off the lossless b7 map 5 5 6 0 through the recon feedback).
     // SCAN POLICY IS OURS: fixed defaultScan8x8 for every block; SVT selects
     // per mode/tx type via get_scan_order (coefficients.h:40).
     const std::uint8_t srcData[256] = {
@@ -1715,38 +1760,41 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
         18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
         22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18};
-    const std::uint8_t goldenModes[4] = {5, 0, 6, 0};
+    // RE7: qw8_modes moved {5,5,6,0} -> {5,5,2,0} and the recon/coeffs moved
+    // with the derived-type composition (block 0's V_PRED composes at
+    // ADST_DCT); re-read from the gate lines.
+    const std::uint8_t goldenModes[4] = {5, 5, 2, 0};
     const std::uint8_t goldenRecon[256] = {
-        18, 0, 6, 9, 19, 0, 7, 21, 13, 14, 10, 0, 21, 9, 7, 15,
-        14, 7, 23, 1, 8, 14, 31, 7, 12, 19, 5, 14, 0, 23, 14, 9,
-        20, 2, 1, 10, 16, 6, 15, 14, 10, 26, 0, 8, 13, 17, 5, 17,
-        27, 0, 11, 16, 0, 34, 8, 17, 18, 25, 14, 18, 3, 35, 13, 19,
-        11, 12, 0, 4, 3, 26, 0, 14, 23, 2, 24, 5, 14, 5, 36, 3,
-        13, 16, 9, 6, 5, 29, 10, 15, 20, 4, 8, 8, 18, 0, 21, 9,
-        9, 26, 4, 9, 11, 19, 14, 18, 25, 10, 16, 16, 9, 25, 11, 19,
-        18, 24, 16, 23, 6, 30, 17, 26, 16, 6, 0, 7, 18, 0, 6, 13,
-        13, 14, 12, 0, 22, 8, 5, 18, 18, 8, 19, 4, 11, 6, 33, 2,
-        11, 18, 4, 15, 0, 25, 14, 8, 19, 7, 0, 14, 16, 0, 18, 10,
-        9, 25, 0, 8, 12, 18, 7, 18, 27, 6, 18, 21, 1, 30, 14, 17,
-        17, 24, 13, 17, 2, 35, 12, 20, 16, 11, 4, 11, 5, 20, 0, 17,
-        22, 1, 23, 4, 14, 4, 36, 2, 14, 15, 4, 16, 0, 23, 10, 11,
-        20, 3, 8, 7, 18, 0, 21, 8, 10, 25, 0, 7, 16, 11, 10, 14,
-        24, 9, 16, 15, 9, 25, 11, 19, 15, 31, 10, 19, 1, 39, 9, 20,
-        16, 6, 0, 6, 18, 0, 6, 13, 13, 12, 3, 0, 26, 0, 6, 15};
+        18, 6, 1, 13, 25, 0, 9, 15, 9, 15, 7, 0, 23, 6, 0, 18,
+        15, 1, 17, 4, 9, 10, 29, 0, 14, 17, 8, 12, 2, 20, 9, 16,
+        13, 11, 0, 9, 17, 9, 19, 5, 4, 29, 0, 5, 9, 16, 4, 19,
+        21, 0, 7, 14, 5, 29, 4, 14, 12, 26, 10, 18, 5, 30, 16, 23,
+        12, 15, 7, 7, 9, 34, 0, 18, 12, 4, 28, 0, 15, 13, 30, 8,
+        9, 14, 4, 9, 10, 24, 4, 16, 18, 7, 3, 12, 17, 8, 22, 12,
+        6, 20, 0, 14, 13, 17, 5, 18, 20, 0, 1, 15, 0, 25, 6, 11,
+        15, 22, 15, 22, 10, 36, 8, 27, 24, 7, 0, 8, 27, 4, 14, 13,
+        0, 10, 8, 3, 24, 0, 6, 16, 18, 5, 20, 2, 10, 7, 30, 2,
+        7, 15, 10, 14, 6, 19, 19, 10, 19, 4, 2, 12, 14, 0, 15, 10,
+        11, 19, 3, 12, 10, 11, 0, 20, 27, 3, 19, 19, 0, 31, 11, 18,
+        12, 25, 11, 11, 5, 26, 12, 21, 16, 7, 5, 10, 3, 22, 0, 17,
+        21, 8, 29, 1, 12, 7, 39, 7, 14, 11, 5, 14, 0, 24, 6, 11,
+        12, 11, 12, 11, 8, 3, 17, 10, 10, 22, 1, 5, 14, 13, 7, 14,
+        25, 6, 10, 15, 4, 28, 5, 17, 15, 28, 11, 17, 0, 40, 6, 20,
+        23, 1, 2, 14, 17, 0, 7, 10, 13, 9, 5, 0, 24, 1, 2, 15};
     const std::int32_t goldenCoeffs[256] = {
-        -79, -1, 1, 1, 0, 0, 1, -1, -1, 0, 0, 0, 1, 1, 0, 2,
-        1, 0, 0, -1, 0, 0, -1, 1, -1, 0, 0, 0, 0, -1, 0, 0,
-        0, 0, 0, 0, 1, 0, 1, -1, 0, 0, 0, 0, 1, 0, 0, 0,
-        0, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0, 1, -1, -1, 0,
-        -3, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
-        -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2,
-        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
-        -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
-        -4, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
-        -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2,
-        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
-        -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
-        1, 0, 1, 1, 0, 0, 0, -1, 0, 0, 0, 0, 0, 2, 0, 1,
+        -71, -1, 0, 1, 0, -1, 1, -2, -21, 0, 0, 1, 0, 1, 0, 1,
+        -12, 0, 0, 0, 0, 1, -1, 1, -10, 0, 0, 0, 0, 0, -1, 1,
+        -7, 0, 0, 0, 0, 0, 1, 0, -7, 0, 0, 0, 1, 0, 0, 0,
+        -6, 0, 0, 0, 1, 0, 0, 0, -6, 0, 0, 0, 1, -1, -1, 0,
+        -1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, -1, -1, 0, -1,
+        -1, 0, 0, 0, 1, -1, 0, -1, -1, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 1, -1,
+        0, 0, 0, 0, 1, -1, -1, 0, -1, 0, 0, 0, 0, -1, 0, 1,
+        -2, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1,
+        -1, 0, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, -1, 0, -1, 1,
+        0, 0, 0, 0, 0, 0, -1, 1, 0, 0, 0, 0, 1, -1, 1, -1,
+        -1, 0, 0, -1, 1, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        -1, 0, 1, 1, 0, 0, 1, -1, 0, 0, 0, 0, 0, 2, 0, 1,
         0, 0, 0, 0, 0, 0, -1, 2, 0, 0, 0, 0, -1, 0, -1, 0,
         -1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 0, 1, -1,
         0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 1, 1, -1};
@@ -1758,8 +1806,7 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
 
     std::int32_t coeffs[256] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto8x8Q(plane, recon, coeffs, modes, 100,
-                                  transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto8x8Q(plane, recon, coeffs, modes, 100);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -1781,10 +1828,16 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
 }
 
 TEST_CASE("frame recon 8x8 with quantization matches the QW1 golden block 0") {
-    // golden: golden_gen qw8_coeffs/qw8_recon block 0 at qindex 100. Block 0
-    // has no neighbors, so the Auto winner (V, qw8_modes[0] = 1) and a forced
-    // V_PRED encode must produce identical coeffs + recon for it - this
-    // pins encodeFrameRecon8x8Q's quantized path to the generator.
+    // golden: golden_gen qw8_coeffs/qw8_recon block 0 at qindex 100. The
+    // coeffs are per-block packed (the first 64 linear values); the recon is
+    // the 16-wide raster, so block 0 = the STRIDED slice rows 0-7 cols 0-7
+    // ([r*16+c]). The RE7 history this test carries: the old forced-V
+    // cross-check relied on the auto winner being V (qw8_modes[0] = 1);
+    // RE7's derived-type recon feedback moved the winner to D113
+    // (qw8_modes 5 5 2 0), whose no-edge prediction mixes the builder's
+    // 129 left-col fill into V_PRED's 127-fill - so the fixture now decides
+    // the walk-faithful triple itself (below) and forces THAT, pinning
+    // encodeFrameRecon8x8Q AND the D2's chosen delta to the gate's block 0.
     const std::uint8_t srcData[256] = {
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18,
         15,  4, 25,  2, 12,  9, 30,  3, 10, 16,  6, 12,  3, 25, 11,  9,
@@ -1803,32 +1856,47 @@ TEST_CASE("frame recon 8x8 with quantization matches the QW1 golden block 0") {
         22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18};
     const std::int32_t goldenBlock0Coeffs[64] = {
-        -79, 0, 1, 1, 0, 0, 1, -1,
-        -1, 0, 0, 0, 1, 1, 0, 2,
-        1, 0, 0, -1, 0, 0, -1, 1,
-        -1, 0, 0, 0, 0, -1, 0, 0,
-        0, 0, 0, 0, 1, 0, 1, -1,
-        0, 0, 0, 0, 1, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        -1, 0, 0, 0, 1, -1, -1, 0};
+        -71, -1, 0, 1, 0, -1, 1, -2,
+        -21, 0, 0, 1, 0, 1, 0, 1,
+        -12, 0, 0, 0, 0, 1, -1, 1,
+        -10, 0, 0, 0, 0, 0, -1, 1,
+        -7, 0, 0, 0, 0, 0, 1, 0,
+        -7, 0, 0, 0, 1, 0, 0, 0,
+        -6, 0, 0, 0, 1, 0, 0, 0,
+        -6, 0, 0, 0, 1, -1, -1, 0};
     const std::uint8_t goldenBlock0Recon[64] = {
-        19, 1, 9, 8, 18, 0, 6, 18,
-        17, 7, 22, 4, 10, 10, 26, 7,
-        19, 6, 5, 8, 13, 7, 15, 9,
-        29, 0, 11, 17, 0, 31, 5, 15,
-        12, 12, 0, 5, 3, 23, 0, 13,
-        11, 20, 12, 4, 2, 29, 10, 10,
-        11, 25, 4, 12, 13, 15, 10, 18,
-        18, 25, 17, 23, 5, 30, 16, 22};
+        18, 6, 1, 13, 25, 0, 9, 15,
+        15, 1, 17, 4, 9, 10, 29, 0,
+        13, 11, 0, 9, 17, 9, 19, 5,
+        21, 0, 7, 14, 5, 29, 4, 14,
+        12, 15, 7, 7, 9, 34, 0, 18,
+        9, 14, 4, 9, 10, 24, 4, 16,
+        6, 20, 0, 14, 13, 17, 5, 18,
+        15, 22, 15, 22, 10, 36, 8, 27};
 
     pixels::Plane plane(16, 16, 4);
     pixels::Plane recon(16, 16, 4);
     for (int y = 0; y < 16; ++y)
         for (int x = 0; x < 16; ++x) plane.at(x, y) = srcData[y * 16 + x];
 
+    // WALK-FAITHFUL DECISION (the RE7 fix): the forced encode uses the
+    // (mode, delta) the auto walk itself decides at block 0. Two earlier
+    // probes were unfaithful and are named as the class: the shared gRdlite
+    // is CDF-adapted by earlier tests (order-dependent winners), and a probe
+    // passed the 256-byte fixture where the walk passes the block's 64
+    // pixels. This decision reproduces the walk's block-0 call exactly: a
+    // FRESH q100 context, block-0 edges all unavailable.
+    std::uint8_t srcBlk0[64];
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x) srcBlk0[y * 8 + x] = srcData[y * 16 + x];
+    pipeline::RdliteFrameCtx fresh;
+    pipeline::initRdliteFrameCtx(&fresh, 100);
+    const auto d0 = pipeline::decideBlockMode8x8(srcBlk0, nullptr, 0, 0, nullptr, 0, 0, 0,
+                                                 intra::NeighborContext(), fresh);
+    CHECK(d0.mode == intra::D113_PRED);  // the gate's qw8_modes[0] = 5
+
     std::int32_t coeffs[256] = {0};
-    pipeline::encodeFrameRecon8x8Q(plane, recon, coeffs, intra::V_PRED, 0, 100,
-                                   transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon8x8Q(plane, recon, coeffs, d0.mode, d0.angleDelta, 100);
 
     bool coeffsOk = true;
     for (int i = 0; i < 64; ++i) {
@@ -1849,7 +1917,8 @@ TEST_CASE("gpu frame auto 8x8 with quantization matches host encodeFrameAuto8x8Q
     }
     gpurt::GpuContext ctx;
 
-    // same 16x16 fixture as the QW2 golden (qw8_modes 1 0 2 0 at qindex 100)
+    // same 16x16 fixture as the QW1 golden (qw8_modes 5 5 2 0 at qindex 100;
+    // RE7: the derived-type composition)
     const std::uint8_t srcData[256] = {
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18,
         15,  4, 25,  2, 12,  9, 30,  3, 10, 16,  6, 12,  3, 25, 11,  9,
@@ -1875,8 +1944,7 @@ TEST_CASE("gpu frame auto 8x8 with quantization matches host encodeFrameAuto8x8Q
         for (int x = 0; x < 16; ++x) plane.at(x, y) = srcData[y * 16 + x];
     std::int32_t refCoeffs[256] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto8x8Q(plane, reconRef, refCoeffs, refModes, kQindex,
-                                  transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto8x8Q(plane, reconRef, refCoeffs, refModes, kQindex);
 
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlock8x8CuSource(), "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
@@ -2024,6 +2092,9 @@ TEST_CASE("gpu frame auto 8x8 with quantization matches host encodeFrameAuto8x8Q
             dAl.uploadFrom(&alArg, sizeof(alArg));
             dPx.uploadFrom(&pxArg, sizeof(pxArg));
             dPy.uploadFrom(&pyArg, sizeof(pyArg));
+            // RE7: the GPU chain composes at the winner's DERIVED type
+            typeArg = (int)d.txType;
+            dType.uploadFrom(&typeArg, sizeof(typeArg));
             if (hasTop) dAbove.uploadFrom(aboveHost, 16);
             if (hasLeft) dLeft.uploadFrom(leftHost, 16);
 
@@ -2136,7 +2207,7 @@ TEST_CASE("gpu frame auto 8x8 matches host encodeFrameAuto8x8 (host decides, gpu
         for (int x = 0; x < 16; ++x) plane.at(x, y) = srcData[y * 16 + x];
     std::int32_t refCoeffs[256] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto8x8(plane, reconRef, refCoeffs, refModes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto8x8(plane, reconRef, refCoeffs, refModes);
 
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlock8x8CuSource(), "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
@@ -2359,8 +2430,7 @@ TEST_CASE("gpu frame auto 4x4 with quantization matches host encodeFrameAuto4x4Q
     }
     std::int32_t refCoeffs[64] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto4x4Q(plane, reconRef, refCoeffs, refModes, kQindex,
-                                  transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto4x4Q(plane, reconRef, refCoeffs, refModes, kQindex);
 
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlockCuSource(), "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
@@ -2502,14 +2572,23 @@ TEST_CASE("gpu frame auto 4x4 with quantization matches host encodeFrameAuto4x4Q
             dAl.uploadFrom(&alArg, sizeof(alArg));
             dPx.uploadFrom(&pxArg, sizeof(pxArg));
             dPy.uploadFrom(&pyArg, sizeof(pyArg));
+            // the per-block edges (RE7 round-4 fix: the typeArg edit had
+            // dropped these two uploads - the kernel then read zeroed edge
+            // buffers with nonzero counts at blocks 1-3 and every DC
+            // prediction was wrong; the round-3 dump's constant gpu DC=4
+            // across different source sums was the signature)
             if (hasTop) dAbove.uploadFrom(aboveHost, 4 + nTopRightPx);
             if (hasLeft) dLeft.uploadFrom(leftHost, 4);
+            // RE7: the GPU chain composes at the winner's DERIVED type
+            typeArg = (int)d.txType;
+            dType.uploadFrom(&typeArg, sizeof(typeArg));
 
             CUdeviceptr pMode = dMode.get();
             CUdeviceptr pDelta = dDelta.get();
             CUdeviceptr pAm = dAm.get();
             CUdeviceptr pLm = dLm.get();
             CUdeviceptr pAbove = dAbove.get();
+
             CUdeviceptr pNTop = dNTop.get();
             CUdeviceptr pNTr = dNTr.get();
             CUdeviceptr pLeft = dLeft.get();
@@ -2606,7 +2685,7 @@ TEST_CASE("frame auto 16x16 matches the f16 generator golden (real top-right)") 
 
     std::int32_t coeffs[1024] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto16x16(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto16x16(plane, recon, coeffs, modes);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -2719,7 +2798,7 @@ TEST_CASE("frame auto 16x16 with quantization matches the f16q generator golden"
 
     std::int32_t coeffs[1024] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -2727,8 +2806,10 @@ TEST_CASE("frame auto 16x16 with quantization matches the f16q generator golden"
     }
     CHECK(modesOk);
 
-    const std::int32_t goldenBlk0[16] = {-88, -21, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    const std::int32_t goldenBlk2[8] = {-128, 0, 0, 0, 0, 0, 0, 0};
+    // RE7: re-read from the gate (the derived-type composition: block 0's
+    // SMOOTH composes at ADST_DCT, block 2's DC at DCT_DCT).
+    const std::int32_t goldenBlk0[16] = {-69, -19, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::int32_t goldenBlk2[8] = {-126, 0, 0, 0, 0, 0, 0, 0};
     bool coeffsOk = true;
     for (int i = 0; i < 16; ++i) {
         if (coeffs[i] != goldenBlk0[i]) coeffsOk = false;
@@ -2740,7 +2821,7 @@ TEST_CASE("frame auto 16x16 with quantization matches the f16q generator golden"
 }
 TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
     // Gate: bsf1_modes 10 7 0 0, bsf1_ctx 0 0 0 1 1 0 4 0,
-    // bsf1_bytes 3 e1 37 b0, bsf1_rt 10 7 3 0 0 0 0, bsf1_cdf_eq 1
+    // bsf1_bytes 3 e1 45 70, bsf1_rt 10 7 5 0 0 0 0, bsf1_cdf_eq 1
     // (tools/golden_gen/main_primitives.c BSF1 block; the RE5 RD-lite map -
     // the SAD-era values were modes 1 7 0 0 / bytes 3 7f f8 b0 / rt
     // 1 3 7 3 0 0 0 0, and SMOOTH_H(10) is non-directional so block 0
@@ -2773,7 +2854,10 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
     // RE6: the Q variant's OWN gate (bsf1q - the q100 RD-lite decide with the
     // quantized-recon feedback; the lossless bsf1 bytes above cover only the
     // q0 decide, whose chosen delta can differ).
-    const unsigned char goldenBytesQ[3] = {0xe1, 0x41, 0x08};
+    // RE7: re-read from the gate (bsf1q_bytes 3 e1 37 b0; bsf1q_rt
+    // 10 7 3 0 0 0 0 - block 1's chosen delta +1 -> 0 through the recon
+    // feedback of block 0's derived-type composition).
+    const unsigned char goldenBytesQ[3] = {0xe1, 0x37, 0xb0};
 
     std::int32_t coeffs[1024] = {0};
     std::uint8_t modes[4] = {0};
@@ -2781,7 +2865,7 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
     entropy::AomWriter w{};
     unsigned char buf[64] = {0};
     w.ec.buf = buf;
-    pipeline::encodeFrameAuto16x16(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT, &w, &fc);
+    pipeline::encodeFrameAuto16x16(plane, recon, coeffs, modes, &w, &fc);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i)
@@ -2800,8 +2884,9 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
     r.allow_update_cdf = 1;
     static const int wantRt[7] = {10, 7, 5, 0, 0, 0, 0};
-    // RE6: the Q variant's read-back wants (bsf1q_rt; raw symbol 4 = delta +1)
-    static const int wantRtQ[7] = {10, 7, 4, 0, 0, 0, 0};
+    // RE6: the Q variant's read-back wants (bsf1q_rt; RE7: raw symbol 3 =
+    // delta 0 - block 1's chosen delta moved +1 -> 0)
+    static const int wantRtQ[7] = {10, 7, 3, 0, 0, 0, 0};
     int ri = 0;
     for (int b = 0; b < 4; ++b) {
         const int bx = b % 2, by = b / 2;
@@ -2832,7 +2917,7 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
     entropy::AomWriter wQ{};
     unsigned char bufQ[64] = {0};
     wQ.ec.buf = bufQ;
-    pipeline::encodeFrameAuto16x16Q(plane, reconQ, coeffsQ, modesQ, 100, transforms::TxType::DCT_DCT, &wQ, &fcQ);
+    pipeline::encodeFrameAuto16x16Q(plane, reconQ, coeffsQ, modesQ, 100, &wQ, &fcQ);
     bool modesQOk = true;
     for (int i = 0; i < 4; ++i)
         if (modesQ[i] != goldenModes[i]) modesQOk = false;
@@ -2896,7 +2981,7 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
     w.ec.buf = buf;
     entropy::DcSignLevelCoeffNa na;
     memset(&na, 0xFF, sizeof(na));
-    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT, &w, &fc, &na);
+    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100, &w, &fc, &na);
     // TS3c: the l6 pipeline and the generator's svtd_ts3_drive agree
     // bit-exact on this fixture (the drive's above-edge gather passed
     // (row, col) where svtd_gather_above expects (px=col, py=row), so
@@ -2911,9 +2996,11 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
     for (int i = 0; i < 4; ++i)
         if (modes[i] != goldenModes[i]) modesOk = false;
     CHECK(modesOk);
-    // measured eobs == gate ecfrm_eobs 21 16 1 1 (scan order)
+    // measured eobs == gate ecfrm_eobs 137 15 1 1 (scan order; RE7: the
+    // derived-type composition - block 0's SMOOTH composes at ADST_DCT, so
+    // its eob moved 21 -> 137)
     {
-        const int wantEob[4] = {21, 16, 1, 1};
+        const int wantEob[4] = {137, 15, 1, 1};
         for (int b = 0; b < 4; ++b) {
             std::int32_t ec = 0;
             for (int c = 255; c >= 0; --c) {
@@ -2923,40 +3010,41 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
             CHECK(ec == wantEob[b]);
         }
     }
-    // token byte stream == gate ecfrm_bytes 29 dd 17 28 cb 39 0f fd 3e 1f
-    // 37 6f 56 f9 de 80 c6 7f 98 c2 be 28 0f 2b 0a e6 ea 0d c5 80 (TD5b:
-    // the q100 bucket, idx 2; RE5: the two DC_PRED blocks emit FI symbols
-    // through the adapting frame-context cdf - the mirror's ts3 drive
-    // gained the same writes, so the stream grew 26 -> 29 bytes)
-    REQUIRE(w.pos == 29);
-    static const unsigned char wantBytes[29] = {
-        0xdd, 0x17, 0x28, 0xcb, 0x39, 0x0f, 0xfd, 0x3e,
-        0x1f, 0x37, 0x6f, 0x73, 0xb0, 0x20, 0xd3, 0x2d,
-        0x4b, 0x9e, 0x84, 0xc8, 0x2e, 0xd5, 0x6a, 0xb9,
-        0xd6, 0x3b, 0x93, 0x60, 0xa0};
-    for (int i = 0; i < 29; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
+    // token byte stream == gate ecfrm_bytes 45 e1 12 56 aa ... 3e 0c 81
+    // (TD5b: the q100 bucket, idx 2; RE5: the two DC_PRED blocks emit FI
+    // symbols; RE7: every eob>0 luma TU emits the tx-type symbol and the
+    // composition runs at the derived type - 29 -> 45 bytes)
+    REQUIRE(w.pos == 45);
+    static const unsigned char wantBytes[45] = {
+        0xe1, 0x12, 0x56, 0xaa, 0x49, 0xff, 0x0a, 0x96,
+        0x8e, 0x02, 0x34, 0x16, 0xbd, 0xd3, 0xf6, 0x2c,
+        0x61, 0xb7, 0x56, 0xd6, 0xd5, 0x6e, 0x0a, 0xb6,
+        0x77, 0x44, 0xff, 0xff, 0xf9, 0x2c, 0x02, 0x65,
+        0x0b, 0xd4, 0xbb, 0x78, 0x4c, 0x97, 0x74, 0xbf,
+        0x6d, 0xe5, 0x3e, 0x0c, 0x81};
+    for (int i = 0; i < 45; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
     // quantized coefficients == gate ecfrm_coeffs (generator raster order)
     static const std::int32_t genCoeffs[1024] = {
-        -88, -21, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        -20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        30, -14, 1, -1, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        -5, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        3, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -69, -19, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -37, -6, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -18, -4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -15, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -11, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -9, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -8, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -7, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -6, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -6, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -6, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -5, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -5, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -5, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -5, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -5, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        36, -3, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -2969,7 +3057,7 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        -128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -126, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -3007,69 +3095,69 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
     CHECK(coeffsOk);
     // reconstructed frame == gate ecfrm_recon (generator raster order)
     static const std::uint8_t genRecon[1024] = {
-        6, 9, 13, 17, 21, 24, 28, 33, 37, 42, 46, 49, 53, 57, 62, 64,
-        69, 71, 76, 80, 83, 87, 90, 95, 100, 105, 109, 112, 117, 123, 128, 132,
-        8, 11, 16, 20, 24, 27, 31, 35, 40, 45, 48, 52, 56, 60, 64, 67,
-        72, 76, 80, 84, 88, 91, 94, 99, 104, 109, 113, 117, 121, 126, 132, 136,
-        13, 15, 20, 24, 28, 31, 35, 40, 44, 49, 53, 56, 60, 64, 69, 71,
-        76, 80, 84, 88, 92, 94, 97, 102, 107, 112, 117, 120, 124, 129, 135, 139,
-        18, 21, 25, 30, 33, 37, 40, 45, 50, 54, 58, 61, 65, 70, 74, 77,
-        81, 85, 89, 93, 95, 98, 101, 106, 111, 116, 120, 124, 128, 133, 138, 142,
-        22, 24, 29, 33, 37, 40, 44, 49, 53, 58, 62, 65, 69, 73, 78, 80,
-        86, 90, 93, 97, 100, 104, 107, 111, 115, 120, 124, 128, 132, 137, 142, 146,
-        25, 28, 32, 36, 40, 43, 47, 52, 56, 61, 65, 68, 72, 76, 81, 83,
-        90, 93, 98, 103, 106, 108, 112, 116, 120, 125, 129, 132, 136, 141, 146, 150,
-        28, 31, 35, 40, 44, 47, 51, 55, 60, 64, 68, 71, 75, 80, 84, 87,
-        94, 99, 103, 107, 110, 113, 116, 121, 125, 129, 133, 137, 141, 145, 151, 154,
-        32, 35, 40, 44, 48, 51, 55, 59, 64, 69, 72, 76, 80, 84, 88, 91,
-        99, 103, 107, 111, 114, 117, 120, 125, 129, 133, 138, 141, 145, 149, 154, 157,
-        37, 40, 44, 49, 52, 56, 60, 64, 69, 73, 77, 80, 84, 89, 93, 96,
-        102, 106, 110, 114, 117, 120, 124, 128, 133, 138, 142, 145, 149, 153, 156, 159,
-        42, 45, 49, 54, 58, 61, 65, 69, 74, 79, 82, 86, 89, 94, 98, 101,
-        104, 108, 113, 117, 120, 123, 127, 132, 137, 142, 146, 149, 151, 155, 158, 161,
-        46, 49, 53, 57, 61, 65, 68, 73, 78, 82, 86, 89, 93, 97, 102, 104,
-        107, 111, 116, 120, 124, 127, 130, 136, 141, 145, 148, 151, 154, 157, 161, 163,
-        49, 52, 56, 61, 64, 68, 71, 76, 81, 85, 89, 92, 96, 101, 105, 108,
-        111, 115, 120, 124, 127, 131, 135, 139, 144, 149, 152, 155, 158, 161, 165, 167,
-        53, 55, 60, 64, 68, 71, 75, 80, 84, 89, 93, 96, 100, 104, 109, 111,
-        116, 120, 124, 129, 132, 135, 138, 143, 148, 153, 156, 159, 163, 166, 170, 172,
-        57, 60, 64, 68, 72, 76, 79, 84, 89, 93, 97, 100, 104, 108, 113, 116,
-        121, 125, 130, 134, 136, 140, 143, 147, 152, 157, 161, 165, 168, 172, 176, 178,
-        61, 64, 68, 73, 76, 80, 84, 88, 93, 97, 101, 104, 108, 113, 117, 120,
-        127, 130, 133, 137, 140, 143, 146, 151, 156, 161, 166, 169, 173, 177, 181, 183,
-        64, 67, 71, 75, 79, 83, 86, 91, 96, 100, 104, 107, 111, 115, 120, 122,
-        129, 132, 136, 139, 142, 145, 148, 153, 159, 164, 168, 172, 176, 180, 184, 186,
+        8, 9, 12, 15, 18, 23, 27, 32, 37, 42, 46, 50, 54, 57, 59, 61,
+        67, 74, 77, 81, 84, 87, 92, 97, 102, 107, 111, 114, 119, 125, 129, 133,
+        12, 14, 17, 20, 24, 28, 33, 37, 42, 46, 51, 55, 58, 62, 65, 67,
+        71, 77, 82, 85, 88, 92, 97, 102, 105, 110, 114, 117, 122, 127, 132, 136,
+        11, 14, 17, 21, 26, 30, 35, 39, 44, 48, 53, 57, 61, 66, 69, 71,
+        75, 81, 86, 89, 93, 96, 100, 105, 109, 113, 117, 120, 124, 129, 133, 137,
+        18, 20, 24, 29, 33, 37, 40, 45, 49, 53, 56, 60, 64, 69, 73, 75,
+        79, 86, 91, 95, 97, 100, 104, 109, 112, 116, 119, 122, 126, 131, 136, 140,
+        22, 25, 29, 34, 38, 41, 45, 49, 52, 56, 59, 63, 67, 72, 76, 78,
+        84, 90, 95, 99, 101, 104, 108, 112, 116, 119, 123, 125, 129, 135, 139, 143,
+        26, 29, 33, 38, 43, 47, 50, 54, 58, 61, 65, 68, 73, 78, 82, 85,
+        88, 94, 99, 103, 105, 108, 112, 116, 120, 123, 127, 130, 134, 139, 143, 147,
+        27, 30, 35, 40, 45, 49, 52, 56, 60, 64, 68, 71, 76, 81, 86, 89,
+        92, 98, 103, 106, 108, 112, 116, 120, 125, 129, 132, 135, 139, 144, 148, 152,
+        32, 35, 40, 45, 49, 53, 56, 60, 64, 68, 71, 74, 79, 84, 89, 92,
+        96, 101, 106, 110, 112, 116, 120, 125, 129, 133, 137, 140, 145, 150, 154, 157,
+        39, 42, 47, 52, 55, 59, 62, 65, 69, 73, 76, 79, 83, 88, 93, 96,
+        100, 105, 109, 113, 116, 119, 123, 128, 132, 137, 141, 145, 149, 153, 158, 161,
+        41, 44, 49, 54, 58, 61, 64, 68, 72, 76, 79, 82, 86, 90, 95, 99,
+        104, 109, 114, 117, 119, 122, 127, 132, 136, 140, 144, 148, 152, 157, 161, 164,
+        42, 45, 50, 55, 59, 62, 66, 70, 75, 79, 83, 86, 90, 95, 100, 103,
+        109, 113, 118, 121, 123, 126, 131, 136, 140, 143, 148, 152, 155, 160, 164, 166,
+        47, 51, 56, 60, 64, 68, 72, 76, 82, 87, 90, 94, 98, 102, 107, 111,
+        113, 118, 122, 126, 128, 131, 135, 140, 145, 148, 152, 156, 160, 164, 167, 170,
+        52, 55, 60, 65, 68, 72, 76, 80, 86, 91, 95, 98, 101, 106, 111, 114,
+        117, 123, 128, 130, 133, 136, 140, 144, 149, 153, 156, 160, 164, 168, 172, 174,
+        57, 60, 65, 69, 73, 76, 79, 84, 89, 94, 98, 101, 104, 109, 113, 116,
+        121, 127, 132, 134, 138, 142, 145, 149, 154, 157, 161, 164, 168, 173, 176, 179,
+        61, 65, 69, 73, 76, 79, 83, 88, 94, 99, 103, 105, 109, 113, 117, 120,
+        123, 130, 134, 139, 142, 145, 149, 153, 158, 162, 165, 169, 172, 177, 180, 183,
+        62, 65, 70, 74, 77, 80, 84, 89, 95, 100, 104, 107, 111, 115, 119, 122,
+        124, 132, 136, 140, 143, 147, 151, 156, 160, 164, 168, 171, 175, 179, 183, 185,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     bool reconOk = true;
     for (int y = 0; y < 32; ++y)
@@ -3115,7 +3203,7 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
         std::int32_t qcRead[256] = {0};
         const int reob = entropy::readTxbCoeffs(&r, &fcR, qcRead, scan16,
                                                 entropy::TX_16X16, txbSkipCtx, dcSignCtx, 1, m,
-                                                entropy::COMPONENT_LUMA);
+                                                entropy::COMPONENT_LUMA, 100, nullptr);
         // reob must equal the writer's eob (the roundtrip property)
         for (int i = 0; i < 256; ++i) CHECK(qcRead[i] == coeffs[b * 256 + i]);
 
@@ -3155,7 +3243,7 @@ std::uint8_t srcData[1024];
 
     std::int32_t refCoeffs[1024] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto16x16(plane, reconRef, refCoeffs, refModes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto16x16(plane, reconRef, refCoeffs, refModes);
 
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlock16x16CuSource(), "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
@@ -3373,7 +3461,7 @@ TEST_CASE("gpu frame auto 16x16 with quantization matches host encodeFrameAuto16
         for (int x = 0; x < 32; ++x) plane.at(x, y) = srcData[y * 32 + x];
     std::int32_t refCoeffs[1024] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto16x16Q(plane, reconRef, refCoeffs, refModes, 100, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto16x16Q(plane, reconRef, refCoeffs, refModes, 100);
 
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlock16x16CuSource(), "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
@@ -3517,7 +3605,10 @@ TEST_CASE("gpu frame auto 16x16 with quantization matches host encodeFrameAuto16
             dAl.uploadFrom(&alArg, sizeof(alArg));
             dPx.uploadFrom(&pxArg, sizeof(pxArg));
             dPy.uploadFrom(&pyArg, sizeof(pyArg));
-            if (hasTop) dAbove.uploadFrom(aboveHost, 16 + nTopRightPx);
+            // RE7: the GPU chain composes at the winner's DERIVED type
+            typeArg = (int)d.txType;
+            dType.uploadFrom(&typeArg, sizeof(typeArg));
+            if (hasTop) dAbove.uploadFrom(aboveHost, 16);
             if (hasLeft) dLeft.uploadFrom(leftHost, 16);
 
             CUdeviceptr pMode = dMode.get();
@@ -3525,6 +3616,7 @@ TEST_CASE("gpu frame auto 16x16 with quantization matches host encodeFrameAuto16
             CUdeviceptr pAm = dAm.get();
             CUdeviceptr pLm = dLm.get();
             CUdeviceptr pAbove = dAbove.get();
+
             CUdeviceptr pNTop = dNTop.get();
             CUdeviceptr pNTr = dNTr.get();
             CUdeviceptr pLeft = dLeft.get();
@@ -3617,8 +3709,7 @@ TEST_CASE("frame recon 16x16 forced mode matches the f16v generator golden") {
             plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
 
     std::int32_t coeffs[1024] = {0};
-    pipeline::encodeFrameRecon16x16(plane, recon, coeffs, intra::V_PRED, 0,
-                                    transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon16x16(plane, recon, coeffs, intra::V_PRED, 0);
 
     bool reconOk = true;
     for (int y = 0; y < 32; ++y)
@@ -3638,12 +3729,13 @@ TEST_CASE("frame recon 16x16 forced mode matches the f16v generator golden") {
 TEST_CASE("frame recon 16x16 with quantization matches the f16vq generator golden") {
     // golden: golden_gen f16vq_recon/f16vq_coeffs at qindex 100 (forced
     // V_PRED, FP quantizer at n_coeffs=256/log_scale 0); recon carries real
-    // quantization loss (row 0 begins 5 8 12 17 ... vs source 4 8 12 16 ...).
+    // quantization loss (row 0 begins 9 10 13 16 ... vs source 4 8 12 16 ...;
+    // RE7: the forced-V composition runs at the derived ADST_DCT).
     const std::int32_t goldenHeads[4][8] = {
-        {-87, -21, 0, -2, 0, -1, 0, 0},
-        {88, -21, 0, -2, 0, -1, 0, 0},
-        {-128, 21, 0, 2, 0, 1, 0, 0},
-        {-216, 21, 0, 2, 0, 1, 0, 0}};
+        {-67, -19, 0, -2, 0, -1, 0, 0},
+        {94, -19, 0, -2, 0, -1, 0, 0},
+        {-116, 20, 0, 1, 0, 1, 0, 0},
+        {-197, 20, 0, 1, 0, 1, 0, 0}};
 
     pixels::Plane plane(32, 32, 4);
     pixels::Plane recon(32, 32, 4);
@@ -3652,11 +3744,10 @@ TEST_CASE("frame recon 16x16 with quantization matches the f16vq generator golde
             plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
 
     std::int32_t coeffs[1024] = {0};
-    pipeline::encodeFrameRecon16x16Q(plane, recon, coeffs, intra::V_PRED, 0, 100,
-                                     transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon16x16Q(plane, recon, coeffs, intra::V_PRED, 0, 100);
 
 bool reconHeadOk = true;
-    const std::uint8_t goldenReconRow0[8] = {5, 8, 12, 17, 21, 24, 28, 32};
+    const std::uint8_t goldenReconRow0[8] = {9, 10, 13, 16, 19, 23, 28, 32};
     for (int x = 0; x < 8; ++x) {
         if (recon.at(x, 0) != goldenReconRow0[x]) reconHeadOk = false;
     }
@@ -3690,7 +3781,7 @@ TEST_CASE("frame auto 32x32 matches the f32 generator golden (real top-right)") 
 
     std::int32_t coeffs[4096] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto32x32(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto32x32(plane, recon, coeffs, modes);
 
 bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -3739,7 +3830,7 @@ TEST_CASE("frame auto 32x32 with quantization matches the f32q generator golden"
 
     std::int32_t coeffs[4096] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto32x32Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto32x32Q(plane, recon, coeffs, modes, 100);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -3762,8 +3853,7 @@ TEST_CASE("frame recon 32x32 forced mode matches the f32v generator golden") {
             plane.at(x, y) = (y < 32) ? static_cast<std::uint8_t>(2 * (x + y + 1)) : 0;
 
 std::int32_t coeffs[4096] = {0};
-    pipeline::encodeFrameRecon32x32(plane, recon, coeffs, intra::V_PRED, 0,
-                                    transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon32x32(plane, recon, coeffs, intra::V_PRED, 0);
 
     const std::uint8_t goldenReconVRow0[64] = {
         2,  4,  6,  8,  10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32,
@@ -3808,8 +3898,7 @@ TEST_CASE("frame recon 32x32 with quantization matches the f32vq generator golde
             plane.at(x, y) = (y < 32) ? static_cast<std::uint8_t>(2 * (x + y + 1)) : 0;
 
     std::int32_t coeffs[4096] = {0};
-    pipeline::encodeFrameRecon32x32Q(plane, recon, coeffs, intra::V_PRED, 0, 100,
-                                     transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon32x32Q(plane, recon, coeffs, intra::V_PRED, 0, 100);
 
     bool reconHeadOk = true;
     const std::uint8_t goldenReconRow0[8] = {3, 4, 6, 8, 11, 13, 15, 17};
@@ -3843,7 +3932,7 @@ TEST_CASE("gpu frame auto 32x32 matches host encodeFrameAuto32x32 (host decides,
 
     std::int32_t refCoeffs[4096] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto32x32(plane, reconRef, refCoeffs, refModes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto32x32(plane, reconRef, refCoeffs, refModes);
 
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlock32x32CuSource(), "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
@@ -4057,7 +4146,7 @@ TEST_CASE("gpu frame auto 32x32 with quantization matches host encodeFrameAuto32
 
     std::int32_t refCoeffs[4096] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto32x32Q(plane, reconRef, refCoeffs, refModes, 100, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto32x32Q(plane, reconRef, refCoeffs, refModes, 100);
 
     transforms::QuantTables qt;
     transforms::buildQuantTables(100, qt);
@@ -4202,6 +4291,9 @@ TEST_CASE("gpu frame auto 32x32 with quantization matches host encodeFrameAuto32
             dAl.uploadFrom(&alArg, sizeof(alArg));
             dPx.uploadFrom(&pxArg, sizeof(pxArg));
             dPy.uploadFrom(&pyArg, sizeof(pyArg));
+            // RE7: the GPU chain composes at the winner's DERIVED type
+            typeArg = (int)d.txType;
+            dType.uploadFrom(&typeArg, sizeof(typeArg));
 
             CUdeviceptr pMode = dMode.get();
             CUdeviceptr pDelta = dDelta.get();
@@ -4304,7 +4396,7 @@ TEST_CASE("frame auto 64x64 matches the f64 generator golden (real top-right)") 
 
     std::int32_t coeffs[16384] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto64x64(plane, recon, coeffs, modes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto64x64(plane, recon, coeffs, modes);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -4326,7 +4418,7 @@ TEST_CASE("frame auto 64x64 with quantization matches the f64q generator golden"
 
     std::int32_t coeffs[16384] = {0};
     std::uint8_t modes[4] = {0};
-    pipeline::encodeFrameAuto64x64Q(plane, recon, coeffs, modes, 100, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto64x64Q(plane, recon, coeffs, modes, 100);
 
     bool modesOk = true;
     for (int i = 0; i < 4; ++i) {
@@ -4347,8 +4439,7 @@ TEST_CASE("frame recon 64x64 forced mode matches the f64v generator golden") {
             plane.at(x, y) = (y < 64) ? static_cast<std::uint8_t>(x + y + 1) : 0;
 
     std::int32_t coeffs[16384] = {0};
-    pipeline::encodeFrameRecon64x64(plane, recon, coeffs, intra::V_PRED, 0,
-                                    transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon64x64(plane, recon, coeffs, intra::V_PRED, 0);
 
     const std::uint8_t goldenReconRow0[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     const std::uint8_t goldenReconRow62[8] = {63, 64, 65, 66, 67, 68, 69, 70};
@@ -4380,8 +4471,7 @@ TEST_CASE("frame recon 64x64 with quantization matches the f64vq generator golde
             plane.at(x, y) = (y < 64) ? static_cast<std::uint8_t>(x + y + 1) : 0;
 
     std::int32_t coeffs[16384] = {0};
-    pipeline::encodeFrameRecon64x64Q(plane, recon, coeffs, intra::V_PRED, 0, 100,
-                                     transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameRecon64x64Q(plane, recon, coeffs, intra::V_PRED, 0, 100);
 
     const std::uint8_t goldenReconRow0[8] = {2, 3, 4, 5, 6, 7, 8, 9};
     const std::uint8_t goldenReconRow62[8] = {64, 64, 65, 66, 67, 68, 69, 70};
@@ -4419,7 +4509,7 @@ TEST_CASE("gpu frame auto 64x64 matches host encodeFrameAuto64x64 (host decides,
 
     std::int32_t refCoeffs[16384] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto64x64(plane, reconRef, refCoeffs, refModes, transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto64x64(plane, reconRef, refCoeffs, refModes);
 
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlock64x64CuSource(), "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
@@ -4633,8 +4723,7 @@ TEST_CASE("gpu frame auto 64x64 with quantization matches host encodeFrameAuto64
 
     std::int32_t refCoeffs[16384] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAuto64x64Q(plane, reconRef, refCoeffs, refModes, 100,
-                                    transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAuto64x64Q(plane, reconRef, refCoeffs, refModes, 100);
 
     transforms::QuantTables qt;
     transforms::buildQuantTables(100, qt);
@@ -4779,6 +4868,9 @@ TEST_CASE("gpu frame auto 64x64 with quantization matches host encodeFrameAuto64
             dAl.uploadFrom(&alArg, sizeof(alArg));
             dPx.uploadFrom(&pxArg, sizeof(pxArg));
             dPy.uploadFrom(&pyArg, sizeof(pyArg));
+            // RE7: the GPU chain composes at the winner's DERIVED type
+            typeArg = (int)d.txType;
+            dType.uploadFrom(&typeArg, sizeof(typeArg));
 
             CUdeviceptr pMode = dMode.get();
             CUdeviceptr pDelta = dDelta.get();
@@ -4919,8 +5011,7 @@ TEST_CASE("frame recon chroma 16x16 forced mode matches the bcf16v golden") {
             src.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(2 * (x + y + 2)) : 0;
 
     std::int32_t coeffs[1024] = {0};
-    pipeline::encodeFrameReconChroma16x16(src, recon, coeffs, intra::UV_V_PRED, 0,
-                                          transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameReconChroma16x16(src, recon, coeffs, intra::UV_V_PRED, 0, transforms::TxType::DCT_DCT);
 
     const std::uint8_t goldenReconRow0[8] = {4, 6, 8, 10, 12, 14, 16, 18};
     const std::uint8_t goldenReconRow30[8] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -4950,8 +5041,7 @@ TEST_CASE("frame recon chroma 16x16 with quantization matches the bcf16vq golden
             src.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(2 * (x + y + 2)) : 0;
 
     std::int32_t coeffs[1024] = {0};
-    pipeline::encodeFrameReconChroma16x16Q(src, recon, coeffs, intra::UV_V_PRED, 0, 100,
-                                           transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameReconChroma16x16Q(src, recon, coeffs, intra::UV_V_PRED, 0, 100, transforms::TxType::DCT_DCT);
 
     const std::uint8_t goldenReconRow0[8] = {7, 8, 10, 12, 14, 16, 18, 20};
     const std::uint8_t goldenReconRow31[8] = {0, 0, 1, 1, 1, 0, 0, 1};
@@ -4992,8 +5082,7 @@ TEST_CASE("gpu frame auto chroma 16x16 matches host encodeFrameAutoChroma16x16")
 
     std::int32_t refCoeffs[1024] = {0};
     std::uint8_t refModes[4] = {0};
-    pipeline::encodeFrameAutoChroma16x16(plane, reconRef, refCoeffs, refModes,
-                                         transforms::TxType::DCT_DCT);
+    pipeline::encodeFrameAutoChroma16x16(plane, reconRef, refCoeffs, refModes, transforms::TxType::DCT_DCT);
 
     const std::string ptxPred = *gpurt::compileToPtx(intra::predictBlock16x16CuSource(), "compute_61");
     const std::vector<std::string> pn = gpurt::ptxEntryNames(ptxPred);
@@ -5424,7 +5513,7 @@ TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
         memset(&naV, 0xFF, sizeof(naV));
         pipeline::encodeFrameChromaQ(srcY, srcU, srcV, reconY, reconU, reconV, coeffsY, coeffsU,
                                      coeffsV, modesY, modesU, modesV, eobsY, eobsU, eobsV, 100, B,
-                                     transforms::TxType::DCT_DCT, &w, &fc, &naY, &naU, &naV);
+                                     &w, &fc, &naY, &naU, &naV);
         // the loop stops the encoder internally (the odEcStopEncode inside);
         // a second stop here would append a duplicated tail (measured)
         // the full walk stream (the byte loop FIRST: the first mismatch
@@ -5768,7 +5857,7 @@ TEST_CASE("CS4: the chroma-ownership rule - a 4x4 frame codes NO chroma, the (1,
         memset(&naV, 0xFF, sizeof(naV));
         pipeline::encodeFrameChromaQ(srcY, srcU, srcV, reconY, reconU, reconV, coeffsY, coeffsU,
                                      coeffsV, modesY, modesU, modesV, eobsY, eobsU, eobsV, 100, 4,
-                                     transforms::TxType::DCT_DCT, &w, &fc, &naY, &naU, &naV);
+                                     &w, &fc, &naY, &naU, &naV);
         CHECK(eobsU[0] == 0xFFFF);
         CHECK(eobsV[0] == 0xFFFF);
         CHECK(modesU[0] == 0xFF);
@@ -5804,7 +5893,7 @@ TEST_CASE("CS4: the chroma-ownership rule - a 4x4 frame codes NO chroma, the (1,
         memset(&naV, 0xFF, sizeof(naV));
         pipeline::encodeFrameChromaQ(srcY, srcU, srcV, reconY, reconU, reconV, coeffsY, coeffsU,
                                      coeffsV, modesY, modesU, modesV, eobsY, eobsU, eobsV, 100, 4,
-                                     transforms::TxType::DCT_DCT, &w, &fc, &naY, &naU, &naV);
+                                     &w, &fc, &naY, &naU, &naV);
         CHECK(eobsU[0] == 0xFFFF);
         CHECK(eobsU[1] == 0xFFFF);
         CHECK(eobsU[2] == 0xFFFF);
@@ -5901,7 +5990,7 @@ TEST_CASE("FI DC-deciding fixture: the FI=1 emission path round-trips content-ex
         entropy::DcSignLevelCoeffNa na;
         memset(&na, 0xFF, sizeof(na));
         pipeline::encodeFrameAuto4x4Q(plane, reconA, coeffs, modes, 100,
-                                      transforms::TxType::DCT_DCT, &w, &fc, &na);
+                                      &w, &fc, &na);
         // RE5: the RD-lite production decisions on this fixture, MEASURED
         // (l6dump: modes 0 0 8 3, pos 13) - no gate line exists for this
         // test-only fixture; the pin is the measured production state.
@@ -5944,7 +6033,7 @@ TEST_CASE("FI DC-deciding fixture: the FI=1 emission path round-trips content-ex
             entropy::readBlockCoeffs(&r, &fcR, &naR, qcRead, scan, entropy::TX_4X4,
                                      entropy::BLOCK_4X4, by, bx, 1,
                                      (entropy::PredictionMode)modesR[b],
-                                     entropy::COMPONENT_LUMA);
+                                     entropy::COMPONENT_LUMA, 100, nullptr);
         }
     }
 
@@ -6050,7 +6139,8 @@ TEST_CASE("FI DC-deciding fixture: the FI=1 emission path round-trips content-ex
         }
         entropy::writeBlockCoeffs(&w, &fc, &na, qc, scan, entropy::TX_4X4,
                                   entropy::BLOCK_4X4, eob, by, bx, 1,
-                                  (entropy::PredictionMode)bm, entropy::COMPONENT_LUMA);
+                                  (entropy::PredictionMode)bm, entropy::COMPONENT_LUMA,
+                                  entropy::DCT_DCT, 100);
         // recon write-back
         std::uint8_t blk[16];
         for (int i = 0; i < 16; ++i) blk[i] = pred[i];
@@ -6154,7 +6244,8 @@ TEST_CASE("FI DC-deciding fixture: the FI=1 emission path round-trips content-ex
         std::int32_t qcRead[16] = {0};
         const int reob = entropy::readBlockCoeffs(&r, &fcR, &naR, qcRead, scan,
                                                   entropy::TX_4X4, entropy::BLOCK_4X4,
-                                                  by, bx, 1, m, entropy::COMPONENT_LUMA);
+                                                  by, bx, 1, m, entropy::COMPONENT_LUMA, 100,
+                                                  nullptr);
         CHECK(reob == (int)eobs[b]);
         // dequant (the quantizeFpN dq rule: qc * dequant[rc != 0]) + predict
         // + inverse -> the decoder recon must equal the writer's per block
@@ -6274,4 +6365,80 @@ TEST_CASE("RE5 decideBlockMode4x4 ranks by RD (rate breaks the zero-variance tie
     const auto d = pipeline::decideBlockMode4x4(src, above, 4, 0, nullptr, 0, 0, 0,
                                                 intra::NeighborContext(), rctx);
     CHECK((int)d.mode == wantMode);
+}
+
+// RE7: the emission walk composes and signals the per-block DERIVED luma tx
+// type. Fixture = the ecfrm fixture (the RD-lite winners {10,7,0,0} at HEAD);
+// the derivation of the decided modes is {ADST_DCT, DCT_ADST, DCT_DCT,
+// DCT_DCT} (the g_intra_mode_to_tx_type rows, mode_decision.c:2959-2973).
+// At the pre-RE7 state the walk signals DCT_DCT for every block, so the
+// read-back is {0,0,0,0} - the RED that motivates the threading.
+TEST_CASE("auto 16x16Q emits the per-block derived tx-type symbol (RE7)") {
+    pixels::Plane plane(32, 32, 4);
+    pixels::Plane recon(32, 32, 4);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            plane.at(x, y) = (y < 16) ? static_cast<std::uint8_t>(4 * (x + y + 1)) : 0;
+
+    std::int32_t coeffs[1024] = {0};
+    std::uint8_t modes[4] = {0};
+    entropy::EcFrameContext fc;
+    entropy::AomWriter w{};
+    unsigned char buf[256] = {0};
+    w.ec.buf = buf;
+    entropy::DcSignLevelCoeffNa na;
+    memset(&na, 0xFF, sizeof(na));
+    pipeline::encodeFrameAuto16x16Q(plane, recon, coeffs, modes, 100,
+                                    &w, &fc, &na);
+
+    std::int16_t scan16[256];
+    transforms::defaultScan16x16(scan16);
+    entropy::EcFrameContext fcR;
+    entropy::initDefaultEcFrameContext(&fcR, 100);
+    entropy::AomReader r;
+    REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
+    r.allow_update_cdf = 1;
+    entropy::DcSignLevelCoeffNa naR;
+    memset(&naR, 0xFF, sizeof(naR));
+    static const int mi[4][2] = {{0, 0}, {0, 4}, {4, 0}, {4, 4}};
+    int modesR[4] = {0, 0, 0, 0};
+    entropy::TxType got[4] = {entropy::DCT_DCT, entropy::DCT_DCT, entropy::DCT_DCT,
+                              entropy::DCT_DCT};
+    for (int b = 0; b < 4; ++b) {
+        const int bx = b % 2, by = b / 2;
+        const bool hasTop = by > 0, hasLeft = bx > 0;
+        // the 16x16Q walk keeps the ratified TD5b-era shape: NO partition and
+        // NO skip symbol - the per-block order is [kf (delta inside)][FI?]
+        // [tokens] (pipeline.cpp:1115, the FS5b note)
+        const int leftMode = hasLeft ? modesR[by * 2 + bx - 1] : 0;
+        const int aboveMode = hasTop ? modesR[(by - 1) * 2 + bx] : 0;
+        int topCtx = 0, leftCtx = 0;
+        entropy::getKfYModeCtx(hasLeft ? 1 : 0, leftMode, hasTop ? 1 : 0, aboveMode, &topCtx,
+                               &leftCtx);
+        int delta = 0;
+        modesR[b] = (int)entropy::readKfLumaMode(&r, &fcR, entropy::BLOCK_16X16, topCtx, leftCtx,
+                                                 &delta);
+        if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0,
+                                        (std::uint32_t)modesR[b])) {
+            entropy::FilterIntraMode f;
+            CHECK(entropy::readFilterIntra(&r, &fcR, entropy::BLOCK_16X16, &f) == 0);
+        }
+        std::int32_t qcRead[256] = {0};
+        entropy::readBlockCoeffs(&r, &fcR, &naR, qcRead, scan16, entropy::TX_16X16,
+                                 entropy::BLOCK_16X16, mi[b][0], mi[b][1], 1,
+                                 (entropy::PredictionMode)modesR[b], entropy::COMPONENT_LUMA, 100,
+                                 &got[b]);
+    }
+    // the read type equals the derivation of the DECIDED mode, per block
+    for (int b = 0; b < 4; ++b) {
+        const entropy::TxType want =
+            (entropy::TxType)l16_rdo::lumaIntraTxType(modesR[b], (int)entropy::TX_16X16, 1);
+        CHECK(got[b] == want);
+    }
+    // the derivation has teeth on this fixture: block 0 (SMOOTH_V at HEAD)
+    // derives ADST_DCT, block 1 (D203) DCT_ADST
+    CHECK(modesR[0] == 10);
+    CHECK(got[0] == entropy::ADST_DCT);
+    CHECK(modesR[1] == 7);
+    CHECK(got[1] == entropy::DCT_ADST);
 }

@@ -108,7 +108,7 @@ void encodeRecon4x4(const pixels::Plane& plane, int px, int py, const std::uint8
 }
 
 void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         intra::PredictionMode mode, int angleDelta, transforms::TxType txType) {
+                         intra::PredictionMode mode, int angleDelta) {
     const int gridW = src.width() / 4;
     const int gridH = src.height() / 4;
     for (int by = 0; by < gridH; ++by) {
@@ -150,7 +150,7 @@ void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::in
                 }
             }
             std::int32_t cb[16] = {0};
-            transforms::fwdTxfm2d4x4(residual, cb, 4, txType);
+            transforms::fwdTxfm2d4x4(residual, cb, 4, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int i = 0; i < 16; ++i) {
                 coeffs[(by * gridW + bx) * 16 + i] = cb[i];
             }
@@ -159,7 +159,7 @@ void encodeFrameRecon4x4(const pixels::Plane& src, pixels::Plane& recon, std::in
             for (int i = 0; i < 16; ++i) {
                 tmp[i] = pred[i];
             }
-            transforms::invTxfm2dAdd4x4(cb, tmp, 4, txType);
+            transforms::invTxfm2dAdd4x4(cb, tmp, 4, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int y = 0; y < 4; ++y) {
                 for (int x = 0; x < 4; ++x) {
                     recon.at(px + x, py + y) = tmp[y * 4 + x];
@@ -229,6 +229,40 @@ int rdliteBsizeEnum(int B) {
            : B == 16 ? entropy::BLOCK_16X16
            : B == 32 ? entropy::BLOCK_32X32
                      : entropy::BLOCK_64X64;
+}
+
+// RE7: the per-candidate luma tx-type derivation the emission composes and
+// signals at. The rule is the DECODER's (the artifact contract):
+//   q0: DCT_DCT implicit (dav1d recon_tmpl.c:363-365 - the luma branch
+//   `!qidx -> DCT_DCT`; aom decodemv.c av1_read_tx_type:638-640);
+//   q > 0: lumaIntraTxType (l16 rate_est.cpp - intra_mode_to_tx_type
+//   mode_decision.c:2975-2979 + the ext-tx-used fold) at the block's whole-
+//   TU tx size with the frame's reduced_tx_set = 1 (the ratified config).
+// The derived set is {DCT_DCT, ADST_DCT, DCT_ADST, ADST_ADST} (the 13-row
+// g_intra_mode_to_tx_type table, mode_decision.c:2959-2973); the 32x32/64x64
+// shapes fold to DCT_DCT in the helper (the DCTONLY set row) and the TX2
+// type_ls INVALID folds agree (inv_transforms.h:191-196).
+// NAMED NON-REPRODUCTION: the brief predicted the fast cost consumes the
+// derived type for the rate side; the reference's svt_aom_intra_fast_cost
+// (rd_cost.c:526-640) carries NO tx-type symbol cost and neither does the
+// landed twin - the ranking is unchanged this rung; the type only feeds the
+// emission.
+transforms::TxType rdliteTxType(const RdliteFrameCtx& rctx, int B, intra::PredictionMode m) {
+    if (rctx.qindex <= 0) return transforms::TxType::DCT_DCT;
+    const int ts = B == 4   ? (int)entropy::TX_4X4
+                   : B == 8 ? (int)entropy::TX_8X8
+                   : B == 16 ? (int)entropy::TX_16X16
+                   : B == 32 ? (int)entropy::TX_32X32
+                             : (int)entropy::TX_64X64;
+    return static_cast<transforms::TxType>(l16_rdo::lumaIntraTxType((int)m, ts, 1));
+}
+
+// RE7: the FIXED-mode derivation for the recon walks (the same rule as
+// rdliteTxType with the walk's own qindex param threaded): q0 -> DCT_DCT
+// (the decoder's rule), else lumaIntraTxType at the walk's whole-TU size.
+transforms::TxType reconQTxType(intra::PredictionMode mode, std::int32_t qindex, int ts) {
+    if (qindex <= 0) return transforms::TxType::DCT_DCT;
+    return static_cast<transforms::TxType>(l16_rdo::lumaIntraTxType((int)mode, ts, 1));
 }
 
 // RE6: the reference's angle_delta_count walk (mode_decision.c:3250-:3253):
@@ -318,7 +352,8 @@ ModeDecision rdliteDecide(const RdliteFrameCtx& rctx, int B, const std::uint8_t*
 
             if (!haveBest || rd < (std::int64_t)best.rd) {
                 best = ModeDecision{static_cast<intra::PredictionMode>(m), sad,
-                                    static_cast<std::uint64_t>(rd), delta};
+                                    static_cast<std::uint64_t>(rd), delta,
+                                    rdliteTxType(rctx, B, static_cast<intra::PredictionMode>(m))};
                 haveBest = true;
             }
         }
@@ -394,6 +429,7 @@ void initRdliteFrameCtx(RdliteFrameCtx* ctx, std::int32_t qindex) {
     l16_rdo::estimateSyntaxRate(&ctx->me, 0, 0, 0, 0, &syn);
     l16_rdo::estimateIntraInterRate(&ctx->me, &syn);
     ctx->lambda = rdliteLambda(qindex);
+    ctx->qindex = qindex;
 }
 
 std::uint32_t rdliteLambda(std::int32_t qindex) {
@@ -410,7 +446,7 @@ ModeDecision decideBlockMode4x4(const std::uint8_t* src, const std::uint8_t* abo
 }
 
 void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                        std::uint8_t* modes, transforms::TxType txType) {
+                        std::uint8_t* modes) {
     const int gridW = src.width() / 4;
     const int gridH = src.height() / 4;
     // RE5: one RD-lite decision context per frame, initialized from the
@@ -468,7 +504,7 @@ void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int
             std::int32_t cb[16] = {0};
             std::uint8_t blkRecon[16] = {0};
             encodeRecon4x4(src, px, py, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
-                           aboveLeft, d.mode, d.angleDelta, txType, cb, blkRecon, nctx);
+                           aboveLeft, d.mode, d.angleDelta, transforms::TxType::DCT_DCT, cb, blkRecon, nctx);
             for (int i = 0; i < 16; ++i) {
                 coeffs[(by * gridW + bx) * 16 + i] = cb[i];
                 recon.at(px + (i & 3), py + (i >> 2)) = blkRecon[i];
@@ -490,7 +526,7 @@ ModeDecision decideBlockMode8x8(const std::uint8_t* src, const std::uint8_t* abo
 }
 
 void encodeFrameRecon8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         intra::PredictionMode mode, int angleDelta, transforms::TxType txType) {
+                         intra::PredictionMode mode, int angleDelta) {
     const int gridW = src.width() / 8;
     const int gridH = src.height() / 8;
     for (int by = 0; by < gridH; ++by) {
@@ -527,12 +563,12 @@ void encodeFrameRecon8x8(const pixels::Plane& src, pixels::Plane& recon, std::in
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 8 + x]);
 
             std::int32_t cb[64] = {0};
-            transforms::fwdTxfm2d8x8(residual, cb, 8, txType);
+            transforms::fwdTxfm2d8x8(residual, cb, 8, transforms::TxType::DCT_DCT);  // the q0 derivation fold (rdliteTxType at qindex 0)
             for (int i = 0; i < 64; ++i) coeffs[(by * gridW + bx) * 64 + i] = cb[i];
 
             std::uint8_t tmp[64] = {0};
             for (int i = 0; i < 64; ++i) tmp[i] = pred[i];
-            transforms::invTxfm2dAdd8x8(cb, tmp, 8, txType);
+            transforms::invTxfm2dAdd8x8(cb, tmp, 8, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int y = 0; y < 8; ++y)
                 for (int x = 0; x < 8; ++x) recon.at(px + x, py + y) = tmp[y * 8 + x];
         }
@@ -540,7 +576,7 @@ void encodeFrameRecon8x8(const pixels::Plane& src, pixels::Plane& recon, std::in
 }
 
 void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                        std::uint8_t* modes, transforms::TxType txType) {
+                        std::uint8_t* modes) {
     const int gridW = src.width() / 8;
     const int gridH = src.height() / 8;
     // RE5: one RD-lite decision context per frame, initialized from the
@@ -597,12 +633,12 @@ void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 8 + x]);
 
             std::int32_t cb[64] = {0};
-            transforms::fwdTxfm2d8x8(residual, cb, 8, txType);
+            transforms::fwdTxfm2d8x8(residual, cb, 8, transforms::TxType::DCT_DCT);  // the q0 derivation fold (rdliteTxType at qindex 0)
             for (int i = 0; i < 64; ++i) coeffs[(by * gridW + bx) * 64 + i] = cb[i];
 
             std::uint8_t reconBlk[64] = {0};
             for (int i = 0; i < 64; ++i) reconBlk[i] = pred[i];
-            transforms::invTxfm2dAdd8x8(cb, reconBlk, 8, txType);
+            transforms::invTxfm2dAdd8x8(cb, reconBlk, 8, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int y = 0; y < 8; ++y)
                 for (int x = 0; x < 8; ++x) recon.at(px + x, py + y) = reconBlk[y * 8 + x];
         }
@@ -617,7 +653,7 @@ void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int
 // scan per mode/tx type via get_scan_order (coefficients.h:40). Fixing the
 // scan is a scope decision, attributed to no one else.
 void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                         std::uint8_t* modes, std::int32_t qindex,
                          entropy::AomWriter* w, entropy::EcFrameContext* fc,
                          entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 4;
@@ -694,8 +730,12 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 4 + x]);
                 }
             }
+            // RE7: the walk composes and signals at the winner's DERIVED type
+            // (d.txType, the rdliteTxType rule) - the frame-level txType
+            // parameter is retired for the deciding walks.
+            const transforms::TxType dTx = d.txType;
             std::int32_t cb[16] = {0};
-            transforms::fwdTxfm2d4x4(residual, cb, 4, txType);
+            transforms::fwdTxfm2d4x4(residual, cb, 4, dTx);
             std::int32_t qc[16] = {0};
             std::int32_t dq[16] = {0};
             std::uint16_t eob = 0;
@@ -730,12 +770,12 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_4X4,
                                           entropy::BLOCK_4X4, eob, by, bx, 1,
                                           static_cast<entropy::PredictionMode>(d.mode),
-                                          entropy::COMPONENT_LUMA);
+                                          entropy::COMPONENT_LUMA, static_cast<entropy::TxType>((int)dTx), qindex);
             }
 
             std::uint8_t blk[16] = {0};
             for (int i = 0; i < 16; ++i) blk[i] = pred[i];
-            transforms::invTxfm2dAdd4x4(dq, blk, 4, txType);
+            transforms::invTxfm2dAdd4x4(dq, blk, 4, dTx);
             for (int i = 0; i < 16; ++i) {
                 recon.at(px + (i & 3), py + (i >> 2)) = blk[i];
             }
@@ -750,8 +790,7 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
 // quantization loss. SCAN POLICY IS OURS: fixed defaultScan8x8 for every
 // block; SVT selects per mode/tx type via get_scan_order (coefficients.h:40).
 void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
-                          transforms::TxType txType) {
+                          intra::PredictionMode mode, int angleDelta, std::int32_t qindex) {
     const int gridW = src.width() / 8;
     const int gridH = src.height() / 8;
     transforms::QuantTables qt;
@@ -791,8 +830,11 @@ void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::i
                     residual[y * 8 + x] =
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 8 + x]);
 
+            // RE7: the walk composes at the FIXED mode's DERIVED type, q-gated
+            // (reconQTxType; the same rule as the deciding walks).
+            const transforms::TxType dTx = reconQTxType(mode, qindex, (int)entropy::TX_8X8);
             std::int32_t cb[64] = {0};
-            transforms::fwdTxfm2d8x8(residual, cb, 8, txType);
+            transforms::fwdTxfm2d8x8(residual, cb, 8, dTx);
             std::int32_t qc[64] = {0};
             std::int32_t dq[64] = {0};
             std::uint16_t eob = 0;
@@ -801,7 +843,7 @@ void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::i
 
             std::uint8_t blk[64] = {0};
             for (int i = 0; i < 64; ++i) blk[i] = pred[i];
-            transforms::invTxfm2dAdd8x8(dq, blk, 8, txType);
+            transforms::invTxfm2dAdd8x8(dq, blk, 8, dTx);
             for (int y = 0; y < 8; ++y)
                 for (int x = 0; x < 8; ++x) recon.at(px + x, py + y) = blk[y * 8 + x];
         }
@@ -809,7 +851,7 @@ void encodeFrameRecon8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::i
 }
 
 void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                         std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                         std::uint8_t* modes, std::int32_t qindex,
                          entropy::AomWriter* w, entropy::EcFrameContext* fc,
                          entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 8;
@@ -888,8 +930,11 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                     residual[y * 8 + x] =
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 8 + x]);
 
+            // RE7: the walk composes and signals at the winner's DERIVED type
+            // (d.txType, the rdliteTxType rule).
+            const transforms::TxType dTx = d.txType;
             std::int32_t cb[64] = {0};
-            transforms::fwdTxfm2d8x8(residual, cb, 8, txType);
+            transforms::fwdTxfm2d8x8(residual, cb, 8, dTx);
             std::int32_t qc[64] = {0};
             std::int32_t dq[64] = {0};
             std::uint16_t eob = 0;
@@ -923,12 +968,12 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_8X8,
                                           entropy::BLOCK_8X8, eob, by * 2, bx * 2, 1,
                                           static_cast<entropy::PredictionMode>(d.mode),
-                                          entropy::COMPONENT_LUMA);
+                                          entropy::COMPONENT_LUMA, static_cast<entropy::TxType>((int)dTx), qindex);
             }
 
             std::uint8_t blk[64] = {0};
             for (int i = 0; i < 64; ++i) blk[i] = pred[i];
-            transforms::invTxfm2dAdd8x8(dq, blk, 8, txType);
+            transforms::invTxfm2dAdd8x8(dq, blk, 8, dTx);
             for (int y = 0; y < 8; ++y)
                 for (int x = 0; x < 8; ++x) recon.at(px + x, py + y) = blk[y * 8 + x];
         }
@@ -975,7 +1020,7 @@ ModeDecision decideBlockMode64x64(const std::uint8_t* src, const std::uint8_t* a
 // ---- C7: 16x16 frame compositions. M1 availability + REAL recon top-right
 // gather (FR-series); 16x16 roundtrip is exact so recon == source.
 void encodeFrameRecon16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType) {
+                           intra::PredictionMode mode, int angleDelta) {
     const int gridW = src.width() / 16;
     const int gridH = src.height() / 16;
     for (int by = 0; by < gridH; ++by) {
@@ -1012,12 +1057,12 @@ void encodeFrameRecon16x16(const pixels::Plane& src, pixels::Plane& recon, std::
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 16 + x]);
 
             std::int32_t cb[256] = {0};
-            transforms::fwdTxfm2d16x16(residual, cb, 16, txType);
+            transforms::fwdTxfm2d16x16(residual, cb, 16, transforms::TxType::DCT_DCT);  // the q0 derivation fold (rdliteTxType at qindex 0)
             for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = cb[i];
 
             std::uint8_t tmp[256] = {0};
             for (int i = 0; i < 256; ++i) tmp[i] = pred[i];
-            transforms::invTxfm2dAdd16x16(cb, tmp, 16, txType);
+            transforms::invTxfm2dAdd16x16(cb, tmp, 16, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int y = 0; y < 16; ++y)
                 for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = tmp[y * 16 + x];
         }
@@ -1025,7 +1070,7 @@ void encodeFrameRecon16x16(const pixels::Plane& src, pixels::Plane& recon, std::
 }
 
 void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          std::uint8_t* modes, transforms::TxType txType, entropy::AomWriter* w,
+                          std::uint8_t* modes, entropy::AomWriter* w,
                           entropy::EcFrameContext* fc) {
     const int gridW = src.width() / 16;
     const int gridH = src.height() / 16;
@@ -1107,12 +1152,12 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 16 + x]);
 
             std::int32_t cb[256] = {0};
-            transforms::fwdTxfm2d16x16(residual, cb, 16, txType);
+            transforms::fwdTxfm2d16x16(residual, cb, 16, transforms::TxType::DCT_DCT);  // the q0 derivation fold (rdliteTxType at qindex 0)
             for (int i = 0; i < 256; ++i) coeffs[(by * gridW + bx) * 256 + i] = cb[i];
 
             std::uint8_t reconBlk[256] = {0};
             for (int i = 0; i < 256; ++i) reconBlk[i] = pred[i];
-            transforms::invTxfm2dAdd16x16(cb, reconBlk, 16, txType);
+            transforms::invTxfm2dAdd16x16(cb, reconBlk, 16, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int y = 0; y < 16; ++y)
                 for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = reconBlk[y * 16 + x];
         }
@@ -1121,8 +1166,7 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
 }
 
 void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
-                            transforms::TxType txType) {
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex) {
     const int gridW = src.width() / 16;
     const int gridH = src.height() / 16;
     transforms::QuantTables qt;
@@ -1162,8 +1206,10 @@ void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std:
                     residual[y * 16 + x] =
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 16 + x]);
 
+            // RE7: the walk composes at the FIXED mode's DERIVED type, q-gated.
+            const transforms::TxType dTx = reconQTxType(mode, qindex, (int)entropy::TX_16X16);
             std::int32_t cb[256] = {0};
-            transforms::fwdTxfm2d16x16(residual, cb, 16, txType);
+            transforms::fwdTxfm2d16x16(residual, cb, 16, dTx);
             std::int32_t qc[256] = {0};
             std::int32_t dq[256] = {0};
             std::uint16_t eob = 0;
@@ -1172,7 +1218,7 @@ void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std:
 
             std::uint8_t blk[256] = {0};
             for (int i = 0; i < 256; ++i) blk[i] = pred[i];
-            transforms::invTxfm2dAdd16x16(dq, blk, 16, txType);
+            transforms::invTxfm2dAdd16x16(dq, blk, 16, dTx);
             for (int y = 0; y < 16; ++y)
                 for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = blk[y * 16 + x];
         }
@@ -1183,7 +1229,7 @@ void encodeFrameRecon16x16Q(const pixels::Plane& src, pixels::Plane& recon, std:
 // SCAN POLICY IS OURS: fixed defaultScan16x16 for every block (see
 // encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
 void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           std::uint8_t* modes, std::int32_t qindex,
                            entropy::AomWriter* w, entropy::EcFrameContext* fc,
                            entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 16;
@@ -1268,8 +1314,12 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
                     residual[y * 16 + x] =
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 16 + x]);
 
+            // RE7: the walk composes and signals at the winner's DERIVED type
+            // (d.txType, the rdliteTxType rule) - the frame-level txType
+            // parameter is retired for the deciding walks.
+            const transforms::TxType dTx = d.txType;
             std::int32_t cb[256] = {0};
-            transforms::fwdTxfm2d16x16(residual, cb, 16, txType);
+            transforms::fwdTxfm2d16x16(residual, cb, 16, dTx);
             std::int32_t qc[256] = {0};
             std::int32_t dq[256] = {0};
             std::uint16_t eob = 0;
@@ -1283,12 +1333,12 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_16X16,
                                           entropy::BLOCK_16X16, eob, by * 4, bx * 4,
                                           1, static_cast<entropy::PredictionMode>(d.mode),
-                                          entropy::COMPONENT_LUMA);
+                                          entropy::COMPONENT_LUMA, static_cast<entropy::TxType>((int)dTx), qindex);
             }
 
             std::uint8_t blk[256] = {0};
             for (int i = 0; i < 256; ++i) blk[i] = pred[i];
-            transforms::invTxfm2dAdd16x16(dq, blk, 16, txType);
+            transforms::invTxfm2dAdd16x16(dq, blk, 16, dTx);
             for (int y = 0; y < 16; ++y)
                 for (int x = 0; x < 16; ++x) recon.at(px + x, py + y) = blk[y * 16 + x];
         }
@@ -1299,7 +1349,7 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
 // ---- L6: 32x32 frame compositions. M1 availability + REAL recon top-right
 // gather (FR-series); 32x32 roundtrip is exact so recon == source.
 void encodeFrameRecon32x32(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType) {
+                           intra::PredictionMode mode, int angleDelta) {
     const int gridW = src.width() / 32;
     const int gridH = src.height() / 32;
     for (int by = 0; by < gridH; ++by) {
@@ -1336,12 +1386,12 @@ void encodeFrameRecon32x32(const pixels::Plane& src, pixels::Plane& recon, std::
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 32 + x]);
 
             std::int32_t cb[1024] = {0};
-            transforms::fwdTxfm2d32x32(residual, cb, 32, txType);
+            transforms::fwdTxfm2d32x32(residual, cb, 32, transforms::TxType::DCT_DCT);  // the q0 derivation fold (rdliteTxType at qindex 0)
             for (int i = 0; i < 1024; ++i) coeffs[(by * gridW + bx) * 1024 + i] = cb[i];
 
             std::uint8_t tmp[1024] = {0};
             for (int i = 0; i < 1024; ++i) tmp[i] = pred[i];
-            transforms::invTxfm2dAdd32x32(cb, tmp, 32, txType);
+            transforms::invTxfm2dAdd32x32(cb, tmp, 32, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int y = 0; y < 32; ++y)
                 for (int x = 0; x < 32; ++x) recon.at(px + x, py + y) = tmp[y * 32 + x];
         }
@@ -1349,7 +1399,7 @@ void encodeFrameRecon32x32(const pixels::Plane& src, pixels::Plane& recon, std::
 }
 
 void encodeFrameAuto32x32(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          std::uint8_t* modes, transforms::TxType txType) {
+                          std::uint8_t* modes) {
     const int gridW = src.width() / 32;
     const int gridH = src.height() / 32;
     // RE5: one RD-lite decision context per frame, initialized from the
@@ -1406,12 +1456,12 @@ void encodeFrameAuto32x32(const pixels::Plane& src, pixels::Plane& recon, std::i
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 32 + x]);
 
             std::int32_t cb[1024] = {0};
-            transforms::fwdTxfm2d32x32(residual, cb, 32, txType);
+            transforms::fwdTxfm2d32x32(residual, cb, 32, transforms::TxType::DCT_DCT);  // the q0 derivation fold (rdliteTxType at qindex 0)
             for (int i = 0; i < 1024; ++i) coeffs[(by * gridW + bx) * 1024 + i] = cb[i];
 
             std::uint8_t reconBlk[1024] = {0};
             for (int i = 0; i < 1024; ++i) reconBlk[i] = pred[i];
-            transforms::invTxfm2dAdd32x32(cb, reconBlk, 32, txType);
+            transforms::invTxfm2dAdd32x32(cb, reconBlk, 32, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int y = 0; y < 32; ++y)
                 for (int x = 0; x < 32; ++x) recon.at(px + x, py + y) = reconBlk[y * 32 + x];
         }
@@ -1419,8 +1469,7 @@ void encodeFrameAuto32x32(const pixels::Plane& src, pixels::Plane& recon, std::i
 }
 
 void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
-                            transforms::TxType txType) {
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex) {
     const int gridW = src.width() / 32;
     const int gridH = src.height() / 32;
     transforms::QuantTables qt;
@@ -1460,8 +1509,11 @@ void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std:
                     residual[y * 32 + x] =
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 32 + x]);
 
+            // RE7: the walk composes at the FIXED mode's DERIVED type, q-gated
+            // (folds to DCT_DCT at TX_32X32 - the DCTONLY set row).
+            const transforms::TxType dTx = reconQTxType(mode, qindex, (int)entropy::TX_32X32);
             std::int32_t cb[1024] = {0};
-            transforms::fwdTxfm2d32x32(residual, cb, 32, txType);
+            transforms::fwdTxfm2d32x32(residual, cb, 32, dTx);
             std::int32_t qc[1024] = {0};
             std::int32_t dq[1024] = {0};
             std::uint16_t eob = 0;
@@ -1470,7 +1522,7 @@ void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std:
 
             std::uint8_t blk[1024] = {0};
             for (int i = 0; i < 1024; ++i) blk[i] = pred[i];
-            transforms::invTxfm2dAdd32x32(dq, blk, 32, txType);
+            transforms::invTxfm2dAdd32x32(dq, blk, 32, dTx);
             for (int y = 0; y < 32; ++y)
                 for (int x = 0; x < 32; ++x) recon.at(px + x, py + y) = blk[y * 32 + x];
         }
@@ -1481,7 +1533,7 @@ void encodeFrameRecon32x32Q(const pixels::Plane& src, pixels::Plane& recon, std:
 // (log_scale 1). SCAN POLICY IS OURS: fixed defaultScan32x32 for every block
 // (see encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
 void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           std::uint8_t* modes, std::int32_t qindex,
                            entropy::AomWriter* w, entropy::EcFrameContext* fc,
                            entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 32;
@@ -1555,8 +1607,11 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
                     residual[y * 32 + x] =
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 32 + x]);
 
+            // RE7: the walk composes and signals at the winner's DERIVED type
+            // (d.txType; folds to DCT_DCT at TX_32X32 - the DCTONLY set row).
+            const transforms::TxType dTx = d.txType;
             std::int32_t cb[1024] = {0};
-            transforms::fwdTxfm2d32x32(residual, cb, 32, txType);
+            transforms::fwdTxfm2d32x32(residual, cb, 32, dTx);
             std::int32_t qc[1024] = {0};
             std::int32_t dq[1024] = {0};
             std::uint16_t eob = 0;
@@ -1591,12 +1646,12 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 entropy::writeBlockCoeffs(w, fc, na, qc, scan, entropy::TX_32X32,
                                           entropy::BLOCK_32X32, eob, by * 8, bx * 8, 1,
                                           static_cast<entropy::PredictionMode>(d.mode),
-                                          entropy::COMPONENT_LUMA);
+                                          entropy::COMPONENT_LUMA, static_cast<entropy::TxType>((int)dTx), qindex);
             }
 
             std::uint8_t blk[1024] = {0};
             for (int i = 0; i < 1024; ++i) blk[i] = pred[i];
-            transforms::invTxfm2dAdd32x32(dq, blk, 32, txType);
+            transforms::invTxfm2dAdd32x32(dq, blk, 32, dTx);
             for (int y = 0; y < 32; ++y)
                 for (int x = 0; x < 32; ++x) recon.at(px + x, py + y) = blk[y * 32 + x];
         }
@@ -1608,8 +1663,7 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
 // gather (FR-series); the 64x64 fwd has net shift 0 - (2-2-2) and the inverse
 // -(2+4): roundtrip is lossy like 8x8/32x32 (recon != source).
 void encodeFrameRecon64x64(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           intra::PredictionMode mode, int angleDelta, transforms::TxType txType) {
-    (void)txType;  // DCT-only at 64x64
+                           intra::PredictionMode mode, int angleDelta) {
     const int gridW = src.width() / 64;
     const int gridH = src.height() / 64;
     for (int by = 0; by < gridH; ++by) {
@@ -1646,12 +1700,12 @@ void encodeFrameRecon64x64(const pixels::Plane& src, pixels::Plane& recon, std::
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 64 + x]);
 
             std::int32_t cb[4096] = {0};
-            transforms::fwdTxfm2d64x64(residual, cb, 64, txType);
+            transforms::fwdTxfm2d64x64(residual, cb, 64, transforms::TxType::DCT_DCT);  // the q0 derivation fold (rdliteTxType at qindex 0)
             for (int i = 0; i < 4096; ++i) coeffs[(by * gridW + bx) * 4096 + i] = cb[i];
 
             std::uint8_t tmp[4096] = {0};
             for (int i = 0; i < 4096; ++i) tmp[i] = pred[i];
-            transforms::invTxfm2dAdd64x64(cb, tmp, 64, txType);
+            transforms::invTxfm2dAdd64x64(cb, tmp, 64, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int y = 0; y < 64; ++y)
                 for (int x = 0; x < 64; ++x) recon.at(px + x, py + y) = tmp[y * 64 + x];
         }
@@ -1659,7 +1713,7 @@ void encodeFrameRecon64x64(const pixels::Plane& src, pixels::Plane& recon, std::
 }
 
 void encodeFrameAuto64x64(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                          std::uint8_t* modes, transforms::TxType txType) {
+                          std::uint8_t* modes) {
     const int gridW = src.width() / 64;
     const int gridH = src.height() / 64;
     // RE5: one RD-lite decision context per frame, initialized from the
@@ -1716,12 +1770,12 @@ void encodeFrameAuto64x64(const pixels::Plane& src, pixels::Plane& recon, std::i
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 64 + x]);
 
             std::int32_t cb[4096] = {0};
-            transforms::fwdTxfm2d64x64(residual, cb, 64, txType);
+            transforms::fwdTxfm2d64x64(residual, cb, 64, transforms::TxType::DCT_DCT);  // the q0 derivation fold (rdliteTxType at qindex 0)
             for (int i = 0; i < 4096; ++i) coeffs[(by * gridW + bx) * 4096 + i] = cb[i];
 
             std::uint8_t reconBlk[4096] = {0};
             for (int i = 0; i < 4096; ++i) reconBlk[i] = pred[i];
-            transforms::invTxfm2dAdd64x64(cb, reconBlk, 64, txType);
+            transforms::invTxfm2dAdd64x64(cb, reconBlk, 64, transforms::TxType::DCT_DCT);  // the q0 derivation fold
             for (int y = 0; y < 64; ++y)
                 for (int x = 0; x < 64; ++x) recon.at(px + x, py + y) = reconBlk[y * 64 + x];
         }
@@ -1729,8 +1783,7 @@ void encodeFrameAuto64x64(const pixels::Plane& src, pixels::Plane& recon, std::i
 }
 
 void encodeFrameRecon64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex,
-                            transforms::TxType txType) {
+                            intra::PredictionMode mode, int angleDelta, std::int32_t qindex) {
     const int gridW = src.width() / 64;
     const int gridH = src.height() / 64;
     transforms::QuantTables qt;
@@ -1770,8 +1823,11 @@ void encodeFrameRecon64x64Q(const pixels::Plane& src, pixels::Plane& recon, std:
                     residual[y * 64 + x] =
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 64 + x]);
 
+            // RE7: the walk composes at the FIXED mode's DERIVED type, q-gated
+            // (folds to DCT_DCT at TX_64X64 - the DCTONLY set row).
+            const transforms::TxType dTx = reconQTxType(mode, qindex, (int)entropy::TX_64X64);
             std::int32_t cb[4096] = {0};
-            transforms::fwdTxfm2d64x64(residual, cb, 64, txType);
+            transforms::fwdTxfm2d64x64(residual, cb, 64, dTx);
             std::int32_t qc[4096] = {0};
             std::int32_t dq[4096] = {0};
             std::uint16_t eob = 0;
@@ -1780,7 +1836,7 @@ void encodeFrameRecon64x64Q(const pixels::Plane& src, pixels::Plane& recon, std:
 
             std::uint8_t blk[4096] = {0};
             for (int i = 0; i < 4096; ++i) blk[i] = pred[i];
-            transforms::invTxfm2dAdd64x64(dq, blk, 64, txType);
+            transforms::invTxfm2dAdd64x64(dq, blk, 64, dTx);
             for (int y = 0; y < 64; ++y)
                 for (int x = 0; x < 64; ++x) recon.at(px + x, py + y) = blk[y * 64 + x];
         }
@@ -1791,7 +1847,7 @@ void encodeFrameRecon64x64Q(const pixels::Plane& src, pixels::Plane& recon, std:
 // (log_scale 2). SCAN POLICY IS OURS: fixed defaultScan64x64 for every block
 // (see encodeFrameAuto4x4Q); SVT selects per mode/tx type via get_scan_order.
 void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::int32_t* coeffs,
-                           std::uint8_t* modes, std::int32_t qindex, transforms::TxType txType,
+                           std::uint8_t* modes, std::int32_t qindex,
                            entropy::AomWriter* w, entropy::EcFrameContext* fc,
                            entropy::DcSignLevelCoeffNa* na) {
     const int gridW = src.width() / 64;
@@ -1865,8 +1921,11 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
                     residual[y * 64 + x] =
                         static_cast<std::int16_t>(src.at(px + x, py + y) - pred[y * 64 + x]);
 
+            // RE7: the walk composes and signals at the winner's DERIVED type
+            // (d.txType; folds to DCT_DCT at TX_64X64 - the DCTONLY set row).
+            const transforms::TxType dTx = d.txType;
             std::int32_t cb[4096] = {0};
-            transforms::fwdTxfm2d64x64(residual, cb, 64, txType);
+            transforms::fwdTxfm2d64x64(residual, cb, 64, dTx);
             std::int32_t qc[4096] = {0};
             std::int32_t dq[4096] = {0};
             std::uint16_t eob = 0;
@@ -1905,9 +1964,9 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 std::int32_t dq64[4096] = {0};
                 for (int r = 0; r < 32; ++r)
                     for (int c = 0; c < 32; ++c) dq64[r * 64 + c] = dqTok[r * 32 + c];
-                transforms::invTxfm2dAdd64x64(dq64, blk, 64, txType);
+                transforms::invTxfm2dAdd64x64(dq64, blk, 64, dTx);
             } else {
-                transforms::invTxfm2dAdd64x64(dq, blk, 64, txType);
+                transforms::invTxfm2dAdd64x64(dq, blk, 64, dTx);
             }
             for (int y = 0; y < 64; ++y)
                 for (int x = 0; x < 64; ++x) recon.at(px + x, py + y) = blk[y * 64 + x];
@@ -1934,7 +1993,7 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 entropy::writeBlockCoeffs(w, fc, na, qcTok, scanTok, entropy::TX_64X64,
                                           entropy::BLOCK_64X64, eobTok, by * 16, bx * 16, 1,
                                           static_cast<entropy::PredictionMode>(d.mode),
-                                          entropy::COMPONENT_LUMA);
+                                          entropy::COMPONENT_LUMA, static_cast<entropy::TxType>((int)dTx), qindex);
             }
         }
     }
@@ -2018,7 +2077,7 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                         std::int32_t* coeffsV, std::uint8_t* modesY, std::uint8_t* modesU,
                         std::uint8_t* modesV, std::uint16_t* eobsY, std::uint16_t* eobsU,
                         std::uint16_t* eobsV, std::int32_t qindex, int lumaB,
-                        transforms::TxType txType, entropy::AomWriter* w,
+                        entropy::AomWriter* w,
                         entropy::EcFrameContext* fc, entropy::DcSignLevelCoeffNa* naY,
                         entropy::DcSignLevelCoeffNa* naU, entropy::DcSignLevelCoeffNa* naV) {
     const int uvB = lumaB / 2;
@@ -2159,20 +2218,24 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                 const int x = i % lumaB, y = i / lumaB;
                 residual[i] = static_cast<std::int16_t>(srcY.at(px + x, py + y) - pred[i]);
             }
+            // RE7: the luma chain composes at the decided mode's DERIVED type
+            // (the rdliteTxType rule at lumaB's whole-TU size; folds DCT at
+            // lumaB 32/64 - the DCTONLY set row).
+            const transforms::TxType lTx = rdliteTxType(rctx, lumaB, static_cast<intra::PredictionMode>(d.mode));
             std::int32_t cb[4096] = {0};
             std::int32_t qc[4096] = {0}, dq[4096] = {0};
             std::uint16_t eob = 0;
             if (lumaB == 8) {
-                transforms::fwdTxfm2d8x8(residual, cb, lumaB, txType);
+                transforms::fwdTxfm2d8x8(residual, cb, lumaB, lTx);
                 transforms::quantizeFp8x8(cb, qt, lscan, qc, dq, &eob);
             } else if (lumaB == 16) {
-                transforms::fwdTxfm2d16x16(residual, cb, lumaB, txType);
+                transforms::fwdTxfm2d16x16(residual, cb, lumaB, lTx);
                 transforms::quantizeFp16x16(cb, qt, lscan, qc, dq, &eob);
             } else if (lumaB == 32) {
-                transforms::fwdTxfm2d32x32(residual, cb, lumaB, txType);
+                transforms::fwdTxfm2d32x32(residual, cb, lumaB, lTx);
                 transforms::quantizeFp32x32(cb, qt, lscan, qc, dq, &eob);
             } else {
-                transforms::fwdTxfm2d64x64(residual, cb, lumaB, txType);
+                transforms::fwdTxfm2d64x64(residual, cb, lumaB, lTx);
             }
             if (lumaB == 64) {
                 if (w && fc) {
@@ -2289,7 +2352,7 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
             if (w && fc) {
                 entropy::writeBlockCoeffs(w, fc, naY, qc, lscan, ltxs, lbs, eob, miRow, miCol, 1,
                                           static_cast<entropy::PredictionMode>(d.mode),
-                                          entropy::COMPONENT_LUMA);
+                                          entropy::COMPONENT_LUMA, static_cast<entropy::TxType>((int)lTx), qindex);
             }
             // ---- the U chain then the V chain (U BEFORE V) ----
             if (chromaRef) {
@@ -2414,7 +2477,7 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                     if (w && fc) {
                         entropy::writeBlockCoeffs(w, fc, cna, cQc, uscan, utxs, ubs, cEob,
                                                   uvmiRow, uvmiCol, 1, entropy::DC_PRED,
-                                                  entropy::COMPONENT_CHROMA);
+                                                  entropy::COMPONENT_CHROMA, static_cast<entropy::TxType>((int)cTxType), qindex);
                     }
                     if (uvB == 4) transforms::invTxfm2dAdd4x4(cDq, cPred, uvB, cTxType);
                     else if (uvB == 8) transforms::invTxfm2dAdd8x8(cDq, cPred, uvB, cTxType);
@@ -2433,16 +2496,16 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                     for (int c = 0; c < 32; ++c) dq64[r * 64 + c] = dq[r * 32 + c];
                 std::uint8_t blk[4096] = {0};
                 for (int i = 0; i < 4096; ++i) blk[i] = pred[i];
-                transforms::invTxfm2dAdd64x64(dq64, blk, 64, txType);
+                transforms::invTxfm2dAdd64x64(dq64, blk, 64, lTx);
                 for (int y = 0; y < 64; ++y)
                     for (int x = 0; x < 64; ++x) reconY.at(px + x, py + y) = blk[y * 64 + x];
             } else {
                 std::uint8_t blk[4096] = {0};
                 for (int i = 0; i < lumaB * lumaB; ++i) blk[i] = pred[i];
-                if (lumaB == 8) transforms::invTxfm2dAdd8x8(dq, blk, lumaB, txType);
-                else if (lumaB == 16) transforms::invTxfm2dAdd16x16(dq, blk, lumaB, txType);
-                else if (lumaB == 32) transforms::invTxfm2dAdd32x32(dq, blk, lumaB, txType);
-                else transforms::invTxfm2dAdd64x64(dq, blk, lumaB, txType);
+                if (lumaB == 8) transforms::invTxfm2dAdd8x8(dq, blk, lumaB, lTx);
+                else if (lumaB == 16) transforms::invTxfm2dAdd16x16(dq, blk, lumaB, lTx);
+                else if (lumaB == 32) transforms::invTxfm2dAdd32x32(dq, blk, lumaB, lTx);
+                else transforms::invTxfm2dAdd64x64(dq, blk, lumaB, lTx);
                 for (int y = 0; y < lumaB; ++y)
                     for (int x = 0; x < lumaB; ++x) reconY.at(px + x, py + y) = blk[y * lumaB + x];
             }

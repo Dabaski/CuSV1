@@ -831,16 +831,16 @@ int main() {
     std::vector<std::uint8_t> modes64Q(4, 0);
 
     std::printf("\n== host frame encode ==\n");
-    timeLoop("host 4x4 lossless", [&] { pipeline::encodeFrameAuto4x4(src, recon4L, coeffs4L.data(), modes4L.data(), transforms::TxType::DCT_DCT); });
-    timeLoop("host 4x4 q100", [&] { pipeline::encodeFrameAuto4x4Q(src, recon4Q, coeffs4Q.data(), modes4Q.data(), kQindex, transforms::TxType::DCT_DCT); });
-    timeLoop("host 8x8 lossless", [&] { pipeline::encodeFrameAuto8x8(src, recon8L, coeffs8L.data(), modes8L.data(), transforms::TxType::DCT_DCT); });
-    timeLoop("host 8x8 q100", [&] { pipeline::encodeFrameAuto8x8Q(src, recon8Q, coeffs8Q.data(), modes8Q.data(), kQindex, transforms::TxType::DCT_DCT); });
-    timeLoop("host 16x16 lossless", [&] { pipeline::encodeFrameAuto16x16(src, recon16L, coeffs16L.data(), modes16L.data(), transforms::TxType::DCT_DCT); });
-    timeLoop("host 16x16 q100", [&] { pipeline::encodeFrameAuto16x16Q(src, recon16Q, coeffs16Q.data(), modes16Q.data(), kQindex, transforms::TxType::DCT_DCT); });
-    timeLoop("host 32x32 lossless", [&] { pipeline::encodeFrameAuto32x32(src32, recon32L, coeffs32L.data(), modes32L.data(), transforms::TxType::DCT_DCT); });
-    timeLoop("host 32x32 q100", [&] { pipeline::encodeFrameAuto32x32Q(src32, recon32Q, coeffs32Q.data(), modes32Q.data(), kQindex, transforms::TxType::DCT_DCT); });
-    timeLoop("host 64x64 lossless", [&] { pipeline::encodeFrameAuto64x64(src64x, recon64L, coeffs64L.data(), modes64L.data(), transforms::TxType::DCT_DCT); });
-    timeLoop("host 64x64 q100", [&] { pipeline::encodeFrameAuto64x64Q(src64x, recon64Q, coeffs64Q.data(), modes64Q.data(), kQindex, transforms::TxType::DCT_DCT); });
+    timeLoop("host 4x4 lossless", [&] { pipeline::encodeFrameAuto4x4(src, recon4L, coeffs4L.data(), modes4L.data()); });
+    timeLoop("host 4x4 q100", [&] { pipeline::encodeFrameAuto4x4Q(src, recon4Q, coeffs4Q.data(), modes4Q.data(), kQindex); });
+    timeLoop("host 8x8 lossless", [&] { pipeline::encodeFrameAuto8x8(src, recon8L, coeffs8L.data(), modes8L.data()); });
+    timeLoop("host 8x8 q100", [&] { pipeline::encodeFrameAuto8x8Q(src, recon8Q, coeffs8Q.data(), modes8Q.data(), kQindex); });
+    timeLoop("host 16x16 lossless", [&] { pipeline::encodeFrameAuto16x16(src, recon16L, coeffs16L.data(), modes16L.data()); });
+    timeLoop("host 16x16 q100", [&] { pipeline::encodeFrameAuto16x16Q(src, recon16Q, coeffs16Q.data(), modes16Q.data(), kQindex); });
+    timeLoop("host 32x32 lossless", [&] { pipeline::encodeFrameAuto32x32(src32, recon32L, coeffs32L.data(), modes32L.data()); });
+    timeLoop("host 32x32 q100", [&] { pipeline::encodeFrameAuto32x32Q(src32, recon32Q, coeffs32Q.data(), modes32Q.data(), kQindex); });
+    timeLoop("host 64x64 lossless", [&] { pipeline::encodeFrameAuto64x64(src64x, recon64L, coeffs64L.data(), modes64L.data()); });
+    timeLoop("host 64x64 q100", [&] { pipeline::encodeFrameAuto64x64Q(src64x, recon64Q, coeffs64Q.data(), modes64Q.data(), kQindex); });
 
 
     if (gpurt::deviceCount() == 0) {
