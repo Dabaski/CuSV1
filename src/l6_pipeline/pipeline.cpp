@@ -199,7 +199,8 @@ std::int64_t frameMse8(const pixels::Plane& a, const pixels::Plane& b) {
 //   threaded from the frame configuration: isISlice=true, skipModeCtx=0
 //   (our named skip=0 emission convention), FI/palette/intrabc off (the
 //   pinned CONFIG), the kf ctx pair from the DECIDED neighbor modes via
-//   l7 getKfYModeCtx, angle delta 0 (our emission's convention), hasUv
+//   l7 getKfYModeCtx, the CHOSEN angle delta (RE6: the 7-delta enumeration
+//   at 8x8+ directional candidates, 0 elsewhere - see rdliteDecide), hasUv
 //   FALSE for the luma ranking (the chroma D2 stays SAD this rung - the
 //   ratified rung boundary).
 // - LAMBDA: rdliteLambda (ours, named; the rc-walled
@@ -230,79 +231,96 @@ int rdliteBsizeEnum(int B) {
                      : entropy::BLOCK_64X64;
 }
 
+// RE6: the reference's angle_delta_count walk (mode_decision.c:3250-:3253):
+// av1_is_directional_mode(intra_mode) && angular_pred_level <= 2 &&
+// use_angle_delta ? 7 : 1. OUR RUNG'S angular-pred-level policy: 1 (the full
+// {-3..+3} set; the reference's level-2/3 delta skips at :3259-:3261 never
+// fire at level 1 - named, ours). The bsize gate is av1_use_angle_delta
+// (intra_prediction.h:214-216) = bsize >= BLOCK_8X8: at 4x4 NO delta variants
+// (deltaCount = 1, delta = 0). Per-delta cost: the SAME composition -
+// buildIntraPredictors at the delta -> varianceCore -> <<4 -> intraFastCost
+// with cand.angleDelta[0] = the delta (rate_est.cpp:1629-:1632 consumes it
+// through angleDeltaFacBits).
 ModeDecision rdliteDecide(const RdliteFrameCtx& rctx, int B, const std::uint8_t* src,
                           const std::uint8_t* aboveRef, int nTopPx, int nTopRightPx,
                           const std::uint8_t* leftRef, int nLeftPx, int nBottomLeftPx,
                           std::uint8_t aboveLeft, const intra::NeighborContext& neighbors) {
-    ModeDecision best{intra::DC_PRED, 0, 0};
+    ModeDecision best{intra::DC_PRED, 0, 0, 0};
     bool haveBest = false;
     const int bsize = rdliteBsizeEnum(B);
+    const bool useAngleDelta = B >= 8;  // av1_use_angle_delta (intra_prediction.h:214-216)
     for (int m = intra::DC_PRED; m <= intra::PAETH_PRED; ++m) {
-        std::uint8_t pred[64 * 64];
-        intra::buildIntraPredictors(pred, B, m, 0, B, B, aboveLeft, aboveRef, nTopPx, nTopRightPx,
-                                    leftRef, nLeftPx, nBottomLeftPx, neighbors);
-        std::uint32_t sad = 0;
-        switch (B) {
-        case 4: sad = motion::sad4x4(src, 4, pred, 4); break;
-        case 8: sad = motion::sad8x8(src, 8, pred, 8); break;
-        case 16: sad = motion::sad16x16(src, 16, pred, 16); break;
-        case 32: sad = motion::sad32x32(src, 32, pred, 32); break;
-        default: sad = motion::sad64x64(src, 64, pred, 64); break;
-        }
+        const bool directional = m >= intra::V_PRED && m <= intra::D67_PRED;
+        const int deltaCount = (directional && useAngleDelta) ? 7 : 1;
+        for (int deltaCtr = 0; deltaCtr < deltaCount; ++deltaCtr) {
+            const int delta =
+                deltaCount == 1 ? 0 : deltaCtr - MAX_ANGLE_DELTA;  // the :3256-:3258 walk
+            std::uint8_t pred[64 * 64];
+            intra::buildIntraPredictors(pred, B, m, delta, B, B, aboveLeft, aboveRef, nTopPx,
+                                        nTopRightPx, leftRef, nLeftPx, nBottomLeftPx, neighbors);
+            std::uint32_t sad = 0;
+            switch (B) {
+            case 4: sad = motion::sad4x4(src, 4, pred, 4); break;
+            case 8: sad = motion::sad8x8(src, 8, pred, 8); break;
+            case 16: sad = motion::sad16x16(src, 16, pred, 16); break;
+            case 32: sad = motion::sad32x32(src, 32, pred, 32); break;
+            default: sad = motion::sad64x64(src, 64, pred, 64); break;
+            }
 
-        std::uint32_t sse = 0;
-        int sum = 0;
-        analysis::varianceCore(src, B, pred, B, B, B, &sse, &sum);
-        const std::uint64_t variance = sse - (std::uint32_t)(((std::int64_t)sum * sum) / (B * B));
-        const std::uint64_t lumaFastDist = variance << 4;
+            std::uint32_t sse = 0;
+            int sum = 0;
+            analysis::varianceCore(src, B, pred, B, B, B, &sse, &sum);
+            const std::uint64_t variance = sse - (std::uint32_t)(((std::int64_t)sum * sum) / (B * B));
+            const std::uint64_t lumaFastDist = variance << 4;
 
-        l16_rdo::IntraFastCandidate cand{};
-        cand.mode = m;
-        cand.uvMode = intra::DC_PRED;
-        cand.angleDelta[0] = 0;
-        cand.angleDelta[1] = 0;
-        cand.filterIntraMode = l6_rdlite::kFilterIntraModes;
-        cand.paletteSize[0] = -1;
-        cand.paletteSize[1] = -1;
+            l16_rdo::IntraFastCandidate cand{};
+            cand.mode = m;
+            cand.uvMode = intra::DC_PRED;
+            cand.angleDelta[0] = delta;
+            cand.angleDelta[1] = 0;
+            cand.filterIntraMode = l6_rdlite::kFilterIntraModes;
+            cand.paletteSize[0] = -1;
+            cand.paletteSize[1] = -1;
 
-        int topCtx = 0, leftCtx = 0;
-        entropy::getKfYModeCtx(nLeftPx > 0 ? 1 : 0, (int)neighbors.leftMode,
-                               nTopPx > 0 ? 1 : 0, (int)neighbors.aboveMode, &topCtx, &leftCtx);
+            int topCtx = 0, leftCtx = 0;
+            entropy::getKfYModeCtx(nLeftPx > 0 ? 1 : 0, (int)neighbors.leftMode,
+                                   nTopPx > 0 ? 1 : 0, (int)neighbors.aboveMode, &topCtx, &leftCtx);
 
-        std::uint32_t lumaRate = 0, chromaRate = 0;
-        l16_rdo::IntraFastCostArgs args{};
-        args.me = &rctx.me;
-        args.cand = &cand;
-        args.bsize = bsize;
-        args.bwidth = B;
-        args.bheight = B;
-        args.lambda = rctx.lambda;
-        args.lumaDistortion = lumaFastDist;
-        args.fastLumaRate = &lumaRate;
-        args.fastChromaRate = &chromaRate;
-        args.skipModeCtx = 0;
-        args.intraLumaTopCtx = topCtx;
-        args.intraLumaLeftCtx = leftCtx;
-        args.isInterCtx = 0;
-        args.hasUv = false;
-        args.paletteModeCtx = 0;
-        args.isISlice = true;
-        args.skipModeFlag = false;
-        args.filterIntraLevel = 0;
-        args.allowScreenContentTools = 0;
-        args.frameAllowIntrabc = false;
-        args.enablePalette = 0;
-        args.dvJointCost = nullptr;
-        args.dvCostRow[0] = nullptr;
-        args.dvCostRow[1] = nullptr;
-        args.blkOrgX = 0;
-        args.blkOrgY = 0;
-        const std::int64_t rd = l16_rdo::intraFastCost(args);
+            std::uint32_t lumaRate = 0, chromaRate = 0;
+            l16_rdo::IntraFastCostArgs args{};
+            args.me = &rctx.me;
+            args.cand = &cand;
+            args.bsize = bsize;
+            args.bwidth = B;
+            args.bheight = B;
+            args.lambda = rctx.lambda;
+            args.lumaDistortion = lumaFastDist;
+            args.fastLumaRate = &lumaRate;
+            args.fastChromaRate = &chromaRate;
+            args.skipModeCtx = 0;
+            args.intraLumaTopCtx = topCtx;
+            args.intraLumaLeftCtx = leftCtx;
+            args.isInterCtx = 0;
+            args.hasUv = false;
+            args.paletteModeCtx = 0;
+            args.isISlice = true;
+            args.skipModeFlag = false;
+            args.filterIntraLevel = 0;
+            args.allowScreenContentTools = 0;
+            args.frameAllowIntrabc = false;
+            args.enablePalette = 0;
+            args.dvJointCost = nullptr;
+            args.dvCostRow[0] = nullptr;
+            args.dvCostRow[1] = nullptr;
+            args.blkOrgX = 0;
+            args.blkOrgY = 0;
+            const std::int64_t rd = l16_rdo::intraFastCost(args);
 
-        if (!haveBest || rd < (std::int64_t)best.rd) {
-            best = ModeDecision{static_cast<intra::PredictionMode>(m), sad,
-                                static_cast<std::uint64_t>(rd)};
-            haveBest = true;
+            if (!haveBest || rd < (std::int64_t)best.rd) {
+                best = ModeDecision{static_cast<intra::PredictionMode>(m), sad,
+                                    static_cast<std::uint64_t>(rd), delta};
+                haveBest = true;
+            }
         }
     }
     return best;
@@ -450,7 +468,7 @@ void encodeFrameAuto4x4(const pixels::Plane& src, pixels::Plane& recon, std::int
             std::int32_t cb[16] = {0};
             std::uint8_t blkRecon[16] = {0};
             encodeRecon4x4(src, px, py, above, nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx,
-                           aboveLeft, d.mode, 0, txType, cb, blkRecon, nctx);
+                           aboveLeft, d.mode, d.angleDelta, txType, cb, blkRecon, nctx);
             for (int i = 0; i < 16; ++i) {
                 coeffs[(by * gridW + bx) * 16 + i] = cb[i];
                 recon.at(px + (i & 3), py + (i >> 2)) = blkRecon[i];
@@ -569,7 +587,7 @@ void encodeFrameAuto8x8(const pixels::Plane& src, pixels::Plane& recon, std::int
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[64] = {0};
-            intra::buildIntraPredictors(pred, 8, d.mode, 0, 8, 8, aboveLeft, above, nTopPx,
+            intra::buildIntraPredictors(pred, 8, d.mode, d.angleDelta, 8, 8, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
 
             std::int16_t residual[64] = {0};
@@ -667,7 +685,7 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
 
             // predict -> residual -> fwd -> quantize fp -> inverse on dqcoeff
             std::uint8_t pred[16] = {0};
-            intra::buildIntraPredictors(pred, 4, d.mode, 0, 4, 4, aboveLeft, above, nTopPx,
+            intra::buildIntraPredictors(pred, 4, d.mode, d.angleDelta, 4, 4, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
             std::int16_t residual[16] = {0};
             for (int y = 0; y < 4; ++y) {
@@ -697,7 +715,7 @@ void encodeFrameAuto4x4Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                                        &topCtx, &leftCtx);
                 entropy::writeKfLumaMode(w, fc, entropy::BLOCK_4X4,
                                          static_cast<entropy::PredictionMode>(d.mode), topCtx,
-                                         leftCtx, 0);
+                                         leftCtx, d.angleDelta);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_4X4, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
                     // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052
@@ -862,7 +880,7 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[64] = {0};
-            intra::buildIntraPredictors(pred, 8, d.mode, 0, 8, 8, aboveLeft, above, nTopPx,
+            intra::buildIntraPredictors(pred, 8, d.mode, d.angleDelta, 8, 8, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
             std::int16_t residual[64] = {0};
             for (int y = 0; y < 8; ++y)
@@ -893,7 +911,7 @@ void encodeFrameAuto8x8Q(const pixels::Plane& src, pixels::Plane& recon, std::in
                                        &topCtx, &leftCtx);
                 entropy::writeKfLumaMode(w, fc, entropy::BLOCK_8X8,
                                          static_cast<entropy::PredictionMode>(d.mode), topCtx,
-                                         leftCtx, 0);
+                                         leftCtx, d.angleDelta);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_8X8, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
                     // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052;
@@ -1067,7 +1085,7 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
                 entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
                                        hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode), &topCtx, &leftCtx);
                 entropy::writeKfLumaMode(w, fc, entropy::BLOCK_16X16,
-                                         static_cast<entropy::PredictionMode>(d.mode), topCtx, leftCtx, 0);
+                                         static_cast<entropy::PredictionMode>(d.mode), topCtx, leftCtx, d.angleDelta);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
                     // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052;
@@ -1079,7 +1097,7 @@ void encodeFrameAuto16x16(const pixels::Plane& src, pixels::Plane& recon, std::i
             }
 
             std::uint8_t pred[256] = {0};
-            intra::buildIntraPredictors(pred, 16, d.mode, 0, 16, 16, aboveLeft, above, nTopPx,
+            intra::buildIntraPredictors(pred, 16, d.mode, d.angleDelta, 16, 16, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
 
             std::int16_t residual[256] = {0};
@@ -1230,7 +1248,7 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
                 entropy::getKfYModeCtx(hasLeft ? 1 : 0, static_cast<int>(nctx.leftMode),
                                        hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode), &topCtx, &leftCtx);
                 entropy::writeKfLumaMode(w, fc, entropy::BLOCK_16X16,
-                                         static_cast<entropy::PredictionMode>(d.mode), topCtx, leftCtx, 0);
+                                         static_cast<entropy::PredictionMode>(d.mode), topCtx, leftCtx, d.angleDelta);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
                     // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052;
@@ -1242,7 +1260,7 @@ void encodeFrameAuto16x16Q(const pixels::Plane& src, pixels::Plane& recon, std::
             }
 
             std::uint8_t pred[256] = {0};
-            intra::buildIntraPredictors(pred, 16, d.mode, 0, 16, 16, aboveLeft, above, nTopPx,
+            intra::buildIntraPredictors(pred, 16, d.mode, d.angleDelta, 16, 16, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
             std::int16_t residual[256] = {0};
             for (int y = 0; y < 16; ++y)
@@ -1378,7 +1396,7 @@ void encodeFrameAuto32x32(const pixels::Plane& src, pixels::Plane& recon, std::i
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[1024] = {0};
-            intra::buildIntraPredictors(pred, 32, d.mode, 0, 32, 32, aboveLeft, above, nTopPx,
+            intra::buildIntraPredictors(pred, 32, d.mode, d.angleDelta, 32, 32, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
 
             std::int16_t residual[1024] = {0};
@@ -1529,7 +1547,7 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[1024] = {0};
-            intra::buildIntraPredictors(pred, 32, d.mode, 0, 32, 32, aboveLeft, above, nTopPx,
+            intra::buildIntraPredictors(pred, 32, d.mode, d.angleDelta, 32, 32, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
             std::int16_t residual[1024] = {0};
             for (int y = 0; y < 32; ++y)
@@ -1561,7 +1579,7 @@ void encodeFrameAuto32x32Q(const pixels::Plane& src, pixels::Plane& recon, std::
                                        &topCtx, &leftCtx);
                 entropy::writeKfLumaMode(w, fc, entropy::BLOCK_32X32,
                                          static_cast<entropy::PredictionMode>(d.mode), topCtx,
-                                         leftCtx, 0);
+                                         leftCtx, d.angleDelta);
                 if (entropy::filterIntraAllowed(1, entropy::BLOCK_32X32, 0,
                                                 static_cast<std::uint32_t>(d.mode))) {
                     // The ADAPTING frame-context cdf (SVT entropy_coding.c:5052;
@@ -1688,7 +1706,7 @@ void encodeFrameAuto64x64(const pixels::Plane& src, pixels::Plane& recon, std::i
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[4096] = {0};
-            intra::buildIntraPredictors(pred, 64, d.mode, 0, 64, 64, aboveLeft, above, nTopPx,
+            intra::buildIntraPredictors(pred, 64, d.mode, d.angleDelta, 64, 64, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
 
             std::int16_t residual[4096] = {0};
@@ -1839,7 +1857,7 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
             modes[by * gridW + bx] = static_cast<std::uint8_t>(d.mode);
 
             std::uint8_t pred[4096] = {0};
-            intra::buildIntraPredictors(pred, 64, d.mode, 0, 64, 64, aboveLeft, above, nTopPx,
+            intra::buildIntraPredictors(pred, 64, d.mode, d.angleDelta, 64, 64, aboveLeft, above, nTopPx,
                                         nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
             std::int16_t residual[4096] = {0};
             for (int y = 0; y < 64; ++y)
@@ -1910,7 +1928,7 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
                                        &topCtx, &leftCtx);
                 entropy::writeKfLumaMode(w, fc, entropy::BLOCK_64X64,
                                          static_cast<entropy::PredictionMode>(d.mode), topCtx,
-                                         leftCtx, 0);
+                                         leftCtx, d.angleDelta);
                 std::int16_t scanTok[1024];
                 transforms::defaultScan32x32(scanTok);
                 entropy::writeBlockCoeffs(w, fc, na, qcTok, scanTok, entropy::TX_64X64,
@@ -2134,7 +2152,7 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                                          aboveLeft, nctx, rctx);
             modesY[bidx] = static_cast<std::uint8_t>(d.mode);
             std::uint8_t pred[4096] = {0};
-            intra::buildIntraPredictors(pred, lumaB, d.mode, 0, lumaB, lumaB, aboveLeft, above,
+            intra::buildIntraPredictors(pred, lumaB, d.mode, d.angleDelta, lumaB, lumaB, aboveLeft, above,
                                         nTopPx, nTopRightPx, left, nLeftPx, nBottomLeftPx, nctx);
             std::int16_t residual[4096];
             for (int i = 0; i < lumaB * lumaB; ++i) {
@@ -2201,7 +2219,7 @@ void encodeFrameChromaQ(const pixels::Plane& srcY, const pixels::Plane& srcU,
                                        hasTop ? 1 : 0, static_cast<int>(nctx.aboveMode), &topCtx,
                                        &leftCtx);
                 entropy::writeKfLumaMode(w, fc, lbs, static_cast<entropy::PredictionMode>(d.mode),
-                                         topCtx, leftCtx, 0);
+                                         topCtx, leftCtx, d.angleDelta);
             }
             std::uint8_t uvMode = 0xFF;
             if (chromaRef) {

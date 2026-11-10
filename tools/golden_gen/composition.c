@@ -874,7 +874,7 @@ static int64_t svtd_rdcost(uint32_t lambda, uint64_t rate, uint64_t dist) {
 static int svtd_rdlite_decide(int B, int qindex, const uint8_t* src, const uint8_t* above,
                               int n_top, int n_topright, const uint8_t* left, int n_left,
                               int n_bottomleft, uint8_t al, int above_mode, int left_mode,
-                              uint32_t* best_sad_out) {
+                              uint32_t* best_sad_out, int* best_delta_out) {
     svtd_rdlite_init();
     const uint32_t lambda = qindex == 0 ? 0 : (uint32_t)qindex;
     // get_kf_y_mode_ctx shape (entropy_coding.c:1004-1021): unavailable
@@ -885,30 +885,45 @@ static int svtd_rdlite_decide(int B, int qindex, const uint8_t* src, const uint8
     uint32_t best_sad = 0;
     int64_t best_rd = 0;
     int best_mode = -1;
+    int best_delta = 0;
     for (int m = 0; m <= PAETH_PRED; ++m) {
-        uint8_t pred[4096];
-        svtd_call_builder_tx(pred, m, 0, FILTER_INTRA_MODES, 0, above, n_top, n_topright, left,
-                             n_left, n_bottomleft, al, ts);
-        uint32_t sse;
-        int sum;
-        svtd_variance_c(src, B, pred, B, B, B, &sse, &sum);
-        const uint64_t variance = sse - (uint32_t)(((int64_t)sum * sum) / (B * B));
-        const uint64_t luma_fast_dist = variance << 4;
-        uint64_t rate = (uint64_t)svtd_rdlite_yrate[top_ctx][left_ctx][m];
-        if (B >= 8 && m >= V_PRED && m <= D67_PRED) {
-            // the reference's angular-mode cost at delta 0 (rd_cost.c:616-618)
-            rate += (uint64_t)svtd_rdlite_anglerate[m - V_PRED][MAX_ANGLE_DELTA + 0];
-        }
-        const int64_t rd = svtd_rdcost(lambda, rate, luma_fast_dist);
-        // the SAD stays as bookkeeping (the l6 ModeDecision::sad field)
-        const uint32_t sad = svt_nxm_sad_kernel_helper_c(src, B, pred, B, B, B);
-        if (best_mode < 0 || rd < best_rd) {
-            best_rd = rd;
-            best_sad = sad;
-            best_mode = m;
+        // RE6: the 7-delta enumeration, the l6 rdliteDecide's exact shape -
+        // the reference's angle_delta_count walk (mode_decision.c:3250-:3253,
+        // angular_pred_level <= 2 && use_angle_delta ? 7 : 1) at OUR RUNG'S
+        // angular-pred-level policy of 1 (the full {-3..+3} set, no level-2/3
+        // skip), gated by av1_use_angle_delta (intra_prediction.h:214-216) =
+        // bsize >= 8x8: at 4x4 NO delta variants (count 1, delta 0).
+        const int directional = m >= V_PRED && m <= D67_PRED;
+        const int delta_count = (directional && B >= 8) ? 7 : 1;
+        for (int dc = 0; dc < delta_count; ++dc) {
+            const int delta = delta_count == 1 ? 0 : dc - MAX_ANGLE_DELTA;
+            uint8_t pred[4096];
+            svtd_call_builder_tx(pred, m, delta, FILTER_INTRA_MODES, 0, above, n_top, n_topright, left,
+                                 n_left, n_bottomleft, al, ts);
+            uint32_t sse;
+            int sum;
+            svtd_variance_c(src, B, pred, B, B, B, &sse, &sum);
+            const uint64_t variance = sse - (uint32_t)(((int64_t)sum * sum) / (B * B));
+            const uint64_t luma_fast_dist = variance << 4;
+            uint64_t rate = (uint64_t)svtd_rdlite_yrate[top_ctx][left_ctx][m];
+            if (B >= 8 && m >= V_PRED && m <= D67_PRED) {
+                // the reference's angular-mode cost at the candidate delta
+                // (rd_cost.c:616-618)
+                rate += (uint64_t)svtd_rdlite_anglerate[m - V_PRED][MAX_ANGLE_DELTA + delta];
+            }
+            const int64_t rd = svtd_rdcost(lambda, rate, luma_fast_dist);
+            // the SAD stays as bookkeeping (the l6 ModeDecision::sad field)
+            const uint32_t sad = svt_nxm_sad_kernel_helper_c(src, B, pred, B, B, B);
+            if (best_mode < 0 || rd < best_rd) {
+                best_rd = rd;
+                best_sad = sad;
+                best_mode = m;
+                best_delta = delta;
+            }
         }
     }
     *best_sad_out = best_sad;
+    *best_delta_out = best_delta;
     return best_mode;
 }
 static void svtd_frame_auto_8x8_blocks(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes) {
@@ -947,12 +962,13 @@ static void svtd_frame_auto_8x8_blocks(const uint8_t* src, uint8_t* recon, int32
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. Lossless walk: lambda 0.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[64];
-            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+            svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_8X8);
             int16_t res[64];
             for (int i = 0; i < 64; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -1010,11 +1026,12 @@ static void svtd_frame_auto_4x4_16x16(const uint8_t* src, uint8_t* recon, int32_
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. q = 0.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(4, 0, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(4, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
             uint8_t pred[16];
-            svtd_call_builder(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
+            svtd_call_builder(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
             int16_t res[16];
             for (int i = 0; i < 16; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
             int32_t cb[16];
@@ -1074,11 +1091,12 @@ static void svtd_frame_auto_4x4_q(const uint8_t* src, uint8_t* recon, int32_t* c
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. q = qindex.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(4, qindex, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(4, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
             uint8_t pred[16];
-            svtd_call_builder(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
+            svtd_call_builder(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
             int16_t res[16];
             for (int i = 0; i < 16; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
             int32_t cb[16];
@@ -1210,12 +1228,13 @@ static void svtd_frame_auto_8x8_q(const uint8_t* src, uint8_t* recon, int32_t* c
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. Q walk: the drive's qindex.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[64];
-            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+            svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_8X8);
             int16_t res[64];
             for (int i = 0; i < 64; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -1240,7 +1259,8 @@ static void svtd_frame_auto_8x8_q(const uint8_t* src, uint8_t* recon, int32_t* c
 // block and its SAD consumes above[16..31].
 static void svtd_default_scan_16x16(int16_t* scan);  // defined with the Q0 scan block below
 
-static void svtd_frame_auto_16x16_blocks(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes) {
+static void svtd_frame_auto_16x16_blocks(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes,
+                                         int* deltas, int qindex) {
     const int fstride = 32;
     const int gridW = 2, gridH = 2;
     const int bsz = 16;
@@ -1276,12 +1296,14 @@ static void svtd_frame_auto_16x16_blocks(const uint8_t* src, uint8_t* recon, int
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. Lossless walk: lambda 0.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
+            deltas[by * gridW + bx] = bdelta;  // RE6: the chosen delta flows to the bsf1/ecfrm emitters
 
             uint8_t pred[256];
-            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+            svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_16X16);
             int16_t res[256];
             for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -1299,7 +1321,7 @@ static void svtd_frame_auto_16x16_blocks(const uint8_t* src, uint8_t* recon, int
 // Q variant: same loop with the FP quantizer wired at a fixed qindex
 // (n_coeffs=256, log_scale 0).
 static void svtd_frame_auto_16x16_q(const uint8_t* src, uint8_t* recon, int32_t* coeffs, int* modes,
-                                    int qindex) {
+                                    int qindex, int* deltas) {
     const int gridW = 2, gridH = 2;
     const int bsz = 16;
     SvtdQuantTables t;
@@ -1338,12 +1360,14 @@ static void svtd_frame_auto_16x16_q(const uint8_t* src, uint8_t* recon, int32_t*
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. Q walk: the drive's qindex.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
+            deltas[by * gridW + bx] = bdelta;  // RE6: the chosen delta (the bsf1q emitter reads it)
 
             uint8_t pred[256];
-            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+            svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_16X16);
             int16_t res[256];
             for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -1529,12 +1553,13 @@ static void svtd_frame_auto_32x32_blocks(const uint8_t* src, uint8_t* recon, int
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. Lossless walk: lambda 0.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[1024];
-            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+            svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_32X32);
             int16_t res[1024];
             for (int i = 0; i < 1024; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -1590,12 +1615,13 @@ static void svtd_frame_auto_32x32_q(const uint8_t* src, uint8_t* recon, int32_t*
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. Q walk: the drive's qindex.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[1024];
-            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+            svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_32X32);
             int16_t res[1024];
             for (int i = 0; i < 1024; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -2054,12 +2080,13 @@ static void svtd_frame_auto_64x64_blocks(const uint8_t* src, uint8_t* recon, int
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. Lossless walk: lambda 0.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(bsz, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[4096];
-            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+            svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_64X64);
             int16_t res[4096];
             for (int i = 0; i < 4096; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -2115,12 +2142,13 @@ static void svtd_frame_auto_64x64_q(const uint8_t* src, uint8_t* recon, int32_t*
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. Q walk: the drive's qindex.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(bsz, qindex, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
 
             uint8_t pred[4096];
-            svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
+            svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft,
                                  0, al, TX_64X64);
             int16_t res[4096];
             for (int i = 0; i < 4096; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -2352,11 +2380,12 @@ static void svtd_frame_auto_8x8(const uint8_t* src, uint8_t* recon, int32_t* coe
             // RE5: the RD-lite ranking (the l6 mirror); the SAD stays as
             // bookkeeping. q = 0.
             uint32_t best_sad = 0;
-            const int mode = svtd_rdlite_decide(4, 0, srcblk, above, nTop, nTr, left, nLeft,
-                                                0, al, aboveMode, leftMode, &best_sad);
+            int bdelta = 0;
+        const int mode = svtd_rdlite_decide(4, 0, srcblk, above, nTop, nTr, left, nLeft,
+                                                0, al, aboveMode, leftMode, &best_sad, &bdelta);
             modes[by * gridW + bx] = mode;
             uint8_t pred[16];
-            svtd_call_builder(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
+            svtd_call_builder(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left, nLeft, 0, al);
             int16_t res[16];
             for (int i = 0; i < 16; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
             int32_t cb[16];
@@ -3336,9 +3365,10 @@ static void svtd_fs2_drive(int S, int emit_lines) {
     // RE5: the RD-lite ranking (the l6 mirror); single block, no edges,
     // q100 (the drive's quantizer).
     uint32_t best_sad = 0;
+    int bdelta = 0;
     const int mode = svtd_rdlite_decide(S, 100, srcblk, NULL, 0, 0, NULL, 0,
-                                        0, 0, DC_PRED, DC_PRED, &best_sad);
-    svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, NULL, 0, 0, NULL, 0, 0, 0, ts);
+                                        0, 0, DC_PRED, DC_PRED, &best_sad, &bdelta);
+    svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, NULL, 0, 0, NULL, 0, 0, 0, ts);
     static int16_t res[4096];
     for (int i = 0; i < n; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
 
@@ -3427,9 +3457,9 @@ svtd_script_row("part", PARTITION_NONE, part_cdf[pctx],
     static AomCdfProb angle_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
     memcpy(angle_cdf, default_angle_delta_cdf, sizeof(angle_cdf));
     if (S >= 8 && av1_is_directional_mode((PredictionMode)mode)) {
-        svtd_script_row("delta", MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
+        svtd_script_row("delta", MAX_ANGLE_DELTA + bdelta, angle_cdf[mode - V_PRED],
                         2 * MAX_ANGLE_DELTA + 1);
-        aom_write_symbol(&w, MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
+        aom_write_symbol(&w, MAX_ANGLE_DELTA + bdelta, angle_cdf[mode - V_PRED],
                          2 * MAX_ANGLE_DELTA + 1);
     }
     // FI iff allowed (mode_decision.c:108-120; 64x64 dead by bsize)
@@ -3622,12 +3652,13 @@ static void svtd_fs5_grid_drive(void) {
             for (int j = 0; j < 32; ++j) srcblk[i * 32 + j] = src[(r + i) * 64 + c + j];
         // RE5: the RD-lite ranking (the l6 mirror); q per the drive (below).
         uint32_t best_sad = 0;
+        int bdelta = 0;
         const int mode = svtd_rdlite_decide(32, fs5g_q, srcblk, above, nTop, nTr, left_edge,
-                                            nLeft, 0, al, aboveMode, leftMode, &best_sad);
+                                            nLeft, 0, al, aboveMode, leftMode, &best_sad, &bdelta);
         modes[b] = mode;
         modes[b] = mode;
         uint8_t pred[1024];
-        svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge,
+        svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge,
                              nLeft, 0, al, TX_32X32);
         int16_t res[1024];
         for (int i = 0; i < 1024; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -3654,9 +3685,9 @@ static void svtd_fs5_grid_drive(void) {
         svtd_script_row("mode", mode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
         aom_write_symbol(&w, mode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
         if (av1_is_directional_mode((PredictionMode)mode)) {
-            svtd_script_row("delta", MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
+            svtd_script_row("delta", MAX_ANGLE_DELTA + bdelta, angle_cdf[mode - V_PRED],
                             2 * MAX_ANGLE_DELTA + 1);
-            aom_write_symbol(&w, MAX_ANGLE_DELTA, angle_cdf[mode - V_PRED],
+            aom_write_symbol(&w, MAX_ANGLE_DELTA + bdelta, angle_cdf[mode - V_PRED],
                              2 * MAX_ANGLE_DELTA + 1);
         }
         if (mode == DC_PRED) {
@@ -3890,12 +3921,13 @@ static void svtd_fs5_grid4_drive(void) {
             for (int j = 0; j < 4; ++j) srcblk[i * 4 + j] = src[(r + i) * 8 + c + j];
         // RE5: the RD-lite ranking (the l6 mirror); q100 (the drive's quantizer).
         uint32_t best_sad = 0;
+        int bdelta = 0;
         const int mode = svtd_rdlite_decide(4, 100, srcblk, above, hasTop ? 4 : 0, nTr, left_edge,
-                                            hasLeft ? 4 : 0, 0, al, aboveMode, leftMode, &best_sad);
+                                            hasLeft ? 4 : 0, 0, al, aboveMode, leftMode, &best_sad, &bdelta);
         modes[b] = mode;
         modes[b] = mode;
         uint8_t pred[16];
-        svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, hasTop ? 4 : 0,
+        svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, hasTop ? 4 : 0,
                              nTr, left_edge, hasLeft ? 4 : 0, 0, al, TX_4X4);
         int16_t res[16];
         for (int i = 0; i < 16; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
@@ -4178,6 +4210,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
     uint8_t recon[1024];
     memset(recon, 0, sizeof(recon));
     int modes[4] = {0};
+    int bdeltas[4] = {0};  // RE6: the chosen angle delta per block (the second pass reads it)
 
     AomWriter w;
     w.ec.buf = buf;
@@ -4214,12 +4247,14 @@ static int svtd_ts3_drive(uint8_t* buf) {
             for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(r + i) * 32 + c + j];
         // RE5: the RD-lite ranking (the l6 mirror); q100 (the drive's quantizer).
         uint32_t best_sad = 0;
+        int bdelta = 0;
         const int mode = svtd_rdlite_decide(16, 100, srcblk, above, nTop, nTr, left_edge,
-                                            nLeft, 0, al, aboveMode, leftMode, &best_sad);
+                                            nLeft, 0, al, aboveMode, leftMode, &best_sad, &bdelta);
         modes[b] = mode;
+        bdeltas[b] = bdelta;
         // decided-mode predictor (NOT DC=0)
         uint8_t pred[256];
-        svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+        svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
         int16_t res[256];
         for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
         int32_t cb[256];
@@ -4264,7 +4299,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
         for (int i = 0; i < 16; ++i)
             for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(r + i) * 32 + c + j];
         uint8_t pred[256];
-        svtd_call_builder_tx(pred, modes[b], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+        svtd_call_builder_tx(pred, modes[b], bdeltas[b], FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
         int16_t res[256];
         for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
         int32_t cb[256];
@@ -4278,9 +4313,9 @@ static int svtd_ts3_drive(uint8_t* buf) {
         const int left_ctx = intra_mode_context[leftMode < 0 ? DC_PRED : (PredictionMode)leftMode];
         aom_write_symbol(&w, modes[b], fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
 
-        // 2. angle delta for directional modes
+        // 2. angle delta for directional modes (the chosen delta, RE6)
         if (av1_is_directional_mode((PredictionMode)modes[b])) {
-            aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[modes[b] - V_PRED], 2 * MAX_ANGLE_DELTA + 1);
+            aom_write_symbol(&w, MAX_ANGLE_DELTA + bdeltas[b], fc.angle_delta_cdf[modes[b] - V_PRED], 2 * MAX_ANGLE_DELTA + 1);
         }
         if (modes[b] == DC_PRED) {
             aom_write_symbol(&w, 0, fc.filter_intra_cdfs[BLOCK_16X16], 2);
@@ -4391,7 +4426,7 @@ static int svtd_ts3_drive(uint8_t* buf) {
         for (int i = 0; i < 16; ++i)
             for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(row + i) * 32 + col + j];
         uint8_t pred[256];
-        svtd_call_builder_tx(pred, modes[b], 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+        svtd_call_builder_tx(pred, modes[b], bdeltas[b], FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
         int16_t res[256];
         for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
         int32_t cb[256];
@@ -4489,6 +4524,7 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
     uint8_t recon[1024];
     memset(recon, 0, sizeof(recon));
     int modes[4] = {0};
+    int bdeltas[4] = {0};  // RE6: the chosen angle delta per block (the emission pass reads it)
     uint16_t eobs[4] = {0};
     static TranLow all_qc[4][256];
 
@@ -4539,11 +4575,13 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
             for (int j = 0; j < 16; ++j) srcblk[i * 16 + j] = src[(r + i) * 32 + c + j];
         // RE5: the RD-lite ranking (the l6 mirror); q100 (the drive's quantizer).
         uint32_t best_sad = 0;
+        int bdelta = 0;
         const int mode = svtd_rdlite_decide(16, 100, srcblk, above, nTop, nTr, left_edge,
-                                            nLeft, 0, al, aboveMode, leftMode, &best_sad);
-        modes[b] = mode;
+                                            nLeft, 0, al, aboveMode, leftMode, &best_sad, &bdelta);
+            modes[b] = mode;
+        bdeltas[b] = bdelta;
         uint8_t pred[256];
-        svtd_call_builder_tx(pred, mode, 0, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
+        svtd_call_builder_tx(pred, mode, bdelta, FILTER_INTRA_MODES, 0, above, nTop, nTr, left_edge, nLeft, 0, al, TX_16X16);
         int16_t res[256];
         for (int i = 0; i < 256; ++i) res[i] = (int16_t)(srcblk[i] - pred[i]);
         int32_t cb[256];
@@ -4555,11 +4593,15 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
         memcpy(all_qc[b], qc, sizeof(all_qc[b]));
         svtd_inv2dadd16x16(dq, pred, 16, svt_av1_idct16_new);
         for (int i = 0; i < 16; ++i)
-            for (int j = 0; j < 16; ++j) recon[(r + i) * 32 + c + j] = pred[i * 16 + j];
+        for (int j = 0; j < 16; ++j) recon[(r + i) * 32 + c + j] = pred[i * 16 + j];
     }
+    // RE6: the decided deltas (the l8 TU pin test's emission consumes them)
+    printf("bsf3v2_deltas:");
+    for (int b = 0; b < 4; ++b) printf(" %d", bdeltas[b]);
+    printf("\n");
 
-    // tile symbol emission: partition plane + per-leaf skip(0) + kf mode +
-    // angle delta + token chain (the TS3-proven per-block symbol sequence)
+// tile symbol emission: partition plane + per-leaf skip(0) + kf mode +
+// angle delta + token chain (the TS3-proven per-block symbol sequence)
     EcPartState st = {&w, part_cdf, above_pctx, left_pctx, 8, 32, 0};
     const int ctx32 = ecpart_derive_ctx(st.above, st.left, 0, 0, BLOCK_32X32);
     aom_write_symbol(&w, PARTITION_SPLIT, part_cdf[ctx32], svt_aom_partition_cdf_length(BLOCK_32X32));
@@ -4579,7 +4621,7 @@ static uint32_t svtd_bsf3_tile_data_v2(uint8_t* dst) {
         const int left_ctx = intra_mode_context[leftMode < 0 ? DC_PRED : (PredictionMode)leftMode];
         aom_write_symbol(&w, modes[b], fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
         if (av1_is_directional_mode((PredictionMode)modes[b])) {
-            aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[modes[b] - V_PRED],
+            aom_write_symbol(&w, MAX_ANGLE_DELTA + bdeltas[b], fc.angle_delta_cdf[modes[b] - V_PRED],
                              2 * MAX_ANGLE_DELTA + 1);
         }
         // filter-intra flag: read for DC_PRED blocks at bsize <= 32x32 (aom
@@ -6236,6 +6278,7 @@ static int svtd_cs4_uv_q_drive(int S) {
     }
     static const int8_t signs[3] = {0, -1, 1};
     static int lmodes[64], umodes[64], vmodes[64];
+    static int ldeltas[64];  // RE6: the chosen luma angle delta per leaf (the read twin checks it)
     static int leobs[64], ueobs[64], veobs[64];
     static TranLow lcoeffs[64][4096], ucoeffs[64][1024], vcoeffs[64][1024];
     static uint8_t na_l_above[16], na_l_left[16];
@@ -6338,9 +6381,12 @@ static int svtd_cs4_uv_q_drive(int S) {
                 for (int j = 0; j < B; ++j) lsrc[i * B + j] = y_src[(py + i) * 64 + px + j];
             // RE5: the RD-lite ranking (the l6 mirror); q100 (the walk's quantizer).
             uint32_t best_sad = 0;
+            int ldelta = 0;
             const int lmode = svtd_rdlite_decide(B, 100, lsrc, labove, nTop, nTr, lleft,
-                                                 nLeft, nBl, lal, laboveMode, lleftMode, &best_sad);
+                                                 nLeft, nBl, lal, laboveMode, lleftMode, &best_sad,
+                                                 &ldelta);
             lmodes[bidx] = lmode;
+            ldeltas[bidx] = ldelta;
             static uint8_t lpred[4096];
             // RT10 step 2 (our side of the diff): dump the left-edge context the
             // builder is handed for the block under test, and derive the
@@ -6395,7 +6441,7 @@ static int svtd_cs4_uv_q_drive(int S) {
                     }
                 }
             }
-            svtd_call_builder_tx(lpred, lmode, 0, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
+            svtd_call_builder_tx(lpred, lmode, ldelta, FILTER_INTRA_MODES, 0, labove, nTop, nTr, lleft,
                                  nLeft, nBl, lal, ltxs);
             // symbols: the partition surfaces (the interior SPLITs gated by the node
             // boundaries + the leaf NONE) + the skip flag, THEN the luma kf
@@ -6424,7 +6470,10 @@ static int svtd_cs4_uv_q_drive(int S) {
             const int left_ctx = intra_mode_context[hasLeft ? lleftMode : DC_PRED];
             aom_write_symbol(&w, lmode, fc.kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
             if (B >= 8 && av1_is_directional_mode((PredictionMode)lmode)) {
-                aom_write_symbol(&w, MAX_ANGLE_DELTA, fc.angle_delta_cdf[lmode - V_PRED],
+                // RE6: the CHOSEN delta (the l6 emission walk's d.angleDelta;
+                // the read twin at the CS4 rt block checks it)
+                aom_write_symbol(&w, MAX_ANGLE_DELTA + ldeltas[bidx],
+                                 fc.angle_delta_cdf[lmode - V_PRED],
                                  2 * MAX_ANGLE_DELTA + 1);
             }
             // uv_mode + the uv angle-delta symbols (chroma-referenced only)
@@ -6936,7 +6985,7 @@ static int svtd_cs4_uv_q_drive(int S) {
                                                 2 * MAX_ANGLE_DELTA + 1);
                 if (svtd_script)
                     fprintf(stderr, "R ang mi=%d,%d v=%d\n", mi_row, mi_col, rd);
-                if (rd != MAX_ANGLE_DELTA) { fprintf(stderr, "CS4 rt ldelta %d\n", S); return 3; }
+                if (rd != MAX_ANGLE_DELTA + ldeltas[bidx]) { fprintf(stderr, "CS4 rt ldelta %d\n", S); return 3; }
             }
             if (chroma_ref) {
                 const int ruv = aom_read_symbol_(&r, fc_r.uv_mode_cdf[cfl][rlm], uv_abc);

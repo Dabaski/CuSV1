@@ -1062,6 +1062,96 @@ TEST_CASE("decide picks d45 for the diagonal fixture") {
     CHECK(d.sad == 0);
 }
 
+TEST_CASE("decide 8x8 reports the chosen angle delta (RE6: non-directional stays 0)") {
+    // RE6: ModeDecision carries the winning candidate's angle delta; a
+    // non-directional winner must report 0 (the reference's
+    // cand->block_mi.angle_delta[PLANE_TYPE_Y] at mode_decision.c:3177).
+    const std::uint8_t src[64] = {50};
+    const std::uint8_t above[8] = {50, 50, 50, 50, 50, 50, 50, 50};
+    const std::uint8_t left[8] = {50, 50, 50, 50, 50, 50, 50, 50};
+    const auto d = pipeline::decideBlockMode8x8(src, above, 8, 0, left, 8, 0, 50,
+                                                intra::NeighborContext(), gRdlite);
+    CHECK(d.angleDelta == 0);
+}
+
+TEST_CASE("decide 8x8 enumerates the angle delta for directional modes (RE6)") {
+    // the source IS the d45 prediction at delta +3 (built with the landed
+    // builder at the same edges): variance 0 at that delta, > 0 at every
+    // other candidate, so the winning candidate is (D45, +3) and the chosen
+    // delta must be reported. The 7-delta enumeration mirrors the reference's
+    // angle_delta_count = 7 walk (mode_decision.c:3250-:3258) at our
+    // angular-pred-level policy of 1 (the full {-3..+3} set, no level-2/3
+    // skip), gated by av1_use_angle_delta = bsize >= BLOCK_8X8
+    // (intra_prediction.h:214-216).
+    const std::uint8_t above[8] = {0, 10, 20, 30, 40, 50, 60, 70};
+    const std::uint8_t left[8] = {0, 10, 20, 30, 40, 50, 60, 70};
+    std::uint8_t src[64];
+    intra::buildIntraPredictors(src, 8, intra::D45_PRED, 3, 8, 8, 0, above, 8, 0,
+                                left, 8, 0);
+    const auto d = pipeline::decideBlockMode8x8(src, above, 8, 0, left, 8, 0, 0,
+                                                intra::NeighborContext(), gRdlite);
+    CHECK(d.mode == intra::D45_PRED);
+    CHECK(d.angleDelta == 3);
+}
+
+
+TEST_CASE("intraFastCost consumes the chosen angle delta rate (RE6, M3 pin)") {
+    // The M3 sharpening: the mutation reversed the angle-delta rate index
+    // (angleDeltaFacBits[mode - V_PRED][MAX_ANGLE_DELTA - delta]) and
+    // SURVIVED every decision fixture - the distortion term dominates
+    // everywhere. The direct pin: at a NON-ZERO delta the luma rate must
+    // read angleDeltaFacBits[mode - V_PRED][MAX_ANGLE_DELTA + delta], and
+    // the two indices differ in the table (the cdf is not symmetric), so
+    // the pinned value kills the reversal outright.
+    l16_rdo::IntraFastCandidate cand{};
+    cand.mode = intra::V_PRED;
+    cand.uvMode = intra::DC_PRED;
+    cand.angleDelta[0] = 3;
+    cand.angleDelta[1] = 0;
+    cand.filterIntraMode = l6_rdlite::kFilterIntraModes;
+    cand.paletteSize[0] = -1;
+    cand.paletteSize[1] = -1;
+    int topCtx = 0, leftCtx = 0;
+    entropy::getKfYModeCtx(0, (int)intra::DC_PRED, 0, (int)intra::DC_PRED, &topCtx, &leftCtx);
+    std::uint32_t lumaRate = 0, chromaRate = 0;
+    l16_rdo::IntraFastCostArgs args{};
+    args.me = &gRdlite.me;
+    args.cand = &cand;
+    args.bsize = entropy::BLOCK_8X8;
+    args.bwidth = 8;
+    args.bheight = 8;
+    args.lambda = gRdlite.lambda;
+    args.lumaDistortion = 0;
+    args.fastLumaRate = &lumaRate;
+    args.fastChromaRate = &chromaRate;
+    args.skipModeCtx = 0;
+    args.intraLumaTopCtx = topCtx;
+    args.intraLumaLeftCtx = leftCtx;
+    args.isInterCtx = 0;
+    args.hasUv = false;
+    args.paletteModeCtx = 0;
+    args.isISlice = true;
+    args.skipModeFlag = false;
+    args.filterIntraLevel = 0;
+    args.allowScreenContentTools = 0;
+    args.frameAllowIntrabc = false;
+    args.enablePalette = 0;
+    args.dvJointCost = nullptr;
+    args.dvCostRow[0] = nullptr;
+    args.dvCostRow[1] = nullptr;
+    args.blkOrgX = 0;
+    args.blkOrgY = 0;
+    (void)l16_rdo::intraFastCost(args);
+    // the composed rate: yModeFacBits[topCtx][leftCtx][V_PRED]
+    // + angleDeltaFacBits[V_PRED - V_PRED][MAX_ANGLE_DELTA + 3]; every other
+    // term is 0 in this configuration (skip 0, no FI, no palette, no inter).
+    const std::uint32_t expect =
+        gRdlite.me.yModeFacBits[topCtx][leftCtx][intra::V_PRED]
+        + gRdlite.me.angleDeltaFacBits[intra::V_PRED - intra::V_PRED]
+                                      [MAX_ANGLE_DELTA + 3];
+    CHECK(lumaRate == expect);
+}
+
 TEST_CASE("frame auto matches the generator policy golden bit-exactly") {
     // golden: golden_gen golden_frame (d3_modes / d3_recon / d3_coeffs) -"
     // identical D2 policy over verbatim SVT primitives, decisions evaluated
@@ -1625,38 +1715,38 @@ TEST_CASE("frame auto 8x8 with quantization matches the QW1 generator golden") {
         18,  5,  7, 13, 14,  2, 20,  8,  6, 24,  3,  9, 11, 17,  5, 19,
         22,  1,  8, 15,  4, 29,  7, 13, 16, 28, 12, 20,  2, 31,  9, 26,
         21,  3,  5,  9, 19,  2,  8, 14,  7, 13,  5,  1, 25,  4,  6, 18};
-    const std::uint8_t goldenModes[4] = {5, 5, 6, 0};
+    const std::uint8_t goldenModes[4] = {5, 0, 6, 0};
     const std::uint8_t goldenRecon[256] = {
-        21, 0, 3, 7, 21, 2, 8, 19, 13, 16, 8, 1, 19, 12, 6, 16,
-        15, 7, 22, 0, 9, 15, 31, 6, 12, 19, 6, 14, 0, 23, 15, 10,
-        20, 3, 2, 11, 15, 5, 15, 15, 9, 24, 3, 5, 17, 15, 7, 17,
-        25, 0, 14, 17, 0, 30, 7, 19, 14, 24, 16, 16, 5, 34, 14, 19,
-        8, 12, 0, 6, 1, 22, 0, 17, 17, 3, 23, 7, 13, 7, 35, 4,
-        12, 18, 11, 6, 4, 27, 10, 16, 18, 2, 6, 12, 15, 2, 20, 10,
-        10, 27, 4, 8, 12, 20, 14, 17, 23, 5, 16, 17, 9, 26, 12, 20,
-        21, 24, 13, 22, 8, 33, 18, 23, 15, 1, 0, 5, 22, 0, 8, 13,
-        13, 14, 11, 0, 19, 5, 2, 15, 18, 5, 20, 2, 9, 7, 30, 2,
-        11, 18, 4, 14, 0, 24, 12, 5, 19, 4, 2, 12, 14, 0, 15, 10,
-        9, 25, 0, 8, 12, 17, 4, 17, 27, 3, 19, 19, 0, 31, 11, 17,
-        17, 24, 13, 17, 3, 35, 12, 18, 16, 7, 5, 9, 3, 22, 0, 17,
-        22, 2, 23, 4, 14, 4, 36, 2, 14, 11, 5, 14, 0, 24, 6, 11,
-        20, 4, 8, 7, 18, 0, 21, 8, 10, 22, 1, 5, 14, 13, 7, 14,
-        24, 9, 16, 15, 9, 25, 11, 19, 14, 28, 11, 17, 0, 40, 6, 20,
-        16, 6, 0, 7, 18, 0, 6, 13, 13, 8, 5, 0, 24, 1, 2, 15};
+        18, 0, 6, 9, 19, 0, 7, 21, 13, 14, 10, 0, 21, 9, 7, 15,
+        14, 7, 23, 1, 8, 14, 31, 7, 12, 19, 5, 14, 0, 23, 14, 9,
+        20, 2, 1, 10, 16, 6, 15, 14, 10, 26, 0, 8, 13, 17, 5, 17,
+        27, 0, 11, 16, 0, 34, 8, 17, 18, 25, 14, 18, 3, 35, 13, 19,
+        11, 12, 0, 4, 3, 26, 0, 14, 23, 2, 24, 5, 14, 5, 36, 3,
+        13, 16, 9, 6, 5, 29, 10, 15, 20, 4, 8, 8, 18, 0, 21, 9,
+        9, 26, 4, 9, 11, 19, 14, 18, 25, 10, 16, 16, 9, 25, 11, 19,
+        18, 24, 16, 23, 6, 30, 17, 26, 16, 6, 0, 7, 18, 0, 6, 13,
+        13, 14, 12, 0, 22, 8, 5, 18, 18, 8, 19, 4, 11, 6, 33, 2,
+        11, 18, 4, 15, 0, 25, 14, 8, 19, 7, 0, 14, 16, 0, 18, 10,
+        9, 25, 0, 8, 12, 18, 7, 18, 27, 6, 18, 21, 1, 30, 14, 17,
+        17, 24, 13, 17, 2, 35, 12, 20, 16, 11, 4, 11, 5, 20, 0, 17,
+        22, 1, 23, 4, 14, 4, 36, 2, 14, 15, 4, 16, 0, 23, 10, 11,
+        20, 3, 8, 7, 18, 0, 21, 8, 10, 25, 0, 7, 16, 11, 10, 14,
+        24, 9, 16, 15, 9, 25, 11, 19, 15, 31, 10, 19, 1, 39, 9, 20,
+        16, 6, 0, 6, 18, 0, 6, 13, 13, 12, 3, 0, 26, 0, 6, 15};
     const std::int32_t goldenCoeffs[256] = {
         -79, -1, 1, 1, 0, 0, 1, -1, -1, 0, 0, 0, 1, 1, 0, 2,
-        1, 0, 0, 0, 0, 0, -1, 1, -1, 0, 0, 0, 0, -1, 0, 0,
+        1, 0, 0, -1, 0, 0, -1, 1, -1, 0, 0, 0, 0, -1, 0, 0,
         0, 0, 0, 0, 1, 0, 1, -1, 0, 0, 0, 0, 1, 0, 0, 0,
         0, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0, 1, -1, -1, 0,
-        -4, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
-        -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1,
-        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
-        -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
-        -6, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
+        -3, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
         -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2,
         0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
         -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
-        1, 0, 1, 1, 0, 0, 1, -1, 0, 0, 0, 0, 0, 2, 0, 1,
+        -4, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, -1,
+        -1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2,
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 1, -1,
+        -1, 0, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+        1, 0, 1, 1, 0, 0, 0, -1, 0, 0, 0, 0, 0, 2, 0, 1,
         0, 0, 0, 0, 0, 0, -1, 2, 0, 0, 0, 0, -1, 0, -1, 0,
         -1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 0, 1, -1,
         0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, -1, 1, 1, -1};
@@ -1909,6 +1999,8 @@ TEST_CASE("gpu frame auto 8x8 with quantization matches host encodeFrameAuto8x8Q
                                                         leftHost, nLeftPx, 0,
                                                         static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
+            deltaArg = d.angleDelta;
+            dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
 
             // GPU EXECUTION of the winner: predict -> subtract -> fwd ->
             // quantize fp -> inverse on dqcoeff
@@ -2149,6 +2241,8 @@ TEST_CASE("gpu frame auto 8x8 matches host encodeFrameAuto8x8 (host decides, gpu
                                                         leftHost, nLeftPx, 0,
                                                         static_cast<std::uint8_t>(alVal), nctx, gRdlite);
             modesGot[by * 2 + bx] = static_cast<std::uint8_t>(d.mode);
+            deltaArg = d.angleDelta;
+            dDelta.uploadFrom(&deltaArg, sizeof(deltaArg));
 
             // GPU EXECUTION of the winner
             int modeArg = d.mode;
@@ -2527,7 +2621,7 @@ TEST_CASE("frame auto 16x16 matches the f16 generator golden (real top-right)") 
     // carries the SAME value - port == mirror == the reference behavior.
     static const std::uint8_t goldenRecon[1024] = {
         4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64,
-        68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 117, 120, 124, 128,
+        68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128,
         8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68,
         72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132,
         12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72,
@@ -2599,10 +2693,10 @@ TEST_CASE("frame auto 16x16 matches the f16 generator golden (real top-right)") 
     // coeff spot pins from the f16_coeffs gate line
     const std::int32_t goldenHeads[4][16] = {
         {-8221, -2344, 0, -257, 0, -90, 0, -44, 3, -24, 0, -14, 0, -7, 0, -3},
-        {2854, -1608, 51, -183, 4, -66, 10, -27, 4, -30, -10, -4, -7, -3, 4, 3},
+        {2509, -1476, 91, -158, 15, -49, 20, -31, 2, -21, 1, -10, -10, -8, -2, 2},
         {-12025, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
         {-10113, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
-    bool coeffsOk = true;
+        bool coeffsOk = true;
     for (int b = 0; b < 4; ++b) {
         for (int i = 0; i < 16; ++i) {
             if (coeffs[b * 256 + i] != goldenHeads[b][i]) coeffsOk = false;
@@ -2675,7 +2769,11 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
         }
 
     const std::uint8_t goldenModes[4] = {10, 7, 0, 0};
-    const unsigned char goldenBytes[3] = {0xe1, 0x37, 0xb0};
+    const unsigned char goldenBytes[3] = {0xe1, 0x45, 0x70};
+    // RE6: the Q variant's OWN gate (bsf1q - the q100 RD-lite decide with the
+    // quantized-recon feedback; the lossless bsf1 bytes above cover only the
+    // q0 decide, whose chosen delta can differ).
+    const unsigned char goldenBytesQ[3] = {0xe1, 0x41, 0x08};
 
     std::int32_t coeffs[1024] = {0};
     std::uint8_t modes[4] = {0};
@@ -2701,7 +2799,9 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
     entropy::AomReader r;
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
     r.allow_update_cdf = 1;
-    static const int wantRt[7] = {10, 7, 3, 0, 0, 0, 0};
+    static const int wantRt[7] = {10, 7, 5, 0, 0, 0, 0};
+    // RE6: the Q variant's read-back wants (bsf1q_rt; raw symbol 4 = delta +1)
+    static const int wantRtQ[7] = {10, 7, 4, 0, 0, 0, 0};
     int ri = 0;
     for (int b = 0; b < 4; ++b) {
         const int bx = b % 2, by = b / 2;
@@ -2738,7 +2838,7 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
         if (modesQ[i] != goldenModes[i]) modesQOk = false;
     CHECK(modesQOk);
     REQUIRE(wQ.pos == 3);
-    for (int i = 0; i < 3; ++i) CHECK((unsigned)bufQ[i] == goldenBytes[i]);
+    for (int i = 0; i < 3; ++i) CHECK((unsigned)bufQ[i] == goldenBytesQ[i]);
     // TD5b: the Q variant's bucket = 2 (q100); the reader side must walk the
     // SAME symbol sequence through the same bucket for the adapted-CDF
     // equality to hold.
@@ -2761,11 +2861,11 @@ TEST_CASE("frame auto 16x16 emits kf luma symbols through l7 (f16dc gate)") {
             (int)entropy::readKfLumaMode(&rQ, &fcRQ, entropy::BLOCK_16X16, topCtxQ, leftCtxQ, &deltaQ);
         CHECK(mQ == wantRt[riQ++]);
         if (entropy::isDirectionalMode((entropy::PredictionMode)modesQ[b])) {
-            CHECK(deltaQ == wantRt[riQ++]);
+            CHECK(deltaQ == wantRtQ[riQ++]);
         }
         if (entropy::filterIntraAllowed(1, entropy::BLOCK_16X16, 0, (std::uint32_t)modesQ[b])) {
             entropy::FilterIntraMode fQ;
-            CHECK(entropy::readFilterIntra(&rQ, &fcRQ, entropy::BLOCK_16X16, &fQ) == wantRt[riQ++]);
+            CHECK(entropy::readFilterIntra(&rQ, &fcRQ, entropy::BLOCK_16X16, &fQ) == wantRtQ[riQ++]);
         }
     }
     CHECK(entropy::ecFrameCdfsEqual(&fcQ, &fcRQ) == 1);
@@ -2829,10 +2929,11 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
     // through the adapting frame-context cdf - the mirror's ts3 drive
     // gained the same writes, so the stream grew 26 -> 29 bytes)
     REQUIRE(w.pos == 29);
-    static const unsigned char wantBytes[29] = {0xdd, 0x17, 0x28, 0xcb, 0x39, 0x0f, 0xfd, 0x3e,
-                                                0x1f, 0x37, 0x6f, 0x56, 0xf9, 0xde, 0x80, 0xc6,
-                                                0x7f, 0x98, 0xc2, 0xbe, 0x28, 0x0f, 0x2b, 0x0a,
-                                                0xe6, 0xea, 0x0d, 0xc5, 0x80};
+    static const unsigned char wantBytes[29] = {
+        0xdd, 0x17, 0x28, 0xcb, 0x39, 0x0f, 0xfd, 0x3e,
+        0x1f, 0x37, 0x6f, 0x73, 0xb0, 0x20, 0xd3, 0x2d,
+        0x4b, 0x9e, 0x84, 0xc8, 0x2e, 0xd5, 0x6a, 0xb9,
+        0xd6, 0x3b, 0x93, 0x60, 0xa0};
     for (int i = 0; i < 29; ++i) CHECK((unsigned)buf[i] == wantBytes[i]);
     // quantized coefficients == gate ecfrm_coeffs (generator raster order)
     static const std::int32_t genCoeffs[1024] = {
@@ -2852,7 +2953,7 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        32, -15, 0, -2, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        30, -14, 1, -1, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         -5, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         3, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -2907,37 +3008,37 @@ TEST_CASE("frame auto 16x16Q token emission matches gate (skip=0, q100)") {
     // reconstructed frame == gate ecfrm_recon (generator raster order)
     static const std::uint8_t genRecon[1024] = {
         6, 9, 13, 17, 21, 24, 28, 33, 37, 42, 46, 49, 53, 57, 62, 64,
-        66, 70, 75, 80, 83, 87, 91, 96, 100, 105, 109, 112, 115, 121, 126, 131,
+        69, 71, 76, 80, 83, 87, 90, 95, 100, 105, 109, 112, 117, 123, 128, 132,
         8, 11, 16, 20, 24, 27, 31, 35, 40, 45, 48, 52, 56, 60, 64, 67,
-        70, 73, 79, 84, 88, 91, 95, 100, 104, 109, 112, 114, 119, 125, 130, 134,
+        72, 76, 80, 84, 88, 91, 94, 99, 104, 109, 113, 117, 121, 126, 132, 136,
         13, 15, 20, 24, 28, 31, 35, 40, 44, 49, 53, 56, 60, 64, 69, 71,
-        74, 77, 83, 88, 92, 95, 99, 103, 107, 111, 115, 119, 123, 128, 133, 137,
+        76, 80, 84, 88, 92, 94, 97, 102, 107, 112, 117, 120, 124, 129, 135, 139,
         18, 21, 25, 30, 33, 37, 40, 45, 50, 54, 58, 61, 65, 70, 74, 77,
-        79, 82, 88, 93, 96, 100, 102, 107, 112, 116, 120, 122, 127, 132, 136, 141,
+        81, 85, 89, 93, 95, 98, 101, 106, 111, 116, 120, 124, 128, 133, 138, 142,
         22, 24, 29, 33, 37, 40, 44, 49, 53, 58, 62, 65, 69, 73, 78, 80,
-        84, 87, 93, 97, 100, 104, 108, 112, 116, 120, 124, 126, 131, 136, 140, 145,
+        86, 90, 93, 97, 100, 104, 107, 111, 115, 120, 124, 128, 132, 137, 142, 146,
         25, 28, 32, 36, 40, 43, 47, 52, 56, 61, 65, 68, 72, 76, 81, 83,
-        88, 92, 96, 102, 106, 109, 113, 117, 120, 125, 128, 131, 135, 140, 144, 149,
+        90, 93, 98, 103, 106, 108, 112, 116, 120, 125, 129, 132, 136, 141, 146, 150,
         28, 31, 35, 40, 44, 47, 51, 55, 60, 64, 68, 71, 75, 80, 84, 87,
-        92, 97, 102, 107, 110, 114, 117, 122, 125, 129, 133, 135, 139, 144, 149, 153,
+        94, 99, 103, 107, 110, 113, 116, 121, 125, 129, 133, 137, 141, 145, 151, 154,
         32, 35, 40, 44, 48, 51, 55, 59, 64, 69, 72, 76, 80, 84, 88, 91,
-        97, 100, 106, 111, 114, 118, 121, 126, 129, 133, 137, 140, 144, 149, 153, 157,
+        99, 103, 107, 111, 114, 117, 120, 125, 129, 133, 138, 141, 145, 149, 154, 157,
         37, 40, 44, 49, 52, 56, 60, 64, 69, 73, 77, 80, 84, 89, 93, 96,
-        100, 103, 109, 114, 117, 121, 125, 129, 133, 138, 141, 144, 147, 153, 157, 161,
+        102, 106, 110, 114, 117, 120, 124, 128, 133, 138, 142, 145, 149, 153, 156, 159,
         42, 45, 49, 54, 58, 61, 65, 69, 74, 79, 82, 86, 89, 94, 98, 101,
-        102, 105, 111, 117, 120, 124, 128, 133, 137, 142, 145, 148, 152, 156, 160, 163,
+        104, 108, 113, 117, 120, 123, 127, 132, 137, 142, 146, 149, 151, 155, 158, 161,
         46, 49, 53, 57, 61, 65, 68, 73, 78, 82, 86, 89, 93, 97, 102, 104,
-        105, 108, 114, 120, 124, 128, 132, 137, 141, 145, 149, 152, 155, 159, 163, 166,
+        107, 111, 116, 120, 124, 127, 130, 136, 141, 145, 148, 151, 154, 157, 161, 163,
         49, 52, 56, 61, 64, 68, 71, 76, 81, 85, 89, 92, 96, 101, 105, 108,
-        109, 112, 118, 124, 128, 133, 137, 141, 146, 150, 153, 156, 159, 163, 167, 170,
+        111, 115, 120, 124, 127, 131, 135, 139, 144, 149, 152, 155, 158, 161, 165, 167,
         53, 55, 60, 64, 68, 71, 75, 80, 84, 89, 93, 96, 100, 104, 109, 111,
-        114, 118, 124, 129, 133, 137, 141, 145, 151, 155, 158, 161, 164, 168, 172, 175,
+        116, 120, 124, 129, 132, 135, 138, 143, 148, 153, 156, 159, 163, 166, 170, 172,
         57, 60, 64, 68, 72, 76, 79, 84, 89, 93, 97, 100, 104, 108, 113, 116,
-        119, 124, 129, 134, 138, 142, 146, 150, 155, 159, 163, 166, 170, 174, 178, 181,
+        121, 125, 130, 134, 136, 140, 143, 147, 152, 157, 161, 165, 168, 172, 176, 178,
         61, 64, 68, 73, 76, 80, 84, 88, 93, 97, 101, 104, 108, 113, 117, 120,
-        124, 128, 133, 138, 142, 145, 149, 154, 159, 163, 167, 171, 174, 179, 183, 186,
+        127, 130, 133, 137, 140, 143, 146, 151, 156, 161, 166, 169, 173, 177, 181, 183,
         64, 67, 71, 75, 79, 83, 86, 91, 96, 100, 104, 107, 111, 115, 120, 122,
-        127, 131, 135, 140, 144, 147, 151, 156, 161, 166, 170, 173, 177, 182, 186, 189,
+        129, 132, 136, 139, 142, 145, 148, 153, 159, 164, 168, 172, 176, 180, 184, 186,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -3164,7 +3265,7 @@ gpurt::DeviceBuffer dAbove(32);
             int modeArg = d.mode;
             amArg = (int)nctx.aboveMode;
             lmArg = (int)nctx.leftMode;
-            int deltaArg = 0;
+            int deltaArg = d.angleDelta;
             int nTopArg = nTopPx;
             int nTrArg = nTopRightPx;
             int nLeftArg = nLeftPx;
@@ -3397,7 +3498,7 @@ TEST_CASE("gpu frame auto 16x16 with quantization matches host encodeFrameAuto16
             int modeArg = d.mode;
             amArg = (int)nctx.aboveMode;
             lmArg = (int)nctx.leftMode;
-            int deltaArg = 0;
+            int deltaArg = d.angleDelta;
             int nTopArg = nTopPx;
             int nTrArg = nTopRightPx;
             int nLeftArg = nLeftPx;
@@ -3603,18 +3704,18 @@ bool modesOk = true;
     const std::uint8_t goldenReconRow0[64] = {
         3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33,
         35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 63, 65,
-        66, 68, 70, 72, 75, 76, 78, 80, 83, 85, 86, 88, 90, 92, 94, 96,
-        98, 100, 102, 104, 107, 108, 110, 112, 114, 116, 118, 120, 122, 124, 127, 128};
+        67, 68, 70, 72, 74, 76, 79, 80, 82, 84, 86, 88, 90, 92, 94, 96,
+        98, 101, 103, 104, 106, 109, 110, 112, 114, 116, 118, 120, 122, 124, 127, 128};
     const std::uint8_t goldenReconRow30[64] = {
         62, 64, 67, 69, 70, 72, 74, 76, 78, 81, 82, 84, 87, 88, 90, 92,
         94, 96, 99, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124,
-        126, 128, 130, 132, 135, 136, 138, 141, 142, 144, 146, 149, 151, 153, 155, 157,
-        159, 160, 162, 165, 167, 168, 170, 172, 174, 176, 179, 180, 182, 184, 186, 188};
+        127, 128, 130, 133, 134, 136, 138, 140, 143, 145, 146, 148, 151, 152, 154, 157,
+        159, 160, 163, 164, 166, 168, 170, 172, 175, 176, 178, 181, 182, 185, 186, 189};
     const std::uint8_t goldenReconRow31[64] = {
         64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94,
         96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126,
-        128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158,
-        160, 162, 163, 166, 169, 170, 172, 174, 175, 177, 180, 182, 184, 186, 188, 190};
+        128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148, 149, 152, 154, 155, 158,
+        160, 162, 164, 165, 168, 169, 172, 174, 176, 178, 179, 182, 184, 186, 188, 190};
 bool reconOk = true;
     for (int x = 0; x < 64; ++x) {
         if (recon.at(x, 0) != goldenReconRow0[x]) reconOk = false;
@@ -3849,7 +3950,7 @@ TEST_CASE("gpu frame auto 32x32 matches host encodeFrameAuto32x32 (host decides,
             int modeArg = d.mode;
             amArg = (int)nctx.aboveMode;
             lmArg = (int)nctx.leftMode;
-            int deltaArg = 0;
+            int deltaArg = d.angleDelta;
             int nTopArg = nTopPx;
             int nTrArg = nTopRightPx;
             int nLeftArg = nLeftPx;
@@ -4082,7 +4183,7 @@ TEST_CASE("gpu frame auto 32x32 with quantization matches host encodeFrameAuto32
             int modeArg = d.mode;
             amArg = (int)nctx.aboveMode;
             lmArg = (int)nctx.leftMode;
-            int deltaArg = 0;
+            int deltaArg = d.angleDelta;
             int nTopArg = nTopPx;
             int nTrArg = nTopRightPx;
             int nLeftArg = nLeftPx;
@@ -4425,7 +4526,7 @@ TEST_CASE("gpu frame auto 64x64 matches host encodeFrameAuto64x64 (host decides,
             int modeArg = d.mode;
             amArg = (int)nctx.aboveMode;
             lmArg = (int)nctx.leftMode;
-            int deltaArg = 0;
+            int deltaArg = d.angleDelta;
             int nTopArg = nTopPx;
             int nTrArg = nTopRightPx;
             int nLeftArg = nLeftPx;
@@ -4659,7 +4760,7 @@ TEST_CASE("gpu frame auto 64x64 with quantization matches host encodeFrameAuto64
             int modeArg = d.mode;
             amArg = (int)nctx.aboveMode;
             lmArg = (int)nctx.leftMode;
-            int deltaArg = 0;
+            int deltaArg = d.angleDelta;
             int nTopArg = nTopPx;
             int nTrArg = nTopRightPx;
             int nLeftArg = nLeftPx;
@@ -5000,7 +5101,7 @@ TEST_CASE("gpu frame auto chroma 16x16 matches host encodeFrameAutoChroma16x16")
             int modeArg = folded;
             int amArg = (int)nctx.aboveMode;
             int lmArg = (int)nctx.leftMode;
-            int deltaArg = 0;
+            int deltaArg = d.angleDelta;
             int nTopArg = nTopPx;
             int nTrArg = nTopRightPx;
             int nLeftArg = nLeftPx;

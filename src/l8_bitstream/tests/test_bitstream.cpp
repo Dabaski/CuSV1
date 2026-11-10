@@ -129,13 +129,13 @@ TEST_CASE("structural keyframe TU assembly matches gate") {
         int topCtx, leftCtxKf;
         entropy::getKfYModeCtx(leftMode[b] >= 0 ? 1 : 0, leftMode[b] < 0 ? 0 : leftMode[b],
                                aboveMode[b] >= 0 ? 1 : 0, aboveMode[b] < 0 ? 0 : aboveMode[b],
-                               &topCtx, &leftCtxKf);
-        entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
-                                 static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, 0);
-    }
-    entropy::odEcStopEncode(&w);
-    REQUIRE(w.pos == 5);
-    static const unsigned char wantTile[5] = {0xc5, 0x2d, 0xb8, 0x76, 0x0c};
+&topCtx, &leftCtxKf);
+entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
+static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, 0);
+}
+entropy::odEcStopEncode(&w);
+REQUIRE(w.pos == 5);
+static const unsigned char wantTile[5] = {0xc5, 0x2d, 0xb8, 0x76, 0x0c};
     for (int i = 0; i < 5; ++i) CHECK((unsigned)tileBuf[i] == wantTile[i]);
 
     // sequence header payload (write_sequence_header_obu :3699-3763 with
@@ -189,10 +189,13 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
     static const unsigned char wantFh2[5] = {0x10, 0xd9, 0x00, 0x00, 0x01};
     for (int i = 0; i < 5; ++i) CHECK((unsigned)fh2Buf[i] == wantFh2[i]);
 
-    // tile v2: partition plane + skip(0) + kf modes + the TS3-proven token
-    // chains; the coefficients come from the pipeline encode
-    // (encodeFrameAuto16x16Q - the TS3c-proven bit-exact path)
-    pixels::Plane plane(32, 32, 4);
+// tile v2: partition plane + skip(0) + kf modes + the TS3-proven token
+// chains; the coefficients come from the pipeline encode
+// (encodeFrameAuto16x16Q - the TS3c-proven bit-exact path)
+// RE6: the emission carries the DECIDED deltas (gate bsf3v2_deltas
+// 0 1 0 0 - the q100 RD-lite decision's chosen angle delta per block).
+static const int wantDeltas[4] = {0, 1, 0, 0};
+pixels::Plane plane(32, 32, 4);
     pixels::Plane recon(32, 32, 4);
     for (int y = 0; y < 32; ++y)
         for (int x = 0; x < 32; ++x)
@@ -239,8 +242,8 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
         int topCtx, leftCtxKf;
         entropy::getKfYModeCtx(b % 2 > 0 ? 1 : 0, leftMode, b / 2 > 0 ? 1 : 0, aboveMode,
                                &topCtx, &leftCtxKf);
-        entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
-                                 static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, 0);
+entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
+static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, wantDeltas[b]);
         // filter-intra flag: the decoder reads it for DC_PRED blocks at
         // bsize <= 32x32 (aom reconintra.h:68-80); the symbol is written
         // exactly when the decoder reads it (mode DC), through the ADAPTING
@@ -271,14 +274,14 @@ TEST_CASE("lossy header v2 + TU v2 match gate (TS4)") {
     memset(tuBuf, 0, sizeof(tuBuf));
     const std::uint32_t tuSize =
         bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, w.pos);
-    REQUIRE(tuSize == 49);
-    static const unsigned char wantTu2[49] = {
-        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x22,
-        0x10, 0xd9, 0x00, 0x00, 0x01, 0xc2, 0xb8, 0xb2, 0x8c, 0xb3, 0x90, 0xff, 0xd3, 0xe1, 0xf3,
-        0x76, 0x74, 0xcc, 0x49, 0x40, 0x31, 0xc3, 0x46, 0xd7, 0x74, 0x60, 0x35, 0x11, 0xdd, 0xf8,
-        0x7a, 0x8e, 0x00, 0x1b};
-    for (int i = 0; i < 49; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
-}
+    REQUIRE(tuSize == 50);
+static const unsigned char wantTu2[50] = {
+    0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x23, 0x10,
+    0xd9, 0x00, 0x00, 0x01, 0xc2, 0xb8, 0xb2, 0x8c, 0xb3, 0x90, 0xff, 0xd3, 0xe1, 0xf3, 0x76, 0x75,
+    0xa8, 0x84, 0x1e, 0x44, 0x62, 0xd6, 0x68, 0xe4, 0x70, 0x56, 0xc5, 0xe1, 0x6c, 0x57, 0xa4, 0xef,
+    0x8e, 0xc0};
+for (int i = 0; i < 50; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
+    }
 
 TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate bytes") {
     // TS4 milestone artifact: goldens/structural_keyframe.obu is the
@@ -292,13 +295,16 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
     // composed TU (l6 coefficients + l7 tile symbols + l8 assembly) ==
     // committed file == gate bytes. The USER runs the external decode
     // check (aomdec/dav1d/ffmpeg - decode handoff attempt #3).
-    static const unsigned char wantTu2[49] = {
-        0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x22,
-        0x10, 0xd9, 0x00, 0x00, 0x01, 0xc2, 0xb8, 0xb2, 0x8c, 0xb3, 0x90, 0xff, 0xd3, 0xe1, 0xf3,
-        0x76, 0x74, 0xcc, 0x49, 0x40, 0x31, 0xc3, 0x46, 0xd7, 0x74, 0x60, 0x35, 0x11, 0xdd, 0xf8,
-        0x7a, 0x8e, 0x00, 0x1b};
+static const unsigned char wantTu2[50] = {
+    0x12, 0x00, 0x0a, 0x09, 0x10, 0x00, 0x00, 0x02, 0x27, 0xfe, 0x60, 0xc2, 0xa0, 0x32, 0x23, 0x10,
+    0xd9, 0x00, 0x00, 0x01, 0xc2, 0xb8, 0xb2, 0x8c, 0xb3, 0x90, 0xff, 0xd3, 0xe1, 0xf3, 0x76, 0x75,
+    0xa8, 0x84, 0x1e, 0x44, 0x62, 0xd6, 0x68, 0xe4, 0x70, 0x56, 0xc5, 0xe1, 0x6c, 0x57, 0xa4, 0xef,
+    0x8e, 0xc0};
 
     // composed v2 TU (identical pipeline to the TS4 test)
+// RE6: the emission carries the DECIDED deltas (gate bsf3v2_deltas
+// 0 1 0 0 - the q100 RD-lite decision's chosen angle delta per block).
+static const int wantDeltas[4] = {0, 1, 0, 0};
     pixels::Plane plane(32, 32, 4);
     pixels::Plane recon(32, 32, 4);
     for (int y = 0; y < 32; ++y)
@@ -337,8 +343,8 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
         int topCtx, leftCtxKf;
         entropy::getKfYModeCtx(b % 2 > 0 ? 1 : 0, leftMode, b / 2 > 0 ? 1 : 0, aboveMode,
                                &topCtx, &leftCtxKf);
-        entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
-                                 static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, 0);
+entropy::writeKfLumaMode(&w, &fc, entropy::BLOCK_16X16,
+static_cast<entropy::PredictionMode>(modes[b]), topCtx, leftCtxKf, wantDeltas[b]);
         // the FI symbol: identical surface to the TS4 walk above (the
         // decoder reads it for DC_PRED blocks at bsize <= 32x32, through
         // the ADAPTING frame-context cdf)
@@ -359,8 +365,8 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
     unsigned char tuBuf[128];
     memset(tuBuf, 0, sizeof(tuBuf));
     const std::uint32_t tuSize = bitstream::assembleStructuralKeyframeTUv2(tuBuf, tileBuf, w.pos);
-    REQUIRE(tuSize == 49);
-    for (int i = 0; i < 49; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
+  REQUIRE(tuSize == 50);
+  for (int i = 0; i < 50; ++i) CHECK((unsigned)tuBuf[i] == wantTu2[i]);
 
     // committed artifact identity. The goldens path derives from __FILE__
     // (robust against compile-definition quoting across CMake generators -
@@ -376,8 +382,8 @@ TEST_CASE("structural keyframe .obu file equals the composed v2 TU and the gate 
     unsigned char fileBytes[64] = {0};
     const size_t n = fread(fileBytes, 1, sizeof(fileBytes), f);
     fclose(f);
-    REQUIRE(n == 49);
-    for (int i = 0; i < 49; ++i) CHECK(fileBytes[i] == wantTu2[i]);
+  REQUIRE(n == 50);
+  for (int i = 0; i < 50; ++i) CHECK(fileBytes[i] == wantTu2[i]);
 }
 
 // ---- FS5b: the per-geometry single-TU v3 artifacts (4/8/16/64) -------------

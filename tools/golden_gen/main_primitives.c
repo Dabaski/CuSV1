@@ -1192,7 +1192,8 @@ int main(void) {
         uint8_t recon[1024];
         int32_t coeffs[1024];
         int modes[4] = {0};
-        svtd_frame_auto_16x16_blocks(src, recon, coeffs, modes);
+        int deltas[4] = {0};
+        svtd_frame_auto_16x16_blocks(src, recon, coeffs, modes, deltas, 0);
         printf("f16_modes:");
         for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
         printf("\n");
@@ -1203,11 +1204,12 @@ int main(void) {
         for (int i = 0; i < 1024; ++i) printf(" %d", coeffs[i]);
         printf("\n");
 
-        uint8_t reconQ[1024];
-        int32_t coeffsQ[1024];
-        int modesQ[4] = {0};
-        svtd_frame_auto_16x16_q(src, reconQ, coeffsQ, modesQ, 100);
-        printf("f16q_modes:");
+uint8_t reconQ[1024];
+int32_t coeffsQ[1024];
+int modesQ[4] = {0};
+int deltasQ[4] = {0};
+svtd_frame_auto_16x16_q(src, reconQ, coeffsQ, modesQ, 100, deltasQ);
+printf("f16q_modes:");
         for (int i = 0; i < 4; ++i) printf(" %d", modesQ[i]);
         printf("\n");
         printf("f16q_recon:");
@@ -1672,7 +1674,8 @@ int main(void) {
         uint8_t recon[1024];
         int32_t coeffs[1024];
         int modes[4] = {0};
-        svtd_frame_auto_16x16_blocks(src, recon, coeffs, modes);
+        int deltas[4] = {0};
+        svtd_frame_auto_16x16_blocks(src, recon, coeffs, modes, deltas, 0);
         printf("bsf1_modes:");
         for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
         printf("\n");
@@ -1700,7 +1703,7 @@ int main(void) {
             printf(" %d %d", top_ctx, left_ctx);
             aom_write_symbol(&w, modes[b], bsf1_kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
             if (BLOCK_16X16 >= BLOCK_8X8 && av1_is_directional_mode((PredictionMode)modes[b])) {
-                aom_write_symbol(&w, MAX_ANGLE_DELTA, bsf1_angle_delta_cdf[modes[b] - V_PRED],
+                aom_write_symbol(&w, MAX_ANGLE_DELTA + deltas[b], bsf1_angle_delta_cdf[modes[b] - V_PRED],
                                  2 * MAX_ANGLE_DELTA + 1);
             }
             if (svt_aom_filter_intra_allowed(1, BLOCK_16X16, 0, (uint32_t)modes[b])) {
@@ -1737,7 +1740,8 @@ int main(void) {
             if (av1_is_directional_mode((PredictionMode)modes[b])) {
                 const int d = aom_read_symbol_(&r, bsf1_angle_delta_cdf_r[modes[b] - V_PRED],
                                                2 * MAX_ANGLE_DELTA + 1);
-                if (d != MAX_ANGLE_DELTA) rt_bad = 1;
+                // RE6: the read twin checks the CHOSEN delta (deltas[b])
+                if (d != MAX_ANGLE_DELTA + deltas[b]) rt_bad = 1;
                 printf(" %d", d);
             }
             if (svt_aom_filter_intra_allowed(1, BLOCK_16X16, 0, (uint32_t)modes[b])) {
@@ -1767,6 +1771,111 @@ int main(void) {
             }
         }
         printf("bsf1_cdf_eq %d\n", cdf_eq);
+    }
+
+    // ---- BSF1q: the same f16dc fixture at the Q rung's qindex (RE6) --------
+    // The port's encodeFrameAuto16x16Q decides with the q100 RD-lite context
+    // (lambda 100), so the chosen angle delta of the directional block can
+    // differ from the lossless (q0) bsf1 walk's. The emission surface is
+    // byte-identical in shape (the syntax cdfs are qindex-independent; only
+    // the coefficient families are bucketed, and this walk emits no tokens).
+    {
+        uint8_t src[1024];
+        for (int y = 0; y < 32; ++y) {
+            for (int x = 0; x < 32; ++x) {
+                if (y < 16)
+                    src[y * 32 + x] = (uint8_t)(4 * (x + y + 1));
+                else if (x < 16)
+                    src[y * 32 + x] = 94;
+                else
+                    src[y * 32 + x] = 126;
+            }
+        }
+        uint8_t recon[1024];
+        int32_t coeffs[1024];
+        int modes[4] = {0};
+        int deltas[4] = {0};
+        // THE Q walk (the quantized-recon feedback the l6 encodeFrameAuto16x16Q
+        // carries): the lossless-recon blocks walk at q100 would decide with
+        // different edges and can pick a different delta.
+        svtd_frame_auto_16x16_q(src, recon, coeffs, modes, 100, deltas);
+        printf("bsf1q_modes:");
+        for (int i = 0; i < 4; ++i) printf(" %d", modes[i]);
+        printf("\n");
+
+        static AomCdfProb bsf1q_kf_y_cdf[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+        memcpy(bsf1q_kf_y_cdf, svt_aom_default_kf_y_mode_cdf, sizeof(bsf1q_kf_y_cdf));
+        static AomCdfProb bsf1q_angle_delta_cdf[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+        memcpy(bsf1q_angle_delta_cdf, default_angle_delta_cdf, sizeof(bsf1q_angle_delta_cdf));
+        static AomCdfProb bsf1q_filter_intra_cdfs[BLOCK_SIZES_ALL][CDF_SIZE(2)];
+        memcpy(bsf1q_filter_intra_cdfs, default_filter_intra_cdfs, sizeof(bsf1q_filter_intra_cdfs));
+
+        AomWriter w;
+        w.ec.buf = ec_buf;
+        svt_od_ec_enc_reset(&w.ec);
+        w.allow_update_cdf = 1;
+        w.pos              = 0;
+
+        printf("bsf1q_ctx");
+        for (int b = 0; b < 4; ++b) {
+            const int bx = b % 2, by = b / 2;
+            const int top_mode  = by > 0 ? modes[(by - 1) * 2 + bx] : DC_PRED;
+            const int left_mode = bx > 0 ? modes[by * 2 + bx - 1] : DC_PRED;
+            const int top_ctx   = intra_mode_context[top_mode];
+            const int left_ctx  = intra_mode_context[left_mode];
+            printf(" %d %d", top_ctx, left_ctx);
+            aom_write_symbol(&w, modes[b], bsf1q_kf_y_cdf[top_ctx][left_ctx], INTRA_MODES);
+            if (BLOCK_16X16 >= BLOCK_8X8 && av1_is_directional_mode((PredictionMode)modes[b])) {
+                aom_write_symbol(&w, MAX_ANGLE_DELTA + deltas[b],
+                                 bsf1q_angle_delta_cdf[modes[b] - V_PRED],
+                                 2 * MAX_ANGLE_DELTA + 1);
+            }
+            if (svt_aom_filter_intra_allowed(1, BLOCK_16X16, 0, (uint32_t)modes[b])) {
+                aom_write_symbol(&w, 0, bsf1q_filter_intra_cdfs[BLOCK_16X16], 2);
+            }
+        }
+        printf("\n");
+        aom_stop_encode(&w);
+        printf("bsf1q_bytes %u", w.pos);
+        for (uint32_t i = 0; i < w.pos; ++i) printf(" %02x", ec_buf[i]);
+        printf("\n");
+
+        static AomCdfProb bsf1q_kf_y_cdf_r[KF_MODE_CONTEXTS][KF_MODE_CONTEXTS][CDF_SIZE(INTRA_MODES)];
+        memcpy(bsf1q_kf_y_cdf_r, svt_aom_default_kf_y_mode_cdf, sizeof(bsf1q_kf_y_cdf_r));
+        static AomCdfProb bsf1q_angle_delta_cdf_r[DIRECTIONAL_MODES][CDF_SIZE(2 * MAX_ANGLE_DELTA + 1)];
+        memcpy(bsf1q_angle_delta_cdf_r, default_angle_delta_cdf, sizeof(bsf1q_angle_delta_cdf_r));
+        static AomCdfProb bsf1q_filter_intra_cdfs_r[BLOCK_SIZES_ALL][CDF_SIZE(2)];
+        memcpy(bsf1q_filter_intra_cdfs_r, default_filter_intra_cdfs, sizeof(bsf1q_filter_intra_cdfs_r));
+        aom_reader r;
+        if (aom_reader_init(&r, ec_buf, w.pos)) { fprintf(stderr, "BSF1q reader init FAILED\n"); return 1; }
+        r.allow_update_cdf = 1;
+        printf("bsf1q_rt");
+        int rt_bad = 0;
+        for (int b = 0; b < 4; ++b) {
+            const int bx = b % 2, by = b / 2;
+            const int top_mode  = by > 0 ? modes[(by - 1) * 2 + bx] : DC_PRED;
+            const int left_mode = bx > 0 ? modes[by * 2 + bx - 1] : DC_PRED;
+            const int top_ctx   = intra_mode_context[top_mode];
+            const int left_ctx  = intra_mode_context[left_mode];
+            const int m = aom_read_symbol_(&r, bsf1q_kf_y_cdf_r[top_ctx][left_ctx], INTRA_MODES);
+            if (m != modes[b]) rt_bad = 1;
+            printf(" %d", m);
+            if (av1_is_directional_mode((PredictionMode)modes[b])) {
+                const int d = aom_read_symbol_(&r, bsf1q_angle_delta_cdf_r[modes[b] - V_PRED],
+                                               2 * MAX_ANGLE_DELTA + 1);
+                // RE6: the read twin checks the CHOSEN delta (deltas[b])
+                if (d != MAX_ANGLE_DELTA + deltas[b]) rt_bad = 1;
+                printf(" %d", d);
+            }
+            if (svt_aom_filter_intra_allowed(1, BLOCK_16X16, 0, (uint32_t)modes[b])) {
+                const int f = aom_read_symbol_(&r, bsf1q_filter_intra_cdfs_r[BLOCK_16X16], 2);
+                if (f != 0) rt_bad = 1;
+                printf(" %d", f);
+            }
+        }
+        printf("\n");
+        if (rt_bad) { fprintf(stderr, "BSF1q roundtrip FAILED\n"); return 1; }
+        printf("bsf1q_rt_ok 1\n");
     }
 
     // ---- ECP1: l7 partition symbol gate lines (court-ordered exception) ----

@@ -158,10 +158,15 @@ void encodeFrameAuto64x64Q(const pixels::Plane& src, pixels::Plane& recon, std::
 // neighbors: chosen neighbor modes for filt_type (default = no history).
 // RE5 UPDATE: the ranking is now RD-lite (see rdlite.h); the sad field stays
 // the SAD bookkeeping value, rd is the winning RDCOST.
+// RE6 UPDATE: angleDelta is the winning candidate's chosen delta; 0 for every
+// non-directional winner and for every 4x4 block (av1_use_angle_delta,
+// intra_prediction.h:214-216 = bsize >= BLOCK_8X8). Consumed by the emission
+// walks (the predict at the delta + the writeKfLumaMode symbol write).
 struct ModeDecision {
     intra::PredictionMode mode;
     std::uint32_t sad;
     std::uint64_t rd;
+    int angleDelta;
 };
 
 // ---- CH3: chroma (4:2:0) frame compositions --------------------------------
