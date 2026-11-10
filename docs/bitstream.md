@@ -166,11 +166,11 @@ Decoder status (measured, `tools/verify_decode4.ps1 -Geometry`):
 
 | Artifact | Size | Decoded | Result |
 | --- | --- | --- | --- |
-| structural_keyframe_d4.obu | 30 B | 64 B (8x8) | content 1:1 == fs5g4_recon; the 4x4 geometry codes an 8x8 frame: the decoders align frame dims to 8 px, so the 8x8 node reads one 4-symbol partition symbol (forced SPLIT) and codes four 4x4 partition leaves - a 4x4 TU exists only as a leaf (dav1d 1.5.4 trace-verified) |
+| structural_keyframe_d4.obu | 31 B | 64 B (8x8) | content 1:1 == fs5g4_recon; the 4x4 geometry codes an 8x8 frame: the decoders align frame dims to 8 px, so the 8x8 node reads one 4-symbol partition symbol (forced SPLIT) and codes four 4x4 partition leaves - a 4x4 TU exists only as a leaf (dav1d 1.5.4 trace-verified) |
 | structural_keyframe_d8.obu | 30 B | 64 B | content 1:1 == fs28_recon |
-| structural_keyframe_d16.obu | 44 B | 256 B | content 1:1 == fs216_recon |
-| structural_keyframe.obu | 47 B | 1024 B (32x32) | content 1:1 == ecfrm_recon (byte-diffs 0/1024, the fingerprint 05 08 0c 11) |
-| structural_keyframe_d64.obu | 441 B | 4096 B | content 1:1 == fs264_recon |
+| structural_keyframe_d16.obu | 43 B | 256 B | content 1:1 == fs216_recon |
+| structural_keyframe.obu | 50 B | 1024 B (32x32) | content 1:1 == ecfrm_recon (byte-diffs 0/1024, the fingerprint 05 08 0c 11) |
+| structural_keyframe_d64.obu | 440 B | 4096 B | content 1:1 == fs264_recon |
 
 All measured with tools/verify_decode4.ps1
 (ffmpeg 8.1.2 / libdav1d 1.5.3-62, exit 0 per geometry).

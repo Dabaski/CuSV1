@@ -99,12 +99,15 @@ each three-way-identity-tested and decoded with the per-plane
 instrument (`tools/verify_decode4.ps1 -Color <4|8|16|32>`, yuv420p
 compared plane-by-plane):
 
-- color32 (165 B), color16 (133 B), color8 (137 B) and color4
-  (183 B): FULL-PLANE content 1:1 (all three planes equal the
+- color32 (165 B), color16 (136 B), color8 (146 B) and color4
+  (209 B): FULL-PLANE content 1:1 (all three planes equal the
   generator's recon). color16/color32 from CS5; color8 joined at the
   CS7 fix (`5ce0224`, the chroma bottom-left Z-order gate); color4 at
   RT21 (`927e697`, the chroma above-right Z-order gate - its last 43
-  divergent V bytes of 1024, across UV leaves 41/42/48/56).
+  divergent V bytes of 1024, across UV leaves 41/42/48/56). The
+  RE5/RE6 golden events regenerated all four (the RD-lite emission
+  and the angle-delta search changed the coded bytes; the conformance
+  count re-verified per event).
 
 Full-plane color conformance is 4/4, CLOSED - the honest per-plane
 matrix and the full chase record are in `docs/decode_conformance.md`.

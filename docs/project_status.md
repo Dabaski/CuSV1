@@ -18,8 +18,8 @@ instrument and `AGENTS.md`.
 
 - The project has 16 CTest targets. The full Release suite last measured
   16/16 passing on 2026-11-05.
-- The golden primitive gate last measured 421/421 lines with a zero diff on
-  2026-11-05.
+- The golden primitive gate last measured 427/427 lines with a zero diff on
+  2026-11-10 (the RE6 regen).
 - Nine committed structural AV1 artifacts cover five grayscale geometries and
   four 4:2:0 color geometries. Their decoder acceptance and reconstruction
   comparisons are recorded per artifact and plane in

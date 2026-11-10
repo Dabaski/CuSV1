@@ -13,9 +13,11 @@ are compiled at runtime with NVRTC.
 ## Current state
 
 The project includes transforms and quantization, intra prediction, frame
-composition, entropy coding, structural AV1 bitstream output, and a growing set
-of analysis, filtering, and utility modules. Nine committed grayscale and
-4:2:0 color artifacts have decoder conformance results recorded in the
+composition with RD-lite mode decision (distortion + rate cost, the angle
+delta enumerated per block), entropy coding, structural AV1 bitstream
+output, and a growing set of analysis, filtering, and utility modules. Nine
+committed grayscale and 4:2:0 color artifacts have decoder conformance
+results recorded in the
 [conformance matrix](docs/decode_conformance.md).
 
 This is still an experimental project, not a production-ready encoder. The

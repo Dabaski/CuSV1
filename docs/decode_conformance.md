@@ -24,7 +24,7 @@ generator's recon line per geometry:
 | d4 (8x8 frame, four 4x4 TUs) | structural_keyframe_d4.obu (31 B) | 64/64 | fs5g4_recon |
 | d8 | structural_keyframe_d8.obu (30 B) | 64/64 | fs28_recon |
 | d16 | structural_keyframe_d16.obu (43 B) | 256/256 | fs216_recon |
-| d32 | structural_keyframe.obu (49 B) | 1024/1024 | ecfrm_recon |
+| d32 | structural_keyframe.obu (50 B) | 1024/1024 | ecfrm_recon |
 | d64 | structural_keyframe_d64.obu (440 B) | 4096/4096 | fs264_recon |
 
 These establish content equality for the five committed fixtures, not

@@ -97,11 +97,11 @@ ffmpeg 8.1.2 / libdav1d 1.5.3-62, exit 0):
 
 | Artifact | TU size | Structure (the decoder-consistent walk) | Decoded == |
 | --- | --- | --- | --- |
-| structural_keyframe_d4.obu | 30 B | an 8x8 FRAME: [part@8 SPLIT, ctx 0][4x [skip][kf, no delta: bsize < 8X8][FI iff DC][tx][tokens]] - the decoders align frame dims to 8 px, so the 8x8 node reads the 4-symbol partition symbol and a 4x4 TU exists only as a leaf (dav1d 1.5.4 trace-verified) | fs5g4_recon 64/64 |
+| structural_keyframe_d4.obu | 31 B | an 8x8 FRAME: [part@8 SPLIT, ctx 0][4x [skip][kf, no delta: bsize < 8X8][FI iff DC][tx][tokens]] - the decoders align frame dims to 8 px, so the 8x8 node reads the 4-symbol partition symbol and a 4x4 TU exists only as a leaf (dav1d 1.5.4 trace-verified) | fs5g4_recon 64/64 |
 | structural_keyframe_d8.obu | 30 B | [part@8, 4-symbol row][skip][kf][delta][FI?][tokens] | fs28_recon 64/64 |
-| structural_keyframe_d16.obu | 44 B | [part@16, 10-symbol row][skip][kf][delta][FI?][tokens] (hand-rolled walk over the l6 coeffs) | fs216_recon 256/256 |
-| structural_keyframe.obu | 47 B | the four-16x16-leaves walk (the TD5b-era committed structure) | ecfrm_recon 1024/1024 (fingerprint 05 08 0c 11) |
-| structural_keyframe_d64.obu | 441 B | [part@64, 10-symbol row][skip][kf][delta][tokens] (no FI at 64) | fs264_recon 4096/4096 |
+| structural_keyframe_d16.obu | 43 B | [part@16, 10-symbol row][skip][kf][delta][FI?][tokens] (hand-rolled walk over the l6 coeffs) | fs216_recon 256/256 |
+| structural_keyframe.obu | 50 B | the four-16x16-leaves walk (the TD5b-era committed structure) | ecfrm_recon 1024/1024 (fingerprint 05 08 0c 11) |
+| structural_keyframe_d64.obu | 440 B | [part@64, 10-symbol row][skip][kf][delta][tokens] (no FI at 64) | fs264_recon 4096/4096 |
 
 The per-size SPS is parameterized by maxDim (frame_width_bits =
 msb(maxDim); svtd_bsf3_encode_sps_dims; the l8
@@ -150,9 +150,9 @@ recon):
 | Artifact | TU size | Structure | Decode outcome (measured) |
 | --- | --- | --- | --- |
 | structural_keyframe_color32.obu | 165 B | lumaB = 64, UV tx 32 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
-| structural_keyframe_color16.obu | 133 B | lumaB = 32, UV tx 16 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
-| structural_keyframe_color8.obu | 137 B | lumaB = 16, UV tx 8 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 (chroma closed at CS7, `5ce0224`) |
-| structural_keyframe_color4.obu | 183 B | lumaB = 8, UV tx 4 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 (closed at RT21, `927e697`) |
+| structural_keyframe_color16.obu | 136 B | lumaB = 32, UV tx 16 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 |
+| structural_keyframe_color8.obu | 146 B | lumaB = 16, UV tx 8 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 (chroma closed at CS7, `5ce0224`) |
+| structural_keyframe_color4.obu | 209 B | lumaB = 8, UV tx 4 | FULL-PLANE 1:1: Y 4096/4096, U 1024/1024, V 1024/1024 (closed at RT21, `927e697`) |
 
 **Deriving the geometry column (do not re-type these numbers).** The
 `lumaB` / `UV tx` pair is not a free annotation - it is fixed by three

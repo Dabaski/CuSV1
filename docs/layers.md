@@ -29,7 +29,7 @@ l13_palette     palette + k-means + segmentation (host; PAL1/SEG1)
 l14_utility     block geometry + utilities (host; U1)
 l15_rc          rate-control qindex tables (host; RC1)
 l16_rdo         rate-estimation + trellis + symbol costs
-                                          (host; RE1-RE4, not wired)
+                                       (host; RE1-RE6, wired into l6)
                           |
              tools/golden_gen (the gate)
              tools/bench (perf)
@@ -170,10 +170,15 @@ above, not zeros).
   inverse round trip onto the same predictor.
 - Frame level: the Recon variants run a raster grid; the Auto variants
   (`encodeFrameAuto*`) drive full frames with each block's mode chosen
-  by the D2 policy (`decideBlockMode*`): all 13 intra modes scored by
-  SAD against reconstructed edges, lowest wins, tie = lowest mode
-  index. This policy is OURS (SVT selects modes via RD/trellis
-  machinery we do not port); the primitives inside it are 1:1 SVT.
+  by the RD-lite policy (`rdliteDecide` wired into `decideBlockMode*`):
+  all 13 intra candidates scored by variance<<4 distortion + the l16
+  intraFastCost rate term through the RDCOST macro (strict < tie-break),
+  with the angle delta enumerated over {-3..+3} for directional
+  candidates at bsize >= 8X8 (RE6). The policy is OURS (SVT's full RD
+  is not ported); the primitives inside it are 1:1 SVT. Chroma UV
+  stays SAD-only (the ratified rung boundary). This is the first
+  emission change since the RT-series: all nine committed artifacts
+  regenerated and re-verified content-1:1 (the gated golden event).
 - Quantized variants (`*Q`) wire the FP quantizer at a fixed qindex
   after the forward transform; the dequantized coefficients feed the
   inverse, so quantization loss feeds back through decisions. Scan
@@ -452,11 +457,13 @@ precedent). Host only.
 
 ## l16_rdo - rate estimation + trellis + symbol costs (RE-series)
 
-The A4 golden-regeneration campaign's machinery rungs, in
-`src/l16_rdo` (namespace `l16_rdo`; the scaffold links av1_transforms).
-All four slices are CONFORMANCE-FREE: no emission change, no golden
-churn - the wiring rung (which changes the emission and regenerates
-all nine artifacts as the planned gated event) opens next.
+The A4 golden-regeneration campaign, in `src/l16_rdo` (namespace
+`l16_rdo`; the scaffold links av1_transforms). RE1-RE4 are the
+machinery rungs (CONFORMANCE-FREE: no emission change, no golden
+churn); RE5-RE6 are the WIRING rungs - the first emission changes
+since the RT-series, each a gated golden event that regenerated all
+nine committed artifacts and re-verified them content-1:1 in the real
+decoders. NEXT: the tx-type wiring rung (RE7, the third gated event).
 
 - RE1, the rate-estimation core of `md_rate_estimation.c` (485 nb
   judge-charged): the cdf->cost core, the estimate_syntax_rate INTRA
@@ -491,15 +498,59 @@ all nine artifacts as the planned gated event) opens next.
   fixed, and fimodeToIntradir's 5th entry DC_PRED -> PAETH_PRED - a
   latent semantic bug (an FI PAETH candidate folded to DC), latent
   safe because the FI costs are not wired.
+- RE5, the RD-lite D2 wiring rung (the first gated golden event):
+  `rdliteLambda` (the policy lambda, q == 0 ? 0 : q),
+  `initRdliteFrameCtx` (the l7 EcFrameContext -> l16
+  MdRateEstimationContext bridge), the kf-y ctx bridge, and
+  `rdliteDecide` (variance<<4 distortion + the landed intraFastCost +
+  the RDCOST macro, strict < tie-break) wired into
+  `decideBlockMode4x4..64x64` + the generator's `svtd_rdlite_decide`
+  twin; chroma UV stays SAD-only (the ratified rung boundary). The
+  new mode map EXPOSED two latent FI emission bugs the SAD policy
+  masked: d4's FI symbol wrote through a per-site local cdf
+  re-initialized from default while the decoder reads the ADAPTING
+  frame_context->filter_intra_cdfs[bsize] (all six l6 sites + the
+  drives now write through the adapting cdf), and d32's
+  svtd_bsf3_tile_data_v2 had NO FI write at all (latent under the
+  SAD map's no-DC_PRED block set; RD-lite made blocks 2-3 DC_PRED) -
+  both fixed before the regen. Artifact matrix (old -> new, ALL decode
+  content-1:1): d4 30->31, d8 30->30 (content changed), d16 44->43,
+  d32 47->49, d64 441->440, color4 183->199, color8 137->147,
+  color16 133->136, color32 165->165; GATE 884,851 -> 884,651 B
+  (-207, 96 lines). The paired conformance count re-verified
+  9 artifacts x decoders - it moves WITH the campaign as designed.
+- RE6, the angle-delta wiring rung (the second gated golden event):
+  the emission's delta=0 park (pipeline.h:156) RESOLVES -
+  `rdliteDecide` enumerates angleDelta over {-3..+3} for directional
+  candidates (bsize >= 8X8; at 4x4 no variants), the
+  angular-pred-level policy = 1 (the full 7-delta set; ours, named),
+  ModeDecision gains the angleDelta field; 11 predictor sites predict
+  at the CHOSEN delta and 7 writeKfLumaMode sites emit it; UV delta
+  stays 0 (the chroma rung boundary); the mirror's
+  `svtd_rdlite_decide` gains the same enumeration (17 call sites).
+  New gate fixtures: the bsf1q_* set (the Q emission's chosen delta
+  with QUANTIZED-recon feedback) + bsf3v2_deltas. Artifact matrix
+  (old -> new): d4/d8/d16/d64 byte-identical, d32 49->50,
+  color4 199->209, color8 147->146, color16 136 (bytes moved); GATE
+  884,651 -> 884,897 B (+246, 427 lines). 6 mutations: 4 killed + M3
+  and M5 SURVIVED their first forms and were SHARPENED (the
+  distortion-dominance blind spot -> the direct rate-consumption pin;
+  the no-delta-3-fixture blind spot -> the written-symbol off-by-one
+  kill); the judge probe (the emission delta-symbol arithmetic +1
+  off) KILLED by the l7 gate-byte fixture. The paired conformance
+  count re-verified 9/9.
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 
 1. Raster-iterate the 16x16 grid. For each block:
-2. `decideBlockMode16x16` scores all 13 intra modes by SAD of the
-   predictor vs the reconstructed edges (above row + left column,
-   already reconstructed by raster order); lowest SAD wins.
-3. The chosen mode + neighbor modes fill `NeighborContext`
-   (filt_type for the edge filter).
+2. `decideBlockMode16x16` scores all 13 intra candidates by RD-lite
+   (variance<<4 distortion + the l16 intraFastCost rate term, RDCOST,
+   strict < tie-break) against the reconstructed edges, with the
+   angle delta enumerated over {-3..+3} for directional candidates
+   (RE5/RE6); lowest cost wins.
+3. The chosen mode + angle delta + neighbor modes fill
+   `NeighborContext` (filt_type for the edge filter); the predictor
+   builds at the chosen delta.
 4. `buildIntraPredictors` (l4) builds the predictor from the
    reconstructed edges (real top-right gather).
 5. Residual = source - predictor as int16 (no clamp).
@@ -508,7 +559,8 @@ all nine artifacts as the planned gated event) opens next.
 7. `invTxfm2dAdd16x16` adds the reconstruction onto the predictor;
    the recon block is written back (later blocks predict from it).
 8. Emission: the kf y-mode symbol (context pair from the decided
-   neighbor modes), the angle-delta symbol when directional, the
+   neighbor modes), the angle-delta symbol carrying the CHOSEN delta
+   when directional (RE6 - the delta=0 park resolved), the
    filter-intra flag where allowed (BSF1); Q paths append the token
    chain for the block's coefficients (TS3); partition + skip symbols
    where the tree codes them (ECP1/ECP2), with running partition

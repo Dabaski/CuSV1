@@ -232,7 +232,7 @@ cmake --build build --config Release --target golden_primitives
 $o = & "build\tools\golden_gen\Release\golden_primitives.exe" 2>$null
 [IO.File]::WriteAllText("out.txt", (($o | Out-String) -replace "`r",""),
                         (New-Object Text.UTF8Encoding $false))
-# out.txt must now be 884,851 B and byte-identical to expected_primitives.txt
+# out.txt must now be 884,897 B and byte-identical to expected_primitives.txt
 Compare-Object (Get-Content tools\golden_gen\expected_primitives.txt) `
                   (Get-Content out.txt)     # must print nothing
 ```
@@ -370,8 +370,9 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   261.59 s, the AN5 run 268.30 s, the AN4 run 270.10 s, the AN3 run
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
-- **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,651
-  bytes**, 427 lines (the RE6 angle-delta regen: +246 B / +6 lines - the
+- **GATE: 427/427 lines, diff 0.** `expected_primitives.txt` is **884,897
+  bytes**, 427 lines (the RE6 angle-delta regen: +246 B / +6 lines from
+  the RE5 884,651 - the
   bsf1q_* fixtures + bsf3v2_deltas; rebuilt, and byte-identical to the
   committed file). History, not a figure to chase:
   884,851 B was the value from the RT21 regen through the RE4 landing;
