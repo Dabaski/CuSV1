@@ -2429,6 +2429,54 @@ A0. SLICE-LEVEL STATE (the live register)
 |    884,851 B diff 0, coverage 23.1% (36,480/157,718): A4 8% (2,419).
 |    The A4 campaign's machinery rungs are complete (RE1-RE4 = 2,759
 |    nb); the wiring rung (the golden event) opens next.
+|  - [x] **l6/RE5 (2026-11-10, the gated golden event, commit 8aa7cd3
+|    cherry-picked 2afeb70): the RD-lite D2 wiring rung LANDS** - the
+|    first emission change since the RT-series and the first slice where
+|    the paired metric moves TOGETHER. The wiring: rdliteLambda (the
+|    policy lambda q==0?0:q), initRdliteFrameCtx (the l7 EcFrameContext
+|    -> l16 MdRateEstimationContext bridge), the kf-y ctx bridge, and
+|    rdliteDecide (variance<<4 distortion + the landed intraFastCost +
+|    the RDCOST macro, strict < tie-break) wired into
+|    decideBlockMode4x4..64x64 + the generator's svtd_rdlite_decide
+|    twin; chroma UV stays SAD-only (the ratified rung boundary); the
+|    bench decision calls take the new signature. THE LATENT FI
+|    EMISSION BUGS THE NEW MODE MAP EXPOSED (the campaign's predicted
+|    find): (1) d4 - the FI symbol emitted through a per-site local cdf
+|    re-initialized from default while the decoder reads from the
+|    ADAPTING frame_context->filter_intra_cdfs[bsize] (entropy_coding.c
+|    :5052) - the second FI symbol diverged; all six l6 sites + the
+|    fs5g32/fs5g4 drives now write through the adapting cdf; (2) d32 -
+|    svtd_bsf3_tile_data_v2 had NO FI write at all (latent under the
+|    SAD map {10,5,3,7}: no DC_PRED block; RD-lite made blocks 2-3
+|    DC_PRED, gate ecfrm_modes 10 7 0 0); the mirror now writes FI for
+|    DC_PRED blocks. THE ARTIFACT MATRIX (old -> new, ALL decode
+|    content-1:1, judge-measured on master): d4 30->31, d8 30->30
+|    (content changed), d16 44->43, d32 47->49 (was ffmpeg exit 69
+|    pre-fix), d64 441->440, color4 183->199, color8 137->147, color16
+|    133->136, color32 165->165. GATE 884,851 -> 884,651 B (-207/96
+|    lines), byte-identical, judge-measured on master. The conformance
+|    count RE-VERIFIED 9 artifacts x decoders - it moves WITH the
+|    campaign as designed. Suite 17/17 (270.27 s judge post-merge;
+|    the worktree's own 271.27 s). NON-REPRODUCTION adjudicated: the
+|    "port composes 183" reading was the stale color4 TU size out of a
+|    stale .inc - the restored CS5 port-composition leg composes 136 ==
+|    gate == file for ALL FOUR sizes; the leg's mutation evidence
+|    (fixture divergence -> the leg FAILS) measured in-session and
+|    recorded here per the discipline. TRANSPORT SAGA (the register's
+|    longest): the writer's session died twice (the runner "no longer
+|    present"), the judge's resume revived it twice, a DUPLICATE
+|    dispatch (RE5C) collided with the revived original and was stood
+|    down, and a concurrent session committed the slice mid-repair -
+|    the commit captured the fully-verified state; the ops lesson:
+|    check mtimes + git log before assuming death; ONE writer per
+|    worktree, verified by PROCESS LISTING, not by transport state.
+|  - [x] **WAVE-14 CLOSE / THE GOLDEN EVENT (judge, post-merge
+|    re-measure on master)**: full rebuild + ctest 17/17 (270.27 s),
+|    GATE byte-identical 884,651 B diff 0, decode gate 5/5 geometries
+|    content-1:1 (judge-measured twice: worktree + master), coverage
+|    23.3% (36,715/157,718 - RE5 is product+wiring work: the coverage
+|    moves at the next 1:1 rung). NEXT: the angle-delta wiring rung
+|    (the second gated event), then the tx-type rung.
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
 ------------------------------------------------------------

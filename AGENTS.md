@@ -336,16 +336,29 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-09, the wave-14 partial: TF2 landed; RE5 the golden event in flight)
+### Last measured state (2026-11-10, the RE5 golden event landed)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 16/16 passed, 0 failed, 277.79 s** (re-measured 2026-11-05 at
-  the 20% line; the suite is 16 targets since 1909438 - l15_rc
+- **ctest: 17/17 passed, 0 failed, 270.27 s** (re-measured 2026-11-10 at
+  the RE5 landing; the suite is 17 targets since bef6904 - l16_rdo
   joined; l4_intra is the slow one; `pipeline` and
   `l3_transforms` next; the rest under 0.5 s.
-  Earlier runs of the same tree: the HM1 wave 15/15 (277.34-278.39 s),
-  the wave-4 close run 15/15 294.41 s, the TF1/PU1/PO1 run 278.04 s (14 targets), the LR3/PAL1/TX1 run 272.63 s, the GR1/AN21/CV1 run 264.97 s (13 targets), the LR2 run 260.65 s (11 targets), the CDEF3+LR1 run 280.41 s, the CDEF1 run 269.66 s, the DF2 run 270.04 s, the AN12 run
+  Earlier runs of the same tree: the worktree's run 271.27 s, the RE5
+  writer's runs (272.39/272.92/279.34 s), the wave-13 close 17/17
+  (277.95 s), the wave-12 close 17/17 (292.08 s), the wave-11 close
+  17/17 (295.11 s), the wave-10 close 17/17 (262.85 s), the HM1 wave
+  15/15 (277.34-278.39 s), the wave-4 close run 15/15 294.41 s, the
+  TF1/PU1/PO1 run 278.04 s (14 targets), the LR3/PAL1/TX1 run 272.63 s,
+  the GR1/AN21/CV1 run 264.97 s (13 targets), the LR2 run 260.65 s (11
+  targets), the CDEF3+LR1 run 280.41 s, the CDEF1 run 269.66 s, the DF2
+  run 270.04 s, the AN12 run
+  275.59 s at 10/10
+  (l4_intra 213.58 s, `pipeline` 53.74 s, `l3_transforms` 7.24 s),
+  a first AN12 run 269.63 s, the AN11
+  run 264.78 s, a second AN11 run 264.07 s, the AN10
+  run 266.17 s, the AN9
+  run 262.05 s, the AN8 run
   275.59 s at 10/10
   (l4_intra 213.58 s, `pipeline` 53.74 s, `l3_transforms` 7.24 s),
   a first AN12 run 269.63 s, the AN11
@@ -357,11 +370,12 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   261.59 s, the AN5 run 268.30 s, the AN4 run 270.10 s, the AN3 run
   272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
   run 272.42 s at 9/9, a judge re-run 267.47 s).
-- **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,851
-  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-05 at the 20% line:
-  rebuilt, and byte-identical to the committed file; no generator input
-  in any wave slice). History, not a figure to chase:
-  884,980 B was the value from RT10b through the doc-currency pass, and
+- **GATE: 421/421 lines, diff 0.** `expected_primitives.txt` is **884,651
+  bytes**, 0 CR, 0 non-ASCII (re-measured 2026-11-10 at RE5: rebuilt, and
+  byte-identical to the committed file; the RE5 golden-event regen moved it
+  -207 B / 96 lines - the RD-lite emission's new decisions). History, not a figure to chase:
+  884,851 B was the value from the RT21 regen through the RE4 landing;
+  884,980 B from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
   13 gate lines, all chroma-side - and the RT21 regen moved it to 884,851 B
   - five moved lines, all chroma-side (ecs44_bytes, ecs44_eobs,
@@ -396,11 +410,14 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   percentage MOVED at AN4: 20,756/157,718 = 13.1602% crosses the 13.15
   rounding boundary that AN1-AN3's 13.1443% sat below, so N1 prints
   13.2% where AN1-AN3 printed 13.1%).
-- **Committed artifacts: 9** `.obu` files, ALL content-1:1 on every plane
+- **Committed artifacts: 9** `.obu` files, ALL content-1:1 on every plane,
+  RE-VERIFIED 2026-11-10 under the RE5 RD-lite emission (the first
+  emission change since the RT-series; the paired conformance count moves
+  WITH the wiring campaign)
   (color4 was the last divergent one: its V 43/1024 residual was the chroma
   above-right Z-order gap, closed by RT21 at 927e697; color8 closed at CS7,
-  5ce0224). Sizes (2026-11-01): d4 30 B / d8 30 B / d16 44 B / d32 47 B /
-  d64 441 B / color4 183 B / color8 137 B / color16 133 B / color32 165 B.
+  5ce0224). Sizes (2026-11-10, the RE5 golden-event regen): d4 31 B / d8 30 B / d16 43 B / d32 49 B /
+  d64 440 B / color4 199 B / color8 147 B / color16 136 B / color32 165 B.
   See `docs/decode_conformance.md` for the authoritative matrix rather than
   a summary line, because that matrix is what changes as the RT-series
   lands.
