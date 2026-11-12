@@ -2155,3 +2155,366 @@ TEST_CASE("set_cdef_recon_controls - the five levels, whole-struct") {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Batch B: set_dlf_controls (enc_mode_config.c:1569-1665).
+// ---------------------------------------------------------------------------
+
+struct DlfOracle {
+    int enabled, sbBasedDlf, pickMethod, dlfAvg, useRefAvgY, useRefAvgUv;
+    int earlyExitConvergence, zeroFilterStrengthLvl;
+    uint16_t prevDlfDistTh;
+};
+
+// Independent transcription of svt_aom_set_dlf_controls (:1569-1665).
+// Tri-state ints: -1 = untouched (the default arm), else the written value.
+static void oracleDlf(DlfOracle& o, int level) {
+    o.enabled = o.sbBasedDlf = o.pickMethod = o.dlfAvg = o.useRefAvgY = o.useRefAvgUv = -1;
+    o.earlyExitConvergence = o.zeroFilterStrengthLvl = -1;
+    o.prevDlfDistTh = 0;
+    switch (level) {
+    case 0:
+        o.enabled = 0; o.sbBasedDlf = 0; o.pickMethod = 0 /*LPF_PICK_FROM_FULL_IMAGE*/;
+        o.dlfAvg = 0; o.useRefAvgY = 0; o.useRefAvgUv = 0;
+        o.earlyExitConvergence = 0; o.zeroFilterStrengthLvl = 0; o.prevDlfDistTh = 0;
+        break;
+    case 1:
+        o.enabled = 1; o.sbBasedDlf = 0; o.pickMethod = 0;
+        o.dlfAvg = 0; o.useRefAvgY = 0; o.useRefAvgUv = 0;
+        o.earlyExitConvergence = 0; o.zeroFilterStrengthLvl = 0; o.prevDlfDistTh = 0;
+        break;
+    case 2:
+        o.enabled = 1; o.sbBasedDlf = 0; o.pickMethod = 0;
+        o.dlfAvg = 1; o.useRefAvgY = 0; o.useRefAvgUv = 1;
+        o.earlyExitConvergence = 1; o.zeroFilterStrengthLvl = 0; o.prevDlfDistTh = 0;
+        break;
+    case 3:
+        o.enabled = 1; o.sbBasedDlf = 0; o.pickMethod = 0;
+        o.dlfAvg = 1; o.useRefAvgY = 1; o.useRefAvgUv = 1;
+        o.earlyExitConvergence = 1; o.zeroFilterStrengthLvl = 0; o.prevDlfDistTh = 0;
+        break;
+    case 4:
+        o.enabled = 1; o.sbBasedDlf = 0; o.pickMethod = 0;
+        o.dlfAvg = 1; o.useRefAvgY = 1; o.useRefAvgUv = 1;
+        o.earlyExitConvergence = 1; o.zeroFilterStrengthLvl = 2; o.prevDlfDistTh = 10;
+        break;
+    case 5:
+        o.enabled = 1; o.sbBasedDlf = 1; o.pickMethod = 2 /*LPF_PICK_FROM_Q*/;
+        o.dlfAvg = 0; o.useRefAvgY = 0; o.useRefAvgUv = 0;
+        o.earlyExitConvergence = 0; o.zeroFilterStrengthLvl = 1; o.prevDlfDistTh = 0;
+        break;
+    case 6:
+        o.enabled = 1; o.sbBasedDlf = 1; o.pickMethod = 2;
+        o.dlfAvg = 0; o.useRefAvgY = 0; o.useRefAvgUv = 0;
+        o.earlyExitConvergence = 0; o.zeroFilterStrengthLvl = 2; o.prevDlfDistTh = 0;
+        break;
+    case 7:
+        o.enabled = 1; o.sbBasedDlf = 1; o.pickMethod = 2;
+        o.dlfAvg = 0; o.useRefAvgY = 0; o.useRefAvgUv = 0;
+        o.earlyExitConvergence = 0; o.zeroFilterStrengthLvl = 3; o.prevDlfDistTh = 0;
+        break;
+    default:  // :1661-1663 assert(0) writes nothing
+        break;
+    }
+}
+
+TEST_CASE("set_dlf_controls - levels 0-7 write all nine fields, default writes nothing") {
+    // :1569-1665. Every case body writes the full DlfCtrls surface, so the
+    // bools are comparable at levels 0-7; at the default arm the poisoned
+    // bools stay unread (the gm-case precedent).
+    for (int level = 0; level <= 8; ++level) {
+        DlfCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setDlfCtrls(c, (uint8_t)level);
+        DlfOracle o;
+        oracleDlf(o, level);
+        if (level <= 7) {
+            CHECK(c.enabled == o.enabled);
+            CHECK(c.sbBasedDlf == o.sbBasedDlf);
+            CHECK(c.pickMethod == o.pickMethod);
+            CHECK(c.dlfAvg == (o.dlfAvg != 0));
+            CHECK(c.useRefAvgY == (o.useRefAvgY != 0));
+            CHECK(c.useRefAvgUv == (o.useRefAvgUv != 0));
+            CHECK(c.earlyExitConvergence == o.earlyExitConvergence);
+            CHECK(c.zeroFilterStrengthLvl == o.zeroFilterStrengthLvl);
+            CHECK(c.prevDlfDistTh == o.prevDlfDistTh);
+        } else {
+            // :1661-1663 - assert(0), writes nothing; the uint8/uint16
+            // poison stands (the bools stay unread).
+            CHECK(c.enabled == kPoison);
+            CHECK(c.sbBasedDlf == kPoison);
+            CHECK(c.pickMethod == kPoison);
+            CHECK(c.earlyExitConvergence == kPoison);
+            CHECK(c.zeroFilterStrengthLvl == kPoison);
+            CHECK(c.prevDlfDistTh == 0xAAAA);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch B: set_intrabc_level (enc_mode_config.c:1672-1851).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_intrabc_level - the level table, whole-struct field checks") {
+    // :1672-1851 with MAX_INTRABC_LEVEL = 7 (:1670). Level 0 writes ONLY
+    // enabled; levels 1-5 write the full surface; levels 6-7 write
+    // everything EXCEPT mesh_search_mv_diff_threshold / mesh_patterns /
+    // mesh_qp_scaling (poison stands); the default arm writes nothing.
+    // Poisoned bools stay unread (the gm-case precedent).
+    for (int level = 0; level <= 8; ++level) {
+        IntrabcCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setIntrabcLevel(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == false);
+            CHECK(c.maxBlockSizeHash == kPoison);
+            CHECK(c.maxCandPerBucket == 0xAAAA);
+            CHECK(c.exhaustiveMeshThresh == 0xAAAAAAAAAAAAAAAAull);
+            CHECK((uint32_t)c.meshSearchMvDiffThreshold == 0xAAAAAAAAu);
+            CHECK(c.searchDir == kPoison);
+        } else if (level >= 1 && level <= 5) {
+            CHECK(c.enabled == true);
+            CHECK(c.paletteHint == (level >= 2));
+            CHECK(c.nsqParentGating == (level >= 3));
+            CHECK(c.b4ParentGating == false);
+            CHECK(c.maxBlockSizeHash == (level <= 4 ? 64 : 8));
+            CHECK(c.maxCandPerBucket == (level <= 3 ? 256 : (level == 4 ? 64 : 64)));
+            CHECK(c.exhaustiveMeshThresh == (level <= 3 ? (1ull << 20) : (1ull << 24)));
+            CHECK(c.meshSearchMvDiffThreshold == (level <= 2 ? -1 : 0));
+            if (level == 1) {
+                CHECK(c.meshPatterns[0].range == 256);
+                CHECK(c.meshPatterns[0].interval == 1);
+                CHECK(c.meshPatterns[1].range == 256);
+                CHECK(c.meshPatterns[1].interval == 1);
+            } else if (level == 2 || level == 3) {
+                CHECK(c.meshPatterns[0].range == 256);
+                CHECK(c.meshPatterns[0].interval == 8);
+                CHECK(c.meshPatterns[1].range == 64);
+                CHECK(c.meshPatterns[1].interval == 1);
+            } else {
+                CHECK(c.meshPatterns[0].range == 256);
+                CHECK(c.meshPatterns[0].interval == 8);
+                CHECK(c.meshPatterns[1].range == 32);
+                CHECK(c.meshPatterns[1].interval == 1);
+            }
+            CHECK(c.meshPatterns[2].range == 0);
+            CHECK(c.meshPatterns[2].interval == 0);
+            CHECK(c.meshPatterns[3].range == 0);
+            CHECK(c.meshPatterns[3].interval == 0);
+            CHECK(c.meshQpScaling == (level >= 3));
+            CHECK(c.searchDir == 0);
+        } else if (level == 6 || level == 7) {
+            CHECK(c.enabled == true);
+            CHECK(c.paletteHint == true);
+            CHECK(c.nsqParentGating == true);
+            CHECK(c.b4ParentGating == false);
+            CHECK(c.maxBlockSizeHash == 8);
+            CHECK(c.maxCandPerBucket == 32);
+            CHECK(c.exhaustiveMeshThresh == ~(uint64_t)0);
+            // :1819-1820/:1839-1840 - the mesh surface is NOT written by
+            // levels 6-7; the poison stands (no-stray-write proof).
+            CHECK((uint32_t)c.meshSearchMvDiffThreshold == 0xAAAAAAAAu);
+            CHECK((uint32_t)c.meshPatterns[0].range == 0xAAAAAAAAu);
+            CHECK((uint32_t)c.meshPatterns[1].interval == 0xAAAAAAAAu);
+            CHECK(c.searchDir == (level == 6 ? 0 : 1));
+        } else {
+            // :1847-1849 - assert(0), writes nothing.
+            CHECK(c.maxBlockSizeHash == kPoison);
+            CHECK(c.maxCandPerBucket == 0xAAAA);
+            CHECK(c.exhaustiveMeshThresh == 0xAAAAAAAAAAAAAAAAull);
+            CHECK((uint32_t)c.meshSearchMvDiffThreshold == 0xAAAAAAAAu);
+            CHECK((uint32_t)c.meshPatterns[2].range == 0xAAAAAAAAu);
+            CHECK(c.searchDir == kPoison);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch B: set_palette_level (enc_mode_config.c:1856-1930).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_palette_level - the ten-level table, whole-struct field checks") {
+    // :1856-1930. Level 0 writes ONLY enabled; levels 1-9 write all five
+    // PaletteCtrls fields; the default arm writes nothing. The poisoned
+    // centroid_refinement bool stays unread at level 0 and default (the
+    // gm-case precedent); dominant_color_step = (uint8_t)~0 = 255 at
+    // levels 3-9 (:1879+).
+    for (int level = 0; level <= 10; ++level) {
+        PaletteCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setPaletteLevel(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.dominantColorStep == kPoison);
+            CHECK(c.kmeanColorStep == kPoison);
+            CHECK(c.kMeansMaxItr == kPoison);
+        } else if (level <= 9) {
+            CHECK(c.enabled == 1);
+            CHECK(c.dominantColorStep == (level == 1 ? 1 : (level == 2 ? 2 : 255)));
+            CHECK(c.kmeanColorStep == (level == 1 ? 1 : (level == 2 ? 1 : (level == 3 ? 1 :
+                                                   (level == 4 ? 2 : (level == 5 ? 3 :
+                                                   (level == 6 ? 5 : (level == 7 ? 5 :
+                                                   (level == 8 ? 6 : 50)))))))));
+            CHECK(c.centroidRefinement == (level == 1));
+            // k_means_max_itr: 50 at L1 (:1868), 2 at L2-L6
+            // (:1875/:1882/:1889/:1896/:1903), 1 at L7-L9
+            // (:1910/:1917/:1924).
+            CHECK(c.kMeansMaxItr == (level == 1 ? 50 : (level <= 6 ? 2 : 1)));
+        } else {
+            // :1926-1928 - assert(0), writes nothing.
+            CHECK(c.enabled == kPoison);
+            CHECK(c.dominantColorStep == kPoison);
+            CHECK(c.kmeanColorStep == kPoison);
+            CHECK(c.kMeansMaxItr == kPoison);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch B: set_wn_filter_ctrls (:1242-1301) + set_sg_filter_ctrls
+// (:1303-1362). The Av1Common wall folds into the two ctrl carriers (the
+// wn/sg LEVEL getters landed in slice 1; these are the ctrls consumers).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_wn_filter_ctrls - levels 0-6, whole-struct field checks") {
+    // :1242-1301. Level 0 writes ONLY enabled; levels 1-6 write all six
+    // WnFilterCtrls fields; the default arm writes nothing. The poisoned
+    // bools stay unread at level 0 and default (the gm-case precedent).
+    for (int level = 0; level <= 7; ++level) {
+        WnFilterCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setWnFilterCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == false);
+            CHECK(c.filterTapLvl == kPoison);
+        } else if (level <= 6) {
+            CHECK(c.enabled == true);
+            CHECK(c.useChroma == (level <= 4));
+            CHECK(c.filterTapLvl == (level <= 2 ? 1 : 2));
+            CHECK(c.useRefinement == (level <= 3));
+            CHECK(c.maxOneRefinementStep == (level == 1 ? false : true));
+            CHECK(c.usePrevFrameCoeffs == (level == 6));
+        } else {
+            // :1297-1299 - assert(0), writes nothing.
+            CHECK(c.filterTapLvl == kPoison);
+        }
+    }
+}
+
+TEST_CASE("set_sg_filter_ctrls - levels 0-4, whole-struct field checks") {
+    // :1303-1362. Level 0 writes ONLY enabled; levels 1-4 write the full
+    // SgFilterCtrls surface; the default arm writes nothing. The poisoned
+    // bool stays unread at level 0 and default; the int8 arrays keep the
+    // 0xAA-as-int8 sentinel where unwritten.
+    for (int level = 0; level <= 5; ++level) {
+        SgFilterCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setSgFilterCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == false);
+            CHECK(c.startEp[0] == kPoisonI8);
+            CHECK(c.endEp[1] == kPoisonI8);
+        } else if (level <= 4) {
+            CHECK(c.enabled == true);
+            CHECK(c.useChroma == (level <= 3));
+            CHECK(c.startEp[0] == 0);
+            CHECK(c.endEp[0] == 16);
+            CHECK(c.epInc[0] == (level <= 2 ? 1 : 8));
+            CHECK(c.startEp[1] == (level == 1 ? 0 : 4));
+            CHECK(c.endEp[1] == (level == 1 ? 16 : 5));
+            CHECK(c.epInc[1] == 1);
+            CHECK(c.refine[0] == 1);
+            CHECK(c.refine[1] == (level == 1 ? 1 : 0));
+        } else {
+            // :1358-1360 - assert(0), writes nothing. The poisoned bools
+            // stay unread; the int8 sentinels stand.
+            CHECK(c.startEp[0] == kPoisonI8);
+            CHECK(c.refine[1] == kPoisonI8);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch B: the small helper family (get_gm_core_level :181-199,
+// derive_gm_level :201-215, derive_input_resolution scs.c:120-139,
+// get_max_can_count :1936-1981).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("get_gm_core_level - the CONFIG fork and the super-res-off ladder") {
+    // :181-199. CONFIG=0: always 0. CONFIG=1: super_res_off gates the
+    // ladder (MR->2, M0-M4->4, else 0); super_res_off=false -> 0. The
+    // fork is threaded as the runtime parameter (the setGmControls
+    // precedent).
+    for (int mode = -1; mode <= 13; ++mode) {
+        CHECK(getGmCoreLevel((EncMode)mode, true, 0) == 0);
+        CHECK(getGmCoreLevel((EncMode)mode, false, 1) == 0);
+        int expect = 0;
+        if (mode <= -1) expect = 2;
+        else if (mode <= 4) expect = 4;
+        else expect = 0;
+        CHECK(getGmCoreLevel((EncMode)mode, true, 1) == expect);
+    }
+}
+
+TEST_CASE("derive_gm_level - the inter-only gate") {
+    // :201-215. is_islice -> 0 regardless; !is_islice ->
+    // get_gm_core_level(enc_mode, super_res_off). The pcs wall folds into
+    // the two consumed scalars.
+    for (int mode = -1; mode <= 13; ++mode) {
+        CHECK(deriveGmLevel((EncMode)mode, true, true, 1) == 0);
+        int expect = 0;
+        if (mode <= -1) expect = 2;
+        else if (mode <= 4) expect = 4;
+        CHECK(deriveGmLevel((EncMode)mode, false, true, 1) == expect);
+        CHECK(deriveGmLevel((EncMode)mode, false, false, 1) == 0);
+    }
+}
+
+TEST_CASE("derive_input_resolution - the seven-band boundary table") {
+    // sequence_control_set.c:120-139 with definitions.h:1819-1824
+    // thresholds. Every band boundary is tested from BOTH sides (the
+    // range-enumeration rule); the EbErrorType return (always
+    // EB_ErrorNone) is dropped - named deviation.
+    const struct { uint32_t size; ResolutionRange res; } t[] = {
+        {0x284FFu, INPUT_SIZE_240p_RANGE},
+        {0x28500u, INPUT_SIZE_360p_RANGE},
+        {0x4CDFFu, INPUT_SIZE_360p_RANGE},
+        {0x4CE00u, INPUT_SIZE_480p_RANGE},
+        {0xA13FFu, INPUT_SIZE_480p_RANGE},
+        {0xA1400u, INPUT_SIZE_720p_RANGE},
+        {0x16D9FFu, INPUT_SIZE_720p_RANGE},
+        {0x16DA00u, INPUT_SIZE_1080p_RANGE},
+        {0x5351FFu, INPUT_SIZE_1080p_RANGE},
+        {0x535200u, INPUT_SIZE_4K_RANGE},
+        {0x1409FFFu, INPUT_SIZE_4K_RANGE},
+        {0x140A000u, INPUT_SIZE_8K_RANGE},
+        {0xFFFFFFFFu, INPUT_SIZE_8K_RANGE},
+    };
+    for (const auto& e : t) CHECK(deriveInputResolution(e.size) == e.res);
+}
+
+TEST_CASE("get_max_can_count - the rtc and non-rtc preset ladders") {
+    // :1936-1981. Every preset boundary enumerated from -1 (ENC_MR)
+    // through 13; the ladder is <=-chained so only the boundary presets
+    // plus one interior preset per band need the value checked - but the
+    // loop checks ALL presets (the range-enumeration rule).
+    for (int mode = -1; mode <= 13; ++mode) {
+        int rtc;
+        if (mode <= 7) rtc = 150;
+        else if (mode == 8) rtc = 75;
+        else if (mode <= 10) rtc = 65;
+        else if (mode == 11) rtc = 15;
+        else rtc = 10;
+        CHECK(getMaxCanCount((EncMode)mode, true) == rtc);
+        int nrtc;
+        if (mode <= 1) nrtc = 1225;
+        else if (mode == 2) nrtc = 1000;
+        else if (mode == 3) nrtc = 720;
+        else if (mode == 4) nrtc = 576;
+        else if (mode == 5) nrtc = 369;
+        else if (mode == 6) nrtc = 236;
+        else if (mode <= 9) nrtc = 190;
+        else nrtc = 80;
+        CHECK(getMaxCanCount((EncMode)mode, false) == nrtc);
+    }
+}

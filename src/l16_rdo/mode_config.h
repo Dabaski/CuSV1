@@ -401,5 +401,123 @@ struct CdefReconCtrls {
 // (documented UB).
 void setCdefReconCtrls(CdefReconCtrls& ctrls, std::uint8_t cdefReconLevel);
 
+// DlfCtrls (pcs.h:604-625, verbatim field order/types; pick_method is an
+// LpfPickMethod value).
+struct DlfCtrls {
+    std::uint8_t enabled;
+    std::uint8_t sbBasedDlf;
+    std::uint8_t pickMethod;
+    bool dlfAvg;
+    bool useRefAvgY;
+    bool useRefAvgUv;
+    std::uint8_t earlyExitConvergence;
+    std::uint8_t zeroFilterStrengthLvl;
+    std::uint16_t prevDlfDistTh;
+};
+
+// svt_aom_set_dlf_controls (:1569-1665). The default case assert(0)s in
+// the reference and writes nothing; the port leaves the struct untouched
+// (documented UB).
+void setDlfCtrls(DlfCtrls& ctrls, std::uint8_t dlfLevel);
+
+// MAX_MESH_STEP (pcs.h:123) + MeshPattern (pcs.h:125-128, verbatim).
+constexpr int kMaxMeshStep = 4;
+struct MeshPattern {
+    int range;
+    int interval;
+};
+
+// IntrabcCtrls (pcs.h:627-649, verbatim field order/types).
+struct IntrabcCtrls {
+    bool enabled;
+    bool paletteHint;
+    bool nsqParentGating;
+    bool b4ParentGating;
+    std::uint8_t maxBlockSizeHash;   // 0 disables hash search
+    std::uint16_t maxCandPerBucket;
+    std::uint64_t exhaustiveMeshThresh;  // ~0 = always allow mesh search
+    std::int32_t meshSearchMvDiffThreshold;
+    MeshPattern meshPatterns[kMaxMeshStep];
+    bool meshQpScaling;
+    std::uint8_t searchDir;  // 0 = Left + Top, 1 = Top only
+};
+
+// MAX_INTRABC_LEVEL (enc_mode_config.c:1670).
+constexpr std::uint8_t kMaxIntrabcLevel = 7;
+
+// set_intrabc_level (:1672-1851). Case MAX_INTRABC_LEVEL is the literal
+// case 7 (:1827). Levels 6-7 write everything EXCEPT the mesh surface
+// (mv_diff threshold / patterns / qp scaling). The default case
+// assert(0)s in the reference and writes nothing; the port leaves the
+// struct untouched (documented UB).
+void setIntrabcLevel(IntrabcCtrls& ctrls, std::uint8_t ibcLevel);
+
+// PaletteCtrls (pcs.h:651-657, verbatim field order/types).
+struct PaletteCtrls {
+    std::uint8_t enabled;
+    std::uint8_t dominantColorStep;
+    std::uint8_t kmeanColorStep;
+    bool centroidRefinement;
+    std::uint8_t kMeansMaxItr;
+};
+
+// set_palette_level (:1856-1930). dominant_color_step = (uint8_t)~0 at
+// levels 3-9. The default case assert(0)s in the reference and writes
+// nothing; the port leaves the struct untouched (documented UB).
+void setPaletteLevel(PaletteCtrls& ctrls, std::uint8_t paletteLevel);
+
+// WnFilterCtrls (av1_common.h:295-313, verbatim field order/types).
+struct WnFilterCtrls {
+    bool enabled;
+    std::uint8_t filterTapLvl;  // 1: Y-7tap/UV-5tap, 2: Y-5tap/UV-5tap, 3: Y-3tap/UV-3tap
+    bool useRefinement;
+    bool maxOneRefinementStep;
+    bool usePrevFrameCoeffs;
+    bool useChroma;
+};
+
+// svt_aom_set_wn_filter_ctrls (:1242-1301). The Av1Common wall folds into
+// the carrier. The default case assert(0)s in the reference and writes
+// nothing (documented UB).
+void setWnFilterCtrls(WnFilterCtrls& ctrls, std::uint8_t wnFilterLvl);
+
+// SgFilterCtrls (av1_common.h:44-62, verbatim; PLANE_TYPES = 2,
+// definitions.h:685).
+constexpr int kPlaneTypes = 2;
+struct SgFilterCtrls {
+    bool enabled;
+    std::int8_t startEp[kPlaneTypes];
+    std::int8_t endEp[kPlaneTypes];
+    std::int8_t epInc[kPlaneTypes];
+    std::int8_t refine[kPlaneTypes];
+    bool useChroma;
+};
+
+// svt_aom_set_sg_filter_ctrls (:1303-1362). The default case assert(0)s
+// in the reference and writes nothing (documented UB).
+void setSgFilterCtrls(SgFilterCtrls& ctrls, std::uint8_t sgFilterLvl);
+
+// ---------------------------------------------------------------------------
+// Batch B: the small helper family.
+// ---------------------------------------------------------------------------
+
+// svt_aom_get_gm_core_level (:181-199). The CONFIG_ENABLE_GLOBAL_MOTION
+// fork is threaded as the runtime parameter (the setGmControls
+// precedent): configEnableGlobalMotion = 0 -> always 0.
+std::uint8_t getGmCoreLevel(EncMode encMode, bool superResOff, int configEnableGlobalMotion);
+
+// svt_aom_derive_gm_level (:201-215). The pcs wall folds into the two
+// consumed scalars (enc_mode, slice_type == I_SLICE).
+std::uint8_t deriveGmLevel(EncMode encMode, bool isISlice, bool superResOff,
+                           int configEnableGlobalMotion);
+
+// svt_aom_derive_input_resolution (sequence_control_set.c:120-139) with
+// the definitions.h:1819-1824 thresholds. NAMED DEVIATION: the EbErrorType
+// return (always EB_ErrorNone) is dropped.
+ResolutionRange deriveInputResolution(std::uint32_t inputSize);
+
+// svt_aom_get_max_can_count (:1936-1981).
+std::uint16_t getMaxCanCount(EncMode encMode, bool rtc);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

@@ -1379,5 +1379,556 @@ void setCdefReconCtrls(CdefReconCtrls& ctrls, std::uint8_t cdefReconLevel) {
     }
 }
 
+// svt_aom_set_dlf_controls (enc_mode_config.c:1569-1665), 1:1.
+void setDlfCtrls(DlfCtrls& ctrls, std::uint8_t dlfLevel) {
+    switch (dlfLevel) {
+    case 0:
+        ctrls.enabled                  = 0;
+        ctrls.sbBasedDlf               = 0;
+        ctrls.pickMethod               = LPF_PICK_FROM_FULL_IMAGE;
+        ctrls.dlfAvg                   = false;
+        ctrls.useRefAvgY               = false;
+        ctrls.useRefAvgUv              = false;
+        ctrls.earlyExitConvergence     = 0;
+        ctrls.zeroFilterStrengthLvl    = 0;
+        ctrls.prevDlfDistTh            = 0;
+        break;
+    case 1:
+        ctrls.enabled                  = 1;
+        ctrls.sbBasedDlf               = 0;
+        ctrls.pickMethod               = LPF_PICK_FROM_FULL_IMAGE;
+        ctrls.dlfAvg                   = false;
+        ctrls.useRefAvgY               = false;
+        ctrls.useRefAvgUv              = false;
+        ctrls.earlyExitConvergence     = 0;
+        ctrls.zeroFilterStrengthLvl    = 0;
+        ctrls.prevDlfDistTh            = 0;
+        break;
+    case 2:
+        ctrls.enabled                  = 1;
+        ctrls.sbBasedDlf               = 0;
+        ctrls.pickMethod               = LPF_PICK_FROM_FULL_IMAGE;
+        ctrls.dlfAvg                   = true;
+        ctrls.useRefAvgY               = false;
+        ctrls.useRefAvgUv              = true;
+        ctrls.earlyExitConvergence     = 1;
+        ctrls.zeroFilterStrengthLvl    = 0;
+        ctrls.prevDlfDistTh            = 0;
+        break;
+    case 3:
+        ctrls.enabled                  = 1;
+        ctrls.sbBasedDlf               = 0;
+        ctrls.pickMethod               = LPF_PICK_FROM_FULL_IMAGE;
+        ctrls.dlfAvg                   = true;
+        ctrls.useRefAvgY               = true;
+        ctrls.useRefAvgUv              = true;
+        ctrls.earlyExitConvergence     = 1;
+        ctrls.zeroFilterStrengthLvl    = 0;
+        ctrls.prevDlfDistTh            = 0;
+        break;
+    case 4:
+        ctrls.enabled                  = 1;
+        ctrls.sbBasedDlf               = 0;
+        ctrls.pickMethod               = LPF_PICK_FROM_FULL_IMAGE;
+        ctrls.dlfAvg                   = true;
+        ctrls.useRefAvgY               = true;
+        ctrls.useRefAvgUv              = true;
+        ctrls.earlyExitConvergence     = 1;
+        ctrls.zeroFilterStrengthLvl    = 2;
+        ctrls.prevDlfDistTh            = 10;
+        break;
+    case 5:
+        ctrls.enabled                  = 1;
+        ctrls.sbBasedDlf               = 1;
+        ctrls.pickMethod               = LPF_PICK_FROM_Q;
+        ctrls.dlfAvg                   = false;
+        ctrls.useRefAvgY               = false;
+        ctrls.useRefAvgUv              = false;
+        ctrls.earlyExitConvergence     = 0;
+        ctrls.zeroFilterStrengthLvl    = 1;
+        ctrls.prevDlfDistTh            = 0;
+        break;
+    case 6:
+        ctrls.enabled                  = 1;
+        ctrls.sbBasedDlf               = 1;
+        ctrls.pickMethod               = LPF_PICK_FROM_Q;
+        ctrls.dlfAvg                   = false;
+        ctrls.useRefAvgY               = false;
+        ctrls.useRefAvgUv              = false;
+        ctrls.earlyExitConvergence     = 0;
+        ctrls.zeroFilterStrengthLvl    = 2;
+        ctrls.prevDlfDistTh            = 0;
+        break;
+    case 7:
+        ctrls.enabled                  = 1;
+        ctrls.sbBasedDlf               = 1;
+        ctrls.pickMethod               = LPF_PICK_FROM_Q;
+        ctrls.dlfAvg                   = false;
+        ctrls.useRefAvgY               = false;
+        ctrls.useRefAvgUv              = false;
+        ctrls.earlyExitConvergence     = 0;
+        ctrls.zeroFilterStrengthLvl    = 3;
+        ctrls.prevDlfDistTh            = 0;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+}
+
+// set_intrabc_level (enc_mode_config.c:1672-1851), 1:1. MAX_INTRABC_LEVEL
+// is 7 (:1670), so case MAX_INTRABC_LEVEL is case 7.
+void setIntrabcLevel(IntrabcCtrls& ctrls, std::uint8_t ibcLevel) {
+    switch (ibcLevel) {
+    case 0:
+        ctrls.enabled = false;
+        break;
+    case 1:
+        ctrls.enabled = true;
+
+        ctrls.paletteHint      = false;
+        ctrls.nsqParentGating  = false;
+        ctrls.b4ParentGating   = false;
+
+        // Hash search settings
+        ctrls.maxBlockSizeHash  = 64;
+        ctrls.maxCandPerBucket  = 256;
+
+        // Mesh search settings
+        ctrls.exhaustiveMeshThresh        = (1 << 20);
+        ctrls.meshSearchMvDiffThreshold   = -1;
+        ctrls.meshPatterns[0]             = MeshPattern{256, 1};
+        ctrls.meshPatterns[1]             = MeshPattern{256, 1};
+        ctrls.meshPatterns[2]             = MeshPattern{0, 0};
+        ctrls.meshPatterns[3]             = MeshPattern{0, 0};
+        ctrls.meshQpScaling               = false;
+
+        // Search direction(s)
+        ctrls.searchDir = 0;
+        break;
+    case 2:
+        ctrls.enabled = true;
+
+        ctrls.paletteHint      = true;
+        ctrls.nsqParentGating  = false;
+        ctrls.b4ParentGating   = false;
+
+        // Hash search settings
+        ctrls.maxBlockSizeHash  = 64;
+        ctrls.maxCandPerBucket  = 256;
+
+        // Mesh search settings
+        ctrls.exhaustiveMeshThresh        = (1 << 20);
+        ctrls.meshSearchMvDiffThreshold   = -1;
+        ctrls.meshPatterns[0]             = MeshPattern{256, 8};
+        ctrls.meshPatterns[1]             = MeshPattern{64, 1};
+        ctrls.meshPatterns[2]             = MeshPattern{0, 0};
+        ctrls.meshPatterns[3]             = MeshPattern{0, 0};
+        ctrls.meshQpScaling               = false;
+
+        // Search direction(s)
+        ctrls.searchDir = 0;
+        break;
+    case 3:
+        ctrls.enabled = true;
+
+        ctrls.paletteHint      = true;
+        ctrls.nsqParentGating  = true;
+        ctrls.b4ParentGating   = false;
+
+        // Hash search settings
+        ctrls.maxBlockSizeHash  = 64;
+        ctrls.maxCandPerBucket  = 256;
+
+        // Mesh search settings
+        ctrls.exhaustiveMeshThresh        = (1 << 20);
+        ctrls.meshSearchMvDiffThreshold   = 0;
+        ctrls.meshPatterns[0]             = MeshPattern{256, 8};
+        ctrls.meshPatterns[1]             = MeshPattern{64, 1};
+        ctrls.meshPatterns[2]             = MeshPattern{0, 0};
+        ctrls.meshPatterns[3]             = MeshPattern{0, 0};
+        ctrls.meshQpScaling               = true;
+
+        // Search direction(s)
+        ctrls.searchDir = 0;
+        break;
+    case 4:
+        ctrls.enabled = true;
+
+        ctrls.paletteHint      = true;
+        ctrls.nsqParentGating  = true;
+        ctrls.b4ParentGating   = false;
+
+        // Hash search settings
+        ctrls.maxBlockSizeHash  = 64;
+        ctrls.maxCandPerBucket  = 64;
+
+        // Mesh search settings
+        ctrls.exhaustiveMeshThresh        = (1 << 24);
+        ctrls.meshSearchMvDiffThreshold   = 0;
+        ctrls.meshPatterns[0]             = MeshPattern{256, 8};
+        ctrls.meshPatterns[1]             = MeshPattern{32, 1};
+        ctrls.meshPatterns[2]             = MeshPattern{0, 0};
+        ctrls.meshPatterns[3]             = MeshPattern{0, 0};
+        ctrls.meshQpScaling               = true;
+
+        // Search direction(s)
+        ctrls.searchDir = 0;
+        break;
+    case 5:
+        ctrls.enabled = true;
+
+        ctrls.paletteHint      = true;
+        ctrls.nsqParentGating  = true;
+        ctrls.b4ParentGating   = false;
+
+        // Hash search settings
+        ctrls.maxBlockSizeHash  = 8;
+        ctrls.maxCandPerBucket  = 64;
+
+        // Mesh search settings
+        ctrls.exhaustiveMeshThresh        = (1 << 24);
+        ctrls.meshSearchMvDiffThreshold   = 0;
+        ctrls.meshPatterns[0]             = MeshPattern{256, 8};
+        ctrls.meshPatterns[1]             = MeshPattern{32, 1};
+        ctrls.meshPatterns[2]             = MeshPattern{0, 0};
+        ctrls.meshPatterns[3]             = MeshPattern{0, 0};
+        ctrls.meshQpScaling               = true;
+
+        // Search direction(s)
+        ctrls.searchDir = 0;
+        break;
+    case 6:
+        ctrls.enabled = true;
+
+        ctrls.paletteHint      = true;
+        ctrls.nsqParentGating  = true;
+        ctrls.b4ParentGating   = false;
+
+        // Hash search settings
+        ctrls.maxBlockSizeHash  = 8;
+        ctrls.maxCandPerBucket  = 32;
+
+        // Mesh search settings
+        ctrls.exhaustiveMeshThresh = (std::uint64_t)~0;
+
+        // Search direction(s)
+        ctrls.searchDir = 0;
+        break;
+    case kMaxIntrabcLevel:
+        ctrls.enabled = true;
+
+        ctrls.paletteHint      = true;
+        ctrls.nsqParentGating  = true;
+        ctrls.b4ParentGating   = false;
+
+        // Hash search settings
+        ctrls.maxBlockSizeHash  = 8;
+        ctrls.maxCandPerBucket  = 32;
+
+        // Mesh search settings
+        ctrls.exhaustiveMeshThresh = (std::uint64_t)~0;
+
+        // Search direction(s)
+        ctrls.searchDir = 1;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+}
+
+// set_palette_level (enc_mode_config.c:1856-1930), 1:1.
+void setPaletteLevel(PaletteCtrls& ctrls, std::uint8_t paletteLevel) {
+    switch (paletteLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled             = 1;
+        ctrls.dominantColorStep   = 1;
+        ctrls.kmeanColorStep      = 1;
+        ctrls.centroidRefinement  = true;
+        ctrls.kMeansMaxItr        = 50;
+        break;
+    case 2:
+        ctrls.enabled             = 1;
+        ctrls.dominantColorStep   = 2;
+        ctrls.kmeanColorStep      = 1;
+        ctrls.centroidRefinement  = false;
+        ctrls.kMeansMaxItr        = 2;
+        break;
+    case 3:
+        ctrls.enabled             = 1;
+        ctrls.dominantColorStep   = (std::uint8_t)~0;
+        ctrls.kmeanColorStep      = 1;
+        ctrls.centroidRefinement  = false;
+        ctrls.kMeansMaxItr        = 2;
+        break;
+    case 4:
+        ctrls.enabled             = 1;
+        ctrls.dominantColorStep   = (std::uint8_t)~0;
+        ctrls.kmeanColorStep      = 2;
+        ctrls.centroidRefinement  = false;
+        ctrls.kMeansMaxItr        = 2;
+        break;
+    case 5:
+        ctrls.enabled             = 1;
+        ctrls.dominantColorStep   = (std::uint8_t)~0;
+        ctrls.kmeanColorStep      = 3;
+        ctrls.centroidRefinement  = false;
+        ctrls.kMeansMaxItr        = 2;
+        break;
+    case 6:
+        ctrls.enabled             = 1;
+        ctrls.dominantColorStep   = (std::uint8_t)~0;
+        ctrls.kmeanColorStep      = 5;
+        ctrls.centroidRefinement  = false;
+        ctrls.kMeansMaxItr        = 2;
+        break;
+    case 7:
+        ctrls.enabled             = 1;
+        ctrls.dominantColorStep   = (std::uint8_t)~0;
+        ctrls.kmeanColorStep      = 5;
+        ctrls.centroidRefinement  = false;
+        ctrls.kMeansMaxItr        = 1;
+        break;
+    case 8:
+        ctrls.enabled             = 1;
+        ctrls.dominantColorStep   = (std::uint8_t)~0;
+        ctrls.kmeanColorStep      = 6;
+        ctrls.centroidRefinement  = false;
+        ctrls.kMeansMaxItr        = 1;
+        break;
+    case 9:
+        ctrls.enabled             = 1;
+        ctrls.dominantColorStep   = (std::uint8_t)~0;
+        ctrls.kmeanColorStep      = 50;
+        ctrls.centroidRefinement  = false;
+        ctrls.kMeansMaxItr        = 1;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+}
+
+// svt_aom_set_wn_filter_ctrls (enc_mode_config.c:1242-1301), 1:1. The
+// Av1Common wall folds into the carrier.
+void setWnFilterCtrls(WnFilterCtrls& ctrls, std::uint8_t wnFilterLvl) {
+    switch (wnFilterLvl) {
+    case 0:
+        ctrls.enabled = false;
+        break;
+    case 1:
+        ctrls.enabled               = true;
+        ctrls.useChroma             = true;
+        ctrls.filterTapLvl          = 1;
+        ctrls.useRefinement         = true;
+        ctrls.maxOneRefinementStep  = false;
+        ctrls.usePrevFrameCoeffs    = false;
+        break;
+    case 2:
+        ctrls.enabled               = true;
+        ctrls.useChroma             = true;
+        ctrls.filterTapLvl          = 1;
+        ctrls.useRefinement         = true;
+        ctrls.maxOneRefinementStep  = true;
+        ctrls.usePrevFrameCoeffs    = false;
+        break;
+    case 3:
+        ctrls.enabled               = true;
+        ctrls.useChroma             = true;
+        ctrls.filterTapLvl          = 2;
+        ctrls.useRefinement         = true;
+        ctrls.maxOneRefinementStep  = true;
+        ctrls.usePrevFrameCoeffs    = false;
+        break;
+    case 4:
+        ctrls.enabled               = true;
+        ctrls.useChroma             = true;
+        ctrls.filterTapLvl          = 2;
+        ctrls.useRefinement         = false;
+        ctrls.maxOneRefinementStep  = true;
+        ctrls.usePrevFrameCoeffs    = false;
+        break;
+    case 5:
+        ctrls.enabled               = true;
+        ctrls.useChroma             = false;
+        ctrls.filterTapLvl          = 2;
+        ctrls.useRefinement         = false;
+        ctrls.maxOneRefinementStep  = true;
+        ctrls.usePrevFrameCoeffs    = false;
+        break;
+    case 6:
+        ctrls.enabled               = true;
+        ctrls.useChroma             = false;
+        ctrls.filterTapLvl          = 2;
+        ctrls.useRefinement         = false;
+        ctrls.maxOneRefinementStep  = true;
+        ctrls.usePrevFrameCoeffs    = true;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+}
+
+// svt_aom_set_sg_filter_ctrls (enc_mode_config.c:1303-1362), 1:1.
+void setSgFilterCtrls(SgFilterCtrls& ctrls, std::uint8_t sgFilterLvl) {
+    switch (sgFilterLvl) {
+    case 0:
+        ctrls.enabled = false;
+        break;
+    case 1:
+        ctrls.enabled    = true;
+        ctrls.useChroma  = true;
+        ctrls.startEp[0] = 0;
+        ctrls.endEp[0]   = 16;
+        ctrls.epInc[0]   = 1;
+        ctrls.startEp[1] = 0;
+        ctrls.endEp[1]   = 16;
+        ctrls.epInc[1]   = 1;
+        ctrls.refine[0]  = 1;
+        ctrls.refine[1]  = 1;
+        break;
+    case 2:
+        ctrls.enabled    = true;
+        ctrls.useChroma  = true;
+        ctrls.startEp[0] = 0;
+        ctrls.endEp[0]   = 16;
+        ctrls.epInc[0]   = 1;
+        ctrls.startEp[1] = 4;
+        ctrls.endEp[1]   = 5;
+        ctrls.epInc[1]   = 1;
+        ctrls.refine[0]  = 1;
+        ctrls.refine[1]  = 0;
+        break;
+    case 3:
+        ctrls.enabled    = true;
+        ctrls.useChroma  = true;
+        ctrls.startEp[0] = 0;
+        ctrls.endEp[0]   = 16;
+        ctrls.epInc[0]   = 8;
+        ctrls.startEp[1] = 4;
+        ctrls.endEp[1]   = 5;
+        ctrls.epInc[1]   = 1;
+        ctrls.refine[0]  = 1;
+        ctrls.refine[1]  = 0;
+        break;
+    case 4:
+        ctrls.enabled    = true;
+        ctrls.useChroma  = false;
+        ctrls.startEp[0] = 0;
+        ctrls.endEp[0]   = 16;
+        ctrls.epInc[0]   = 8;
+        ctrls.startEp[1] = 4;
+        ctrls.endEp[1]   = 5;
+        ctrls.epInc[1]   = 1;
+        ctrls.refine[0]  = 1;
+        ctrls.refine[1]  = 0;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch B: the small helper family.
+// ---------------------------------------------------------------------------
+
+// svt_aom_get_gm_core_level (enc_mode_config.c:181-199), 1:1 with the
+// CONFIG_ENABLE_GLOBAL_MOTION fork threaded as a runtime parameter (the
+// setGmControls precedent; the pinned build resolves the macro to 1).
+std::uint8_t getGmCoreLevel(EncMode encMode, bool superResOff, int configEnableGlobalMotion) {
+    if (!configEnableGlobalMotion) {
+        (void)encMode;
+        (void)superResOff;
+        return 0;
+    }
+    std::uint8_t gmLevel = 0;
+    if (superResOff) {
+        if (encMode <= ENC_MR) {
+            gmLevel = 2;
+        } else if (encMode <= ENC_M4) {
+            gmLevel = 4;
+        } else {
+            gmLevel = 0;
+        }
+    }
+    return gmLevel;
+}
+
+// svt_aom_derive_gm_level (enc_mode_config.c:201-215), 1:1 with the pcs
+// wall folded into the two consumed scalars.
+std::uint8_t deriveGmLevel(EncMode encMode, bool isISlice, bool superResOff,
+                           int configEnableGlobalMotion) {
+    std::uint8_t gmLevel = 0;
+    // disable global motion when reference scaling enabled,
+    // even if current pic is not scaled, because its reference
+    // pics might be scaled in different size
+    // super-res is ok for its reference pics are always upscaled
+    // to original size
+    if (!isISlice) {
+        gmLevel = getGmCoreLevel(encMode, superResOff, configEnableGlobalMotion);
+    }
+    return gmLevel;
+}
+
+// svt_aom_derive_input_resolution (sequence_control_set.c:120-139), 1:1
+// with the thresholds of definitions.h:1819-1824. NAMED DEVIATION: the
+// EbErrorType return (always EB_ErrorNone) is dropped.
+ResolutionRange deriveInputResolution(std::uint32_t inputSize) {
+    if (inputSize < 0x28500u) {        // INPUT_SIZE_240p_TH
+        return INPUT_SIZE_240p_RANGE;
+    } else if (inputSize < 0x4CE00u) {   // INPUT_SIZE_360p_TH
+        return INPUT_SIZE_360p_RANGE;
+    } else if (inputSize < 0xA1400u) {   // INPUT_SIZE_480p_TH
+        return INPUT_SIZE_480p_RANGE;
+    } else if (inputSize < 0x16DA00u) {  // INPUT_SIZE_720p_TH
+        return INPUT_SIZE_720p_RANGE;
+    } else if (inputSize < 0x535200u) {  // INPUT_SIZE_1080p_TH
+        return INPUT_SIZE_1080p_RANGE;
+    } else if (inputSize < 0x140A000u) {  // INPUT_SIZE_4K_TH
+        return INPUT_SIZE_4K_RANGE;
+    }
+    return INPUT_SIZE_8K_RANGE;
+}
+
+// svt_aom_get_max_can_count (enc_mode_config.c:1936-1981), 1:1.
+std::uint16_t getMaxCanCount(EncMode encMode, bool rtc) {
+    std::uint16_t memMaxCanCount;
+    if (rtc) {
+        // RTC allocation upper bound: sized to cover the worst-case candidate injection count per preset
+        // (up to 3L pred structure), with headroom for preset-boundary tuning (e.g. an Mn tool tested at Mn+1).
+        if (encMode <= ENC_M7) {
+            memMaxCanCount = 150;
+        } else if (encMode <= ENC_M8) {
+            memMaxCanCount = 75;
+        } else if (encMode <= ENC_M10) {
+            memMaxCanCount = 65;
+        } else if (encMode <= ENC_M11) {
+            memMaxCanCount = 15;
+        } else {
+            memMaxCanCount = 10;
+        }
+    } else {
+        if (encMode <= ENC_M1) {
+            memMaxCanCount = 1225;
+        } else if (encMode <= ENC_M2) {
+            memMaxCanCount = 1000;
+        } else if (encMode <= ENC_M3) {
+            memMaxCanCount = 720;
+        } else if (encMode <= ENC_M4) {
+            memMaxCanCount = 576;
+        } else if (encMode <= ENC_M5) {
+            memMaxCanCount = 369;
+        } else if (encMode <= ENC_M6) {
+            memMaxCanCount = 236;
+        } else if (encMode <= ENC_M9) {
+            memMaxCanCount = 190;
+        } else {
+            memMaxCanCount = 80;
+        }
+    }
+    return memMaxCanCount;
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo
