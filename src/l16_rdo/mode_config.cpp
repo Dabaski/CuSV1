@@ -2436,5 +2436,414 @@ void sigDerivMultiProcessesAllIntra(MultiProcPpcs& pcs, const MultiProcScs& scs)
 }
 
 
+// ---------------------------------------------------------------------------
+// Batch B rung 4: set_inter_comp_controls, the level getters, the
+// sg/restoration enable wrappers, the pre-analysis derivations.
+// ---------------------------------------------------------------------------
+
+// set_inter_comp_controls (enc_mode_config.c:2627-2709), 1:1.
+void setInterCompCtrls(InterCompCtrls& ctrls, std::uint8_t interCompMode) {
+    switch (interCompMode) {
+    case 0:  // OFF (AVG only)
+        ctrls.totCompTypes     = kMdCompDist;
+        ctrls.doNearestNearest = false;
+        ctrls.doNearNear       = false;
+        ctrls.doMe             = false;
+        ctrls.doPme            = false;
+        ctrls.doNearestNearNew = false;
+        ctrls.do3x3Bi          = false;
+        ctrls.doGlobal         = false;
+        break;
+    case 1:  // FULL
+        ctrls.totCompTypes     = kMdCompTypes;
+        ctrls.doNearestNearest = true;
+        ctrls.doNearNear       = true;
+        ctrls.doMe             = true;
+        ctrls.doPme            = true;
+        ctrls.doNearestNearNew = true;
+        ctrls.do3x3Bi          = true;
+        ctrls.doGlobal         = true;
+
+        ctrls.skipOnRefInfo    = false;
+        ctrls.useRate          = true;
+        ctrls.pred0ToPred1Mult = 0;
+        ctrls.maxMvLength      = 0;
+        ctrls.noSymDist        = false;
+        break;
+    case 2:
+        ctrls.totCompTypes     = kMdCompTypes;
+        ctrls.doNearestNearest = true;
+        ctrls.doNearNear       = true;
+        ctrls.doMe             = true;
+        ctrls.doPme            = true;
+        ctrls.doNearestNearNew = false;
+        ctrls.do3x3Bi          = false;
+        ctrls.doGlobal         = true;
+
+        ctrls.skipOnRefInfo    = false;
+        ctrls.useRate          = false;
+        ctrls.pred0ToPred1Mult = 1;
+        ctrls.maxMvLength      = 0;
+        ctrls.noSymDist        = false;
+        break;
+    case 3:
+        ctrls.totCompTypes     = kMdCompTypes;
+        ctrls.doNearestNearest = true;
+        ctrls.doNearNear       = true;
+        ctrls.doMe             = true;
+        ctrls.doPme            = false;
+        ctrls.doNearestNearNew = false;
+        ctrls.do3x3Bi          = false;
+        ctrls.doGlobal         = true;
+
+        ctrls.skipOnRefInfo    = true;
+        ctrls.useRate          = false;
+        ctrls.pred0ToPred1Mult = 1;
+        ctrls.maxMvLength      = 0;
+        ctrls.noSymDist        = true;
+        break;
+    case 4:
+        ctrls.totCompTypes     = kMdCompTypes;
+        ctrls.doNearestNearest = true;
+        ctrls.doNearNear       = true;
+        ctrls.doMe             = true;
+        ctrls.doPme            = false;
+        ctrls.doNearestNearNew = false;
+        ctrls.do3x3Bi          = false;
+        ctrls.doGlobal         = true;
+
+        ctrls.skipOnRefInfo    = true;
+        ctrls.useRate          = false;
+        ctrls.pred0ToPred1Mult = 4;
+        ctrls.maxMvLength      = 32;
+        ctrls.noSymDist        = true;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+}
+
+// get_inter_compound_level (enc_mode_config.c:8839-8850), 1:1.
+std::uint8_t getInterCompoundLevel(EncMode encMode) {
+    std::uint8_t compLevel;
+    if (encMode <= ENC_M0) {
+        compLevel = 3;
+    } else if (encMode <= ENC_M2) {
+        compLevel = 4;
+    } else {
+        compLevel = 0;
+    }
+    return compLevel;
+}
+
+// get_filter_intra_level_default (:8852-8863), 1:1.
+std::uint8_t getFilterIntraLevelDefault(EncMode encMode) {
+    std::uint8_t filterIntraLevel;
+    if (encMode <= ENC_M1) {
+        filterIntraLevel = 1;
+    } else if (encMode <= ENC_M5) {
+        filterIntraLevel = 2;
+    } else {
+        filterIntraLevel = 0;
+    }
+    return filterIntraLevel;
+}
+
+// get_filter_intra_level_rtc (:8865-8869), 1:1.
+std::uint8_t getFilterIntraLevelRtc() {
+    return 0;
+}
+
+// get_filter_intra_level_allintra (:8871-8882), 1:1.
+std::uint8_t getFilterIntraLevelAllIntra(EncMode encMode) {
+    std::uint8_t filterIntraLevel;
+    if (encMode <= ENC_M0) {
+        filterIntraLevel = 1;
+    } else if (encMode <= ENC_M6) {
+        filterIntraLevel = 2;
+    } else {
+        filterIntraLevel = 0;
+    }
+    return filterIntraLevel;
+}
+
+// svt_aom_get_inter_intra_level (:8884-8894), 1:1.
+std::uint8_t getInterIntraLevel(EncMode encMode, std::uint8_t transitionPresent) {
+    std::uint8_t interIntraLevel = 0;
+    if (encMode <= ENC_M1) {
+        interIntraLevel = 2;
+    } else if (encMode <= ENC_M8) {
+        interIntraLevel = transitionPresent ? 2 : 0;
+    } else {
+        interIntraLevel = 0;
+    }
+    return interIntraLevel;
+}
+
+// svt_aom_get_intra_mode_levels_allintra (:5429-5453), 1:1.
+void getIntraModeLevelsAllIntra(EncMode encMode, std::uint32_t* intraLevel,
+                                std::uint32_t* distBasedAngIntraLevel) {
+    std::uint32_t intra;
+    std::uint32_t dist;
+    if (encMode <= ENC_M4) {
+        intra = 1;
+        dist  = 0;
+    } else if (encMode <= ENC_M5) {
+        intra = 2;
+        dist  = 0;
+    } else if (encMode <= ENC_M6) {
+        intra = 6;
+        dist  = 0;
+    } else if (encMode <= ENC_M8) {
+        intra = 7;
+        dist  = 0;
+    } else {
+        intra = 8;
+        dist  = 0;
+    }
+    *intraLevel                = intra;
+    *distBasedAngIntraLevel    = dist;
+}
+
+// svt_aom_get_enable_me_8x8 (:146-173), 1:1.
+std::uint8_t getEnableMe8x8(EncMode encMode, std::uint8_t inputResolution, bool rtcTune) {
+    std::uint8_t enableMe8x8 = 0;
+    if (rtcTune) {
+        if (encMode <= ENC_M8) {
+            if (inputResolution <= INPUT_SIZE_720p_RANGE) {
+                enableMe8x8 = 1;
+            } else {
+                enableMe8x8 = 0;
+            }
+        } else {
+            enableMe8x8 = 0;
+        }
+    } else {
+        if (encMode <= ENC_M5) {
+            enableMe8x8 = 1;
+        } else if (encMode <= ENC_M8) {
+            if (inputResolution <= INPUT_SIZE_720p_RANGE) {
+                enableMe8x8 = 1;
+            } else {
+                enableMe8x8 = 0;
+            }
+        } else {
+            enableMe8x8 = 0;
+        }
+    }
+    return enableMe8x8;
+}
+
+// svt_aom_get_enable_me_16x16 (:175-179), 1:1.
+std::uint8_t getEnableMe16x16(EncMode) {
+    return 1;
+}
+
+// svt_aom_get_enable_sg_default (:2711-2715), 1:1.
+std::uint8_t getEnableSgDefault(EncMode encMode, std::uint8_t inputResolution,
+                                std::uint8_t fastDecode) {
+    return getSgFilterLevelDefault(encMode, inputResolution, fastDecode) > 0 ? 1 : 0;
+}
+
+// svt_aom_get_enable_sg_rtc (:2717-2721), 1:1.
+std::uint8_t getEnableSgRtc(std::uint8_t inputResolution, std::uint8_t fastDecode) {
+    return getSgFilterLevelRtc(inputResolution, fastDecode) > 0 ? 1 : 0;
+}
+
+// svt_aom_get_enable_sg_allintra (:2723-2727), 1:1.
+std::uint8_t getEnableSgAllIntra(EncMode encMode) {
+    return getSgFilterLevelAllIntra(encMode) > 0 ? 1 : 0;
+}
+
+// svt_aom_get_enable_restoration_default (:2733-2748), 1:1.
+std::uint8_t getEnableRestorationDefault(EncMode encMode, std::int8_t configEnableRestoration,
+                                         std::uint8_t inputResolution, std::uint8_t fastDecode) {
+    if (configEnableRestoration != (std::int8_t)kDefaultSentinel) {
+        return (std::uint8_t)configEnableRestoration;
+    }
+    std::uint8_t wn = 0;
+    for (int isRef = 0; isRef < 2; isRef++) {
+        wn = getWnFilterLevelDefault(encMode, inputResolution, isRef != 0);
+        if (wn) {
+            break;
+        }
+    }
+    std::uint8_t sg = getEnableSgDefault(encMode, inputResolution, fastDecode);
+    return (sg > 0 || wn > 0) ? 1 : 0;
+}
+
+// svt_aom_get_enable_restoration_rtc (:2750-2765), 1:1.
+std::uint8_t getEnableRestorationRtc(std::int8_t configEnableRestoration,
+                                     std::uint8_t inputResolution, std::uint8_t fastDecode) {
+    if (configEnableRestoration != (std::int8_t)kDefaultSentinel) {
+        return (std::uint8_t)configEnableRestoration;
+    }
+    std::uint8_t wn = 0;
+    for (int isRef = 0; isRef < 2; isRef++) {
+        wn = getWnFilterLevelRtc(inputResolution);
+        if (wn) {
+            break;
+        }
+    }
+    std::uint8_t sg = getEnableSgRtc(inputResolution, fastDecode);
+    return (sg > 0 || wn > 0) ? 1 : 0;
+}
+
+// svt_aom_get_enable_restoration_allintra (:2767-2781), 1:1.
+std::uint8_t getEnableRestorationAllIntra(EncMode encMode, std::int8_t configEnableRestoration) {
+    if (configEnableRestoration != (std::int8_t)kDefaultSentinel) {
+        return (std::uint8_t)configEnableRestoration;
+    }
+    std::uint8_t wn = 0;
+    for (int isRef = 0; isRef < 2; isRef++) {
+        wn = getWnFilterLevelAllIntra(encMode);
+        if (wn) {
+            break;
+        }
+    }
+    std::uint8_t sg = getEnableSgAllIntra(encMode);
+    return (sg > 0 || wn > 0) ? 1 : 0;
+}
+
+// svt_aom_sig_deriv_pre_analysis_pcs (:2788-2811), 1:1.
+void sigDerivPreAnalysisPcs(PreAnalysisPcs& pcs) {
+    // Derive ME enable flags based on current enc_mode
+    ResolutionRange resolution = deriveInputResolution(pcs.maxInputLumaWidth * pcs.maxInputLumaHeight);
+    pcs.enableMe16x16 = getEnableMe16x16(pcs.encMode) != 0;
+    pcs.enableMe8x8 = pcs.enableMe16x16
+        ? getEnableMe8x8(pcs.encMode, (std::uint8_t)resolution, pcs.rtcTune) != 0
+        : false;
+
+    // Derive HME Flag
+    // Set here to allocate resources for the downsampled pictures used in HME (generated in PictureAnalysis)
+    // Will be later updated for SC/NSC in PictureDecisionProcess
+    pcs.enableHmeFlag        = true;
+    pcs.enableHmeLevel0Flag  = true;
+    pcs.enableHmeLevel1Flag  = true;
+    pcs.enableHmeLevel2Flag  = true;
+    pcs.tfEnableHmeFlag      = true;
+    pcs.tfEnableHmeLevel0Flag = true;
+    pcs.tfEnableHmeLevel1Flag = true;
+    pcs.tfEnableHmeLevel2Flag = true;
+}
+
+// svt_aom_sig_deriv_pre_analysis_scs (:2818-2918), 1:1 with the five
+// CONFIG_ENABLE_* forks threaded as runtime values (the pinned build
+// resolves all five to 1; both arm shapes are tested).
+void sigDerivPreAnalysisScs(PreAnalysisScs& scs, std::int8_t encMode, const PreAnalysisCfg& cfg) {
+    const EncMode mode = (EncMode)encMode;
+    const bool allintra = scs.allintra;
+    // initialize sequence level enable_superres
+    if (cfg.superres) {
+        scs.seqEnableSuperres = scs.superresMode > 0 /* SUPERRES_NONE */ ? true : false;
+    } else {
+        scs.seqEnableSuperres = false;
+    }
+    if (cfg.interIntra) {
+        std::uint8_t iiAllowed = 0;
+        for (std::uint8_t transitionPresent = 0; transitionPresent < 2; transitionPresent++) {
+            if (iiAllowed) {
+                break;
+            }
+            iiAllowed |= getInterIntraLevel(mode, transitionPresent);
+        }
+        scs.seqEnableInterintraCompound = iiAllowed ? true : false;
+    } else {
+        scs.seqEnableInterintraCompound = false;
+    }
+    const bool rtcTune = scs.rtcTune;
+    if (cfg.filterIntra) {
+        std::uint8_t isFilterIntraUsed =
+            allintra ? getFilterIntraLevelAllIntra(mode)
+            : rtcTune ? getFilterIntraLevelRtc()
+                      : getFilterIntraLevelDefault(mode);
+        scs.seqFilterIntraLevel = isFilterIntraUsed ? 1 : 0;
+    } else {
+        scs.seqFilterIntraLevel = 0;
+    }
+    if (cfg.interCompound) {
+        if (getInterCompoundLevel(mode)) {
+            scs.seqEnableJntComp        = 1;  // DISTANCE
+            scs.seqEnableMaskedCompound = 1;  // DIFF+WEDGE
+        } else {
+            scs.seqEnableJntComp        = 0;
+            scs.seqEnableMaskedCompound = 0;
+        }
+    } else {
+        scs.seqEnableJntComp        = 0;
+        scs.seqEnableMaskedCompound = 0;
+    }
+    // For non-still-image or non-all-intra configurations, keep edge filter always ON, otherwise OFF unless angular refinement pruning techniques are active
+    if (allintra) {
+        // Flag indicating whether angular refinement pruning is active
+        std::uint32_t intraLevel = 0;
+        std::uint32_t distBasedAngIntraLevel = 0;
+        getIntraModeLevelsAllIntra(mode, &intraLevel, &distBasedAngIntraLevel);
+        scs.seqEnableIntraEdgeFilter =
+            distBasedAngIntraLevel >= 1 || angularPredLevel[intraLevel] == 2 ||
+                    angularPredLevel[intraLevel] == 3
+                ? 1
+                : 0;
+    } else {
+        scs.seqEnableIntraEdgeFilter = 1;
+    }
+    if (cfg.restoration) {
+        if (scs.enableRestorationFiltering == kDefaultSentinel) {
+            // As allocation has already happened based on the initial input resolution, the resolution
+            // changes should not impact enabling restoration. For some presets, restoration is off for 8K
+            // and above and memory allocation is not performed. So, if we switch to smaller resolution, we need
+            // to keep restoration off
+            ResolutionRange initInputResolution =
+                deriveInputResolution(scs.maxInitialInputLumaWidth * scs.maxInitialInputLumaHeight);
+            scs.seqEnableRestoration =
+                allintra
+                    ? getEnableRestorationAllIntra(mode,
+                                                   (std::int8_t)scs.enableRestorationFiltering)
+                    : rtcTune ? getEnableRestorationRtc((std::int8_t)scs.enableRestorationFiltering,
+                                                        (std::uint8_t)initInputResolution,
+                                                        scs.fastDecode)
+                              : getEnableRestorationDefault(mode,
+                                                            (std::int8_t)scs.enableRestorationFiltering,
+                                                            (std::uint8_t)initInputResolution,
+                                                            scs.fastDecode);
+        } else {
+            ResolutionRange frRes =
+                deriveInputResolution(scs.maxInitialInputLumaWidth * scs.maxInitialInputLumaHeight);
+            const std::uint8_t autoEn =
+                allintra ? getEnableRestorationAllIntra(mode, (std::int8_t)kDefaultSentinel)
+                : rtcTune
+                    ? getEnableRestorationRtc((std::int8_t)kDefaultSentinel,
+                                              (std::uint8_t)frRes, scs.fastDecode)
+                    : getEnableRestorationDefault(mode, (std::int8_t)kDefaultSentinel,
+                                                  (std::uint8_t)frRes, scs.fastDecode);
+            scs.seqEnableRestoration =
+                (scs.enableRestorationFiltering != 0 && autoEn) ? 1 : 0;
+        }
+    } else {
+        scs.seqEnableRestoration = 0;
+    }
+    if (scs.cdefLevel == kDefaultSentinel) {
+        scs.seqCdefLevel = 1;
+    } else {
+        scs.seqCdefLevel = (std::uint8_t)(scs.cdefLevel > 0);
+    }
+    scs.seqEnableWarpedMotion = true;
+}
+
+// svt_aom_is_ref_same_size (:2925-2941), 1:1 with the EbReferenceObject
+// wall folded into the per-slot present/width/height arrays.
+bool isRefSameSize(const RefSameSizePcs& pcs, std::uint8_t listIdx, std::uint8_t refIdx) {
+    if (!pcs.isBSlice) {
+        return false;
+    }
+    const int refCount = pcs.refListCountTry[listIdx];
+    if (refCount == 0 || !pcs.refPresent[listIdx][refIdx]) {
+        return false;
+    }
+    return pcs.refPicWidth[listIdx][refIdx] == pcs.frameWidth &&
+        pcs.refPicHeight[listIdx][refIdx] == pcs.frameHeight;
+}
+
+
 }  // namespace mode_config
 }  // namespace l16_rdo

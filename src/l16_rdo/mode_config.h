@@ -605,5 +605,141 @@ void sigDerivMultiProcessesRtc(MultiProcPpcs& pcs, const MultiProcScs& scs,
 // svt_aom_sig_deriv_multi_processes_allintra (:2369-2518).
 void sigDerivMultiProcessesAllIntra(MultiProcPpcs& pcs, const MultiProcScs& scs);
 
+// ---------------------------------------------------------------------------
+// Batch B rung 4: set_inter_comp_controls (:2627-2709), the level getters,
+// the sg/restoration enable wrappers (:2711-2781), the pre-analysis
+// derivations (:2788-2942).
+// ---------------------------------------------------------------------------
+// The MD_COMP_TYPE tail (definitions.h:1264-1269): AVG=0, DIST=1, DIFF0=2,
+// WEDGE=3, TYPES=4.
+constexpr std::uint8_t kMdCompDist = 1;
+constexpr std::uint8_t kMdCompTypes = 4;
+
+// InterCompCtrls (mode_decision.h, verbatim field order/types).
+struct InterCompCtrls {
+    std::uint8_t totCompTypes;
+    bool doMe;
+    bool doPme;
+    bool doNearestNearest;
+    bool doNearNear;
+    bool doNearestNearNew;
+    bool do3x3Bi;
+    bool doGlobal;
+    std::uint8_t pred0ToPred1Mult;
+    std::uint16_t maxMvLength;
+    bool skipOnRefInfo;
+    bool useRate;
+    bool noSymDist;
+};
+
+// set_inter_comp_controls (:2627-2709). The ModeDecisionContext wall folds
+// into the carrier. The default case assert(0)s and writes nothing
+// (documented UB).
+void setInterCompCtrls(InterCompCtrls& ctrls, std::uint8_t interCompMode);
+
+// get_inter_compound_level (:8839-8850).
+std::uint8_t getInterCompoundLevel(EncMode encMode);
+// get_filter_intra_level_default (:8852-8863) / _rtc (:8865-8869) /
+// _allintra (:8871-8882).
+std::uint8_t getFilterIntraLevelDefault(EncMode encMode);
+std::uint8_t getFilterIntraLevelRtc();
+std::uint8_t getFilterIntraLevelAllIntra(EncMode encMode);
+// svt_aom_get_inter_intra_level (:8884-8894).
+std::uint8_t getInterIntraLevel(EncMode encMode, std::uint8_t transitionPresent);
+// svt_aom_get_intra_mode_levels_allintra (:5429-5453).
+void getIntraModeLevelsAllIntra(EncMode encMode, std::uint32_t* intraLevel,
+                                std::uint32_t* distBasedAngIntraLevel);
+// svt_aom_get_enable_me_8x8 (:146-173) / _16x16 (:175-179).
+std::uint8_t getEnableMe8x8(EncMode encMode, std::uint8_t inputResolution, bool rtcTune);
+std::uint8_t getEnableMe16x16(EncMode encMode);
+
+// svt_aom_get_enable_sg_{default,rtc,allintra} (:2711-2727).
+std::uint8_t getEnableSgDefault(EncMode encMode, std::uint8_t inputResolution,
+                                std::uint8_t fastDecode);
+std::uint8_t getEnableSgRtc(std::uint8_t inputResolution, std::uint8_t fastDecode);
+std::uint8_t getEnableSgAllIntra(EncMode encMode);
+// svt_aom_get_enable_restoration_{default,rtc,allintra} (:2733-2781).
+// configEnableRestoration is the DEFAULT-threaded config value.
+std::uint8_t getEnableRestorationDefault(EncMode encMode, std::int8_t configEnableRestoration,
+                                         std::uint8_t inputResolution, std::uint8_t fastDecode);
+std::uint8_t getEnableRestorationRtc(std::int8_t configEnableRestoration,
+                                     std::uint8_t inputResolution, std::uint8_t fastDecode);
+std::uint8_t getEnableRestorationAllIntra(EncMode encMode, std::int8_t configEnableRestoration);
+
+// The pcs surface of svt_aom_sig_deriv_pre_analysis_pcs (:2788-2811).
+struct PreAnalysisPcs {
+    EncMode encMode;                       // pcs->enc_mode
+    std::uint32_t maxInputLumaWidth;       // scs->max_input_luma_width
+    std::uint32_t maxInputLumaHeight;      // scs->max_input_luma_height
+    bool rtcTune;                          // scs->static_config.rtc
+    // writes:
+    bool enableMe16x16;
+    bool enableMe8x8;
+    bool enableHmeFlag;
+    bool enableHmeLevel0Flag;
+    bool enableHmeLevel1Flag;
+    bool enableHmeLevel2Flag;
+    bool tfEnableHmeFlag;
+    bool tfEnableHmeLevel0Flag;
+    bool tfEnableHmeLevel1Flag;
+    bool tfEnableHmeLevel2Flag;
+};
+
+// svt_aom_sig_deriv_pre_analysis_pcs (:2788-2811).
+void sigDerivPreAnalysisPcs(PreAnalysisPcs& pcs);
+
+// The five CONFIG forks of svt_aom_sig_deriv_pre_analysis_scs (:2818-2918)
+// threaded as runtime values (the CONFIG_ENABLE_GLOBAL_MOTION precedent;
+// the pinned build resolves ALL FIVE to 1 - EbConfigMacros.h:178-208).
+struct PreAnalysisCfg {
+    int superres;       // CONFIG_ENABLE_SUPERRES
+    int interIntra;     // CONFIG_ENABLE_INTER_INTRA
+    int filterIntra;    // CONFIG_ENABLE_FILTER_INTRA
+    int interCompound;  // CONFIG_ENABLE_INTER_COMPOUND
+    int restoration;    // CONFIG_ENABLE_RESTORATION
+};
+
+// The scs surface of svt_aom_sig_deriv_pre_analysis_scs (:2818-2918).
+struct PreAnalysisScs {
+    bool allintra;                          // scs->allintra
+    bool rtcTune;                           // static_config.rtc
+    std::uint8_t fastDecode;                // static_config.fast_decode
+    std::int32_t superresMode;              // static_config.superres_mode (SUPERRES_NONE = 0)
+    std::int32_t enableRestorationFiltering;  // static_config.enable_restoration_filtering
+    std::int32_t cdefLevel;                 // static_config.cdef_level
+    std::uint32_t maxInitialInputLumaWidth;
+    std::uint32_t maxInitialInputLumaHeight;
+    // writes (the seq_header surface):
+    bool seqEnableSuperres;
+    bool seqEnableInterintraCompound;
+    std::uint8_t seqFilterIntraLevel;
+    std::uint8_t seqEnableJntComp;
+    std::uint8_t seqEnableMaskedCompound;
+    std::uint8_t seqEnableIntraEdgeFilter;
+    std::uint8_t seqEnableRestoration;
+    std::uint8_t seqCdefLevel;
+    bool seqEnableWarpedMotion;
+};
+
+// svt_aom_sig_deriv_pre_analysis_scs (:2818-2918).
+void sigDerivPreAnalysisScs(PreAnalysisScs& scs, std::int8_t encMode, const PreAnalysisCfg& cfg);
+
+// The pcs surface of svt_aom_is_ref_same_size (:2925-2941). The
+// EbReferenceObject wall folds into per-slot present/width/height arrays
+// (the [2][8] bound is the test's enumeration bound; the reference reads
+// only [list][ref_idx] for ref_idx < ref_list{0,1}_count_try).
+struct RefSameSizePcs {
+    bool isBSlice;                        // pcs->slice_type == B_SLICE
+    std::uint8_t refListCountTry[2];      // ppcs->ref_list{0,1}_count_try
+    bool refPresent[2][8];                // ref_pic_ptr_array[list][idx] != NULL
+    std::uint32_t refPicWidth[2][8];      // ref_obj->reference_picture->width
+    std::uint32_t refPicHeight[2][8];     // ...->height
+    std::uint32_t frameWidth;             // ppcs->frame_width
+    std::uint32_t frameHeight;            // ppcs->frame_height
+};
+
+// svt_aom_is_ref_same_size (:2925-2941).
+bool isRefSameSize(const RefSameSizePcs& pcs, std::uint8_t listIdx, std::uint8_t refIdx);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

@@ -3090,3 +3090,290 @@ TEST_CASE("sig_deriv_multi_processes_allintra - the composition over every wall 
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Batch B rung 4: set_inter_comp_controls (:2627-2709), the level getters,
+// the sg/restoration enable wrappers (:2711-2781), the pre-analysis
+// derivations (:2788-2942).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_inter_comp_controls - the five levels, whole-struct field checks") {
+    // :2627-2709. Level 0 writes tot_comp_types + the seven do_* fields;
+    // levels 1-4 write the full surface; the default arm writes nothing.
+    // The poisoned bools stay unread at level 0 and default.
+    for (int level = 0; level <= 5; ++level) {
+        InterCompCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setInterCompCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.totCompTypes == kMdCompDist);
+            CHECK(c.doMe == false);
+            CHECK(c.doPme == false);
+            CHECK(c.doNearestNearest == false);
+            CHECK(c.doNearNear == false);
+            CHECK(c.doNearestNearNew == false);
+            CHECK(c.do3x3Bi == false);
+            CHECK(c.doGlobal == false);
+            CHECK(c.pred0ToPred1Mult == kPoison);
+            CHECK(c.maxMvLength == 0xAAAA);
+        } else if (level <= 4) {
+            CHECK(c.totCompTypes == kMdCompTypes);
+            CHECK(c.doMe == true);
+            CHECK(c.doPme == (level <= 2));
+            CHECK(c.doNearestNearest == true);
+            CHECK(c.doNearNear == true);
+            CHECK(c.doNearestNearNew == (level == 1));
+            CHECK(c.do3x3Bi == (level == 1));
+            CHECK(c.doGlobal == true);
+            CHECK(c.skipOnRefInfo == (level >= 3));
+            CHECK(c.useRate == (level == 1));
+            CHECK(c.pred0ToPred1Mult == (level == 1 ? 0 : (level == 2 ? 1 : (level == 3 ? 1 : 4))));
+            CHECK(c.maxMvLength == (level == 4 ? 32 : 0));
+            CHECK(c.noSymDist == (level >= 3));
+        } else {
+            // :2705-2707 - assert(0), writes nothing.
+            CHECK(c.totCompTypes == kPoison);
+            CHECK(c.pred0ToPred1Mult == kPoison);
+            CHECK(c.maxMvLength == 0xAAAA);
+        }
+    }
+}
+
+TEST_CASE("the level getter ladders - every preset enumerated") {
+    // get_inter_compound_level :8839-8850; get_filter_intra_level_default
+    // :8852-8863 / _rtc :8865-8869 / _allintra :8871-8882;
+    // get_inter_intra_level :8884-8894; get_intra_mode_levels_allintra
+    // :5429-5453; get_enable_me_8x8 :146-173 / _16x16 :175-179.
+    for (int mode = -1; mode <= 13; ++mode) {
+        int icl = mode <= 0 ? 3 : (mode <= 2 ? 4 : 0);
+        CHECK(getInterCompoundLevel((EncMode)mode) == icl);
+        int fil = mode <= 1 ? 1 : (mode <= 5 ? 2 : 0);
+        CHECK(getFilterIntraLevelDefault((EncMode)mode) == fil);
+        CHECK(getFilterIntraLevelRtc() == 0);
+        int fia = mode <= 0 ? 1 : (mode <= 6 ? 2 : 0);
+        CHECK(getFilterIntraLevelAllIntra((EncMode)mode) == fia);
+        uint32_t il, dil;
+        getIntraModeLevelsAllIntra((EncMode)mode, &il, &dil);
+        int expIl = mode <= 4 ? 1 : (mode <= 5 ? 2 : (mode <= 6 ? 6 : (mode <= 8 ? 7 : 8)));
+        CHECK(il == expIl);
+        CHECK(dil == 0);
+        CHECK(getEnableMe16x16((EncMode)mode) == 1);
+        for (int trans = 0; trans <= 1; ++trans) {
+            int iil = mode <= 1 ? 2 : (mode <= 8 ? (trans ? 2 : 0) : 0);
+            CHECK(getInterIntraLevel((EncMode)mode, (uint8_t)trans) == iil);
+        }
+        for (int res = 0; res <= 6; ++res) {
+            for (int rtc = 0; rtc <= 1; ++rtc) {
+                int m8;
+                if (rtc) m8 = mode <= 8 ? (res <= 3 ? 1 : 0) : 0;
+                else m8 = mode <= 5 ? 1 : (mode <= 8 ? (res <= 3 ? 1 : 0) : 0);
+                CHECK(getEnableMe8x8((EncMode)mode, (uint8_t)res, rtc != 0) == m8);
+            }
+        }
+    }
+}
+
+TEST_CASE("the enable_sg / enable_restoration wrappers") {
+    // :2711-2727 (sg) and :2733-2781 (restoration). The restoration
+    // wrappers thread the DEFAULT config value and the two-iteration wn
+    // loop over the ported getters.
+    for (int mode = -1; mode <= 13; ++mode) {
+        CHECK(getEnableSgAllIntra((EncMode)mode) == (mode <= -1 ? 1 : 0));
+        CHECK(getEnableRestorationAllIntra((EncMode)mode, -1) == (mode <= 6 ? 1 : 0));
+        CHECK(getEnableRestorationAllIntra((EncMode)mode, 0) == 0);
+        CHECK(getEnableRestorationAllIntra((EncMode)mode, 1) == 1);
+        for (int res = 1; res <= 3; res += 2) {
+            for (int fd = 0; fd <= 2; ++fd) {
+                // sg default: MR->1, <=M3->3, else 0; the fd gate zeroes
+                // at fd > 0 && res > 360p.
+                int sgd = mode <= -1 ? 1 : (mode <= 3 ? 3 : 0);
+                if (fd && res > 1) sgd = 0;
+                CHECK(getEnableSgDefault((EncMode)mode, (uint8_t)res, (uint8_t)fd) ==
+                      (sgd > 0 ? 1 : 0));
+                CHECK(getEnableSgRtc((uint8_t)res, (uint8_t)fd) == 0);
+                // restoration default: wn loop picks notLast=true ->
+                // <=M3:4, <=M8:5, else 0 (res < 8K here).
+                int wn = mode <= 3 ? 4 : (mode <= 8 ? 5 : 0);
+                CHECK(getEnableRestorationDefault((EncMode)mode, -1, (uint8_t)res, (uint8_t)fd) ==
+                      ((wn > 0 || sgd > 0) ? 1 : 0));
+                CHECK(getEnableRestorationDefault((EncMode)mode, 0, (uint8_t)res, (uint8_t)fd) == 0);
+                CHECK(getEnableRestorationDefault((EncMode)mode, 1, (uint8_t)res, (uint8_t)fd) == 1);
+                CHECK(getEnableRestorationRtc(-1, (uint8_t)res, (uint8_t)fd) == 0);
+                CHECK(getEnableRestorationRtc(0, (uint8_t)res, (uint8_t)fd) == 0);
+                CHECK(getEnableRestorationRtc(1, (uint8_t)res, (uint8_t)fd) == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("sig_deriv_pre_analysis_pcs - the ME flags over every preset and resolution") {
+    // :2788-2811. resolution derives from max_INPUT dims (the fixtures
+    // 640x360 -> 360p, 1920x1080 -> 1080p); enable_me_8x8 is gated on
+    // enable_me_16x16 (always 1); the eight HME flags all 1.
+    const uint32_t dims[2][2] = {{640, 360}, {1920, 1080}};
+    for (int mode = -1; mode <= 13; ++mode) {
+        for (int d = 0; d <= 1; ++d) {
+            for (int rtc = 0; rtc <= 1; ++rtc) {
+                PreAnalysisPcs c;
+                std::memset(&c, kPoison, sizeof(c));
+                c.encMode = (EncMode)mode;
+                c.maxInputLumaWidth = dims[d][0];
+                c.maxInputLumaHeight = dims[d][1];
+                c.rtcTune = rtc != 0;
+                sigDerivPreAnalysisPcs(c);
+                int res = d == 0 ? 1 : 4;  // oracleInitRes band
+                int m8;
+                if (rtc) m8 = mode <= 8 ? (res <= 3 ? 1 : 0) : 0;
+                else m8 = mode <= 5 ? 1 : (mode <= 8 ? (res <= 3 ? 1 : 0) : 0);
+                CHECK(c.enableMe16x16 == true);
+                CHECK(c.enableMe8x8 == (m8 != 0));
+                CHECK(c.enableHmeFlag == true);
+                CHECK(c.enableHmeLevel0Flag == true);
+                CHECK(c.enableHmeLevel1Flag == true);
+                CHECK(c.enableHmeLevel2Flag == true);
+                CHECK(c.tfEnableHmeFlag == true);
+                CHECK(c.tfEnableHmeLevel0Flag == true);
+                CHECK(c.tfEnableHmeLevel1Flag == true);
+                CHECK(c.tfEnableHmeLevel2Flag == true);
+            }
+        }
+    }
+}
+
+// svt_aom_sig_deriv_pre_analysis_scs (:2818-2918), independent transcription.
+static void oraclePreAnalysisScs(const PreAnalysisScs& in, std::int8_t encMode,
+                                 const PreAnalysisCfg& cfg, PreAnalysisScs& o) {
+    const int mode = encMode;
+    const bool allintra = in.allintra;
+    const bool rtcTune = in.rtcTune;
+    // :2821-2825
+    if (cfg.superres) o.seqEnableSuperres = in.superresMode > 0;
+    else o.seqEnableSuperres = false;
+    // :2826-2837
+    if (cfg.interIntra) {
+        int ii = 0;
+        for (int t = 0; t < 2; ++t) {
+            if (ii) break;
+            ii |= mode <= 1 ? 2 : (mode <= 8 ? (t ? 2 : 0) : 0);
+        }
+        o.seqEnableInterintraCompound = ii != 0;
+    } else o.seqEnableInterintraCompound = false;
+    // :2839-2850
+    if (cfg.filterIntra) {
+        int fi = allintra ? (mode <= 0 ? 1 : (mode <= 6 ? 2 : 0))
+                 : rtcTune ? 0
+                           : (mode <= 1 ? 1 : (mode <= 5 ? 2 : 0));
+        o.seqFilterIntraLevel = fi != 0 ? 1 : 0;
+    } else o.seqFilterIntraLevel = 0;
+    // :2852-2863
+    if (cfg.interCompound) {
+        int cl = mode <= 0 ? 3 : (mode <= 2 ? 4 : 0);
+        o.seqEnableJntComp = cl != 0 ? 1 : 0;
+        o.seqEnableMaskedCompound = cl != 0 ? 1 : 0;
+    } else {
+        o.seqEnableJntComp = 0;
+        o.seqEnableMaskedCompound = 0;
+    }
+    // :2864-2878
+    if (allintra) {
+        uint32_t il = mode <= 4 ? 1 : (mode <= 5 ? 2 : (mode <= 6 ? 6 : (mode <= 8 ? 7 : 8)));
+        int a[10] = {0, 1, 2, 2, 3, 4, 4, 4, 4, 0};  // angular_pred_level :23
+        o.seqEnableIntraEdgeFilter = (0 >= 1 || a[il] == 2 || a[il] == 3) ? 1 : 0;
+    } else o.seqEnableIntraEdgeFilter = 1;
+    // :2879-2909
+    if (cfg.restoration) {
+        // the fixtures derive init_res from the max_initial dims (640x360
+        // -> 360p = 1 for every cell here)
+        if (in.enableRestorationFiltering == -1) {
+            if (allintra) o.seqEnableRestoration = mode <= 6 ? 1 : 0;
+            else if (rtcTune) o.seqEnableRestoration = 0;
+            else {
+                int sgd = mode <= -1 ? 1 : (mode <= 3 ? 3 : 0);
+                if (in.fastDecode && !(1 <= 1)) sgd = 0;
+                int wn = mode <= 3 ? 4 : (mode <= 8 ? 5 : 0);
+                o.seqEnableRestoration = (sgd > 0 || wn > 0) ? 1 : 0;
+            }
+        } else {
+            int autoEn;
+            if (allintra) autoEn = mode <= 6 ? 1 : 0;
+            else if (rtcTune) autoEn = 0;
+            else {
+                int sgd = mode <= -1 ? 1 : (mode <= 3 ? 3 : 0);
+                if (in.fastDecode && !(1 <= 1)) sgd = 0;
+                int wn = mode <= 3 ? 4 : (mode <= 8 ? 5 : 0);
+                autoEn = (sgd > 0 || wn > 0) ? 1 : 0;
+            }
+            o.seqEnableRestoration = (in.enableRestorationFiltering && autoEn) ? 1 : 0;
+        }
+    } else o.seqEnableRestoration = 0;
+    // :2911-2915
+    o.seqCdefLevel = in.cdefLevel == -1 ? 1 : (in.cdefLevel > 0 ? 1 : 0);
+    // :2917
+    o.seqEnableWarpedMotion = true;
+}
+
+TEST_CASE("sig_deriv_pre_analysis_scs - the composition over every wall cell") {
+    // :2818-2918. The five CONFIG forks are threaded (pinned build: all
+    // 1); the test enumerates the all-1 arm AND the all-0 arm (both
+    // #if/#else shapes). superresMode {0 = SUPERRES_NONE, 1};
+    // enable_restoration_filtering {DEFAULT(-1), 0, 1}; cdefLevel
+    // {DEFAULT(-1), 0, 3}; fastDecode {0, 1}; the max_initial dims fixed
+    // at 640x360 (init_res 360p).
+    const PreAnalysisCfg cfgs[2] = {{1, 1, 1, 1, 1}, {0, 0, 0, 0, 0}};
+    for (int mode = -1; mode <= 13; ++mode)
+    for (int ai = 0; ai <= 1; ++ai)
+    for (int rtc = 0; rtc <= 1; ++rtc)
+    for (int fd = 0; fd <= 1; ++fd)
+    for (int cfgIdx = 0; cfgIdx <= 1; ++cfgIdx)
+    for (int srMode = 0; srMode <= 1; ++srMode)
+    for (int enr = -1; enr <= 1; ++enr)
+    for (int cdefIdx = 0; cdefIdx <= 2; ++cdefIdx) {
+    int cdef = cdefIdx == 0 ? -1 : (cdefIdx == 1 ? 0 : 3);
+        PreAnalysisScs c;
+        std::memset(&c, kPoison, sizeof(c));
+        c.allintra = ai != 0;
+        c.rtcTune = rtc != 0;
+        c.fastDecode = (uint8_t)fd;
+        c.superresMode = srMode;
+        c.enableRestorationFiltering = enr;
+        c.cdefLevel = cdef;
+        c.maxInitialInputLumaWidth = 640;
+        c.maxInitialInputLumaHeight = 360;
+        sigDerivPreAnalysisScs(c, (int8_t)mode, cfgs[cfgIdx]);
+        PreAnalysisScs o;
+        std::memset(&o, kPoison, sizeof(o));
+        oraclePreAnalysisScs(c, (int8_t)mode, cfgs[cfgIdx], o);
+        CHECK(c.seqEnableSuperres == o.seqEnableSuperres);
+        CHECK(c.seqEnableInterintraCompound == o.seqEnableInterintraCompound);
+        CHECK(c.seqFilterIntraLevel == o.seqFilterIntraLevel);
+        CHECK(c.seqEnableJntComp == o.seqEnableJntComp);
+        CHECK(c.seqEnableMaskedCompound == o.seqEnableMaskedCompound);
+        CHECK(c.seqEnableIntraEdgeFilter == o.seqEnableIntraEdgeFilter);
+        CHECK(c.seqEnableRestoration == o.seqEnableRestoration);
+        CHECK(c.seqCdefLevel == o.seqCdefLevel);
+        CHECK(c.seqEnableWarpedMotion == o.seqEnableWarpedMotion);
+    }
+}
+
+TEST_CASE("is_ref_same_size - the null/size gating table") {
+    // :2925-2941. false unless: B slice, ref_count > 0, the slot present,
+    // and the ref picture dims equal the frame dims.
+    for (int b = 0; b <= 1; ++b)
+    for (int list = 0; list <= 1; ++list)
+    for (int count = 0; count <= 1; ++count)
+    for (int present = 0; present <= 1; ++present)
+    for (int match = 0; match <= 1; ++match) {
+        RefSameSizePcs c;
+        std::memset(&c, kPoison, sizeof(c));
+        c.isBSlice = b != 0;
+        c.refListCountTry[0] = c.refListCountTry[1] = (uint8_t)count;
+        c.refPresent[0][0] = c.refPresent[1][0] = present != 0;
+        c.refPicWidth[0][0] = c.refPicWidth[1][0] = match ? 1920u : 640u;
+        c.refPicHeight[0][0] = c.refPicHeight[1][0] = match ? 1080u : 360u;
+        c.frameWidth = 1920;
+        c.frameHeight = 1080;
+        bool expect = b != 0 && count != 0 && present != 0 && match != 0;
+        CHECK(isRefSameSize(c, (uint8_t)list, 0) == expect);
+    }
+}
+
