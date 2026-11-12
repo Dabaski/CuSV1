@@ -2105,8 +2105,98 @@ int getRegulatedQUndershoot(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& pp
     return qRegulated;
 }
 
-// ---- RC2 Wave D2: the recode-loop driver (rc_vbr_cbr.c :1794-:1926) ----
+// ---- RC2 Wave D4: the vbr cyclic-refresh trio (rc_vbr_cbr.c :895-:998) ----
 
+// cyclic_refresh_init (rc_vbr_cbr.c:895-972): verbatim.
+void cyclicRefreshInit(RcControl& rc, CrRefreshCarrier& cr, const PcsCarrier& ppcs, int superBlockSize,
+                       std::uint16_t sbTotalCount, std::uint32_t& crSbEnd, int hierarchicalLevels) {
+    // Cases to reset the cyclic refresh adjustment parameters.
+    if (ppcs.sliceType == kIslice) {
+        rc.percentRefreshAdjustment = 5;
+        rc.rateRatioQdeltaAdjustment = 0.25;
+    }
+
+    cr.percentRefresh = 20 + rc.percentRefreshAdjustment;
+
+    if (ppcs.scClass1) {
+        cr.percentRefresh += 5;
+    }
+
+    cr.applyCyclicRefresh = (ppcs.sliceType != kIslice && ppcs.temporalLayerIndex == 0) ? 1 : 0;
+
+    if (superBlockSize != 64) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    const int qpThresh = std::max(16, rc.bestQuality + 4);
+    const int qpMaxThresh = 118 * kMaxQ >> 7;
+
+    if (rc.avgFrameQindex[1] > qpMaxThresh) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    if (rc.avgFrameQindex[1] < qpThresh) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    if (rc.avgFrameLowMotion && rc.avgFrameLowMotion < 50) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    if (cr.percentRefresh <= 0) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    if (!cr.applyCyclicRefresh) {
+        return;
+    }
+
+    cr.sbStart = crSbEnd;
+    cr.sbEnd = std::min(cr.sbStart + (std::uint32_t)sbTotalCount * cr.percentRefresh / 100,
+                        (std::uint32_t)sbTotalCount);
+    crSbEnd = cr.sbEnd >= sbTotalCount ? 0 : cr.sbEnd;
+
+    // Use larger delta - qp(increase rate_ratio_qdelta) for first few(~4)
+    // periods of the refresh cycle, after a key frame.
+    cr.maxQdeltaPerc = 60;
+
+    if (!ppcs.scClass1) {
+        cr.rateRatioQdelta =
+            (rc.framesSinceKey < 4 * (1 << hierarchicalLevels) * 100 / cr.percentRefresh) ? 1.50 : 1.15;
+        cr.rateRatioQdelta += rc.rateRatioQdeltaAdjustment;
+        cr.rateBoostFac = 15;
+    } else {
+        const double distanceFromScFactor =
+            std::min(0.75, (double)(rc.framesSinceKey / 10) * 0.1);
+        cr.rateRatioQdelta = 2.25 + rc.rateRatioQdeltaAdjustment - distanceFromScFactor;
+        if (rc.rc1Frame < 0 || rc.rc2Frame < 0) {
+            cr.rateRatioQdelta -= 0.25;
+        }
+        cr.rateBoostFac = 10;
+    }
+}
+
+// compute_cr_deltaq (rc_vbr_cbr.c:978-985): verbatim.
+int computeCrDeltaq(const RcControl& rc, const CrRefreshCarrier& cr, int q, double rateRatioQdelta,
+                    int bitDepth, bool scClass1) {
+    const int deltaq =
+        computeQdeltaByRate(rc.bestQuality, rc.worstQuality, kInterFrame, q, rateRatioQdelta, bitDepth,
+                            scClass1);
+    return std::max(deltaq, -cr.maxQdeltaPerc * q / 100);
+}
+
+// cyclic_refresh_compute_cr_qdeltas (rc_vbr_cbr.c:989-998): verbatim.
+void cyclicRefreshComputeCrQdeltas(const RcControl& rc, CrRefreshCarrier& cr, int baseQIdx, int bitDepth,
+                                   bool scClass1) {
+    const double rateRatioQdelta = cr.rateRatioQdelta;
+    const double rateRatioQdeltaSeg2 = std::min(kCrMaxRateTargetRatio, cr.rateRatioQdeltaSeg2);
+
+    cr.qindexDelta[0] = 0;
+    cr.qindexDelta[1] = computeCrDeltaq(rc, cr, baseQIdx, rateRatioQdelta, bitDepth, scClass1);
+    cr.qindexDelta[2] = computeCrDeltaq(rc, cr, baseQIdx, rateRatioQdeltaSeg2, bitDepth, scClass1);
+}
+
+// ---- RC2 Wave D2: the recode-loop driver (rc_vbr_cbr.c :1794-:1926) ----
 // recode_loop_update_q (:1794-1926): verbatim; the capped_crf_reencode
 // call (rc_crf_cqp.c) is the named park - q passes through unchanged.
 void recodeLoopUpdateQ(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, const CrRefreshCarrier& cr,

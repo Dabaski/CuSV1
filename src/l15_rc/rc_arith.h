@@ -762,6 +762,30 @@ int getRegulatedQUndershoot(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& pp
                             const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int qHigh,
                             int topIndex, int bottomIndex, int bitDepth);
 
+// ---- RC2 Wave D4: the vbr cyclic-refresh trio (rc_vbr_cbr.c :895-:998) ----
+
+// CR_MAX_RATE_TARGET_RATIO (rc_vbr_cbr.c:987).
+constexpr double kCrMaxRateTargetRatio = 4.0;
+
+// cyclic_refresh_init (rc_vbr_cbr.c:895-972): verbatim; the scs walls
+// thread (super_block_size != 64 gate, sb_total_count, static_config.
+// hierarchical_levels); enc_ctx->cr_sb_end threads as the persistent
+// cycling index (the crSelectSbs precedent). The I_SLICE reset writes
+// percent_refresh_adjustment / rate_ratio_qdelta_adjustment.
+void cyclicRefreshInit(RcControl& rc, CrRefreshCarrier& cr, const PcsCarrier& ppcs, int superBlockSize,
+                       std::uint16_t sbTotalCount, std::uint32_t& crSbEnd, int hierarchicalLevels);
+
+// compute_cr_deltaq (rc_vbr_cbr.c:978-985): static in the reference;
+// exported for testability (the DF1 signedCharClamp precedent). Consumes
+// the landed computeQdeltaByRate.
+int computeCrDeltaq(const RcControl& rc, const CrRefreshCarrier& cr, int q, double rateRatioQdelta,
+                    int bitDepth, bool scClass1);
+
+// cyclic_refresh_compute_cr_qdeltas (rc_vbr_cbr.c:989-998): verbatim; the
+// seg2 ratio clamps at kCrMaxRateTargetRatio.
+void cyclicRefreshComputeCrQdeltas(const RcControl& rc, CrRefreshCarrier& cr, int baseQIdx, int bitDepth,
+                                   bool scClass1);
+
 // ---- RC2 Wave D2: the recode-loop driver (rc_vbr_cbr.c :1794-:1926) ----
 
 // recode_loop_update_q (:1794-1926): verbatim; the enc_ctx->recode_loop /
