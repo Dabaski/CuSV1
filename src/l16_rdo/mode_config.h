@@ -957,5 +957,87 @@ struct MdSqMotionSearchCtrls {
 // in the reference and writes nothing (documented UB).
 void setMdSqMotionSearchCtrls(MdSqMotionSearchCtrls& ctrls, std::uint8_t mdSqMvSearchLevel);
 
+
+// ---------------------------------------------------------------------------
+// Batch C rung 3: the subpel/rdoq/shaving setters (:3633-3962).
+// ---------------------------------------------------------------------------
+// SUBPEL_SEARCH_TYPE (definitions.h:829-834, verbatim).
+enum SubpelSearchType {
+    USE_2_TAPS_ORIG = 0,  // used in temporal filtering
+    USE_2_TAPS = 1,
+    USE_4_TAPS = 2,
+    USE_8_TAPS = 3,
+};
+// SUBPEL_SEARCH_METHODS (definitions.h:836-840, verbatim).
+enum SubpelSearchMethods {
+    SUBPEL_TREE = 0,
+    SUBPEL_TREE_PRUNED = 1,  // prunes 1/2-pel searches
+    SUBPEL_FIXED_STAGE_SEARCH = 2,
+};
+// SUBPEL_FORCE_STOP (definitions.h:842, verbatim).
+enum SubpelForceStop {
+    EIGHTH_PEL = 0,
+    QUARTER_PEL = 1,
+    HALF_PEL = 2,
+    FULL_PEL = 3,
+};
+
+// MdSubPelSearchCtrls (md_process.h:384-418, verbatim field order/types).
+struct MdSubPelSearchCtrls {
+    std::uint8_t enabled;                // 0: OFF, 1: ON
+    std::uint8_t subpelSearchType;       // SUBPEL_SEARCH_TYPE
+    std::uint8_t maxPrecision;           // SUBPEL_FORCE_STOP
+    std::uint8_t subpelSearchMethod;     // SUBPEL_SEARCH_METHODS
+    std::int32_t subpelItersPerStep;
+    std::int32_t predVarianceTh;
+    std::uint8_t absThMult;
+    std::int32_t roundDevTh;
+    std::uint8_t skipDiagRefinement;
+    std::uint8_t minBlkSz;
+    std::uint8_t mvpTh;
+    std::int32_t hpMvTh;
+    std::int32_t biasFp;
+};
+
+// md_subpel_me_controls (:3633-3774). Cases 7-10 write the
+// SUBPEL_FIXED_STAGE_SEARCH surface ONLY (the reference's own comment
+// :3730-3732: subpel_search_type / subpel_iters_per_step / round_dev_th /
+// skip_diag_refinement / mvp_th / hp_mv_th are unused there and stay
+// untouched). The default case assert(0)s and writes nothing (documented
+// UB).
+void setMdSubpelMeCtrls(MdSubPelSearchCtrls& ctrls, std::uint8_t mdSubpelMeLevel);
+// md_subpel_pme_controls (:3779-3846). The default case assert(0)s and
+// writes nothing (documented UB).
+void setMdSubpelPmeCtrls(MdSubPelSearchCtrls& ctrls, std::uint8_t mdSubpelPmeLevel);
+
+// RdoqCtrls (md_process.h:429-441, verbatim field order/types).
+struct RdoqCtrls {
+    std::uint8_t enabled;
+    std::uint16_t cutOffNum;
+    std::uint16_t cutOffDenum;
+    std::uint8_t skipUv;                 // 1: RDOQ luma only
+    std::uint8_t dctDctOnly;             // 1: RDOQ DCT_DCT only
+    std::uint8_t eobTh;
+    std::uint8_t eobFastTh;
+};
+
+// set_rdoq_controls (:3851-3906). NOTE: case 1 does NOT write
+// cut_off_denum (the reference leaves it); the whole-struct test pins the
+// poison surviving there. The default case assert(0)s and writes nothing
+// (documented UB).
+void setRdoqCtrls(RdoqCtrls& ctrls, std::uint8_t rdoqLevel);
+
+// CoeffShavingCtrls (md_process.h:443-448, verbatim field order/types).
+struct CoeffShavingCtrls {
+    std::uint8_t enabled;
+    std::int32_t levelThreshold;         // max abs(quantized_level) eligible
+    std::int32_t zeroGapThreshold;       // min zero-gap to justify removal
+    std::int32_t rdZeroStrength;         // RD-zero aggressiveness [0..10]
+};
+
+// set_coeff_shaving_controls (:3911-3935). The default case assert(0)s
+// and writes nothing (documented UB).
+void setCoeffShavingCtrls(CoeffShavingCtrls& ctrls, std::uint8_t coeffShavingLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

@@ -3671,5 +3671,300 @@ void setMdSqMotionSearchCtrls(MdSqMotionSearchCtrls& ctrls, std::uint8_t mdSqMvS
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Batch C rung 3: the subpel/rdoq/shaving setters.
+// ---------------------------------------------------------------------------
+
+// md_subpel_me_controls (enc_mode_config.c:3633-3774), 1:1.
+void setMdSubpelMeCtrls(MdSubPelSearchCtrls& ctrls, std::uint8_t mdSubpelMeLevel) {
+    switch (mdSubpelMeLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_8_TAPS;
+        ctrls.subpelItersPerStep = 2;
+        ctrls.maxPrecision       = (std::uint8_t)EIGHTH_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.skipDiagRefinement = 0;
+        ctrls.minBlkSz           = 0;
+        ctrls.mvpTh              = 0;
+        ctrls.hpMvTh             = kMaxSignedValue;
+        ctrls.biasFp             = 0;
+        break;
+    case 2:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_4_TAPS;
+        ctrls.subpelItersPerStep = 2;
+        ctrls.maxPrecision       = (std::uint8_t)EIGHTH_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.skipDiagRefinement = 0;
+        ctrls.minBlkSz           = 4;
+        ctrls.mvpTh              = 18;
+        ctrls.hpMvTh             = 32;
+        ctrls.biasFp             = 0;
+        break;
+    case 3:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_4_TAPS;
+        ctrls.subpelItersPerStep = 2;
+        ctrls.maxPrecision       = (std::uint8_t)EIGHTH_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.skipDiagRefinement = 0;
+        ctrls.minBlkSz           = 4;
+        ctrls.mvpTh              = 18;
+        ctrls.hpMvTh             = 32;
+        ctrls.biasFp             = 104;
+        break;
+    case 4:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_4_TAPS;
+        ctrls.subpelItersPerStep = 2;
+        ctrls.maxPrecision       = (std::uint8_t)EIGHTH_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE_PRUNED;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.skipDiagRefinement = 0;
+        ctrls.minBlkSz           = 4;
+        ctrls.mvpTh              = 18;
+        ctrls.hpMvTh             = 32;
+        ctrls.biasFp             = 104;
+        break;
+    case 5:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_4_TAPS;
+        ctrls.subpelItersPerStep = 2;
+        ctrls.maxPrecision       = (std::uint8_t)EIGHTH_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE_PRUNED;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.skipDiagRefinement = 0;
+        ctrls.minBlkSz           = 4;
+        ctrls.mvpTh              = 18;
+        ctrls.hpMvTh             = 32;
+        ctrls.biasFp             = 110;
+        break;
+    case 6:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_4_TAPS;
+        ctrls.subpelItersPerStep = 1;
+        ctrls.maxPrecision       = (std::uint8_t)QUARTER_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE_PRUNED;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.skipDiagRefinement = 3;
+        ctrls.minBlkSz           = 4;
+        ctrls.mvpTh              = 12;
+        ctrls.hpMvTh             = 32;
+        ctrls.biasFp             = 110;
+        break;
+    // Cases 7-10: SUBPEL_FIXED_STAGE_SEARCH path. Unused fields (not
+    // applicable to md_subpel_search_fixed_stage): subpel_search_type,
+    // subpel_iters_per_step, round_dev_th, skip_diag_refinement, mvp_th,
+    // hp_mv_th.
+    case 7:
+        ctrls.enabled            = 1;
+        ctrls.maxPrecision       = (std::uint8_t)QUARTER_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_FIXED_STAGE_SEARCH;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.minBlkSz           = 4;
+        ctrls.biasFp             = 110;
+        break;
+    case 8:
+        ctrls.enabled            = 1;
+        ctrls.maxPrecision       = (std::uint8_t)QUARTER_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_FIXED_STAGE_SEARCH;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 10;
+        ctrls.minBlkSz           = 4;
+        ctrls.biasFp             = 110;
+        break;
+    case 9:
+        ctrls.enabled            = 1;
+        ctrls.maxPrecision       = (std::uint8_t)QUARTER_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_FIXED_STAGE_SEARCH;
+        ctrls.predVarianceTh     = 100;
+        ctrls.absThMult          = 20;
+        ctrls.minBlkSz           = 4;
+        ctrls.biasFp             = 110;
+        break;
+    case 10:
+        ctrls.enabled            = 1;
+        ctrls.maxPrecision       = (std::uint8_t)QUARTER_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_FIXED_STAGE_SEARCH;
+        ctrls.predVarianceTh     = 100;
+        ctrls.absThMult          = 25;
+        ctrls.minBlkSz           = 4;
+        ctrls.biasFp             = 110;
+        break;
+    default:
+        // The reference assert(0)s (:3770-3772) and writes nothing.
+        break;
+    }
+}
+
+// md_subpel_pme_controls (enc_mode_config.c:3779-3846), 1:1.
+void setMdSubpelPmeCtrls(MdSubPelSearchCtrls& ctrls, std::uint8_t mdSubpelPmeLevel) {
+    switch (mdSubpelPmeLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_8_TAPS;
+        ctrls.subpelItersPerStep = 2;
+        ctrls.maxPrecision       = (std::uint8_t)EIGHTH_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.minBlkSz           = 0;
+        ctrls.mvpTh              = 0;
+        ctrls.hpMvTh             = 0;
+        ctrls.biasFp             = 0;
+        break;
+    case 2:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_8_TAPS;
+        ctrls.subpelItersPerStep = 2;
+        ctrls.maxPrecision       = (std::uint8_t)EIGHTH_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE_PRUNED;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.minBlkSz           = 0;
+        ctrls.mvpTh              = 0;
+        ctrls.hpMvTh             = 0;
+        ctrls.biasFp             = 104;
+        break;
+    case 3:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_8_TAPS;
+        ctrls.subpelItersPerStep = 2;
+        ctrls.maxPrecision       = (std::uint8_t)EIGHTH_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE_PRUNED;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.minBlkSz           = 0;
+        ctrls.mvpTh              = 0;
+        ctrls.hpMvTh             = 0;
+        ctrls.biasFp             = 110;
+        break;
+    case 4:
+        ctrls.enabled            = 1;
+        ctrls.subpelSearchType   = (std::uint8_t)USE_8_TAPS;
+        ctrls.subpelItersPerStep = 2;
+        ctrls.maxPrecision       = (std::uint8_t)HALF_PEL;
+        ctrls.subpelSearchMethod = (std::uint8_t)SUBPEL_TREE_PRUNED;
+        ctrls.predVarianceTh     = 0;
+        ctrls.absThMult          = 0;
+        ctrls.roundDevTh         = kMaxSignedValue;
+        ctrls.minBlkSz           = 0;
+        ctrls.mvpTh              = 0;
+        ctrls.hpMvTh             = 0;
+        ctrls.biasFp             = 110;
+        break;
+    default:
+        // The reference assert(0)s (:3842-3844) and writes nothing.
+        break;
+    }
+}
+
+// set_rdoq_controls (enc_mode_config.c:3851-3906), 1:1.
+void setRdoqCtrls(RdoqCtrls& ctrls, std::uint8_t rdoqLevel) {
+    switch (rdoqLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled      = 1;
+        ctrls.cutOffNum    = 0;
+        ctrls.skipUv       = 0;
+        ctrls.dctDctOnly   = 0;
+        ctrls.eobTh        = (std::uint8_t)~0;
+        ctrls.eobFastTh    = (std::uint8_t)~0;
+        break;
+    case 2:
+        ctrls.enabled      = 1;
+        ctrls.cutOffNum    = 80;
+        ctrls.cutOffDenum  = 100;
+        ctrls.skipUv       = 0;
+        ctrls.dctDctOnly   = 0;
+        ctrls.eobTh        = (std::uint8_t)~0;
+        ctrls.eobFastTh    = (std::uint8_t)~0;
+        break;
+    case 3:
+        ctrls.enabled      = 1;
+        ctrls.cutOffNum    = 60;
+        ctrls.cutOffDenum  = 100;
+        ctrls.skipUv       = 1;
+        ctrls.dctDctOnly   = 1;
+        ctrls.eobTh        = (std::uint8_t)~0;
+        ctrls.eobFastTh    = (std::uint8_t)~0;
+        break;
+    case 4:
+        ctrls.enabled      = 1;
+        ctrls.cutOffNum    = 60;
+        ctrls.cutOffDenum  = 100;
+        ctrls.skipUv       = 1;
+        ctrls.dctDctOnly   = 1;
+        ctrls.eobTh        = (std::uint8_t)~0;
+        ctrls.eobFastTh    = 30;
+        break;
+    case 5:
+        ctrls.enabled      = 1;
+        ctrls.cutOffNum    = 60;
+        ctrls.cutOffDenum  = 100;
+        ctrls.skipUv       = 1;
+        ctrls.dctDctOnly   = 1;
+        ctrls.eobTh        = 85;
+        ctrls.eobFastTh    = 0;
+        break;
+    default:
+        // The reference assert(0)s (:3902-3904) and writes nothing.
+        break;
+    }
+}
+
+// set_coeff_shaving_controls (enc_mode_config.c:3911-3935), 1:1.
+void setCoeffShavingCtrls(CoeffShavingCtrls& ctrls, std::uint8_t coeffShavingLevel) {
+    switch (coeffShavingLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled            = 1;
+        ctrls.levelThreshold     = 1;
+        ctrls.zeroGapThreshold   = 8;
+        ctrls.rdZeroStrength     = 32;
+        break;
+    case 2:
+        ctrls.enabled            = 1;
+        ctrls.levelThreshold     = 1;
+        ctrls.zeroGapThreshold   = 8;
+        ctrls.rdZeroStrength     = 0;
+        break;
+    default:
+        // The reference assert(0)s (:3931-3933) and writes nothing.
+        break;
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

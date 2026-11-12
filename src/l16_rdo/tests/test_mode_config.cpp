@@ -4145,3 +4145,149 @@ TEST_CASE("md_sq_motion_search_controls - the five levels, whole-struct") {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Batch C rung 3: the subpel/rdoq/shaving setters (:3633-3962).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("md_subpel_me_controls - the eleven levels, whole-struct") {
+    // :3633-3774. Level 0 writes ONLY enabled; 1-6 write all thirteen
+    // fields; 7-10 write the SUBPEL_FIXED_STAGE_SEARCH surface ONLY (the
+    // six unused fields stay untouched per the reference's own comment
+    // :3730-3732); the default arm assert(0)s and writes nothing.
+    for (int level = 0; level <= 11; ++level) {
+        MdSubPelSearchCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setMdSubpelMeCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.subpelSearchType == kPoison);
+            CHECK(c.biasFp == (int32_t)((uint32_t)kPoison * 0x01010101u));
+        } else if (level <= 6) {
+            CHECK(c.enabled == 1);
+            CHECK(c.subpelSearchType == (level == 1 ? USE_8_TAPS : USE_4_TAPS));
+            CHECK(c.subpelItersPerStep == (level == 6 ? 1 : 2));
+            CHECK(c.maxPrecision == (level == 6 ? QUARTER_PEL : EIGHTH_PEL));
+            CHECK(c.subpelSearchMethod == (level <= 3 ? SUBPEL_TREE : SUBPEL_TREE_PRUNED));
+            CHECK(c.predVarianceTh == 0);
+            CHECK(c.absThMult == 0);
+            CHECK(c.roundDevTh == kMaxSignedValue);
+            CHECK(c.skipDiagRefinement == (level == 6 ? 3 : 0));
+            CHECK(c.minBlkSz == (level == 1 ? 0 : 4));
+            CHECK(c.mvpTh == (level == 1 ? 0 : (level == 6 ? 12 : 18)));
+            CHECK(c.hpMvTh == (level == 1 ? kMaxSignedValue : 32));
+            CHECK(c.biasFp == (level == 1 || level == 2 ? 0 : (level <= 4 ? 104 : 110)));
+        } else if (level <= 10) {
+            CHECK(c.enabled == 1);
+            CHECK(c.maxPrecision == QUARTER_PEL);
+            CHECK(c.subpelSearchMethod == SUBPEL_FIXED_STAGE_SEARCH);
+            CHECK(c.predVarianceTh == (level <= 8 ? 0 : 100));
+            CHECK(c.absThMult == (level == 7 ? 0 : (level == 8 ? 10 : (level == 9 ? 20 : 25))));
+            CHECK(c.minBlkSz == 4);
+            CHECK(c.biasFp == 110);
+            // the six unused fields stay untouched
+            CHECK(c.subpelSearchType == kPoison);
+            CHECK(c.subpelItersPerStep == (int32_t)((uint32_t)kPoison * 0x01010101u));
+            CHECK(c.roundDevTh == (int32_t)((uint32_t)kPoison * 0x01010101u));
+            CHECK(c.skipDiagRefinement == kPoison);
+            CHECK(c.mvpTh == kPoison);
+            CHECK(c.hpMvTh == (int32_t)((uint32_t)kPoison * 0x01010101u));
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.maxPrecision == kPoison);
+            CHECK(c.subpelSearchMethod == kPoison);
+        }
+    }
+}
+
+TEST_CASE("md_subpel_pme_controls - the five levels, whole-struct") {
+    // :3779-3846. Level 0 writes ONLY enabled; 1-4 write all thirteen
+    // fields; the default arm assert(0)s and writes nothing.
+    for (int level = 0; level <= 5; ++level) {
+        MdSubPelSearchCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setMdSubpelPmeCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.subpelSearchType == kPoison);
+        } else if (level <= 4) {
+            CHECK(c.enabled == 1);
+            CHECK(c.subpelSearchType == USE_8_TAPS);
+            CHECK(c.subpelItersPerStep == 2);
+            CHECK(c.maxPrecision == (level == 4 ? HALF_PEL : EIGHTH_PEL));
+            CHECK(c.subpelSearchMethod == (level == 1 ? SUBPEL_TREE : SUBPEL_TREE_PRUNED));
+            CHECK(c.predVarianceTh == 0);
+            CHECK(c.absThMult == 0);
+            CHECK(c.roundDevTh == kMaxSignedValue);
+            CHECK(c.minBlkSz == 0);
+            CHECK(c.mvpTh == 0);
+            CHECK(c.hpMvTh == 0);
+            CHECK(c.biasFp == (level == 1 ? 0 : (level == 2 ? 104 : 110)));
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.biasFp == (int32_t)((uint32_t)kPoison * 0x01010101u));
+        }
+    }
+}
+
+TEST_CASE("set_rdoq_controls - the six levels, whole-struct") {
+    // :3851-3906. Level 0 writes ONLY enabled; case 1 does NOT write
+    // cut_off_denum (poison survives - pinned); 2-5 write all seven
+    // fields; the default arm assert(0)s and writes nothing.
+    for (int level = 0; level <= 6; ++level) {
+        RdoqCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setRdoqCtrls(c, (uint8_t)level);
+        // the uint16 poison pair the fixture's 0xAA memset leaves:
+        // 0xAA * 0x0101 = 0xAAAA = 43690
+        const uint16_t kPoison16 = (uint16_t)(kPoison * 0x0101);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.cutOffNum == kPoison16);
+            CHECK(c.cutOffDenum == kPoison16);
+        } else if (level == 1) {
+            CHECK(c.enabled == 1);
+            CHECK(c.cutOffNum == 0);
+            CHECK(c.cutOffDenum == kPoison16);  // the reference leaves it
+            CHECK(c.skipUv == 0);
+            CHECK(c.dctDctOnly == 0);
+            CHECK(c.eobTh == 0xFF);
+            CHECK(c.eobFastTh == 0xFF);
+        } else if (level <= 5) {
+            CHECK(c.enabled == 1);
+            CHECK(c.cutOffNum == (level == 2 ? 80 : 60));
+            CHECK(c.cutOffDenum == 100);
+            CHECK(c.skipUv == (level >= 3 ? 1 : 0));
+            CHECK(c.dctDctOnly == (level >= 3 ? 1 : 0));
+            CHECK(c.eobTh == (level == 5 ? 85 : 0xFF));
+            CHECK(c.eobFastTh == (level == 2 || level == 3 ? 0xFF : (level == 4 ? 30 : 0)));
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.eobTh == kPoison);
+            CHECK(c.cutOffDenum == kPoison16);
+        }
+    }
+}
+
+TEST_CASE("set_coeff_shaving_controls - the three levels, whole-struct") {
+    // :3911-3935. Level 0 writes ONLY enabled; 1-2 write all four fields
+    // and differ ONLY in rd_zero_strength (32 vs 0); the default arm
+    // assert(0)s and writes nothing.
+    for (int level = 0; level <= 3; ++level) {
+        CoeffShavingCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setCoeffShavingCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.levelThreshold == (int32_t)((uint32_t)kPoison * 0x01010101u));
+        } else if (level <= 2) {
+            CHECK(c.enabled == 1);
+            CHECK(c.levelThreshold == 1);
+            CHECK(c.zeroGapThreshold == 8);
+            CHECK(c.rdZeroStrength == (level == 1 ? 32 : 0));
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.zeroGapThreshold == (int32_t)((uint32_t)kPoison * 0x01010101u));
+        }
+    }
+}
