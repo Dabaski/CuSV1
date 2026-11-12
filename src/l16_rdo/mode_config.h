@@ -741,5 +741,25 @@ struct RefSameSizePcs {
 // svt_aom_is_ref_same_size (:2925-2941).
 bool isRefSameSize(const RefSameSizePcs& pcs, std::uint8_t listIdx, std::uint8_t refIdx);
 
+// ObmcControls (mode_decision.h, verbatim field order/types).
+struct ObmcCtrls {
+    std::uint8_t enabled;
+    std::uint8_t maxBlkSizeToRefine;
+    std::uint8_t maxBlkSize;
+    std::uint8_t refineLevel;
+    std::uint8_t transFaceOff;
+    std::uint8_t fpelSearchRange;
+    std::uint8_t fpelSearchDiag;
+};
+
+// set_obmc_controls (:2943-3007). The ModeDecisionContext wall folds into
+// the carrier. NOTE: the default arm is NOT assert(0) - it writes
+// enabled = 0 (:3003-3005).
+void setObmcCtrls(ObmcCtrls& ctrls, std::uint8_t obmcMode);
+
+// dimensions_require_8x8 (:3012-3028). Assumes max block 64x64 (ISLICEs
+// never use 128x128); not NSQ aware.
+bool dimensionsRequire8x8(std::uint16_t alignedWidth, std::uint16_t alignedHeight);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

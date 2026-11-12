@@ -3377,3 +3377,73 @@ TEST_CASE("is_ref_same_size - the null/size gating table") {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Batch B rung 5: set_obmc_controls (:2943-3007) + dimensions_require_8x8
+// (:3012-3028).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_obmc_controls - the seven levels, whole-struct field checks") {
+    // :2943-3007. Level 0 writes ONLY enabled; levels 1-6 write all seven
+    // ObmcControls fields; the DEFAULT arm is NOT assert(0) - it writes
+    // enabled = 0 (:3003-3005) and leaves the rest poisoned.
+    for (int level = 0; level <= 8; ++level) {
+        ObmcCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setObmcCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.maxBlkSizeToRefine == kPoison);
+            CHECK(c.maxBlkSize == kPoison);
+        } else if (level <= 6) {
+            CHECK(c.enabled == 1);
+            CHECK(c.maxBlkSizeToRefine == (level == 1 ? 128 : (level == 2 ? 64 :
+                                            (level <= 5 ? 32 : 16))));
+            CHECK(c.maxBlkSize == (level <= 4 ? 128 : (level == 5 ? 32 : 16)));
+            CHECK(c.refineLevel == (level <= 2 ? (level == 1 ? 0 : 1) :
+                                    (level <= 4 ? 1 : 4)));
+            CHECK(c.transFaceOff == (uint8_t)(level >= 4));
+            CHECK(c.fpelSearchRange == (level <= 4 ? (level == 3 ? 8 : 16) : 8));
+            CHECK(c.fpelSearchDiag == (level <= 2 ? 1 : (level == 3 ? 0 :
+                                        (level == 4 ? 1 : 0))));
+        } else {
+            // :3003-3005 - the default arm writes enabled = 0 ONLY.
+            CHECK(c.enabled == 0);
+            CHECK(c.maxBlkSizeToRefine == kPoison);
+            CHECK(c.fpelSearchDiag == kPoison);
+        }
+    }
+}
+
+// dimensions_require_8x8 (:3012-3028), independent transcription.
+static bool oracleDimRequire8x8(uint16_t w, uint16_t h) {
+    uint16_t lw = (uint16_t)(w % 64);
+    uint16_t lh = (uint16_t)(h % 64);
+    for (uint16_t half = 32; half >= 8; half = (uint16_t)(half >> 1)) {
+        if ((lw == 0 || lw > half) && (lh == 0 || lh > half)) return false;
+        lw = (uint16_t)(lw % half);
+        lh = (uint16_t)(lh % half);
+    }
+    return true;
+}
+
+TEST_CASE("dimensions_require_8x8 - the dense aligned grid + the hand pins") {
+    // :3012-3028. Assumes max block 64x64 (ISLICEs never use 128x128); NOT
+    // NSQ aware - the (leftover > half) arms mean non-tileable dims like
+    // 40x40 do NOT require 8x8 (pinned below).
+    for (uint16_t w = 8; w <= 280; w += 8)
+        for (uint16_t h = 8; h <= 280; h += 8)
+            CHECK(dimensionsRequire8x8(w, h) == oracleDimRequire8x8(w, h));
+    // Hand pins (independently derived from the loop arithmetic):
+    CHECK(dimensionsRequire8x8(64, 64) == false);    // full 64 tiling
+    CHECK(dimensionsRequire8x8(96, 96) == false);    // 32-tileable
+    CHECK(dimensionsRequire8x8(80, 80) == false);    // 16-tileable
+    CHECK(dimensionsRequire8x8(72, 72) == true);     // only 8 fits
+    CHECK(dimensionsRequire8x8(40, 40) == false);    // leftover 40 > 32 arm
+    CHECK(dimensionsRequire8x8(8, 8) == true);
+    CHECK(dimensionsRequire8x8(136, 136) == true);   // 136%64=8 -> only 8 fits
+    CHECK(dimensionsRequire8x8(64, 72) == true);     // h forces 8
+    CHECK(dimensionsRequire8x8(280, 280) == false);  // 280%64=24: at half=16, 24>16 -> false
+    CHECK(dimensionsRequire8x8(264, 264) == true);   // 264%64=8 -> only 8 fits
+}
+

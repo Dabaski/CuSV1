@@ -2845,5 +2845,93 @@ bool isRefSameSize(const RefSameSizePcs& pcs, std::uint8_t listIdx, std::uint8_t
 }
 
 
+// set_obmc_controls (enc_mode_config.c:2943-3007), 1:1.
+void setObmcCtrls(ObmcCtrls& ctrls, std::uint8_t obmcMode) {
+    switch (obmcMode) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled                = 1;
+        ctrls.maxBlkSizeToRefine     = 128;
+        ctrls.maxBlkSize             = 128;
+        ctrls.refineLevel            = 0;
+        ctrls.transFaceOff           = 0;
+        ctrls.fpelSearchRange        = 16;
+        ctrls.fpelSearchDiag         = 1;
+        break;
+    case 2:
+        ctrls.enabled                = 1;
+        ctrls.maxBlkSizeToRefine     = 64;
+        ctrls.maxBlkSize             = 128;
+        ctrls.refineLevel            = 1;
+        ctrls.transFaceOff           = 0;
+        ctrls.fpelSearchRange        = 16;
+        ctrls.fpelSearchDiag         = 1;
+        break;
+    case 3:
+        ctrls.enabled                = 1;
+        ctrls.maxBlkSizeToRefine     = 32;
+        ctrls.maxBlkSize             = 128;
+        ctrls.refineLevel            = 1;
+        ctrls.transFaceOff           = 0;
+        ctrls.fpelSearchRange        = 8;
+        ctrls.fpelSearchDiag         = 0;
+        break;
+    case 4:
+        ctrls.enabled                = 1;
+        ctrls.maxBlkSizeToRefine     = 32;
+        ctrls.maxBlkSize             = 128;
+        ctrls.refineLevel            = 1;
+        ctrls.transFaceOff           = 1;
+        ctrls.fpelSearchRange        = 16;
+        ctrls.fpelSearchDiag         = 1;
+        break;
+    case 5:
+        ctrls.enabled                = 1;
+        ctrls.maxBlkSizeToRefine     = 32;
+        ctrls.maxBlkSize             = 32;
+        ctrls.refineLevel            = 4;
+        ctrls.transFaceOff           = 1;
+        ctrls.fpelSearchRange        = 8;
+        ctrls.fpelSearchDiag         = 0;
+        break;
+    case 6:
+        ctrls.enabled                = 1;
+        ctrls.maxBlkSizeToRefine     = 16;
+        ctrls.maxBlkSize             = 16;
+        ctrls.refineLevel            = 4;
+        ctrls.transFaceOff           = 1;
+        ctrls.fpelSearchRange        = 8;
+        ctrls.fpelSearchDiag         = 0;
+        break;
+    default:
+        ctrls.enabled = 0;
+        break;
+    }
+}
+
+// dimensions_require_8x8 (enc_mode_config.c:3012-3028), 1:1. Assumes the
+// max block size is 64x64 because ISLICEs do not use 128x128 blocks,
+// even when enabled at the sequence level. Not NSQ aware.
+bool dimensionsRequire8x8(std::uint16_t alignedWidth, std::uint16_t alignedHeight) {
+    // start checking if 64x64 is allowed b/c we don't use 128x128 for ISLICE
+    const std::uint16_t startBsize    = 64;
+    std::uint16_t leftoverWidth  = (std::uint16_t)(alignedWidth % startBsize);
+    std::uint16_t leftoverHeight = (std::uint16_t)(alignedHeight % startBsize);
+    for (std::uint16_t halfBsize = (std::uint16_t)(startBsize >> 1); halfBsize >= 8;
+         halfBsize = (std::uint16_t)(halfBsize >> 1)) {
+        // If allowable block size is found, don't require 8x8
+        if ((leftoverWidth == 0 || leftoverWidth > halfBsize) &&
+            (leftoverHeight == 0 || leftoverHeight > halfBsize)) {
+            return false;
+        }
+        leftoverWidth  = (std::uint16_t)(leftoverWidth % halfBsize);
+        leftoverHeight = (std::uint16_t)(leftoverHeight % halfBsize);
+    }
+    // No allowable block size from 16x16-64x64 was found; therefore, require 8x8
+    return true;
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo
