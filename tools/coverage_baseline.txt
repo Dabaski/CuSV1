@@ -15,19 +15,19 @@
 # only place the figure exists.
 generated  : 2026-11-12
 reference  : third_party/SVT-AV1 pinned snapshot, CHANGELOG 4.2.0
-areas file : 69426 B, sha256:B764FD45DA7196BA
+areas file : 69426 B, sha256:3588BFF9554FE8FC
 surface    : 254 files, 157718 non-blank lines
-coverage   : 29.2%  (46,110 covered, 157,718 denominator)
+coverage   : 30.0%  (47,339 covered, 157,718 denominator)
 
 A1    Transform/TX                                    9   27008      41%    11087
 A2    Intra prediction                                4    3478      91%     3156
 A3    Inter prediction + motion estimation           44   17738      17%     3056
-A4    Mode decision + RDO + pc_tree                  18   31088      20%     6326
+A4    Mode decision + RDO + pc_tree                  18   31088      23%     7041
 A5    Entropy coding (CABAC/OD)                      11    8460      61%     5167
 A6    Coding loop + PCS + block structures           22   13928      12%     1734
 A7    Bitstream + OBU + headers                       5    1436      40%      574
 A8    Post-filters (deblock/CDEF/restoration/grain)     27   10600      44%     4699
-A9    Rate control                                   17    5951      37%     2211
+A9    Rate control                                   17    5951      46%     2725
 A10   Picture management + threading                 30    9662       0%        0
 A11   Content analysis + temporal filtering          16   12028      42%     5047
 A12   Palette + segmentation + misc                   8    1612      34%      550
