@@ -2616,19 +2616,19 @@ completing it moves the metric. Read it before picking work.
 | A1 | Transform/TX | 27,008 | 41% | 11,087 | 1.3 |
 | A2 | Intra prediction | 3,478 | 91% | 3,156 | 1.1 (CFL deferred) |
 | A3 | Inter pred + ME/MC | 17,738 | 6% | 1,009 | 2.2, 2.3, 2.4 |
-| A4 | Mode decision + RDO | 31,088 | 8% | 2,419 | 1.6 (the RE-series campaign) |
+| A4 | Mode decision + RDO | 31,088 | 12% | 3,690 | 1.6 (the RE-series campaign) |
 | A5 | Entropy coding | 8,460 | 61% | 5,167 | 1.3, 1.4, 2.2 |
 | A6 | Coding loop + PCS | 13,928 | 12% | 1,734 | 1.3, 1.5 |
 | A7 | Bitstream + OBU | 1,436 | 40% | 574 | 1.4, 1.5 |
 | A8 | Post-filters | 10,600 | 37% | 3,929 | 3 |
-| A9 | Rate control | 5,951 | 5% | 278 | 2.5 |
+| A9 | Rate control | 5,951 | 31% | 1,830 | 2.5 |
 | A10 | Pic mgmt + threading | 9,662 | 0% | 0 | 2.4 |
 | A11 | Analysis + temporal | 12,028 | 42% | 5,047 | A0 (the AN-series, COMPLETE) |
 | A12 | Palette + segmentation | 1,612 | 34% | 550 | 4 |
 | A13 | Utility + headers | 5,357 | 19% | 1,037 | - |
 | A14 | C_DEFAULT kernels | 1,466 | **100%** | 1,466 | A0 (the C_DEFAULT sweep, COMPLETE) |
 | - | excluded: rtcd dispatch | 7,906 | - | 0 | - |
-| | **TOTAL** | **157,718** | | **37,453** | |
+| | **TOTAL** | **157,718** | | **40,276** | |
 
 **+1.0 point = 1,577 non-blank reference lines.** So a slice is worth
 about +1 point per 1,600 lines of ported reference surface.

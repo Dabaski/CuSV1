@@ -13,21 +13,21 @@
 # The number itself is also printed by every plain run, together with the
 # inputs that produced it, so this file is a convenience and never the
 # only place the figure exists.
-generated  : 2026-11-11
+generated  : 2026-11-12
 reference  : third_party/SVT-AV1 pinned snapshot, CHANGELOG 4.2.0
-areas file : 69426 B, sha256:3968D801DBB6AC25
+areas file : 69426 B, sha256:92451D9489E680D7
 surface    : 254 files, 157718 non-blank lines
-coverage   : 23.7%  (37,453 covered, 157,718 denominator)
+coverage   : 25.5%  (40,276 covered, 157,718 denominator)
 
 A1    Transform/TX                                    9   27008      41%    11087
 A2    Intra prediction                                4    3478      91%     3156
 A3    Inter prediction + motion estimation           44   17738       6%     1009
-A4    Mode decision + RDO + pc_tree                  18   31088       8%     2419
+A4    Mode decision + RDO + pc_tree                  18   31088      12%     3690
 A5    Entropy coding (CABAC/OD)                      11    8460      61%     5167
 A6    Coding loop + PCS + block structures           22   13928      12%     1734
 A7    Bitstream + OBU + headers                       5    1436      40%      574
 A8    Post-filters (deblock/CDEF/restoration/grain)     27   10600      37%     3929
-A9    Rate control                                   17    5951       5%      278
+A9    Rate control                                   17    5951      31%     1830
 A10   Picture management + threading                 30    9662       0%        0
 A11   Content analysis + temporal filtering          16   12028      42%     5047
 A12   Palette + segmentation + misc                   8    1612      34%      550

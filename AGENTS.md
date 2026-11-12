@@ -1245,19 +1245,19 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A1 | Transform/TX | 9 | 27,008 | 37% | 10,044 |
 | A2 | Intra prediction | 4 | 3,478 | 91% | 3,156 |
 | A3 | Inter prediction + motion estimation | 44 | 17,738 | 6% | 1,009 |
-| A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 8% | 2,419 |
+| A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 12% | 3,690 |
 | A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 61% | 5,167 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 12% | 1,734 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
 | A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 37% | 3,929 |
-| A9 | Rate control | 17 | 5,951 | 5% | 278 |
+| A9 | Rate control | 17 | 5,951 | 31% | 1,830 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
 | A11 | Content analysis + temporal filtering | 16 | 12,028 | 42% | 5,047 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 34% | 550 |
 | A13 | Utility + platform + core headers | 24 | 5,357 | 17% | 889 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 100% | 1,466 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **37,453** |
+| | **TOTAL** | **254** | **157,718** | | **40,276** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported
