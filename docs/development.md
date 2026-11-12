@@ -76,9 +76,10 @@ same configuration; the project rules and dated baseline are in `AGENTS.md`.
 
 Third-party components and reference trees:
 
-- `third_party/SVT-AV1/` is the pinned 4.2-era, 1:1 reference snapshot. Do not
-  update it without revalidating the goldens and provenance. See its `LICENSE`
-  and `NOTICE` files and [provenance](provenance.md).
+- `third_party/SVT-AV1/` is the pinned 1:1 reference snapshot, upstream commit
+  `fd116158a00986d923db8a1fdddd0dbd5fd0e240` (2026-08-15; a post-v4.2.0
+  snapshot). Do not update it without revalidating the goldens and provenance.
+  See its `LICENSE` and `NOTICE` files and [provenance](provenance.md).
 - `third_party/aom_dsp/` contains reader-side sources used by the entropy
   decoder port. `third_party/aom/` is a working-directory libaom checkout used
   to resolve reference citations; it is ignored by git and is not included in a

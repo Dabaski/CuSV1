@@ -4,8 +4,9 @@ Every port artifact in `src/l3_transforms`, `src/l4_intra`,
 `src/l5_motion`, `src/l6_pipeline`, `src/l7_entropy`,
 `src/l8_bitstream`, `src/l9_analysis` and `src/l10_filters` (plus the
 l2 runtime and fixture classification below) traced to the pinned
-vendored reference (`third_party/SVT-AV1/`, REFERENCE PINNING rule in
-`AGENTS.md`). l0_core/l1_pixels are
+vendored reference (`third_party/SVT-AV1/`, upstream commit
+`fd116158a00986d923db8a1fdddd0dbd5fd0e240`, 2026-08-15; REFERENCE PINNING rule
+in `AGENTS.md`). l0_core/l1_pixels are
 infrastructure with no SVT symbol to trace (single policy row in the
 classification section). The l9/l10 families' span-by-span anchors
 (file:line per function) live in the A8/A11/A13/A14 rows of

@@ -4,7 +4,9 @@
 
 CuSV1 is an experimental, correctness-first port of selected SVT-AV1 encoder
 building blocks to CUDA 12.2 for NVIDIA Pascal (`sm_61`). Host reference
-implementations are ported from the pinned SVT-AV1 snapshot; CUDA kernels are
+implementations are ported from the pinned SVT-AV1 snapshot in
+`third_party/SVT-AV1/` (upstream commit
+`fd116158a00986d923db8a1fdddd0dbd5fd0e240`, 2026-08-15); CUDA kernels are
 JIT-compiled with NVRTC.
 
 **Portable-C coverage: 23.7%**, measured 2026-11-11 by

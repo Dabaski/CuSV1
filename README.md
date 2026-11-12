@@ -56,8 +56,10 @@ benchmarks, see [development and verification](docs/development.md).
 ## Reference and licenses
 
 The pinned SVT-AV1 snapshot in `third_party/SVT-AV1/` is the 1:1 reference for
-this port. It is a 4.2-era snapshot and is not byte-identical to the official
-v4.2.0 tag. See its `LICENSE` and `NOTICE` files. This project is not
+this port. It is upstream commit
+`fd116158a00986d923db8a1fdddd0dbd5fd0e240` (2026-08-15), a post-v4.2.0 master
+snapshot that is not byte-identical to the official v4.2.0 tag. See its
+`LICENSE` and `NOTICE` files. This project is not
 affiliated with or endorsed by SVT-AV1's authors or the Alliance for Open Media.
 
 Other third-party components and their license locations are described in

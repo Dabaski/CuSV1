@@ -341,6 +341,8 @@ unified inside the quantize helpers via `dequant_ptr[rc != 0]` /
 index 0 of the extracted helpers.
 
 REFERENCE PINNING note: every extract targets the vendored snapshot in
-`third_party/SVT-AV1/` (4.2-era, CHANGELOG 4.2.0 dated 2026-07-14, NOT
-byte-identical to the official v4.2.0 tag). The pinned tree is the sole 1:1
-reference; updating it would invalidate every golden line above.
+`third_party/SVT-AV1/` (upstream commit
+`fd116158a00986d923db8a1fdddd0dbd5fd0e240`, 2026-08-15; CHANGELOG 4.2.0 dated
+2026-07-14; NOT byte-identical to the official v4.2.0 tag). The pinned tree
+is the sole 1:1 reference; updating it would invalidate every golden line
+above.

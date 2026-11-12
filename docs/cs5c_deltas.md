@@ -2,8 +2,10 @@
 
 Every place our quantizer/entropy port differs in semantics from SVT's, named
 and verdict-tagged. The pinned reference is `third_party/SVT-AV1/` (the
-vendored 4.2-era snapshot). No code changes in this ticket - the deltas are
-named so we know what is exact and what is a shortcut. Each verdict: EXACT
+vendored snapshot at upstream commit
+`fd116158a00986d923db8a1fdddd0dbd5fd0e240`, 2026-08-15). No code changes in
+this ticket - the deltas are named so we know what is exact and what is a
+shortcut. Each verdict: EXACT
 (bit-exact with the pinned reference), SHORTCUT (a documented simplification
 that does not diverge for the committed fixtures), or CRITICAL (a genuine
 bit-exactness divergence).

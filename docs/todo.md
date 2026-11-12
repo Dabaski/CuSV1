@@ -12,7 +12,9 @@ PRODUCTION-READY - defined as the step before the "ffmpeg blueprint" phase
 
 North stars (AGENTS.md):
 1. Bit-exact 1:1 with the PINNED vendored SVT-AV1 reference
-   (third_party/SVT-AV1, 4.2-era snapshot). Every algorithm traceable.
+   (third_party/SVT-AV1, upstream commit
+   `fd116158a00986d923db8a1fdddd0dbd5fd0e240`, 2026-08-15). Every algorithm
+   traceable.
 2. Production-ready: not just correct - fast, robust, validated, packaged.
 
 How to use this file:

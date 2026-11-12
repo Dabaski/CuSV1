@@ -99,9 +99,11 @@ compile. If you can split a step into two smaller ones, split it.
     `transform.cpp` line numbers because `transform.cpp` grew by ~700 lines
     after that doc was written.
 - **REFERENCE PINNING**: the project's 1:1 reference is the VENDORED SVT-AV1
-  snapshot in `third_party/SVT-AV1/` - a 4.2-era snapshot (CHANGELOG 4.2.0,
-  2026-07-14) that is NOT byte-identical to the official v4.2.0 tag, and
-  upstream master has diverged further. The vendored tree is pinned and is
+  snapshot in `third_party/SVT-AV1/` - upstream commit
+  `fd116158a00986d923db8a1fdddd0dbd5fd0e240` (2026-08-15), a post-v4.2.0
+  master snapshot (CHANGELOG 4.2.0, 2026-07-14) that is NOT byte-identical to
+  the official v4.2.0 tag, and upstream master has diverged further. The
+  vendored tree is pinned and is
   NOT to be updated without a court order (updating it would invalidate
   every golden and provenance citation). The north star is therefore
   "bit-exact 1:1 with the pinned vendored SVT-AV1 reference".
@@ -146,7 +148,7 @@ compile. If you can split a step into two smaller ones, split it.
   `cs7_prefix_baseline.inc` had to record the pre-fix bytes somewhere,
   because after the fix landed nothing in the repo could show them.
   **PROVENANCE of these two rules, since they arrived by accident and a
-  reader deserves to know that.** They are on disk at `AGENTS.md:129-147`
+  reader deserves to know that.** They are on disk at `AGENTS.md:131-149`
   and they have no commit of their own. They were the court author's
   uncommitted edit when this file was staged for `c6836e6` - a commit
   titled for the throwaway's retirement, which is a different subject
