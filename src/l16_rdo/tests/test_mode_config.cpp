@@ -2518,3 +2518,575 @@ TEST_CASE("get_max_can_count - the rtc and non-rtc preset ladders") {
         CHECK(getMaxCanCount((EncMode)mode, false) == nrtc);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Batch B: the sig_deriv_multi_processes family (:1988-2518). The oracle
+// transcribes the three composition flows independently; the per-level
+// ctrl-struct expectations are independent re-transcriptions of the setter
+// tables (the full structs are setter-test-proven; the composition test
+// proves the level derivation and the wiring).
+// ---------------------------------------------------------------------------
+
+struct MultiProcO {
+    int gmLevel;
+    int hmeFlag, hmeL0, hmeL1, hmeL2;
+    int tfHmeFlag, tfHmeL0, tfHmeL1, tfHmeL2;
+    int multiPassPd;
+    int intrabcLevel;
+    int paletteLevel;
+    int cdefSearchLevel, cdefReconLevel;
+    int wnLevel, sgLevel;
+    int initRes;
+    int enableRestoration, cdfMode, hbdMd, maxCanCount, useBest;
+    int allowIntrabc, scTools;
+};
+
+// oracle reps for the setter tables (independent re-transcriptions).
+static int oracleIntrabcEnabled(int level) { return level != 0; }
+static void oracleIntrabcRep(int level, int& hashBs, int& cand, std::uint64_t& thresh, int& dir) {
+    hashBs = 0; cand = 0; thresh = 0; dir = 0;
+    switch (level) {
+    case 1: case 2: case 3: hashBs = 64; cand = 256; thresh = 1ull << 20; dir = 0; break;
+    case 4: hashBs = 64; cand = 64; thresh = 1ull << 24; dir = 0; break;
+    case 5: hashBs = 8; cand = 64; thresh = 1ull << 24; dir = 0; break;
+    case 6: hashBs = 8; cand = 32; thresh = ~(std::uint64_t)0; dir = 0; break;
+    case 7: hashBs = 8; cand = 32; thresh = ~(std::uint64_t)0; dir = 1; break;
+    default: break;
+    }
+}
+static void oraclePaletteRep(int level, int& en, int& dcs, int& kcs, int& cr, int& kmitr) {
+    en = 0; dcs = 0; kcs = 0; cr = 0; kmitr = 0;
+    switch (level) {
+    case 1: en = 1; dcs = 1; kcs = 1; cr = 1; kmitr = 50; break;
+    case 2: en = 1; dcs = 2; kcs = 1; cr = 0; kmitr = 2; break;
+    case 3: en = 1; dcs = 255; kcs = 1; cr = 0; kmitr = 2; break;
+    case 4: en = 1; dcs = 255; kcs = 2; cr = 0; kmitr = 2; break;
+    case 5: en = 1; dcs = 255; kcs = 3; cr = 0; kmitr = 2; break;
+    case 6: en = 1; dcs = 255; kcs = 5; cr = 0; kmitr = 2; break;
+    case 7: en = 1; dcs = 255; kcs = 5; cr = 0; kmitr = 1; break;
+    case 8: en = 1; dcs = 255; kcs = 6; cr = 0; kmitr = 1; break;
+    case 9: en = 1; dcs = 255; kcs = 50; cr = 0; kmitr = 1; break;
+    default: break;
+    }
+}
+static void oracleCdefSearchRep(int level, bool base, bool nl, int& en, int& sub, int& skipTh,
+                                int& searchBest, int& useRef) {
+    en = 0; sub = 0; skipTh = 0; searchBest = 0; useRef = 0;
+    switch (level) {
+    case 1: case 2: case 3: case 4: en = 1; sub = 1; skipTh = 0; searchBest = 0; useRef = 0; break;
+    case 5: en = 1; sub = 1; skipTh = 0; searchBest = nl ? 0 : 1; useRef = 0; break;
+    case 6: en = 1; sub = 4; skipTh = 0; searchBest = nl ? 0 : 1; useRef = 0; break;
+    case 7: en = 1; sub = 4; skipTh = base ? 0 : 80; searchBest = base ? 0 : 1; useRef = nl ? 0 : 1; break;
+    case 8: en = 1; sub = 4; skipTh = base ? 0 : 80; searchBest = base ? 0 : 1; useRef = base ? 0 : 1; break;
+    case 9: en = 1; sub = 4; skipTh = base ? 0 : 80; searchBest = base ? 0 : 1; useRef = base ? 0 : 1; break;
+    case 10: en = 1; sub = -1; skipTh = base ? 0 : 80; searchBest = 0; useRef = 0; break;
+    default: break;
+    }
+}
+static void oracleCdefReconRep(int level, int& zb, int& zl, int& pd) {
+    zb = 0; zl = 0; pd = 0;
+    switch (level) {
+    case 1: zb = 61; zl = 2; pd = 10; break;
+    case 2: zb = 61; zl = 3; pd = 10; break;
+    case 3: zb = 60; zl = 3; pd = 10; break;
+    case 4: zb = 58; zl = 3; pd = 10; break;
+    default: break;
+    }
+}
+static void oracleWnRep(int level, int& en, int& chroma, int& tap, int& refine, int& maxOne, int& prev) {
+    en = 0; chroma = 0; tap = 0; refine = 0; maxOne = 0; prev = 0;
+    switch (level) {
+    case 1: en = 1; chroma = 1; tap = 1; refine = 1; maxOne = 0; prev = 0; break;
+    case 2: en = 1; chroma = 1; tap = 1; refine = 1; maxOne = 1; prev = 0; break;
+    case 3: en = 1; chroma = 1; tap = 2; refine = 1; maxOne = 1; prev = 0; break;
+    case 4: en = 1; chroma = 1; tap = 2; refine = 0; maxOne = 1; prev = 0; break;
+    case 5: en = 1; chroma = 0; tap = 2; refine = 0; maxOne = 1; prev = 0; break;
+    case 6: en = 1; chroma = 0; tap = 2; refine = 0; maxOne = 1; prev = 1; break;
+    default: break;
+    }
+}
+static void oracleSgRep(int level, int& en, int& chroma, int& s0, int& e0, int& i0, int& s1,
+                        int& e1, int& i1, int& r0, int& r1) {
+    en = 0; chroma = 0; s0 = e0 = i0 = s1 = e1 = i1 = r0 = r1 = 0;
+    switch (level) {
+    case 1: en = 1; chroma = 1; s0 = 0; e0 = 16; i0 = 1; s1 = 0; e1 = 16; i1 = 1; r0 = 1; r1 = 1; break;
+    case 2: en = 1; chroma = 1; s0 = 0; e0 = 16; i0 = 1; s1 = 4; e1 = 5; i1 = 1; r0 = 1; r1 = 0; break;
+    case 3: en = 1; chroma = 1; s0 = 0; e0 = 16; i0 = 8; s1 = 4; e1 = 5; i1 = 1; r0 = 1; r1 = 0; break;
+    case 4: en = 1; chroma = 0; s0 = 0; e0 = 16; i0 = 8; s1 = 4; e1 = 5; i1 = 1; r0 = 1; r1 = 0; break;
+    default: break;
+    }
+}
+
+// The wn/sg level getters oracleWnDefault/oracleSgDefault already exist at the top of the file (independent transcriptions of :1365-1448) and are reused here.
+
+
+// The init-resolution derivation the compositions perform (scs.c:120-139 thresholds, independent transcription - NOT the port's helper).
+static int oracleInitRes(std::uint32_t w, std::uint32_t h) {
+    const std::uint32_t sz = w * h;
+    if (sz < 0x28500u) return 0;
+    if (sz < 0x4CE00u) return 1;
+    if (sz < 0xA1400u) return 2;
+    if (sz < 0x16DA00u) return 3;
+    if (sz < 0x535200u) return 4;
+    if (sz < 0x140A000u) return 5;
+    return 6;
+}
+
+// svt_aom_sig_deriv_multi_processes_default (:1988-2188), independent
+// transcription.
+static void oracleMultiProcDefault(const MultiProcScs& scs, MultiProcPpcs& pcs, MultiProcO& o) {
+    const int mode = (int)pcs.encMode;
+    o.initRes = oracleInitRes(scs.maxInitialInputLumaWidth, scs.maxInitialInputLumaHeight);
+    o.gmLevel = pcs.isISlice ? 0 : (mode <= -1 ? 2 : (mode <= 4 ? 4 : 0));
+    o.hmeFlag = 1; o.hmeL0 = 1;
+    if (pcs.scClass5) {
+        if (mode <= 2) { o.hmeL1 = 1; o.hmeL2 = 1; } else { o.hmeL1 = 1; o.hmeL2 = 0; }
+    } else {
+        o.hmeL1 = 1; o.hmeL2 = 0;
+    }
+    switch (pcs.tfHmeMeLevel) {
+    case 0: o.tfHmeFlag = 1; o.tfHmeL0 = 1; o.tfHmeL1 = 1; o.tfHmeL2 = 1; break;
+    case 1: case 2: o.tfHmeFlag = 1; o.tfHmeL0 = 1; o.tfHmeL1 = 1; o.tfHmeL2 = 0; break;
+    case 3: case 4: o.tfHmeFlag = 1; o.tfHmeL0 = 1; o.tfHmeL1 = 0; o.tfHmeL2 = 0; break;
+    default: break;
+    }
+    o.multiPassPd = 1;
+    int ibc = 0;
+    if (!scs.enableIntrabc) ibc = 0;
+    else if (pcs.scClass5) {
+        if (pcs.isISlice) {
+            if (mode <= 3) ibc = 2;
+            else if (mode <= 5) ibc = 3;
+            else if (mode <= 8) ibc = 5;
+            else if (mode <= 9) ibc = 6;
+            else ibc = 0;
+        } else ibc = 0;
+    }
+    o.intrabcLevel = ibc;
+    o.allowIntrabc = oracleIntrabcEnabled(ibc);
+    int pal = 0;
+    if (pcs.scClass5) {
+        if (mode <= 0) pal = pcs.isISlice ? 1 : 0;
+        else if (mode == 1) pal = pcs.isISlice ? 2 : 0;
+        else if (mode == 2) pal = pcs.isISlice ? 4 : 0;
+        else if (mode <= 5) pal = pcs.isISlice ? 5 : 0;
+        else if (mode <= 9) pal = pcs.isISlice ? 6 : 0;
+        else if (mode == 10) pal = pcs.isISlice ? 8 : 0;
+        else pal = 0;
+    }
+    o.paletteLevel = pal;
+    o.scTools = (pcs.scClass5 && (pal || o.allowIntrabc)) ? 1 : 0;
+    int cdef = 0;
+    if (!scs.seqCdefLevel || o.allowIntrabc) cdef = 0;
+    else if (scs.cdefLevel != -1) cdef = scs.cdefLevel;
+    else if (mode <= -1) cdef = 1;
+    else if (mode <= 2) cdef = 2;
+    else if (mode <= 5) cdef = 5;
+    else if (mode <= 7) cdef = pcs.isBase ? 5 : 6;
+    else cdef = 7;
+    o.cdefSearchLevel = cdef;
+    int cr = 0;
+    if (scs.fastDecode == 0 || pcs.gm.inputResolution <= 1) {
+        if (mode <= 8) cr = 0;
+        else if (mode <= 10) cr = 1;
+        else cr = 2;
+    } else if (scs.fastDecode == 1) cr = 1;
+    else {
+        if (mode <= 8) cr = 2; else cr = 1;
+    }
+    o.cdefReconLevel = cr;
+    if (scs.seqEnableRestoration) {
+        o.wnLevel = oracleWnDefault(mode, o.initRes, pcs.isNotLastLayer);
+        o.sgLevel = oracleSgDefault(mode, o.initRes, scs.fastDecode);
+    } else { o.wnLevel = 0; o.sgLevel = 0; }
+    o.enableRestoration = (o.wnLevel > 0 || o.sgLevel > 0) ? 1 : 0;
+    o.cdfMode = 1;
+    if (scs.encoderBitDepth == 8) o.hbdMd = 0;
+    else if (scs.hbdMds != -1) o.hbdMd = scs.hbdMds;
+    else if (mode <= -1) o.hbdMd = 1;
+    else if (mode <= 5) o.hbdMd = pcs.isBase ? 2 : 0;
+    else o.hbdMd = pcs.isISlice ? 2 : 0;
+    o.maxCanCount = (mode <= 1) ? 1225 : (mode == 2) ? 1000 : (mode == 3) ? 720 :
+                    (mode == 4) ? 576 : (mode == 5) ? 369 : (mode == 6) ? 236 :
+                    (mode <= 9) ? 190 : 80;
+    o.useBest = mode <= 1 ? 0 : 1;
+}
+
+// svt_aom_sig_deriv_multi_processes_rtc (:2190-2367).
+static void oracleMultiProcRtc(const MultiProcScs& scs, MultiProcPpcs& pcs, MultiProcO& o, int ftr) {
+    const int mode = (int)pcs.encMode;
+    o.initRes = oracleInitRes(scs.maxInitialInputLumaWidth, scs.maxInitialInputLumaHeight);
+    o.gmLevel = pcs.isISlice ? 0 : (mode <= -1 ? 2 : (mode <= 4 ? 4 : 0));
+    o.hmeFlag = 1; o.hmeL0 = 1;
+    if (pcs.useFlatIpp) {
+        if (mode <= 11 || (mode == 12 && pcs.picAvgVariance < 1000)) { o.hmeL1 = 1; o.hmeL2 = 0; }
+        else { o.hmeL1 = 0; o.hmeL2 = 0; }
+    } else { o.hmeL1 = 1; o.hmeL2 = 0; }
+    switch (pcs.tfHmeMeLevel) {
+    case 0: o.tfHmeFlag = 1; o.tfHmeL0 = 1; o.tfHmeL1 = 1; o.tfHmeL2 = 1; break;
+    case 1: case 2: o.tfHmeFlag = 1; o.tfHmeL0 = 1; o.tfHmeL1 = 1; o.tfHmeL2 = 0; break;
+    case 3: case 4: o.tfHmeFlag = 1; o.tfHmeL0 = 1; o.tfHmeL1 = 0; o.tfHmeL2 = 0; break;
+    default: break;
+    }
+    o.multiPassPd = 1;
+    o.intrabcLevel = 0;
+    o.allowIntrabc = 0;
+    int pal = 0;
+    if (pcs.scClass5) {
+        if (ftr) {
+            if (mode <= 7) pal = pcs.isISlice ? 5 : 7;
+            else if (mode == 8) pal = 7;
+            else pal = 0;
+        } else {
+            if (mode <= 7) pal = pcs.isISlice ? 5 : 0;
+            else if (mode == 8) pal = pcs.isISlice ? 7 : 0;
+            else pal = 0;
+        }
+    }
+    o.paletteLevel = pal;
+    o.scTools = (pcs.scClass5 && (pal || o.allowIntrabc)) ? 1 : 0;
+    int cdef = 0;
+    if (!scs.seqCdefLevel || o.allowIntrabc) cdef = 0;
+    else if (scs.cdefLevel != -1) cdef = scs.cdefLevel;
+    else if (pcs.useFlatIpp) {
+        if (mode <= 7) cdef = 5;
+        else if (mode <= 11) cdef = (pcs.gm.inputResolution <= 1) ? 6 : (pcs.isISlice ? 5 : 8);
+        else if (mode == 12 && pcs.picAvgVariance < 350)
+            cdef = (pcs.gm.inputResolution <= 1) ? 6 : (pcs.isISlice ? 5 : 8);
+        else cdef = pcs.isISlice ? 5 : 9;
+    } else {
+        if (mode <= 7) cdef = 5;
+        else if (mode == 8) cdef = (pcs.gm.inputResolution <= 1) ? 6 : (pcs.isISlice ? 5 : 8);
+        else cdef = pcs.isISlice ? 5 : 8;
+    }
+    o.cdefSearchLevel = cdef;
+    o.cdefReconLevel = 0;
+    if (scs.seqEnableRestoration) {
+        o.wnLevel = 0;  // get_wn_filter_level_rtc = 0 for every resolution
+        o.sgLevel = 0;  // get_sg_filter_level_rtc = 0 for every resolution/fd
+    } else { o.wnLevel = 0; o.sgLevel = 0; }
+    o.enableRestoration = 0;
+    o.cdfMode = 1;
+    if (scs.enableHbdModeDecision == -1) o.hbdMd = pcs.isISlice ? 2 : 0;
+    else o.hbdMd = scs.enableHbdModeDecision;
+    o.maxCanCount = (mode <= 7) ? 150 : (mode == 8) ? 75 : (mode <= 10) ? 65 :
+                    (mode == 11) ? 15 : 10;
+    o.useBest = 1;
+}
+
+// svt_aom_sig_deriv_multi_processes_allintra (:2369-2518).
+static void oracleMultiProcAllIntra(const MultiProcScs& scs, MultiProcPpcs& pcs, MultiProcO& o) {
+    const int mode = (int)pcs.encMode;
+    o.initRes = oracleInitRes(scs.maxInitialInputLumaWidth, scs.maxInitialInputLumaHeight);
+    o.multiPassPd = 1;  // :2376
+    int ibc = 0;
+    if (!scs.enableIntrabc) ibc = 0;
+    else if (pcs.scClass5) {
+        if (mode <= -1) ibc = 1;
+        else if (mode == 0) ibc = 3;
+        else if (mode == 1) ibc = 4;
+        else if (mode == 2) ibc = 5;
+        else if (mode == 3) ibc = 6;
+        else if (mode == 4) ibc = 7;
+        else ibc = 0;
+    }
+    o.intrabcLevel = ibc;
+    o.allowIntrabc = oracleIntrabcEnabled(ibc);
+    int pal = 0;
+    if (pcs.scClass5) {
+        if (mode <= 2) pal = 2;
+        else if (mode == 3) pal = 3;
+        else if (mode <= 5) pal = 4;
+        else if (mode == 6) pal = 5;
+        else if (mode == 7) pal = 7;
+        else pal = 0;
+    }
+    o.paletteLevel = pal;
+    o.scTools = (pal || o.allowIntrabc) ? 1 : 0;
+    int cdef = 0;
+    if (!scs.seqCdefLevel || o.allowIntrabc) cdef = 0;
+    else if (scs.cdefLevel != -1) cdef = scs.cdefLevel;
+    else if (scs.fastDecode == 0 || pcs.gm.inputResolution <= 1) {
+        if (mode <= -1) cdef = 1;
+        else if (mode == 0) cdef = 2;
+        else if (mode <= 3) cdef = 3;
+        else if (mode <= 5) cdef = 5;
+        else if (mode == 6) cdef = 7;
+        else cdef = 10;
+    } else {
+        if (mode <= 3) cdef = 3;
+        else if (mode <= 5) cdef = 5;
+        else if (mode <= 7) cdef = 7;
+        else cdef = 0;
+    }
+    o.cdefSearchLevel = cdef;
+    int cr = 0;
+    if (scs.fastDecode == 0 || pcs.gm.inputResolution <= 1) {
+        cr = mode <= 7 ? 0 : 1;
+    } else if (scs.fastDecode == 1) {
+        cr = mode <= 7 ? 1 : 3;
+    } else cr = 3;
+    o.cdefReconLevel = cr;
+    if (scs.seqEnableRestoration) {
+        // get_wn_filter_level_allintra / get_sg_filter_level_allintra
+        o.wnLevel = mode <= 0 ? 3 : (mode <= 3 ? 3 : (mode <= 6 ? 4 : 0));
+        o.sgLevel = mode <= -1 ? 1 : 0;
+    } else { o.wnLevel = 0; o.sgLevel = 0; }
+    o.enableRestoration = (o.wnLevel > 0 || o.sgLevel > 0) ? 1 : 0;
+    o.cdfMode = 1;
+    if (scs.enableHbdModeDecision == -1) o.hbdMd = mode <= -1 ? 1 : 2;
+    else o.hbdMd = scs.enableHbdModeDecision;
+    o.maxCanCount = (mode <= 1) ? 1225 : (mode == 2) ? 1000 : (mode == 3) ? 720 :
+                    (mode == 4) ? 576 : (mode == 5) ? 369 : (mode == 6) ? 236 :
+                    (mode <= 9) ? 190 : 80;
+    o.useBest = -1;  // NOT written by the allintra variant (poison stands)
+}
+
+// The shared field comparison (the flow outputs + the ctrl-struct
+// representatives). useBestPoison: the allintra variant leaves
+// use_best_me_unipred_cand_only untouched - the uint8 poison stands.
+// writesHmeAndGm: only the default/rtc variants touch the GM ctrls and
+// the HME flags; the allintra variant writes NONE of them (:2369-2518),
+// so the GM enabled uint8 keeps the poison (a safe uint8 read) and the
+// eight HME bools stay unread (poisoned bools stay unread).
+static void checkMultiProc(MultiProcPpcs& c, const MultiProcO& o,
+                           bool base, bool nl, bool useBestPoison, bool writesHmeAndGm) {
+    if (writesHmeAndGm) {
+        CHECK(c.gm.gmCtrls.enabled == (uint8_t)(o.gmLevel != 0));
+        CHECK(c.enableHmeFlag == (o.hmeFlag != 0));
+        CHECK(c.enableHmeLevel0Flag == (o.hmeL0 != 0));
+        CHECK(c.enableHmeLevel1Flag == (o.hmeL1 != 0));
+        CHECK(c.enableHmeLevel2Flag == (o.hmeL2 != 0));
+        CHECK(c.tfEnableHmeFlag == (o.tfHmeFlag != 0));
+        CHECK(c.tfEnableHmeLevel0Flag == (o.tfHmeL0 != 0));
+        CHECK(c.tfEnableHmeLevel1Flag == (o.tfHmeL1 != 0));
+        CHECK(c.tfEnableHmeLevel2Flag == (o.tfHmeL2 != 0));
+    } else {
+        CHECK(c.gm.gmCtrls.enabled == 0xAA);
+    }
+    CHECK(c.multiPassPdLevel == o.multiPassPd);
+    CHECK(c.allowIntrabc == (o.allowIntrabc != 0));
+    {
+        int hashBs, cand, dir; std::uint64_t thresh;
+        oracleIntrabcRep(o.intrabcLevel, hashBs, cand, thresh, dir);
+        CHECK(c.intrabcCtrls.enabled == (oracleIntrabcEnabled(o.intrabcLevel) != 0));
+        if (o.intrabcLevel != 0) {
+            CHECK(c.intrabcCtrls.maxBlockSizeHash == hashBs);
+            CHECK(c.intrabcCtrls.maxCandPerBucket == cand);
+            CHECK(c.intrabcCtrls.exhaustiveMeshThresh == thresh);
+            CHECK(c.intrabcCtrls.searchDir == dir);
+        }
+    }
+    CHECK(c.paletteLevel == o.paletteLevel);
+    {
+        int en, dcs, kcs, cr, kmitr;
+        oraclePaletteRep(o.paletteLevel, en, dcs, kcs, cr, kmitr);
+        CHECK(c.paletteCtrls.enabled == (uint8_t)en);
+        if (o.paletteLevel != 0) {
+            CHECK(c.paletteCtrls.dominantColorStep == dcs);
+            CHECK(c.paletteCtrls.kmeanColorStep == kcs);
+            CHECK(c.paletteCtrls.centroidRefinement == (cr != 0));
+            CHECK(c.paletteCtrls.kMeansMaxItr == kmitr);
+        }
+    }
+    CHECK(c.cdefLevel == o.cdefSearchLevel);
+    {
+        int en, sub, skipTh, searchBest, useRef;
+        oracleCdefSearchRep(o.cdefSearchLevel, base, nl, en, sub, skipTh, searchBest, useRef);
+        CHECK(c.cdefSearchCtrls.enabled == en);
+        if (o.cdefSearchLevel != 0 && o.cdefSearchLevel != 10) {
+            CHECK(c.cdefSearchCtrls.subsamplingFactor == sub);
+            CHECK(c.cdefSearchCtrls.searchBestRefFs == searchBest);
+        }
+        if (o.cdefSearchLevel != 0 && o.cdefSearchLevel <= 10) {
+            CHECK(c.cdefSearchCtrls.skipTh == skipTh);
+            CHECK(c.cdefSearchCtrls.useReferenceCdefFs == useRef);
+        }
+    }
+    {
+        int zb, zl, pd;
+        oracleCdefReconRep(o.cdefReconLevel, zb, zl, pd);
+        CHECK(c.cdefReconCtrls.zeroFsCostBias == zb);
+        CHECK(c.cdefReconCtrls.zeroFilterStrengthLvl == zl);
+        CHECK(c.cdefReconCtrls.prevCdefDistTh == pd);
+    }
+    {
+        int en, chroma, tap, refine, maxOne, prev;
+        oracleWnRep(o.wnLevel, en, chroma, tap, refine, maxOne, prev);
+        CHECK(c.wnFilterCtrls.enabled == (en != 0));
+        if (o.wnLevel != 0) {
+            CHECK(c.wnFilterCtrls.useChroma == (chroma != 0));
+            CHECK(c.wnFilterCtrls.filterTapLvl == tap);
+            CHECK(c.wnFilterCtrls.useRefinement == (refine != 0));
+            CHECK(c.wnFilterCtrls.maxOneRefinementStep == (maxOne != 0));
+            CHECK(c.wnFilterCtrls.usePrevFrameCoeffs == (prev != 0));
+        }
+    }
+    {
+        int en, chroma, s0, e0, i0, s1, e1, i1, r0, r1;
+        oracleSgRep(o.sgLevel, en, chroma, s0, e0, i0, s1, e1, i1, r0, r1);
+        CHECK(c.sgFilterCtrls.enabled == (en != 0));
+        if (o.sgLevel != 0) {
+            CHECK(c.sgFilterCtrls.useChroma == (chroma != 0));
+            CHECK(c.sgFilterCtrls.startEp[0] == s0);
+            CHECK(c.sgFilterCtrls.endEp[0] == e0);
+            CHECK(c.sgFilterCtrls.epInc[0] == i0);
+            CHECK(c.sgFilterCtrls.startEp[1] == s1);
+            CHECK(c.sgFilterCtrls.endEp[1] == e1);
+            CHECK(c.sgFilterCtrls.epInc[1] == i1);
+            CHECK(c.sgFilterCtrls.refine[0] == r0);
+            CHECK(c.sgFilterCtrls.refine[1] == r1);
+        }
+    }
+    CHECK(c.enableRestoration == (o.enableRestoration != 0));
+    CHECK(c.frameEndCdfUpdateMode == o.cdfMode);
+    CHECK(c.hbdMd == o.hbdMd);
+    CHECK(c.maxCanCount == o.maxCanCount);
+    if (useBestPoison) CHECK(c.useBestMeUnipredCandOnly == 0xAA);
+    else CHECK(c.useBestMeUnipredCandOnly == o.useBest);
+    CHECK(c.allowScreenContentTools == (o.scTools != 0));
+}
+
+TEST_CASE("sig_deriv_multi_processes_default - the composition over every wall cell") {
+    // :1988-2188. Axes: mode, isISlice, isBase, scClass5, enableIntrabc,
+    // seqCdefLevel, fastDecode, inputResolution {360p, 720p},
+    // seqEnableRestoration, encoderBitDepth {8, 10}, hbdMds {-1, 1},
+    // isNotLastLayer, isNotHighestLayer. maxInitial dims fixed at
+    // 640x360 -> initRes 360p (the derivation itself is helper-tested).
+    for (int mode = -1; mode <= 13; ++mode)
+    for (int isI = 0; isI <= 1; ++isI)
+    for (int base = 0; base <= 1; ++base)
+    for (int sc5 = 0; sc5 <= 1; ++sc5)
+    for (int ibc = 0; ibc <= 1; ++ibc)
+    for (int seqCdef = 0; seqCdef <= 1; ++seqCdef)
+    for (int fd = 0; fd <= 2; ++fd)
+    for (int res = 1; res <= 3; res += 2)
+    for (int seqRest = 0; seqRest <= 1; ++seqRest)
+    for (int bd = 8; bd <= 10; bd += 2)
+    for (int hbdMds = -1; hbdMds <= 1; hbdMds += 2)
+    for (int nll = 0; nll <= 1; ++nll)
+    for (int nlh = 0; nlh <= 1; ++nlh) {
+        MultiProcPpcs c;
+        std::memset(&c, kPoison, sizeof(c));
+        c.encMode = (EncMode)mode;
+        c.isISlice = isI != 0;
+        c.isBase = base != 0;
+        c.scClass5 = sc5 != 0;
+        c.isNotLastLayer = nll != 0;
+        c.isNotHighestLayer = nlh != 0;
+        c.useFlatIpp = false;
+        c.picAvgVariance = 12345;
+        c.tfHmeMeLevel = 2;
+        c.gm.inputResolution = (uint8_t)res;
+        MultiProcScs s{};
+        s.fastDecode = (uint8_t)fd;
+        s.enableIntrabc = ibc != 0;
+        s.cdefLevel = -1;
+        s.seqCdefLevel = (uint8_t)seqCdef;
+        s.seqEnableRestoration = seqRest != 0;
+        s.maxInitialInputLumaWidth = 640;
+        s.maxInitialInputLumaHeight = 360;
+        s.hbdMds = hbdMds;
+        s.encoderBitDepth = (uint8_t)bd;
+        s.enableHbdModeDecision = -1;
+        sigDerivMultiProcessesDefault(c, s, 1);
+        MultiProcO o;
+        std::memset(&o, 0, sizeof(o));
+        oracleMultiProcDefault(s, c, o);
+        checkMultiProc(c, o, base != 0, nlh != 0, false, true);
+    }
+}
+
+TEST_CASE("sig_deriv_multi_processes_rtc - the composition over every wall cell") {
+    // :2190-2367. Axes: mode, isISlice, useFlatIpp, scClass5, seqCdefLevel,
+    // inputResolution, picAvgVariance {500, 2000} (crosses both variance
+    // thresholds), ftrRtcInterPalette {0, 1}, seqEnableRestoration,
+    // fastDecode, enableHbdModeDecision {-1, 1}. intrabc_level = 0
+    // unconditionally (:2248-2249).
+    for (int mode = -1; mode <= 13; ++mode)
+    for (int isI = 0; isI <= 1; ++isI)
+    for (int flat = 0; flat <= 1; ++flat)
+    for (int sc5 = 0; sc5 <= 1; ++sc5)
+    for (int seqCdef = 0; seqCdef <= 1; ++seqCdef)
+    for (int res = 1; res <= 3; res += 2)
+    for (int varIdx = 0; varIdx <= 1; ++varIdx)
+    for (int ftr = 0; ftr <= 1; ++ftr)
+    for (int seqRest = 0; seqRest <= 1; ++seqRest)
+    for (int fd = 0; fd <= 2; ++fd)
+    for (int hbd = -1; hbd <= 1; hbd += 2) {
+        MultiProcPpcs c;
+        std::memset(&c, kPoison, sizeof(c));
+        c.encMode = (EncMode)mode;
+        c.isISlice = isI != 0;
+        c.isBase = false;
+        c.scClass5 = sc5 != 0;
+        c.useFlatIpp = flat != 0;
+        c.isNotLastLayer = true;
+        c.isNotHighestLayer = true;
+        c.picAvgVariance = varIdx == 0 ? 500u : 2000u;
+        c.tfHmeMeLevel = 3;
+        c.gm.inputResolution = (uint8_t)res;
+        MultiProcScs s{};
+        s.fastDecode = (uint8_t)fd;
+        s.enableIntrabc = true;
+        s.cdefLevel = -1;
+        s.seqCdefLevel = (uint8_t)seqCdef;
+        s.seqEnableRestoration = seqRest != 0;
+        s.maxInitialInputLumaWidth = 640;
+        s.maxInitialInputLumaHeight = 360;
+        s.hbdMds = -1;
+        s.encoderBitDepth = 10;
+        s.enableHbdModeDecision = hbd;
+        sigDerivMultiProcessesRtc(c, s, 1, ftr);
+        MultiProcO o;
+        std::memset(&o, 0, sizeof(o));
+        oracleMultiProcRtc(s, c, o, ftr);
+        checkMultiProc(c, o, false, true, false, true);
+    }
+}
+
+TEST_CASE("sig_deriv_multi_processes_allintra - the composition over every wall cell") {
+    // :2369-2518. Axes: mode, scClass5, enableIntrabc, seqCdefLevel,
+    // fastDecode, inputResolution, seqEnableRestoration,
+    // enableHbdModeDecision {-1, 1}. use_best_me_unipred_cand_only is NOT
+    // written by this variant - the poison stands (checked in
+    // checkMultiProc via useBestPoison).
+    for (int mode = -1; mode <= 13; ++mode)
+    for (int sc5 = 0; sc5 <= 1; ++sc5)
+    for (int ibc = 0; ibc <= 1; ++ibc)
+    for (int seqCdef = 0; seqCdef <= 1; ++seqCdef)
+    for (int fd = 0; fd <= 2; ++fd)
+    for (int res = 1; res <= 3; res += 2)
+    for (int seqRest = 0; seqRest <= 1; ++seqRest)
+    for (int hbd = -1; hbd <= 1; hbd += 2) {
+        MultiProcPpcs c;
+        std::memset(&c, kPoison, sizeof(c));
+        c.encMode = (EncMode)mode;
+        c.isISlice = true;
+        c.isBase = false;
+        c.scClass5 = sc5 != 0;
+        c.useFlatIpp = false;
+        c.isNotLastLayer = true;
+        c.isNotHighestLayer = true;
+        c.picAvgVariance = 12345;
+        c.tfHmeMeLevel = 1;
+        c.gm.inputResolution = (uint8_t)res;
+        MultiProcScs s{};
+        s.fastDecode = (uint8_t)fd;
+        s.enableIntrabc = ibc != 0;
+        s.cdefLevel = -1;
+        s.seqCdefLevel = (uint8_t)seqCdef;
+        s.seqEnableRestoration = seqRest != 0;
+        s.maxInitialInputLumaWidth = 1280;
+        s.maxInitialInputLumaHeight = 720;
+        s.hbdMds = -1;
+        s.encoderBitDepth = 8;
+        s.enableHbdModeDecision = hbd;
+        sigDerivMultiProcessesAllIntra(c, s);
+        MultiProcO o;
+        std::memset(&o, 0, sizeof(o));
+        oracleMultiProcAllIntra(s, c, o);
+        checkMultiProc(c, o, false, true, true, false);
+    }
+}
+

@@ -1930,5 +1930,511 @@ std::uint16_t getMaxCanCount(EncMode encMode, bool rtc) {
     return memMaxCanCount;
 }
 
+// ---------------------------------------------------------------------------
+// Batch B: the sig_deriv_multi_processes family (enc_mode_config.c
+// :1988-2518), 1:1 per variant. The walls fold into the two carriers; the
+// derived walls (isBase / isNotHighestLayer / isNotLastLayer) arrive as
+// annotated bools.
+// ---------------------------------------------------------------------------
+
+// svt_aom_sig_deriv_multi_processes_default (:1988-2188).
+void sigDerivMultiProcessesDefault(MultiProcPpcs& pcs, const MultiProcScs& scs,
+                                   int configEnableGlobalMotion) {
+    // Set GM ctrls assuming super-res is off for gm-pp need (:1999)
+    setGmControls(pcs.gm, deriveGmLevel(pcs.encMode, pcs.isISlice, true, configEnableGlobalMotion),
+                  configEnableGlobalMotion);
+
+    // If enabled here, the hme enable flags should also be enabled in ResourceCoordinationProcess
+    // to ensure that resources are allocated for the downsampled pictures used in HME
+    pcs.enableHmeFlag        = true;
+    pcs.enableHmeLevel0Flag  = true;
+    if (pcs.scClass5) {
+        if (pcs.encMode <= ENC_M2) {
+            pcs.enableHmeLevel1Flag = true;
+            pcs.enableHmeLevel2Flag = true;
+        } else {
+            pcs.enableHmeLevel1Flag = true;
+            pcs.enableHmeLevel2Flag = false;
+        }
+    } else {
+        pcs.enableHmeLevel1Flag = true;
+        pcs.enableHmeLevel2Flag = false;
+    }
+
+    switch (pcs.tfHmeMeLevel) {
+    case 0:
+        pcs.tfEnableHmeFlag        = true;
+        pcs.tfEnableHmeLevel0Flag  = true;
+        pcs.tfEnableHmeLevel1Flag  = true;
+        pcs.tfEnableHmeLevel2Flag  = true;
+        break;
+    case 1:
+    case 2:
+        pcs.tfEnableHmeFlag        = true;
+        pcs.tfEnableHmeLevel0Flag  = true;
+        pcs.tfEnableHmeLevel1Flag  = true;
+        pcs.tfEnableHmeLevel2Flag  = false;
+        break;
+    case 3:
+    case 4:
+        pcs.tfEnableHmeFlag        = true;
+        pcs.tfEnableHmeLevel0Flag  = true;
+        pcs.tfEnableHmeLevel1Flag  = false;
+        pcs.tfEnableHmeLevel2Flag  = false;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+    // Set the Multi-Pass PD level
+    pcs.multiPassPdLevel = kMultiPassPdOn;
+
+    // Set intra-bc level
+    std::uint8_t intrabcLevel = 0;
+    if (!scs.enableIntrabc) {
+        intrabcLevel = 0;
+    } else if (pcs.scClass5) {
+        if (pcs.isISlice) {
+            if (pcs.encMode <= ENC_M3) {
+                intrabcLevel = 2;
+            } else if (pcs.encMode <= ENC_M5) {
+                intrabcLevel = 3;
+            } else if (pcs.encMode <= ENC_M8) {
+                intrabcLevel = 5;
+            } else if (pcs.encMode <= ENC_M9) {
+                intrabcLevel = 6;
+            } else {
+                intrabcLevel = 0;
+            }
+        } else {
+            intrabcLevel = 0;
+        }
+    }
+    setIntrabcLevel(pcs.intrabcCtrls, intrabcLevel);
+    pcs.allowIntrabc = pcs.intrabcCtrls.enabled != false;
+
+    // Set palette level
+    if (pcs.scClass5) {
+        if (pcs.encMode <= ENC_M0) {
+            pcs.paletteLevel = pcs.isISlice ? 1 : 0;
+        } else if (pcs.encMode <= ENC_M1) {
+            pcs.paletteLevel = pcs.isISlice ? 2 : 0;
+        } else if (pcs.encMode <= ENC_M2) {
+            pcs.paletteLevel = pcs.isISlice ? 4 : 0;
+        } else if (pcs.encMode <= ENC_M5) {
+            pcs.paletteLevel = pcs.isISlice ? 5 : 0;
+        } else if (pcs.encMode <= ENC_M9) {
+            pcs.paletteLevel = pcs.isISlice ? 6 : 0;
+        } else if (pcs.encMode <= ENC_M10) {
+            pcs.paletteLevel = pcs.isISlice ? 8 : 0;
+        } else {
+            pcs.paletteLevel = 0;
+        }
+    } else {
+        pcs.paletteLevel = 0;
+    }
+    setPaletteLevel(pcs.paletteCtrls, pcs.paletteLevel);
+
+    pcs.allowScreenContentTools =
+        (pcs.scClass5 && (pcs.paletteLevel != 0 || pcs.allowIntrabc)) ? true : false;
+
+    // Set CDEF level
+    std::uint8_t cdefSearchLevel = 0;
+    if (scs.seqCdefLevel == 0 || pcs.allowIntrabc) {
+        cdefSearchLevel = 0;
+    } else if (scs.cdefLevel != kDefaultSentinel) {
+        cdefSearchLevel = (std::uint8_t)scs.cdefLevel;
+    } else if (pcs.encMode <= ENC_MR) {
+        cdefSearchLevel = 1;
+    } else if (pcs.encMode <= ENC_M2) {
+        cdefSearchLevel = 2;
+    } else if (pcs.encMode <= ENC_M5) {
+        cdefSearchLevel = 5;
+    } else if (pcs.encMode <= ENC_M7) {
+        cdefSearchLevel = pcs.isBase ? 5 : 6;
+    } else {
+        cdefSearchLevel = 7;
+    }
+    setCdefSearchCtrls(pcs.cdefSearchCtrls, cdefSearchLevel, pcs.isBase, pcs.isNotHighestLayer);
+    pcs.cdefLevel = cdefSearchLevel;
+
+    std::uint8_t cdefReconLevel = 0;
+    if (scs.fastDecode == 0 || pcs.gm.inputResolution <= INPUT_SIZE_360p_RANGE) {
+        if (pcs.encMode <= ENC_M8) {
+            cdefReconLevel = 0;
+        } else if (pcs.encMode <= ENC_M10) {
+            cdefReconLevel = 1;
+        } else {
+            cdefReconLevel = 2;
+        }
+    } else if (scs.fastDecode == 1) {
+        cdefReconLevel = 1;
+    } else {  // fast_decode 2
+        if (pcs.encMode <= ENC_M8) {
+            cdefReconLevel = 2;
+        } else {
+            cdefReconLevel = 1;
+        }
+    }
+    setCdefReconCtrls(pcs.cdefReconCtrls, cdefReconLevel);
+
+    std::uint8_t wn = 0, sg = 0;
+    // If restoration filtering is enabled at the sequence level, derive the settings used for this frame
+    if (scs.seqEnableRestoration) {
+        // As allocation has already happened based on the initial input resolution/QP, the resolution/QP
+        // changes should not impact enabling restoration. For some presets, restoration is off for 8K
+        // and above and memory allocation is not performed. So, if we switch to smaller resolution, we need
+        // to keep restoration off.
+        ResolutionRange initInputResolution =
+            deriveInputResolution(scs.maxInitialInputLumaWidth * scs.maxInitialInputLumaHeight);
+        wn = getWnFilterLevelDefault(pcs.encMode, (std::uint8_t)initInputResolution, pcs.isNotLastLayer);
+        sg = getSgFilterLevelDefault(pcs.encMode, (std::uint8_t)initInputResolution,
+                                     (std::uint8_t)scs.fastDecode);
+    }
+    setWnFilterCtrls(pcs.wnFilterCtrls, wn);
+    setSgFilterCtrls(pcs.sgFilterCtrls, sg);
+
+    // Set whether restoration filtering is enabled for this frame
+    pcs.enableRestoration = (wn > 0 || sg > 0);
+
+    // Set frame end cdf update mode
+    pcs.frameEndCdfUpdateMode = 1;
+
+    // User accessible setting for forcing different levels of
+    // high bit depth mode decision; also has a check to make sure
+    // encoder bit depth > 8 to work in full hbd-md
+    if (scs.encoderBitDepth == 8) {  // SVT_EFFECTIVE_BIT_DEPTH(bd) == EB_EIGHT_BIT
+        pcs.hbdMd = 0;
+    } else if (scs.hbdMds != kDefaultSentinel) {
+        pcs.hbdMd = (std::uint8_t)scs.hbdMds;
+    } else {
+        // Default preset-defined behavior
+        if (pcs.encMode <= ENC_MR) {
+            pcs.hbdMd = 1;
+        } else if (pcs.encMode <= ENC_M5) {
+            pcs.hbdMd = pcs.isBase ? 2 : 0;
+        } else {
+            pcs.hbdMd = pcs.isISlice ? 2 : 0;
+        }
+    }
+
+    pcs.maxCanCount                = getMaxCanCount(pcs.encMode, false);
+    if (pcs.encMode <= ENC_M1) {
+        pcs.useBestMeUnipredCandOnly = 0;
+    } else {
+        pcs.useBestMeUnipredCandOnly = 1;
+    }
+}
+
+// svt_aom_sig_deriv_multi_processes_rtc (:2190-2367).
+void sigDerivMultiProcessesRtc(MultiProcPpcs& pcs, const MultiProcScs& scs,
+                               int configEnableGlobalMotion, int ftrRtcInterPalette) {
+    // Set GM ctrls assuming super-res is off for gm-pp need (:2198)
+    setGmControls(pcs.gm, deriveGmLevel(pcs.encMode, pcs.isISlice, true, configEnableGlobalMotion),
+                  configEnableGlobalMotion);
+
+    // If enabled here, the hme enable flags should also be enabled in ResourceCoordinationProcess
+    // to ensure that resources are allocated for the downsampled pictures used in HME
+    pcs.enableHmeFlag        = true;
+    pcs.enableHmeLevel0Flag  = true;
+    if (pcs.useFlatIpp) {
+        if (pcs.encMode <= ENC_M11 ||
+            (pcs.encMode <= ENC_M12 && pcs.picAvgVariance < kRtcLowVarianceTh)) {
+            pcs.enableHmeLevel1Flag = true;
+            pcs.enableHmeLevel2Flag = false;
+        } else {
+            pcs.enableHmeLevel1Flag = false;
+            pcs.enableHmeLevel2Flag = false;
+        }
+    } else {
+        pcs.enableHmeLevel1Flag = true;
+        pcs.enableHmeLevel2Flag = false;
+    }
+
+    switch (pcs.tfHmeMeLevel) {
+    case 0:
+        pcs.tfEnableHmeFlag        = true;
+        pcs.tfEnableHmeLevel0Flag  = true;
+        pcs.tfEnableHmeLevel1Flag  = true;
+        pcs.tfEnableHmeLevel2Flag  = true;
+        break;
+    case 1:
+    case 2:
+        pcs.tfEnableHmeFlag        = true;
+        pcs.tfEnableHmeLevel0Flag  = true;
+        pcs.tfEnableHmeLevel1Flag  = true;
+        pcs.tfEnableHmeLevel2Flag  = false;
+        break;
+    case 3:
+    case 4:
+        pcs.tfEnableHmeFlag        = true;
+        pcs.tfEnableHmeLevel0Flag  = true;
+        pcs.tfEnableHmeLevel1Flag  = false;
+        pcs.tfEnableHmeLevel2Flag  = false;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+    // Set the Multi-Pass PD level
+    pcs.multiPassPdLevel = kMultiPassPdOn;
+
+    // Set intra-bc level
+    std::uint8_t intrabcLevel = 0;
+    setIntrabcLevel(pcs.intrabcCtrls, intrabcLevel);
+    pcs.allowIntrabc = pcs.intrabcCtrls.enabled != false;
+
+    // Set palette level
+    if (pcs.scClass5) {
+        if (ftrRtcInterPalette) {
+            // Palette also on intra blocks inside inter frames at M7-M8, where the static text/UI of a
+            // screen-share stream lives. The level must be set here, pre-ME, so allow_screen_content_tools
+            // below accounts for it; the frame-idle gate needs this frame's norm_me_dist, which only
+            // exists post-ME, so it runs in svt_aom_sig_deriv_mode_decision_config_rtc. Active inter
+            // frames therefore carry allow_screen_content_tools=1 even where most blocks decline
+            // palette: the cost is one header bit plus the per-block palette_y_mode flag on
+            // palette-eligible intra blocks.
+            if (pcs.encMode <= ENC_M7) {
+                pcs.paletteLevel = pcs.isISlice ? 5 : 7;
+            } else if (pcs.encMode <= ENC_M8) {
+                pcs.paletteLevel = 7;
+            } else {
+                pcs.paletteLevel = 0;
+            }
+        } else {
+            if (pcs.encMode <= ENC_M7) {
+                pcs.paletteLevel = pcs.isISlice ? 5 : 0;
+            } else if (pcs.encMode <= ENC_M8) {
+                pcs.paletteLevel = pcs.isISlice ? 7 : 0;
+            } else {
+                pcs.paletteLevel = 0;
+            }
+        }
+    } else {
+        pcs.paletteLevel = 0;
+    }
+    setPaletteLevel(pcs.paletteCtrls, pcs.paletteLevel);
+
+    pcs.allowScreenContentTools =
+        (pcs.scClass5 && (pcs.paletteLevel != 0 || pcs.allowIntrabc)) ? true : false;
+
+    // Set CDEF level
+    std::uint8_t cdefSearchLevel = 0;
+    if (scs.seqCdefLevel == 0 || pcs.allowIntrabc) {
+        cdefSearchLevel = 0;
+    } else if (scs.cdefLevel != kDefaultSentinel) {
+        cdefSearchLevel = (std::uint8_t)scs.cdefLevel;
+    } else {
+        if (pcs.useFlatIpp) {
+            if (pcs.encMode <= ENC_M7) {
+                cdefSearchLevel = 5;
+            } else if (pcs.encMode <= ENC_M11) {
+                if (pcs.gm.inputResolution <= INPUT_SIZE_360p_RANGE) {
+                    cdefSearchLevel = 6;
+                } else {
+                    cdefSearchLevel = pcs.isISlice ? 5 : 8;
+                }
+            } else if (pcs.encMode <= ENC_M12 && pcs.picAvgVariance < kRtcUltraLowVarianceTh) {
+                // Ultra-easy M12: keep M11-grade CDEF search for preset continuity.
+                if (pcs.gm.inputResolution <= INPUT_SIZE_360p_RANGE) {
+                    cdefSearchLevel = 6;
+                } else {
+                    cdefSearchLevel = pcs.isISlice ? 5 : 8;
+                }
+            } else {
+                cdefSearchLevel = pcs.isISlice ? 5 : 9;
+            }
+        } else {
+            if (pcs.encMode <= ENC_M7) {
+                cdefSearchLevel = 5;
+            } else if (pcs.encMode <= ENC_M8) {
+                if (pcs.gm.inputResolution <= INPUT_SIZE_360p_RANGE) {
+                    cdefSearchLevel = 6;
+                } else {
+                    cdefSearchLevel = pcs.isISlice ? 5 : 8;
+                }
+            } else {
+                cdefSearchLevel = pcs.isISlice ? 5 : 8;
+            }
+        }
+    }
+    setCdefSearchCtrls(pcs.cdefSearchCtrls, cdefSearchLevel, pcs.isBase, pcs.isNotHighestLayer);
+    pcs.cdefLevel = cdefSearchLevel;
+
+    std::uint8_t cdefReconLevel = 0;
+    setCdefReconCtrls(pcs.cdefReconCtrls, cdefReconLevel);
+
+    std::uint8_t wn = 0, sg = 0;
+    // If restoration filtering is enabled at the sequence level, derive the settings used for this frame
+    if (scs.seqEnableRestoration) {
+        // As allocation has already happened based on the initial input resolution/QP, the resolution/QP
+        // changes should not impact enabling restoration. For some presets, restoration is off for 8K
+        // and above and memory allocation is not performed. So, if we switch to smaller resolution, we need
+        // to keep restoration off.
+        ResolutionRange initInputResolution =
+            deriveInputResolution(scs.maxInitialInputLumaWidth * scs.maxInitialInputLumaHeight);
+        wn = getWnFilterLevelRtc((std::uint8_t)initInputResolution);
+        sg = getSgFilterLevelRtc((std::uint8_t)initInputResolution, (std::uint8_t)scs.fastDecode);
+    }
+    setWnFilterCtrls(pcs.wnFilterCtrls, wn);
+    setSgFilterCtrls(pcs.sgFilterCtrls, sg);
+
+    // Set whether restoration filtering is enabled for this frame
+    pcs.enableRestoration = (wn > 0 || sg > 0);
+
+    // Set frame end cdf update mode
+    pcs.frameEndCdfUpdateMode = 1;
+
+    if (scs.enableHbdModeDecision == kDefaultSentinel) {
+        pcs.hbdMd = pcs.isISlice ? 2 : 0;
+    } else {
+        pcs.hbdMd = (std::uint8_t)scs.enableHbdModeDecision;
+    }
+
+    pcs.maxCanCount                 = getMaxCanCount(pcs.encMode, true);
+    pcs.useBestMeUnipredCandOnly    = 1;
+}
+
+// svt_aom_sig_deriv_multi_processes_allintra (:2369-2518).
+void sigDerivMultiProcessesAllIntra(MultiProcPpcs& pcs, const MultiProcScs& scs) {
+    // Set the Multi-Pass PD level
+    pcs.multiPassPdLevel = kMultiPassPdOn;
+
+    // Set intra-bc level
+    std::uint8_t intrabcLevel = 0;
+    if (!scs.enableIntrabc) {
+        intrabcLevel = 0;
+    } else if (pcs.scClass5) {
+        // Use intrabc_level 1 or 2 to achieve maximum intra-BC coding gain (higher computational complexity)
+        if (pcs.encMode <= ENC_MR) {
+            intrabcLevel = 1;
+        } else if (pcs.encMode <= ENC_M0) {
+            intrabcLevel = 3;
+        } else if (pcs.encMode <= ENC_M1) {
+            intrabcLevel = 4;
+        } else if (pcs.encMode <= ENC_M2) {
+            intrabcLevel = 5;
+        } else if (pcs.encMode <= ENC_M3) {
+            intrabcLevel = 6;
+        } else if (pcs.encMode <= ENC_M4) {
+            intrabcLevel = kMaxIntrabcLevel;
+        } else {
+            intrabcLevel = 0;
+        }
+    } else {
+        intrabcLevel = 0;
+    }
+    setIntrabcLevel(pcs.intrabcCtrls, intrabcLevel);
+    pcs.allowIntrabc = pcs.intrabcCtrls.enabled != false;
+
+    // Set palette level
+    if (pcs.scClass5) {
+        if (pcs.encMode <= ENC_M2) {
+            pcs.paletteLevel = 2;
+        } else if (pcs.encMode <= ENC_M3) {
+            pcs.paletteLevel = 3;
+        } else if (pcs.encMode <= ENC_M5) {
+            pcs.paletteLevel = 4;
+        } else if (pcs.encMode <= ENC_M6) {
+            pcs.paletteLevel = 5;
+        } else if (pcs.encMode <= ENC_M7) {
+            pcs.paletteLevel = 7;
+        } else {
+            pcs.paletteLevel = 0;
+        }
+    } else {
+        pcs.paletteLevel = 0;
+    }
+    setPaletteLevel(pcs.paletteCtrls, pcs.paletteLevel);
+
+    pcs.allowScreenContentTools = (pcs.paletteLevel != 0 || pcs.allowIntrabc) ? true : false;
+
+    // Set CDEF level
+    std::uint8_t cdefSearchLevel = 0;
+    if (scs.seqCdefLevel == 0 || pcs.allowIntrabc) {
+        cdefSearchLevel = 0;
+    } else if (scs.cdefLevel != kDefaultSentinel) {
+        cdefSearchLevel = (std::uint8_t)scs.cdefLevel;
+    } else {
+        if ((scs.fastDecode == 0 || pcs.gm.inputResolution <= INPUT_SIZE_360p_RANGE)) {
+            if (pcs.encMode <= ENC_MR) {
+                cdefSearchLevel = 1;
+            } else if (pcs.encMode <= ENC_M0) {
+                cdefSearchLevel = 2;
+            } else if (pcs.encMode <= ENC_M3) {
+                cdefSearchLevel = 3;
+            } else if (pcs.encMode <= ENC_M5) {
+                cdefSearchLevel = 5;
+            } else if (pcs.encMode <= ENC_M6) {
+                cdefSearchLevel = 7;
+            } else {
+                // For fd1/fd2, disable CDEF search if fd0 uses level 10 or 0
+                cdefSearchLevel = 10;
+            }
+        } else {
+            if (pcs.encMode <= ENC_M3) {
+                cdefSearchLevel = 3;
+            } else if (pcs.encMode <= ENC_M5) {
+                cdefSearchLevel = 5;
+            } else if (pcs.encMode <= ENC_M7) {
+                cdefSearchLevel = 7;
+            } else {
+                cdefSearchLevel = 0;
+            }
+        }
+    }
+    setCdefSearchCtrls(pcs.cdefSearchCtrls, cdefSearchLevel, pcs.isBase, pcs.isNotHighestLayer);
+    pcs.cdefLevel = cdefSearchLevel;
+
+    std::uint8_t cdefReconLevel = 0;
+    if ((scs.fastDecode == 0 || pcs.gm.inputResolution <= INPUT_SIZE_360p_RANGE)) {
+        if (pcs.encMode <= ENC_M7) {
+            cdefReconLevel = 0;
+        } else {
+            cdefReconLevel = 1;
+        }
+    } else if (scs.fastDecode == 1) {
+        if (pcs.encMode <= ENC_M7) {
+            cdefReconLevel = 1;
+        } else {
+            cdefReconLevel = 3;
+        }
+    } else {
+        cdefReconLevel = 3;
+    }
+    setCdefReconCtrls(pcs.cdefReconCtrls, cdefReconLevel);
+
+    std::uint8_t wn = 0, sg = 0;
+    // If restoration filtering is enabled at the sequence level, derive the settings used for this frame
+    if (scs.seqEnableRestoration) {
+        // As allocation has already happened based on the initial input resolution/QP, the resolution/QP
+        // changes should not impact enabling restoration. For some presets, restoration is off for 8K
+        // and above and memory allocation is not performed. So, if we switch to smaller resolution, we need
+        // to keep restoration off.
+        ResolutionRange initInputResolution =
+            deriveInputResolution(scs.maxInitialInputLumaWidth * scs.maxInitialInputLumaHeight);
+        (void)initInputResolution;
+        wn = getWnFilterLevelAllIntra(pcs.encMode);
+        sg = getSgFilterLevelAllIntra(pcs.encMode);
+    }
+    setWnFilterCtrls(pcs.wnFilterCtrls, wn);
+    setSgFilterCtrls(pcs.sgFilterCtrls, sg);
+
+    // Set whether restoration filtering is enabled for this frame
+    pcs.enableRestoration = (wn > 0 || sg > 0);
+
+    // Set frame end cdf update mode
+    pcs.frameEndCdfUpdateMode = 1;
+    if (scs.enableHbdModeDecision == kDefaultSentinel) {
+        if (pcs.encMode <= ENC_MR) {
+            pcs.hbdMd = 1;
+        } else {
+            pcs.hbdMd = 2;
+        }
+    } else {
+        pcs.hbdMd = (std::uint8_t)scs.enableHbdModeDecision;
+    }
+    pcs.maxCanCount = getMaxCanCount(pcs.encMode, false);
+}
+
+
 }  // namespace mode_config
 }  // namespace l16_rdo

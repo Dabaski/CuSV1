@@ -519,5 +519,91 @@ ResolutionRange deriveInputResolution(std::uint32_t inputSize);
 // svt_aom_get_max_can_count (:1936-1981).
 std::uint16_t getMaxCanCount(EncMode encMode, bool rtc);
 
+// ---------------------------------------------------------------------------
+// Batch B: the sig_deriv_multi_processes family (:1988-2518) - the three
+// per-tune compositions default/rtc/allintra. The pcs/scs/frm_hdr/cm walls
+// fold into two carriers; every field annotated with its reference path.
+// ---------------------------------------------------------------------------
+// MULTI_PASS_PD_ON (definitions.h:2062).
+constexpr std::uint8_t kMultiPassPdOn = 1;
+// RTC_LOW_VARIANCE_TH / RTC_ULTRA_LOW_VARIANCE_TH (enc_mode_config.c:17-18).
+constexpr std::uint32_t kRtcLowVarianceTh = 1000;
+constexpr std::uint32_t kRtcUltraLowVarianceTh = 350;
+// DEFAULT (EbSvtAv1Enc.h:63).
+constexpr std::int32_t kDefaultSentinel = -1;
+
+// The ppcs surface: the consumed wall inputs + the written outputs. The
+// three derived walls are threaded as bools annotated with their
+// derivation (the MeModeCfg frameIsBoosted precedent):
+//   isBase            = frame_is_boosted(ppcs) (enc_mode_config.h:108-110,
+//                       the kf/gf/arf update_type wall)
+//   isNotHighestLayer = !frame_is_leaf(ppcs) (:902, the cdef setter's
+//                       internal wall - NOT the same as isNotLastLayer)
+//   isNotLastLayer    = !pcs->is_highest_layer (:1996, default variant,
+//                       feeds wn/sg only)
+struct MultiProcPpcs {
+    GmPpcs gm;  // gm.gmCtrls + gm.inputResolution - the :2524 setter target
+    EncMode encMode;                     // pcs->enc_mode
+    bool isISlice;                       // pcs->slice_type == I_SLICE
+    bool isBase;                         // frame_is_boosted(ppcs)
+    bool scClass5;                       // pcs->sc_class5
+    bool isNotLastLayer;                 // !pcs->is_highest_layer (:1996)
+    bool useFlatIpp;                     // pcs->hierarchical_levels == 0 (:2196, rtc)
+    bool isNotHighestLayer;              // !frame_is_leaf(ppcs) (:902)
+    std::uint32_t picAvgVariance;        // pcs->pic_avg_variance (:2205/:2302, rtc)
+    std::uint8_t tfHmeMeLevel;           // pcs->tf_ctrls.hme_me_level (:2018/:2217)
+    // writes:
+    bool enableHmeFlag;
+    bool enableHmeLevel0Flag;
+    bool enableHmeLevel1Flag;
+    bool enableHmeLevel2Flag;
+    bool tfEnableHmeFlag;
+    bool tfEnableHmeLevel0Flag;
+    bool tfEnableHmeLevel1Flag;
+    bool tfEnableHmeLevel2Flag;
+    std::uint8_t multiPassPdLevel;       // = MULTI_PASS_PD_ON (:2046/:2245/:2376)
+    IntrabcCtrls intrabcCtrls;           // pcs->intrabc_ctrls
+    std::uint8_t paletteLevel;           // pcs->palette_level
+    PaletteCtrls paletteCtrls;           // pcs->palette_ctrls
+    CdefSearchCtrls cdefSearchCtrls;     // pcs->cdef_search_ctrls
+    CdefReconCtrls cdefReconCtrls;       // pcs->cdef_recon_ctrls
+    std::uint8_t cdefLevel;              // pcs->cdef_level (:2115/:2328/:2462)
+    bool allowIntrabc;                   // frm_hdr->allow_intrabc (:2070/:2250/:2403)
+    bool allowScreenContentTools;        // frm_hdr->allow_screen_content_tools (:2095/:2284/:2425)
+    WnFilterCtrls wnFilterCtrls;         // cm->wn_filter_ctrls
+    SgFilterCtrls sgFilterCtrls;         // cm->sg_filter_ctrls
+    bool enableRestoration;              // pcs->enable_restoration (:2157/:2352/:2502)
+    std::uint8_t frameEndCdfUpdateMode;  // (:2162/:2357/:2507)
+    std::uint8_t hbdMd;                  // pcs->hbd_md (:2168/:2360/:2510)
+    std::uint16_t maxCanCount;           // pcs->max_can_count (:2182/:2365/:2517)
+    std::uint8_t useBestMeUnipredCandOnly;  // (:2184/:2366; NOT written by allintra)
+};
+
+// The scs surface (DEFAULT = -1, EbSvtAv1Enc.h:63; SVT_EFFECTIVE_BIT_DEPTH
+// (bd) = (bd) in the pinned build, EbConfigMacros.h:293).
+struct MultiProcScs {
+    std::uint8_t fastDecode;             // static_config.fast_decode
+    bool enableIntrabc;                  // static_config.enable_intrabc
+    std::int32_t cdefLevel;              // static_config.cdef_level
+    std::uint8_t seqCdefLevel;           // seq_header.cdef_level (truthiness)
+    bool seqEnableRestoration;           // seq_header.enable_restoration
+    std::uint32_t maxInitialInputLumaWidth;
+    std::uint32_t maxInitialInputLumaHeight;
+    std::int32_t hbdMds;                 // static_config.hbd_mds (:2169)
+    std::uint8_t encoderBitDepth;        // scs->encoder_bit_depth (:2167)
+    std::int32_t enableHbdModeDecision;  // scs->enable_hbd_mode_decision (:2359/:2508)
+};
+
+// svt_aom_sig_deriv_multi_processes_default (:1988-2188).
+void sigDerivMultiProcessesDefault(MultiProcPpcs& pcs, const MultiProcScs& scs,
+                                   int configEnableGlobalMotion);
+// svt_aom_sig_deriv_multi_processes_rtc (:2190-2367). The FTR_RTC_INTER_
+// PALETTE fork (EbDebugMacros.h:37 = 1 in the pinned build) is threaded
+// as the runtime parameter (the CONFIG_ENABLE_GLOBAL_MOTION precedent).
+void sigDerivMultiProcessesRtc(MultiProcPpcs& pcs, const MultiProcScs& scs,
+                               int configEnableGlobalMotion, int ftrRtcInterPalette);
+// svt_aom_sig_deriv_multi_processes_allintra (:2369-2518).
+void sigDerivMultiProcessesAllIntra(MultiProcPpcs& pcs, const MultiProcScs& scs);
+
 }  // namespace mode_config
 }  // namespace l16_rdo
