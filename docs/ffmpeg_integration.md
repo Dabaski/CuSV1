@@ -1,9 +1,9 @@
-# Blueprint: Import the AV1 CUDA encoder as a native FFmpeg encoder
+# Blueprint: Import CuSV1 as a native FFmpeg encoder
 
 ## Context & assumptions
 
-- **End goal:** a new AV1 encoder in FFmpeg (`-c:v av1_gpu`) that runs the CUDA
-  pipeline and emits a **decodable AV1 bitstream**.
+- **End goal:** a new AV1 encoder in FFmpeg (`-c:v av1_gpu`) that runs the CuSV1
+  CUDA pipeline and emits a **decodable AV1 bitstream**.
 - **Mechanism:** native FFmpeg CUDA encoder - implement the `AVCodec` inside
   `libavcodec`, using `libavutil/hwcontext_cuda` for device management (the
   `av1_nvenc` model), not an external-library wrapper.
@@ -35,7 +35,7 @@
 
 ## Prerequisite: the encoder-core C contract FFmpeg will consume
 
-Before any FFmpeg work, the CUDA encoder must expose a stable C ABI (this is the
+Before any FFmpeg work, CuSV1 must expose a stable C ABI (this is the
 "library ABI" boundary). FFmpeg's native encoder calls this, not the C++
 `pipeline::*`/`gpurt::*` directly.
 

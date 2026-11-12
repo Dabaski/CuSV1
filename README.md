@@ -1,4 +1,4 @@
-# AV1 CUDA 12.2 port
+# CuSV1
 
 An experimental port of selected [SVT-AV1](https://gitlab.com/AOMediaCodec/SVT-AV1)
 encoder building blocks to CUDA 12.2, targeting NVIDIA Pascal (`sm_61`). Host
@@ -20,7 +20,7 @@ committed grayscale and 4:2:0 color artifacts have decoder conformance
 results recorded in the
 [conformance matrix](docs/decode_conformance.md).
 
-This is still an experimental project, not a production-ready encoder. The
+CuSV1 is still an experimental project, not a production-ready encoder. The
 [project status](docs/project_status.md) summarizes verified milestones and
 important boundaries. See [the layer stack](docs/layers.md) for implementation
 details.

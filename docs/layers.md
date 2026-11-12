@@ -1,6 +1,6 @@
 # The layer stack - how everything works
 
-Orientation doc for the port. Symbol-by-symbol provenance lives in
+Orientation doc for CuSV1, the port. Symbol-by-symbol provenance lives in
 `docs/provenance.md`; the golden generator's own inventory in
 `tools/golden_gen/README.md`; the bitstream path in `docs/bitstream.md`;
 decoder-acceptance status in `docs/decode_conformance.md`. Standing rules

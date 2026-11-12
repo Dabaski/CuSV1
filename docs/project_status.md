@@ -2,7 +2,7 @@
 
 ## At a glance
 
-This is an experimental, correctness-first port of selected SVT-AV1 encoder
+CuSV1 is an experimental, correctness-first port of selected SVT-AV1 encoder
 building blocks to CUDA 12.2 for NVIDIA Pascal (`sm_61`). Host reference
 implementations are ported from the pinned SVT-AV1 snapshot; CUDA kernels are
 JIT-compiled with NVRTC.
@@ -46,7 +46,7 @@ in [color and chroma](color.md).
 
 ## Important scope boundaries
 
-- This is not a production-ready encoder. Full inter prediction and motion
+- CuSV1 is not a production-ready encoder. Full inter prediction and motion
   compensation, broader partition decisions, rate control integration,
   multi-frame sequencing, and a stable public encoder API remain incomplete.
 - Many analysis, filtering, and utility ports are host-only and are not yet
