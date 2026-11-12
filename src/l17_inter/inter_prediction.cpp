@@ -391,4 +391,455 @@ std::int32_t getWedgeParamsBits(int bsize) {
     return wedgeParamsLookup[bsize].bits;
 }
 
+// ---------- T3: the sr convolve family ----------
+
+// clip_pixel_highbd(val, 8), definitions.h:704-:710 at bd=8 (the 8-bit branch).
+inline std::uint8_t clipPixelHighbd8(std::int32_t val) {
+    return static_cast<std::uint8_t>(clampInt(val, 0, 255));
+}
+
+// clip_pixel_highbd(val, bd), definitions.h:704-:710 (the bd-parameterized form).
+inline std::int32_t clipPixelHighbd(std::int32_t val, std::int32_t bd) {
+    return clampInt(val, 0, (1 << bd) - 1);
+}
+
+// get_msb, portable #else body (definitions.h:628-:643): floor(log2(n)),
+// n != 0. l13-palette precedent (the per-module local copy).
+inline std::int32_t getMsb(std::uint32_t n) {
+    assert(n != 0);
+    std::int32_t log = 0;
+    std::uint32_t value = n;
+    for (std::int32_t i = 4; i >= 0; --i) {
+        const std::uint32_t x = value >> (1 << i);
+        if (x != 0) {
+            value = x;
+            log += (1 << i);
+        }
+    }
+    return log;
+}
+
+// svt_av1_convolve_2d_sr_c, inter_prediction.c:332-:375.
+void convolve2dSr(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+                  std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                  const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                  ConvolveParams* convParams) {
+    std::int16_t imBlock[(convolve::maxSbSize + kMaxFilterTap - 1) * convolve::maxSbSize];
+    std::int32_t imH = h + filterParamsY->taps - 1;
+    std::int32_t imStride = w;
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+    const std::int32_t bd = 8;
+    const std::int32_t bits = convolve::filterBits * 2 - convParams->round0 - convParams->round1;
+
+    // horizontal filter
+    const std::uint8_t* srcHoriz = src - foVert * srcStride;
+    const std::int16_t* xFilter = convolve::getInterpFilterSubpelKernel(*filterParamsX, subpelXQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < imH; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = (1 << (bd + convolve::filterBits - 1));
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                sum += xFilter[k] * srcHoriz[y * srcStride + x - foHoriz + k];
+            }
+            assert(0 <= sum && sum < (1 << (bd + convolve::filterBits + 1)));
+            imBlock[y * imStride + x] = static_cast<std::int16_t>(roundPowerOfTwo(sum, convParams->round0));
+        }
+    }
+
+    // vertical filter
+    std::int16_t* srcVert = imBlock + foVert * imStride;
+    const std::int16_t* yFilter = convolve::getInterpFilterSubpelKernel(*filterParamsY, subpelYQ4 & convolve::subpelMask);
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = 1 << offsetBits;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                sum += yFilter[k] * srcVert[(y - foVert + k) * imStride + x];
+            }
+            assert(0 <= sum && sum < (1 << (offsetBits + 2)));
+            std::int16_t res = static_cast<std::uint16_t>(roundPowerOfTwo(sum, convParams->round1) -
+                ((1 << (offsetBits - convParams->round1)) + (1 << (offsetBits - convParams->round1 - 1))));
+            dst[y * dstStride + x] = clipPixelHighbd8(roundPowerOfTwo(res, bits));
+        }
+    }
+}
+
+// svt_av1_convolve_y_sr_c, inter_prediction.c:377-:403.
+void convolveYSr(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+                 std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                 const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                 ConvolveParams* convParams) {
+    assert(filterParamsY);
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    (void)filterParamsX;
+    (void)subpelXQ4;
+    (void)convParams; // the reference voids conv_params: rounding is FILTER_BITS-hardwired here
+    assert(convParams->round0 <= convolve::filterBits);
+    assert(convParams->round0 + convParams->round1 <= convolve::filterBits + 1 ||
+           convParams->round0 + convParams->round1 == convolve::filterBits * 2);
+    const std::int16_t* yFilter = convolve::getInterpFilterSubpelKernel(*filterParamsY, subpelYQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = 0;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                sum += yFilter[k] * src[(y - foVert + k) * srcStride + x];
+            }
+            dst[y * dstStride + x] = clipPixelHighbd8(roundPowerOfTwo(sum, convolve::filterBits));
+        }
+    }
+}
+
+// svt_av1_convolve_x_sr_c, inter_prediction.c:405-:432.
+void convolveXSR(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+                 std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                 const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                 ConvolveParams* convParams) {
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+    const std::int32_t bits = convolve::filterBits - convParams->round0;
+    (void)filterParamsY;
+    (void)subpelYQ4;
+    (void)convParams;
+    assert(bits >= 0);
+    assert((convolve::filterBits - convParams->round1) >= 0 ||
+           convParams->round0 + convParams->round1 == convolve::filterBits * 2);
+    const std::int16_t* xFilter = convolve::getInterpFilterSubpelKernel(*filterParamsX, subpelXQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = 0;
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                sum += xFilter[k] * src[y * srcStride + x - foHoriz + k];
+            }
+            sum = roundPowerOfTwo(sum, convParams->round0);
+            dst[y * dstStride + x] = clipPixelHighbd8(roundPowerOfTwo(sum, bits));
+        }
+    }
+}
+
+// svt_av1_convolve_2d_copy_sr_c, inter_prediction.c:434-:449.
+void convolve2dCopySr(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+                      std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                      const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                      ConvolveParams* convParams) {
+    (void)filterParamsX;
+    (void)filterParamsY;
+    (void)subpelXQ4;
+    (void)subpelYQ4;
+    (void)convParams;
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            dst[y * dstStride + x] = src[y * srcStride + x];
+        }
+    }
+}
+
+// svt_av1_convolve_2d_scale_c, inter_prediction.c:451-:527. The reference's
+// SCALE_SUBPEL_BITS=10 stepping (x_step_qn/y_step_qn); the compound branches
+// are carried verbatim (isCompound + doAverage).
+void convolve2dScale(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                     std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                     const InterpFilterParams* filterParamsY, std::int32_t subpelXQn, std::int32_t xStepQn,
+                     std::int32_t subpelYQn, std::int32_t yStepQn, ConvolveParams* convParams) {
+    std::int16_t imBlock[(2 * convolve::maxSbSize + kMaxFilterTap) * convolve::maxSbSize];
+    const std::int32_t imH = (((h - 1) * yStepQn + subpelYQn) >> kScaleSubpelBits) + filterParamsY->taps;
+    ConvBufType* dst16 = convParams->dst;
+    const std::int32_t dst16Stride = convParams->dstStride;
+    const std::int32_t bits = convolve::filterBits * 2 - convParams->round0 - convParams->round1;
+    assert(bits >= 0);
+    const std::int32_t imStride = w;
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+    const std::int32_t bd = 8;
+
+    // horizontal filter
+    const std::uint8_t* srcHoriz = src - foVert * srcStride;
+    for (std::int32_t y = 0; y < imH; ++y) {
+        std::int32_t xQn = subpelXQn;
+        for (std::int32_t x = 0; x < w; ++x, xQn += xStepQn) {
+            const std::uint8_t* srcX = &srcHoriz[xQn >> kScaleSubpelBits];
+            const std::int32_t xFilterIdx =
+                (xQn & kScaleSubpelMask) >> kScaleSubpelBits;
+            assert(xFilterIdx < convolve::subpelShifts);
+            const std::int16_t* xFilter =
+                convolve::getInterpFilterSubpelKernel(*filterParamsX, xFilterIdx);
+            std::int32_t sum = (1 << (bd + convolve::filterBits - 1));
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                sum += xFilter[k] * srcX[k - foHoriz];
+            }
+            assert(0 <= sum && sum < (1 << (bd + convolve::filterBits + 1)));
+            imBlock[y * imStride + x] = static_cast<std::int16_t>(roundPowerOfTwo(sum, convParams->round0));
+        }
+        srcHoriz += srcStride;
+    }
+
+    // vertical filter
+    std::int16_t* srcVert = imBlock + foVert * imStride;
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    for (std::int32_t x = 0; x < w; ++x) {
+        std::int32_t yQn = subpelYQn;
+        for (std::int32_t y = 0; y < h; ++y, yQn += yStepQn) {
+            const std::int16_t* srcY = &srcVert[(yQn >> kScaleSubpelBits) * imStride];
+            const std::int32_t yFilterIdx =
+                (yQn & kScaleSubpelMask) >> kScaleSubpelBits;
+            assert(yFilterIdx < convolve::subpelShifts);
+            const std::int16_t* yFilter =
+                convolve::getInterpFilterSubpelKernel(*filterParamsY, yFilterIdx);
+            std::int32_t sum = 1 << offsetBits;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                sum += yFilter[k] * srcY[(k - foVert) * imStride];
+            }
+            assert(0 <= sum && sum < (1 << (offsetBits + 2)));
+            ConvBufType res = static_cast<ConvBufType>(roundPowerOfTwo(sum, convParams->round1));
+            if (convParams->isCompound) {
+                if (convParams->doAverage) {
+                    std::int32_t tmp = dst16[y * dst16Stride + x];
+                    if (convParams->useDistWtdCompAvg) {
+                        tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                        tmp = tmp >> kDiffFactorLog2;
+                    } else {
+                        tmp += res;
+                        tmp = tmp >> 1;
+                    }
+                    tmp = tmp -
+                        ((1 << (offsetBits - convParams->round1)) + (1 << (offsetBits - convParams->round1 - 1)));
+                    dst8[y * dst8Stride + x] = clipPixelHighbd8(roundPowerOfTwo(tmp, bits));
+                } else {
+                    dst16[y * dst16Stride + x] = res;
+                }
+            } else {
+                std::int32_t tmp = res -
+                    ((1 << (offsetBits - convParams->round1)) + (1 << (offsetBits - convParams->round1 - 1)));
+                dst8[y * dst8Stride + x] = clipPixelHighbd8(roundPowerOfTwo(tmp, bits));
+            }
+        }
+        ++srcVert;
+    }
+}
+
+// convolve_2d_for_intrabc, inter_prediction.c:1200-:1241. The NULL filter
+// pointer slots are only read when the matching subpel is nonzero, and the
+// dispatch is: both subpels -> 2d_sr, x only -> x_sr, else y_sr.
+void convolve2dForIntrabc(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+                          std::int32_t w, std::int32_t h, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                          ConvolveParams* convParams) {
+    const InterpFilterParams* filterParamsX =
+        subpelXQ4 ? &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)] : nullptr;
+    const InterpFilterParams* filterParamsY =
+        subpelYQ4 ? &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)] : nullptr;
+    if (subpelXQ4 != 0 && subpelYQ4 != 0) {
+        convolve2dSr(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 8, 8, convParams);
+    } else if (subpelXQ4 != 0) {
+        convolveXSR(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 8, 0, convParams);
+    } else {
+        convolveYSr(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 0, 8, convParams);
+    }
+}
+
+// svt_inter_predictor, inter_prediction.c:1397-:1453. The svt_aom_convolve
+// function-pointer table (:1115, set at :1118-:1129) dispatches as direct
+// calls: [0][0][0] copy_sr, [0][1][0] y_sr, [1][0][0] x_sr, [1][1][0] 2d_sr;
+// the four compound jnt slots park per the header's named deviation.
+void interPredictor(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+                    const SubpelParams* subpelParams, const ScaleFactors* sf, std::int32_t w, std::int32_t h,
+                    ConvolveParams* convParams, std::uint32_t interpFilters, std::int32_t isIntrabc) {
+    InterpFilterParams filterParamsX, filterParamsY;
+    const std::int32_t isScaled = hasScale(subpelParams->xs, subpelParams->ys);
+
+    convolve::getConvolveFilterParams(interpFilters, &filterParamsX, &filterParamsY, w, h);
+
+    assert(convParams->doAverage == 0 || convParams->doAverage == 1);
+    assert(sf);
+    assert(!(isIntrabc && isScaled));
+    (void)sf; // assert-only under NDEBUG; the scaled arms consume xs/ys instead
+
+    if (isScaled) {
+        if (isIntrabc && (subpelParams->subpelX != 0 || subpelParams->subpelY != 0)) {
+            convolve2dForIntrabc(src, srcStride, dst, dstStride, w, h, subpelParams->subpelX, subpelParams->subpelY,
+                                 convParams);
+            return;
+        }
+        if (convParams->isCompound) {
+            assert(convParams->dst != nullptr);
+        }
+        convolve2dScale(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, subpelParams->subpelX,
+                        subpelParams->xs, subpelParams->subpelY, subpelParams->ys, convParams);
+    } else {
+        SubpelParams sp = *subpelParams;
+        revertScaleExtraBits(&sp);
+
+        if (isIntrabc && (sp.subpelX != 0 || sp.subpelY != 0)) {
+            convolve2dForIntrabc(src, srcStride, dst, dstStride, w, h, sp.subpelX, sp.subpelY, convParams);
+            return;
+        }
+
+        if (sp.subpelX != 0 && sp.subpelY != 0) {
+            convolve2dSr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX,
+                         sp.subpelY, convParams);
+        } else if (sp.subpelX != 0) {
+            convolveXSR(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX, 0,
+                        convParams);
+        } else if (sp.subpelY != 0) {
+            convolveYSr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, 0, sp.subpelY,
+                        convParams);
+        } else {
+            convolve2dCopySr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX,
+                             sp.subpelY, convParams);
+        }
+    }
+}
+
+// ---------- T4: struct-free enc helpers (enc_inter_prediction.c) ----------
+
+// svt_av1_wedge_compute_delta_squares_c, enc_inter_prediction.c:375-:381.
+// clamp = the reference's utility.h three-argument macro, clampInt above.
+void wedgeComputeDeltaSquares(std::int16_t* d, const std::int16_t* a, const std::int16_t* b, int n) {
+    for (int i = 0; i < n; ++i) {
+        d[i] = static_cast<std::int16_t>(clampInt(a[i] * a[i] - b[i] * b[i], INT16_MIN, INT16_MAX));
+    }
+}
+
+// svt_av1_wedge_sign_from_residuals_c, enc_inter_prediction.c:414-:422.
+std::int8_t wedgeSignFromResiduals(const std::int16_t* ds, const std::uint8_t* m, int n, std::int64_t limit) {
+    std::int64_t acc = 0;
+
+    do {
+        acc += *ds++ * *m++;
+    } while (--n);
+
+    return acc > limit;
+}
+
+// svt_aom_highbd_sse_c, enc_inter_prediction.c:600-:613. The reference's
+// CONVERT_TO_SHORTPTR cast is the hbd staging entry; the port aliases the
+// uint16 buffers through the uint8 parameters per the header contract.
+// SQR = utility.h:107 ((x)*(x)): the product is the reference's int multiply,
+// widened only at the += into the int64 accumulator.
+std::int64_t sseHighbd(const std::uint8_t* a8, int aStride, const std::uint8_t* b8, int bStride, int width,
+                       int height) {
+    const std::uint16_t* a = (const std::uint16_t*)a8;
+    const std::uint16_t* b = (const std::uint16_t*)b8;
+    std::int64_t sse = 0;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::int32_t diff = (std::int32_t)a[x] - (std::int32_t)b[x];
+            sse += (std::int64_t)(diff * diff);
+        }
+        a += aStride;
+        b += bStride;
+    }
+    return sse;
+}
+
+// svt_aom_sse_c, enc_inter_prediction.c:615-:627. Same SQR discipline.
+std::int64_t sse8(const std::uint8_t* a, int aStride, const std::uint8_t* b, int bStride, int width, int height) {
+    std::int64_t sse = 0;
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::int32_t diff = (std::int32_t)a[x] - (std::int32_t)b[x];
+            sse += (std::int64_t)(diff * diff);
+        }
+        a += aStride;
+        b += bStride;
+    }
+    return sse;
+}
+
+// model_rd_norm, enc_inter_prediction.c:1883-:1937. Static in the reference; exported here per the header (the test oracle consumes it directly).
+void modelRdNorm(std::int32_t xsqQ10, std::int32_t* rQ10, std::int32_t* dQ10) {
+    // NOTE: The tables below must be of the same size.
+    // The functions described below are sampled at the four most significant
+    // bits of x^2 + 8 / 256.
+    // Normalized rate:
+    // This table models the rate for a Laplacian source with given variance
+    // when quantized with a uniform quantizer with given stepsize. The
+    // closed form expression is:
+    // Rn(x) = H(sqrt(r)) + sqrt(r)*[1 + H(r)/(1 - r)],
+    // where r = exp(-sqrt(2) * x) and x = qpstep / sqrt(variance),
+    // and H(x) is the binary entropy function.
+    static const std::int32_t rateTabQ10[] = {
+        65536, 6086, 5574, 5275, 5063, 4899, 4764, 4651, 4553, 4389, 4255, 4142, 4044, 3958, 3881, 3811, 3748, 3635,
+        3538,  3453, 3376, 3307, 3244, 3186, 3133, 3037, 2952, 2877, 2809, 2747, 2690, 2638, 2589, 2501, 2423, 2353,
+        2290,  2232, 2179, 2130, 2084, 2001, 1928, 1862, 1802, 1748, 1698, 1651, 1608, 1530, 1460, 1398, 1342, 1290,
+        1243,  1199, 1159, 1086, 1021, 963,  911,  864,  821,  781,  745,  680,  623,  574,  530,  490,  455,  424,
+        395,   345,  304,  269,  239,  213,  190,  171,  154,  126,  104,  87,   73,   61,   52,   44,   38,   28,
+        21,    16,   12,   10,   8,    6,    5,    3,    2,    1,    1,    1,    0,    0,
+    };
+    // Normalized distortion:
+    // This table models the normalized distortion for a Laplacian source
+    // with given variance when quantized with a uniform quantizer
+    // with given stepsize. The closed form expression is:
+    // Dn(x) = 1 - 1/sqrt(2) * x / sinh(x/sqrt(2))
+    // where x = qpstep / sqrt(variance).
+    // Note the actual distortion is Dn * variance.
+    static const std::int32_t distTabQ10[] = {
+        0,    0,    1,    1,    1,    2,    2,    2,    3,    3,    4,    5,    5,    6,    7,   7,   8,   9,
+        11,   12,   13,   15,   16,   17,   18,   21,   24,   26,   29,   31,   34,   36,   39,  44,  49,  54,
+        59,   64,   69,   73,   78,   88,   97,   106,  115,  124,  133,  142,  151,  167,  184, 200, 215, 231,
+        245,  260,  274,  301,  327,  351,  375,  397,  418,  439,  458,  495,  528,  559,  587, 613, 637, 659,
+        680,  717,  749,  777,  801,  823,  842,  859,  874,  899,  919,  936,  949,  960,  969, 977, 983, 994,
+        1001, 1006, 1010, 1013, 1015, 1017, 1018, 1020, 1022, 1022, 1023, 1023, 1023, 1024,
+    };
+    static const std::int32_t xsqIqQ10[] = {
+        0,     4,     8,      12,     16,     20,     24,     28,     32,     40,     48,     56,     64,
+        72,    80,    88,     96,     112,    128,    144,    160,    176,    192,    208,    224,    256,
+        288,   320,   352,    384,    416,    448,    480,    544,    608,    672,    736,    800,    864,
+        928,   992,   1120,   1248,   1376,   1504,   1632,   1760,   1888,   2016,   2272,   2528,   2784,
+        3040,  3296,  3552,   3808,   4064,   4576,   5088,   5600,   6112,   6624,   7136,   7648,   8160,
+        9184,  10208, 11232,  12256,  13280,  14304,  15328,  16352,  18400,  20448,  22496,  24544,  26592,
+        28640, 30688, 32736,  36832,  40928,  45024,  49120,  53216,  57312,  61408,  65504,  73696,  81888,
+        90080, 98272, 106464, 114656, 122848, 131040, 147424, 163808, 180192, 196576, 212960, 229344, 245728,
+    };
+    const std::int32_t tmp     = (xsqQ10 >> 2) + 8;
+    const std::int32_t k       = getMsb(tmp) - 3;
+    const std::int32_t xq      = (k << 3) + ((tmp >> k) & 0x7);
+    const std::int32_t oneQ10 = 1 << 10;
+    const std::int32_t aQ10   = ((xsqQ10 - xsqIqQ10[xq]) << 10) >> (2 + k);
+    const std::int32_t bQ10   = oneQ10 - aQ10;
+    *rQ10                = (rateTabQ10[xq] * bQ10 + rateTabQ10[xq + 1] * aQ10) >> 10;
+    *dQ10                = (distTabQ10[xq] * bQ10 + distTabQ10[xq + 1] * aQ10) >> 10;
+}
+
+// svt_av1_model_rd_from_var_lapndz, enc_inter_prediction.c:1939-:1958.
+void modelRdFromVarLapndz(std::int64_t var, std::uint32_t nLog2, std::uint32_t qstep, std::int32_t* rate, std::int64_t* dist) {
+    // This function models the rate and distortion for a Laplacian
+    // source with given variance when quantized with a uniform quantizer
+    // with given stepsize. The closed form expressions are in:
+    // Hang and Chen, "Source Model for transform video coder and its
+    // application - Part I: Fundamental Theory", IEEE Trans. Circ.
+    // Sys. for Video Tech., April 1997.
+    if (var == 0) {
+        *rate = 0;
+        *dist = 0;
+    } else {
+        std::int32_t               dQ10, rQ10;
+        static const std::uint32_t kMaxXsqQ10 = 245727;
+        const std::uint64_t        xsqQ10_64  = (((std::uint64_t)qstep * qstep << (nLog2 + 10)) + (var >> 1)) / var;
+        const std::int32_t         xsqQ10     = (std::int32_t)std::min<std::uint64_t>(xsqQ10_64, kMaxXsqQ10);
+        modelRdNorm(xsqQ10, &rQ10, &dQ10);
+        *rate = roundPowerOfTwo(rQ10 << nLog2, 10 - kAv1ProbCostShift);
+        *dist = (var * (std::int64_t)dQ10 + 512) >> 10;
+    }
+}
+
+// model_rd_from_sse, enc_inter_prediction.c:1960-:1981. NAMED DEVIATION: eb_num_pels_log2_lookup[bsize] threads as numPelsLog2 (the caller-side table read at :1977).
+void modelRdFromSse(std::int32_t numPelsLog2, std::int16_t quantizer, std::uint8_t bitDepth, std::uint64_t sse, std::uint32_t* rate,
+                       std::uint64_t* dist, std::uint8_t simpleModelRdFromVar) {
+    std::int32_t dequantShift = bitDepth - 5;
+    // Fast approximate the modelling function.
+    if (simpleModelRdFromVar) {
+        std::int64_t squareError = sse;
+        quantizer            = quantizer >> dequantShift;
+        if (quantizer < 120) {
+            *rate = (std::int32_t)((squareError * (280 - quantizer)) >> (16 - kAv1ProbCostShift));
+        } else {
+            *rate = 0;
+        }
+        *dist = (std::uint64_t)(squareError * quantizer) >> 8;
+    } else {
+        modelRdFromVarLapndz(
+            sse, numPelsLog2, quantizer >> dequantShift, (std::int32_t*)rate, (std::int64_t*)dist);
+    }
+    *dist <<= 4;
+}
+
 } // namespace inter

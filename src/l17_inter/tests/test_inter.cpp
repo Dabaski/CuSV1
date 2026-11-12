@@ -487,3 +487,398 @@ TEST_CASE("wedge_params_lookup matches the reference (ip:2001-2024)") {
     CHECK(inter::getWedgeParamsBits(0) == 0);
 }
 
+// ---------------------------------------------------------------- T3
+
+// The T3 convolve fixture: a 16x16 plane, v(r,c) = r*16+c, big enough for
+// the 8-tap two-pass reach (rows/cols 1..11) that the 10x10 BorderedPlane
+// above cannot serve at 4x4.
+struct Plane16 {
+    std::uint8_t buf[256];
+    Plane16() {
+        for (int r = 0; r < 16; ++r)
+            for (int c = 0; c < 16; ++c) buf[r * 16 + c] = static_cast<std::uint8_t>(r * 16 + c);
+    }
+    const std::uint8_t* at(int r, int c) const { return buf + r * 16 + c; }
+    std::uint8_t v(int r, int c) const { return buf[r * 16 + c]; }
+};
+
+// The test-side transcription oracle for the two-pass sr convolve
+// (ip:332-375): independent re-derivation of the two-pass structure against
+// the l12 kernel accessor. Hardwires the sr convention round0 = round1 =
+// FILTER_BITS (bits = 0), which every T3 case below runs under.
+void oracleConvolve2dSr(const std::uint8_t* src, int srcStride, std::uint8_t* dst, int dstStride, int w, int h,
+                        const convolve::InterpFilterParams* fx, const convolve::InterpFilterParams* fy,
+                        int subpelXQ4, int subpelYQ4) {
+    const int fo = fy->taps / 2 - 1;
+    const int imH = h + fy->taps - 1;
+    std::vector<std::int16_t> im(static_cast<std::size_t>(imH * w));
+    const std::int16_t* xf = convolve::getInterpFilterSubpelKernel(*fx, subpelXQ4 & convolve::subpelMask);
+    const std::uint8_t* sh = src - fo * srcStride;
+    for (int y = 0; y < imH; ++y)
+        for (int x = 0; x < w; ++x) {
+            int sum = 1 << (8 + convolve::filterBits - 1);
+            for (int k = 0; k < fx->taps; ++k) sum += xf[k] * sh[y * srcStride + x - fo + k];
+            im[y * w + x] = static_cast<std::int16_t>((sum + (1 << (convolve::filterBits - 1))) >>
+                                                      convolve::filterBits);
+        }
+    const std::int16_t* yf = convolve::getInterpFilterSubpelKernel(*fy, subpelYQ4 & convolve::subpelMask);
+    const std::int16_t* sv = im.data() + fo * w;
+    const int offsetBits = 8 + 2 * convolve::filterBits - convolve::filterBits;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            int sum = 1 << offsetBits;
+            for (int k = 0; k < fy->taps; ++k) sum += yf[k] * sv[(y - fo + k) * w + x];
+            const int res = ((sum + (1 << (convolve::filterBits - 1))) >> convolve::filterBits) -
+                ((1 << (offsetBits - convolve::filterBits)) + (1 << (offsetBits - convolve::filterBits - 1)));
+            const int out = res < 0 ? 0 : (res > 255 ? 255 : res);
+            dst[y * dstStride + x] = static_cast<std::uint8_t>(out);
+        }
+}
+
+TEST_CASE("convolve_2d_sr: subpel-0 identity and the half-pel two-pass oracle (ip:332-375)") {
+    Plane16 p;
+    inter::ConvolveParams cp = srConvParams();
+    std::uint8_t dst[16];
+    const auto* fx = &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::EIGHTTAP_REGULAR)];
+    const auto* fy = fx;
+
+    // Subpel 0/0: both kernels are the {0,0,0,128,0,0,0,0} delta, so the
+    // two passes are the identity and dst is the source window.
+    inter::convolve2dSr(p.at(4, 4), 16, dst, 4, 4, 4, fx, fy, 0, 0, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 4 + x] == p.v(4 + y, 4 + x));
+
+    // Subpel 8/8 against the transcription oracle (8-tap reach, rows 1..11).
+    std::uint8_t oracle[16];
+    inter::convolve2dSr(p.at(4, 4), 16, dst, 4, 4, 4, fx, fy, 8, 8, &cp);
+    oracleConvolve2dSr(p.at(4, 4), 16, oracle, 4, 4, 4, fx, fy, 8, 8);
+    for (int i = 0; i < 16; ++i) CHECK(dst[i] == oracle[i]);
+    // The half-pel result differs from the identity pin (the oracle run is a
+    // real filter, not a copy).
+    CHECK(dst[0] != p.v(4, 4));
+}
+
+TEST_CASE("convolve_y_sr: vertical-only, x filter not dereferenced (ip:377-403)") {
+    Plane16 p;
+    inter::ConvolveParams cp = srConvParams();
+    std::uint8_t dst[16];
+    const auto* fy = &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)];
+
+    // Subpel 0: the {0,0,0,128,0,0,0,0} delta row -> identity. filterParamsX
+    // is nullptr: the y path must not touch it.
+    inter::convolveYSr(p.at(4, 4), 16, dst, 4, 4, 4, nullptr, fy, 0, 0, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 4 + x] == p.v(4 + y, 4 + x));
+
+    // Half-pel vertical: res = 64*a + 64*b over rows y and y+1 (k = 3, 4 of
+    // the padded 8-tap row), no seed; dst = clip((res + 64) >> 7) = the ceil
+    // half, (a+b+1) >> 1. The fixture max (264) does not reach the clip.
+    inter::convolveYSr(p.at(4, 4), 16, dst, 4, 4, 4, nullptr, fy, 0, 8, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {
+            const int s = p.v(4 + y, 4 + x) + p.v(5 + y, 4 + x);
+            CHECK(dst[y * 4 + x] == (s + 1) / 2);
+        }
+}
+
+TEST_CASE("convolve_x_sr: horizontal-only, y filter not dereferenced (ip:405-432)") {
+    Plane16 p;
+    inter::ConvolveParams cp = srConvParams();
+    std::uint8_t dst[16];
+    const auto* fx = &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)];
+
+    // Subpel 0: identity, filterParamsY nullptr (the x path must not touch it).
+    inter::convolveXSR(p.at(4, 4), 16, dst, 4, 4, 4, fx, nullptr, 0, 0, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 4 + x] == p.v(4 + y, 4 + x));
+
+    // Half-pel horizontal: sum = 64*a + 64*b over cols x and x+1 (k = 3, 4),
+    // no seed; the round0 stage gives ((a+b)+1) >> 1 (ceil) and the bits
+    // stage is the identity at round1 = FILTER_BITS.
+    inter::convolveXSR(p.at(4, 4), 16, dst, 4, 4, 4, fx, nullptr, 8, 0, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {
+            const int s = p.v(4 + y, 4 + x) + p.v(4 + y, 5 + x);
+            CHECK(dst[y * 4 + x] == (s + 1) / 2);
+        }
+}
+
+TEST_CASE("convolve_2d_copy_sr: plain copy with independent strides (ip:434-449)") {
+    Plane16 p;
+    inter::ConvolveParams cp = srConvParams();
+    std::uint8_t dst[24];
+    for (int i = 0; i < 24; ++i) dst[i] = 0xAA;
+    const auto* fx = &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)];
+
+    inter::convolve2dCopySr(p.at(4, 4), 16, dst, 6, 4, 4, fx, fx, 8, 8, &cp);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 6 + x] == p.v(4 + y, 4 + x));
+        CHECK(dst[y * 6 + 4] == 0xAA); // the stride gap is untouched
+    }
+    // The copy ignores the filters and subpels entirely (nullptr-safe).
+    inter::convolve2dCopySr(p.at(4, 4), 16, dst, 6, 4, 4, nullptr, nullptr, 0, 0, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 6 + x] == p.v(4 + y, 4 + x));
+}
+
+TEST_CASE("convolve_2d_scale: q10 stepping, 1:1 and 2x downsample anchors (ip:451-527)") {
+    Plane16 p;
+    inter::ConvolveParams cp = srConvParams();
+    std::uint8_t dst[16];
+    const auto* fx = &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)];
+
+    // 1:1 (step 1<<10, subpels 0): each phase lands on kernel row 0 (the
+    // delta), so the two passes are the identity on the source window.
+    inter::convolve2dScale(p.at(4, 4), 16, dst, 4, 4, 4, fx, fx, 0, 1 << inter::kScaleSubpelBits, 0,
+                           1 << inter::kScaleSubpelBits, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 4 + x] == p.v(4 + y, 4 + x));
+
+    // 2x downsample (step 1<<11): the phase stays on the delta kernel while
+    // the integer position steps by 2, so dst[y][x] = src[2y][2x].
+    inter::convolve2dScale(p.at(4, 4), 16, dst, 4, 4, 4, fx, fx, 0, 1 << (inter::kScaleSubpelBits + 1), 0,
+                           1 << (inter::kScaleSubpelBits + 1), &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 4 + x] == p.v(4 + 2 * y, 4 + 2 * x));
+}
+
+TEST_CASE("convolve_2d_scale: the compound branches carry verbatim (ip:491-517)") {
+    Plane16 p;
+    inter::ConvolveParams cp = srConvParams();
+    std::uint8_t dst[16];
+    std::uint16_t dst16[16];
+    const auto* fx = &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)];
+    const int step = 1 << inter::kScaleSubpelBits;
+
+    // isCompound + doAverage: dst16 holds the reference prediction at the
+    // pre-correction scale; with dst16 = 384 the avg folds to p >> 1.
+    for (int i = 0; i < 16; ++i) dst16[i] = 384;
+    cp.isCompound = 1;
+    cp.doAverage = 1;
+    cp.dst = dst16;
+    cp.dstStride = 4;
+    inter::convolve2dScale(p.at(4, 4), 16, dst, 4, 4, 4, fx, fx, 0, step, 0, step, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 4 + x] == p.v(4 + y, 4 + x) >> 1);
+
+    // The dist-wtd fold: (dst16*fwd + res*bck) >> DIST_PRECISION_BITS; with
+    // fwd = 12, bck = 4 the fold is p >> 2.
+    for (int i = 0; i < 16; ++i) dst16[i] = 384;
+    cp.useDistWtdCompAvg = 1;
+    cp.fwdOffset = 12;
+    cp.bckOffset = 4;
+    inter::convolve2dScale(p.at(4, 4), 16, dst, 4, 4, 4, fx, fx, 0, step, 0, step, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 4 + x] == p.v(4 + y, 4 + x) >> 2);
+
+    // isCompound + !doAverage: the un-corrected residual lands in dst16
+    // (res = 384 + p, STORED, not added - ip:505) and dst8 stays untouched.
+    // dst16 is strided (dst16Stride = 4), so the pin indexes the 4x4 grid.
+    for (int i = 0; i < 16; ++i) dst[i] = 0xAA;
+    cp.useDistWtdCompAvg = 0;
+    cp.doAverage = 0;
+    inter::convolve2dScale(p.at(4, 4), 16, dst, 4, 4, 4, fx, fx, 0, step, 0, step, &cp);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst16[y * 4 + x] == 384 + p.v(4 + y, 4 + x));
+    for (int i = 0; i < 16; ++i) CHECK(dst[i] == 0xAA);
+}
+
+TEST_CASE("convolve_2d_for_intrabc: the routing forces the q4=8 phases (ip:1200-1241)") {
+    Plane16 p;
+    std::uint8_t dst[16], ref[16];
+    const auto* bf = &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)];
+
+    // Both subpels: 2d_sr is invoked with the LITERAL 8, 8 phases.
+    inter::ConvolveParams cp = srConvParams();
+    inter::convolve2dForIntrabc(p.at(4, 4), 16, dst, 4, 4, 4, 4, 4, &cp);
+    inter::ConvolveParams cp2 = srConvParams();
+    inter::convolve2dSr(p.at(4, 4), 16, ref, 4, 4, 4, bf, bf, 8, 8, &cp2);
+    for (int i = 0; i < 16; ++i) CHECK(dst[i] == ref[i]);
+
+    // x only: x_sr at phase 8 with a NULL y filter.
+    cp = srConvParams();
+    inter::convolve2dForIntrabc(p.at(4, 4), 16, dst, 4, 4, 4, 4, 0, &cp);
+    cp2 = srConvParams();
+    inter::convolveXSR(p.at(4, 4), 16, ref, 4, 4, 4, bf, nullptr, 8, 0, &cp2);
+    for (int i = 0; i < 16; ++i) CHECK(dst[i] == ref[i]);
+
+    // y only: y_sr at phase 8 with a NULL x filter.
+    cp = srConvParams();
+    inter::convolve2dForIntrabc(p.at(4, 4), 16, dst, 4, 4, 4, 0, 4, &cp);
+    cp2 = srConvParams();
+    inter::convolveYSr(p.at(4, 4), 16, ref, 4, 4, 4, nullptr, bf, 0, 8, &cp2);
+    for (int i = 0; i < 16; ++i) CHECK(dst[i] == ref[i]);
+}
+
+TEST_CASE("inter_predictor: the dispatch matrix routes each subpel shape (ip:1397-1453)") {
+    Plane16 p;
+    std::uint8_t dst[16], ref[16];
+    const auto regs =
+        convolve::makeInterpFilters(convolve::InterpFilter::EIGHTTAP_REGULAR, convolve::InterpFilter::EIGHTTAP_REGULAR);
+    const auto bil =
+        convolve::makeInterpFilters(convolve::InterpFilter::BILINEAR, convolve::InterpFilter::BILINEAR);
+    const auto* bf = &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)];
+    inter::ScaleFactors sf;
+    inter::setupScaleFactorsForFrame(&sf, 32, 32, 32, 32); // unscaled
+
+    // (a) no-scale, both subpels 0 -> the copy path.
+    inter::SubpelParams sp{1024, 1024, 0, 0};
+    inter::ConvolveParams cp = srConvParams();
+    inter::interPredictor(p.at(4, 4), 16, dst, 4, &sp, &sf, 4, 4, &cp, regs, 0);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 4 + x] == p.v(4 + y, 4 + x));
+
+    // (b) no-scale, subpel_x only: the q10 512 reverts to the q4 8 and the
+    // x_sr path runs; compare against the direct call.
+    sp = {1024, 1024, 512, 0};
+    cp = srConvParams();
+    inter::interPredictor(p.at(4, 4), 16, dst, 4, &sp, &sf, 4, 4, &cp, bil, 0);
+    inter::ConvolveParams cp2 = srConvParams();
+    inter::convolveXSR(p.at(4, 4), 16, ref, 4, 4, 4, bf, nullptr, 8, 0, &cp2);
+    for (int i = 0; i < 16; ++i) CHECK(dst[i] == ref[i]);
+
+    // (c) scaled 2x: the 2d_scale path consumes xs/ys as the q10 steps.
+    inter::ScaleFactors sf2;
+    inter::setupScaleFactorsForFrame(&sf2, 64, 64, 32, 32);
+    sp = {2048, 2048, 0, 0};
+    cp = srConvParams();
+    inter::interPredictor(p.at(4, 4), 16, dst, 4, &sp, &sf2, 4, 4, &cp, bil, 0);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) CHECK(dst[y * 4 + x] == p.v(4 + 2 * y, 4 + 2 * x));
+
+    // (d) intrabc with both subpels nonzero: the intrabc 2d path at (8, 8).
+    sp = {1024, 1024, 512, 512};
+    cp = srConvParams();
+    inter::interPredictor(p.at(4, 4), 16, dst, 4, &sp, &sf, 4, 4, &cp, bil, 1);
+    cp2 = srConvParams();
+    inter::convolve2dSr(p.at(4, 4), 16, ref, 4, 4, 4, bf, bf, 8, 8, &cp2);
+    for (int i = 0; i < 16; ++i) CHECK(dst[i] == ref[i]);
+}
+
+// ---------------------------------------------------------------- T4
+
+TEST_CASE("wedge_compute_delta_squares clamps at the int16 bounds (enc:375-381)") {
+    std::int16_t a[3] = {10, 0, 200};
+    std::int16_t b[3] = {6, 200, 0};
+    std::int16_t d[3] = {0, 0, 0};
+    inter::wedgeComputeDeltaSquares(d, a, b, 3);
+    CHECK(d[0] == 64);     // 100 - 36, in range
+    CHECK(d[1] == -32768); // -40000 clamps to INT16_MIN
+    CHECK(d[2] == 32767);  // 40000 clamps to INT16_MAX
+}
+
+TEST_CASE("wedge_sign_from_residuals: the do-while sum and the strict limit (enc:414-422)") {
+    {
+        const std::int16_t ds[4] = {10, -3, 5, 1};
+        const std::uint8_t m[4] = {2, 4, 1, 3};
+        // acc = 20 - 12 + 5 + 3 = 16.
+        CHECK(inter::wedgeSignFromResiduals(ds, m, 4, 15) == 1);
+        CHECK(inter::wedgeSignFromResiduals(ds, m, 4, 16) == 0); // strict >
+    }
+    {
+        const std::int16_t ds[3] = {-10, -10, -10};
+        const std::uint8_t m[3] = {1, 1, 1};
+        CHECK(inter::wedgeSignFromResiduals(ds, m, 3, -31) == 1);
+        CHECK(inter::wedgeSignFromResiduals(ds, m, 3, -30) == 0);
+    }
+    // The do-while runs once even for n = 1.
+    const std::int16_t one[1] = {7};
+    const std::uint8_t om[1] = {5};
+    CHECK(inter::wedgeSignFromResiduals(one, om, 1, 34) == 1);
+    CHECK(inter::wedgeSignFromResiduals(one, om, 1, 35) == 0);
+}
+
+TEST_CASE("model_rd_norm: the get_msb / xq chain pins the table walks (enc:1883-1937)") {
+    // xsq = 0: tmp = 8, k = 0, xq = 0, a = 0 -> the pure row-0 entries.
+    std::int32_t r = 0, d = 0;
+    inter::modelRdNorm(0, &r, &d);
+    CHECK(r == 65536); // rate_tab_q10[0]
+    CHECK(d == 0);     // dist_tab_q10[0]
+
+    // xsq = 40 = xsq_iq_q10[9]: tmp = 18, k = 1, xq = 9, a = 0 -> row 9.
+    inter::modelRdNorm(40, &r, &d);
+    CHECK(r == 4389); // rate_tab_q10[9]
+    CHECK(d == 3);    // dist_tab_q10[9]
+
+    // xsq = 44: xq stays 9, a = ((44-40) << 10) >> 3 = 512, b = 512 ->
+    // the two-row interpolation averages the rows.
+    inter::modelRdNorm(44, &r, &d);
+    CHECK(r == (4389 * 512 + 4255 * 512) >> 10); // 4322
+    CHECK(d == (3 * 512 + 4 * 512) >> 10);       // 3
+
+    // NAMED REFERENCE QUIRK, untested: at the top xq (xsq = 245727) the
+    // reference reads rate/dist_tab_q10[xq + 1] with xq = 103 - one past
+    // the 104-entry tables. The port carries it verbatim; no assertion
+    // pins a read the reference itself leaves out of bounds.
+}
+
+TEST_CASE("model_rd_from_var_lapndz and model_rd_from_sse (enc:1939-1981)") {
+    std::uint32_t rate = 999;
+    std::uint64_t dist = 999;
+
+    // var = 0 zeroes both.
+    inter::modelRdFromVarLapndz(0, 0, 4, reinterpret_cast<std::int32_t*>(&rate),
+                                reinterpret_cast<std::int64_t*>(&dist));
+    CHECK(rate == 0);
+    CHECK(dist == 0);
+
+    // var = 1, n_log2 = 0, qstep = 4: xsq_q10 = 16384 -> xq = 72, r_q10 =
+    // 394, d_q10 = 680 -> rate = round(394, 1) = 197, dist = (680+512)>>10 = 1.
+    inter::modelRdFromVarLapndz(1, 0, 4, reinterpret_cast<std::int32_t*>(&rate),
+                                reinterpret_cast<std::int64_t*>(&dist));
+    CHECK(rate == 197);
+    CHECK(dist == 1);
+
+    // var = 1024, qstep = 8: xsq_q10 = 64 -> xq = 12, a = 0 -> r = 4044,
+    // d = 5 -> rate = 2022, dist = (1024*5 + 512)>>10 = 5.
+    inter::modelRdFromVarLapndz(1024, 0, 8, reinterpret_cast<std::int32_t*>(&rate),
+                                reinterpret_cast<std::int64_t*>(&dist));
+    CHECK(rate == 2022);
+    CHECK(dist == 5);
+
+    // model_rd_from_sse, fast path: q = quantizer >> (bit_depth - 5);
+    // sse = 1000, quantizer = 100, bd = 8 -> q = 12 < 120:
+    // rate = (1000 * 268) >> 7 = 2093, dist = (1000 * 12) >> 8 << 4 = 736.
+    inter::modelRdFromSse(6, 100, 8, 1000, &rate, &dist, 1);
+    CHECK(rate == 2093);
+    CHECK(dist == 736);
+
+    // Fast path, q >= 120: rate zeroes, dist carries the squared-term fold.
+    // quantizer = 1000 -> q = 125; sse = 8192: dist = (8192*125)>>8 << 4 = 64000.
+    inter::modelRdFromSse(6, 1000, 8, 8192, &rate, &dist, 1);
+    CHECK(rate == 0);
+    CHECK(dist == 64000);
+
+    // The non-fast path delegates to the lapndz model with the numPelsLog2
+    // parameter (the reference's eb_num_pels_log2_lookup[bsize] read, :1977)
+    // and applies the final << 4: sse = 1, numPelsLog2 = 0, quantizer = 32
+    // -> q = 4, the var=1 anchor -> rate 197, dist 1 << 4 = 16.
+    inter::modelRdFromSse(0, 32, 8, 1, &rate, &dist, 0);
+    CHECK(rate == 197);
+    CHECK(dist == 16);
+}
+
+TEST_CASE("sse8 and sse_highbd: the summed squared differences (enc:600-627)") {
+    {
+        const std::uint8_t a[8] = {10, 20, 30, 40, 11, 21, 31, 41}; // stride 4, two rows
+        const std::uint8_t b[8] = {9, 18, 33, 36, 11, 19, 28, 40};
+        // Row diffs {1,2,3,4}, row2 diffs {0,2,3,1}: sse = 1+4+9+16+0+4+9+1 = 44.
+        CHECK(inter::sse8(a, 4, b, 4, 4, 2) == 44);
+        CHECK(inter::sse8(a, 4, b, 4, 4, 0) == 0);
+        // Identical buffers -> 0.
+        CHECK(inter::sse8(a, 4, a, 4, 4, 2) == 0);
+        // Independent strides: 2x2 from the row tails (offsets 2 and 6).
+        CHECK(inter::sse8(a + 2, 4, b + 2, 4, 2, 2) ==
+              (30 - 33) * (30 - 33) + (40 - 36) * (40 - 36) + (31 - 28) * (31 - 28) + (41 - 40) * (41 - 40));
+    }
+    {
+        // The hbd twin aliases the uint16 planes through the uint8 params.
+        const std::uint16_t a[4] = {300, 1000, 0, 4999};
+        const std::uint16_t b[4] = {45, 744, 1023, 4999};
+        // Diffs {255, 256, -1023, 0}: 65025 + 65536 + 1046529 + 0 = 1177090.
+        CHECK(inter::sseHighbd(reinterpret_cast<const std::uint8_t*>(a), 2, reinterpret_cast<const std::uint8_t*>(b),
+                               2, 2, 2) == 1177090);
+    }
+}
+
+
