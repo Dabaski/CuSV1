@@ -115,6 +115,7 @@ struct RcConfig {
     int maxQpAllowed;  // static_config.max_qp_allowed (0..63)
     int worstAllowedQ;  // rc_cfg->worst_allowed_q
     int bestAllowedQ;   // rc_cfg->best_allowed_q
+    int minCr;          // rc_cfg->min_cr (the compression-ratio floor, percent)
 };
 
 // PictureParentControlSet mirrors the one-pass target arithmetic consumes.
@@ -167,6 +168,11 @@ struct PcsCarrier {
     int baseQIdx;                    // frm_hdr.quantization_params.base_q_idx
                                      // (definitions.h:1604-1606, the AV1 spec
                                      // quantization_params struct)
+
+    // the RC2 Wave D2 walls (recode_loop_update_q's consumes)
+    int superresUpscaledWidth;       // av1_cm->frm_size.superres_upscaled_width
+    int seqProfile;                  // scs->seq_header.seq_profile (EbAv1SeqProfile)
+    int maxFrameSize;                // ppcs->max_frame_size (the Q-mode bounds)
 };
 
 // ASSIGN_MINQ_TABLE (rc_tables.h:36-39, the CONFIG_ENABLE_HIGH_BIT_DEPTH=0
@@ -705,6 +711,10 @@ int getGfuQTpl(const RcControl& rc, int targetActiveQuality, int bitDepth);
 // ---- RC2 Wave D3 (the vbr updater + the postencode pair + the regulated
 // pair): rc_vbr_cbr.c :1349-:1472 / :1495-:1629 / :1720-:1752 ----
 
+// AV1_PROB_COST_SHIFT (definitions.h): the rate-probability fractional bit
+// count; the dummy pack shifts pcs_total_rate by it.
+constexpr int kAv1ProbCostShift = 9;
+
 // av1_estimate_bits_at_q (rc_vbr_cbr.c:1349-1353): verbatim; the frame
 // type / screen-content flags thread (the reference reads them off ppcs).
 int estimateBitsAtQ(int frameType, int q, int mbs, double correctionFactor, int bitDepth,
@@ -751,6 +761,21 @@ int getRegulatedQOvershoot(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppc
 int getRegulatedQUndershoot(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
                             const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int qHigh,
                             int topIndex, int bottomIndex, int bitDepth);
+
+// ---- RC2 Wave D2: the recode-loop driver (rc_vbr_cbr.c :1794-:1926) ----
+
+// recode_loop_update_q (:1794-1926): verbatim; the enc_ctx->recode_loop /
+// scs->static_config.max_bit_rate / enc_ctx->recode_tolerance walls thread
+// as recodeLoop / maxBitRate / recodeTolerance; the caller-local
+// out-params (loop/q/q_low/q_high/undershoot_seen/overshoot_seen/
+// low_cr_seen) keep the reference's shapes. PARK (named): the
+// capped_crf_reencode call (rc_crf_cqp.c, out of this file) is dropped
+// at the AOM_Q + max_bit_rate + tl==0 branch - q passes through unchanged.
+void recodeLoopUpdateQ(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, const CrRefreshCarrier& cr,
+                       std::uint16_t b64TotalCount, int recodeLoop, std::int64_t maxBitRate,
+                       int recodeTolerance, int bitDepth, int topIndex, int bottomIndex, int loopCount,
+                       bool& loop, int& q, int& qLow, int& qHigh, int& undershootSeen, int& overshootSeen,
+                       int& lowCrSeen);
 
 // ROUND_POWER_OF_TWO (definitions.h:457): the rounding shift.
 std::int64_t roundPowerOfTwo(std::int64_t value, int n);

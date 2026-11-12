@@ -2105,6 +2105,148 @@ int getRegulatedQUndershoot(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& pp
     return qRegulated;
 }
 
+// ---- RC2 Wave D2: the recode-loop driver (rc_vbr_cbr.c :1794-:1926) ----
+
+// recode_loop_update_q (:1794-1926): verbatim; the capped_crf_reencode
+// call (rc_crf_cqp.c) is the named park - q passes through unchanged.
+void recodeLoopUpdateQ(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, const CrRefreshCarrier& cr,
+                       std::uint16_t b64TotalCount, int recodeLoop, std::int64_t maxBitRate,
+                       int recodeTolerance, int bitDepth, int topIndex, int bottomIndex, int loopCount,
+                       bool& loop, int& q, int& qLow, int& qHigh, int& undershootSeen, int& overshootSeen,
+                       int& lowCrSeen) {
+    const bool doDummyPack =
+        (recodeLoop >= kAllowRecodeKfMaxBw && !(rcCfg.mode == kRcQ && maxBitRate == 0)) || rcCfg.minCr > 0;
+    if (doDummyPack) {
+        ppcs.projectedFrameSize =
+            (int)((ppcs.pcsTotalRate + (1 << (kAv1ProbCostShift - 1))) >> kAv1ProbCostShift) +
+            (ppcs.frameType == kKeyFrame ? 13 : 0);
+    } else {
+        ppcs.projectedFrameSize = 0;
+    }
+    loop = false;
+    if (recodeLoop == kAllowRecodeKfMaxBw && ppcs.frameType != kKeyFrame) {
+        // skip re-encode for inter frame when setting -recode-loop 1
+        return;
+    }
+
+    if (rcCfg.minCr > 0) {
+        const double compressionRatio =
+            getCompressionRatio(ppcs.superresUpscaledWidth, ppcs.frameHeight, ppcs.seqProfile,
+                                (std::uint64_t)(ppcs.projectedFrameSize >> 3));
+        const double targetCr = rcCfg.minCr / 100.0;
+        if (compressionRatio < targetCr) {
+            lowCrSeen = 1;
+            if (q < rc.worstQuality) {
+                const double crRatio = targetCr / compressionRatio;
+                const int projectedQ = std::max(q + 1, (int)(q * crRatio * crRatio));
+                q = std::min(std::min(projectedQ, q + 32), rc.worstQuality);
+                qLow = std::max(q, qLow);
+                qHigh = std::max(q, qHigh);
+                loop = true;
+            }
+        }
+        if (lowCrSeen) {
+            return;
+        }
+    }
+    // Used for capped CRF. Update the active worse quality.
+    if (rcCfg.mode == kRcQ && maxBitRate) {
+        if (ppcs.temporalLayerIndex > 0) {
+            return;
+        } else {
+            // capped_crf_reencode(ppcs, &q); - PARKED (rc_crf_cqp.c).
+        }
+    }
+    const int lastQ = q;
+    int frameOverShootLimit = 0;
+    int frameUnderShootLimit = 0;
+    computeFrameSizeBounds(rcCfg.mode, recodeTolerance, ppcs.maxFrameSize, ppcs.loopCount,
+                           ppcs.thisFrameTarget, rc.maxFrameBandwidth, frameUnderShootLimit,
+                           frameOverShootLimit);
+    if (frameOverShootLimit == 0) {
+        frameOverShootLimit = 1;
+    }
+
+    if (recodeLoopTest(rc, ppcs, recodeLoop, frameOverShootLimit, frameUnderShootLimit, q,
+                       std::max(qHigh, topIndex), bottomIndex)) {
+        const int width = ppcs.frameWidth;
+        const int height = ppcs.frameHeight;
+        // Is the projected frame size out of range and are we allowed
+        // to attempt to recode.
+
+        // Frame size out of permitted range:
+        // Update correction factor & compute new Q to try...
+        // Frame is too large
+        if (ppcs.projectedFrameSize > ppcs.thisFrameTarget) {
+            // Special case if the projected size is > the max allowed.
+            if (q == qHigh && ppcs.projectedFrameSize >= rc.maxFrameBandwidth) {
+                const double qValHighCurrent = convertQindexToQ(qHigh, bitDepth);
+                const double qValHighNew =
+                    qValHighCurrent * ((double)ppcs.projectedFrameSize / rc.maxFrameBandwidth);
+                qHigh = av1FindQindex(qValHighNew, bitDepth, rc.bestQuality, rc.worstQuality);
+            }
+            // Raise Qlow as to at least the current value
+            qLow = std::min(q + 1, qHigh);
+
+            if (undershootSeen || loopCount > 2 || (loopCount == 2 && !frameIsIntraOnly(ppcs.frameType))) {
+                rcUpdateRateCorrectionFactors(rc, rcCfg, ppcs, cr, b64TotalCount, width, height, bitDepth);
+
+                q = (qHigh + qLow + 1) / 2;
+            } else if (loopCount == 2 && frameIsIntraOnly(ppcs.frameType)) {
+                const int qMid = (qHigh + qLow + 1) / 2;
+                const int qRegulated =
+                    getRegulatedQOvershoot(rc, rcCfg, ppcs, cr, b64TotalCount, qLow, qHigh, topIndex,
+                                           bottomIndex, bitDepth);
+                // Get 'q' in-between 'q_mid' and 'q_regulated' for a smooth
+                // transition between loop_count < 2 and loop_count > 2.
+                q = (qMid + qRegulated + 1) / 2;
+            } else {
+                q = getRegulatedQOvershoot(rc, rcCfg, ppcs, cr, b64TotalCount, qLow, qHigh, topIndex,
+                                           bottomIndex, bitDepth);
+            }
+
+            overshootSeen = 1;
+        } else {
+            // Frame is too small
+            qHigh = std::max(q - 1, qLow);
+
+            if (overshootSeen || loopCount > 2 || (loopCount == 2 && !frameIsIntraOnly(ppcs.frameType))) {
+                rcUpdateRateCorrectionFactors(rc, rcCfg, ppcs, cr, b64TotalCount, width, height, bitDepth);
+                q = (qHigh + qLow) / 2;
+            } else if (loopCount == 2 && frameIsIntraOnly(ppcs.frameType)) {
+                const int qMid = (qHigh + qLow) / 2;
+                const int qRegulated =
+                    getRegulatedQUndershoot(rc, rcCfg, ppcs, cr, b64TotalCount, qHigh, topIndex,
+                                            bottomIndex, bitDepth);
+                // Get 'q' in-between 'q_mid' and 'q_regulated' for a smooth
+                // transition between loop_count < 2 and loop_count > 2.
+                q = (qMid + qRegulated) / 2;
+            } else {
+                q = getRegulatedQUndershoot(rc, rcCfg, ppcs, cr, b64TotalCount, qHigh, topIndex,
+                                            bottomIndex, bitDepth);
+            }
+
+            undershootSeen = 1;
+        }
+
+        // Clamp Q to upper and lower limits:
+        q = clip3(q, qLow, qHigh);
+    }
+
+    q = clampQindex(rcCfg, q);
+    loop = (q != lastQ);
+    // Used for capped CRF. Update the active worse quality based on the final assigned qindex.
+    if (rcCfg.mode == kRcQ && maxBitRate && loop == false && ppcs.loopCount > 0) {
+        if (ppcs.sliceType == kIslice) {
+            rc.activeWorstQuality = getKfQTpl(rc, q, bitDepth);
+        } else {
+            rc.activeWorstQuality = getGfuQTpl(rc, q, bitDepth);
+        }
+
+        rc.activeWorstQuality = clampQindex(rcCfg, rc.activeWorstQuality);
+    }
+}
+
 // ---- RC2 Wave D (recode helpers): rc_vbr_cbr.c :1642-:1789 ----
 
 // av1_find_qindex (rc_vbr_cbr.c:1773-1789): verbatim.
