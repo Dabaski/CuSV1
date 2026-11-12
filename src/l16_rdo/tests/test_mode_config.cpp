@@ -3447,3 +3447,701 @@ TEST_CASE("dimensions_require_8x8 - the dense aligned grid + the hand pins") {
     CHECK(dimensionsRequire8x8(264, 264) == true);   // 264%64=8 -> only 8 fits
 }
 
+
+// ---------------------------------------------------------------------------
+// set_depth_removal_level_controls (:3030-3343) + get_sb128_me_data
+// (:63-115) - independent transcription. The oracle mirrors the
+// reference's own prior-state reads: the disallow_below_* fields and
+// (for level > 15) enabled are READ before write, so the caller supplies
+// live prior state (the poison discipline does not apply to those four
+// fields; the remaining wall inputs are still fully enumerated).
+// ---------------------------------------------------------------------------
+static int64_t oracleDrRdCost(int64_t rdmult, int64_t rate, int64_t dist) {
+    // RDCOST (rd_cost.h:36-38): ROUND_POWER_OF_TWO(rate*rmult, 9) + dist*(1<<7).
+    return (((rate * rdmult) + (1 << 8)) >> 9) + (dist * (1 << 7));
+}
+
+static const uint8_t oracleQuantizerToQindex[64] = {
+    0,   4,   8,   12,  16,  20,  24,  28,  32,  36,  40,  44,  48,  52,  56,  60,  64,  68,  72,  76,  80,  84,
+    88,  92,  96,  100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172,
+    176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 249, 255};
+
+static void oracleGetSb128MeData(const DepthRemovalPcs& pcs, const DepthRemovalCtx& ctx, uint32_t* d64,
+                                 uint32_t* d32, uint32_t* d16, uint32_t* d8, uint32_t* var) {
+    const uint32_t meSbSize = pcs.b64Size;
+    const uint32_t mePW = (pcs.alignedWidth + meSbSize - 1) / meSbSize;
+    const uint32_t mePH = (pcs.alignedHeight + meSbSize - 1) / meSbSize;
+    const uint32_t meSbX = ctx.sbOriginX / meSbSize;
+    const uint32_t meSbY = ctx.sbOriginY / meSbSize;
+    const uint32_t addr = meSbX + meSbY * mePW;
+    uint32_t dist64 = pcs.me64x64Distortion[addr];
+    uint32_t dist32 = pcs.me32x32Distortion[addr];
+    uint32_t dist16 = pcs.me16x16Distortion[addr];
+    uint32_t dist8 = pcs.me8x8Distortion[addr];
+    uint32_t var8 = pcs.me8x8CostVariance[addr];
+    int count = 1;
+    if (meSbX + 1 < mePW) {
+        dist64 += pcs.me64x64Distortion[addr + 1];
+        dist32 += pcs.me32x32Distortion[addr + 1];
+        dist16 += pcs.me16x16Distortion[addr + 1];
+        dist8 += pcs.me8x8Distortion[addr + 1];
+        var8 = var8 > pcs.me8x8CostVariance[addr + 1] ? var8 : pcs.me8x8CostVariance[addr + 1];
+        ++count;
+    }
+    if (meSbY + 1 < mePH) {
+        dist64 += pcs.me64x64Distortion[addr + mePW];
+        dist32 += pcs.me32x32Distortion[addr + mePW];
+        dist16 += pcs.me16x16Distortion[addr + mePW];
+        dist8 += pcs.me8x8Distortion[addr + mePW];
+        var8 = var8 > pcs.me8x8CostVariance[addr + mePW] ? var8 : pcs.me8x8CostVariance[addr + mePW];
+        ++count;
+    }
+    if (meSbX + 1 < mePW && meSbY + 1 < mePH) {
+        dist64 += pcs.me64x64Distortion[addr + mePW + 1];
+        dist32 += pcs.me32x32Distortion[addr + mePW + 1];
+        dist16 += pcs.me16x16Distortion[addr + mePW + 1];
+        dist8 += pcs.me8x8Distortion[addr + mePW + 1];
+        var8 = var8 > pcs.me8x8CostVariance[addr + mePW + 1] ? var8 : pcs.me8x8CostVariance[addr + mePW + 1];
+        ++count;
+    }
+    *d64 = dist64 / count;
+    *d32 = dist32 / count;
+    *d16 = dist16 / count;
+    *d8 = dist8 / count;
+    *var = var8;
+}
+
+static void oracleSetDepthRemoval(DepthRemovalCtrls& ctrls, const DepthRemovalPcs& pcs, DepthRemovalCtx& ctx,
+                                  uint8_t level) {
+    if (pcs.isISlice) {
+        ctrls.enabled = 0;
+        return;
+    }
+    const uint32_t fastLambda = ctx.fastLambdaMd[0];
+    const uint32_t sbSize = 64 * 64;
+    const uint64_t costThRate = (uint64_t)1 << 13;
+    uint64_t mult4x4 = 0, mult16 = 0, mult32 = 0, mult64 = 0;
+    int64_t dev16Th = kMaxSignedValue, dev32Th = kMaxSignedValue, dev32To8Th = kMaxSignedValue;
+    int8_t qpScale = 0;
+    if (pcs.modulateByQp) {
+        const int diff = (int)ctx.sbQindex - (int)oracleQuantizerToQindex[pcs.pictureQp];
+        if (diff <= -12)      level = (uint8_t)(level >= 4 ? level - 4 : 0);
+        else if (diff <= -6)  level = (uint8_t)(level >= 3 ? level - 3 : 0);
+        else if (diff <= -3)  level = (uint8_t)(level >= 2 ? level - 2 : 0);
+        else if (diff < 0)    level = (uint8_t)(level >= 1 ? level - 1 : 0);
+    }
+    bool written = level <= 15;
+    if (written) {
+        ctrls.enabled = level == 0 ? 0 : 1;
+        if (level >= 1) {
+            mult4x4 = 64;
+            switch (level) {
+            case 1:  dev16Th = 0;  dev32Th = 0; qpScale = 1; break;
+            case 2:  dev16Th = 10; dev32Th = 0; qpScale = 1; break;
+            case 3:  dev16Th = 20; dev32Th = 0; qpScale = 1; break;
+            case 4:  dev16Th = 30; dev32Th = 0; qpScale = 1; break;
+            case 5:  mult16 = 6; mult32 = 6; dev16Th = 40;  dev32Th = 0; qpScale = 1; break;
+            case 6:  mult16 = 6; mult32 = 6; dev16Th = 50;  dev32Th = 25; qpScale = 1; break;
+            case 7:  mult16 = 6; mult32 = 6; dev16Th = 50;  dev32Th = 25; qpScale = 2; break;
+            case 8:  mult16 = 16; mult32 = 8; mult64 = 8; dev16Th = 100; dev32Th = 50; qpScale = 3; break;
+            case 9:  mult16 = 32; mult32 = 8; mult64 = 8; dev16Th = 100; dev32Th = 50; qpScale = 3; break;
+            case 10: mult16 = 128; mult32 = 8; mult64 = 8; dev16Th = 200; dev32Th = 75; qpScale = 3; break;
+            case 11: mult16 = 128; mult32 = 8; mult64 = 8; dev16Th = 250; dev32Th = 125; qpScale = 3; break;
+            case 12: mult16 = 128; mult32 = 16; mult64 = 8; dev16Th = 250; dev32Th = 150; qpScale = 4; break;
+            case 13: mult16 = 256; mult32 = 16; mult64 = 8; dev16Th = 250; dev32Th = 150; qpScale = 4; break;
+            case 14: mult16 = 256; mult32 = 16; mult64 = 16; dev16Th = 250; dev32Th = 150; qpScale = 4; break;
+            case 15: mult16 = 384; mult32 = 24; mult64 = 24; dev16Th = 300; dev32Th = 200; qpScale = 4; break;
+            default: break;
+            }
+        }
+    }
+    if (ctrls.enabled) {
+        const bool useRefInfo = pcs.rtc ? false : true;
+        if (useRefInfo) {
+            // is_ref_same_size, re-derived from the carrier surface
+            // (:2925-2941: the B-slice gate, the count/null gate, then the
+            // per-slot size match).
+            const bool l0Avail = pcs.ref.isBSlice && pcs.ref.refPresent[0][0] &&
+                pcs.ref.refPicWidth[0][0] == pcs.ref.frameWidth &&
+                pcs.ref.refPicHeight[0][0] == pcs.ref.frameHeight;
+            const bool l1Avail = pcs.ref.isBSlice && pcs.ref.refPresent[1][0] &&
+                pcs.ref.refPicWidth[1][0] == pcs.ref.frameWidth &&
+                pcs.ref.refPicHeight[1][0] == pcs.ref.frameHeight;
+            if (l0Avail) {
+                uint8_t minSq = (uint8_t)~0;
+                const int d0 = (int)(pcs.pictureNumber - pcs.refPocL0);
+                const int ad0 = d0 < 0 ? -d0 : d0;
+                if (ad0 <= 1) minSq = pcs.refSbMinSqSizeL0;
+                if (l1Avail) {
+                    const int d1 = (int)(pcs.pictureNumber - pcs.refPocL1);
+                    const int ad1 = d1 < 0 ? -d1 : d1;
+                    if (ad1 <= 1) minSq = minSq < pcs.refSbMinSqSizeL1 ? minSq : pcs.refSbMinSqSizeL1;
+                }
+                if (minSq != (uint8_t)~0) {
+                    if (minSq >= 64) {
+                        dev32Th += 5;
+                        dev16Th += 20;
+                    } else if (minSq >= 32) {
+                        dev16Th += 15;
+                    }
+                }
+            }
+        }
+        uint32_t dist64, dist32, dist16, dist8, var8;
+        if (pcs.superBlockSize == 64) {
+            dist64 = pcs.me64x64Distortion[ctx.sbIndex];
+            dist32 = pcs.me32x32Distortion[ctx.sbIndex];
+            dist16 = pcs.me16x16Distortion[ctx.sbIndex];
+            dist8 = pcs.me8x8Distortion[ctx.sbIndex];
+            var8 = pcs.me8x8CostVariance[ctx.sbIndex];
+        } else {
+            oracleGetSb128MeData(pcs, ctx, &dist64, &dist32, &dist16, &dist8, &var8);
+        }
+        // The unsigned wrap for picture_qp > 53 is the reference's own
+        // arithmetic (63 - (qp + 10) in uint32).
+        var8 /= (63u - (pcs.pictureQp + 10u)) > 1u ? (63u - (pcs.pictureQp + 10u)) : 1u;
+        if (var8 < kLow8x8DistVarTh) {
+            dev16Th = dev16Th << 2;
+        } else if (var8 < kHigh8x8DistVarTh) {
+            dev16Th = dev16Th << 1;
+            dev32Th = dev32Th >> 1;
+        } else {
+            dev16Th = 0;
+            dev32Th = 0;
+        }
+        const uint32_t qpWeight = ((63u - (pcs.pictureQp + 10u)) > 1u ? (63u - (pcs.pictureQp + 10u)) : 1u) >> 4;
+        const uint32_t qpW = qpWeight > 1u ? qpWeight : 1u;
+        dev16Th *= (int64_t)(qpW * (uint32_t)qpScale);
+        dev32Th *= (int64_t)(qpW * (uint32_t)qpScale);
+        dev32To8Th = (dev32Th * ((1 << 2) + 1)) >> 2;
+        const uint64_t th16 = mult16 ? (uint64_t)oracleDrRdCost(fastLambda, (int64_t)costThRate,
+                                                                (int64_t)((sbSize >> 3) * mult16)) : 0;
+        const uint64_t th32 = mult32 ? (uint64_t)oracleDrRdCost(fastLambda, (int64_t)costThRate,
+                                                                (int64_t)((sbSize >> 3) * mult32)) : 0;
+        const uint64_t th64 = mult64 ? (uint64_t)oracleDrRdCost(fastLambda, (int64_t)costThRate,
+                                                                (int64_t)((sbSize >> 3) * mult64)) : 0;
+        const uint64_t cost64 = (uint64_t)oracleDrRdCost(fastLambda, 0, dist64);
+        const uint64_t cost32 = (uint64_t)oracleDrRdCost(fastLambda, 0, dist32);
+        const uint64_t cost16 = (uint64_t)oracleDrRdCost(fastLambda, 0, dist16);
+        const uint64_t cost8 = (uint64_t)oracleDrRdCost(fastLambda, 0, dist8);
+        const int64_t dev32To16 = (int64_t)(((int64_t)(cost32 > 1u ? cost32 : 1u) -
+                                             (int64_t)(cost16 > 1u ? cost16 : 1u)) * 1000) /
+            (int64_t)(cost16 > 1u ? cost16 : 1u);
+        const int64_t dev32To8 = (int64_t)(((int64_t)(cost32 > 1u ? cost32 : 1u) -
+                                            (int64_t)(cost8 > 1u ? cost8 : 1u)) * 1000) /
+            (int64_t)(cost8 > 1u ? cost8 : 1u);
+        const int64_t dev16To8 = (int64_t)(((int64_t)(cost16 > 1u ? cost16 : 1u) -
+                                            (int64_t)(cost8 > 1u ? cost8 : 1u)) * 1000) /
+            (int64_t)(cost8 > 1u ? cost8 : 1u);
+        const uint8_t w = pcs.sbGeomWidth, h = pcs.sbGeomHeight;
+        ctrls.disallowBelow64x64 =
+            (uint8_t)(((w % 64) == 0 || (w % 64) > 32) && ((h % 64) == 0 || (h % 64) > 32)
+                          ? (ctrls.disallowBelow64x64 || cost64 < th64) : 0);
+        ctrls.disallowBelow32x32 =
+            (uint8_t)(((w % 32) == 0 || (w % 32) > 16) && ((h % 32) == 0 || (h % 32) > 16)
+                          ? (ctrls.disallowBelow32x32 || cost32 < th32 ||
+                             (dev32To16 < dev32Th && dev32To8 < dev32To8Th)) : 0);
+        ctrls.disallowBelow16x16 =
+            (uint8_t)((!dimensionsRequire8x8(w, h))
+                          ? (ctrls.disallowBelow16x16 || cost16 < th16 || dev16To8 < dev16Th) : 0);
+        if (!ctx.disallow4x4 && mult4x4) {
+            const uint64_t th4x4 = (uint64_t)oracleDrRdCost(fastLambda, (int64_t)costThRate,
+                                                            (int64_t)((sbSize >> 1) * mult4x4));
+            if (cost8 < th4x4 && var8 < kLow8x8DistVarTh) ctx.disallow4x4 = 1;
+        }
+    }
+}
+
+TEST_CASE("get_depth_removal_level_params - every level 0-15 plus the no-default arm") {
+    // :3068-3224. The switch has NO default: level > 15 leaves enabled
+    // unwritten (enabledWritten = false) and the locals at their pre-switch
+    // init values (multipliers 0, dev ths MAX_SIGNED_VALUE, qp_scale 0).
+    DepthRemovalLevelParams p;
+    getDepthRemovalLevelParams(0, p);
+    CHECK(p.enabledWritten);
+    CHECK(p.enabled == 0);
+    CHECK(p.disallow4x4CostThMultiplier == 0);
+    getDepthRemovalLevelParams(1, p);
+    CHECK(p.enabledWritten);
+    CHECK(p.enabled == 1);
+    CHECK(p.disallow4x4CostThMultiplier == 64);
+    CHECK(p.disallowBelow16x16CostThMultiplier == 0);
+    CHECK(p.disallowBelow32x32CostThMultiplier == 0);
+    CHECK(p.disallowBelow64x64CostThMultiplier == 0);
+    CHECK(p.dev16x16To8x8Th == 0);
+    CHECK(p.dev32x32To16x16Th == 0);
+    CHECK(p.qpScaleFactor == 1);
+    struct Row { int lvl; uint64_t m16, m32, m64; int64_t d16, d32; int qp; };
+    static const Row rows[] = {
+        {2, 0, 0, 0, 10, 0, 1},    {3, 0, 0, 0, 20, 0, 1},    {4, 0, 0, 0, 30, 0, 1},
+        {5, 6, 6, 0, 40, 0, 1},    {6, 6, 6, 0, 50, 25, 1},   {7, 6, 6, 0, 50, 25, 2},
+        {8, 16, 8, 8, 100, 50, 3}, {9, 32, 8, 8, 100, 50, 3}, {10, 128, 8, 8, 200, 75, 3},
+        {11, 128, 8, 8, 250, 125, 3}, {12, 128, 16, 8, 250, 150, 4},
+        {13, 256, 16, 8, 250, 150, 4}, {14, 256, 16, 16, 250, 150, 4},
+        {15, 384, 24, 24, 300, 200, 4},
+    };
+    for (const Row& r : rows) {
+        getDepthRemovalLevelParams((uint8_t)r.lvl, p);
+        CHECK(p.enabledWritten);
+        CHECK(p.enabled == 1);
+        CHECK(p.disallow4x4CostThMultiplier == 64);
+        CHECK(p.disallowBelow16x16CostThMultiplier == r.m16);
+        CHECK(p.disallowBelow32x32CostThMultiplier == r.m32);
+        CHECK(p.disallowBelow64x64CostThMultiplier == r.m64);
+        CHECK(p.dev16x16To8x8Th == r.d16);
+        CHECK(p.dev32x32To16x16Th == r.d32);
+        CHECK(p.qpScaleFactor == r.qp);
+    }
+    // Level 16 (and anything > 15): the reference switch has no default -
+    // the port reports enabledWritten = false and hands back the INIT
+    // locals (multipliers 0, dev ths MAX_SIGNED_VALUE, qp_scale 0).
+    getDepthRemovalLevelParams(16, p);
+    CHECK(!p.enabledWritten);
+    CHECK(p.disallow4x4CostThMultiplier == 0);
+    CHECK(p.disallowBelow16x16CostThMultiplier == 0);
+    CHECK(p.disallowBelow32x32CostThMultiplier == 0);
+    CHECK(p.disallowBelow64x64CostThMultiplier == 0);
+    CHECK(p.dev16x16To8x8Th == kMaxSignedValue);
+    CHECK(p.dev32x32To16x16Th == kMaxSignedValue);
+    CHECK(p.qpScaleFactor == 0);
+}
+
+// The wall grid for the composition: every cell x level 0-15 (+ the >15
+// arm under both prior-enabled states) against the oracle.
+struct DrCell {
+    bool modulateByQp;
+    uint32_t pictureQp;
+    uint8_t sbQindex;      // the diff = sbQindex - q2i[qp] bin
+    bool rtc;
+    uint8_t refAvail;      // bit0 = l0, bit1 = l1
+    uint64_t refPocDelta;  // picture_number - ref_poc (abs'd by the port)
+    uint8_t sbMinSqL0;
+    uint8_t sbMinSqL1;
+    uint32_t superBlockSize;  // 64 or 128
+    uint32_t sbOriginX, sbOriginY;
+    uint8_t sbGeomW, sbGeomH;
+    uint32_t d64[4], d32[4], d16[4], d8[4], var[4];  // the me arrays
+    uint8_t priorBelow64, priorBelow32, priorBelow16;
+};
+
+static DepthRemovalPcs drCellPcs(const DrCell& cell, bool isISlice, uint64_t pictureNumber) {
+    DepthRemovalPcs pcs;
+    std::memset(&pcs, 0, sizeof(pcs));
+    pcs.isISlice = isISlice;
+    pcs.pictureNumber = pictureNumber;
+    pcs.rtc = cell.rtc;
+    pcs.superBlockSize = cell.superBlockSize;
+    pcs.b64Size = 64;
+    pcs.alignedWidth = 128;   // me_pic 2x2 for the SB128 arm
+    pcs.alignedHeight = 128;
+    pcs.sbGeomWidth = cell.sbGeomW;
+    pcs.sbGeomHeight = cell.sbGeomH;
+    pcs.modulateByQp = cell.modulateByQp;
+    pcs.pictureQp = cell.pictureQp;
+    pcs.ref.isBSlice = true;
+    pcs.ref.refListCountTry[0] = 1;
+    pcs.ref.refListCountTry[1] = 1;
+    pcs.ref.refPresent[0][0] = (cell.refAvail & 1) != 0;
+    pcs.ref.refPresent[1][0] = (cell.refAvail & 2) != 0;
+    pcs.ref.refPicWidth[0][0] = 64;
+    pcs.ref.refPicHeight[0][0] = 64;
+    pcs.ref.refPicWidth[1][0] = 64;
+    pcs.ref.refPicHeight[1][0] = 64;
+    pcs.ref.frameWidth = 64;
+    pcs.ref.frameHeight = 64;
+    pcs.refPocL0 = cell.refAvail & 1 ? pictureNumber - cell.refPocDelta : 0;
+    pcs.refPocL1 = cell.refAvail & 2 ? pictureNumber - cell.refPocDelta : 0;
+    pcs.refSbMinSqSizeL0 = cell.sbMinSqL0;
+    pcs.refSbMinSqSizeL1 = cell.sbMinSqL1;
+    pcs.me64x64Distortion = cell.d64;
+    pcs.me32x32Distortion = cell.d32;
+    pcs.me16x16Distortion = cell.d16;
+    pcs.me8x8Distortion = cell.d8;
+    pcs.me8x8CostVariance = cell.var;
+    return pcs;
+}
+
+TEST_CASE("set_depth_removal_level_controls - the wall grid x every level, vs the oracle") {
+    static const DrCell cells[] = {
+        // 0: plain non-rtc, no refs, SB64, flat geometry, tiny dists
+        {false, 30, 120, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 1: refs both avail, poc delta 0, min_sq 64 (the +20/+5 bump arm)
+        {false, 30, 120, false, 3, 0, 64, 64, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 2: min_sq 32 (the +15-only arm)
+        {false, 30, 120, false, 3, 0, 32, 32, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 3: min_sq 16 (no bump), poc delta 5 (no bump either)
+        {false, 30, 120, false, 3, 5, 16, 16, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 4: l0 only
+        {false, 30, 120, false, 1, 0, 64, 32, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 5: l1 only (l0 unavailable -> the whole ref arm is skipped)
+        {false, 30, 120, false, 2, 0, 64, 64, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 6: rtc (use_ref_info = false)
+        {false, 30, 120, true, 3, 0, 64, 64, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 7: SB128 at the (0,0) corner (both +1 arms live)
+        {false, 30, 120, false, 0, 0, 255, 255, 128, 0, 0, 128, 128,
+         {100, 200, 300, 400}, {80, 160, 240, 320}, {60, 120, 180, 240},
+         {40, 80, 120, 160}, {10, 20, 30, 40}, 0, 0, 0},
+        // 8: SB128 at the (64,0) edge (x+1 arm dead)
+        {false, 30, 120, false, 0, 0, 255, 255, 128, 64, 0, 128, 128,
+         {100, 200, 300, 400}, {80, 160, 240, 320}, {60, 120, 180, 240},
+         {40, 80, 120, 160}, {10, 20, 30, 40}, 0, 0, 0},
+        // 9: SB128 at the (0,64) edge (y+1 arm dead)
+        {false, 30, 120, false, 0, 0, 255, 255, 128, 0, 64, 128, 128,
+         {100, 200, 300, 400}, {80, 160, 240, 320}, {60, 120, 180, 240},
+         {40, 80, 120, 160}, {10, 20, 30, 40}, 0, 0, 0},
+        // 10: SB128 at the (64,64) far corner (all +1 arms dead)
+        {false, 30, 120, false, 0, 0, 255, 255, 128, 64, 64, 128, 128,
+         {100, 200, 300, 400}, {80, 160, 240, 320}, {60, 120, 180, 240},
+         {40, 80, 120, 160}, {10, 20, 30, 40}, 0, 0, 0},
+        // 11: variance above HIGH after the qp division (the zero arm)
+        {false, 30, 120, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {60000, 0, 0, 0},
+         0, 0, 0},
+        // 12: variance in the mid band (<<1 / >>1 arm)
+        {false, 30, 120, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {30000, 0, 0, 0},
+         0, 0, 0},
+        // 13: the qp > 53 unsigned-wrap divisor arm
+        {false, 63, 255, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 14: non-tileable geometry (the :0 arms) + prior flags set
+        {false, 30, 120, false, 0, 0, 255, 255, 64, 0, 0, 100, 100,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         1, 1, 1},
+        // 15: the delta-qp modulation, diff <= -12 bin (sbQindex 0, qp 30
+        // -> q2i[30] = 120 -> diff -120): level drops 4
+        {true, 30, 0, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 16: the -2 bin (115 - 120 = -5: <= -3, not <= -6)
+        {true, 30, 115, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 17: the -3 bin (113 - 120 = -7: <= -6, not <= -12)
+        {true, 30, 113, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 18: diff < 0 bin (sbQindex 119 -> -1)
+        {true, 30, 119, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 19: diff == 0 (no modulation)
+        {true, 30, 120, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 20: diff > 0 (no modulation)
+        {true, 30, 124, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+         {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+         0, 0, 0},
+        // 21: costly dists (the thresholds bite), prior flags set
+        {false, 30, 120, false, 3, 0, 64, 64, 64, 0, 0, 64, 64,
+         {900000, 0, 0, 0}, {800000, 0, 0, 0}, {700000, 0, 0, 0}, {600000, 0, 0, 0},
+         {10, 0, 0, 0}, 1, 1, 0},
+    };
+    int checked = 0;
+    for (const DrCell& cell : cells) {
+        for (int level = 0; level <= 15; ++level) {
+            DepthRemovalPcs pcs = drCellPcs(cell, false, 1000);
+            DepthRemovalCtx ctx;
+            std::memset(&ctx, 0, sizeof(ctx));
+            ctx.fastLambdaMd[0] = 500;
+            ctx.fastLambdaMd[1] = 777;
+            ctx.sbIndex = 0;
+            ctx.sbQindex = cell.sbQindex;
+            DepthRemovalCtrls c;
+            std::memset(&c, 0xA5, sizeof(c));
+            c.disallowBelow64x64 = cell.priorBelow64;
+            c.disallowBelow32x32 = cell.priorBelow32;
+            c.disallowBelow16x16 = cell.priorBelow16;
+            DepthRemovalCtrls o = c;
+            DepthRemovalCtx ctxO = ctx;
+            setDepthRemovalLevelCtrls(c, pcs, ctx, (uint8_t)level);
+            oracleSetDepthRemoval(o, pcs, ctxO, (uint8_t)level);
+            CHECK(c.enabled == o.enabled);
+            CHECK(c.disallowBelow64x64 == o.disallowBelow64x64);
+            CHECK(c.disallowBelow32x32 == o.disallowBelow32x32);
+            CHECK(c.disallowBelow16x16 == o.disallowBelow16x16);
+            CHECK(ctx.disallow4x4 == ctxO.disallow4x4);
+            ++checked;
+        }
+        // The >15 arm under BOTH prior-enabled states (the switch's
+        // missing default: enabled keeps prior state).
+        for (uint8_t priorEnabled = 0; priorEnabled <= 1; ++priorEnabled) {
+            DepthRemovalPcs pcs = drCellPcs(cell, false, 1000);
+            DepthRemovalCtx ctx;
+            std::memset(&ctx, 0, sizeof(ctx));
+            ctx.fastLambdaMd[0] = 500;
+            DepthRemovalCtrls c;
+            std::memset(&c, 0xA5, sizeof(c));
+            c.enabled = priorEnabled;
+            c.disallowBelow64x64 = cell.priorBelow64;
+            c.disallowBelow32x32 = cell.priorBelow32;
+            c.disallowBelow16x16 = cell.priorBelow16;
+            DepthRemovalCtrls o = c;
+            DepthRemovalCtx ctxO = ctx;
+            setDepthRemovalLevelCtrls(c, pcs, ctx, 16);
+            oracleSetDepthRemoval(o, pcs, ctxO, 16);
+            CHECK(c.enabled == o.enabled);
+            CHECK(c.disallowBelow64x64 == o.disallowBelow64x64);
+            CHECK(c.disallowBelow32x32 == o.disallowBelow32x32);
+            CHECK(c.disallowBelow16x16 == o.disallowBelow16x16);
+            CHECK(ctx.disallow4x4 == ctxO.disallow4x4);
+            ++checked;
+        }
+    }
+    CHECK(checked == 22 * 18);
+}
+
+TEST_CASE("set_depth_removal_level_controls - the I-slice and level-0 gates, poison pins") {
+    // I-slice: enabled = 0 and NOTHING else is touched (:3033-3034).
+    DrCell cell = {false, 30, 120, false, 3, 0, 64, 64, 64, 0, 0, 64, 64,
+                   {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+                   0, 0, 0};
+    DepthRemovalPcs pcs = drCellPcs(cell, true, 1000);
+    DepthRemovalCtx ctx;
+    std::memset(&ctx, 0, sizeof(ctx));
+    ctx.fastLambdaMd[0] = 500;
+    DepthRemovalCtrls c;
+    std::memset(&c, 0xA5, sizeof(c));
+    setDepthRemovalLevelCtrls(c, pcs, ctx, 9);
+    CHECK(c.enabled == 0);
+    CHECK(c.disallowBelow64x64 == 0xA5);
+    CHECK(c.disallowBelow32x32 == 0xA5);
+    CHECK(c.disallowBelow16x16 == 0xA5);
+    CHECK(ctx.disallow4x4 == 0);
+    // Level 0 (non-I-slice): enabled = 0, the rest untouched (:3069-3071).
+    DepthRemovalPcs pcs2 = drCellPcs(cell, false, 1000);
+    DepthRemovalCtrls c2;
+    std::memset(&c2, 0xA5, sizeof(c2));
+    setDepthRemovalLevelCtrls(c2, pcs2, ctx, 0);
+    CHECK(c2.enabled == 0);
+    CHECK(c2.disallowBelow64x64 == 0xA5);
+    CHECK(c2.disallowBelow32x32 == 0xA5);
+    CHECK(c2.disallowBelow16x16 == 0xA5);
+    // Level > 15 with prior enabled = 0: nothing written at all (the
+    // enabled byte must be set to the KNOWN 0 - a poison 0xA5 would read
+    // truthy and RUN the enabled block, writing the three flags).
+    DepthRemovalCtrls c3;
+    std::memset(&c3, 0xA5, sizeof(c3));
+    c3.enabled = 0;
+    setDepthRemovalLevelCtrls(c3, pcs2, ctx, 16);
+    CHECK(c3.enabled == 0);
+    CHECK(c3.disallowBelow64x64 == 0xA5);
+    CHECK(c3.disallowBelow32x32 == 0xA5);
+    CHECK(c3.disallowBelow16x16 == 0xA5);
+}
+
+TEST_CASE("set_depth_removal_level_controls - hand pins over the modulation and 4x4 arm") {
+    // Hand-derived cell: level 15, no refs, SB64, qp 30, flat geometry,
+    // dist8 tiny (cost8 < the 4x4 th) + variance below LOW after the qp
+    // division -> ctx.disallow4x4 flips to 1; prior disallow4x4 = 1 keeps
+    // it (the !ctx->disallow_4x4 gate :3333).
+    DrCell cell = {false, 30, 120, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+                   {1000, 0, 0, 0}, {800, 0, 0, 0}, {600, 0, 0, 0}, {4, 0, 0, 0}, {10, 0, 0, 0},
+                   0, 0, 0};
+    DepthRemovalPcs pcs = drCellPcs(cell, false, 1000);
+    DepthRemovalCtx ctx;
+    std::memset(&ctx, 0, sizeof(ctx));
+    ctx.fastLambdaMd[0] = 500;
+    DepthRemovalCtrls c;
+    std::memset(&c, 0xA5, sizeof(c));
+    setDepthRemovalLevelCtrls(c, pcs, ctx, 15);
+    CHECK(c.enabled == 1);
+    CHECK(ctx.disallow4x4 == 1);
+    // The gate: prior disallow4x4 = 1 -> no re-evaluation, stays 1.
+    DepthRemovalCtx ctx2;
+    std::memset(&ctx2, 0, sizeof(ctx2));
+    ctx2.fastLambdaMd[0] = 500;
+    ctx2.disallow4x4 = 1;
+    DepthRemovalCtrls c2;
+    std::memset(&c2, 0xA5, sizeof(c2));
+    setDepthRemovalLevelCtrls(c2, pcs, ctx2, 15);
+    CHECK(ctx2.disallow4x4 == 1);
+    // The modulation: level 15 with diff <= -12 drops to 11 (same
+    // multipliers, dev16 250): the dists here make the two levels
+    // indistinguishable in the flags, so the pin is the ref-less
+    // identical-threshold pair - instead pin the LEVEL BOUND directly:
+    // level 2 with diff <= -12 -> level 0 (enabled = 0).
+    DrCell cell2 = {true, 30, 0, false, 0, 0, 255, 255, 64, 0, 0, 64, 64,
+                    {100, 0, 0, 0}, {80, 0, 0, 0}, {60, 0, 0, 0}, {40, 0, 0, 0}, {10, 0, 0, 0},
+                    0, 0, 0};
+    DepthRemovalPcs pcs2 = drCellPcs(cell2, false, 1000);
+    DepthRemovalCtrls c3;
+    std::memset(&c3, 0xA5, sizeof(c3));
+    setDepthRemovalLevelCtrls(c3, pcs2, ctx, 2);
+    CHECK(c3.enabled == 0);
+    // ...and level 5 with the same diff drops to level 1 (enabled stays 1;
+    // MAX(0, 5 - 4) = 1). Level 3 would clamp to 0 (MAX(0, 3 - 4)).
+    DepthRemovalCtrls c4;
+    std::memset(&c4, 0xA5, sizeof(c4));
+    setDepthRemovalLevelCtrls(c4, pcs2, ctx, 5);
+    CHECK(c4.enabled == 1);
+}
+
+// ---------------------------------------------------------------------------
+// Batch C rung 2: the MD search setters (:3348-3631).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("md_nsq_motion_search_controls - the three levels, whole-struct") {
+    // :3348-3373. Level 0 writes ONLY enabled; 1-2 write all five fields;
+    // the default arm assert(0)s and writes nothing.
+    for (int level = 0; level <= 3; ++level) {
+        MdNsqMotionSearchCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setMdNsqMotionSearchCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.distType == kPoison);
+            CHECK(c.fullPelSearchWidth == kPoison);
+        } else if (level <= 2) {
+            CHECK(c.enabled == 1);
+            CHECK(c.distType == VAR);
+            CHECK(c.fullPelSearchWidth == (level == 1 ? 32 : 16));
+            CHECK(c.fullPelSearchHeight == (level == 1 ? 16 : 8));
+            CHECK(c.enablePsad == 1);
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.distType == kPoison);
+            CHECK(c.enablePsad == kPoison);
+        }
+    }
+}
+
+TEST_CASE("md_pme_search_controls - the six levels, whole-struct") {
+    // :3375-3451. Level 0 writes ONLY enabled; 1-5 write all eleven
+    // fields; the default arm assert(0)s and writes nothing. The
+    // MAX/MIN_SIGNED_VALUE sentinels are pinned literally (utility.h:164-
+    // 165: MIN = ~0 - ((signed)(~0u >> 1)) = INT32_MIN).
+    for (int level = 0; level <= 6; ++level) {
+        MdPmeCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setMdPmeCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.distType == kPoison);
+            CHECK(c.saQWeight == kPoison);
+        } else if (level <= 5) {
+            CHECK(c.enabled == 1);
+            CHECK(c.distType == (level >= 4 ? SAD : VAR));
+            CHECK(c.fullPelSearchWidth == (level >= 4 ? 7 : 9));
+            CHECK(c.fullPelSearchHeight == (level == 3 ? 7 : (level >= 4 ? 5 : 9)));
+            CHECK(c.earlyCheckMvThMultiplier == (level == 5 ? 64 : kMinSignedValue));
+            CHECK(c.preFpPmeToMeCostTh == (level >= 4 ? 25 : kMaxSignedValue));
+            CHECK(c.preFpPmeToMeMvTh == (level >= 3 ? 16 : kMinSignedValue));
+            CHECK(c.postFpPmeToMeCostTh == (level >= 4 ? 50 : (level == 3 ? 50 : kMaxSignedValue)));
+            CHECK(c.postFpPmeToMeMvTh == (level == 4 || level == 5 ? 32 : kMinSignedValue));
+            CHECK(c.enablePsad == (level >= 4 ? 1 : 0));
+            CHECK(c.saQWeight == (level == 1 ? 0 : 1));
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.distType == kPoison);
+            CHECK(c.preFpPmeToMeCostTh == (int32_t)((uint32_t)kPoison * 0x01010101u));
+        }
+    }
+}
+
+TEST_CASE("set_subres_controls - the three levels and the prior-state default arm") {
+    // :3453-3476. step is written by cases 0-2; the post-switch
+    // odd_to_even_deviation_th is written from the (possibly prior) step
+    // on EVERY call - so the default arm (assert(0), step untouched)
+    // still writes the TH from the PRIOR step. The poison step 0xA5 != 0
+    // pins the else arm.
+    for (int level = 0; level <= 2; ++level) {
+        SubresCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setSubresCtrls(c, (uint8_t)level);
+        CHECK(c.step == level);
+        CHECK(c.oddToEvenDeviationTh == (level == 0 ? 0 : 5));
+    }
+    SubresCtrls c;
+    std::memset(&c, kPoison, sizeof(c));
+    setSubresCtrls(c, 3);  // default arm: step untouched (0xA5), TH = 5
+    CHECK(c.step == kPoison);
+    CHECK(c.oddToEvenDeviationTh == 5);
+    // A prior step of 0 (e.g. level 0 first, then the default arm) keeps 0.
+    SubresCtrls c2;
+    std::memset(&c2, kPoison, sizeof(c2));
+    setSubresCtrls(c2, 0);
+    setSubresCtrls(c2, 7);
+    CHECK(c2.step == 0);
+    CHECK(c2.oddToEvenDeviationTh == 0);
+}
+
+TEST_CASE("set_pf_controls - the four shapes, whole-struct") {
+    // :3478-3503. The #if !CONFIG_ENABLE_TX_PF_N2 assert is compiled out
+    // in the pinned build (TX_PF_N2 = 1), so pf_level 2 (N2_SHAPE) is a
+    // plain write here; the default arm assert(0)s and writes nothing.
+    for (int level = 0; level <= 4; ++level) {
+        PfCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setPfCtrls(c, (uint8_t)level);
+        if (level <= 3) {
+            CHECK(c.pfShape == (level == 0 ? ONLY_DC_SHAPE
+                                             : (level == 1 ? DEFAULT_SHAPE
+                                                           : (level == 2 ? N2_SHAPE : N4_SHAPE))));
+        } else {
+            CHECK(c.pfShape == kPoison);
+        }
+    }
+}
+
+TEST_CASE("md_sq_motion_search_controls - the five levels, whole-struct") {
+    // :3508-3628. Level 0 writes ONLY enabled; 1-4 write all 22 fields and
+    // differ ONLY in the two sparse multipliers (500/400/300/100); the
+    // default arm assert(0)s and writes nothing.
+    for (int level = 0; level <= 5; ++level) {
+        MdSqMotionSearchCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setMdSqMotionSearchCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.distType == kPoison);
+            CHECK(c.enablePsad == kPoison);
+        } else if (level <= 4) {
+            CHECK(c.enabled == 1);
+            CHECK(c.distType == SAD);
+            CHECK(c.pameDistortionTh == 10);
+            CHECK(c.sprsLev0Enabled == 1);
+            CHECK(c.sprsLev0Step == 4);
+            CHECK(c.sprsLev0W == 15);
+            CHECK(c.sprsLev0H == 15);
+            CHECK(c.maxSprsLev0W == 150);
+            CHECK(c.maxSprsLev0H == 150);
+            CHECK(c.sprsLev0Multiplier == (level == 1 ? 500 : (level == 2 ? 400 :
+                                            (level == 3 ? 300 : 100))));
+            CHECK(c.sprsLev1Enabled == 1);
+            CHECK(c.sprsLev1Step == 2);
+            CHECK(c.sprsLev1W == 4);
+            CHECK(c.sprsLev1H == 4);
+            CHECK(c.maxSprsLev1W == 50);
+            CHECK(c.maxSprsLev1H == 50);
+            CHECK(c.sprsLev1Multiplier == c.sprsLev0Multiplier);
+            CHECK(c.sprsLev2Enabled == 1);
+            CHECK(c.sprsLev2Step == 1);
+            CHECK(c.sprsLev2W == 3);
+            CHECK(c.sprsLev2H == 3);
+            CHECK(c.enablePsad == 1);
+        } else {
+            CHECK(c.enabled == kPoison);
+            // the fixture poison byte pair 0xAAAA reads as -21846 in the
+            // int16 field
+            CHECK(c.sprsLev0Multiplier == (int16_t)-21846);
+            CHECK(c.enablePsad == kPoison);
+        }
+    }
+}

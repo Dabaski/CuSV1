@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace l16_rdo {
 namespace mode_config {
@@ -2931,6 +2932,743 @@ bool dimensionsRequire8x8(std::uint16_t alignedWidth, std::uint16_t alignedHeigh
     }
     // No allowable block size from 16x16-64x64 was found; therefore, require 8x8
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Batch C rung 1: set_depth_removal_level_controls (:3030-3343) and its
+// get_sb128_me_data dependency (:63-115).
+// ---------------------------------------------------------------------------
+
+// quantizer_to_qindex (md_process.c:20-23, verbatim) - the rate_est.cpp
+// twin duplicated (the l7/l13/l16 duplication precedent).
+static const std::uint8_t kQuantizerToQindex[64] = {
+    0,   4,   8,   12,  16,  20,  24,  28,  32,  36,  40,  44,  48,  52,  56,  60,  64,  68,  72,  76,  80,  84,
+    88,  92,  96,  100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172,
+    176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 249, 255};
+
+// RDCOST (rd_cost.h:36-38) with ROUND_POWER_OF_TWO (definitions.h:457),
+// AV1_PROB_COST_SHIFT 9 (md_rate_estimation.h:29) and RDDIV_BITS 7
+// (rd_cost.h:34) - the rate_est.cpp twin duplicated.
+static std::int64_t rdCost(std::int64_t rdmult, std::int64_t rate, std::int64_t dist) {
+    return (((rate * rdmult) + (((1 << 9) >> 1))) >> 9) + (dist * ((std::int64_t)1 << 7));
+}
+
+// get_sb128_me_data (enc_mode_config.c:63-115), 1:1. The
+// PictureControlSet/ModeDecisionContext walls thread as the consumed
+// scalars + the five ME arrays (pcs.h:866-870).
+static void getSb128MeData(std::uint8_t b64Size, std::uint32_t alignedWidth,
+                           std::uint32_t alignedHeight, std::uint32_t sbOriginX,
+                           std::uint32_t sbOriginY, const std::uint32_t* me64x64Distortion,
+                           const std::uint32_t* me32x32Distortion,
+                           const std::uint32_t* me16x16Distortion,
+                           const std::uint32_t* me8x8Distortion,
+                           const std::uint32_t* me8x8CostVariance, std::uint32_t* me64x64Dist,
+                           std::uint32_t* me32x32Dist, std::uint32_t* me16x16Dist,
+                           std::uint32_t* me8x8Dist, std::uint32_t* me8x8CostVar) {
+    const std::uint32_t meSbSize         = b64Size;
+    const std::uint32_t mePicWidthInSb  = (alignedWidth + meSbSize - 1) / meSbSize;
+    const std::uint32_t mePicHeightInSb = (alignedHeight + meSbSize - 1) / meSbSize;
+    const std::uint32_t meSbX = (sbOriginX / meSbSize);
+    const std::uint32_t meSbY = (sbOriginY / meSbSize);
+    const std::uint32_t meSbAddr = meSbX + meSbY * mePicWidthInSb;
+
+    std::uint32_t dist64 = me64x64Distortion[meSbAddr];
+    std::uint32_t dist32 = me32x32Distortion[meSbAddr];
+    std::uint32_t dist16 = me16x16Distortion[meSbAddr];
+    std::uint32_t dist8  = me8x8Distortion[meSbAddr];
+    std::uint32_t meCostVar = me8x8CostVariance[meSbAddr];
+    int count = 1;
+    if (meSbX + 1 < mePicWidthInSb) {
+        dist64 += me64x64Distortion[meSbAddr + 1];
+        dist32 += me32x32Distortion[meSbAddr + 1];
+        dist16 += me16x16Distortion[meSbAddr + 1];
+        dist8 += me8x8Distortion[meSbAddr + 1];
+        meCostVar = std::max(meCostVar, me8x8CostVariance[meSbAddr + 1]);
+        count++;
+    }
+    if (meSbY + 1 < mePicHeightInSb) {
+        dist64 += me64x64Distortion[meSbAddr + mePicWidthInSb];
+        dist32 += me32x32Distortion[meSbAddr + mePicWidthInSb];
+        dist16 += me16x16Distortion[meSbAddr + mePicWidthInSb];
+        dist8 += me8x8Distortion[meSbAddr + mePicWidthInSb];
+        meCostVar = std::max(meCostVar, me8x8CostVariance[meSbAddr + mePicWidthInSb]);
+        count++;
+    }
+    if (meSbX + 1 < mePicWidthInSb && meSbY + 1 < mePicHeightInSb) {
+        dist64 += me64x64Distortion[meSbAddr + mePicWidthInSb + 1];
+        dist32 += me32x32Distortion[meSbAddr + mePicWidthInSb + 1];
+        dist16 += me16x16Distortion[meSbAddr + mePicWidthInSb + 1];
+        dist8 += me8x8Distortion[meSbAddr + mePicWidthInSb + 1];
+        meCostVar = std::max(meCostVar, me8x8CostVariance[meSbAddr + mePicWidthInSb + 1]);
+        count++;
+    }
+    dist64 /= count;
+    dist32 /= count;
+    dist16 /= count;
+    dist8 /= count;
+
+    *me64x64Dist   = dist64;
+    *me32x32Dist   = dist32;
+    *me16x16Dist   = dist16;
+    *me8x8Dist     = dist8;
+    *me8x8CostVar  = meCostVar;
+}
+
+// The :3068-3224 switch, 1:1 (the fold's struct is the
+// getGmCorrespondence precedent). NO default case in the reference:
+// level > 15 leaves enabled unwritten (enabledWritten = false) and the
+// locals at their pre-switch init values.
+void getDepthRemovalLevelParams(std::uint8_t level, DepthRemovalLevelParams& params) {
+    // Pre-switch inits (:3043-3052).
+    params.enabledWritten                     = false;
+    params.enabled                            = 0;
+    params.disallow4x4CostThMultiplier        = 0;
+    params.disallowBelow16x16CostThMultiplier = 0;
+    params.disallowBelow32x32CostThMultiplier = 0;
+    params.disallowBelow64x64CostThMultiplier = 0;
+    params.dev16x16To8x8Th                    = kMaxSignedValue;
+    params.dev32x32To16x16Th                  = kMaxSignedValue;
+    params.qpScaleFactor                      = 0;
+
+    switch (level) {
+    case 0:
+        params.enabledWritten = true;
+        params.enabled        = 0;
+        break;
+    case 1:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 0;
+        params.disallowBelow32x32CostThMultiplier = 0;
+        params.disallowBelow64x64CostThMultiplier = 0;
+        params.dev16x16To8x8Th                    = 0;
+        params.dev32x32To16x16Th                  = 0;
+        params.qpScaleFactor                      = 1;
+        break;
+    case 2:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 0;
+        params.disallowBelow32x32CostThMultiplier = 0;
+        params.disallowBelow64x64CostThMultiplier = 0;
+        params.dev16x16To8x8Th                    = 10;
+        params.dev32x32To16x16Th                  = 0;
+        params.qpScaleFactor                      = 1;
+        break;
+    case 3:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 0;
+        params.disallowBelow32x32CostThMultiplier = 0;
+        params.disallowBelow64x64CostThMultiplier = 0;
+        params.dev16x16To8x8Th                    = 20;
+        params.dev32x32To16x16Th                  = 0;
+        params.qpScaleFactor                      = 1;
+        break;
+    case 4:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 0;
+        params.disallowBelow32x32CostThMultiplier = 0;
+        params.disallowBelow64x64CostThMultiplier = 0;
+        params.dev16x16To8x8Th                    = 30;
+        params.dev32x32To16x16Th                  = 0;
+        params.qpScaleFactor                      = 1;
+        break;
+    case 5:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 6;
+        params.disallowBelow32x32CostThMultiplier = 6;
+        params.disallowBelow64x64CostThMultiplier = 0;
+        params.dev16x16To8x8Th                    = 40;
+        params.dev32x32To16x16Th                  = 0;
+        params.qpScaleFactor                      = 1;
+        break;
+    case 6:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 6;
+        params.disallowBelow32x32CostThMultiplier = 6;
+        params.disallowBelow64x64CostThMultiplier = 0;
+        params.dev16x16To8x8Th                    = 50;
+        params.dev32x32To16x16Th                  = 25;
+        params.qpScaleFactor                      = 1;
+        break;
+    case 7:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 6;
+        params.disallowBelow32x32CostThMultiplier = 6;
+        params.disallowBelow64x64CostThMultiplier = 0;
+        params.dev16x16To8x8Th                    = 50;
+        params.dev32x32To16x16Th                  = 25;
+        params.qpScaleFactor                      = 2;
+        break;
+    case 8:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 16;
+        params.disallowBelow32x32CostThMultiplier = 8;
+        params.disallowBelow64x64CostThMultiplier = 8;
+        params.dev16x16To8x8Th                    = 100;
+        params.dev32x32To16x16Th                  = 50;
+        params.qpScaleFactor                      = 3;
+        break;
+    case 9:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 32;
+        params.disallowBelow32x32CostThMultiplier = 8;
+        params.disallowBelow64x64CostThMultiplier = 8;
+        params.dev16x16To8x8Th                    = 100;
+        params.dev32x32To16x16Th                  = 50;
+        params.qpScaleFactor                      = 3;
+        break;
+    case 10:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 128;
+        params.disallowBelow32x32CostThMultiplier = 8;
+        params.disallowBelow64x64CostThMultiplier = 8;
+        params.dev16x16To8x8Th                    = 200;
+        params.dev32x32To16x16Th                  = 75;
+        params.qpScaleFactor                      = 3;
+        break;
+    case 11:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 128;
+        params.disallowBelow32x32CostThMultiplier = 8;
+        params.disallowBelow64x64CostThMultiplier = 8;
+        params.dev16x16To8x8Th                    = 250;
+        params.dev32x32To16x16Th                  = 125;
+        params.qpScaleFactor                      = 3;
+        break;
+    case 12:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 128;
+        params.disallowBelow32x32CostThMultiplier = 16;
+        params.disallowBelow64x64CostThMultiplier = 8;
+        params.dev16x16To8x8Th                    = 250;
+        params.dev32x32To16x16Th                  = 150;
+        params.qpScaleFactor                      = 4;
+        break;
+    case 13:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 256;
+        params.disallowBelow32x32CostThMultiplier = 16;
+        params.disallowBelow64x64CostThMultiplier = 8;
+        params.dev16x16To8x8Th                    = 250;
+        params.dev32x32To16x16Th                  = 150;
+        params.qpScaleFactor                      = 4;
+        break;
+    case 14:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 256;
+        params.disallowBelow32x32CostThMultiplier = 16;
+        params.disallowBelow64x64CostThMultiplier = 16;
+        params.dev16x16To8x8Th                    = 250;
+        params.dev32x32To16x16Th                  = 150;
+        params.qpScaleFactor                      = 4;
+        break;
+    case 15:
+        params.enabledWritten                     = true;
+        params.enabled                            = 1;
+        params.disallow4x4CostThMultiplier        = 64;
+        params.disallowBelow16x16CostThMultiplier = 384;
+        params.disallowBelow32x32CostThMultiplier = 24;
+        params.disallowBelow64x64CostThMultiplier = 24;
+        params.dev16x16To8x8Th                    = 300;
+        params.dev32x32To16x16Th                  = 200;
+        params.qpScaleFactor                      = 4;
+        break;
+    }
+}
+
+// set_depth_removal_level_controls (enc_mode_config.c:3030-3343), 1:1.
+void setDepthRemovalLevelCtrls(DepthRemovalCtrls& ctrls, const DepthRemovalPcs& pcs,
+                               DepthRemovalCtx& ctx, std::uint8_t depthRemovalLevel) {
+    if (pcs.isISlice) {
+        ctrls.enabled = 0;
+    } else {
+        // me_distortion => EB_8_BIT_MD (:3036-3037).
+        const std::uint32_t fastLambda = ctx.fastLambdaMd[0];
+
+        const std::uint32_t sbSize = 64 * 64;
+
+        const std::uint64_t costThRate = (std::uint64_t)1 << 13;
+
+        std::uint64_t disallow4x4CostThMultiplier        = 0;
+        std::uint64_t disallowBelow16x16CostThMultiplier = 0;
+        std::uint64_t disallowBelow32x32CostThMultiplier = 0;
+        std::uint64_t disallowBelow64x64CostThMultiplier = 0;
+
+        std::int64_t dev16x16To8x8Th   = kMaxSignedValue;
+        std::int64_t dev32x32To16x16Th = kMaxSignedValue;
+        std::int64_t dev32x32To8x8Th   = kMaxSignedValue;
+
+        std::int8_t qpScaleFactor = 0;
+
+        // modulate the depth-removal level using: (1) tpl-information,
+        // specifically the SB delta-qp, and (2) the high-freq information
+        // (:3054-3066). The delta_q_present || r0_delta_qp_md gate folds
+        // into modulateByQp.
+        if (pcs.modulateByQp) {
+            const int diff = (int)ctx.sbQindex - (int)kQuantizerToQindex[pcs.pictureQp];
+            if (diff <= -12) {
+                depthRemovalLevel = (std::uint8_t)std::max(0, (int)depthRemovalLevel - 4);
+            } else if (diff <= -6) {
+                depthRemovalLevel = (std::uint8_t)std::max(0, (int)depthRemovalLevel - 3);
+            } else if (diff <= -3) {
+                depthRemovalLevel = (std::uint8_t)std::max(0, (int)depthRemovalLevel - 2);
+            } else if (diff < 0) {
+                depthRemovalLevel = (std::uint8_t)std::max(0, (int)depthRemovalLevel - 1);
+            }
+        }
+
+        DepthRemovalLevelParams params;
+        getDepthRemovalLevelParams(depthRemovalLevel, params);
+        if (params.enabledWritten) {
+            ctrls.enabled                            = params.enabled;
+            disallow4x4CostThMultiplier              = params.disallow4x4CostThMultiplier;
+            disallowBelow16x16CostThMultiplier       = params.disallowBelow16x16CostThMultiplier;
+            disallowBelow32x32CostThMultiplier       = params.disallowBelow32x32CostThMultiplier;
+            disallowBelow64x64CostThMultiplier       = params.disallowBelow64x64CostThMultiplier;
+            dev16x16To8x8Th                          = params.dev16x16To8x8Th;
+            dev32x32To16x16Th                        = params.dev32x32To16x16Th;
+            qpScaleFactor                            = params.qpScaleFactor;
+        }
+        if (ctrls.enabled) {
+            // Use info from ref. frames (if available) (:3228-3262).
+            const bool useRefInfo = pcs.rtc ? false : true;
+            if (useRefInfo) {
+                const bool isRefL0Avail = isRefSameSize(pcs.ref, 0, 0);
+                const bool isRefL1Avail = isRefSameSize(pcs.ref, 1, 0);
+
+                if (isRefL0Avail) {
+                    std::uint8_t sbMinSqSize = (std::uint8_t)~0;
+
+                    if (std::abs((int)(pcs.pictureNumber - pcs.refPocL0)) <= 1) {
+                        sbMinSqSize = pcs.refSbMinSqSizeL0;
+                    }
+
+                    if (isRefL1Avail) {
+                        if (std::abs((int)(pcs.pictureNumber - pcs.refPocL1)) <= 1) {
+                            sbMinSqSize =
+                                (std::uint8_t)std::min(sbMinSqSize, pcs.refSbMinSqSizeL1);
+                        }
+                    }
+
+                    if (sbMinSqSize != (std::uint8_t)~0) {
+                        if (sbMinSqSize >= 64) {
+                            dev32x32To16x16Th = dev32x32To16x16Th + 5;
+                            dev16x16To8x8Th   = dev16x16To8x8Th + 20;
+                        } else if (sbMinSqSize >= 32) {
+                            dev16x16To8x8Th = dev16x16To8x8Th + 15;
+                        }
+                    }
+                }
+            }
+            std::uint32_t dist64, dist32, dist16, dist8, me8x8CostVariance;
+            if (pcs.superBlockSize == 64) {
+                dist64              = pcs.me64x64Distortion[ctx.sbIndex];
+                dist32              = pcs.me32x32Distortion[ctx.sbIndex];
+                dist16              = pcs.me16x16Distortion[ctx.sbIndex];
+                dist8               = pcs.me8x8Distortion[ctx.sbIndex];
+                me8x8CostVariance   = pcs.me8x8CostVariance[ctx.sbIndex];
+            } else {
+                getSb128MeData(pcs.b64Size, pcs.alignedWidth, pcs.alignedHeight, ctx.sbOriginX,
+                               ctx.sbOriginY, pcs.me64x64Distortion, pcs.me32x32Distortion,
+                               pcs.me16x16Distortion, pcs.me8x8Distortion, pcs.me8x8CostVariance,
+                               &dist64, &dist32, &dist16, &dist8, &me8x8CostVariance);
+            }
+
+            // dev_16x16_to_8x8_th, dev_32x32_to_16x16_th =
+            // f(me_8x8_cost_variance) (:3274-3284). The divisor's
+            // unsigned arithmetic WRAPS for picture_qp > 53 - the
+            // reference's own behavior, mirrored.
+            me8x8CostVariance /= std::max(std::max(63u - (pcs.pictureQp + 10u), 1u), 1u);
+            if (me8x8CostVariance < kLow8x8DistVarTh) {
+                dev16x16To8x8Th = dev16x16To8x8Th << 2;
+            } else if (me8x8CostVariance < kHigh8x8DistVarTh) {
+                dev16x16To8x8Th   = dev16x16To8x8Th << 1;
+                dev32x32To16x16Th = dev32x32To16x16Th >> 1;
+            } else {
+                dev16x16To8x8Th   = 0;
+                dev32x32To16x16Th = 0;
+            }
+
+            // dev_16x16_to_8x8_th, dev_32x32_to_16x16_th = f(QP)
+            // (:3286-3288); the unsigned wrap mirrors.
+            const std::uint32_t qpWeight =
+                std::max(std::max(63u - (pcs.pictureQp + 10u), 1u) >> 4, 1u);
+            dev16x16To8x8Th   *= (std::int64_t)(qpWeight * (std::uint32_t)qpScaleFactor);
+            dev32x32To16x16Th *= (std::int64_t)(qpWeight * (std::uint32_t)qpScaleFactor);
+            // dev_32x32_to_8x8_th = f(dev_32x32_to_16x16_th); a bit higher
+            // (:3289-3290).
+            dev32x32To8x8Th = (dev32x32To16x16Th * ((1 << 2) + 1)) >> 2;
+
+            const std::uint64_t disallowBelow16x16CostTh = disallowBelow16x16CostThMultiplier
+                ? (std::uint64_t)rdCost((std::int64_t)fastLambda, (std::int64_t)costThRate,
+                                        (std::int64_t)((sbSize >> 3) *
+                                                       disallowBelow16x16CostThMultiplier))
+                : 0;
+            const std::uint64_t disallowBelow32x32CostTh = disallowBelow32x32CostThMultiplier
+                ? (std::uint64_t)rdCost((std::int64_t)fastLambda, (std::int64_t)costThRate,
+                                        (std::int64_t)((sbSize >> 3) *
+                                                       disallowBelow32x32CostThMultiplier))
+                : 0;
+            const std::uint64_t disallowBelow64x64CostTh = disallowBelow64x64CostThMultiplier
+                ? (std::uint64_t)rdCost((std::int64_t)fastLambda, (std::int64_t)costThRate,
+                                        (std::int64_t)((sbSize >> 3) *
+                                                       disallowBelow64x64CostThMultiplier))
+                : 0;
+
+            const std::uint64_t cost64x64 = (std::uint64_t)rdCost((std::int64_t)fastLambda, 0,
+                                                                  (std::int64_t)dist64);
+            const std::uint64_t cost32x32 = (std::uint64_t)rdCost((std::int64_t)fastLambda, 0,
+                                                                  (std::int64_t)dist32);
+            const std::uint64_t cost16x16 = (std::uint64_t)rdCost((std::int64_t)fastLambda, 0,
+                                                                  (std::int64_t)dist16);
+            const std::uint64_t cost8x8   = (std::uint64_t)rdCost((std::int64_t)fastLambda, 0,
+                                                                  (std::int64_t)dist8);
+
+            const std::int64_t dev32x32To16x16 =
+                (std::int64_t)(((std::int64_t)std::max(cost32x32, (std::uint64_t)1) -
+                                (std::int64_t)std::max(cost16x16, (std::uint64_t)1)) *
+                               1000) /
+                (std::int64_t)std::max(cost16x16, (std::uint64_t)1);
+
+            const std::int64_t dev32x32To8x8 =
+                (std::int64_t)(((std::int64_t)std::max(cost32x32, (std::uint64_t)1) -
+                                (std::int64_t)std::max(cost8x8, (std::uint64_t)1)) *
+                               1000) /
+                (std::int64_t)std::max(cost8x8, (std::uint64_t)1);
+
+            const std::int64_t dev16x16To8x8 =
+                (std::int64_t)(((std::int64_t)std::max(cost16x16, (std::uint64_t)1) -
+                                (std::int64_t)std::max(cost8x8, (std::uint64_t)1)) *
+                               1000) /
+                (std::int64_t)std::max(cost8x8, (std::uint64_t)1);
+
+            // Enable depth removal at a given depth if the entire SB can be
+            // covered by blocks of that size (to avoid disallowing
+            // necessary blocks) (:3316-3332).
+            ctrls.disallowBelow64x64 = (std::uint8_t)(
+                (((pcs.sbGeomWidth % 64) == 0 || (pcs.sbGeomWidth % 64) > 32) &&
+                 ((pcs.sbGeomHeight % 64) == 0 || (pcs.sbGeomHeight % 64) > 32))
+                    ? (ctrls.disallowBelow64x64 || cost64x64 < disallowBelow64x64CostTh)
+                    : 0);
+
+            ctrls.disallowBelow32x32 = (std::uint8_t)(
+                (((pcs.sbGeomWidth % 32) == 0 || (pcs.sbGeomWidth % 32) > 16) &&
+                 ((pcs.sbGeomHeight % 32) == 0 || (pcs.sbGeomHeight % 32) > 16))
+                    ? (ctrls.disallowBelow32x32 || cost32x32 < disallowBelow32x32CostTh ||
+                       (dev32x32To16x16 < dev32x32To16x16Th &&
+                        dev32x32To8x8 < dev32x32To8x8Th))
+                    : 0);
+
+            ctrls.disallowBelow16x16 = (std::uint8_t)(
+                (!dimensionsRequire8x8(pcs.sbGeomWidth, pcs.sbGeomHeight))
+                    ? (ctrls.disallowBelow16x16 || cost16x16 < disallowBelow16x16CostTh ||
+                       dev16x16To8x8 < dev16x16To8x8Th)
+                    : 0);
+            if (!ctx.disallow4x4 && disallow4x4CostThMultiplier) {
+                const std::uint64_t disallow4x4CostTh =
+                    (std::uint64_t)rdCost((std::int64_t)fastLambda, (std::int64_t)costThRate,
+                                          (std::int64_t)((sbSize >> 1) *
+                                                         disallow4x4CostThMultiplier));
+
+                if (cost8x8 < disallow4x4CostTh && me8x8CostVariance < kLow8x8DistVarTh) {
+                    ctx.disallow4x4 = 1;
+                }
+            }
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Batch C rung 2: the MD search setters.
+// ---------------------------------------------------------------------------
+
+// md_nsq_motion_search_controls (enc_mode_config.c:3348-3373), 1:1.
+void setMdNsqMotionSearchCtrls(MdNsqMotionSearchCtrls& ctrls, std::uint8_t mdNsqMvSearchLevel) {
+    switch (mdNsqMvSearchLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled            = 1;
+        ctrls.distType           = (std::uint8_t)VAR;
+        ctrls.fullPelSearchWidth  = 32;
+        ctrls.fullPelSearchHeight = 16;
+        ctrls.enablePsad         = 1;
+        break;
+    case 2:
+        ctrls.enabled            = 1;
+        ctrls.distType           = (std::uint8_t)VAR;
+        ctrls.fullPelSearchWidth  = 16;
+        ctrls.fullPelSearchHeight = 8;
+        ctrls.enablePsad         = 1;
+        break;
+    default:
+        // The reference assert(0)s (:3369-3371) and writes nothing.
+        break;
+    }
+}
+
+// svt_aom_md_pme_search_controls (enc_mode_config.c:3375-3451), 1:1.
+void setMdPmeCtrls(MdPmeCtrls& ctrls, std::uint8_t mdPmeLevel) {
+    switch (mdPmeLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled                  = 1;
+        ctrls.distType                 = (std::uint8_t)VAR;
+        ctrls.fullPelSearchWidth       = 9;
+        ctrls.fullPelSearchHeight      = 9;
+        ctrls.earlyCheckMvThMultiplier = kMinSignedValue;
+        ctrls.preFpPmeToMeCostTh       = kMaxSignedValue;
+        ctrls.preFpPmeToMeMvTh         = kMinSignedValue;
+        ctrls.postFpPmeToMeCostTh      = kMaxSignedValue;
+        ctrls.postFpPmeToMeMvTh        = kMinSignedValue;
+        ctrls.enablePsad               = 0;
+        ctrls.saQWeight                = 0;
+        break;
+    case 2:
+        ctrls.enabled                  = 1;
+        ctrls.distType                 = (std::uint8_t)VAR;
+        ctrls.fullPelSearchWidth       = 9;
+        ctrls.fullPelSearchHeight      = 9;
+        ctrls.earlyCheckMvThMultiplier = kMinSignedValue;
+        ctrls.preFpPmeToMeCostTh       = kMaxSignedValue;
+        ctrls.preFpPmeToMeMvTh         = kMinSignedValue;
+        ctrls.postFpPmeToMeCostTh      = kMaxSignedValue;
+        ctrls.postFpPmeToMeMvTh        = kMinSignedValue;
+        ctrls.enablePsad               = 0;
+        ctrls.saQWeight                = 1;
+        break;
+    case 3:
+        ctrls.enabled                  = 1;
+        ctrls.distType                 = (std::uint8_t)VAR;
+        ctrls.fullPelSearchWidth       = 9;
+        ctrls.fullPelSearchHeight      = 7;
+        ctrls.earlyCheckMvThMultiplier = kMinSignedValue;
+        ctrls.preFpPmeToMeCostTh       = kMaxSignedValue;
+        ctrls.preFpPmeToMeMvTh         = 16;
+        ctrls.postFpPmeToMeCostTh      = 50;
+        ctrls.postFpPmeToMeMvTh        = kMinSignedValue;
+        ctrls.enablePsad               = 0;
+        ctrls.saQWeight                = 1;
+        break;
+    case 4:
+        ctrls.enabled                  = 1;
+        ctrls.distType                 = (std::uint8_t)SAD;
+        ctrls.fullPelSearchWidth       = 7;
+        ctrls.fullPelSearchHeight      = 5;
+        ctrls.earlyCheckMvThMultiplier = kMinSignedValue;
+        ctrls.preFpPmeToMeCostTh       = 25;
+        ctrls.preFpPmeToMeMvTh         = 16;
+        ctrls.postFpPmeToMeCostTh      = 50;
+        ctrls.postFpPmeToMeMvTh        = 32;
+        ctrls.enablePsad               = 1;
+        ctrls.saQWeight                = 1;
+        break;
+    case 5:
+        ctrls.enabled                  = 1;
+        ctrls.distType                 = (std::uint8_t)SAD;
+        ctrls.fullPelSearchWidth       = 7;
+        ctrls.fullPelSearchHeight      = 5;
+        ctrls.earlyCheckMvThMultiplier = 64;
+        ctrls.preFpPmeToMeCostTh       = 25;
+        ctrls.preFpPmeToMeMvTh         = 16;
+        ctrls.postFpPmeToMeCostTh      = 50;
+        ctrls.postFpPmeToMeMvTh        = 32;
+        ctrls.enablePsad               = 1;
+        ctrls.saQWeight                = 1;
+        break;
+    default:
+        // The reference assert(0)s (:3447-3449) and writes nothing.
+        break;
+    }
+}
+
+// set_subres_controls (enc_mode_config.c:3453-3476), 1:1. The
+// post-switch adjustment reads step - for level > 2 the switch wrote
+// nothing, so step is the struct's prior state (documented).
+void setSubresCtrls(SubresCtrls& ctrls, std::uint8_t subresLevel) {
+    switch (subresLevel) {
+    case 0:
+        ctrls.step = 0;
+        break;
+    case 1:
+        ctrls.step = 1;
+        break;
+    case 2:
+        ctrls.step = 2;
+        break;
+    default:
+        // The reference assert(0)s (:3466-3468) and writes nothing.
+        break;
+    }
+    // Set the TH used to determine if subres is safe to use (based on
+    // ODD vs. EVEN rows' distortion).
+    if (ctrls.step == 0) {
+        ctrls.oddToEvenDeviationTh = 0;
+    } else {
+        ctrls.oddToEvenDeviationTh = 5;
+    }
+}
+
+// set_pf_controls (enc_mode_config.c:3478-3503), 1:1. The
+// #if !CONFIG_ENABLE_TX_PF_N2 assert is compiled out in the pinned build
+// (CONFIG_ENABLE_TX_PF_N2 = 1) - named in the header.
+void setPfCtrls(PfCtrls& ctrls, std::uint8_t pfLevel) {
+    switch (pfLevel) {
+    case 0:
+        ctrls.pfShape = (std::uint8_t)ONLY_DC_SHAPE;
+        break;
+    case 1:
+        ctrls.pfShape = (std::uint8_t)DEFAULT_SHAPE;
+        break;
+    case 2:
+        ctrls.pfShape = (std::uint8_t)N2_SHAPE;
+        break;
+    case 3:
+        ctrls.pfShape = (std::uint8_t)N4_SHAPE;
+        break;
+    default:
+        // The reference assert(0)s (:3494-3496) and writes nothing.
+        break;
+    }
+}
+
+// md_sq_motion_search_controls (enc_mode_config.c:3508-3628), 1:1.
+void setMdSqMotionSearchCtrls(MdSqMotionSearchCtrls& ctrls, std::uint8_t mdSqMvSearchLevel) {
+    switch (mdSqMvSearchLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled            = 1;
+        ctrls.distType           = (std::uint8_t)SAD;
+        ctrls.pameDistortionTh   = 10;
+        ctrls.sprsLev0Enabled    = 1;
+        ctrls.sprsLev0Step       = 4;
+        ctrls.sprsLev0W          = 15;
+        ctrls.sprsLev0H          = 15;
+        ctrls.maxSprsLev0W       = 150;
+        ctrls.maxSprsLev0H       = 150;
+        ctrls.sprsLev0Multiplier = 500;
+        ctrls.sprsLev1Enabled    = 1;
+        ctrls.sprsLev1Step       = 2;
+        ctrls.sprsLev1W          = 4;
+        ctrls.sprsLev1H          = 4;
+        ctrls.maxSprsLev1W       = 50;
+        ctrls.maxSprsLev1H       = 50;
+        ctrls.sprsLev1Multiplier = 500;
+        ctrls.sprsLev2Enabled    = 1;
+        ctrls.sprsLev2Step       = 1;
+        ctrls.sprsLev2W          = 3;
+        ctrls.sprsLev2H          = 3;
+        ctrls.enablePsad         = 1;
+        break;
+    case 2:
+        ctrls.enabled            = 1;
+        ctrls.distType           = (std::uint8_t)SAD;
+        ctrls.pameDistortionTh   = 10;
+        ctrls.sprsLev0Enabled    = 1;
+        ctrls.sprsLev0Step       = 4;
+        ctrls.sprsLev0W          = 15;
+        ctrls.sprsLev0H          = 15;
+        ctrls.maxSprsLev0W       = 150;
+        ctrls.maxSprsLev0H       = 150;
+        ctrls.sprsLev0Multiplier = 400;
+        ctrls.sprsLev1Enabled    = 1;
+        ctrls.sprsLev1Step       = 2;
+        ctrls.sprsLev1W          = 4;
+        ctrls.sprsLev1H          = 4;
+        ctrls.maxSprsLev1W       = 50;
+        ctrls.maxSprsLev1H       = 50;
+        ctrls.sprsLev1Multiplier = 400;
+        ctrls.sprsLev2Enabled    = 1;
+        ctrls.sprsLev2Step       = 1;
+        ctrls.sprsLev2W          = 3;
+        ctrls.sprsLev2H          = 3;
+        ctrls.enablePsad         = 1;
+        break;
+    case 3:
+        ctrls.enabled            = 1;
+        ctrls.distType           = (std::uint8_t)SAD;
+        ctrls.pameDistortionTh   = 10;
+        ctrls.sprsLev0Enabled    = 1;
+        ctrls.sprsLev0Step       = 4;
+        ctrls.sprsLev0W          = 15;
+        ctrls.sprsLev0H          = 15;
+        ctrls.maxSprsLev0W       = 150;
+        ctrls.maxSprsLev0H       = 150;
+        ctrls.sprsLev0Multiplier = 300;
+        ctrls.sprsLev1Enabled    = 1;
+        ctrls.sprsLev1Step       = 2;
+        ctrls.sprsLev1W          = 4;
+        ctrls.sprsLev1H          = 4;
+        ctrls.maxSprsLev1W       = 50;
+        ctrls.maxSprsLev1H       = 50;
+        ctrls.sprsLev1Multiplier = 300;
+        ctrls.sprsLev2Enabled    = 1;
+        ctrls.sprsLev2Step       = 1;
+        ctrls.sprsLev2W          = 3;
+        ctrls.sprsLev2H          = 3;
+        ctrls.enablePsad         = 1;
+        break;
+    case 4:
+        ctrls.enabled            = 1;
+        ctrls.distType           = (std::uint8_t)SAD;
+        ctrls.pameDistortionTh   = 10;
+        ctrls.sprsLev0Enabled    = 1;
+        ctrls.sprsLev0Step       = 4;
+        ctrls.sprsLev0W          = 15;
+        ctrls.sprsLev0H          = 15;
+        ctrls.maxSprsLev0W       = 150;
+        ctrls.maxSprsLev0H       = 150;
+        ctrls.sprsLev0Multiplier = 100;
+        ctrls.sprsLev1Enabled    = 1;
+        ctrls.sprsLev1Step       = 2;
+        ctrls.sprsLev1W          = 4;
+        ctrls.sprsLev1H          = 4;
+        ctrls.maxSprsLev1W       = 50;
+        ctrls.maxSprsLev1H       = 50;
+        ctrls.sprsLev1Multiplier = 100;
+        ctrls.sprsLev2Enabled    = 1;
+        ctrls.sprsLev2Step       = 1;
+        ctrls.sprsLev2W          = 3;
+        ctrls.sprsLev2H          = 3;
+        ctrls.enablePsad         = 1;
+        break;
+    default:
+        // The reference assert(0)s (:3624-3626) and writes nothing.
+        break;
+    }
 }
 
 }  // namespace mode_config

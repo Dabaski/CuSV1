@@ -761,5 +761,201 @@ void setObmcCtrls(ObmcCtrls& ctrls, std::uint8_t obmcMode);
 // never use 128x128); not NSQ aware.
 bool dimensionsRequire8x8(std::uint16_t alignedWidth, std::uint16_t alignedHeight);
 
+// ---------------------------------------------------------------------------
+// Batch C rung 1: set_depth_removal_level_controls (:3030-3343) and its
+// get_sb128_me_data dependency (:63-115).
+// ---------------------------------------------------------------------------
+// DepthRemovalCtrls (md_process.h:213-223, verbatim field order/types).
+struct DepthRemovalCtrls {
+    std::uint8_t enabled;
+    std::uint8_t disallowBelow64x64;  // remove 32x32 and below f(me_dist, var)
+    std::uint8_t disallowBelow32x32;  // remove 16x16 and below f(me_dist, var)
+    std::uint8_t disallowBelow16x16;  // remove 8x8 and below f(me_dist, var)
+    std::uint8_t disallow4x4;
+};
+
+// LOW_8x8_DIST_VAR_TH / HIGH_8x8_DIST_VAR_TH (enc_mode_config.c:10-11).
+constexpr std::uint32_t kLow8x8DistVarTh = 25000;
+constexpr std::uint32_t kHigh8x8DistVarTh = 50000;
+// MAX_SIGNED_VALUE (utility.h:165, ((signed)(~0u >> 1))).
+constexpr std::int32_t kMaxSignedValue = 2147483647;
+
+// The :3068-3224 switch, factored for testability (the getGmCorrespondence
+// precedent): the per-level locals the switch folds. enabledWritten is
+// false ONLY for level > 15 - the reference switch has NO default, so
+// enabled keeps the struct's PRIOR state there (a documented prior-state
+// read, as in the reference); the locals keep the pre-switch init values.
+struct DepthRemovalLevelParams {
+    bool enabledWritten;
+    std::uint8_t enabled;
+    std::uint64_t disallow4x4CostThMultiplier;
+    std::uint64_t disallowBelow16x16CostThMultiplier;
+    std::uint64_t disallowBelow32x32CostThMultiplier;
+    std::uint64_t disallowBelow64x64CostThMultiplier;
+    std::int64_t dev16x16To8x8Th;
+    std::int64_t dev32x32To16x16Th;
+    std::int8_t qpScaleFactor;
+};
+
+// The switch fold (:3068-3224).
+void getDepthRemovalLevelParams(std::uint8_t level, DepthRemovalLevelParams& params);
+
+// The pcs/ppcs/ref-object wall surface (the folded-wall carrier is the
+// MeModeCfg precedent; each field cites its reference path). The ME
+// arrays carry BOTH paths: the SB64 path reads [sbIndex] (:3265-3269),
+// the SB128 path reads [me_sb_addr .. me_sb_addr + pw + 1] through
+// get_sb128_me_data (:63-115) - the test supplies arrays of
+// me_pic_width_in_sb * me_pic_height_in_sb entries.
+struct DepthRemovalPcs {
+    bool isISlice;                    // pcs->slice_type == I_SLICE
+    std::uint64_t pictureNumber;      // pcs->picture_number
+    bool rtc;                         // pcs->scs->static_config.rtc
+    std::uint32_t superBlockSize;     // pcs->scs->super_block_size
+    std::uint8_t b64Size;             // pcs->scs->b64_size (SB128 path)
+    std::uint32_t alignedWidth;       // pcs->ppcs->aligned_width (SB128 path)
+    std::uint32_t alignedHeight;      // pcs->ppcs->aligned_height
+    std::uint8_t sbGeomWidth;         // pcs->ppcs->sb_geom[sbIndex].width
+    std::uint8_t sbGeomHeight;        // ... .height
+    bool modulateByQp;                // :3055 - frm_hdr.delta_q_params.delta_q_present
+                                      //   || ppcs->r0_delta_qp_md, OR-folded
+    std::uint32_t pictureQp;          // pcs->ppcs->picture_qp (:3056/:3275/:3287)
+    RefSameSizePcs ref;               // the svt_aom_is_ref_same_size wall (embedded)
+    std::uint64_t refPocL0;           // ref_obj_l0->ref_poc (:3240)
+    std::uint64_t refPocL1;           // ref_obj_l1->ref_poc (:3248)
+    std::uint8_t refSbMinSqSizeL0;    // ref_obj_l0->sb_min_sq_size[sbIndex] (:3241)
+    std::uint8_t refSbMinSqSizeL1;    // ref_obj_l1->sb_min_sq_size[sbIndex] (:3249)
+    const std::uint32_t* me64x64Distortion;  // pcs.h:867
+    const std::uint32_t* me32x32Distortion;  // pcs.h:868
+    const std::uint32_t* me16x16Distortion;  // pcs.h:869
+    const std::uint32_t* me8x8Distortion;    // pcs.h:870
+    const std::uint32_t* me8x8CostVariance;  // pcs.h:866
+};
+
+// The ctx surface (the ModeDecisionContext fields the span consumes).
+struct DepthRemovalCtx {
+    std::uint32_t fastLambdaMd[2];    // ctx->fast_lambda_md (EB_8_BIT_MD = 0)
+    std::uint16_t sbIndex;            // ctx->sb_index (md_process.h:1179)
+    std::uint32_t sbOriginX;          // ctx->sb_origin_x (get_sb128_me_data)
+    std::uint32_t sbOriginY;          // ctx->sb_origin_y
+    std::uint8_t sbQindex;            // ctx->sb_ptr->qindex (coding_unit.h:270)
+    std::uint8_t disallow4x4;         // ctx->disallow_4x4 (read + write :3333-3339)
+};
+
+// set_depth_removal_level_controls (:3030-3343), 1:1. NOTE: the
+// disallow_below_* fields are READ (the || term :3320/:3325/:3330) -
+// the caller supplies live prior state, as the reference context does.
+void setDepthRemovalLevelCtrls(DepthRemovalCtrls& ctrls, const DepthRemovalPcs& pcs,
+                               DepthRemovalCtx& ctx, std::uint8_t depthRemovalLevel);
+
+
+// ---------------------------------------------------------------------------
+// Batch C rung 2: the MD search setters (:3348-3631).
+// ---------------------------------------------------------------------------
+// DistortionType (definitions.h:871, verbatim).
+enum DistortionType {
+    SAD = 0,
+    VAR = 1,
+    SSD = 2,
+    DIST_TYPES = 3,
+};
+
+// TxCoeffShape (definitions.h:2044-2050, verbatim).
+enum TxCoeffShape {
+    DEFAULT_SHAPE = 0,
+    N2_SHAPE = 1,
+    N4_SHAPE = 2,
+    ONLY_DC_SHAPE = 3,
+};
+
+// MIN_SIGNED_VALUE (utility.h:164, ~0 - ((signed)(~0u >> 1)) = INT32_MIN).
+constexpr std::int32_t kMinSignedValue = -2147483647 - 1;
+
+// MdNsqMotionSearchCtrls (md_process.h:291-302, verbatim field order/types).
+struct MdNsqMotionSearchCtrls {
+    std::uint8_t enabled;                // 0: NSQ ME @ MD OFF; 1: ON
+    std::uint8_t distType;               // DistortionType
+    std::uint8_t fullPelSearchWidth;
+    std::uint8_t fullPelSearchHeight;
+    std::uint8_t enablePsad;
+};
+
+// md_nsq_motion_search_controls (:3348-3373). The default case assert(0)s
+// in the reference and writes nothing; the port leaves the struct
+// untouched (documented UB).
+void setMdNsqMotionSearchCtrls(MdNsqMotionSearchCtrls& ctrls, std::uint8_t mdNsqMvSearchLevel);
+
+// MdPmeCtrls (md_process.h:354-382, verbatim field order/types).
+struct MdPmeCtrls {
+    std::uint8_t enabled;                // 0: PME @ MD OFF; 1: ON
+    std::uint8_t distType;               // DistortionType
+    std::int32_t earlyCheckMvThMultiplier;
+    std::uint8_t fullPelSearchWidth;
+    std::uint8_t fullPelSearchHeight;
+    std::int32_t preFpPmeToMeCostTh;
+    std::int32_t preFpPmeToMeMvTh;
+    std::int32_t postFpPmeToMeCostTh;
+    std::int32_t postFpPmeToMeMvTh;
+    std::uint8_t enablePsad;
+    std::uint8_t saQWeight;
+};
+
+// svt_aom_md_pme_search_controls (:3375-3451). The default case assert(0)s
+// in the reference and writes nothing (documented UB).
+void setMdPmeCtrls(MdPmeCtrls& ctrls, std::uint8_t mdPmeLevel);
+
+// SubresCtrls (md_process.h:278-285, verbatim).
+struct SubresCtrls {
+    std::uint8_t step;                   // residual sub-sampling step (0: OFF)
+    std::uint8_t oddToEvenDeviationTh;
+};
+
+// set_subres_controls (:3453-3476). NOTE: the post-switch adjustment reads
+// step (:3471) - for level > 2 the switch wrote nothing, so step is the
+// struct's PRIOR state (a documented prior-state read, as in the
+// reference) and oddToEvenDeviationTh is written from it either way.
+void setSubresCtrls(SubresCtrls& ctrls, std::uint8_t subresLevel);
+
+// PfCtrls (md_process.h:287-289, verbatim).
+struct PfCtrls {
+    std::uint8_t pfShape;                // TxCoeffShape
+};
+
+// set_pf_controls (:3478-3503). The #if !CONFIG_ENABLE_TX_PF_N2 assert
+// (:3498-3502) is COMPILED OUT in the pinned build (EbConfigMacros.h
+// resolves CONFIG_ENABLE_TX_PF_N2 = 1; the pinned build is neither
+// RTC_BUILD nor MINIMAL_BUILD) - named, nothing to thread. The default
+// case assert(0)s in the reference and writes nothing (documented UB).
+void setPfCtrls(PfCtrls& ctrls, std::uint8_t pfLevel);
+
+// MdSqMotionSearchCtrls (md_process.h:304-352, verbatim field order/types).
+struct MdSqMotionSearchCtrls {
+    std::uint8_t enabled;                // 0: SQ ME @ MD OFF; 1: ON
+    std::uint8_t distType;               // DistortionType
+    std::uint16_t pameDistortionTh;
+    std::uint8_t sprsLev0Enabled;
+    std::uint8_t sprsLev0Step;
+    std::uint16_t sprsLev0W;
+    std::uint16_t sprsLev0H;
+    std::uint16_t maxSprsLev0W;
+    std::uint16_t maxSprsLev0H;
+    std::int16_t sprsLev0Multiplier;
+    std::uint8_t sprsLev1Enabled;
+    std::uint8_t sprsLev1Step;
+    std::uint16_t sprsLev1W;
+    std::uint16_t sprsLev1H;
+    std::uint16_t maxSprsLev1W;
+    std::uint16_t maxSprsLev1H;
+    std::int16_t sprsLev1Multiplier;
+    std::uint8_t sprsLev2Enabled;
+    std::uint8_t sprsLev2Step;
+    std::uint16_t sprsLev2W;
+    std::uint16_t sprsLev2H;
+    std::uint8_t enablePsad;
+};
+
+// md_sq_motion_search_controls (:3508-3628). The default case assert(0)s
+// in the reference and writes nothing (documented UB).
+void setMdSqMotionSearchCtrls(MdSqMotionSearchCtrls& ctrls, std::uint8_t mdSqMvSearchLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo
