@@ -1085,5 +1085,83 @@ struct InterpolationSearchCtrls {
 void setInterpolationSearchLevelCtrls(InterpolationSearchCtrls& ctrls,
                                       std::uint8_t interpolationSearchLevel);
 
+
+// ---------------------------------------------------------------------------
+// Batch C rung 5: set_cand_reduction_ctrls (:4164-4394).
+// ---------------------------------------------------------------------------
+// Pd1Level (definitions.h:748-763, verbatim; REGULAR_PD1 is negative so
+// that LPD1 can start at 0).
+enum Pd1Level {
+    REGULAR_PD1 = -1,
+    LPD1_LVL_0 = 0,
+    LPD1_LVL_1 = 1,
+    LPD1_LVL_2 = 2,
+    LPD1_LVL_3 = 3,
+    LPD1_LVL_4 = 4,
+    LPD1_LVL_5 = 5,
+    LPD1_LVL_6 = 6,
+    LPD1_LEVELS = 7,
+};
+
+// RedundantCandCtrls (md_process.h:675-678, verbatim).
+struct RedundantCandCtrls {
+    std::int32_t scoreTh;
+    std::int32_t magTh;
+};
+// NearCountCtrls (md_process.h:181-188, verbatim).
+struct NearCountCtrls {
+    std::uint8_t enabled;
+    std::uint8_t nearCount;
+    std::uint8_t nearNearCount;
+};
+// UseNeighbouringModeCtrls (md_process.h:680-682, verbatim).
+struct UseNeighbouringModeCtrls {
+    std::uint8_t enabled;
+};
+// CandEliminationCtlrs (md_process.h:523-533, verbatim - enabled is
+// uint32_t here, NOT uint8_t).
+struct CandEliminationCtlrs {
+    std::uint32_t enabled;
+    std::uint16_t dcOnlyTh;
+    std::uint16_t skipDcTh;
+};
+// CandReductionCtrls (md_process.h:812-821, verbatim field order).
+struct CandReductionCtrls {
+    RedundantCandCtrls redundantCandCtrls;
+    NearCountCtrls nearCountCtrls;
+    std::uint8_t lpd1MvpBestMeList;
+    UseNeighbouringModeCtrls useNeighbouringModeCtrls;
+    CandEliminationCtlrs candEliminationCtrls;
+    std::uint8_t reduceUnipredCandidates;
+    std::uint8_t reduceFilterIntra;
+};
+
+// The pcs wall surface (:4390-4391): the tail gate that zeroes
+// lpd1_mvp_best_me_list.
+struct CandReductionPcs {
+    std::uint8_t refList0CountTry;       // ppcs->ref_list0_count_try
+    std::uint8_t refList1CountTry;       // ppcs->ref_list1_count_try
+    bool useBestMeUnipredCandOnly;       // ppcs->use_best_me_unipred_cand_only
+};
+
+// The ctx wall surface (:4169-4171). isNotLastLayer = !frame_is_leaf
+// (ppcs) threaded (the batch-B wall precedent); rtc +
+// hierarchicalLevels are the use_flat_ipp fold's raw inputs (:4171).
+struct CandReductionCtx {
+    std::int8_t pd1Level;                // ctx->lpd1_ctrls.pd1_level
+    bool isNotLastLayer;                 // !frame_is_leaf(pcs->ppcs)
+    bool rtc;                            // pcs->scs->static_config.rtc
+    std::uint8_t hierarchicalLevels;     // pcs->ppcs->hierarchical_levels
+};
+
+// set_cand_reduction_ctrls (:4164-4394), 1:1. The level switch writes
+// 0-8 of the eleven leaf fields (level-dependent); the tail gate
+// (:4389-4393) runs on EVERY level including 0 and the default arm.
+void setCandReductionCtrls(CandReductionCtrls& ctrls, std::uint8_t candReductionLevel,
+                           const CandReductionPcs& pcs, const CandReductionCtx& ctx,
+                           std::uint32_t pictureQp, std::uint32_t me8x8CostVariance,
+                           std::uint32_t me64x64Distortion, std::uint8_t l0WasSkip,
+                           std::uint8_t l1WasSkip, std::uint8_t refSkipPerc);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

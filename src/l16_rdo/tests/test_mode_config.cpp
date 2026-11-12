@@ -4355,3 +4355,122 @@ TEST_CASE("set_interpolation_search_level_ctrls - the five levels") {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Batch C rung 5: set_cand_reduction_ctrls (:4164-4394).
+// ---------------------------------------------------------------------------
+
+// The four-arm dc_only_th fold, independent transcription (:4241-4244 etc).
+static uint16_t oracleDcOnlyTh(bool isLpd1, bool useFlatIpp, bool notLast, int level) {
+    if (!isLpd1) return (uint16_t)(notLast ? 10 : 200);
+    if (useFlatIpp) return (uint16_t)(level >= 5 ? 800 : (level == 4 ? 600 : 200));
+    return (uint16_t)(notLast ? 30 : (level >= 4 ? 600 : 200));
+}
+
+// The reduce_unipred_candidates arm (:4340-4345), independent transcription.
+static uint8_t oracleReduceUnipred(bool notLast, bool l0, bool l1, uint8_t refSkipPerc,
+                                   uint32_t var8, uint32_t dist64, uint32_t qp) {
+    return (uint8_t)(!notLast || ((l0 && l1 && refSkipPerc > 35) &&
+                                  var8 < (500 * qp) && dist64 < (500 * qp)) ? 2 : 1);
+}
+
+TEST_CASE("set_cand_reduction_ctrls - the seven levels x the wall grid, vs the oracle") {
+    // :4164-4394. is_lpd1 (pd1_level > -1), is_not_last_layer,
+    // use_flat_ipp and the tail gate all thread through the carriers; the
+    // level switch + the :4389-4393 tail gate are the full behavior.
+    struct Wall { bool lpd1; bool flatIpp; bool notLast; uint8_t l0c, l1c; bool bestOnly; };
+    static const Wall walls[] = {
+        {false, false, false, 1, 1, true},   // REGULAR_PD1, single-ref best-only
+        {false, false, false, 2, 1, true},   // the tail gate zeroes lpd1_mvp_best_me_list
+        {true,  false, false, 1, 1, true},   // LPD1, tail gate satisfied
+        {true,  false, true,  1, 1, false},  // LPD1, not-last-layer, gate unsatisfied
+        {true,  true,  false, 1, 1, true},   // flat-ipp arm of the dc_only_th fold
+        {false, true,  true,  1, 1, false},
+    };
+    struct Skip { uint8_t l0, l1, perc; uint32_t var8, dist64, qp; };
+    static const Skip skips[] = {
+        {0, 0, 0, 1000, 1000, 30},      // l0/l1 not skip -> arm 1
+        {1, 1, 40, 10000, 10000, 30},   // skip + cheap -> arm 2
+        {1, 1, 40, 20000, 20000, 30},   // skip + costly -> arm 1
+        {1, 0, 40, 10000, 10000, 30},   // l0 only -> arm 1
+        {0, 0, 0, 0, 0, 0},             // qp 0: 500*0 = 0, var < 0 false
+    };
+    for (const Wall& w : walls) {
+        for (const Skip& s : skips) {
+            for (int level = 0; level <= 7; ++level) {
+                CandReductionCtrls c;
+                std::memset(&c, kPoison, sizeof(c));
+                CandReductionPcs pcs;
+                pcs.refList0CountTry = w.l0c;
+                pcs.refList1CountTry = w.l1c;
+                pcs.useBestMeUnipredCandOnly = w.bestOnly;
+                CandReductionCtx ctx;
+                ctx.pd1Level = (int8_t)(w.lpd1 ? LPD1_LVL_1 : REGULAR_PD1);
+                ctx.isNotLastLayer = w.notLast;
+                ctx.rtc = w.flatIpp;
+                ctx.hierarchicalLevels = w.flatIpp ? 0 : 1;
+                setCandReductionCtrls(c, (uint8_t)level, pcs, ctx, s.qp, s.var8, s.dist64,
+                                      s.l0, s.l1, s.perc);
+                const uint8_t expectMvp =
+                    (uint8_t)(((w.l0c == 1 && w.l1c == 1 && w.bestOnly) && level >= 5) ? 1 : 0);
+                if (level <= 6) {
+                    CHECK(c.reduceFilterIntra == (level == 0 ? 0 : 1));
+                    CHECK(c.redundantCandCtrls.scoreTh == (level >= 4 ? 8 : 0));
+                    CHECK(c.redundantCandCtrls.magTh ==
+                          (level >= 4 ? 64 : (int32_t)((uint32_t)kPoison * 0x01010101u)));
+                    CHECK(c.useNeighbouringModeCtrls.enabled == (level >= 2 ? 1 : 0));
+                    CHECK(c.nearCountCtrls.enabled == 1);
+                    CHECK(c.nearCountCtrls.nearCount ==
+                          (level <= 2 ? 3 : (level == 3 ? 1 : (level <= 5 ? 1 : 0))));
+                    CHECK(c.nearCountCtrls.nearNearCount == (level <= 3 ? 3 : 1));
+                    CHECK(c.lpd1MvpBestMeList == expectMvp);
+                    CHECK(c.candEliminationCtrls.enabled == (level >= 2 ? 1u : 0u));
+                    if (level >= 2) {
+                        CHECK(c.candEliminationCtrls.dcOnlyTh ==
+                              oracleDcOnlyTh(w.lpd1, w.flatIpp, w.notLast, level));
+                        CHECK(c.candEliminationCtrls.skipDcTh ==
+                              (level >= 5 ? (uint16_t)(w.notLast ? 5 : 15) : 0));
+                    }
+                    CHECK(c.reduceUnipredCandidates ==
+                          (level <= 2 ? 0 : (level <= 4 ? 1 :
+                               oracleReduceUnipred(w.notLast, s.l0 == 1, s.l1 == 1,
+                                                   s.perc, s.var8, s.dist64, s.qp))));
+                } else {
+                    // default arm: the switch writes nothing, but the tail
+                    // gate STILL runs (and can write lpd1_mvp_best_me_list).
+                    CHECK(c.reduceFilterIntra == kPoison);
+                    CHECK(c.candEliminationCtrls.enabled == (uint32_t)((uint32_t)kPoison * 0x01010101u));
+                    CHECK(c.lpd1MvpBestMeList ==
+                          (uint8_t)((w.l0c == 1 && w.l1c == 1 && w.bestOnly) ? kPoison : 0));
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("set_cand_reduction_ctrls - the tail gate over every count pair") {
+    // :4389-4393: lpd1_mvp_best_me_list survives ONLY when
+    // ref_list0_count_try == 1 && ref_list1_count_try == 1 &&
+    // use_best_me_unipred_cand_only - enumerated over both counts x the
+    // flag, on a level that sets the flag (5) AND on the default arm (7).
+    for (int l0 = 0; l0 <= 2; ++l0)
+        for (int l1 = 0; l1 <= 2; ++l1)
+            for (int best = 0; best <= 1; ++best)
+                for (int level : {5, 7}) {
+                    CandReductionCtrls c;
+                    std::memset(&c, kPoison, sizeof(c));
+                    CandReductionPcs pcs;
+                    pcs.refList0CountTry = (uint8_t)l0;
+                    pcs.refList1CountTry = (uint8_t)l1;
+                    pcs.useBestMeUnipredCandOnly = best == 1;
+                    CandReductionCtx ctx;
+                    ctx.pd1Level = LPD1_LVL_0;
+                    ctx.isNotLastLayer = false;
+                    ctx.rtc = false;
+                    ctx.hierarchicalLevels = 1;
+                    setCandReductionCtrls(c, (uint8_t)level, pcs, ctx, 30, 0, 0, 0, 0, 0);
+                    const bool gate = l0 == 1 && l1 == 1 && best == 1;
+                    CHECK(c.lpd1MvpBestMeList ==
+                          (uint8_t)(gate ? (level == 5 ? 1 : kPoison) : 0));
+                }
+}

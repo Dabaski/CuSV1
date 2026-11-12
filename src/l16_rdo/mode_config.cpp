@@ -4149,5 +4149,197 @@ void setInterpolationSearchLevelCtrls(InterpolationSearchCtrls& ctrls,
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Batch C rung 5: set_cand_reduction_ctrls.
+// ---------------------------------------------------------------------------
+
+// set_cand_reduction_ctrls (enc_mode_config.c:4164-4394), 1:1.
+void setCandReductionCtrls(CandReductionCtrls& ctrls, std::uint8_t candReductionLevel,
+                           const CandReductionPcs& pcs, const CandReductionCtx& ctx,
+                           std::uint32_t pictureQp, std::uint32_t me8x8CostVariance,
+                           std::uint32_t me64x64Distortion, std::uint8_t l0WasSkip,
+                           std::uint8_t l1WasSkip, std::uint8_t refSkipPerc) {
+    const bool isLpd1 = ctx.pd1Level > REGULAR_PD1;
+    const bool isNotLastLayer = ctx.isNotLastLayer;
+    const bool useFlatIpp = ctx.rtc && ctx.hierarchicalLevels == 0;
+    switch (candReductionLevel) {
+    case 0:
+        // Filter INTRA reduction
+        ctrls.reduceFilterIntra = 0;
+        // redundant_cand_level
+        ctrls.redundantCandCtrls.scoreTh = 0;
+        // use_neighbouring_mode
+        ctrls.useNeighbouringModeCtrls.enabled = 0;
+        // near_count_ctrls
+        ctrls.nearCountCtrls.enabled         = 1;
+        ctrls.nearCountCtrls.nearCount       = 3;
+        ctrls.nearCountCtrls.nearNearCount   = 3;
+        // lpd1_mvp_best_me_list (LPD1 only signal)
+        ctrls.lpd1MvpBestMeList = 0;
+        // cand_elimination_ctrls
+        ctrls.candEliminationCtrls.enabled = 0;
+        // reduce_unipred_candidates
+        ctrls.reduceUnipredCandidates = 0;
+        break;
+    case 1:
+        // Filter INTRA reduction
+        ctrls.reduceFilterIntra = 1;
+        // redundant_cand_level
+        ctrls.redundantCandCtrls.scoreTh = 0;
+        // use_neighbouring_mode
+        ctrls.useNeighbouringModeCtrls.enabled = 0;
+        // near_count_ctrls
+        ctrls.nearCountCtrls.enabled         = 1;
+        ctrls.nearCountCtrls.nearCount       = 3;
+        ctrls.nearCountCtrls.nearNearCount   = 3;
+        // lpd1_mvp_best_me_list (LPD1 only signal)
+        ctrls.lpd1MvpBestMeList = 0;
+        // cand_elimination_ctrls
+        ctrls.candEliminationCtrls.enabled = 0;
+        // reduce_unipred_candidates
+        ctrls.reduceUnipredCandidates = 0;
+        break;
+    case 2:
+        // Filter INTRA reduction
+        ctrls.reduceFilterIntra = 1;
+        // redundant_cand_level
+        ctrls.redundantCandCtrls.scoreTh = 0;
+        // use_neighbouring_mode
+        ctrls.useNeighbouringModeCtrls.enabled = 1;
+        // near_count_ctrls
+        ctrls.nearCountCtrls.enabled         = 1;
+        ctrls.nearCountCtrls.nearCount       = 3;
+        ctrls.nearCountCtrls.nearNearCount   = 3;
+        // lpd1_mvp_best_me_list (LPD1 only signal)
+        ctrls.lpd1MvpBestMeList = 0;
+        // cand_elimination_ctrls
+        ctrls.candEliminationCtrls.enabled    = 1;
+        ctrls.candEliminationCtrls.dcOnlyTh   = (std::uint16_t)(isLpd1 ? (useFlatIpp              ? 200
+                                                         : isNotLastLayer ? 30
+                                                                          : 200)
+                                                         : (isNotLastLayer ? 10 : 200));
+        ctrls.candEliminationCtrls.skipDcTh   = 0;
+        // reduce_unipred_candidates
+        ctrls.reduceUnipredCandidates = 0;
+        break;
+    case 3:
+        // Filter INTRA reduction
+        ctrls.reduceFilterIntra = 1;
+        // redundant_cand_level
+        ctrls.redundantCandCtrls.scoreTh = 0;
+        // use_neighbouring_mode
+        ctrls.useNeighbouringModeCtrls.enabled = 1;
+        // near_count_ctrls
+        ctrls.nearCountCtrls.enabled         = 1;
+        ctrls.nearCountCtrls.nearCount       = 1;
+        ctrls.nearCountCtrls.nearNearCount   = 3;
+        // lpd1_mvp_best_me_list (LPD1 only signal)
+        ctrls.lpd1MvpBestMeList = 0;
+        // cand_elimination_ctrls
+        ctrls.candEliminationCtrls.enabled    = 1;
+        ctrls.candEliminationCtrls.dcOnlyTh   = (std::uint16_t)(isLpd1 ? (useFlatIpp              ? 200
+                                                         : isNotLastLayer ? 30
+                                                                          : 200)
+                                                         : (isNotLastLayer ? 10 : 200));
+        ctrls.candEliminationCtrls.skipDcTh   = 0;
+        // reduce_unipred_candidates
+        ctrls.reduceUnipredCandidates = 1;
+        break;
+    case 4:
+        // Filter INTRA reduction
+        ctrls.reduceFilterIntra = 1;
+        // redundant_cand_level
+        ctrls.redundantCandCtrls.scoreTh = 8;
+        ctrls.redundantCandCtrls.magTh   = 64;
+        // use_neighbouring_mode
+        ctrls.useNeighbouringModeCtrls.enabled = 1;
+        // near_count_ctrls
+        ctrls.nearCountCtrls.enabled         = 1;
+        ctrls.nearCountCtrls.nearCount       = 1;
+        ctrls.nearCountCtrls.nearNearCount   = 1;
+        // lpd1_mvp_best_me_list (LPD1 only signal)
+        ctrls.lpd1MvpBestMeList = 0;
+        // cand_elimination_ctrls
+        ctrls.candEliminationCtrls.enabled    = 1;
+        ctrls.candEliminationCtrls.dcOnlyTh   = (std::uint16_t)(isLpd1 ? (useFlatIpp              ? 600
+                                                         : isNotLastLayer ? 30
+                                                                          : 600)
+                                                         : (isNotLastLayer ? 10 : 200));
+        ctrls.candEliminationCtrls.skipDcTh   = 0;
+        // reduce_unipred_candidates
+        ctrls.reduceUnipredCandidates = 1;
+        break;
+    case 5:
+        // Filter INTRA reduction
+        ctrls.reduceFilterIntra = 1;
+        // redundant_cand_level
+        ctrls.redundantCandCtrls.scoreTh = 8;
+        ctrls.redundantCandCtrls.magTh   = 64;
+        // use_neighbouring_mode
+        ctrls.useNeighbouringModeCtrls.enabled = 1;
+        // near_count_ctrls
+        ctrls.nearCountCtrls.enabled         = 1;
+        ctrls.nearCountCtrls.nearCount       = 1;
+        ctrls.nearCountCtrls.nearNearCount   = 1;
+        // lpd1_mvp_best_me_list (LPD1 only signal)
+        ctrls.lpd1MvpBestMeList = 1;
+        // cand_elimination_ctrls
+        ctrls.candEliminationCtrls.enabled    = 1;
+        ctrls.candEliminationCtrls.dcOnlyTh   = (std::uint16_t)(isLpd1 ? (useFlatIpp              ? 800
+                                                         : isNotLastLayer ? 30
+                                                                          : 600)
+                                                         : (isNotLastLayer ? 10 : 200));
+        ctrls.candEliminationCtrls.skipDcTh   = (std::uint16_t)(isNotLastLayer ? 5 : 15);
+        // reduce_unipred_candidates
+        ctrls.reduceUnipredCandidates =
+            (std::uint8_t)((!isNotLastLayer || ((l0WasSkip && l1WasSkip && refSkipPerc > 35) &&
+                                 me8x8CostVariance < (500 * pictureQp) &&
+                                 me64x64Distortion < (500 * pictureQp)))
+                ? 2
+                : 1);
+        break;
+    case 6:
+        // Filter INTRA reduction
+        ctrls.reduceFilterIntra = 1;
+        // redundant_cand_level
+        ctrls.redundantCandCtrls.scoreTh = 8;
+        ctrls.redundantCandCtrls.magTh   = 64;
+        // use_neighbouring_mode
+        ctrls.useNeighbouringModeCtrls.enabled = 1;
+        // near_count_ctrls
+        ctrls.nearCountCtrls.enabled         = 1;
+        ctrls.nearCountCtrls.nearCount       = 0;
+        ctrls.nearCountCtrls.nearNearCount   = 1;
+        // lpd1_mvp_best_me_list (LPD1 only signal)
+        ctrls.lpd1MvpBestMeList = 1;
+        // cand_elimination_ctrls
+        ctrls.candEliminationCtrls.enabled    = 1;
+        ctrls.candEliminationCtrls.dcOnlyTh   = (std::uint16_t)(isLpd1 ? (useFlatIpp              ? 800
+                                                         : isNotLastLayer ? 30
+                                                                          : 600)
+                                                         : (isNotLastLayer ? 10 : 200));
+        ctrls.candEliminationCtrls.skipDcTh   = (std::uint16_t)(isNotLastLayer ? 5 : 15);
+        // reduce_unipred_candidates
+        ctrls.reduceUnipredCandidates =
+            (std::uint8_t)((!isNotLastLayer || ((l0WasSkip && l1WasSkip && refSkipPerc > 35) &&
+                                 me8x8CostVariance < (500 * pictureQp) &&
+                                 me64x64Distortion < (500 * pictureQp)))
+                ? 2
+                : 1);
+        break;
+    default:
+        // The reference assert(0)s (:4384-4386) and writes nothing.
+        break;
+    }
+
+    // lpd1_mvp_best_me_list can only use this feature when a single
+    // unipred ME candidate is selected,
+    if (!(pcs.refList0CountTry == 1 && pcs.refList1CountTry == 1 &&
+          pcs.useBestMeUnipredCandOnly)) {
+        ctrls.lpd1MvpBestMeList = 0;
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo
