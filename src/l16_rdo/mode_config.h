@@ -354,5 +354,52 @@ void sigDerivMe(const MeModeCfg& scs, const MeModeCfg& pcs, MeSearchParams& meCt
 // svt_aom_sig_deriv_me_tf (:856-897).
 void sigDerivMeTf(const MeModeCfg& pcs, MeSearchParams& meCtx);
 
+// ---------------------------------------------------------------------------
+// EMC1 slice 2, batch B: the cdef search/recon setter family
+// (enc_mode_config.c:899-1240).
+// ---------------------------------------------------------------------------
+// TOTAL_STRENGTHS = CDEF_PRI_STRENGTHS 16 * CDEF_SEC_STRENGTHS 4
+// (cdef.h:22-23, pcs.h:50).
+constexpr int kCdefTotalStrengths = 64;
+
+// CdefSearchControls (pcs.h:557-592) minus pred_y_f/pred_uv_f - the two
+// fields the span (:899-1206) neither reads nor writes (the carrier holds
+// exactly the consumed surface; named exclusion).
+struct CdefSearchCtrls {
+    std::uint8_t enabled;
+    std::uint8_t firstPassFsNum;
+    std::uint8_t defaultFirstPassFs[kCdefTotalStrengths];
+    std::uint8_t defaultSecondPassFsNum;
+    std::uint8_t defaultSecondPassFs[kCdefTotalStrengths];
+    std::int8_t defaultFirstPassFsUv[kCdefTotalStrengths];
+    std::int8_t defaultSecondPassFsUv[kCdefTotalStrengths];
+    std::int8_t useReferenceCdefFs;
+    std::uint8_t subsamplingFactor;
+    std::uint8_t searchBestRefFs;
+    std::uint8_t skipTh;
+    bool uvFromY;
+    bool useQpStrength;
+};
+
+// set_cdef_search_controls (:899-1206). isBase = frame_is_boosted(pcs)
+// (:901), isNotHighestLayer = !frame_is_leaf(pcs) (:902) - both threaded
+// as parameters (the RE8A wall-threading precedent). The switch's default
+// case assert(0)s in the reference and writes nothing; the port leaves
+// the struct untouched (documented UB).
+void setCdefSearchCtrls(CdefSearchCtrls& ctrls, std::uint8_t cdefSearchLevel, bool isBase,
+                        bool isNotHighestLayer);
+
+// CdefReconControls (pcs.h:594-602, verbatim).
+struct CdefReconCtrls {
+    std::uint16_t zeroFsCostBias;
+    std::uint8_t zeroFilterStrengthLvl;
+    std::uint16_t prevCdefDistTh;
+};
+
+// set_cdef_recon_controls (:1208-1240). The default case assert(0)s in
+// the reference and writes nothing; the port leaves the struct untouched
+// (documented UB).
+void setCdefReconCtrls(CdefReconCtrls& ctrls, std::uint8_t cdefReconLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

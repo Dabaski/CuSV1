@@ -1063,5 +1063,321 @@ void sigDerivMeTf(const MeModeCfg& pcs, MeSearchParams& meCtx) {
     meCtx.prevMeStageBasedExitTh   = pcs.tfHmeMeLevel <= 1 ? 0 : BLOCK_SIZE_64 * BLOCK_SIZE_64 * 4;
 }
 
+// ---------------------------------------------------------------------------
+// Batch B: the cdef search/recon setter family.
+// ---------------------------------------------------------------------------
+
+// set_cdef_search_controls (enc_mode_config.c:899-1206), 1:1. The walls
+// are threaded: isBase = frame_is_boosted(pcs) (:901), isNotHighestLayer
+// = !frame_is_leaf(pcs) (:902).
+void setCdefSearchCtrls(CdefSearchCtrls& ctrls, std::uint8_t cdefSearchLevel, bool isBase,
+                        bool isNotHighestLayer) {
+    const bool isBase_             = isBase;
+    const bool isNotHighestLayer_  = isNotHighestLayer;
+    int secondPassFsNum;
+    switch (cdefSearchLevel) {
+    // OFF
+    case 0:
+        ctrls.enabled               = 0;
+        ctrls.useReferenceCdefFs    = 0;
+        ctrls.skipTh                = 0;
+        ctrls.uvFromY               = false;
+        break;
+    case 1: {
+        // pf_set {0,1,..,15}
+        // sf_set {0,1,2,3}
+        ctrls.enabled                    = 1;
+        ctrls.firstPassFsNum             = 16;
+        secondPassFsNum                  = 3;
+        ctrls.defaultSecondPassFsNum     = (std::uint8_t)(ctrls.firstPassFsNum * secondPassFsNum);
+        for (int i = 0; i < 16; ++i) ctrls.defaultFirstPassFs[i] = pfGi[i];
+        int sfIdx = 0;
+        for (int i = 0; i < ctrls.firstPassFsNum; i++) {
+            int pfIdx = ctrls.defaultFirstPassFs[i];
+            for (int j = 1; j < 4; j++) {
+                ctrls.defaultSecondPassFs[sfIdx] = (std::uint8_t)(pfIdx + j);
+                sfIdx++;
+            }
+        }
+        for (int i = 0; i < ctrls.firstPassFsNum; i++) {
+            ctrls.defaultFirstPassFsUv[i] = (std::int8_t)ctrls.defaultFirstPassFs[i];
+        }
+        for (int i = 0; i < ctrls.defaultSecondPassFsNum; i++) {
+            ctrls.defaultSecondPassFsUv[i] = (std::int8_t)ctrls.defaultSecondPassFs[i];
+        }
+        ctrls.useReferenceCdefFs = 0;
+        ctrls.searchBestRefFs    = 0;
+        ctrls.subsamplingFactor  = 1;
+        ctrls.skipTh             = 0;
+        ctrls.uvFromY            = false;
+        ctrls.useQpStrength      = false;
+        break;
+    }
+    case 2: {
+        // pf_set {0,1,2,4,5,6,8,9,10,12,13,14}
+        // sf_set {0,1,..,3}
+        ctrls.enabled                    = 1;
+        ctrls.firstPassFsNum             = 12;
+        secondPassFsNum                  = 3;
+        ctrls.defaultSecondPassFsNum     = (std::uint8_t)(ctrls.firstPassFsNum * secondPassFsNum);
+        const int sel[12] = {0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14};
+        for (int i = 0; i < 12; ++i) ctrls.defaultFirstPassFs[i] = pfGi[sel[i]];
+        int sfIdx = 0;
+        for (int i = 0; i < ctrls.firstPassFsNum; i++) {
+            int pfIdx = ctrls.defaultFirstPassFs[i];
+            for (int j = 1; j < 4; j++) {
+                ctrls.defaultSecondPassFs[sfIdx] = (std::uint8_t)(pfIdx + j);
+                sfIdx++;
+            }
+        }
+        for (int i = 0; i < ctrls.firstPassFsNum; i++) {
+            ctrls.defaultFirstPassFsUv[i] = (std::int8_t)ctrls.defaultFirstPassFs[i];
+        }
+        for (int i = 0; i < ctrls.defaultSecondPassFsNum; i++) {
+            ctrls.defaultSecondPassFsUv[i] = -1;
+        }
+        ctrls.useReferenceCdefFs = 0;
+        ctrls.searchBestRefFs    = 0;
+        ctrls.subsamplingFactor  = 1;
+        ctrls.skipTh             = 0;
+        ctrls.uvFromY            = false;
+        ctrls.useQpStrength      = false;
+        break;
+    }
+    case 3: {
+        // pf_set {0,4,8,12,15}
+        // sf_set {0,1,..,3}
+        ctrls.enabled                    = 1;
+        ctrls.firstPassFsNum             = 5;
+        secondPassFsNum                  = 3;
+        ctrls.defaultSecondPassFsNum     = (std::uint8_t)(ctrls.firstPassFsNum * secondPassFsNum);
+        const int sel[5] = {0, 4, 8, 12, 15};
+        for (int i = 0; i < 5; ++i) ctrls.defaultFirstPassFs[i] = pfGi[sel[i]];
+        int sfIdx = 0;
+        for (int i = 0; i < ctrls.firstPassFsNum; i++) {
+            int pfIdx = ctrls.defaultFirstPassFs[i];
+            for (int j = 1; j < 4; j++) {
+                ctrls.defaultSecondPassFs[sfIdx] = (std::uint8_t)(pfIdx + j);
+                sfIdx++;
+            }
+        }
+        for (int i = 0; i < ctrls.firstPassFsNum; i++) {
+            ctrls.defaultFirstPassFsUv[i] = (std::int8_t)ctrls.defaultFirstPassFs[i];
+        }
+        for (int i = 0; i < ctrls.defaultSecondPassFsNum; i++) {
+            ctrls.defaultSecondPassFsUv[i] = -1;
+        }
+        ctrls.useReferenceCdefFs = 0;
+        ctrls.searchBestRefFs    = 0;
+        ctrls.subsamplingFactor  = 1;
+        ctrls.skipTh             = 0;
+        ctrls.uvFromY            = false;
+        ctrls.useQpStrength      = false;
+        break;
+    }
+    case 4: {
+        // pf_set {0,7,15}
+        // sf_set {0,1,..,3}
+        ctrls.enabled                    = 1;
+        ctrls.firstPassFsNum             = 3;
+        secondPassFsNum                  = 3;
+        ctrls.defaultSecondPassFsNum     = (std::uint8_t)(ctrls.firstPassFsNum * secondPassFsNum);
+        const int sel[3] = {0, 7, 15};
+        for (int i = 0; i < 3; ++i) ctrls.defaultFirstPassFs[i] = pfGi[sel[i]];
+        int sfIdx = 0;
+        for (int i = 0; i < ctrls.firstPassFsNum; i++) {
+            int pfIdx = ctrls.defaultFirstPassFs[i];
+            for (int j = 1; j < 4; j++) {
+                ctrls.defaultSecondPassFs[sfIdx] = (std::uint8_t)(pfIdx + j);
+                sfIdx++;
+            }
+        }
+        for (int i = 0; i < ctrls.firstPassFsNum; i++) {
+            ctrls.defaultFirstPassFsUv[i] = (std::int8_t)ctrls.defaultFirstPassFs[i];
+        }
+        for (int i = 0; i < ctrls.defaultSecondPassFsNum; i++) {
+            ctrls.defaultSecondPassFsUv[i] = -1;
+        }
+        ctrls.useReferenceCdefFs = 0;
+        ctrls.searchBestRefFs    = 0;
+        ctrls.subsamplingFactor  = 1;
+        ctrls.skipTh             = 0;
+        ctrls.uvFromY            = false;
+        ctrls.useQpStrength      = false;
+        break;
+    }
+    case 5: {
+        // pf_set {0,7,15}
+        // sf_set {0,2}
+        ctrls.enabled                    = 1;
+        ctrls.firstPassFsNum             = 3;
+        secondPassFsNum                  = 1;
+        ctrls.defaultSecondPassFsNum     = (std::uint8_t)(ctrls.firstPassFsNum * secondPassFsNum);
+        ctrls.defaultFirstPassFs[0]      = pfGi[0];
+        ctrls.defaultFirstPassFs[1]      = pfGi[7];
+        ctrls.defaultFirstPassFs[2]      = pfGi[15];
+        ctrls.defaultSecondPassFs[0]     = (std::uint8_t)(pfGi[0] + 2);
+        ctrls.defaultSecondPassFs[1]     = (std::uint8_t)(pfGi[7] + 2);
+        ctrls.defaultSecondPassFs[2]     = (std::uint8_t)(pfGi[15] + 2);
+        for (int i = 0; i < ctrls.firstPassFsNum; i++) {
+            ctrls.defaultFirstPassFsUv[i] = (std::int8_t)ctrls.defaultFirstPassFs[i];
+        }
+        for (int i = 0; i < ctrls.defaultSecondPassFsNum; i++) {
+            ctrls.defaultSecondPassFsUv[i] = -1;
+        }
+        ctrls.useReferenceCdefFs = 0;
+        ctrls.searchBestRefFs    = isNotHighestLayer_ ? 0 : 1;
+        ctrls.subsamplingFactor  = 1;
+        ctrls.skipTh             = 0;
+        ctrls.uvFromY            = false;
+        ctrls.useQpStrength      = false;
+        break;
+    }
+    case 6: {
+        // pf_set {0,15}
+        // sf_set {0,2}
+        ctrls.enabled                    = 1;
+        ctrls.firstPassFsNum             = 2;
+        secondPassFsNum                  = 1;
+        ctrls.defaultSecondPassFsNum     = (std::uint8_t)(ctrls.firstPassFsNum * secondPassFsNum);
+        ctrls.defaultFirstPassFs[0]      = pfGi[0];
+        ctrls.defaultFirstPassFs[1]      = pfGi[15];
+        ctrls.defaultSecondPassFs[0]     = (std::uint8_t)(pfGi[0] + 2);
+        ctrls.defaultSecondPassFs[1]     = (std::uint8_t)(pfGi[15] + 2);
+        ctrls.defaultFirstPassFsUv[0]    = (std::int8_t)ctrls.defaultFirstPassFs[0];
+        ctrls.defaultFirstPassFsUv[1]    = (std::int8_t)ctrls.defaultFirstPassFs[1];
+        ctrls.defaultFirstPassFsUv[2]    = -1;  // when using search_best_ref_fs, set at least 3 filters
+        ctrls.defaultSecondPassFsUv[0]   = -1;
+        ctrls.defaultSecondPassFsUv[1]   = -1;
+        ctrls.useReferenceCdefFs = 0;
+        ctrls.searchBestRefFs    = isNotHighestLayer_ ? 0 : 1;
+        ctrls.subsamplingFactor  = 4;
+        ctrls.skipTh             = 0;
+        ctrls.uvFromY            = false;
+        ctrls.useQpStrength      = false;
+        break;
+    }
+    case 7: {
+        // pf_set {0,15}
+        // sf_set {0,2}
+        ctrls.enabled                    = 1;
+        ctrls.firstPassFsNum             = 2;
+        secondPassFsNum                  = 1;
+        ctrls.defaultSecondPassFsNum     = (std::uint8_t)(ctrls.firstPassFsNum * secondPassFsNum);
+        ctrls.defaultFirstPassFs[0]      = pfGi[0];
+        ctrls.defaultFirstPassFs[1]      = pfGi[15];
+        ctrls.defaultSecondPassFs[0]     = (std::uint8_t)(pfGi[0] + 2);
+        ctrls.defaultSecondPassFs[1]     = (std::uint8_t)(pfGi[15] + 2);
+        ctrls.defaultFirstPassFsUv[0]    = (std::int8_t)ctrls.defaultFirstPassFs[0];
+        ctrls.defaultFirstPassFsUv[1]    = (std::int8_t)ctrls.defaultFirstPassFs[1];
+        ctrls.defaultFirstPassFsUv[2]    = -1;  // if using search_best_ref_fs, set at least 3 filters
+        ctrls.defaultSecondPassFsUv[0]   = -1;
+        ctrls.defaultSecondPassFsUv[1]   = -1;
+        ctrls.useReferenceCdefFs = isNotHighestLayer_ ? 0 : 1;
+        ctrls.searchBestRefFs    = isBase_ ? 0 : 1;
+        ctrls.subsamplingFactor  = 4;
+        ctrls.skipTh             = isBase_ ? 0 : 80;
+        ctrls.uvFromY            = false;
+        ctrls.useQpStrength      = false;
+        break;
+    }
+    case 8: {
+        // pf_set {0,15}
+        // sf_set {0,2}
+        ctrls.enabled                    = 1;
+        ctrls.firstPassFsNum             = 2;
+        secondPassFsNum                  = 1;
+        ctrls.defaultSecondPassFsNum     = (std::uint8_t)(ctrls.firstPassFsNum * secondPassFsNum);
+        ctrls.defaultFirstPassFs[0]      = pfGi[0];
+        ctrls.defaultFirstPassFs[1]      = pfGi[15];
+        ctrls.defaultSecondPassFs[0]     = (std::uint8_t)(pfGi[0] + 2);
+        ctrls.defaultSecondPassFs[1]     = (std::uint8_t)(pfGi[15] + 2);
+        ctrls.defaultFirstPassFsUv[0]    = -1;
+        ctrls.defaultFirstPassFsUv[1]    = -1;
+        ctrls.defaultFirstPassFsUv[2]    = -1;  // if using search_best_ref_fs, set at least 3 filters
+        ctrls.defaultSecondPassFsUv[0]   = -1;
+        ctrls.defaultSecondPassFsUv[1]   = -1;
+        ctrls.useReferenceCdefFs = isBase_ ? 0 : 1;
+        ctrls.searchBestRefFs    = isBase_ ? 0 : 1;
+        ctrls.subsamplingFactor  = 4;
+        ctrls.skipTh             = isBase_ ? 0 : 80;
+        ctrls.uvFromY            = true;
+        ctrls.useQpStrength      = false;
+        break;
+    }
+    case 9: {
+        // Primary-only: no secondary strength candidates
+        ctrls.enabled                    = 1;
+        ctrls.firstPassFsNum             = 2;
+        secondPassFsNum                  = 0;
+        ctrls.defaultSecondPassFsNum     = 0;
+        ctrls.defaultFirstPassFs[0]      = pfGi[0];
+        ctrls.defaultFirstPassFs[1]      = pfGi[15];
+        ctrls.defaultFirstPassFsUv[0]    = -1;
+        ctrls.defaultFirstPassFsUv[1]    = -1;
+        ctrls.defaultFirstPassFsUv[2]    = -1;
+        ctrls.defaultSecondPassFsUv[0]   = -1;
+        ctrls.defaultSecondPassFsUv[1]   = -1;
+        ctrls.useReferenceCdefFs = isBase_ ? 0 : 1;
+        ctrls.searchBestRefFs    = isBase_ ? 0 : 1;
+        ctrls.subsamplingFactor  = 4;
+        ctrls.skipTh             = isBase_ ? 0 : 80;
+        ctrls.uvFromY            = true;
+        ctrls.useQpStrength      = false;
+        break;
+    }
+    case 10:
+        ctrls.enabled               = 1;
+        ctrls.useReferenceCdefFs    = 0;
+        ctrls.useQpStrength         = true;
+        ctrls.skipTh                = isBase_ ? 0 : 80;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+    // If chroma filters will be copied from luma, set chroma filters to -1 to avoid testing
+    if (ctrls.uvFromY && !ctrls.useQpStrength) {
+        for (int fsIdx = 0; fsIdx < ctrls.firstPassFsNum; fsIdx++) {
+            ctrls.defaultFirstPassFsUv[fsIdx] = -1;
+        }
+        for (int fsIdx = 0; fsIdx < ctrls.defaultSecondPassFsNum; fsIdx++) {
+            ctrls.defaultSecondPassFsUv[fsIdx] = -1;
+        }
+    }
+}
+
+// set_cdef_recon_controls (enc_mode_config.c:1208-1240), 1:1.
+void setCdefReconCtrls(CdefReconCtrls& ctrls, std::uint8_t cdefReconLevel) {
+    switch (cdefReconLevel) {
+    case 0:  // OFF
+        ctrls.zeroFsCostBias        = 0;
+        ctrls.zeroFilterStrengthLvl = 0;
+        ctrls.prevCdefDistTh        = 0;
+        break;
+    case 1:
+        ctrls.zeroFsCostBias        = 61;
+        ctrls.zeroFilterStrengthLvl = 2;
+        ctrls.prevCdefDistTh        = 10;
+        break;
+    case 2:
+        ctrls.zeroFsCostBias        = 61;
+        ctrls.zeroFilterStrengthLvl = 3;
+        ctrls.prevCdefDistTh        = 10;
+        break;
+    case 3:  // old level 4
+        ctrls.zeroFsCostBias        = 60;
+        ctrls.zeroFilterStrengthLvl = 3;
+        ctrls.prevCdefDistTh        = 10;
+        break;
+    case 4:  // old level 5
+        ctrls.zeroFsCostBias        = 58;
+        ctrls.zeroFilterStrengthLvl = 3;
+        ctrls.prevCdefDistTh        = 10;
+        break;
+    default:  // assert(0) in the reference; it writes nothing and we keep that.
+        break;
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

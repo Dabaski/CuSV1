@@ -1843,3 +1843,315 @@ TEST_CASE("sig_deriv_me_tf - the composition over every (level, resolution, qp_o
         }
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Batch B: the cdef search/recon setter family (enc_mode_config.c:899-1240).
+// ---------------------------------------------------------------------------
+
+// Test-side pf_gi copy (enc_mode_config.c:21) - the oracle never reads the
+// port's table.
+static const uint8_t kPfGi[16] = {0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60};
+
+// The poisoned int8 sentinel: 0xAA reinterpreted as int8_t (= -86).
+static const int8_t kPoisonI8 = -86;
+
+struct CdefSearchOracle {
+    uint8_t enabled;
+    uint8_t firstPassFsNum;
+    uint8_t firstPass[64];
+    uint8_t secondPassFsNum;
+    uint8_t secondPass[64];
+    int8_t firstPassUv[64];
+    int8_t secondPassUv[64];
+    int8_t useReferenceCdefFs;
+    uint8_t subsamplingFactor;
+    uint8_t searchBestRefFs;
+    uint8_t skipTh;
+    int uvFromY;
+    int useQpStrength;
+};
+
+// Independent transcription of set_cdef_search_controls (:899-1206). The
+// uv arrays hold the poison sentinel wherever the reference leaves them
+// untouched; the tri-state uvFromY/useQpStrength make the :1197 post-loop
+// guard fire only when the reference's own would.
+static void oracleCdefSearch(CdefSearchOracle& o, int level, bool isBase, bool isNotHighestLayer) {
+    std::memset(&o, 0xAA, sizeof(o));
+    switch (level) {
+    case 0:  // :906-911
+        o.enabled = 0;
+        o.useReferenceCdefFs = 0;
+        o.skipTh = 0;
+        o.uvFromY = false;
+        break;
+    case 1: {  // :912-955 pf_set {0..15}, sf_set {0,1,2,3}
+        o.enabled = 1;
+        o.firstPassFsNum = 16;
+        o.secondPassFsNum = 16 * 3;
+        for (int i = 0; i < 16; ++i) o.firstPass[i] = kPfGi[i];
+        int sf = 0;
+        for (int i = 0; i < 16; ++i)
+            for (int j = 1; j < 4; ++j) o.secondPass[sf++] = (uint8_t)(o.firstPass[i] + j);
+        for (int i = 0; i < 16; ++i) o.firstPassUv[i] = (int8_t)o.firstPass[i];
+        for (int i = 0; i < o.secondPassFsNum; ++i) o.secondPassUv[i] = (int8_t)o.secondPass[i];
+        o.useReferenceCdefFs = 0;
+        o.searchBestRefFs = 0;
+        o.subsamplingFactor = 1;
+        o.skipTh = 0;
+        o.uvFromY = false;
+        o.useQpStrength = false;
+        break;
+    }
+    case 2: {  // :956-995 pf_set {0,1,2,4,5,6,8,9,10,12,13,14}
+        o.enabled = 1;
+        o.firstPassFsNum = 12;
+        o.secondPassFsNum = 12 * 3;
+        const int sel[12] = {0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14};
+        for (int i = 0; i < 12; ++i) o.firstPass[i] = kPfGi[sel[i]];
+        int sf = 0;
+        for (int i = 0; i < 12; ++i)
+            for (int j = 1; j < 4; ++j) o.secondPass[sf++] = (uint8_t)(o.firstPass[i] + j);
+        for (int i = 0; i < 12; ++i) o.firstPassUv[i] = (int8_t)o.firstPass[i];
+        for (int i = 0; i < o.secondPassFsNum; ++i) o.secondPassUv[i] = -1;
+        o.useReferenceCdefFs = 0;
+        o.searchBestRefFs = 0;
+        o.subsamplingFactor = 1;
+        o.skipTh = 0;
+        o.uvFromY = false;
+        o.useQpStrength = false;
+        break;
+    }
+    case 3: {  // :996-1028 pf_set {0,4,8,12,15}
+        o.enabled = 1;
+        o.firstPassFsNum = 5;
+        o.secondPassFsNum = 5 * 3;
+        const int sel[5] = {0, 4, 8, 12, 15};
+        for (int i = 0; i < 5; ++i) o.firstPass[i] = kPfGi[sel[i]];
+        int sf = 0;
+        for (int i = 0; i < 5; ++i)
+            for (int j = 1; j < 4; ++j) o.secondPass[sf++] = (uint8_t)(o.firstPass[i] + j);
+        for (int i = 0; i < 5; ++i) o.firstPassUv[i] = (int8_t)o.firstPass[i];
+        for (int i = 0; i < o.secondPassFsNum; ++i) o.secondPassUv[i] = -1;
+        o.useReferenceCdefFs = 0;
+        o.searchBestRefFs = 0;
+        o.subsamplingFactor = 1;
+        o.skipTh = 0;
+        o.uvFromY = false;
+        o.useQpStrength = false;
+        break;
+    }
+    case 4: {  // :1029-1059 pf_set {0,7,15}
+        o.enabled = 1;
+        o.firstPassFsNum = 3;
+        o.secondPassFsNum = 3 * 3;
+        const int sel[3] = {0, 7, 15};
+        for (int i = 0; i < 3; ++i) o.firstPass[i] = kPfGi[sel[i]];
+        int sf = 0;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 1; j < 4; ++j) o.secondPass[sf++] = (uint8_t)(o.firstPass[i] + j);
+        for (int i = 0; i < 3; ++i) o.firstPassUv[i] = (int8_t)o.firstPass[i];
+        for (int i = 0; i < o.secondPassFsNum; ++i) o.secondPassUv[i] = -1;
+        o.useReferenceCdefFs = 0;
+        o.searchBestRefFs = 0;
+        o.subsamplingFactor = 1;
+        o.skipTh = 0;
+        o.uvFromY = false;
+        o.useQpStrength = false;
+        break;
+    }
+    case 5: {  // :1060-1086 pf_set {0,7,15}, sf_set {0,2}
+        o.enabled = 1;
+        o.firstPassFsNum = 3;
+        o.secondPassFsNum = 3 * 1;
+        o.firstPass[0] = kPfGi[0];
+        o.firstPass[1] = kPfGi[7];
+        o.firstPass[2] = kPfGi[15];
+        o.secondPass[0] = (uint8_t)(kPfGi[0] + 2);
+        o.secondPass[1] = (uint8_t)(kPfGi[7] + 2);
+        o.secondPass[2] = (uint8_t)(kPfGi[15] + 2);
+        for (int i = 0; i < 3; ++i) o.firstPassUv[i] = (int8_t)o.firstPass[i];
+        for (int i = 0; i < o.secondPassFsNum; ++i) o.secondPassUv[i] = -1;
+        o.useReferenceCdefFs = 0;
+        o.searchBestRefFs = isNotHighestLayer ? 0 : 1;
+        o.subsamplingFactor = 1;
+        o.skipTh = 0;
+        o.uvFromY = false;
+        o.useQpStrength = false;
+        break;
+    }
+    case 6: {  // :1087-1112 pf_set {0,15}, sf_set {0,2}
+        o.enabled = 1;
+        o.firstPassFsNum = 2;
+        o.secondPassFsNum = 2 * 1;
+        o.firstPass[0] = kPfGi[0];
+        o.firstPass[1] = kPfGi[15];
+        o.secondPass[0] = (uint8_t)(kPfGi[0] + 2);
+        o.secondPass[1] = (uint8_t)(kPfGi[15] + 2);
+        o.firstPassUv[0] = (int8_t)o.firstPass[0];
+        o.firstPassUv[1] = (int8_t)o.firstPass[1];
+        o.firstPassUv[2] = -1;
+        o.secondPassUv[0] = -1;
+        o.secondPassUv[1] = -1;
+        o.useReferenceCdefFs = 0;
+        o.searchBestRefFs = isNotHighestLayer ? 0 : 1;
+        o.subsamplingFactor = 4;
+        o.skipTh = 0;
+        o.uvFromY = false;
+        o.useQpStrength = false;
+        break;
+    }
+    case 7: {  // :1113-1137
+        o.enabled = 1;
+        o.firstPassFsNum = 2;
+        o.secondPassFsNum = 2 * 1;
+        o.firstPass[0] = kPfGi[0];
+        o.firstPass[1] = kPfGi[15];
+        o.secondPass[0] = (uint8_t)(kPfGi[0] + 2);
+        o.secondPass[1] = (uint8_t)(kPfGi[15] + 2);
+        o.firstPassUv[0] = (int8_t)o.firstPass[0];
+        o.firstPassUv[1] = (int8_t)o.firstPass[1];
+        o.firstPassUv[2] = -1;
+        o.secondPassUv[0] = -1;
+        o.secondPassUv[1] = -1;
+        o.useReferenceCdefFs = isNotHighestLayer ? 0 : 1;
+        o.searchBestRefFs = isBase ? 0 : 1;
+        o.subsamplingFactor = 4;
+        o.skipTh = isBase ? 0 : 80;
+        o.uvFromY = false;
+        o.useQpStrength = false;
+        break;
+    }
+    case 8: {  // :1138-1162
+        o.enabled = 1;
+        o.firstPassFsNum = 2;
+        o.secondPassFsNum = 2 * 1;
+        o.firstPass[0] = kPfGi[0];
+        o.firstPass[1] = kPfGi[15];
+        o.secondPass[0] = (uint8_t)(kPfGi[0] + 2);
+        o.secondPass[1] = (uint8_t)(kPfGi[15] + 2);
+        o.firstPassUv[0] = -1;
+        o.firstPassUv[1] = -1;
+        o.firstPassUv[2] = -1;
+        o.secondPassUv[0] = -1;
+        o.secondPassUv[1] = -1;
+        o.useReferenceCdefFs = isBase ? 0 : 1;
+        o.searchBestRefFs = isBase ? 0 : 1;
+        o.subsamplingFactor = 4;
+        o.skipTh = isBase ? 0 : 80;
+        o.uvFromY = true;
+        o.useQpStrength = false;
+        break;
+    }
+    case 9: {  // :1164-1184 primary-only
+        o.enabled = 1;
+        o.firstPassFsNum = 2;
+        o.secondPassFsNum = 0;
+        o.firstPass[0] = kPfGi[0];
+        o.firstPass[1] = kPfGi[15];
+        o.firstPassUv[0] = -1;
+        o.firstPassUv[1] = -1;
+        o.firstPassUv[2] = -1;
+        o.secondPassUv[0] = -1;
+        o.secondPassUv[1] = -1;
+        o.useReferenceCdefFs = isBase ? 0 : 1;
+        o.searchBestRefFs = isBase ? 0 : 1;
+        o.subsamplingFactor = 4;
+        o.skipTh = isBase ? 0 : 80;
+        o.uvFromY = true;
+        o.useQpStrength = false;
+        break;
+    }
+    case 10:  // :1186-1191
+        o.enabled = 1;
+        o.useReferenceCdefFs = 0;
+        o.useQpStrength = true;
+        o.skipTh = isBase ? 0 : 80;
+        break;
+    default:  // :1192-1194 assert(0) writes nothing
+        break;
+    }
+    // :1196-1205 - the chroma-copy post-loop.
+    if (o.uvFromY && !o.useQpStrength) {
+        for (int i = 0; i < o.firstPassFsNum; ++i) o.firstPassUv[i] = -1;
+        for (int i = 0; i < o.secondPassFsNum; ++i) o.secondPassUv[i] = -1;
+    }
+}
+
+TEST_CASE("set_cdef_search_controls - every level x isBase x isNotHighestLayer, whole-struct") {
+    // :899-1206. Levels 1-5 write the full surface; 6-9 the short pf sets
+    // with the tail uv slots untouched; 0 and 10 write their scalars only;
+    // the default arm writes nothing. The two poisoned bools stay unread
+    // where the reference does not write them (the gm precedent).
+    for (int level = 0; level <= 11; ++level) {
+        for (int base = 0; base <= 1; ++base) {
+            for (int nl = 0; nl <= 1; ++nl) {
+                CdefSearchCtrls c;
+                std::memset(&c, kPoison, sizeof(c));
+                setCdefSearchCtrls(c, (uint8_t)level, base != 0, nl != 0);
+                CdefSearchOracle o;
+                oracleCdefSearch(o, level, base != 0, nl != 0);
+                CHECK(c.enabled == o.enabled);
+                CHECK(c.firstPassFsNum == o.firstPassFsNum);
+                CHECK(c.defaultSecondPassFsNum == o.secondPassFsNum);
+                CHECK(c.useReferenceCdefFs == o.useReferenceCdefFs);
+                CHECK(c.subsamplingFactor == o.subsamplingFactor);
+                CHECK(c.searchBestRefFs == o.searchBestRefFs);
+                CHECK(c.skipTh == o.skipTh);
+                for (int i = 0; i < 64; ++i) {
+                    CHECK(c.defaultFirstPassFs[i] == o.firstPass[i]);
+                    CHECK(c.defaultSecondPassFs[i] == o.secondPass[i]);
+                    CHECK(c.defaultFirstPassFsUv[i] == o.firstPassUv[i]);
+                    CHECK(c.defaultSecondPassFsUv[i] == o.secondPassUv[i]);
+                }
+                // The bools are compared only where the reference writes
+                // them: uv_from_y by levels 0-9, use_qp_strength by 1-10
+                // (reading a bool holding 0xAA is UB - the gm precedent).
+                if (level <= 9) CHECK(c.uvFromY == (o.uvFromY != 0));
+                if (level >= 1 && level <= 10) CHECK(c.useQpStrength == (o.useQpStrength != 0));
+            }
+        }
+    }
+}
+
+TEST_CASE("set_cdef_recon_controls - the five levels, whole-struct") {
+    // :1208-1240. Each case writes exactly the three fields; the default
+    // arm writes nothing (the poison stands).
+    for (int level = 0; level <= 5; ++level) {
+        CdefReconCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setCdefReconCtrls(c, (uint8_t)level);
+        switch (level) {
+        case 0:
+            CHECK(c.zeroFsCostBias == 0);
+            CHECK(c.zeroFilterStrengthLvl == 0);
+            CHECK(c.prevCdefDistTh == 0);
+            break;
+        case 1:
+            CHECK(c.zeroFsCostBias == 61);
+            CHECK(c.zeroFilterStrengthLvl == 2);
+            CHECK(c.prevCdefDistTh == 10);
+            break;
+        case 2:
+            CHECK(c.zeroFsCostBias == 61);
+            CHECK(c.zeroFilterStrengthLvl == 3);
+            CHECK(c.prevCdefDistTh == 10);
+            break;
+        case 3:
+            CHECK(c.zeroFsCostBias == 60);
+            CHECK(c.zeroFilterStrengthLvl == 3);
+            CHECK(c.prevCdefDistTh == 10);
+            break;
+        case 4:
+            CHECK(c.zeroFsCostBias == 58);
+            CHECK(c.zeroFilterStrengthLvl == 3);
+            CHECK(c.prevCdefDistTh == 10);
+            break;
+        default:  // :1236-1238 assert(0) writes nothing
+            CHECK(c.zeroFsCostBias == 0xAAAA);
+            CHECK(c.zeroFilterStrengthLvl == kPoison);
+            CHECK(c.prevCdefDistTh == 0xAAAA);
+            break;
+        }
+    }
+}
