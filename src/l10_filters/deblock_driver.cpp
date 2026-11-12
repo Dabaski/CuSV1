@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstring>
 
+#include "deblock_hbd.h"
 #include "deblock_driver.h"
 
 namespace l10_filters {
@@ -288,12 +289,12 @@ int getTransformSize(const DeblockMi& mbmi, EdgeDir edgeDir, int plane, const De
 }
 
 // 1:1 port of svt_av1_filter_block_plane_vert (deblocking_filter.c
-// :340-466): the vertical-edge walk over one superblock. The highbd
-// branches (:400-401 etc.) are PARKED with the hbd kernel family - the
-// DF1 8-bit discipline (assert, named deviation).
+// :340-466): the vertical-edge walk over one superblock. The is_16bit
+// branches (:400-401 etc.) dispatch into the landed highbdLpfVertical*
+// kernels with the threaded encoder bit depth (the A8W1 wiring turn -
+// the assert-park is LIFTED).
 void filterBlockPlaneVert(const DeblockContext& ctx, int plane, const DeblockPlane& planePtr, std::uint32_t miRow,
                           std::uint32_t miCol) {
-    assert(!planePtr.is16bit); // highbd_lpf_vertical_* parked (hbd)
     const int rowStep = kMiSize >> 2; // MI_SIZE >> MI_SIZE_LOG2 = 1
     const int scaleHorz = planePtr.subsamplingX;
     const int scaleVert = planePtr.subsamplingY;
@@ -331,11 +332,39 @@ void filterBlockPlaneVert(const DeblockContext& ctx, int plane, const DeblockPla
                 params.filterLength = 0;
                 txSize = TX_4X4;
             }
-            switch (params.filterLength) { // :397-453
-            case 4: lpfVertical4(p, dstStride, params.mblim, params.lim, params.hevThr); break;
-            case 6: lpfVertical6(p, dstStride, params.mblim, params.lim, params.hevThr); break;
-            case 8: lpfVertical8(p, dstStride, params.mblim, params.lim, params.hevThr); break;
-            case 14: lpfVertical14(p, dstStride, params.mblim, params.lim, params.hevThr); break;
+            switch (params.filterLength) { // :397-453 (the is_16bit branches :400-401 etc.)
+            case 4:
+                if (planePtr.is16bit) {
+                    highbdLpfVertical4(reinterpret_cast<std::uint16_t*>(p), dstStride, params.mblim, params.lim,
+                        params.hevThr, ctx.encoderBitDepth);
+                } else {
+                    lpfVertical4(p, dstStride, params.mblim, params.lim, params.hevThr);
+                }
+                break;
+            case 6:
+                if (planePtr.is16bit) {
+                    highbdLpfVertical6(reinterpret_cast<std::uint16_t*>(p), dstStride, params.mblim, params.lim,
+                        params.hevThr, ctx.encoderBitDepth);
+                } else {
+                    lpfVertical6(p, dstStride, params.mblim, params.lim, params.hevThr);
+                }
+                break;
+            case 8:
+                if (planePtr.is16bit) {
+                    highbdLpfVertical8(reinterpret_cast<std::uint16_t*>(p), dstStride, params.mblim, params.lim,
+                        params.hevThr, ctx.encoderBitDepth);
+                } else {
+                    lpfVertical8(p, dstStride, params.mblim, params.lim, params.hevThr);
+                }
+                break;
+            case 14:
+                if (planePtr.is16bit) {
+                    highbdLpfVertical14(reinterpret_cast<std::uint16_t*>(p), dstStride, params.mblim, params.lim,
+                        params.hevThr, ctx.encoderBitDepth);
+                } else {
+                    lpfVertical14(p, dstStride, params.mblim, params.lim, params.hevThr);
+                }
+                break;
             default: break;
             }
             // advance the destination pointer (:454-458)
@@ -382,10 +411,11 @@ void loopFilterFrame(std::uint8_t* const buffers[kMaxPlanes], const int strides[
 // steps 1 mi, the y inner loop advances by eb_tx_size_high_unit[ts] mi
 // (the pointer by advance * dst_stride * MI_SIZE rows), mode_step =
 // mi_stride << scale_vert, and the 4/6/8/14 dispatch into the landed
-// lpfHorizontal* kernels. Highbd branches PARKED (8-bit discipline).
+// lpfHorizontal* kernels. The is_16bit branches dispatch into the
+// landed highbdLpfHorizontal* kernels with the threaded encoder bit
+// depth (the A8W1 wiring turn - the assert-park is LIFTED).
 void filterBlockPlaneHorz(const DeblockContext& ctx, int plane, const DeblockPlane& planePtr, std::uint32_t miRow,
                           std::uint32_t miCol) {
-    assert(!planePtr.is16bit); // highbd_lpf_horizontal_* parked (hbd)
     const int colStep = kMiSize >> 2; // MI_SIZE >> MI_SIZE_LOG2 = 1
     const int scaleHorz = planePtr.subsamplingX;
     const int scaleVert = planePtr.subsamplingY;
@@ -423,11 +453,39 @@ void filterBlockPlaneHorz(const DeblockContext& ctx, int plane, const DeblockPla
                 params.filterLength = 0;
                 txSize = TX_4X4;
             }
-            switch (params.filterLength) { // :532-589
-            case 4: lpfHorizontal4(p, dstStride, params.mblim, params.lim, params.hevThr); break;
-            case 6: lpfHorizontal6(p, dstStride, params.mblim, params.lim, params.hevThr); break;
-            case 8: lpfHorizontal8(p, dstStride, params.mblim, params.lim, params.hevThr); break;
-            case 14: lpfHorizontal14(p, dstStride, params.mblim, params.lim, params.hevThr); break;
+            switch (params.filterLength) { // :532-589 (the is_16bit branches :536-537 etc.)
+            case 4:
+                if (planePtr.is16bit) {
+                    highbdLpfHorizontal4(reinterpret_cast<std::uint16_t*>(p), dstStride, params.mblim, params.lim,
+                        params.hevThr, ctx.encoderBitDepth);
+                } else {
+                    lpfHorizontal4(p, dstStride, params.mblim, params.lim, params.hevThr);
+                }
+                break;
+            case 6:
+                if (planePtr.is16bit) {
+                    highbdLpfHorizontal6(reinterpret_cast<std::uint16_t*>(p), dstStride, params.mblim, params.lim,
+                        params.hevThr, ctx.encoderBitDepth);
+                } else {
+                    lpfHorizontal6(p, dstStride, params.mblim, params.lim, params.hevThr);
+                }
+                break;
+            case 8:
+                if (planePtr.is16bit) {
+                    highbdLpfHorizontal8(reinterpret_cast<std::uint16_t*>(p), dstStride, params.mblim, params.lim,
+                        params.hevThr, ctx.encoderBitDepth);
+                } else {
+                    lpfHorizontal8(p, dstStride, params.mblim, params.lim, params.hevThr);
+                }
+                break;
+            case 14:
+                if (planePtr.is16bit) {
+                    highbdLpfHorizontal14(reinterpret_cast<std::uint16_t*>(p), dstStride, params.mblim, params.lim,
+                        params.hevThr, ctx.encoderBitDepth);
+                } else {
+                    lpfHorizontal14(p, dstStride, params.mblim, params.lim, params.hevThr);
+                }
+                break;
             default: break;
             }
             // advance the destination pointer (:591-595)
@@ -672,6 +730,459 @@ void loopFilterInit(LfFrameParams& hdr, LfInfoN& lfi) {
     // every SIMD_WIDTH lane of each level's hev_thr.
     for (int lvl = 0; lvl <= kMaxLoopFilter; lvl++) {
         std::memset(lfi.thr.lfthr[lvl].hev_thr, (lvl >> 4), kSimdWidth);
+    }
+}
+
+// A8W1 walls rung (G5): the disable_dlf_th table + the svt_copy_buffer /
+// picture_sse_calculations pair (deblocking_filter.c:27-:32, :711-:770).
+
+// disable_dlf_th (deblocking_filter.c:29-32): [zero_filter_strength_lvl]
+// [input_resolution]; DLF_MAX_LVL = 4 (:27), INPUT_SIZE_COUNT = 7.
+const std::uint32_t kDisableDlfTh[4][7] = {{0, 0, 0, 0, 0, 0, 0},
+                                           {100, 200, 500, 800, 1000, 1000, 1000},
+                                           {900, 1000, 2000, 3000, 4000, 4000, 4000},
+                                           {6000, 7000, 8000, 9000, 10000, 10000, 10000}};
+
+// 1:1 port of svt_copy_buffer (deblocking_filter.c:711-740): the
+// EbPictureBufferDesc wall threaded as LfSearchPic. is_16bit =
+// bit_depth > EB_EIGHT_BIT (:712) doubles copy_width and copy_stride;
+// a chroma plane halves both copy dims (:728-731); the ten header
+// fields + the stride/stride_bit_inc cell copy dst<-src (:713-:722,
+// :734-:735); the buffer pointers do not move.
+void copyBuffer(const LfSearchPic& src, LfSearchPic& dst, int plane) {
+    const bool is16bit = src.bitDepth > 8;
+    dst.border = src.border;
+    dst.width = src.width;
+    dst.height = src.height;
+    dst.maxWidth = src.maxWidth;
+    dst.maxHeight = src.maxHeight;
+    dst.bitDepth = src.bitDepth;
+    dst.colorFormat = src.colorFormat;
+    dst.lumaSize = src.lumaSize;
+    dst.chromaSize = src.chromaSize;
+    dst.packedFlag = src.packedFlag;
+
+    std::uint16_t copyWidth =
+        static_cast<std::uint16_t>(((src.width + 7) & ~7) << static_cast<int>(is16bit));
+    std::uint16_t copyHeight = static_cast<std::uint16_t>((src.height + 7) & ~7);
+
+    // TODO: Don't assume YUV420 (the reference's own comment, :727).
+    if (plane) {
+        copyWidth = static_cast<std::uint16_t>(copyWidth >> 1);
+        copyHeight = static_cast<std::uint16_t>(copyHeight >> 1);
+    }
+
+    const std::uint16_t copyStride =
+        static_cast<std::uint16_t>(src.stride[plane] << static_cast<int>(is16bit));
+    dst.stride[plane] = src.stride[plane];
+    dst.strideBitInc[plane] = src.strideBitInc[plane];
+
+    for (std::uint16_t row = 0; row < copyHeight; row++) {
+        std::memcpy(dst.buffer[plane] + copyStride * row, src.buffer[plane] + copyStride * row, copyWidth);
+    }
+}
+
+// 1:1 port of picture_sse_calculations (deblocking_filter.c:742-770):
+// the pcs/scs walls threaded through DlfWalls; is_16bit selects the
+// kernel AND the input pic (:758-:760); the aligned dims shift right by
+// the subsampling for a chroma plane (:755-:756); the offsets are 0.
+std::uint64_t pictureSseCalculations(const DlfWalls& walls, const LfSearchPic& reconPic, int plane) {
+    assert(plane >= 0 && plane < kMaxPlanes);
+    const bool is16bit = walls.is16bitPipeline;
+    const std::uint32_t ssX = static_cast<std::uint32_t>(walls.ssX);
+    const std::uint32_t ssY = static_cast<std::uint32_t>(walls.ssY);
+
+    // svt_spatial_full_distortion_kernel note (:749-:754): the intrinsic
+    // kernel requires 4-pixel-aligned dims; the aligned_width/height
+    // avoid wrong sse results when scaling is enabled.
+    const std::uint16_t inputAlignWidth = plane
+        ? static_cast<std::uint16_t>(walls.alignedWidth >> ssX)
+        : static_cast<std::uint16_t>(walls.alignedWidth);
+    const std::uint16_t inputAlignHeight = plane
+        ? static_cast<std::uint16_t>(walls.alignedHeight >> ssY)
+        : static_cast<std::uint16_t>(walls.alignedHeight);
+
+    const DlfSseFn distFn = is16bit ? walls.dist16 : walls.dist8;
+    const LfSearchPic* inputPic = is16bit ? walls.inputPic16 : walls.inputPic8;
+
+    return distFn(inputPic->buffer[plane], 0, inputPic->stride[plane], reconPic.buffer[plane], 0,
+        reconPic.stride[plane], inputAlignWidth, inputAlignHeight);
+}
+
+// 1:1 port of me_based_dlf_skip (deblocking_filter.c:954-1010): the
+// ME-based skip heuristic; writes *doY/*doUv. The ref-frame wall
+// (ref_frame_type_arr + av1_set_ref_frame + the EbReferenceObject deref,
+// :981-:996) reduces to the DlfRefStat rows (the caller's surviving
+// single-ref entries, the named deviation); the zero-strength threshold
+// scales by the mult arm (:963-:967) and the prev_dlf_dist gate by mult
+// too (:1002).
+void meBasedDlfSkip(const DlfWalls& walls, std::uint16_t prevDlfDistTh, bool* doY, bool* doUv) {
+    *doY = true;
+    *doUv = true;
+    if (walls.intraSlice) {
+        return;
+    }
+
+    const std::uint8_t inRes = static_cast<std::uint8_t>(walls.inputResolution);
+    // For flat, mult should be based on update_type since all pics are
+    // temporal layer 0 (:962-:966).
+    const int mult = walls.hierarchicalLevels ? (walls.temporalLayerIndex + 1) : walls.boosted ? 1 : walls.leaf ? 3 : 2;
+    const std::uint32_t useZeroStrengthTh =
+        kDisableDlfTh[walls.zeroFilterStrengthLvl][inRes] * static_cast<std::uint32_t>(mult);
+    if (!useZeroStrengthTh) {
+        return;
+    }
+
+    std::uint32_t totalMeSad = 0;
+    for (int b64Index = 0; b64Index < walls.b64TotalCount; ++b64Index) {
+        totalMeSad += walls.rcMeDistortion[b64Index];
+    }
+    const std::uint32_t averageMeSad = totalMeSad / walls.b64TotalCount;
+
+    std::int32_t prevDlfDist = 0;
+    if (prevDlfDistTh) {
+        std::int32_t totRefs = 0;
+        for (int refIt = 0; refIt < walls.dlfRefCount; ++refIt) {
+            const DlfRefStat& row = walls.dlfRefs[refIt];
+            if (row.dlfDistDev >= 0 && row.tmpLayerIdx <= walls.temporalLayerIndex) {
+                prevDlfDist += row.dlfDistDev;
+                ++totRefs;
+            }
+        }
+        if (totRefs) {
+            prevDlfDist /= totRefs;
+        }
+    }
+
+    if (!prevDlfDistTh || (prevDlfDist < (prevDlfDistTh * mult))) {
+        if (averageMeSad < useZeroStrengthTh) {
+            *doY = false;
+        }
+        if (averageMeSad < (useZeroStrengthTh * 2)) {
+            *doUv = false;
+        }
+    }
+}
+
+// 1:1 port of try_filter_frame (deblocking_filter.c:772-822): sets the
+// trial level into the frame header (:799-:810), runs the landed
+// loopFilterFrame on [plane, plane+1) (:812), measures the SSE against
+// the walls' input pic (:814), and reinstates the unfiltered recon from
+// the temp copy when any level is nonzero (:817-:819). sd is not carried
+// (the SSE reads the walls' input pic directly) and partial_frame is
+// carried for signature parity - the reference (void)s both (:780-:782).
+// The svt_aom_get_recon_pic selector is PARKED (named): the recon pic
+// comes through the walls' reconPic8/reconPic16 per the pipeline flag.
+std::int64_t tryFilterFrame(const DlfWalls& walls, DeblockContext& ctx, const LfSearchPic& tempPic,
+    std::int32_t filtLevel, std::int32_t partialFrame, int plane, int dir) {
+    (void)partialFrame;
+    LfFrameParams& hdr = ctx.hdr;
+    assert(plane >= 0 && plane <= 2);
+    std::int32_t filterLevel[2] = {filtLevel, filtLevel};
+    if (plane == 0 && dir == 0) {
+        filterLevel[1] = hdr.filterLevel[1];
+    }
+    if (plane == 0 && dir == 1) {
+        filterLevel[0] = hdr.filterLevel[0];
+    }
+
+    LfSearchPic& reconPic = walls.is16bitPipeline ? *walls.reconPic16 : *walls.reconPic8;
+
+    // set base filters for use of get_filter_level when in DELTA_Q_LF mode
+    switch (plane) {
+    case 0:
+        hdr.filterLevel[0] = filterLevel[0];
+        hdr.filterLevel[1] = filterLevel[1];
+        break;
+    case 1:
+        hdr.filterLevelU = filterLevel[0];
+        break;
+    case 2:
+        hdr.filterLevelV = filterLevel[0];
+        break;
+    }
+
+    int strides[kMaxPlanes] = {reconPic.stride[0], reconPic.stride[1], reconPic.stride[2]};
+    loopFilterFrame(reconPic.buffer, strides, reconPic.bitDepth, ctx, walls.alignedWidth, walls.alignedHeight, plane,
+        plane + 1, true);
+
+    const std::int64_t filtErr = static_cast<std::int64_t>(pictureSseCalculations(walls, reconPic, plane));
+
+    // Re-instate the unfiltered frame; if both filters are off, no need
+    // to copy as there was no change to the pic (:817-:819).
+    if (filterLevel[0] || filterLevel[1]) {
+        copyBuffer(tempPic, reconPic, plane);
+    }
+
+    return filtErr;
+}
+
+// 1:1 port of search_filter_level (deblocking_filter.c:828-952): the
+// seeded hill-climb over MAX_LOOP_FILTER+1 with the ss_err cache
+// (memset 0xFF = all -1), the bias toward lower levels (per-iteration
+// best_err >> (15 - filt_mid/8) * step, halved when tx_mode !=
+// ONLY_4X4), the convergence exit (tot_convergence counts PLATEAUS;
+// early_exit_convergence 0 = never early-exit), the filt_best-moves-
+// without-best_err acceptance quirk (:898-:904), the final
+// best_err = ss_err[filt_best] overwrite (:936) and the plane-0 pcs
+// side effects threaded as DlfSearchState* (:938-:946). The recon/temp
+// pictures thread as parameters/pointers (the get_recon_pic selector
+// PARKED, named).
+std::int32_t searchFilterLevel(const DlfWalls& walls, DeblockContext& ctx, LfSearchPic& tempPic,
+    DlfSearchState* state, std::int32_t partialFrame, const std::int32_t lastFrameFilterLevel[4],
+    double* bestCostRet, int plane, int dir) {
+    const std::int32_t minFilterLevel = 0;
+    const std::int32_t maxFilterLevel = kMaxLoopFilter; // av1_get_max_filter_level(cpi)
+    std::int32_t filtDirection = 0;
+    std::int64_t bestErr;
+    std::int32_t filtBest;
+
+    // Start the search at the previous frame filter level unless it is
+    // now out of range (:840-:860).
+    std::int32_t lvl;
+    switch (plane) {
+    case 0:
+        if (dir > 1) {
+            lvl = (lastFrameFilterLevel[0] + lastFrameFilterLevel[1] + 1) >> 1;
+        } else {
+            lvl = lastFrameFilterLevel[dir];
+        }
+        break;
+    case 1:
+        lvl = lastFrameFilterLevel[2];
+        break;
+    case 2:
+        lvl = lastFrameFilterLevel[3];
+        break;
+    default:
+        assert(plane >= 0 && plane <= 2);
+        return 0;
+    }
+    std::int32_t filtMid = lvl < minFilterLevel ? minFilterLevel : (lvl > maxFilterLevel ? maxFilterLevel : lvl);
+    std::int32_t filterStep = filtMid < 16 ? 4 : filtMid / 4;
+
+    // Sum squared error at each filter level; set each entry to -1
+    // (:868-:871).
+    std::int64_t ssErr[kMaxLoopFilter + 1];
+    std::memset(ssErr, 0xFF, sizeof(ssErr));
+    // make a copy of recon_buffer (:873) - the recon is the SRC, the
+    // temp the DST.
+    LfSearchPic& reconPic = walls.is16bitPipeline ? *walls.reconPic16 : *walls.reconPic8;
+    copyBuffer(reconPic, tempPic, plane);
+
+    bestErr = tryFilterFrame(walls, ctx, tempPic, filtMid, partialFrame, plane, dir);
+    filtBest = filtMid;
+    ssErr[filtMid] = bestErr;
+    std::int32_t totConvergence = 0;
+    while (filterStep > 0) {
+        const std::int32_t filtHigh =
+            filtMid + filterStep > maxFilterLevel ? maxFilterLevel : filtMid + filterStep;
+        const std::int32_t filtLow = filtMid - filterStep < minFilterLevel ? minFilterLevel : filtMid - filterStep;
+
+        // Bias against raising loop filter in favor of lowering it.
+        std::int64_t bias = (bestErr >> (15 - (filtMid / 8))) * filterStep;
+
+        // yx, bias less for large block size
+        if (!walls.txModeOnly4x4) {
+            bias >>= 1;
+        }
+
+        if (filtDirection <= 0 && filtLow != filtMid) {
+            // Get Low filter error score
+            if (ssErr[filtLow] < 0) {
+                ssErr[filtLow] = tryFilterFrame(walls, ctx, tempPic, filtLow, partialFrame, plane, dir);
+            }
+            // If value is close to the best so far then bias towards a
+            // lower loop filter value.
+            if (ssErr[filtLow] < (bestErr + bias)) {
+                // Was it actually better than the previous best?
+                if (ssErr[filtLow] < bestErr) {
+                    bestErr = ssErr[filtLow];
+                }
+                filtBest = filtLow;
+            }
+        }
+
+        // Now look at filt_high
+        if (filtDirection >= 0 && filtHigh != filtMid) {
+            if (ssErr[filtHigh] < 0) {
+                ssErr[filtHigh] = tryFilterFrame(walls, ctx, tempPic, filtHigh, partialFrame, plane, dir);
+            }
+            // If value is significantly better than previous best, bias
+            // added against raising filter value
+            if (ssErr[filtHigh] < (bestErr - bias)) {
+                bestErr = ssErr[filtHigh];
+                filtBest = filtHigh;
+            }
+        }
+
+        // Half the step distance if the best filter value was the same
+        // as last time
+        if (filtBest == filtMid) {
+            ++totConvergence;
+            if (totConvergence == walls.earlyExitConvergence) {
+                filterStep = 0;
+            } else {
+                filterStep /= 2;
+            }
+            filtDirection = 0;
+        } else {
+            filtDirection = (filtBest < filtMid) ? -1 : 1;
+            filtMid = filtBest;
+        }
+    }
+    // Update best error
+    bestErr = ssErr[filtBest];
+
+    if (plane == 0 && state) {
+        if (ssErr[0] >= 0) {
+            state->zeroFiltSse = ssErr[0];
+        }
+        if (ssErr[filtBest] >= 0) {
+            state->bestFiltSse = bestErr;
+        }
+    }
+
+    if (bestCostRet) {
+        *bestCostRet = static_cast<double>(bestErr);
+    }
+    return filtBest;
+}
+
+// dlf_search padding (deblocking_filter.c:1148-1151): sb_size + 32, +
+// sb_size when superres or resize is on. Factored out of the pick
+// driver for testability (named deviation: inline in the reference).
+int dlfSearchPadding(int sbSizePx, bool superresOrResize) {
+    int padding = sbSizePx + 32;
+    if (superresOrResize) {
+        padding += sbSizePx;
+    }
+    return padding;
+}
+
+// 1:1 port of svt_av1_pick_filter_level (deblocking_filter.c:1110-1286):
+// the pick driver. srcBuffer is unused in the reference (:1113) - not
+// carried. The sharpness derivation (:1115-:1136), then the method
+// dispatch: MINIMAL_LPF zeroes the luma levels (:1137-:1138); >= FROM_Q
+// delegates to the landed pickFilterLevelByQ with the me-skip EFFECT
+// computed through the landed meBasedDlfSkip (the reference's by_q
+// calls it internally at :1081 with th 0; the landed RE8A threading
+// carries the effect, and the walls' `q` IS the dequant - the
+// svt_aom_ac_quant_qtx call site is the wiring rung's); else the
+// DLF-search block (:1146-:1283) with the EB_NEW/EB_DELETE temp
+// allocation PARKED (the walls' tempPic8/16) and the ref walks reduced
+// to the RefFilterLevels / DlfRefStat rows. CONFIG_ENABLE_DLF_SEARCH is
+// 0 in the pinned EbConfigMacros.h:116 - the branch is compiled-in here
+// (named deviation, testable through LpfPickFromFullImage).
+void pickFilterLevel(const DlfWalls& walls, DeblockContext& ctx, std::int32_t q) {
+    LfFrameParams& hdr = ctx.hdr;
+    const std::int32_t sharpnessVal = walls.sharpness < 0 ? 0 : (walls.sharpness > 7 ? 7 : walls.sharpness);
+
+    const LpfPickMethod method = walls.pickMethod;
+
+    hdr.sharpnessLevel = sharpnessVal;
+    if (walls.isKeyFrame && walls.tune == 0) { // TUNE_VQ
+        hdr.sharpnessLevel = sharpnessVal + 2 < 7 ? sharpnessVal + 2 : 7;
+    } else if (walls.tune == 3 || walls.tune == 4) { // TUNE_IQ / TUNE_MS_SSIM
+        // Loop filter sharpness levels are highly nonlinear (:1122-:1124).
+        std::int32_t maxLfSharpness;
+        if (walls.baseQIdx <= 112) {
+            maxLfSharpness = 7;
+        } else if (walls.baseQIdx <= 160) {
+            maxLfSharpness = 1;
+        } else {
+            maxLfSharpness = 0;
+        }
+        hdr.sharpnessLevel = hdr.sharpnessLevel < maxLfSharpness ? hdr.sharpnessLevel : maxLfSharpness;
+    }
+    if (method == LpfPickMinimalLpf) {
+        hdr.filterLevel[0] = 0;
+        hdr.filterLevel[1] = 0;
+    } else if (method >= LpfPickFromQ) {
+        std::int32_t filterLevel[4];
+        PickQParams params{};
+        params.isKeyFrame = walls.isKeyFrame;
+        params.inputResolution = walls.inputResolution;
+        params.boosted = walls.boosted;
+        params.bitDepth = ctx.encoderBitDepth;
+        params.refs = walls.refLevels;
+        params.refCount = walls.refLevelCount;
+        meBasedDlfSkip(walls, 0, &params.doY, &params.doUv);
+        pickFilterLevelByQ(params, q, filterLevel);
+        hdr.filterLevel[0] = filterLevel[0];
+        hdr.filterLevel[1] = filterLevel[1];
+        hdr.filterLevelU = filterLevel[2];
+        hdr.filterLevelV = filterLevel[3];
+    } else {
+        LfSearchPic& tempPic = walls.is16bitPipeline ? *walls.tempPic16 : *walls.tempPic8;
+
+        if (walls.dlfAvg && walls.refLevelCount > 0) {
+            std::int32_t totRefFilterLevel[2] = {0, 0};
+            std::int32_t totRefFilterLevelU = 0;
+            std::int32_t totRefFilterLevelV = 0;
+            for (int refIt = 0; refIt < walls.refLevelCount; ++refIt) {
+                const RefFilterLevels& row = walls.refLevels[refIt];
+                totRefFilterLevel[0] += row.fl0;
+                totRefFilterLevel[1] += row.fl1;
+                totRefFilterLevelU += row.flu;
+                totRefFilterLevelV += row.flv;
+            }
+            hdr.filterLevel[0] = totRefFilterLevel[0] / walls.refLevelCount;
+            hdr.filterLevel[1] = totRefFilterLevel[1] / walls.refLevelCount;
+            hdr.filterLevelU = totRefFilterLevelU / walls.refLevelCount;
+            hdr.filterLevelV = totRefFilterLevelV / walls.refLevelCount;
+        }
+        bool doY = true;
+        bool doUv = true;
+        meBasedDlfSkip(walls, static_cast<std::uint16_t>(walls.prevDlfDistTh), &doY, &doUv);
+
+        const std::int32_t lastFrameFilterLevel[4] = {hdr.filterLevel[0], hdr.filterLevel[1], hdr.filterLevelU,
+            hdr.filterLevelV};
+        const std::int32_t partial = method == LpfPickFromSubimage ? 1 : 0;
+
+        if (!doY) {
+            hdr.filterLevel[0] = 0;
+            hdr.filterLevel[1] = 0;
+        } else if (walls.boosted || !walls.useRefAvgY || walls.dlfRefCount == 0) {
+            const std::int32_t searched =
+                searchFilterLevel(walls, ctx, tempPic, walls.searchState, partial, lastFrameFilterLevel, nullptr, 0, 2);
+            hdr.filterLevel[0] = searched;
+            hdr.filterLevel[1] = searched;
+        } else if (lastFrameFilterLevel[0] || lastFrameFilterLevel[1]) {
+            std::int32_t prevDlfDist = 0;
+            std::int32_t totRefs = 0;
+            for (int refIt = 0; refIt < walls.dlfRefCount; ++refIt) {
+                const DlfRefStat& row = walls.dlfRefs[refIt];
+                if (row.dlfDistDev >= 0) {
+                    prevDlfDist += row.dlfDistDev;
+                    ++totRefs;
+                }
+            }
+            if (totRefs) {
+                prevDlfDist /= totRefs;
+            }
+            // If improvement from DLF of ref frames is small, disable DLF
+            // for the current frame (:1248-:1251).
+            if (totRefs && prevDlfDist < 5) {
+                hdr.filterLevel[0] = 0;
+                hdr.filterLevel[1] = 0;
+            }
+        }
+
+        if (!doUv || (hdr.filterLevel[0] == 0 && hdr.filterLevel[1] == 0)) {
+            // chroma filtering not allowed if luma filters off
+            hdr.filterLevelU = 0;
+            hdr.filterLevelV = 0;
+        } else if (!walls.boosted && walls.useRefAvgUv && walls.dlfRefCount > 0) {
+            // use avg-ref for chroma
+            hdr.filterLevelU = lastFrameFilterLevel[2];
+            hdr.filterLevelV = lastFrameFilterLevel[3];
+        } else {
+            hdr.filterLevelU =
+                searchFilterLevel(walls, ctx, tempPic, walls.searchState, partial, lastFrameFilterLevel, nullptr, 1, 0);
+            hdr.filterLevelV =
+                searchFilterLevel(walls, ctx, tempPic, walls.searchState, partial, lastFrameFilterLevel, nullptr, 2, 0);
+        }
     }
 }
 

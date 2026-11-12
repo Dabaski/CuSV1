@@ -13,13 +13,21 @@
 // frame-header level + the post-recon filter pass + the goldens) comes
 // later.
 // LANDED so far: loopFilterInit (deblocking_filter.c:82-97).
-// PARKED (named, deblocking_filter.c spans): svt_copy_buffer :711-:740 +
-// picture_sse_calculations :742-:770 + try_filter_frame :772-:822 (the SD
-// copy / SSE pair, 101 nb), search_filter_level :828-:953 (113 nb, the
-// search-based pick), me_based_dlf_skip :954-:1010 (55 nb, the ME-based
-// skip heuristic; its do_y/do_uv EFFECT is threaded as parameters),
+// A8W1 (the walls rung): the deblocking_filter.c walls :711-:1286 land in
+// groups G5-G9 - svt_copy_buffer :711-:740 + picture_sse_calculations
+// :742-:770 + try_filter_frame :772-:822 (the SD copy / SSE pair, 101 nb),
+// search_filter_level :828-:953 (113 nb, the search-based pick),
+// me_based_dlf_skip :954-:1010 (55 nb, the ME-based skip heuristic) and
 // svt_av1_pick_filter_level :1110-:1286 (158 nb, the search-based pick
-// driver).
+// driver) plus the disable_dlf_th table :27-:32 (6 nb) = 425 nb. The
+// EbPictureBufferDesc / PictureControlSet / SequenceControlSet /
+// EbReferenceObject walls are threaded as LfSearchPic / DlfWalls /
+// DlfRefStat carriers (the shapes the staged test_deblock_walls.cpp
+// drives). PARKED (named): the EB_NEW/EB_DELETE temp-recon allocation
+// (:1163-:1171, :1281-:1282) and the svt_aom_get_recon_pic selector
+// (:796, :866) - the recon/temp pictures are threaded as fields and
+// parameters; the compound-pair ref walk (av1_set_ref_frame + the
+// EbReferenceObject deref) reduces to the DlfRefStat rows.
 // Also carried locally (not linked): the small lookup tables the driver
 // arithmetic consumes (mode_lf_lut, txsize_horz/vert_map, tx_size_wide/
 // high, eb_tx_size_*_unit, block_size_wide/high, mi_size_wide/high,
@@ -170,6 +178,9 @@ struct DeblockContext {
     bool superresOrResize;
     int frameWidth;
     int frameHeight;
+    // The encoder bit depth (scs->static_config.encoder_bit_depth), read
+    // by the walk dispatches to pick the 8-bit vs hbd kernel family.
+    int encoderBitDepth;
 };
 
 // Av1DeblockingParameters (deblocking_common.h:24-31): the scalar limit
@@ -380,6 +391,176 @@ struct PickQParams {
 // own zero-ref quirk). Unknown bit depths return without writing
 // (the reference's assert+return, :1066-1070).
 void pickFilterLevelByQ(const PickQParams& params, std::int32_t q, std::int32_t filterLevel[4]);
+
+// ---------------------------------------------------------------------------
+// A8W1 walls rung (G5-G9): the deblocking_filter.c search walls :711-:1286.
+// ---------------------------------------------------------------------------
+
+// LfSearchPic - the threaded EbPictureBufferDesc surface the walls read
+// and copy. Field types follow the test's static_casts; the enums
+// (bit_depth / color_format) thread as ints (named deviation).
+struct LfSearchPic {
+    std::uint16_t width;
+    std::uint16_t height;
+    std::uint16_t maxWidth;
+    std::uint16_t maxHeight;
+    std::uint32_t border;
+    int bitDepth; // > 8 = the 16-bit copy path (deblocking_filter.c:712)
+    int colorFormat;
+    std::uint32_t lumaSize;
+    std::uint32_t chromaSize;
+    bool packedFlag;
+    std::uint8_t* buffer[kMaxPlanes];
+    std::uint16_t stride[kMaxPlanes];
+    std::uint8_t strideBitInc[kMaxPlanes];
+};
+
+// DlfRefStat - the threaded EbReferenceObject row the ref loops consume:
+// dlf_dist_dev + tmp_layer_idx (deblocking_filter.c:991, :1238). The
+// av1_set_ref_frame / compound-pair skip is the caller's (the rows are
+// the surviving SINGLE-ref entries).
+struct DlfRefStat {
+    std::int32_t dlfDistDev;
+    int tmpLayerIdx;
+};
+
+// The threaded EbSpatialFullDistType kernel signature
+// (deblocking_filter.c:758-759; the call passes the plane buffers,
+// offset 0, the strides, the aligned dims).
+using DlfSseFn = std::uint64_t (*)(const std::uint8_t*, std::uint32_t, std::uint32_t, const std::uint8_t*,
+    std::int32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+
+// LpfPickMethod (deblocking_filter.h:24-33) - the REFERENCE enum order
+// (FROM_FULL_IMAGE 0 / FROM_SUBIMAGE 1 / FROM_Q 2 / MINIMAL_LPF 3); the
+// pick driver's method >= FROM_Q fold must NOT be reordered.
+enum LpfPickMethod {
+    LpfPickFromFullImage = 0,
+    LpfPickFromSubimage = 1,
+    LpfPickFromQ = 2,
+    LpfPickMinimalLpf = 3,
+};
+
+// DlfWalls - the threaded PictureControlSet / SequenceControlSet /
+// FrameHeader / EbReferenceObject walls the five wall functions consume,
+// one named field per consumed reference field. The DLF-search branch
+// (:1146-:1283) is compiled-in here (CONFIG_ENABLE_DLF_SEARCH is 0 in
+// the pinned EbConfigMacros.h:116 - the span is carried and testable
+// through LpfPickFromFullImage, named deviation). DlfSearchState is
+// defined below; the walls' searchState field needs only the pointer.
+struct DlfSearchState;
+struct DlfWalls {
+    int tune;                    // static_config.tune (VQ=0, PSNR=1, IQ=3, MS_SSIM=4)
+    int sbSizePx;                // scs->super_block_size
+    int alignedWidth;            // ppcs->aligned_width
+    int alignedHeight;           // ppcs->aligned_height
+    int inputResolution;         // ppcs->input_resolution
+    DlfSseFn dist8;              // svt_spatial_full_distortion_kernel
+    DlfSseFn dist16;             // svt_full_distortion_kernel16_bits
+    bool is16bitPipeline;        // SVT_EFFECTIVE_IS_16BIT_PIPELINE
+    int ssX;                     // scs->subsampling_x
+    int ssY;                     // scs->subsampling_y
+    LfSearchPic* inputPic8;      // ppcs->enhanced_pic
+    LfSearchPic* inputPic16;     // pcs->input_frame16bit
+    LfSearchPic* reconPic8;      // svt_aom_get_recon_pic(pcs, &, false) - PARKED selector
+    LfSearchPic* reconPic16;     // svt_aom_get_recon_pic(pcs, &, true)
+    // ERRATA #7/#9 (A8W1e): the temp recon picture (the reference EB_NEWs
+    // it at :1163-:1171 - PARKED, threaded instead) and the pcs
+    // zero_filt_sse/best_filt_sse pair (deblocking_filter.c:938-:946
+    // write; dlf_process.c:90-:122 reads - the future dlf_process rung
+    // owns persistence). Null searchState skips the plane-0 writes.
+    LfSearchPic* tempPic8;
+    LfSearchPic* tempPic16;
+    DlfSearchState* searchState;
+    const std::uint32_t* rcMeDistortion; // ppcs->rc_me_distortion
+    int b64TotalCount;           // pcs->b64_total_count
+    bool intraSlice;             // pcs->slice_type == I_SLICE
+    int zeroFilterStrengthLvl;   // dlf_ctrls.zero_filter_strength_lvl
+    int prevDlfDistTh;           // dlf_ctrls.prev_dlf_dist_th (:1205)
+    int hierarchicalLevels;      // ppcs->hierarchical_levels
+    bool boosted;                // frame_is_boosted(ppcs)
+    bool leaf;                   // frame_is_leaf(ppcs)
+    int temporalLayerIndex;      // pcs->temporal_layer_index
+    const DlfRefStat* dlfRefs;   // the surviving single-ref rows
+    int dlfRefCount;             // ppcs->tot_ref_frame_types
+    int earlyExitConvergence;    // dlf_ctrls.early_exit_convergence
+    bool txModeOnly4x4;          // frm_hdr->tx_mode == ONLY_4X4
+    LpfPickMethod pickMethod;    // dlf_ctrls.pick_method
+    int sharpness;               // static_config.sharpness
+    bool isKeyFrame;             // frm_hdr->frame_type == KEY_FRAME
+    int baseQIdx;                // frm_hdr->quantization_params.base_q_idx
+    bool dlfAvg;                 // dlf_ctrls.dlf_avg
+    const RefFilterLevels* refLevels; // the refs' saved filter levels
+    int refLevelCount;           // the surviving single-ref rows
+    bool useRefAvgY;             // dlf_ctrls.use_ref_avg_y
+    bool useRefAvgUv;            // dlf_ctrls.use_ref_avg_uv
+};
+
+// DlfSearchState - the threaded pcs->zero_filt_sse / best_filt_sse pair
+// the plane-0 search writes (deblocking_filter.c:938-946).
+struct DlfSearchState {
+    std::int64_t zeroFiltSse;
+    std::int64_t bestFiltSse;
+};
+
+// disable_dlf_th (deblocking_filter.c:27-32): [zero_filter_strength_lvl]
+// [input_resolution], exported as data (the l7 blockSizeWide pattern).
+extern const std::uint32_t kDisableDlfTh[4][7];
+
+// svt_copy_buffer (deblocking_filter.c:711-740): the ten header fields
+// dst<-src, the stride/stride_bit_inc cell, then the row copies -
+// copy_width = ALIGN_POWER_OF_TWO(width, 3) << is_16bit (is_16bit =
+// bit_depth > 8), copy_height = ALIGN_POWER_OF_TWO(height, 3), both
+// >>1 for a chroma plane, copy_stride = stride[plane] << is_16bit.
+void copyBuffer(const LfSearchPic& src, LfSearchPic& dst, int plane);
+
+// picture_sse_calculations (deblocking_filter.c:742-770): is_16bit
+// selects the kernel AND the input pic; the aligned dims >> ss for
+// chroma; offsets 0; dispatches the threaded SSE kernel.
+std::uint64_t pictureSseCalculations(const DlfWalls& walls, const LfSearchPic& reconPic, int plane);
+
+// me_based_dlf_skip (deblocking_filter.c:954-1010): the ME-based skip
+// heuristic; writes *doY/*doUv. The ref-frame wall reduces to the
+// DlfRefStat rows (dlf_dist_dev >= 0 && tmp_layer_idx <= temporal
+// layer); the prev_dlf_dist_th comes through the parameter (the
+// reference's uint16_t form).
+void meBasedDlfSkip(const DlfWalls& walls, std::uint16_t prevDlfDistTh, bool* doY, bool* doUv);
+
+// try_filter_frame (deblocking_filter.c:772-822): sets the trial level
+// into the frame header (dir 0/1 keep the other luma level; chroma
+// writes only the plane slot), runs the landed loopFilterFrame on
+// [plane, plane+1), measures the SSE, restores the recon from the temp
+// copy when any level is nonzero. partial_frame is carried for
+// signature parity (the reference (void)s it, :781).
+std::int64_t tryFilterFrame(const DlfWalls& walls, DeblockContext& ctx, const LfSearchPic& tempPic,
+    std::int32_t filtLevel, std::int32_t partialFrame, int plane, int dir);
+
+// search_filter_level (deblocking_filter.c:828-952): the seeded
+// hill-climb over MAX_LOOP_FILTER+1 with the ss_err cache, the bias
+// toward lower levels (halved when tx_mode != ONLY_4X4), the
+// convergence exit, and the plane-0 pcs state side effects (threaded as
+// DlfSearchState*, written only when plane == 0). ERRATA (A8W1e): the
+// staged decl took const LfSearchPic& tempPic, but :873 WRITES the temp
+// (svt_copy_buffer(recon, temp, plane) - recon is src, temp is dst);
+// the decl is corrected to LfSearchPic& (the staged tests pass non-const
+// lvalues, which bind identically).
+std::int32_t searchFilterLevel(const DlfWalls& walls, DeblockContext& ctx, LfSearchPic& tempPic,
+    DlfSearchState* state, std::int32_t partialFrame, const std::int32_t lastFrameFilterLevel[4],
+    double* bestCostRet, int plane, int dir);
+
+// dlf_search padding (deblocking_filter.c:1148-1151): sb_size + 32,
+// + sb_size when superres or resize is on. Factored out of the pick
+// driver for testability (named deviation: inline in the reference).
+int dlfSearchPadding(int sbSizePx, bool superresOrResize);
+
+// svt_av1_pick_filter_level (deblocking_filter.c:1110-1286): the pick
+// driver. Derives the sharpness level (CLIP3(0,7); the VQ-keyframe +2
+// capped at 7; the IQ/MS_SSIM base_q_idx tiers), then dispatches on the
+// pick method: MINIMAL_LPF zeroes the luma levels, >= FROM_Q delegates
+// to the landed pickFilterLevelByQ (the threaded dequant `q` is the
+// svt_aom_ac_quant_qtx call site), else the DLF search block
+// (:1146-:1283). srcBuffer is unused in the reference (:1113) - not
+// carried.
+void pickFilterLevel(const DlfWalls& walls, DeblockContext& ctx, std::int32_t q);
 
 } // namespace deblock
 } // namespace l10_filters
