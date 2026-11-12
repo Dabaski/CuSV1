@@ -84,6 +84,11 @@ struct RcControl {
     int rcMiniGopPos;             // rc->rc_mini_gop_pos
     int rcNumLayers;              // rc->rc_num_layers
     int minRefBaseQIdx;           // rc->min_ref_base_q_idx
+    int rollingTargetBits;        // rc->rolling_target_bits
+    int rollingActualBits;        // rc->rolling_actual_bits
+    std::int64_t totalActualBits;  // rc->total_actual_bits
+    std::int64_t totalTargetBits;  // rc->total_target_bits
+    int framesSinceCdfUpdate;     // rc->frames_since_cdf_update
 };
 
 // RateControlCfg carrier (the enc_ctx->rc_cfg mirrors the bodies consume;
@@ -99,6 +104,8 @@ struct RcConfig {
     std::int64_t maximumBufferSizeMs;
     int minQpAllowed;  // static_config.min_qp_allowed (0..63)
     int maxQpAllowed;  // static_config.max_qp_allowed (0..63)
+    int worstAllowedQ;  // rc_cfg->worst_allowed_q
+    int bestAllowedQ;   // rc_cfg->best_allowed_q
 };
 
 // PictureParentControlSet mirrors the one-pass target arithmetic consumes.
@@ -133,6 +140,24 @@ struct PcsCarrier {
     int refList1CountTry;        // ppcs->ref_list1_count_try
     int ref0SliceType;           // pcs->ref_slice_type[REF_LIST_0][0]
     int ref0TmpLayer;            // get_ref_obj(pcs, REF_LIST_0, 0)->tmp_layer_idx
+
+    // the RC2c Wave C2 fields (the driver-family walls threaded)
+    std::int64_t targetBitRate;      // ppcs->target_bit_rate
+    int numMbs;                      // scs->frame_info->num_mbs
+    int vbrmaxSection;               // scs->twopass_cfg.vbrmax_section
+    bool seqParamChanged;            // ppcs->seq_param_changed
+    bool bitrateChanged;             // ppcs->bitrate_changed
+    bool frameRateChanged;           // ppcs->frame_rate_changed
+    int frameRateNumerator;          // static_config.frame_rate_numerator
+    int frameRateDenominator;        // static_config.frame_rate_denominator
+    int projectedFrameSize;          // ppcs->projected_frame_size
+    std::uint64_t pcsTotalRate;      // ppcs->pcs_total_rate
+    int loopCount;                   // ppcs->loop_count
+    std::uint64_t totalNumBits;      // ppcs->total_num_bits
+    int avgCntZeromv;                // ppcs->child_pcs->avg_cnt_zeromv
+    int baseQIdx;                    // frm_hdr.quantization_params.base_q_idx
+                                     // (definitions.h:1604-1606, the AV1 spec
+                                     // quantization_params struct)
 };
 
 // ASSIGN_MINQ_TABLE (rc_tables.h:36-39, the CONFIG_ENABLE_HIGH_BIT_DEPTH=0
@@ -581,5 +606,48 @@ int calculateQindexRtc(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, C
                        const MeStatCarrier& me, std::uint32_t& crSbIndex, std::uint16_t sbsInFrame,
                        int superBlockSize, int intraPeriodLength, bool randomAccess);
 
+// ---- RC2c Wave C2 (RTC-series): the driver family ----
+
+// svt_av1_rc_init (rc_process.c:498-536): verbatim; the scs walls thread
+// (hierarchical_levels, target_bit_rate, frame_info->num_mbs,
+// two_pass_cfg.vbrmax_section, frame_rate_numerator/denominator);
+// newFramerate mirrors scs->new_framerate (read + written by
+// svt_av1_new_framerate / av1_rc_update_framerate, pass2_strategy.c
+// :877-904: MAX_MB_RATE 250, MAXRATE_1080P 2025000, the < 0.1 -> 30
+// clamp).
+void rcInit(RcControl& rc, const RcConfig& rcCfg, double& newFramerate, int frameRateNumerator,
+            int frameRateDenominator, int hierarchicalLevels, std::int64_t targetBitRate, int numMbs,
+            int vbrmaxSection);
+
+// svt_av1_rc_calc_qindex_rtc_cbr (rc_rtc_cbr.c:459-549): verbatim; the
+// resize gate and the pred-structure walls thread as booleans.
+void calcQindexRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, CrRefreshCarrier& cr,
+                      const MeStatCarrier& me, std::uint32_t& crSbIndex, std::uint16_t sbsInFrame,
+                      bool resizeDynamic, bool singlePass, bool lowDelay, bool randomAccess,
+                      ResizePendingCarrier& pending, double& newFramerate);
+
+// rtc_update_rate_correction_factors (rc_rtc_cbr.c:551-609): verbatim;
+// projected_frame_size threads (ppcs->projected_frame_size); the Kalman
+// filter on the log-rcf state.
+void rtcUpdateRateCorrectionFactors(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                                    const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int bitDepth);
+
+// rtc_update_buffer_level (rc_rtc_cbr.c:615-626): verbatim (the INVERTED
+// leaky bucket - no upper clip, floored at 0).
+void rtcUpdateBufferLevel(RcControl& rc, const PcsCarrier& ppcs, int encodedFrameSize);
+
+// svt_av1_rc_recode_decision_rtc_cbr (rc_rtc_cbr.c:630-689): verbatim;
+// returns true when the recode rewrites base_q_idx.
+bool recodeDecisionRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, const CrRefreshCarrier& cr,
+                          std::uint16_t b64TotalCount, int bitDepth);
+
+// svt_av1_rc_postencode_update_rtc_cbr (rc_rtc_cbr.c:691-729): verbatim;
+// the resize_mode == RESIZE_DYNAMIC gate threads as resizeDynamic.
+void postencodeUpdateRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                            const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int bitDepth,
+                            bool resizeDynamic);
+
+// ROUND_POWER_OF_TWO (definitions.h:457): the rounding shift.
+std::int64_t roundPowerOfTwo(std::int64_t value, int n);
 
 }

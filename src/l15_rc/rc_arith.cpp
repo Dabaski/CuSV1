@@ -1512,4 +1512,325 @@ int calculateQindexRtc(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, C
     return clampQindex(rcCfg, qindex);
 }
 
+// ---- RC2c Wave C2 (RTC-series): the driver family ----
+
+// ROUND_POWER_OF_TWO (definitions.h:457): verbatim.
+std::int64_t roundPowerOfTwo(std::int64_t value, int n) {
+    return (value + (((std::int64_t)1 << n) >> 1)) >> n;
+}
+
+// av1_rc_update_framerate (pass2_strategy.c:880-898) folded into rcInit:
+// MAX_MB_RATE 250, MAXRATE_1080P 2025000 (:877-878).
+// svt_av1_rc_init (rc_process.c:498-536): verbatim; the scs walls thread
+// (the new_framerate mirror is read by the update_framerate helper).
+void rcInit(RcControl& rc, const RcConfig& rcCfg, double& newFramerate, int frameRateNumerator,
+            int frameRateDenominator, int hierarchicalLevels, std::int64_t targetBitRate, int numMbs,
+            int vbrmaxSection) {
+    int i;
+    if (rcCfg.mode == kRcCbr) {
+        rc.avgFrameQindex[0] = rcCfg.worstAllowedQ;
+        rc.avgFrameQindex[1] = rcCfg.worstAllowedQ;
+        rc.lastQ[0] = rcCfg.worstAllowedQ;
+        rc.lastQ[1] = rcCfg.worstAllowedQ;
+    } else {
+        rc.avgFrameQindex[0] = (rcCfg.worstAllowedQ + rcCfg.bestAllowedQ) / 2;
+        rc.avgFrameQindex[1] = (rcCfg.worstAllowedQ + rcCfg.bestAllowedQ) / 2;
+        rc.lastQ[0] = (rcCfg.worstAllowedQ + rcCfg.bestAllowedQ) / 2;
+        rc.lastQ[1] = (rcCfg.worstAllowedQ + rcCfg.bestAllowedQ) / 2;
+    }
+    rc.bufferLevel = rc.startingBufferLevel;
+    rc.bitsOffTarget = rc.startingBufferLevel;
+
+    rc.rollingTargetBits = rc.avgFrameBandwidth;
+    rc.rollingActualBits = rc.avgFrameBandwidth;
+    rc.totalActualBits = 0;
+    rc.totalTargetBits = 0;
+
+    rc.framesSinceKey = 8;  // Sensible default for first frame.
+    rc.framesSinceCdfUpdate = 0;
+    rc.thisKeyFrameForced = 0;
+    for (i = 0; i < kMaxTemporalLayers + 1; ++i) {
+        rc.rateCorrectionFactors[i] = 0.7;
+    }
+    if (rcCfg.mode != kRcCbr) {
+        rc.rateCorrectionFactors[kKfStd] = 1.0;
+    }
+    rc.baselineGfInterval = 1 << hierarchicalLevels;
+
+    // Set absolute upper and lower quality limits
+    rc.worstQuality = rcCfg.worstAllowedQ;
+    rc.bestQuality = rcCfg.bestAllowedQ;
+    if (rcCfg.mode != kRcQ) {
+        const double frameRate = (double)frameRateNumerator / (double)frameRateDenominator;
+        // svt_av1_new_framerate (pass2_strategy.c:901-904): verbatim.
+        newFramerate = frameRate < 0.1 ? 30 : frameRate;
+        // av1_rc_update_framerate (pass2_strategy.c:880-898): verbatim.
+        rc.avgFrameBandwidth = (int)(targetBitRate / newFramerate);
+        std::int64_t vbrMaxBits =
+            (std::int64_t)rc.avgFrameBandwidth * vbrmaxSection / 100;
+        vbrMaxBits = std::min(vbrMaxBits, (std::int64_t)INT_MAX);
+        const int mbsFrames = numMbs * 250;  // MAX_MB_RATE
+        rc.maxFrameBandwidth =
+            (int)std::max(std::max((std::int64_t)mbsFrames, (std::int64_t)2025000), vbrMaxBits);  // MAXRATE_1080P
+    }
+    // current and previous average base layer ME distortion
+    rc.curAvgBaseMeDist = 0;
+    rc.prevAvgBaseMeDist = 0;
+    rc.avgFrameLowMotion = 0;
+}
+
+// svt_av1_rc_calc_qindex_rtc_cbr (rc_rtc_cbr.c:459-549): verbatim; the
+// resize gate and the pred-structure walls thread as booleans.
+void calcQindexRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, CrRefreshCarrier& cr,
+                      const MeStatCarrier& me, std::uint32_t& crSbIndex, std::uint16_t sbsInFrame,
+                      bool resizeDynamic, bool singlePass, bool lowDelay, bool randomAccess,
+                      ResizePendingCarrier& pending, double& newFramerate) {
+    const bool fullUpdate = ppcs.pictureNumber == 0 || ppcs.seqParamChanged;
+    const bool softUpdate = ppcs.bitrateChanged || ppcs.frameRateChanged;
+    if (fullUpdate || softUpdate) {
+        // Use per-PCS runtime rate values (rc_rtc_cbr.c:469-487): the
+        // INVERSE leaky-bucket conversion to the classic bucket.
+        const std::int64_t bandwidth = ppcs.targetBitRate;
+        const std::int64_t starting = rcCfg.startingBufferLevelMs;
+        const std::int64_t optimal = rcCfg.optimalBufferLevelMs;
+        const std::int64_t maximum = rcCfg.maximumBufferSizeMs;
+
+        rc.startingBufferLevel = starting * bandwidth / 1000;
+        rc.optimalBufferLevel = (maximum - optimal) * bandwidth / 1000;
+        rc.maximumBufferSize = maximum * bandwidth / 1000;
+
+        if (fullUpdate) {
+            // First frame: full initialization
+            rcInit(rc, rcCfg, newFramerate, ppcs.frameRateNumerator, ppcs.frameRateDenominator,
+                   ppcs.hierarchicalLevels, ppcs.targetBitRate, ppcs.numMbs, ppcs.vbrmaxSection);
+
+            // d) invert current buffer level
+            rc.bufferLevel = (maximum - starting) * bandwidth / 1000;
+
+            // flat uses virtual 3-layer RC model for adaptive bit
+            // distribution
+            rc.rcNumLayers = ppcs.hierarchicalLevels == 0 ? 3 : ppcs.hierarchicalLevels + 1;
+            rc.rcMiniGopPos = 0;
+            const int numLayers = rc.rcNumLayers;
+            for (int k = 0; k < numLayers + 1; k++) {
+                rc.targetSizeFactors[k] = 1.0;  // flat at start
+            }
+            rc.miniQopSize = 1 << (numLayers - 1);
+            for (int k = 0; k < rc.miniQopSize + 1; k++) {
+                rc.rcfValues[k] = 0.7;
+                rc.rcfKalmanP[k] = 1.0;  // high initial uncertainty
+                rc.rcfKalmanR[k] = 0.08;
+            }
+            if (rcCfg.mode == kRcCbr) {
+                // just to match existent CBR
+                rc.targetSizeFactors[0] = rc.startingBufferLevel / (2.0 * rc.avgFrameBandwidth);
+            } else {
+                // TODO: VBR
+                rc.targetSizeFactors[0] = 10;
+            }
+        } else {
+            // Bitrate change: incremental update preserving learned RC
+            // state. Recompute frame bandwidth from runtime rate values.
+            double framerate = (double)ppcs.frameRateNumerator / (double)ppcs.frameRateDenominator;
+            if (framerate < 0.1) {
+                framerate = 30.0;
+            }
+            rc.avgFrameBandwidth = (int)(bandwidth / framerate);
+            rc.maxFrameBandwidth = std::max(rc.avgFrameBandwidth, rc.maxFrameBandwidth);
+        }
+    }
+
+    // Dynamic resolution resize (parity with the libaom RT path).
+    if (resizeDynamic && singlePass && lowDelay) {
+        dynamicResizeDecision(rc, rcCfg, ppcs, newFramerate, false, 0, 0, 0, pending);
+    }
+
+    const int qindex = calculateQindexRtc(rc, rcCfg, ppcs, cr, me, crSbIndex, sbsInFrame, 64,
+                                          32 /*intra_period_length*/, randomAccess);
+
+    if (cr.applyCyclicRefresh) {
+        // compute CR qdeltas with final qindex
+        const int width = ppcs.frameWidth;
+        const int height = ppcs.frameHeight;
+        const double rcf = rtcGetRateCorrectionFactor(rc, ppcs, width, height);
+        rtcCyclicRefreshComputeCrQdeltas(cr, rc, rcCfg, ppcs.frameType == kKeyFrame, qindex, rcf,
+                                         ppcs.encoderBitDepth);
+    }
+
+    ppcs.baseQIdx = qindex;
+}
+
+// rtc_update_rate_correction_factors (rc_rtc_cbr.c:551-609): verbatim;
+// projected_frame_size threads (ppcs->projected_frame_size); the Kalman
+// filter on the log-rcf state.
+void rtcUpdateRateCorrectionFactors(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                                    const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int bitDepth) {
+    const int width = ppcs.frameWidth;
+    const int height = ppcs.frameHeight;
+    const int baseQIdx = ppcs.baseQIdx;
+    const double rcf = rtcGetRateCorrectionFactor(rc, ppcs, width, height);
+
+    // Do not update the rate factors for arf overlay frames.
+    if (ppcs.isOverlay) {
+        return;
+    }
+
+    if (ppcs.frameType != kKeyFrame) {
+        // Do not update the rate factors for repeated pictures
+        if (rc.curAvgBaseMeDist == 0) {
+            return;
+        }
+    }
+
+    // Work out how big we would have expected the frame to be at this Q
+    // given the current correction factor.
+    const int estimatedSize = estimateFrameSize(rc, rcCfg, cr, ppcs.frameType == kKeyFrame, baseQIdx, rcf, width,
+                                                height, b64TotalCount, false, bitDepth);
+
+    // Work out a size correction factor.
+    double correctionFactor = 1.0 * ppcs.projectedFrameSize / estimatedSize;
+
+    // Clamp correction factor to prevent anything too extreme
+    correctionFactor = std::max(correctionFactor, 0.25);
+    correctionFactor = std::min(correctionFactor, 4.0);
+
+    // Kalman filter update for RCF.
+    constexpr double kQ = 0.04;
+    constexpr double kRMin = 0.04;  // floor to prevent over-reaction
+
+    const int k = getRcfIndex(ppcs.frameType == kKeyFrame, rc.rcMiniGopPos, rc.miniQopSize);
+
+    // Innovation in log domain
+    const double innovation = std::log(correctionFactor);
+
+    // Adaptive R: track EMA of squared innovations as measurement noise
+    rc.rcfKalmanR[k] += 0.05 * (innovation * innovation - rc.rcfKalmanR[k]);
+    const double r = std::max(kRMin, rc.rcfKalmanR[k]);
+
+    // Predict step: P increases by process noise
+    const double p = rc.rcfKalmanP[k] + kQ;
+    // Update step: Kalman gain
+    const double gain = p / (p + r);
+    // Update state: log(rcf) += K * innovation -> rcf *= exp(K * innovation)
+    double newRcf = rcf * std::exp(gain * innovation);
+    // Update estimation variance
+    rc.rcfKalmanP[k] = (1.0 - gain) * p;
+
+    rtcSetRateCorrectionFactor(rc, ppcs, newRcf, width, height);
+}
+
+// rtc_update_buffer_level (rc_rtc_cbr.c:615-626): verbatim (the INVERTED
+// leaky bucket - no upper clip, floored at 0).
+void rtcUpdateBufferLevel(RcControl& rc, const PcsCarrier& ppcs, int encodedFrameSize) {
+    rc.bufferLevel += encodedFrameSize;
+    if (ppcs.showableFrame) {
+        rc.bufferLevel -= rc.avgFrameBandwidth;
+    }
+    rc.bufferLevel = std::max((std::int64_t)0, rc.bufferLevel);
+}
+
+// svt_av1_rc_recode_decision_rtc_cbr (rc_rtc_cbr.c:630-689): verbatim.
+bool recodeDecisionRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, const CrRefreshCarrier& cr,
+                          std::uint16_t b64TotalCount, int bitDepth) {
+    // Prevent re-entry: only one recode pass
+    if (ppcs.loopCount > 0) {
+        return false;
+    }
+
+    // Can't reduce frame size if already on worst quality
+    if (ppcs.baseQIdx >= rc.worstQuality) {
+        return false;
+    }
+
+    int projectedFrameSize = (int)roundPowerOfTwo((std::int64_t)ppcs.pcsTotalRate, 9 /*AV1_PROB_COST_SHIFT*/);
+    projectedFrameSize += (ppcs.frameType == kKeyFrame) ? 13 : 0;
+
+    std::int64_t maxFrameSize = INT64_MAX;
+    const int maxPct = frameIsIntraOnly(ppcs.frameType) ? rcCfg.maxIntraBitratePct : rcCfg.maxInterBitratePct;
+    if (rcCfg.mode == kRcCbr && maxPct > 0) {
+        maxFrameSize = (std::int64_t)rc.avgFrameBandwidth * maxPct / 100;
+    }
+
+    // Project VBV buffer after this frame
+    const std::int64_t projectedBuffer = rc.bufferLevel + projectedFrameSize - rc.avgFrameBandwidth;
+    if (projectedBuffer <= rc.maximumBufferSize && projectedFrameSize <= maxFrameSize) {
+        return false;
+    }
+
+    int newQIdx = rc.worstQuality;
+
+    // Frame would overflow the VBV and/or the frame cap. Compute target
+    // size that fits.
+    const std::int64_t targetSize =
+        std::min(maxFrameSize, rc.maximumBufferSize - rc.bufferLevel + rc.avgFrameBandwidth);
+    if (targetSize >= kFrameOverheadBits) {
+        const int width = ppcs.frameWidth;
+        const int height = ppcs.frameHeight;
+        double rcf = rtcGetRateCorrectionFactor(rc, ppcs, width, height);
+
+        // Correct RCF based on actual vs estimated size ratio
+        const int baseQIdx = ppcs.baseQIdx;
+        const int estimatedSize =
+            estimateFrameSize(rc, rcCfg, cr, ppcs.frameType == kKeyFrame, baseQIdx, rcf, width, height,
+                              b64TotalCount, false, bitDepth);
+        const double correction = (double)projectedFrameSize / estimatedSize;
+        rcf *= correction;
+
+        const auto evalFrameSize = [&](int q) {
+            return estimateFrameSize(rc, rcCfg, cr, ppcs.frameType == kKeyFrame, q, rcf, width, height,
+                                     b64TotalCount, false, bitDepth);
+        };
+        newQIdx = findClosestArg(static_cast<double>(targetSize), rc.bestQuality, rc.worstQuality, evalFrameSize);
+
+        // New QP must be strictly higher than original, otherwise recode
+        // is pointless
+        newQIdx = std::max(baseQIdx + 4, newQIdx);
+        newQIdx = clampQindex(rcCfg, newQIdx);
+    }
+
+    // Store new qindex for recode
+    ppcs.baseQIdx = newQIdx;
+
+    return true;
+}
+
+// svt_av1_rc_postencode_update_rtc_cbr (rc_rtc_cbr.c:691-729): verbatim;
+// the resize_mode == RESIZE_DYNAMIC gate threads as resizeDynamic.
+void postencodeUpdateRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                            const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int bitDepth,
+                            bool resizeDynamic) {
+    // Update rate control heuristics
+    ppcs.projectedFrameSize = (int)ppcs.totalNumBits;
+
+    // Post encode loop adjustment of Q prediction.
+    rtcUpdateRateCorrectionFactors(rc, rcCfg, ppcs, cr, b64TotalCount, bitDepth);
+
+    rtcUpdateBufferLevel(rc, ppcs, ppcs.projectedFrameSize);
+
+    const int qindex = ppcs.baseQIdx;
+
+    if (ppcs.frameType == kKeyFrame) {
+        rc.avgFrameQindex[0] = (int)roundPowerOfTwo(3 * rc.avgFrameQindex[0] + qindex, 2);
+
+        rc.framesSinceKey = 0;
+        rc.framesSinceCdfUpdate = 0;
+        rc.rcMiniGopPos = 0;
+    } else if (!ppcs.isOverlay) {
+        rc.avgFrameQindex[1] = (int)roundPowerOfTwo(3 * rc.avgFrameQindex[1] + qindex, 2);
+        // Maintain last_q for the dynamic-resize decision; the RTC path
+        // otherwise leaves it stale (rc_rtc_cbr.c:713-719).
+        if (resizeDynamic) {
+            rc.lastQ[1] = qindex;
+        }
+
+        const int avgCntZeromv = ppcs.avgCntZeromv;
+        if (rc.avgFrameLowMotion == 0) {
+            rc.avgFrameLowMotion = avgCntZeromv;
+        } else {
+            rc.avgFrameLowMotion = (int)roundPowerOfTwo(3 * rc.avgFrameLowMotion + avgCntZeromv, 2);
+        }
+        rc.rcMiniGopPos = (rc.rcMiniGopPos + 1) % rc.miniQopSize;
+    }
+}
+
 } // namespace l15_rc
