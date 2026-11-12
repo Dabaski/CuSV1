@@ -166,10 +166,10 @@ Decoder status (measured, `tools/verify_decode4.ps1 -Geometry`):
 
 | Artifact | Size | Decoded | Result |
 | --- | --- | --- | --- |
-| structural_keyframe_d4.obu | 31 B | 64 B (8x8) | content 1:1 == fs5g4_recon; the 4x4 geometry codes an 8x8 frame: the decoders align frame dims to 8 px, so the 8x8 node reads one 4-symbol partition symbol (forced SPLIT) and codes four 4x4 partition leaves - a 4x4 TU exists only as a leaf (dav1d 1.5.4 trace-verified) |
+| structural_keyframe_d4.obu | 33 B | 64 B (8x8) | content 1:1 == fs5g4_recon; the 4x4 geometry codes an 8x8 frame: the decoders align frame dims to 8 px, so the 8x8 node reads one 4-symbol partition symbol (forced SPLIT) and codes four 4x4 partition leaves - a 4x4 TU exists only as a leaf (dav1d 1.5.4 trace-verified) |
 | structural_keyframe_d8.obu | 30 B | 64 B | content 1:1 == fs28_recon |
 | structural_keyframe_d16.obu | 43 B | 256 B | content 1:1 == fs216_recon |
-| structural_keyframe.obu | 50 B | 1024 B (32x32) | content 1:1 == ecfrm_recon (byte-diffs 0/1024, the fingerprint 05 08 0c 11) |
+| structural_keyframe.obu | 66 B | 1024 B (32x32) | content 1:1 == ecfrm_recon (byte-diffs 0/1024, the fingerprint 05 08 0c 11) |
 | structural_keyframe_d64.obu | 440 B | 4096 B | content 1:1 == fs264_recon |
 
 All measured with tools/verify_decode4.ps1
@@ -201,9 +201,9 @@ walk. The color artifact set: structural_keyframe_color{4,8,16,32}.obu
 - color32 (165 B): CONTENT 1:1 ON ALL THREE PLANES (Y 4096/4096,
   U 1024/1024, V 1024/1024) - the first color frame this project
   produces decoded by an independent reference decoder.
-- color16 (133 B): FULL-PLANE content 1:1 (Y 4096/4096, U 1024/1024,
+- color16 (136 B): FULL-PLANE content 1:1 (Y 4096/4096, U 1024/1024,
   V 1024/1024).
-- color8 (137 B): FULL-PLANE content 1:1 (Y 4096/4096, U 1024/1024,
+- color8 (161 B): FULL-PLANE content 1:1 (Y 4096/4096, U 1024/1024,
   V 1024/1024). The exit-69 parse desyncs were fixed by the
   RT-series: RT6 the tree-order leaf emission - the flat walk had
   emitted the interior partition SPLIT symbols in raster order,
@@ -212,7 +212,7 @@ walk. The color artifact set: structural_keyframe_color{4,8,16,32}.obu
   residual fell to the RT10b bottom-left edge extension; the chroma
   U/V closed at the CS7 fix (`5ce0224`, the chroma bottom-left
   Z-order gate).
-- color4 (183 B): FULL-PLANE content 1:1 - Y and U closed at CS7, and
+- color4 (214 B): FULL-PLANE content 1:1 - Y and U closed at CS7, and
   the last chroma divergence (V 43/1024, first at 647, across UV
   leaves 41/42/48/56) closed at RT21 (`927e697`), the chroma
   above-right Z-order gate: leaf 41's owner block walks one step

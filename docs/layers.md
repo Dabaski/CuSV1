@@ -27,9 +27,11 @@ l11_resize      resize 1D kernels         (host; AN21)
 l12_convolve    convolution + interp filters (host; CV1/IP1)
 l13_palette     palette + k-means + segmentation (host; PAL1/SEG1)
 l14_utility     block geometry + utilities (host; U1)
-l15_rc          rate-control qindex tables (host; RC1)
-l16_rdo         rate-estimation + trellis + symbol costs
-                                       (host; RE1-RE6, wired into l6)
+l15_rc          rate-control tables + arithmetic (host; RC1/RC2)
+l16_rdo         rate-estimation + trellis + symbol costs + mode config
+                                       (host; RE1-RE7, wired into l6)
+l17_inter       inter-prediction compound/distwtd/scale + sr convolve
+                                       (host; MC1)
                           |
              tools/golden_gen (the gate)
              tools/bench (perf)
@@ -157,6 +159,19 @@ land 100% of their portable surface. The paired-metric caveat is
 stated: the instances are transcription of the reference's own
 dispatch surface (the algorithm cores were already landed).
 
+AMVP1 landed the adaptive-MV-prediction candidate machinery
+(`amvp.{h,cpp}`, namespace `motion::amvp`, 1,523 nb across 23 measured
+spans): the block/row/col/blk scan family, `has_top_right`,
+`get_relative_dist`, the TPL-ref and MVP-table builders
+(`add_tpl_ref_mv`, `sort_mvp_table`, `scan_row_col_light`,
+`setup_ref_mv_list`), `gm_get_motion_vector_enc`, the light-context
+inter-mode derivation, `generate_av1_mvp_table`/`get_av1_mv_pred_drl`,
+the sample recording/finding pair, the overlappable counters,
+`is_dv_valid` and `ref_mv_from_stack`/`find_best`. The struct walls are
+threaded as carriers (the RE8A precedent); the mi-grid/mi-map mutation
+quartet, `init_wm_samples` and `warped_motion_parameters` stay parked
+named. 91 cases / 783 assertions.
+
 ## l6_pipeline - composition + decision
 
 Block and frame composition at 4x4..64x64, intra-only. The pipeline
@@ -224,6 +239,18 @@ above, not zeros).
   (`hadamard4x4..32x32`); HB1 added its hbd twin
   (`highbdHadamard8x8` with the two 26 nb first/second-pass column
   helpers).
+- SRC1 added the source-ops surface (`src_ops.{h,cpp}`, namespace
+  `pipeline::srcops`, 380 nb ported of `src_ops_process.c`'s 2,014):
+  the TPL dispenser/synthesizer and the SSIM-rdmult driver -
+  `getNeighborSamplesDc`, `roundFloor`, `getOverlapArea`,
+  `deltaRateCost`, `perpixelVariance` (the AN8 offs-folded instances),
+  `rateEstimator`, `tplModelUpdateB`/`tplModelUpdate` (the verbatim
+  non-reset-i scan quirk fixture-pinned), `tplMcFlowSynthesizer`,
+  `generateLambdaScalingFactor`, `generateR0beta` and
+  `setMbSsimRdmultScaling`. The pcs/scs/me/tpl walls (the dispenser,
+  `tpl_mc_flow`, the kernel pair) stay parked named (1,449 nb). The
+  brief's plane copy/pad helpers do not exist in this file - the only
+  pad content is one call of `svt_aom_generate_padding`.
 
 ## l7_entropy - entropy coder + symbols
 
@@ -387,6 +414,17 @@ move no conformance count - see the paired-metric caveat in
   luma/chroma grain generators, scaling, `add_noise_to_block`,
   `params_equal`, the copy helpers + boundary overlaps and the frame
   driver; the hbd path and dealloc are parked.
+- A8W1 added the hbd deblocking family (`deblock_hbd.{h,cpp}`, 347 nb:
+  the bd-parameterized mask/flat/hev gates, `highbdFilter4/6/8/14`,
+  the `lpfHorizontal/Vertical` 4/6/8/14 entries and the mb-level edge
+  walkers) and the DLF-search walls (`deblock_driver.{h,cpp}`, 423 nb:
+  `disableDlfTh`, `svtCopyBuffer`, `pictureSseCalculations`,
+  `tryFilterFrame`, `searchFilterLevel`, `meBasedDlfSkip`,
+  `svtAv1PickFilterLevel`), with the walk's hbd dispatch resolving the
+  RE8A assert-parks. 315 cases / 35,207 assertions; fourteen
+  judge-adjudicated staged-fixture errata; the `svt_aom_ac_quant_qtx`
+  call site, the `dlf_process` SSE persistence, the recon-pic selector
+  and the temp-recon allocation stay parked named.
 
 ## l11_resize - resize 1D kernels (AN21)
 
@@ -446,24 +484,40 @@ all 11 geometries and the GEOM_2 85-block cross-check against
 `coded_unit_stats_array` (two independent transcriptions agreeing
 through the algorithm) pin the tables. Host only.
 
-## l15_rc - rate-control qindex tables (RC1)
+## l15_rc - rate-control tables + arithmetic (RC1/RC2)
 
 `rc_tables.h` in `src/l15_rc`: the 18 qindex-mapping tables x 256
 entries (278 nb), mechanically extracted from the pinned reference
 with a runtime diff-verify test that parses the reference file itself.
 The paired-metric caveat is stated: this block moves the coverage
-number by transcription, not by algorithm (the AN14 OD_DIVU
-precedent). Host only.
+number by transcription, not by algorithm (the AN14 OD_DIVU precedent).
+Host only.
+
+RC2 added the rate-control arithmetic and driver families
+(`rc_arith.{h,cpp}`, 2,447 nb across waves A-D): the active-quality and
+one-pass target/buffer helpers, the D-series qindex/qdelta arithmetic,
+the AQ series, the one-pass allocation/dynamic-resize family, the RTC
+primitives and the RTC-CBR driver family (including the Kalman rcf
+state), the recode helpers and `recodeLoopUpdateQ`, the VBR updater +
+postencode pair + regulated pair, and the cyclic-refresh trio. The
+8-bit dc/ac qlookup rows are mechanically extracted into the registry;
+the 10/12-bit rows are the `CONFIG_ENABLE_HIGH_BIT_DEPTH=0` -1 branch,
+pinned. Integer outputs are exact and doubles are compared at
+`fabs 1e-9`; the oracles parse the reference tables and are the
+authority (five hand-trace errors were caught). The TPL-lambda wall,
+the mutex ops, the debug prints and the pick-q/rate-allocation shell
+stay parked named.
 
 ## l16_rdo - rate estimation + trellis + symbol costs (RE-series)
 
 The A4 golden-regeneration campaign, in `src/l16_rdo` (namespace
 `l16_rdo`; the scaffold links av1_transforms). RE1-RE4 are the
 machinery rungs (CONFORMANCE-FREE: no emission change, no golden
-churn); RE5-RE6 are the WIRING rungs - the first emission changes
+churn); RE5-RE7 are the WIRING rungs - the first emission changes
 since the RT-series, each a gated golden event that regenerated all
 nine committed artifacts and re-verified them content-1:1 in the real
-decoders. NEXT: the tx-type wiring rung (RE7, the third gated event).
+decoders. EMC1 and MD1 are the later coverage-only surfaces (the
+mode-config conveyor and the pure-arithmetic mode-decision helpers).
 
 - RE1, the rate-estimation core of `md_rate_estimation.c` (485 nb
   judge-charged): the cdf->cost core, the estimate_syntax_rate INTRA
@@ -539,6 +593,35 @@ decoders. NEXT: the tx-type wiring rung (RE7, the third gated event).
   kill); the judge probe (the emission delta-symbol arithmetic +1
   off) KILLED by the l7 gate-byte fixture. The paired conformance
   count re-verified 9/9.
+- RE7, the tx-type rung (the third gated golden event): the derived
+  intra UV tx-type (`intraUvTxType`, the l3 `transform.h:97` twin of
+  `svt_aom_get_intra_uv_tx_type`) lands in the emission; the nine
+  artifacts regenerate (d4 33 / d8 30 / d16 43 / d32 66 / d64 440 /
+  color4 214 / color8 161 / color16 136 / color32 165 B, all
+  content-1:1) and the GATE moves to 885,347 B / 427 lines.
+- EMC1, the mode-config conveyor (4,050 nb of `enc_mode_config.c`,
+  struct-free via mirror carriers): slice 1 + batch A (qp-th scaling,
+  pf/angular, the wn/sg/dlf level families, GM correspondence and
+  `setGmControls`, HME/ME search params, the prune ctrl setters, the
+  sig-deriv pair), batch B (the CDEF search/recon setters, the
+  dlf/intrabc/palette setters, `sigDerivMultiProcesses`, inter-comp
+  ctrls, level getters + enable wrappers, OBMC controls) and batch C
+  (the MD search, subpel/rdoq/shaving, txt/interpolation-search and
+  cand-reduction setters). The compile-time forks
+  (`CONFIG_ENABLE_GLOBAL_MOTION`/`_LOSSLESS`/`_INTER_INTRA`) thread as
+  runtime parameters; the poison-and-oracle whole-struct discipline
+  pins each setter. The l16 target closes at 185 cases / 4,707,133
+  assertions.
+- MD1, the mode-decision pure-arithmetic surface (572 nb): the
+  similarity + cc1/cc2 family (`enc_dec_process.c:638-671`), the SSIM
+  family (`mode_decision.c:4238-4490`, incl. the hbd twins and the
+  block walkers), the hbd hadamard trio
+  (`picture_operators_c.c:176-262`), the hbd psy
+  (`ac_bias.c:103-144`, landed but unwired) and the MV/ME helpers
+  (`is_lossless_segment`, `check_mv_validity`, the me-block-offset
+  tables, `have_newmv_in_inter_mode`, `get_max_drl_index`,
+  `mv_is_already_injected`, the uni/bipred validity pairs). 23
+  TEST_CASEs; coverage-only.
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 
@@ -573,8 +656,9 @@ policy entry points; 64x64 is DCT-only (no tx-type symbol, no FI -
 the token domain is the adjusted 32x32, 1024 positions). A 4x4 frame
 is an 8x8 node in every decoder (8px alignment): the 4x4 TUs exist
 only as partition leaves (FS5c). Each geometry has a committed
-content-1:1 artifact (d4 30B / d8 30B / d16 44B / d32 47B / d64 441B;
-tools/verify_decode4.ps1 -Geometry N).
+content-1:1 artifact (d4 33 B / d8 30 B / d16 43 B / d32 66 B / d64
+440 B, the RE7 tx-type regen sizes; tools/verify_decode4.ps1
+-Geometry N).
 
 ## The golden gate (tools/golden_gen)
 
@@ -591,20 +675,20 @@ hand-traces:
 3. `composition.c` wires the extracts into the dispatch tables and the
    frame/policy/chroma/bitstream/token drivers.
 4. `golden_primitives.exe` dumps the primitive vectors; its output is
-   diffed against `committed expected_primitives.txt` (currently 421
-   lines - 0 diff is a commit precondition). Round-trips and
+   diffed against `committed expected_primitives.txt` (currently 427
+   lines, 885,347 B - 0 diff is a commit precondition). Round-trips and
    inequalities exit nonzero inside the generator itself.
 5. `golden_frame.exe` captures the D-policy frame golden.
 
 ## Test suite map
 
-Seventeen doctest targets (l0_core, l1_pixels, l2_gpurt, l3_transforms,
+Eighteen doctest targets (l0_core, l1_pixels, l2_gpurt, l3_transforms,
 l4_intra, l5_motion, l7_entropy, l6_pipeline, l8_bitstream,
 l9_analysis, l10_filters, l11_resize, l12_convolve, l13_palette,
-l14_utility, l15_rc, l16_rdo), each with
+l14_utility, l15_rc, l16_rdo, l17_inter), each with
 a "test runner boots" guard plus real test files. GPU-required tests
 skip with a `SKIP:`-prefixed message when no CUDA device is present.
-`ctest --test-dir build` runs all seventeen.
+`ctest --test-dir build` runs all eighteen.
 
 ## Where the deep detail lives
 

@@ -15,7 +15,7 @@
 # only place the figure exists.
 generated  : 2026-11-12
 reference  : third_party/SVT-AV1 pinned snapshot, CHANGELOG 4.2.0
-areas file : 69426 B, sha256:1A7FA0A732CFF569
+areas file : 74452 B, sha256:BE676960F3D72F7F
 surface    : 254 files, 157718 non-blank lines
 coverage   : 30.3%  (47,719 covered, 157,718 denominator)
 

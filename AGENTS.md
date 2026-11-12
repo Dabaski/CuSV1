@@ -338,53 +338,42 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-11, the RE8A driver rung landed)
+### Last measured state (2026-11-12, the 30.3% campaign close)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **Portable-C coverage: 23.7%** (see the completion metric section;
-  re-measured 2026-11-11 at the RE8A landing: 37,453 of 157,718 non-blank
-  lines, +738 from 36,715 at the TF2 landing - the A8 deblocking DRIVER
-  machinery (647 nb deblocking_filter.c + 91 deblocking_common.c,
-  span-measured; A8 prints 37%, 3,929 of 10,600; conformance-free, RE8B
-  wires). The 2026-11-09 measurement was 23.3% (36,715), +5,022 from 31,693 at the 20% line.
-- **ctest: 17/17 passed, 0 failed, 273.39 s** (re-measured 2026-11-11
-  at the RE8A landing on master 043f1ec; the earlier RE7 landing run was
-  371.71 s - re-measured 2026-11-10 at
-  the RE7 landing; the suite is 17 targets since bef6904 - l16_rdo
-  joined; l4_intra is the slow one; `pipeline` and
-  `l3_transforms` next; the rest under 0.5 s.
-  Earlier runs of the same tree: the worktree's run 271.27 s, the RE5
-  writer's runs (272.39/272.92/279.34 s), the wave-13 close 17/17
-  (277.95 s), the wave-12 close 17/17 (292.08 s), the wave-11 close
-  17/17 (295.11 s), the wave-10 close 17/17 (262.85 s), the HM1 wave
-  15/15 (277.34-278.39 s), the wave-4 close run 15/15 294.41 s, the
-  TF1/PU1/PO1 run 278.04 s (14 targets), the LR3/PAL1/TX1 run 272.63 s,
-  the GR1/AN21/CV1 run 264.97 s (13 targets), the LR2 run 260.65 s (11
-  targets), the CDEF3+LR1 run 280.41 s, the CDEF1 run 269.66 s, the DF2
-  run 270.04 s, the AN12 run
-  275.59 s at 10/10
-  (l4_intra 213.58 s, `pipeline` 53.74 s, `l3_transforms` 7.24 s),
-  a first AN12 run 269.63 s, the AN11
-  run 264.78 s, a second AN11 run 264.07 s, the AN10
-  run 266.17 s, the AN9
-  run 262.05 s, the AN8 run
-  275.59 s at 10/10
-  (l4_intra 213.58 s, `pipeline` 53.74 s, `l3_transforms` 7.24 s),
-  a first AN12 run 269.63 s, the AN11
-  run 264.78 s, a second AN11 run 264.07 s, the AN10
-  run 266.17 s, the AN9
-  run 262.05 s, the AN8 run
-  261.66 s, the AN7 run
-  263.08 s, the AN6 run
-  261.59 s, the AN5 run 268.30 s, the AN4 run 270.10 s, the AN3 run
-  272.67 s, the AN2 run 272.62 s, the AN1 run 263.38 s, the RT21 fix
-  run 272.42 s at 9/9, a judge re-run 267.47 s).
+- **Portable-C coverage: 30.3%** (see the completion metric section;
+  re-measured 2026-11-12 at the campaign close on master 6bd9468: 47,719
+  of 157,718 non-blank lines, +10,266 from 37,453 at the 23.7% RE8A
+  landing). The campaign: EMC1's mode-config conveyor + MD1 (A4 8% ->
+  23%, 2,419 -> 7,041), RC2's rate-control waves A-D (A9 5% -> 46%,
+  278 -> 2,725), the A8W1 arc (A8 37% -> 44%, 3,929 -> 4,699), AMVP1 +
+  MC1 (A3 6% -> 17%, 1,009 -> 3,056) and SRC1 (A6 12% -> 15%, 1,734 ->
+  2,114). The 2026-11-09 measurement was 23.3% (36,715), +5,022 from
+  31,693 at the 20% line. All coverage-only: no conformance movement,
+  the nine artifacts untouched.
+- **ctest: 18/18 passed, 0 failed, 281.39 s** (re-measured 2026-11-12 on
+  master 6bd9468; the suite is 18 targets since 0db4ca0 - l17_inter
+  joined; l4_intra is the slow one, `pipeline` (55.45 s) and
+  `l3_transforms` next; the rest under 0.5 s). Earlier runs of the same
+  tree: the RE8A landing 17/17 (273.39 s), the RE7 landing 17/17
+  (371.71 s), the worktree run 271.27 s, the RE5 writer's runs
+  (272.39/272.92/279.34 s), the wave-13 close 17/17 (277.95 s), the
+  wave-12 close 17/17 (292.08 s), the wave-11 close 17/17 (295.11 s),
+  the wave-10 close 17/17 (262.85 s), the HM1 wave 15/15
+  (277.34-278.39 s), the wave-4 close 15/15 (294.41 s), the TF1/PU1/PO1
+  run 278.04 s (14 targets), the LR3/PAL1/TX1 run 272.63 s, the
+  GR1/AN21/CV1 run 264.97 s (13 targets), the LR2 run 260.65 s (11
+  targets), and the AN-series runs 260.65-280.41 s. The duplicated
+  AN12/AN11/AN10 block that used to sit here was removed 2026-11-12;
+  the numbers are unchanged, just stated once.
 - **GATE: 427/427 lines, diff 0.** `expected_primitives.txt` is **885,347
   bytes**, 427 lines (the RE7 tx-type regen: +450 B from the RE6 884,897 -
-  the derived-type emission's token/tx-type symbols; rebuilt, and
-  byte-identical to the committed file). History, not a figure to chase:
-  884,851 B was the value from the RT21 regen through the RE4 landing;
+  the derived-type emission's token/tx-type symbols; rebuilt and
+  byte-identical to the committed file at the 30.3% campaign close
+  2026-11-12, and the campaign touched neither tools/golden_gen nor the
+  artifact set). History, not a figure to chase: 884,897 B at RE6,
+  884,651 B at RE5, 884,851 B from the RT21 regen through the RE4 landing;
   884,980 B from RT10b through the doc-currency pass, and
   884,961 B before RT10b. The CS7 regen moved it to 884,953 B by 27 B -
   13 gate lines, all chroma-side - and the RT21 regen moved it to 884,851 B
@@ -392,11 +381,11 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Coverage history, waves 6-14** (span-measured; register entries in docs/todo.md section A0): wave 6 (TX2 +205 in A1,
+- **Coverage history, waves 6-15** (span-measured; register entries in docs/todo.md section A0): wave 6 (TX2 +205 in A1,
   SYM1 +436 in A5 + +45 in A12) and wave 7 (IP1 +203 across A3/A13/A14,
   SUB1 +149 in A14) and wave 8 (SW1 +119 the SAD wrapper instances, HB1
-  +168 the hbd twins) and wave 9 (RS2 +273 the hbd resize 1D family - the hbd park resolves, AM1+AN20 +386 the vmaf activity-masking family + the preprocessing statistics + the firstpass pure pair - the A4 RDO input side) and wave 10 (RE1 +485 in A4 - the rate-estimation core, the campaign's foundation slice, conformance-free) and wave 11 (RE2 +1,222 the optimize_b trellis + the scan/tx carries + the nz-map LUT carry - charged A1+A4+A5+A13; the JUDGE'S J3 SURVIVOR sharpened - the fast-path zbin-trim had no boundary fixture) and wave 12 (RE3 +576 the rd_cost.c symbol-cost surface - three carry double-counts struck at merge, three judge probes all killed) and wave 13 (RE4 +476 the ac_bias psy-distortion family + the intra candidate-injection family + the FI ERRATA - FILTER_INTRA_MODES 7 -> 5 with the mis-citation fixed and the fimodeToIntradir content corrected) and wave 14-partial (TF2 +234 the temporal-filtering hbd twins - the TF1 park resolves; the block-error pre-shifts are HARD-CODED >>4/>>6 at hbd, not bd-parameterized) - all span-measured; register entries in docs/todo.md
-  section A0); A1 prints 41% (11,087 of 27,008), A4 prints 8% (2,419 of 31,088), A5 prints 61% (5,167 of 8,460), A11 prints 42% (5,047 of 12,028), A13 prints 19% (1,037 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is COVERAGE-ONLY (it moves no conformance count). 
+  +168 the hbd twins) and wave 9 (RS2 +273 the hbd resize 1D family - the hbd park resolves, AM1+AN20 +386 the vmaf activity-masking family + the preprocessing statistics + the firstpass pure pair - the A4 RDO input side) and wave 10 (RE1 +485 in A4 - the rate-estimation core, the campaign's foundation slice, conformance-free) and wave 11 (RE2 +1,222 the optimize_b trellis + the scan/tx carries + the nz-map LUT carry - charged A1+A4+A5+A13; the JUDGE'S J3 SURVIVOR sharpened - the fast-path zbin-trim had no boundary fixture) and wave 12 (RE3 +576 the rd_cost.c symbol-cost surface - three carry double-counts struck at merge, three judge probes all killed) and wave 13 (RE4 +476 the ac_bias psy-distortion family + the intra candidate-injection family + the FI ERRATA - FILTER_INTRA_MODES 7 -> 5 with the mis-citation fixed and the fimodeToIntradir content corrected) and wave 14 (TF2 +234 the temporal-filtering hbd twins - the TF1 park resolves; the block-error pre-shifts are HARD-CODED >>4/>>6 at hbd, not bd-parameterized) and wave 15 (the 30.3% campaign: AMVP1 +1,523 + MC1 +524 in A3; EMC1 +4,050 + MD1 +572 in A4; SRC1 +380 in A6; A8W1 +770 in A8; RC2 +2,447 in A9) - all span-measured; register entries in docs/todo.md
+  section A0); A1 prints 41% (11,087 of 27,008), A3 17% (3,056 of 17,738), A4 23% (7,041 of 31,088), A5 61% (5,167 of 8,460), A6 15% (2,114 of 13,928), A8 44% (4,699 of 10,600), A9 46% (2,725 of 5,951), A11 42% (5,047 of 12,028), A13 19% (1,037 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is COVERAGE-ONLY (it moves no conformance count).
   PARSE-BUG EPISODE (recorded, wave 4): an embedded
   pipe in a prose sentence (get_msb(x|1)) split the A12 row's 5 fields
   and the tool silently printed A12 as 0 files/0 lines - caught by the
@@ -419,12 +408,13 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   rounding boundary that AN1-AN3's 13.1443% sat below, so N1 prints
   13.2% where AN1-AN3 printed 13.1%).
 - **Committed artifacts: 9** `.obu` files, ALL content-1:1 on every plane,
-  RE-VERIFIED 2026-11-10 under the RE5 RD-lite emission (the first
-  emission change since the RT-series; the paired conformance count moves
-  WITH the wiring campaign)
+  RE-VERIFIED 2026-11-10 under the RE7 tx-type emission (the last emission
+  change; the 2026-11-12 30.3% campaign is conformance-free and touched
+  none of the nine)
   (color4 was the last divergent one: its V 43/1024 residual was the chroma
   above-right Z-order gap, closed by RT21 at 927e697; color8 closed at CS7,
-  5ce0224). Sizes (2026-11-10, the RE7 tx-type regen): d4 33 B / d8 30 B / d16 43 B / d32 66 B /
+  5ce0224). Sizes (2026-11-10, the RE7 tx-type regen; unchanged at the
+  2026-11-12 campaign close): d4 33 B / d8 30 B / d16 43 B / d32 66 B /
   d64 440 B / color4 214 B / color8 161 B / color16 136 B / color32 165 B.
   See `docs/decode_conformance.md` for the authoritative matrix rather than
   a summary line, because that matrix is what changes as the RT-series
@@ -540,11 +530,11 @@ North star: a working, bit-exact 1:1 port of SVT-AV1 on CUDA 12.2 - every algori
 - l2_gpurt - NVRTC JIT + driver-API runtime (GpuContext, DeviceBuffer, Kernel, ptxEntryNames); kernels are CUDA C++ source strings compiled for compute_61. No CUstream anywhere: Kernel::launch uses the hard-coded stream 0 and a cuCtxSynchronize per launch (gpurt.cpp:104-115), so there is no batching, no async copy and no graph capture.
 - l3_transforms - SVT-AV1 fixed-point transforms at 4x4 / 8x8 / 16x16 (C-series) then 32x32 / 64x64 (L-series). Host 1D kernels: fdct4/fadst4, fdct8/fadst8, fdct16/fadst16 (verbatim svt_av1_fdct/fadst_N_new) and idct4/iadst4, idct8/iadst8, idct16/iadst16 (verbatim, clamps only where SVT consumes stage_range: idct16 stages 3-7, iadst16 stages 3/5/7; iadst16 has no all-zero early-out at 16); fdct32/fadst32 + idct32/iadst32 (idct32 clamps ONLY stages 3-9, iadst32 clamps EVERY stage, no all-zero early-out at 32); fdct64/idct64 DCT-only within our TxType scope (av1_txfm_type_ls[4] = {DCT64, INVALID, INVALID, IDENTITY64}, inv_transforms.h:196 - no ADST is signalable at TX_64X64; the IDENTITY64 column is parked, not ported) - ported mechanically from the committed extract svt_gen.c with the SVT pointer-swap structure preserved, fdct64B takes cos_bit. Host 2D: fwdTxfm2d4x4/8x8/16x16/32x32/64x64 + invTxfm2dAdd4x4/8x8/16x16/32x32/64x64 (64x64 DCT-only; the 64x64 fwd has net shift 0 so the roundtrip is lossy like 8x8/32x32). cos_bit findings from the SVT tables (transforms.c:19-22, inv_transforms.h:32-41): fwd 4x4 13/13, 8x8 13/13, 16x16 col 13 / row 12, 32x32 12/12, 64x64 col 13 / row 10 (the only pass below 12 - fdct16/fadst16 and fdct64B are cos_bit-parameterized via cospiRow = cospi_arr mirror); inv is 12/12 (INV_COS_BIT) at every size. Shifts: fwd {2,0,0} / {2,-1,0} / {2,-2,0} / {2,-4,0} / {0,-2,-2}; inv {0,-4} / {-1,-4} / {-2,-4} / {-2,-4} / {-2,-4}. Quantizer stage: buildQuantTables (luma rows of svt_av1_build_quantizer, sharpness=0), size-parameterized quantizeFpN/quantizeBN (verbatim semantics of quantize_fp_helper_c / svt_aom_quantize_b_c) with 4x4/8x8/16x16 (log_scale 0) / 32x32 (log_scale 1) / 64x64 (log_scale 2) wrappers per av1_get_tx_scale_tab (full_loop.c:22) - the escalated arithmetic (rounding ROUND_POWER_OF_TWO(round, log_scale), threshold << (1+log_scale), quant >> (16-log_scale), dq >> log_scale) cited in the L5/L9a commits; defaultScan4x4/8x8/16x16/32x32/64x64 (svt_aom_init_iscan formula); dc/ac unified via table index [rc != 0] - this SVT tree has no av1_quantize_dc. GPU twins at every size: fwd_txfm_2d_4x4..64x64, inv_txfm_2d_add_4x4..64x64, quant_dequant_4x4..64x64 (32x32 fwd/inv cos_bit 12 via kC12f/kC12; 64x64 d_fdct64 selects bit 13 col / 10 row; quant_dequant_64x64 = 4 scan positions per thread). MSVC toolchain limit named: raw string literals > ~16.8KB fire C2026 - all CuSource functions are += chunked (<= ~13.5KB per chunk). Integer only.; TX1 (2026-11-04) the non-square 2D transform family - 14 shapes (the brief's 12 missed 8x16/16x8; the writer caught it), the generic cfg machinery (shift/type/cos_bit tables + two_d_core + dispatch switches) generalized, 76 admissible (shape,TxType) pairs enumerated (46 fwd / 62 inv), roundtrip exactness classified per shape (8x16 exact, 16x8 lossy-1 - the reference itself is asymmetric, measured and pinned), 220 nb of highbd inv wrappers NAMED-PARKED (A1 charges 928); TX2 (2026-11-04) the remaining TxType surface - the FULL 16-type list the lowbd tables admit (definitions.h:1031-1047): set_flip_cfg verbatim (inv_transforms.h:139-181), the vtx/htx tables all 16 rows, fwdIdentity4..64/invIdentity4..64 (the reference's fidentity/iidentity renamed, named deviation), the fwd/inv core flip branches (the TX1 fixed-zero-flips deviation RESOLVED), IDTX joined at the 32-class shapes and the six one-axis types at TX_32X32 through the CONFIG=1 fallback branch (EbConfigMacros.h:246; the 64-axis shapes stay DCT_DCT-only), supported() 165 fwd / 243 inv; the ten square facades route through the TX1 config+core path (the reference's own facade shape) with the landed DCT/ADST outputs unchanged; invTxfm2dAdd64x64 keeps the landed 4096 facade (no compaction - the port's callers expand, the FS5d named follow-up; routing it through the compacting form broke the FS3 emission walk and was reverted in-slice). 204 nb measured.
 - l4_intra - buildIntraPredictors (1:1 with SVT build_intra_predictors, luma, size-generic over 4/8/16/32/64, DC availability variants, missing-neighbor fills), drZ1/2/3 + drPredictor, edge filter/upsample, smoothPredict family, filterIntraPredictor. Corner blend (enc_intra_prediction.c:190-191 8-bit, :392-393 16-bit, the guard `txwpx + txhpx >= 24`): dead at 4x4/8x8 (sums 8/16), LIVE at 16x16 (32), 32x32 (64) and 64x64 (128) - the 16x16/32x32/64x64 GPU kernels carry it. Upsample never fires at 16x16/32x32/64x64 (blk_wh 32/64/128 > 16, svt_aom_use_intra_edge_upsample). GPU twins: predict_block_4x4, predict_block_8x8, predict_block_16x16 (256 threads, shared sizing: above/left max 32 used, zone-1 maxBaseX = 31, above[31] reach within 96-byte arrays), predict_block_32x32 (1024 threads = the CUDA block maximum, __launch_bounds__(1024) after CUresult 701 at naive 1024-thread/64-reg; zone-1 maxBaseX = 63, edge-filter nPx = 65, corner blend live) and predict_block_64x64 (1024 threads, FOUR pixels per thread p = t + 1024k - the stated thread-map design; zone-1 maxBaseX = 127, edge-filter nPx = 129 within 256-byte shared arrays; filter-intra NOT signalable at 64x64 so the 64x64 kernel has no FI path).
-- l5_motion - motion::sad4x4 / sad8x8 / sad16x16 / sad32x32 / sad64x64 (strided uint8) + GPU kernels for 4x4 and 8x8 only; the 16x16 / 32x32 / 64x64 D2 policies score host-side (frame GPU tests are host-decides-gpu-executes, like 8x8). Provenance: sad8x8 mirrors the dedicated 8x8 kernel compute8x8_sad_kernel_c (motion_estimation.c:71); sad4x4 / sad16x16 / sad32x32 / sad64x64 mirror svt_nxm_sad_kernel_helper_c at those dims (compute_sad_c.c:21). (HK1 correction: both citations restored - the HK1 edit had dropped compute8x8_sad_kernel_c, which does exist at motion_estimation.c:71.); HM1 (2026-11-05) the motion-hash + global-motion surface - hash_motion.{h,cpp} (the crc32c pair hash.c:28-:70, the hash-table machinery + block-hash generation + the walk, hash_motion.c:20-:341 = 269 nb) and global_motion.{h,cpp} (the GM param surface global_motion.c:30-:212 = 163 nb incl. refine_integerized_param with GmControls threaded as scalars); 473 nb judge-charge, 137 nb parked named (the two hbd twins + the correspondence/PCS walls); the transport-wedge ops lesson (wait's stale-final replay is not evidence of death; never mutate-verify a worktree with recent mtime activity) is in the register entry.
+- l5_motion - motion::sad4x4 / sad8x8 / sad16x16 / sad32x32 / sad64x64 (strided uint8) + GPU kernels for 4x4 and 8x8 only; the 16x16 / 32x32 / 64x64 D2 policies score host-side (frame GPU tests are host-decides-gpu-executes, like 8x8). Provenance: sad8x8 mirrors the dedicated 8x8 kernel compute8x8_sad_kernel_c (motion_estimation.c:71); sad4x4 / sad16x16 / sad32x32 / sad64x64 mirror svt_nxm_sad_kernel_helper_c at those dims (compute_sad_c.c:21). (HK1 correction: both citations restored - the HK1 edit had dropped compute8x8_sad_kernel_c, which does exist at motion_estimation.c:71.); HM1 (2026-11-05) the motion-hash + global-motion surface - hash_motion.{h,cpp} (the crc32c pair hash.c:28-:70, the hash-table machinery + block-hash generation + the walk, hash_motion.c:20-:341 = 269 nb) and global_motion.{h,cpp} (the GM param surface global_motion.c:30-:212 = 163 nb incl. refine_integerized_param with GmControls threaded as scalars); 473 nb judge-charge, 137 nb parked named (the two hbd twins + the correspondence/PCS walls); the transport-wedge ops lesson (wait's stale-final replay is not evidence of death; never mutate-verify a worktree with recent mtime activity) is in the register entry. AMVP1 (2026-11-12, judge takeover) the adaptive_mv_pred surface in src/l5_motion/amvp.{h,cpp} (namespace motion::amvp, struct-free via the TileInfo/BlockModeInfo/MbModeInfo/MacroBlockD/Av1Common/WarpedMotionParams/OrderHintInfo/TplMvRef/MvRefSetup carriers - the RE8A DeblockContext precedent): 1,523 nb across 23 measured spans (get_block_mv/clamp_mv_ref, the row/col/blk scan family, has_top_right, get_relative_dist, add_tpl_ref_mv/sort_mvp_table/scan_row_col_light/setup_ref_mv_list, gm_get_motion_vector_enc, compute_inter_mode_ctx_light/generate_av1_mvp_table/get_av1_mv_pred_drl, record_samples/av1_find_samples, the overlappable counters, is_dv_valid, ref_mv_from_stack/find_best); 91 cases / 783 assertions (the whole-domain level enumerations, the AMVP stack ordering, the light-context top-right/outer-row/outer-col matrix, the DRL indexing and the DV validity bands pinned); RED = LNK2019 x42 at the first full-API link; parks named: init_xd 74 (the mi-grid wall), the mi-map mutation quartet update_mi_map_enc_dec/copy_mi_map_grid_c/get_mbmi/update_mi_map 118, init_wm_samples 23 (the wm_sample_info wall), warped_motion_parameters 47 (needs warped_motion.c's select_samples/projection); coverage-only, no emission change.
 - l6_pipeline - block + frame composition and DECISION at all five geometries: 4x4 (encode
-Block4x4 / encodeRecon4x4 / encodeFrameRecon4x4 / encodeFrameAuto4x4 / encodeFrameAuto4x4Q), 8x8 (encodeFrameRecon8x8 / Auto8x8 / Recon8x8Q / Auto8x8Q), 16x16 (encodeFrameRecon16x16 / Auto16x16 / Recon16x16Q / Auto16x16Q), 32x32 (encodeFrameRecon32x32 / Auto32x32 / Recon32x32Q / Auto32x32Q + decideBlockMode32x32) and 64x64 (encodeFrameRecon64x64 / Auto64x64 / Recon64x64Q / Auto64x64Q + decideBlockMode64x64, DCT-only within our TxType scope) - raster grids, intra-only, each block predicting from RECONSTRUCTED neighbors (M1 availability rules) with the FR-series REAL recon top-right gather in every variant (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]; row above fully reconstructed by raster order). Each Auto variant's mode is CHOSEN by the D2 SAD policy per geometry (decideBlockMode4x4/8x8/16x16/32x32/64x64 - policy is ours; primitives 1:1) evaluated against reconstructed edges; chosen modes feed NeighborContext (filt_type live) = plane window (l1) + buildIntraPredictors (l4) -> int16 residual (no clamp) -> fwdTxfm2d (l3) -> invTxfm2dAdd (l3 inverse) onto the same predictor. GPU frame paths: per-block kernel chains (predict_block / subtract_4x4..64x64_plane / fwd_txfm_2d / quant_dequant / inv_txfm_2d_add), edges gathered host-side from the device recon buffer; ALL FIVE geometries are bit-exact vs host in both lossless and q100 GPU frame tests. The 16x16 fwd/inv roundtrip is exact (recon == source at 16x16); 8x8 / 32x32 / 64x64 are lossy by design (fwd shift sums -2, 0 for 64). Goldens captured from SVT's own C in the committed generator (tools/golden_gen). Emission sites (TD5b): encodeFrameAuto16x16 (pipeline.cpp:832) inits the frame context with q0 (CodedLossless, bucket 0, pipeline.cpp:840) and encodeFrameAuto16x16Q (pipeline.cpp:982) passes the frame qindex (pipeline.cpp:991) - the l7 init is qindex-bucketed (see l7). FS-series (CLOSED, content-1:1 at all five geometries): the 4x4Q/8x8Q/32x32Q/64x64Q loops take optional w/fc/na (defaults nullptr) and emit the full per-block walk [partition iff the frame reads one: 8x8 = the 4-symbol row, 16/32/64 = the 10-symbol rows, 4x4 = none][skip=0 ctx 0][kf mode + the angle-delta symbol for directional at bsize >= 8X8][FI iff DC_PRED && bsize <= 32x32][writeBlockCoeffs] with initDefaultEcFrameContext(fc, qindex) (the bucketed init, see l7) - bit-exact vs the fs2S_* gate lines per size (the 64x64 emission-domain = the TX_64X64 scan contract: compact the fwd64 top-left 32x32, quantize n_coeffs=1024 with the 1024-position token scan via quantizeFp64x64Token, expand the compacted dqcoeff for inv64; the legacy/GPU callers keep the 4096 facade - the FS5d named follow-up); the 8x8Q/32x32Q/64x64Q emit RUNNING partition contexts (updatePartitionContext after each coded block; for uniform grids these coincide with fresh INVALID - the lookup bit at the leaf's own bsl is 0 for every square size, mutation-check-proven) and writeBlockCoeffs takes mi-unit args. The grid conformance gate = the fs5g32 fixture (the 2x2 of 32x32). CHROMA (CS-series, LANDED - the layer map used to describe l6 as luma-only, which was stale): the 4:2:0 chroma-emitting walk is encodeFrameChromaQ (pipeline.cpp:1785), taking srcY/srcU/srcV and reconY/reconU/reconV, with uvB = lumaB/2 (pipeline.cpp:1794) and UV block sizes {4,8,16,32} selected from lumaB {8,16,32,64} per av1_get_max_uv_txsize (common_utils.h:142-149). The chroma-ownership predicate is the AV1 is_chroma_reference rule for 4:2:0 (pipeline.cpp:1859-1861). The walk is a real superblock tree in the DECODER's Z-order DFS (zorderLeaves, pipeline.cpp:1772-1784, cited to aom decodeframe.c:1392-1397) and it is the only emitter that writes a partition value other than PARTITION_NONE: PARTITION_SPLIT at the 64x64 root and at the 32x32/16x16 interior nodes (pipeline.cpp:1839, :1965, :1969). Per leaf the order is [luma kf mode][uv_mode - ONE per block, the V TU shares the U decision][uv angle-delta where gated][luma chain][U chain][V chain], U BEFORE V, with three separate neighbour arrays naY/naU/naV. Chroma mode decision is the project's own SAD policy (decideBlockModeUv pipeline.cpp:1742, decideBlockModeUv16x16 pipeline.cpp:1720) over 13 folded candidates via intra::uv2y with UV_CFL_PRED excluded (the loop bounds, pipeline.cpp:1726 and :1748) - the CFL alpha combine is out of scope by named policy (pipeline.h:169-171). The chroma transform type is DERIVED, never signalled: transforms::intraUvTxType (transform.h:97, RT9 step 2) 1:1 with svt_aom_get_intra_uv_tx_type (mode_decision.c:2985-2997), called at pipeline.cpp:2155. The bottom-left availability rule is a single named function, `pipeline::bottomLeftPx` - **DECLARED at pipeline.h:246, DEFINED at pipeline.cpp:2469-2473** (the definition slides: 2420 -> 2459 at CS7 -> 2469 at RT21). Read the declaration and the definition as different things: the declaration has not moved since the be67d6f extraction and is the stable thing to cite in prose, while the definition slides with every edit below it in the file. The ABOVE-RIGHT twin (RT21, LANDED 927e697): chroma top-right is Z-order gated via `pipeline::topRightPx` - **DECLARED at pipeline.h:255 beside bottomLeftPx, DEFINED at pipeline.cpp:2480-2484** - the same shape with the diagonal on the other corner (bx + 1 >= grid / by <= 0 guards, owner (by-1)*grid + (bx+1), available exactly when zPos[owner] < zPos[bIdx]); the chroma gather consumes ONE count for BOTH the cAbove gather bound (pipeline.cpp:2113) and the buildIntraPredictorsUv argument (pipeline.cpp:2142), so they cannot disagree; the generator mirror is `cNTr` (composition.c:6595-6596), likewise one fact at the gather bound (:6613) and the builder call (:6733). The chroma D2 DECISION site (pipeline.cpp:2001) keeps the structural gather by named scope, and the luma twin (composition.c:6264) is measured live and PARKED (see the RT21 register entry in docs/todo.md section 9). The two call sites are `pipeline.cpp:1884` (luma) and `pipeline.cpp:2103` (chroma, the site CS7 changed - it was a literal `0` before; the line moved +10 under the RT21 topRightPx insertion), and the luma gather that consumes the count is `pipeline.cpp:1892-1894` (RT10b). Do not cite 1884 as the gate - 1885-1886 are the above/left buffer declarations. Do not cite 2469 as a call site; it is the rule. The UV side is three different things, not two: **the site CS7 changed is pipeline.cpp:2103**, now a `bottomLeftPx` call like the luma one. **Do NOT "fix" pipeline.cpp:2231.** That is `encodeFrameReconChroma16x16`, one of four standalone 16x16-UV compositions whose grid is `src.width()/16 x src.height()/16`, so on the committed 16x16 UV fixture the grid is 1, no below-left neighbour exists, and the `nBottomLeftPx = 0` there is CORRECT BY GEOMETRY rather than by omission. It is on record as a site where zero is right, so that nobody reads it as CS4, and so that nobody believes CS4 is already handled. Its siblings are pipeline.cpp:2281 (`AutoChroma16x16`), :2356 (`ReconChroma16x16Q`) and :2413 (`AutoChroma16x16Q`), same fixed 16x16 shape. The one condition that would make :2231 a real hole is a caller passing a UV plane larger than one block; no committed caller does, and the fix should either leave it alone or add the rule behind the same guard rather than special-casing the literal. Four standalone UV-plane compositions also exist at 16x16 UV (encodeFrameReconChroma16x16 pipeline.cpp:2217, AutoChroma16x16 :2267, ReconChroma16x16Q :2337, AutoChroma16x16Q :2395). Scope: single-TU + the grid fixtures gate-pinned; the FI DC-deciding fixture still open; FS5d the named dual-domain follow-up (a 1024-position GPU kernel + bench work). Per-geometry decode conformance: the five committed artifacts (d4 30B the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px so the 8x8 node reads the partition symbol; d8 30B; d16 44B; d32 47B committed; d64 441B) decode content-1:1 per geometry via tools/verify_decode4.ps1 -Geometry. PO1 (2026-11-04) the struct-free pic_operators kernels in src/l6_pipeline/picops.{h,cpp} (namespace pipeline::picops) - 199 nb: the two residual kernels (NO clamp, the uint16 wrap-cast - matches the l6 convention), the three full-distortion kernels + the 32-single dispatcher (shift-free int64 SQR - the brief's shift-table claim did not reproduce, corrected), the yv12 copy trio and generatePadding16Bit (struct-free; AN10 had NAMED it excluded - now landed in picops); 172 nb parked named (the pack2d/unpack2d dispatches - callees are PU1's packunpack - and the five EbPictureBufferDesc-walled pic drivers); memset32bit grep-verified DEAD.
+Block4x4 / encodeRecon4x4 / encodeFrameRecon4x4 / encodeFrameAuto4x4 / encodeFrameAuto4x4Q), 8x8 (encodeFrameRecon8x8 / Auto8x8 / Recon8x8Q / Auto8x8Q), 16x16 (encodeFrameRecon16x16 / Auto16x16 / Recon16x16Q / Auto16x16Q), 32x32 (encodeFrameRecon32x32 / Auto32x32 / Recon32x32Q / Auto32x32Q + decideBlockMode32x32) and 64x64 (encodeFrameRecon64x64 / Auto64x64 / Recon64x64Q / Auto64x64Q + decideBlockMode64x64, DCT-only within our TxType scope) - raster grids, intra-only, each block predicting from RECONSTRUCTED neighbors (M1 availability rules) with the FR-series REAL recon top-right gather in every variant (above[B..2B-1] = recon[(py-1)][px+B..px+2B-1]; row above fully reconstructed by raster order). Each Auto variant's mode is CHOSEN by the D2 SAD policy per geometry (decideBlockMode4x4/8x8/16x16/32x32/64x64 - policy is ours; primitives 1:1) evaluated against reconstructed edges; chosen modes feed NeighborContext (filt_type live) = plane window (l1) + buildIntraPredictors (l4) -> int16 residual (no clamp) -> fwdTxfm2d (l3) -> invTxfm2dAdd (l3 inverse) onto the same predictor. GPU frame paths: per-block kernel chains (predict_block / subtract_4x4..64x64_plane / fwd_txfm_2d / quant_dequant / inv_txfm_2d_add), edges gathered host-side from the device recon buffer; ALL FIVE geometries are bit-exact vs host in both lossless and q100 GPU frame tests. The 16x16 fwd/inv roundtrip is exact (recon == source at 16x16); 8x8 / 32x32 / 64x64 are lossy by design (fwd shift sums -2, 0 for 64). Goldens captured from SVT's own C in the committed generator (tools/golden_gen). Emission sites (TD5b): encodeFrameAuto16x16 (pipeline.cpp:832) inits the frame context with q0 (CodedLossless, bucket 0, pipeline.cpp:840) and encodeFrameAuto16x16Q (pipeline.cpp:982) passes the frame qindex (pipeline.cpp:991) - the l7 init is qindex-bucketed (see l7). FS-series (CLOSED, content-1:1 at all five geometries): the 4x4Q/8x8Q/32x32Q/64x64Q loops take optional w/fc/na (defaults nullptr) and emit the full per-block walk [partition iff the frame reads one: 8x8 = the 4-symbol row, 16/32/64 = the 10-symbol rows, 4x4 = none][skip=0 ctx 0][kf mode + the angle-delta symbol for directional at bsize >= 8X8][FI iff DC_PRED && bsize <= 32x32][writeBlockCoeffs] with initDefaultEcFrameContext(fc, qindex) (the bucketed init, see l7) - bit-exact vs the fs2S_* gate lines per size (the 64x64 emission-domain = the TX_64X64 scan contract: compact the fwd64 top-left 32x32, quantize n_coeffs=1024 with the 1024-position token scan via quantizeFp64x64Token, expand the compacted dqcoeff for inv64; the legacy/GPU callers keep the 4096 facade - the FS5d named follow-up); the 8x8Q/32x32Q/64x64Q emit RUNNING partition contexts (updatePartitionContext after each coded block; for uniform grids these coincide with fresh INVALID - the lookup bit at the leaf's own bsl is 0 for every square size, mutation-check-proven) and writeBlockCoeffs takes mi-unit args. The grid conformance gate = the fs5g32 fixture (the 2x2 of 32x32). CHROMA (CS-series, LANDED - the layer map used to describe l6 as luma-only, which was stale): the 4:2:0 chroma-emitting walk is encodeFrameChromaQ (pipeline.cpp:1785), taking srcY/srcU/srcV and reconY/reconU/reconV, with uvB = lumaB/2 (pipeline.cpp:1794) and UV block sizes {4,8,16,32} selected from lumaB {8,16,32,64} per av1_get_max_uv_txsize (common_utils.h:142-149). The chroma-ownership predicate is the AV1 is_chroma_reference rule for 4:2:0 (pipeline.cpp:1859-1861). The walk is a real superblock tree in the DECODER's Z-order DFS (zorderLeaves, pipeline.cpp:1772-1784, cited to aom decodeframe.c:1392-1397) and it is the only emitter that writes a partition value other than PARTITION_NONE: PARTITION_SPLIT at the 64x64 root and at the 32x32/16x16 interior nodes (pipeline.cpp:1839, :1965, :1969). Per leaf the order is [luma kf mode][uv_mode - ONE per block, the V TU shares the U decision][uv angle-delta where gated][luma chain][U chain][V chain], U BEFORE V, with three separate neighbour arrays naY/naU/naV. Chroma mode decision is the project's own SAD policy (decideBlockModeUv pipeline.cpp:1742, decideBlockModeUv16x16 pipeline.cpp:1720) over 13 folded candidates via intra::uv2y with UV_CFL_PRED excluded (the loop bounds, pipeline.cpp:1726 and :1748) - the CFL alpha combine is out of scope by named policy (pipeline.h:169-171). The chroma transform type is DERIVED, never signalled: transforms::intraUvTxType (transform.h:97, RT9 step 2) 1:1 with svt_aom_get_intra_uv_tx_type (mode_decision.c:2985-2997), called at pipeline.cpp:2155. The bottom-left availability rule is a single named function, `pipeline::bottomLeftPx` - **DECLARED at pipeline.h:246, DEFINED at pipeline.cpp:2469-2473** (the definition slides: 2420 -> 2459 at CS7 -> 2469 at RT21). Read the declaration and the definition as different things: the declaration has not moved since the be67d6f extraction and is the stable thing to cite in prose, while the definition slides with every edit below it in the file. The ABOVE-RIGHT twin (RT21, LANDED 927e697): chroma top-right is Z-order gated via `pipeline::topRightPx` - **DECLARED at pipeline.h:255 beside bottomLeftPx, DEFINED at pipeline.cpp:2480-2484** - the same shape with the diagonal on the other corner (bx + 1 >= grid / by <= 0 guards, owner (by-1)*grid + (bx+1), available exactly when zPos[owner] < zPos[bIdx]); the chroma gather consumes ONE count for BOTH the cAbove gather bound (pipeline.cpp:2113) and the buildIntraPredictorsUv argument (pipeline.cpp:2142), so they cannot disagree; the generator mirror is `cNTr` (composition.c:6595-6596), likewise one fact at the gather bound (:6613) and the builder call (:6733). The chroma D2 DECISION site (pipeline.cpp:2001) keeps the structural gather by named scope, and the luma twin (composition.c:6264) is measured live and PARKED (see the RT21 register entry in docs/todo.md section 9). The two call sites are `pipeline.cpp:1884` (luma) and `pipeline.cpp:2103` (chroma, the site CS7 changed - it was a literal `0` before; the line moved +10 under the RT21 topRightPx insertion), and the luma gather that consumes the count is `pipeline.cpp:1892-1894` (RT10b). Do not cite 1884 as the gate - 1885-1886 are the above/left buffer declarations. Do not cite 2469 as a call site; it is the rule. The UV side is three different things, not two: **the site CS7 changed is pipeline.cpp:2103**, now a `bottomLeftPx` call like the luma one. **Do NOT "fix" pipeline.cpp:2231.** That is `encodeFrameReconChroma16x16`, one of four standalone 16x16-UV compositions whose grid is `src.width()/16 x src.height()/16`, so on the committed 16x16 UV fixture the grid is 1, no below-left neighbour exists, and the `nBottomLeftPx = 0` there is CORRECT BY GEOMETRY rather than by omission. It is on record as a site where zero is right, so that nobody reads it as CS4, and so that nobody believes CS4 is already handled. Its siblings are pipeline.cpp:2281 (`AutoChroma16x16`), :2356 (`ReconChroma16x16Q`) and :2413 (`AutoChroma16x16Q`), same fixed 16x16 shape. The one condition that would make :2231 a real hole is a caller passing a UV plane larger than one block; no committed caller does, and the fix should either leave it alone or add the rule behind the same guard rather than special-casing the literal. Four standalone UV-plane compositions also exist at 16x16 UV (encodeFrameReconChroma16x16 pipeline.cpp:2217, AutoChroma16x16 :2267, ReconChroma16x16Q :2337, AutoChroma16x16Q :2395). Scope: single-TU + the grid fixtures gate-pinned; the FI DC-deciding fixture still open; FS5d the named dual-domain follow-up (a 1024-position GPU kernel + bench work). Per-geometry decode conformance: the five committed artifacts (d4 33 B the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px so the 8x8 node reads the partition symbol; d8 30 B; d16 43 B; d32 66 B; d64 440 B, the RE7 tx-type regen sizes) decode content-1:1 per geometry via tools/verify_decode4.ps1 -Geometry. PO1 (2026-11-04) the struct-free pic_operators kernels in src/l6_pipeline/picops.{h,cpp} (namespace pipeline::picops) - 199 nb: the two residual kernels (NO clamp, the uint16 wrap-cast - matches the l6 convention), the three full-distortion kernels + the 32-single dispatcher (shift-free int64 SQR - the brief's shift-table claim did not reproduce, corrected), the yv12 copy trio and generatePadding16Bit (struct-free; AN10 had NAMED it excluded - now landed in picops); 172 nb parked named (the pack2d/unpack2d dispatches - callees are PU1's packunpack - and the five EbPictureBufferDesc-walled pic drivers); memset32bit grep-verified DEAD. SRC1 (2026-11-12) the A6 source-ops surface in src/l6_pipeline/src_ops.{h,cpp} (namespace pipeline::srcops): 380 nb ported of src_ops_process.c's 2,014, the TPL dispenser/synthesizer + the SSIM-rdmult driver - getNeighborSamplesDc :364-:376, roundFloor :1453-:1462, getOverlapArea :1423-:1451, deltaRateCost :1464-:1490, perpixelVariance :2151-:2156 (the AN8 offs-folded instances), rateEstimator :263-:276, tplModelUpdateB :1496-:1549 + tplModelUpdate :1555-:1582 (the verbatim non-reset-i scan quirk fixture-pinned), tplMcFlowSynthesizer :1589-:1602, generateLambdaScalingFactor :188-:234, generateR0beta :1604-:1697, setMbSsimRdmultScaling :2158-:2236; 1,449 nb parked named (the pcs/scs/me/tpl walls - the dispenser :524-:1200, tpl_mc_flow :1810-:1992, the kernel pair :2243-:2298); BRIEF CORRECTION: the brief's plane copy/pad helpers do not exist in this file (the only pad content is one call of svt_aom_generate_padding); RED = LNK2019 x16; 31 TEST_CASEs / 164 CHECK sites; deviations named (one flat TplStatsCell array, the mefn dispatch replaced by the offs-folded instances at the live sizes); coverage-only, no emission change.
 - l7_entropy - the od_ec writer/reader families + the full symbol surface: initDefaultEcFrameContext(fc, base_q_idx) (TD5b: the coefficient tables QINDEX-BUCKET-SELECTED per the spec's init_coeff_cdfs, 07.bitstream.semantics.md:1800-1820, via the verbatim getQCtx mirror of cabac_context_model.c:1907-1918; the 13 token-table families carried as the 4-bucket *_buckets.inc files mechanically split from the committed svt_gen.c extracts - no hand-transcribed values; previously the idx-0 bucket was used for every frame = the TS1 deviation, RESOLVED 2026-09-21: it was the q100 tile-divergence root cause), writeTxbCoeffs/writeBlockCoeffs/readBlockCoeffs (the token chain: txb_skip, tx-type, eob_pt/eob_extra, base_eob+br, reverse base+brs, dc_sign + raw signs + golomb; FS3-prep: the in-chain tx-type symbol requires tx_size_sqr_up < TX_32X32 - DCTONLY at 32x32/64x64 intra writes/reads NO symbol, entropy_coding.c:321-322), writeKfLumaMode/readKfLumaMode, writeSkip, writePartition/readPartition, writeTxType, updatePartitionContext (FS5a: wired into the 8x8Q/32x32Q/64x64Q emission loops), getKfYModeCtx (entropy.cpp:840 - the context is DERIVED from live neighbour modes, not pinned), updateCdf (the spec adaptation rate), writeGolomb/readGolomb. CONTEXT DERIVATION IS LIVE, not stubbed: getTxbCtx (entropy.cpp:1455) drives the per-coefficient skip context from the real neighbour arrays via the skip_contexts table, the nz-map offset LUT (nz_map_ctx_offset.inc) and the chroma ctx_base + 7 branch (entropy.h:605-612); the per-block call sites are entropy.cpp:1533 and :1562. Named scope: the skip symbol is always emitted as skip=0 ctx 0 (no skip decision is taken - pipeline.cpp:499, :685, :1356, :1694, :1982), the angle delta is always 0 in our emission (pipeline.h:156, named parked), and the tx sets fold reduced_tx_set=1 (entropy.cpp:1585). Provenance: every primitive cites the vendored extract; the per-bucket rows cite cabac_context_model.c (the court-cited [2]-bucket EobPt256 row {3089, 3920, ...} = token_cdfs.h:861 on the aom side). CHROMA (CS1b, LANDED): the uv_mode write/read pair (entropy_coding.c:1080-1081 write, decodemv.c:144-147/:823-837 read; alphabet UV_INTRA_MODES - !cflAllowed = 14 at bsize <= 32x32 / 13 at 64x64), the uv angle-delta pair (:1087-1092 / :830-833, gated on bsize >= BLOCK_8X8 AND the folded mode directional), a ComponentType enum threading six component-dim CDF families through both twins, and writeFilterIntra for the chroma walk. Named deferral: write_cfl_alphas (:1060-1071) - UV_CFL_PRED is not a D2 candidate (pipeline.cpp:1726), so the alphas are dead in our emission. SYM1 (2026-11-04) the palette + segmentation symbol surface - six palette CDF families + the EcSegProbs struct (cabac_context_model.c:477-:586 + the nine mechanical .inc extracts via the committed tools/extract_palette_cdfs.ps1), allowPalette + getPaletteBsizeCtx with the FINDING pinned (the reference's bsize >= BLOCK_8X8 gate is ENUM order, not geometry - BLOCK_4X16/16X4 pass it; the enumerated 22-bsize want[] table pins the quirk), deltaEncodePaletteColors (the odEcEncTell delta == l13_palette::deltaEncodeCost's formula), writeUniform/readUniform + readLiteralBits, writePaletteColorsY/readPaletteColorsY + the local indexColorCache twin (DUPLICATED from l13_palette - l7 cannot link l13 without a CMake edit; both port palette.c:111-141), writePaletteModeInfo (the uv continuation PARKED - the pinned writer emits no uv palette, entropy_coding.c:4371 asserts palette_size[1] == 0), the fast-context family twin (palette.c:639-776, also duplicated), tokenizeColorMap (palette.c:781-828; PAL1 had parked it) + packMapTokens + getColorIndexContext + decodeColorMapTokens - TWO roundtrip-caught defects named (the cdf-row pointer indexed the ELEMENT dimension instead of the [ctx]-th ROW; and an out-of-range fixture map value, the fixture's bug), the wb trio duplicated into l7 (entropy_coding.c:1343-1382; l7 cannot link l8 - cycle) + rbRead* + writeSegFeatures/readSegFeatures (a third caught defect: the seg-enabled bit was a parameter; the reader reads enabled itself and FORCES update_map=1/temporal=0/update_data=1 at PRIMARY_REF_NONE), getSegmentId/updateSegmentationMap/getSpatialSegPrediction/negInterleave/negDeinterleave/writeSegmentId/readSegmentId. SVT-side 634 nb (481 new-to-the-port + 153 duplicated with l13) + 242 nb aom reader twins (out-of-tree, not in the denominator). Parks named: write_palette_colors_uv (does not exist in the pinned encoder; the aom read twin parked with it), the uv palette families LANDED but unreachable (the uv emission is DCE'd upstream), the seg TEMPORAL path (the SVT writer SVT_ERRORs on it, entropy_coding.c:4895-4903).
-- l8_bitstream - the bit assembly: wb family (bit writer), uleb128, OBU header + temporal delimiter, SPS encode (writeSequenceHeaderObu, sps_obu; FS5b: maxDim-parameterized max frame dims - frame_width_bits = msb(maxDim), the default 32 = the committed walk), the frame-header v1 (writeFrameHeader, lossless q0, 22-bit walk + 2 pad = 3 bytes) and v2 (writeFrameHeaderV2, lossy q100, 40-bit walk - verified field-by-field against both aom decodeframe.c and dav1d obu.c), assembleStructuralKeyframeTUv2 (TD + SPS + OBU_FRAME; FS5b: the dims threaded through bsf3EncodeSps), the committed artifact SET goldens/structural_keyframe*.obu - the 47-byte d32 (TD5b: the v2 header + the idx-2-coded tile, the four-16x16-leaves walk; decodes exit 0 with the content 1:1 - the ecfrm_recon fingerprint 05 08 0c 11, byte-diffs 0/1024) plus the FS5 per-geometry set (d4 30B = the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px; d8 30B; d16 44B; d64 441B - each three-way-identity-tested and content-1:1 measured per geometry; tools/verify_decode4.ps1 -Geometry = the standing instrument). Gate: tu_bytes_v2 47 + tu_bytes_v2_d4/d8/d16/d64 (tools/golden_gen). COLOR HEADERS (CS3, LANDED - the layer map used to stop at v2): writeSequenceHeaderObuV3 (bitstream.cpp:390, the D1 un-patch: mono bit 0, the 4:2:0 colour config, chroma_sample_position = UNKNOWN, separate_uv_delta_q = 0) + writeFrameHeaderV3 (bitstream.cpp:413, v2's 40 bits + the unconditional U/V delta_q bits = 42 bits + 6 pad = 6 bytes) + assembleStructuralKeyframeTUv3 (bitstream.cpp:476). The D1 mono producers stay pinned for the mono artifact set. The committed artifact set is NINE .obu files: the five grayscale above plus color4 183B / color8 137B / color16 133B / color32 165B (color4 and color8 shrank in the chroma regens: 201 -> 198 B at CS7 then 198 -> 183 B at RT21 for color4, 139 -> 137 B at CS7 for color8; the earlier sizes are correct statements about their own commits); the per-artifact decode outcomes are in docs/decode_conformance.md.
+- l8_bitstream - the bit assembly: wb family (bit writer), uleb128, OBU header + temporal delimiter, SPS encode (writeSequenceHeaderObu, sps_obu; FS5b: maxDim-parameterized max frame dims - frame_width_bits = msb(maxDim), the default 32 = the committed walk), the frame-header v1 (writeFrameHeader, lossless q0, 22-bit walk + 2 pad = 3 bytes) and v2 (writeFrameHeaderV2, lossy q100, 40-bit walk - verified field-by-field against both aom decodeframe.c and dav1d obu.c), assembleStructuralKeyframeTUv2 (TD + SPS + OBU_FRAME; FS5b: the dims threaded through bsf3EncodeSps), the committed artifact SET src/l8_bitstream/tests/goldens/structural_keyframe*.obu - the 66-byte d32 (TD5b: the v2 header + the idx-2-coded tile, the four-16x16-leaves walk; decodes exit 0 with the content 1:1 - the ecfrm_recon fingerprint 05 08 0c 11, byte-diffs 0/1024) plus the FS5 per-geometry set (d4 33 B = the 8x8-frame four-4x4-TU structure - the decoders align frame dims to 8 px; d8 30 B; d16 43 B; d64 440 B - each three-way-identity-tested and content-1:1 measured per geometry; tools/verify_decode4.ps1 -Geometry = the standing instrument; the sizes are the RE7 tx-type regen). Gate: tu_bytes_v2 47 + tu_bytes_v2_d4/d8/d16/d64 (tools/golden_gen). COLOR HEADERS (CS3, LANDED - the layer map used to stop at v2): writeSequenceHeaderObuV3 (bitstream.cpp:390, the D1 un-patch: mono bit 0, the 4:2:0 colour config, chroma_sample_position = UNKNOWN, separate_uv_delta_q = 0) + writeFrameHeaderV3 (bitstream.cpp:413, v2's 40 bits + the unconditional U/V delta_q bits = 42 bits + 6 pad = 6 bytes) + assembleStructuralKeyframeTUv3 (bitstream.cpp:476). The D1 mono producers stay pinned for the mono artifact set. The committed artifact set is NINE .obu files: the five grayscale above plus color4 214 B / color8 161 B / color16 136 B / color32 165 B (the RE7 tx-type regen; color4 201 -> 198 B at CS7 -> 183 B at RT21 -> 214 B at RE7, color8 139 -> 137 B at CS7 -> 161 B at RE7; the earlier sizes are correct statements about their own commits); the per-artifact decode outcomes are in docs/decode_conformance.md.
 - third_party/ - vendored SVT-AV1 (1:1 source of truth), doctest, hardware docs (perf-axis only: PTX ISA, GP104 whitepaper, Pascal Tuning Guide, Nsight-focused guides; CUDA 12.2 profiling is ncu, not nvprof). NOTE for anyone auditing third_party: it is NOT just SVT-AV1 + doctest. third_party/aom is a FULL libaom checkout (av1/decoder/decodeframe.c, av1/decoder/decodemv.c, av1/common/token_cdfs.h, av1/encoder/av1_quantize.c are all present and are the resolution target for the aom-side citations in docs/provenance.md and docs/color.md), third_party/aom_dsp carries src/entdec.c + src/bitreader.c, and third_party/dav1d is **present in the working directory but NOT tracked by git** (see the evidence contract below - "vendored" is ambiguous across exactly these two trees, and only one of the two senses is true of each).
 
 ## The evidence contract: the working directory, not git
@@ -944,6 +934,30 @@ are partly right and I re-measured rather than restated them:
   SB-local dst.buf contract and the frame-header plane gates; PARKED
   named: the search walls :828-:953/:954-:1010/:1110-:1286 and the SD
   copy/SSE trio :711-:822; highbd assert-parked; plane_type not carried.
+  A8W1 (2026-11-12, judge takeover) the hbd deblocking family + the
+  DLF-search walls in src/l10_filters/deblock_hbd.{h,cpp} and
+  deblock_driver.{h,cpp}: 770 nb measured (347 the hbd kernel family -
+  signed_char_clamp_high :34-:44, highbd_flat_mask3_chroma :194-:203,
+  highbd_filter_mask2 :388-:398, highbd_filter_mask :400-:414,
+  highbd_flat_mask4 :416-:427, highbd_hev_mask :429-:437,
+  highbd_filter4 :439-:471, lpf_horizontal/vertical_4 :473-:505,
+  highbd_filter8 :507-:524, lpf_horizontal/vertical_8 :526-:558,
+  highbd_filter14 :591-:627, highbd_mb_lpf_horizontal_edge_w :629-:672,
+  lpf_horizontal_14 :674-:677, highbd_filter_mask3_chroma :679-:690,
+  highbd_filter6 :692-:706, lpf_vertical/horizontal_6 :708-:739,
+  highbd_mb_lpf_vertical_edge_w :741-:779, lpf_vertical_14 :781-:784;
+  423 the walls - disable_dlf_th :29-:32, svt_copy_buffer :711-:740,
+  picture_sse_calculations :742-:770, try_filter_frame :772-:822,
+  search_filter_level :828-:952, me_based_dlf_skip :954-:1010,
+  svt_av1_pick_filter_level :1110-:1286); the RE8A assert-parks RESOLVE
+  (filterBlockPlaneVert/Horz dispatch the 4/6/8/14 cases on the plane's
+  bit depth); 315 cases / 35,207 assertions; FOURTEEN judge-adjudicated
+  errata (all staged-fixture defects; the filter8 bd=10 op1 absolute
+  114 -> 101, the flat fallbacks, the tempPic WRITE-bind, the element
+  stride r*stride*2); parks named: the svt_aom_ac_quant_qtx call site
+  (the walls' q IS the dequant), the dlf_process persistence of
+  zero_filt_sse/best_filt_sse, the recon-pic selector, the EB_NEW
+  temp-recon allocation; conformance-free.
 
 ## New module layer map (the wave-era layers, src/)
 
@@ -997,6 +1011,26 @@ are partly right and I re-measured rather than restated them:
   extracted, the runtime diff-verify test parses the reference file
   itself; the PAIRED-METRIC CAVEAT STATED (transcription, not
   algorithm - the AN14 OD_DIVU precedent). Host only.
+  RC2 (2026-11-12) the rate-control arithmetic + driver families in
+  src/l15_rc/rc_arith.{h,cpp} (namespace l15_rc, struct-free via the
+  RcControl/RcConfig/PcsCarrier carriers + the grown FrameHdrCarrier /
+  CrRefreshCarrier / MeStatCarrier / ResizePendingCarrier): 2,447 nb
+  across the A-D waves, span-measured - the rc_vbr_cbr.c /
+  rc_rtc_cbr.c / rc_crf_cqp.c / rc_aq.c / rc_process.c arithmetic
+  (R1-R3 125: the active-quality + one-pass target/buffer helpers;
+  A+B 1,076: the D-series qindex/qdelta arithmetic + the AQ series +
+  the one-pass alloc/dyn-resize family, 85 nb parked at the TPL-lambda
+  wall; C1 351: the RTC primitives; C2 279: the RTC-CBR driver family
+  incl. the Kalman rcf state; D1 102: the recode helpers;
+  D2 130: recode_loop_update_q; D3 288: the VBR updater + postencode
+  pair + regulated pair; D4 96: the cyclic-refresh trio), the 8-bit
+  dc/ac qlookup rows mechanically extracted into the registry (the
+  10/12-bit rows are the CONFIG_ENABLE_HIGH_BIT_DEPTH=0 -1 branch,
+  pinned); integer outputs exact, doubles at fabs 1e-9; the oracles
+  parse the reference tables and are the authority (five hand-trace
+  errors caught); parks named (the TPL-lambda wall, the mutex ops,
+  SVT_DEBUG prints, the pick-q/rate-allocation shell); coverage-only,
+  no conformance movement.
 - l16_rdo - the RE-series (A4 machinery, the golden-regeneration
   campaign's foundation; scaffold bef6904 links av1_transforms; all
   four slices CONFORMANCE-FREE - no emission change, no golden churn;
@@ -1074,6 +1108,85 @@ are partly right and I re-measured rather than restated them:
   parked named: the palette injection :3404-:3476 (68), the
   sframe/me candidates :3478-:3560 (79, inter), the psy hbd twin
   (33), the decision loops (the wiring rung).
+  RE5 (8aa7cd3) the RD-lite D2 wiring rung - the FIRST gated golden
+  event: rdliteLambda (the policy lambda q == 0 ? 0 : q),
+  initRdliteFrameCtx (the l7 EcFrameContext -> l16
+  MdRateEstimationContext bridge), the kf-y ctx bridge and rdliteDecide
+  (variance<<4 distortion + the landed intraFastCost + the RDCOST
+  macro, strict < tie-break) wired into decideBlockMode4x4..64x64 + the
+  generator's svtd_rdlite_decide twin; chroma UV stays SAD-only. The
+  new mode map EXPOSED two latent FI emission bugs the SAD policy
+  masked (d4's FI symbol through a per-site local cdf re-initialized
+  from default while the decoder reads the ADAPTING
+  frame_context->filter_intra_cdfs[bsize] - all six l6 sites + the
+  fs5g32/fs5g4 drives now write through the adapting cdf; d32's
+  svtd_bsf3_tile_data_v2 had NO FI write at all - the mirror now writes
+  FI for DC_PRED blocks); all nine artifacts + the gate regenerated IN
+  THE SLICE, re-verified content-1:1.
+  RE6 (050e8da) the angle-delta wiring rung - the second gated golden
+  event: the emission's delta=0 park (pipeline.h:156) RESOLVES -
+  rdliteDecide enumerates angleDelta over {-3..+3} for directional
+  candidates (bsize >= 8X8; at 4x4 no variants), the
+  angular-pred-level policy = 1 (ours, named), ModeDecision gains the
+  angleDelta field; 11 predictor sites predict at the CHOSEN delta and
+  7 writeKfLumaMode sites emit it; UV delta stays 0; the mirror gains
+  the same enumeration (17 call sites); new gate fixtures bsf1q_* +
+  bsf3v2_deltas; 6 mutations (4 killed + M3/M5 SURVIVED their first
+  forms and were SHARPENED).
+  RE7 (167ca35) the tx-type rung - the third gated golden event: the
+  derived-type emission (intraUvTxType's l3 Twin, transform.h:97) lands;
+  artifacts regenerate (d4 33 / d8 30 / d16 43 / d32 66 / d64 440 /
+  color4 214 / color8 161 / color16 136 / color32 165 B, all content-
+  1:1) and the GATE moves to 885,347 B / 427 lines (+450 from RE6's
+  884,897 - the token/tx-type symbols).
+  EMC1 (2026-11-12) the mode-config conveyor in src/l16_rdo/
+  mode_config.{h,cpp} - 4,050 nb of enc_mode_config.c ported
+  struct-free via mirror carriers (the RE8A DeblockContext pattern):
+  slice 1 + batch A (the qp-th scaling, pf/angular, the wn/sg/dlf
+  level families, gm correspondence + set_gm_controls, set_hme/
+  me_search_params, the five prune ctrl setters, tf_set_me_hme_params_
+  oq, sig_deriv_me/_tf), batch B (the cdef search/recon setters, the
+  dlf/intrabc/palette setters, sig_deriv_multi_processes, the
+  inter-comp ctrls, the level getters + enable wrappers, set_obmc_
+  controls + dimensions_require_8x8) and batch C (the MD search,
+  subpel/rdoq/shaving, txt/interpolation-search and
+  set_cand_reduction_ctrls setters); the CONFIG_ENABLE_GLOBAL_MOTION /
+  _LOSSLESS / _INTER_INTRA forks threaded as runtime parameters (the
+  pinned build is neither RTC_BUILD nor MINIMAL_BUILD); the
+  poison-and-oracle whole-struct discipline throughout; the l16 test
+  target closes at 185 cases / 4,707,133 assertions; coverage-only.
+  MD1 (9002c95) the mode-decision pure-arithmetic surface in
+  src/l16_rdo/md_slices.{h,cpp} - 572 nb: the similarity + cc1/cc2
+  family (enc_dec_process.c:638-671), the SSIM family (mode_decision.c
+  :4238-4490 incl. the hbd twins and the block walkers/dispatch), the
+  hbd hadamard trio (picture_operators_c.c:176-262), the hbd psy
+  (ac_bias.c:103-144, the RE4 hbd park resolves but stays unwired) and
+  the MV/ME helpers (is_lossless_segment, check_mv_validity, the
+  me-block-offset tables, have_newmv_in_inter_mode, get_max_drl_index,
+  mv_is_already_injected, the uni/bipred validity pairs); 23
+  TEST_CASEs; three RED rounds incl. the LNK2019 x29 full-API link;
+  coverage-only, no emission change.
+- l17_inter - MC1 (2026-11-12, writer + judge): the inter-prediction
+  surface in src/l17_inter/inter_prediction.{h,cpp} (namespace
+  l17_inter; the 18th ctest target), 524 nb ported in two slices -
+  slice 1 (T1a/T1b/T2, 168 nb: pack_block, div_mult,
+  is_masked_compound_type, the diffwtd mask family + the highbd build,
+  the fixed-point scale-factor family + setup_scale_factors_for_frame,
+  has_scale/revert_scale_extra_bits, get_relative_dist_enc + the
+  dist-wtd weight assign) and slice 2 (T3, 240 nb: convolve_2d_sr /
+  _y_sr / _x_sr / _2d_copy_sr / _2d_scale / _2d_for_intrabc +
+  svt_inter_predictor; T4, 116 nb: the wedge delta-square/sign pair,
+  sse/highbd_sse, model_rd_norm/from_var_lapndz/from_sse + the
+  mechanically extracted rate/dist/xsq_iq tables via the committed
+  gen_t4.ps1). 36 TEST_CASEs / 747 assertions; parks named: the jnt
+  compound convolve family and the highbd convolve family, pack2d_src
+  (the PO1-parked dispatch), the subtract pair (l6 picops carry), the
+  sub-pel filter tables (l12 CV1 carry), the wedge mask synthesis +
+  get_contiguous_soft_mask, the asm setter block; deviations named
+  (the convolve fn-table dispatches as direct calls, sseHighbd aliases
+  the uint16 planes through the uint8 params, SQR keeps the int32
+  product widened at the int64 accumulator); coverage-only, no
+  emission change.
 
 ## Completion metric (the portable-C coverage number)
 
@@ -1082,8 +1195,17 @@ QUALITY bar, not a PROGRESS bar - it says whether what we ported is correct,
 and says nothing about how much is ported. This section defines the progress
 bar, and it is the number to quote when asked "how far along is the port?".
 
-**THE NUMBER, as measured 2026-11-09 (the wave-13 close): 23.1%**
-(36,480 of 157,718 non-blank lines - the covered count moved +476 from
+**THE NUMBER, as measured 2026-11-12 (the campaign close): 30.3%**
+(47,719 of 157,718 non-blank lines - the covered count moved +10,266 from
+37,453 at the 23.7% RE8A landing: AMVP1 +1,523 and MC1 +524 in A3 (the
+AMVP candidate machinery + the inter-prediction compound/distwtd/scale
+and sr-convolve surfaces), EMC1 +4,050 and MD1 +572 in A4 (the
+mode-config setter conveyor + the pure-arithmetic mode-decision
+surface), SRC1 +380 in A6 (the source-ops TPL/SSIM-rdmult surface),
+A8W1 +770 in A8 (the hbd deblocking family + the DLF-search walls) and
+RC2 +2,447 in A9 (the rate-control arithmetic + the RTC-CBR/VBR driver
+families). All coverage-only: no conformance movement, the nine
+artifacts untouched. The wave-13 movement was +476 from
 36,004 at the wave-12 close: RE4 +476 in A4 (the ac_bias psy-distortion
 family 117 nb - the brief's 'ac_bias tables' do not exist, the file is
 the psy family - + the intra candidate-injection family 201 nb (the
@@ -1223,6 +1345,14 @@ files) = 254 files, 157,718 non-blank lines. Deliberately EXCLUDED:
   glue, not portable algorithm).
 - `third_party/` in its entirety.
 
+**Denominator note (audit, 2026-11-12):** the four rtcd files REMAIN in
+the 157,718 denominator at 0 covered points - "excluded" in the list above
+means excluded from the numerator's portable-algorithm surface, not from
+the denominator. The printed percentage is therefore conservative: the
+same covered total over the 149,812 non-rtcd area lines would read 31.9%.
+The canonical figure is always covered/157,718 (which is also why +1.0
+point = 1,577, not 1,498).
+
 **Metric: NON-BLANK lines.** `Measure-Object -Line` and
 `[IO.File]::ReadAllLines | Where Trim` both report non-blank; the trap is that
 `Get-Content | Measure-Object -Line` LOOKS like it counts physical lines and
@@ -1242,22 +1372,22 @@ newly added reference file lowers the percentage loudly rather than silently.
 
 | id | area | files | non-blank | cov% | covered |
 |---|---|---|---|---|---|
-| A1 | Transform/TX | 9 | 27,008 | 37% | 10,044 |
+| A1 | Transform/TX | 9 | 27,008 | 41% | 11,087 |
 | A2 | Intra prediction | 4 | 3,478 | 91% | 3,156 |
-| A3 | Inter prediction + motion estimation | 44 | 17,738 | 6% | 1,009 |
-| A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 12% | 3,690 |
+| A3 | Inter prediction + motion estimation | 44 | 17,738 | 17% | 3,056 |
+| A4 | Mode decision + RDO + pc_tree | 18 | 31,088 | 23% | 7,041 |
 | A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 61% | 5,167 |
-| A6 | Coding loop + PCS + block structures | 22 | 13,928 | 12% | 1,734 |
+| A6 | Coding loop + PCS + block structures | 22 | 13,928 | 15% | 2,114 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
-| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 37% | 3,929 |
-| A9 | Rate control | 17 | 5,951 | 31% | 1,830 |
+| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 44% | 4,699 |
+| A9 | Rate control | 17 | 5,951 | 46% | 2,725 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
 | A11 | Content analysis + temporal filtering | 16 | 12,028 | 42% | 5,047 |
 | A12 | Palette + segmentation + misc | 8 | 1,612 | 34% | 550 |
-| A13 | Utility + platform + core headers | 24 | 5,357 | 17% | 889 |
+| A13 | Utility + platform + core headers | 24 | 5,357 | 19% | 1,037 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 100% | 1,466 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **40,276** |
+| | **TOTAL** | **254** | **157,718** | | **47,719** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported
