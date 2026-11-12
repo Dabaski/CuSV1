@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 
 namespace l15_rc {
 
@@ -32,10 +33,11 @@ constexpr int kBoostKfHigh = 5000;
 constexpr int kBoostKfLow = 400;
 
 // MAX_HIERARCHICAL_LEVEL (EbSvtAv1Enc.h:34) / MAX_TEMPORAL_LAYERS
-// (definitions.h:2030) - declared before the carriers that size arrays by
-// them.
+// (definitions.h:2030) / MAX_MINIGOP_SIZE (definitions.h:2031) - declared
+// before the carriers that size arrays by them.
 constexpr int kMaxHierarchicalLevel = 6;
 constexpr int kMaxTemporalLayers = 6;
+constexpr int kMaxMinigopSize = 1 << (kMaxTemporalLayers - 1);
 
 // RATE_CONTROL carrier (rc_process.h:108-202): mirrors of the consumed
 // fields only; grows with the slices that consume them.
@@ -71,6 +73,17 @@ struct RcControl {
     int resizeAvgQp;              // rc->resize_avg_qp
     int resizeCount;              // rc->resize_count
     int resizeBufferUnderflow;    // rc->resize_buffer_underflow
+
+    // the RTC-CBR virtual mini-GoP state (RC2c Wave C)
+    int avgFrameLowMotion;        // rc->avg_frame_low_motion
+    double targetSizeFactors[kMaxTemporalLayers + 1];  // rc->target_size_factors
+    double rcfValues[1 + kMaxMinigopSize];             // rc->rcf_values
+    double rcfKalmanP[1 + kMaxMinigopSize];            // rc->rcf_kalman_P
+    double rcfKalmanR[1 + kMaxMinigopSize];            // rc->rcf_kalman_R
+    int miniQopSize;              // rc->mini_qop_size
+    int rcMiniGopPos;             // rc->rc_mini_gop_pos
+    int rcNumLayers;              // rc->rc_num_layers
+    int minRefBaseQIdx;           // rc->min_ref_base_q_idx
 };
 
 // RateControlCfg carrier (the enc_ctx->rc_cfg mirrors the bodies consume;
@@ -112,6 +125,14 @@ struct PcsCarrier {
     int encoderBitDepth;         // scs->static_config.encoder_bit_depth (threaded
                                  // here because get_bits_per_mb / adjust_q_cbr
                                  // read it through ppcs->scs)
+
+    // the RC2c Wave C fields (the ref-object / slice walls threaded)
+    int sliceType;               // ppcs->slice_type (SliceType, definitions.h:1874-1878)
+    int ref0BaseQIdx;            // pcs->ref_base_q_idx[REF_LIST_0][0]
+    int ref1BaseQIdx;            // pcs->ref_base_q_idx[REF_LIST_1][0]
+    int refList1CountTry;        // ppcs->ref_list1_count_try
+    int ref0SliceType;           // pcs->ref_slice_type[REF_LIST_0][0]
+    int ref0TmpLayer;            // get_ref_obj(pcs, REF_LIST_0, 0)->tmp_layer_idx
 };
 
 // ASSIGN_MINQ_TABLE (rc_tables.h:36-39, the CONFIG_ENABLE_HIGH_BIT_DEPTH=0
@@ -486,5 +507,79 @@ void onePassRtRateAlloc(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& pcs, d
                         bool resizeDynamic, bool singlePass, bool lowDelay, bool rcResetFlag,
                         int intraPeriodLength, int maxInputLumaWidth, int maxInputLumaHeight,
                         int frameUpdated, ResizePendingCarrier& pending);
+
+// ---- RC2c Wave C (RTC-series): rc_rtc_cbr.c ----
+
+// get_msb (definitions.h:596-605): the portable floor(log2) for n != 0
+// (the reference asserts n != 0; the loop form returns 0 for 0).
+int getMsb(std::uint32_t n);
+
+// av1_estimate_bits_at_qindex (rc_rtc_cbr.c:42-58): verbatim; the
+// rc->min_ref_base_q_idx / frame_type / me_dist arguments threaded.
+double estimateBitsAtQindex(bool keyFrame, int minRefBaseQIdx, int qindex, double rcf, std::uint64_t meDist,
+                            int bitDepth);
+
+// find_closest_arg (rc_rtc_cbr.c:73-97): verbatim; the reference's
+// arg_eval_fn + void* ctx pair threads as a callable.
+int findClosestArg(double target, int minArg, int maxArg, const std::function<double(int)>& eval);
+
+// rtc_compute_cr_deltaq (rc_rtc_cbr.c:103-121): verbatim; the rc/cfg
+// walls thread (best/worst quality, min/max qp allowed); the key-frame
+// flag propagates from the caller.
+int rtcComputeCrDeltaq(const CrRefreshCarrier& cr, const RcControl& rc, const RcConfig& rcCfg, bool keyFrame,
+                       int qindex, double rcf, std::uint64_t meDist, double rateRatio, int bitDepth);
+
+// rtc_cyclic_refresh_compute_cr_qdeltas (rc_rtc_cbr.c:123-136): verbatim;
+// the per-segment me_distortion rides on the CR carrier.
+void rtcCyclicRefreshComputeCrQdeltas(CrRefreshCarrier& cr, const RcControl& rc, const RcConfig& rcCfg,
+                                      bool keyFrame, int qindex, double rcf, int bitDepth);
+
+// av1_estimate_frame_size (rc_rtc_cbr.c:138-163): verbatim; the CR
+// weighting consumes the carrier's segment state.
+int estimateFrameSize(const RcControl& rc, const RcConfig& rcCfg, const CrRefreshCarrier& cr, bool keyFrame,
+                      int qindex, double rcf, int frameWidth, int frameHeight, std::uint16_t b64TotalCount,
+                      bool calcSbQindex, int bitDepth);
+
+// normalize_factors (rc_rtc_cbr.c:175-184): verbatim (the reference calls
+// it in-place; the pointers may alias).
+void normalizeFactors(double* dst, const double* src, int iStart, int iEnd);
+
+// index2tl (rc_rtc_cbr.c:186-188): verbatim.
+int index2tl(int index, int levels);
+
+// calc_pframe_target_size (rc_rtc_cbr.c:190-269): verbatim; the
+// pred_structure gate threads as randomAccess (RANDOM_ACCESS -> 0.5).
+int calcPframeTargetSizeRtc(RcControl& rc, const RcConfig& rcCfg, const PcsCarrier& ppcs, bool randomAccess);
+
+// cr_select_sbs (rc_rtc_cbr.c:272-298): verbatim; enc_ctx->cr_sb_index
+// threads by reference (the persistent cycling index).
+void crSelectSbs(CrRefreshCarrier& cr, std::uint32_t& crSbIndex, std::uint16_t sbsInFrame);
+
+// rtc_cyclic_refresh_init (rc_rtc_cbr.c:300-360): verbatim;
+// super_block_size threads (the != 64 gate); frame_is_leaf consumes
+// ppcs.updateType.
+void rtcCyclicRefreshInit(RcControl& rc, CrRefreshCarrier& cr, const PcsCarrier& ppcs, int rcMode,
+                          int superBlockSize, std::uint32_t& crSbIndex, std::uint16_t sbsInFrame,
+                          int bitDepth);
+
+// get_rcf_index (rc_rtc_cbr.c:362-368): verbatim.
+int getRcfIndex(bool keyFrame, int rcMiniGopPos, int miniQopSize);
+
+// rtc_get_rate_correction_factor (rc_rtc_cbr.c:370-381): verbatim (NO
+// fclamp on get - unlike the vbr-path getter).
+double rtcGetRateCorrectionFactor(const RcControl& rc, const PcsCarrier& ppcs, int width, int height);
+
+// rtc_set_rate_correction_factor (rc_rtc_cbr.c:383-400): verbatim (the
+// pessimistic reset loop when frames_since_key < mini_qop_size).
+void rtcSetRateCorrectionFactor(RcControl& rc, const PcsCarrier& ppcs, double rcf, int width, int height);
+
+// calculate_qindex (rc_rtc_cbr.c:402-457): verbatim; the ref-object wall
+// threads through PcsCarrier; the unconditional svt_aom_cyclic_refresh_
+// setup call (:447) is the landed AQ4 body and consumes the ME-statistics
+// carrier; super_block_size and intra_period_length thread.
+int calculateQindexRtc(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, CrRefreshCarrier& cr,
+                       const MeStatCarrier& me, std::uint32_t& crSbIndex, std::uint16_t sbsInFrame,
+                       int superBlockSize, int intraPeriodLength, bool randomAccess);
+
 
 }

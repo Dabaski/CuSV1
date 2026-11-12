@@ -1107,4 +1107,409 @@ void onePassRtRateAlloc(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& pcs, d
     pcs.baseFrameTarget = target;
 }
 
+// ---- RC2c Wave C1 (RTC-series): the rc_rtc_cbr.c primitives ----
+
+// get_msb (definitions.h:596-605): the portable floor(log2) for n != 0
+// (the reference's MSVC branch scans via _BitScanReverse; the assert on
+// n != 0 is dropped - the loop form returns 0 for 0).
+int getMsb(std::uint32_t n) {
+    int r = 0;
+    while (n >>= 1) {
+        ++r;
+    }
+    return r;
+}
+
+// av1_estimate_bits_at_qindex (rc_rtc_cbr.c:42-58): verbatim.
+double estimateBitsAtQindex(bool keyFrame, int minRefBaseQIdx, int qindex, double rcf, std::uint64_t meDist,
+                            int bitDepth) {
+    const double quantizer = convertQindexToQ(qindex, bitDepth);
+    double refScale = 1.0;
+    std::int64_t complexity = 5600;
+    if (!keyFrame) {
+        const double refQ = convertQindexToQ(minRefBaseQIdx, bitDepth);
+        refScale = std::sqrt(refQ) / quantizer;
+        complexity = std::max<std::int64_t>((std::int64_t)meDist, 64 * 64 / 4);
+    }
+    return rcf * complexity * refScale / quantizer;
+}
+
+// find_closest_arg (rc_rtc_cbr.c:73-97): verbatim; the eval context is a
+// callable (the reference's arg_eval_fn + void* pair).
+int findClosestArg(double target, int minArg, int maxArg, const std::function<double(int)>& eval) {
+    int loArg = minArg;
+    int hiArg = maxArg;
+    while (loArg < hiArg) {
+        const int midArg = (loArg + hiArg) >> 1;
+        const double midVal = eval(midArg);
+        if (midVal > target) {
+            loArg = midArg + 1;
+        } else {
+            hiArg = midArg;
+        }
+    }
+
+    int currArg = loArg;
+    if (currArg > minArg) {
+        const double prevVal = eval(loArg - 1);
+        const double currVal = eval(loArg);
+        if (std::fabs(prevVal - target) < std::fabs(currVal - target)) {
+            currArg = loArg - 1;
+        }
+    }
+    return currArg;
+}
+
+// rtc_compute_cr_deltaq (rc_rtc_cbr.c:103-121): verbatim; the rc/cfg
+// walls thread (best/worst quality, min/max qp allowed).
+int rtcComputeCrDeltaq(const CrRefreshCarrier& cr, const RcControl& rc, const RcConfig& rcCfg, bool keyFrame,
+                       int qindex, double rcf, std::uint64_t meDist, double rateRatio, int bitDepth) {
+    // Get current estimated bits for given qindex, then target.
+    const double baseBits = estimateBitsAtQindex(keyFrame, rc.minRefBaseQIdx, qindex, rcf, meDist, bitDepth);
+    const double targetBits = rateRatio * baseBits;
+
+    const int minQindex = (rateRatio < 1.0) ? qindex : rc.bestQuality;
+    const int maxQindex = (rateRatio < 1.0) ? rc.worstQuality : qindex;
+
+    const auto evalBlockBits = [&](int q) {
+        return estimateBitsAtQindex(keyFrame, rc.minRefBaseQIdx, q, rcf, meDist, bitDepth);
+    };
+
+    // Find closest qindex to generate this size.
+    int targetIndex = findClosestArg(targetBits, minQindex, maxQindex, evalBlockBits);
+
+    targetIndex = clampQindex(rcCfg, targetIndex);
+    return std::max(targetIndex - qindex, -cr.maxQdeltaPerc * qindex / 100);
+}
+
+// rtc_cyclic_refresh_compute_cr_qdeltas (rc_rtc_cbr.c:123-136): verbatim.
+void rtcCyclicRefreshComputeCrQdeltas(CrRefreshCarrier& cr, const RcControl& rc, const RcConfig& rcCfg,
+                                      bool keyFrame, int qindex, double rcf, int bitDepth) {
+    cr.qindexDelta[0] = 0;
+    cr.qindexDelta[1] = 0;
+    cr.qindexDelta[2] = 0;
+    if (cr.actualNumSeg1Sbs) {
+        const double qdelta = std::min(4.0, cr.rateRatioQdelta);
+        cr.qindexDelta[1] = rtcComputeCrDeltaq(cr, rc, rcCfg, keyFrame, qindex, rcf, cr.meDistortion[1], qdelta,
+                                               bitDepth);
+    }
+    if (cr.actualNumSeg2Sbs) {
+        const double qdelta = std::min(8.0, cr.rateRatioQdeltaSeg2);
+        cr.qindexDelta[2] = rtcComputeCrDeltaq(cr, rc, rcCfg, keyFrame, qindex, rcf, cr.meDistortion[2], qdelta,
+                                               bitDepth);
+    }
+}
+
+// av1_estimate_frame_size (rc_rtc_cbr.c:138-163): verbatim; the CR
+// weighting consumes the carrier's segment state.
+int estimateFrameSize(const RcControl& rc, const RcConfig& rcCfg, const CrRefreshCarrier& cr, bool keyFrame,
+                       int qindex, double rcf, int frameWidth, int frameHeight, std::uint16_t b64TotalCount,
+                       bool calcSbQindex, int bitDepth) {
+    double estimatedSize;
+    if (cr.applyCyclicRefresh) {
+        if (calcSbQindex) {
+            rtcCyclicRefreshComputeCrQdeltas(const_cast<CrRefreshCarrier&>(cr), rc, rcCfg, keyFrame, qindex, rcf,
+                                             bitDepth);
+        }
+
+        // Weight for non-base segments.
+        const double w1 = (double)cr.actualNumSeg1Sbs / b64TotalCount;
+        const double w2 = (double)cr.actualNumSeg2Sbs / b64TotalCount;
+
+        // Take segment weighted average for estimated bits.
+        estimatedSize =
+            (1.0 - w1 - w2) * estimateBitsAtQindex(keyFrame, rc.minRefBaseQIdx, qindex, rcf, cr.meDistortion[0], bitDepth) +
+            w1 * estimateBitsAtQindex(keyFrame, rc.minRefBaseQIdx, qindex + cr.qindexDelta[1], rcf, cr.meDistortion[1], bitDepth) +
+            w2 * estimateBitsAtQindex(keyFrame, rc.minRefBaseQIdx, qindex + cr.qindexDelta[2], rcf, cr.meDistortion[2], bitDepth);
+    } else {
+        estimatedSize = estimateBitsAtQindex(keyFrame, rc.minRefBaseQIdx, qindex, rcf, rc.curAvgBaseMeDist, bitDepth);
+    }
+
+    // scale to resolution
+    return (int)std::max(estimatedSize * frameWidth * frameHeight / 512, 1.0);
+}
+
+// normalize_factors (rc_rtc_cbr.c:175-184): verbatim (the reference calls
+// it in-place; the pointers may alias).
+void normalizeFactors(double* dst, const double* src, int iStart, int iEnd) {
+    double sum = 0.0;
+    for (int k = iStart; k < iEnd; k++) {
+        sum += src[k] * (1 << std::max(k - iStart - 1, 0));
+    }
+    const double avgFactor = sum / (1 << std::max(iEnd - iStart - 1, 0));
+    for (int k = iStart; k < iEnd; k++) {
+        dst[k] = src[k] / avgFactor;
+    }
+}
+
+// index2tl (rc_rtc_cbr.c:186-188): verbatim.
+int index2tl(int index, int levels) {
+    return index ? levels - getMsb(index ^ (index - 1)) : 0;
+}
+
+// calc_pframe_target_size (rc_rtc_cbr.c:190-269): verbatim; the
+// pred_structure gate threads as randomAccess (RANDOM_ACCESS -> 0.5).
+int calcPframeTargetSizeRtc(RcControl& rc, const RcConfig& rcCfg, const PcsCarrier& ppcs, bool randomAccess) {
+    if (rc.rcMiniGopPos == (rc.miniQopSize - 1)) {
+        double weights[kMaxTemporalLayers + 1] = {0};
+        double rcfTlx[kMaxTemporalLayers + 1] = {0};
+
+        // prepare weighted RCFs - core components of layer weights
+        const int numLayers = rc.rcNumLayers;
+        for (int k = 1; k < rc.miniQopSize + 1; k++) {
+            const int kTl = index2tl(k - 1, numLayers - 1);
+            rcfTlx[kTl + 1] += rc.rcfValues[k] / (1 << std::max(kTl - 1, 0));
+        }
+
+        if (ppcs.hierarchicalLevels == 0) {
+            for (int k = 1; k < numLayers + 1; k++) {
+                weights[k] = rcfTlx[k];
+            }
+        } else {
+            normalizeFactors(rcfTlx, rcfTlx, 1, numLayers + 1);
+
+            // Adaptive rcf_last + avg_frame_qindex + avg_zeromv model:
+            const double rcfLast = rcfTlx[1 + numLayers - 1];
+            const double avgQindex = rc.avgFrameQindex[1];
+            const double avgZeromv = rc.avgFrameLowMotion;
+
+            // Base layer weight is derived from encoding properties:
+            const double w0 = -9.32 * rcfLast + 0.023 * avgQindex + 0.034 * avgZeromv + 8.14;
+
+            // Saturating intermediate weights; generalizes to N layers
+            // (k=1 is base, k=num_layers is top).
+            const double amplitude = 0.81;
+            const double rate = 0.83;
+
+            // adjustment for bidirectional prediction efficiency
+            const double scale = randomAccess ? 0.5 : 1.0;
+
+            weights[1] = w0;
+            for (int k = 2; k < numLayers + 1; k++) {
+                const double amp = amplitude * (numLayers - k) / (numLayers - 1);
+                const double wK = 1.0 + amp * (1.0 - std::exp(-rate * (std::max(w0, 1.0) - 1.0)));
+                weights[k] = wK * scale;
+            }
+        }
+
+        // Enforce w0 >= w1 >= ... >= wN (monotonically non-increasing)
+        for (int k = numLayers; k >= 2; k--) {
+            weights[k - 1] = std::max(weights[k - 1], weights[k]);
+        }
+
+        normalizeFactors(rc.targetSizeFactors, weights, 1, numLayers + 1);
+    }
+
+    double frameTarget = rc.avgFrameBandwidth;
+    double bufferDiff = (double)rc.bufferLevel - rc.optimalBufferLevel;
+    const double onePctBits = 1.0 + rc.optimalBufferLevel / 100.0;
+
+    // temporal dependency and mode decision modulation
+    const int virtualTl = index2tl(rc.rcMiniGopPos + 1, rc.rcNumLayers - 1);
+    frameTarget *= rc.targetSizeFactors[virtualTl + 1];
+
+    // buffer adjustment, estimate buffer level after this frame
+    bufferDiff += frameTarget - rc.avgFrameBandwidth;
+    if (bufferDiff > 0) {
+        // Lower the target for this frame.
+        const double pct = std::min(bufferDiff / onePctBits, (double)rcCfg.overShootPct);
+        frameTarget *= 1.0 - pct / 200;
+    } else if (rc.bufferLevel < rc.avgFrameBandwidth / 4) {
+        // Increase the target for this frame, less aggressively
+        const double pct = std::min(-bufferDiff / onePctBits, (double)rcCfg.underShootPct);
+        frameTarget *= 1.0 + pct / 400;
+    }
+
+    return (int)frameTarget;
+}
+
+// cr_select_sbs (rc_rtc_cbr.c:272-298): verbatim; enc_ctx->cr_sb_index
+// threads by reference (the persistent cycling index).
+void crSelectSbs(CrRefreshCarrier& cr, std::uint32_t& crSbIndex, std::uint16_t sbsInFrame) {
+    const int sbs = sbsInFrame;
+    const int sbTarget = cr.percentRefresh * sbs / 100;
+
+    if (sbTarget <= 0) {
+        cr.sbStart = 0;
+        cr.sbEnd = 0;
+        return;
+    }
+
+    if ((int)crSbIndex >= sbs) {
+        crSbIndex = 0;
+    }
+
+    cr.sbStart = crSbIndex;
+    int sbEnd = crSbIndex + sbTarget;
+    if (sbEnd >= sbs) {
+        sbEnd -= sbs;
+    }
+    cr.sbEnd = (std::uint32_t)sbEnd;
+
+    crSbIndex = sbEnd;
+}
+
+// rtc_cyclic_refresh_init (rc_rtc_cbr.c:300-360): verbatim;
+// super_block_size threads (the != 64 gate); frame_is_leaf consumes
+// ppcs.updateType.
+void rtcCyclicRefreshInit(RcControl& rc, CrRefreshCarrier& cr, const PcsCarrier& ppcs, int rcMode,
+                          int superBlockSize, std::uint32_t& crSbIndex, std::uint16_t sbsInFrame,
+                          int bitDepth) {
+    const bool isInterBaseLayer =
+        ppcs.sliceType != kIslice && ppcs.temporalLayerIndex == 0 && !frameIsLeaf(ppcs.updateType);
+    // Technically it could be used in VBR too (rc_rtc_cbr.c:306-308).
+    cr.applyCyclicRefresh = (rcMode == kRcCbr && isInterBaseLayer) ? 1 : 0;
+
+    if (superBlockSize != 64) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    const int qpMinThresh = std::max(16, rc.bestQuality + 4);
+    const int qpMaxThresh = 118 * kMaxQ >> 7;
+
+    if (rc.avgFrameQindex[1] > qpMaxThresh) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    if (rc.avgFrameQindex[1] < qpMinThresh) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    if (rc.avgFrameLowMotion < 50) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    cr.percentRefresh = 20;
+
+    if (cr.percentRefresh <= 0) {
+        cr.applyCyclicRefresh = 0;
+    }
+
+    if (!cr.applyCyclicRefresh) {
+        return;
+    }
+
+    // Select SBs for refresh by cycling through the frame
+    crSelectSbs(cr, crSbIndex, sbsInFrame);
+    if (cr.sbStart == 0 && cr.sbEnd == 0) {
+        cr.applyCyclicRefresh = 0;
+        return;
+    }
+
+    // Quantizer-based multiplicative adjustment
+    const double avgQ = convertQindexToQ(rc.avgFrameQindex[1], bitDepth);
+
+    // these values depend on the R-Q model in av1_estimate_bits_at_qindex
+    // (rc_rtc_cbr.c:350-355)
+    const double rateRatioQdeltaBase = 2.7;
+    const double rateRatioQdeltaScale = 170.0;
+    const int rateBoostFac = 18;
+
+    cr.maxQdeltaPerc = 60;
+    cr.rateRatioQdelta = rateRatioQdeltaBase + avgQ / rateRatioQdeltaScale;
+    cr.rateBoostFac = rateBoostFac;
+}
+
+// get_rcf_index (rc_rtc_cbr.c:362-368): verbatim.
+int getRcfIndex(bool keyFrame, int rcMiniGopPos, int miniQopSize) {
+    if (keyFrame) {
+        return 0;
+    }
+    return ((rcMiniGopPos + 1) % miniQopSize) + 1;
+}
+
+// rtc_get_rate_correction_factor (rc_rtc_cbr.c:370-381): verbatim (NO
+// fclamp on get - unlike the vbr-path getter).
+double rtcGetRateCorrectionFactor(const RcControl& rc, const PcsCarrier& ppcs, int width, int height) {
+    const double rcf = rc.rcfValues[getRcfIndex(ppcs.frameType == kKeyFrame, rc.rcMiniGopPos, rc.miniQopSize)];
+
+    // Normalize RCF to account for the size-dependent scaling factor.
+    const double resScale = (double)(ppcs.frameWidth * ppcs.frameHeight) / (width * height);
+
+    return rcf * resScale;
+}
+
+// rtc_set_rate_correction_factor (rc_rtc_cbr.c:383-400): verbatim (the
+// pessimistic reset loop when frames_since_key < mini_qop_size).
+void rtcSetRateCorrectionFactor(RcControl& rc, const PcsCarrier& ppcs, double rcf, int width, int height) {
+    // Normalize RCF to account for the size-dependent scaling factor.
+    const double resScale = (double)(ppcs.frameWidth * ppcs.frameHeight) / (width * height);
+
+    rcf = clip3(rcf, kMinBpbFactor, kMaxBpbFactor) / resScale;
+
+    const int idx = getRcfIndex(ppcs.frameType == kKeyFrame, rc.rcMiniGopPos, rc.miniQopSize);
+    rc.rcfValues[idx] = rcf;
+    if (rc.framesSinceKey < rc.miniQopSize) {
+        // Reset all factors pessimistically at start as initial values
+        // could be off
+        for (int i = 1; i < rc.miniQopSize + 1; ++i) {
+            rc.rcfValues[i] = std::max(rcf, rc.rcfValues[i]);
+        }
+    }
+}
+
+// calculate_qindex (rc_rtc_cbr.c:402-457): verbatim; the ref-object wall
+// threads through PcsCarrier; the unconditional cyclic-refresh setup call
+// (:447) is the landed AQ4 body.
+int calculateQindexRtc(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, CrRefreshCarrier& cr,
+                       const MeStatCarrier& me, std::uint32_t& crSbIndex, std::uint16_t sbsInFrame,
+                       int superBlockSize, int intraPeriodLength, bool randomAccess) {
+    int minQindex = rc.bestQuality;
+    int maxQindex = rc.worstQuality;
+    const int vbvBudget = (int)(rc.maximumBufferSize - rc.bufferLevel + rc.avgFrameBandwidth);
+    int maxSize = std::min(rc.maxFrameBandwidth, vbvBudget);
+    const int minSize = std::max(rc.avgFrameBandwidth >> 4, kFrameOverheadBits);
+
+    const bool keyFrame = frameIsIntraOnly(ppcs.frameType);
+    if (keyFrame) {
+        rc.framesToKey = intraPeriodLength + 1;
+
+        ppcs.baseFrameTarget = (int)(rc.avgFrameBandwidth * rc.targetSizeFactors[0]);
+
+        if (rcCfg.maxIntraBitratePct && rcCfg.mode == kRcCbr) {
+            const int maxi = rc.avgFrameBandwidth * rcCfg.maxIntraBitratePct / 100;
+            maxSize = std::min(maxSize, maxi);
+        }
+    } else {
+        rc.minRefBaseQIdx = ppcs.ref0BaseQIdx;
+        if (ppcs.refList1CountTry > 0) {
+            rc.minRefBaseQIdx = std::min(rc.minRefBaseQIdx, ppcs.ref1BaseQIdx);
+        }
+
+        if (ppcs.ref0SliceType == kIslice) {
+            minQindex = std::max(minQindex, rc.minRefBaseQIdx - 1 * 4);
+        } else {
+            const bool isHigherLayer =
+                ppcs.ref0TmpLayer < ppcs.temporalLayerIndex && (ppcs.hierarchicalLevels != 0);
+            const int minLimit = isHigherLayer ? 0 : 4;
+            const int maxLimit = isHigherLayer ? 32 : 16;
+            minQindex = std::max(minQindex, rc.minRefBaseQIdx - minLimit * 4);
+            maxQindex = std::min(maxQindex, rc.minRefBaseQIdx + maxLimit * 4);
+        }
+        ppcs.baseFrameTarget = calcPframeTargetSizeRtc(rc, rcCfg, ppcs, randomAccess);
+
+        if (rcCfg.maxInterBitratePct && rcCfg.mode == kRcCbr) {
+            const int maxp = rc.avgFrameBandwidth * rcCfg.maxInterBitratePct / 100;
+            maxSize = std::min(maxSize, maxp);
+        }
+    }
+    ppcs.baseFrameTarget = std::max(std::min(ppcs.baseFrameTarget, maxSize), minSize);
+    ppcs.thisFrameTarget = ppcs.baseFrameTarget;
+
+    rtcCyclicRefreshInit(rc, cr, ppcs, rcCfg.mode, superBlockSize, crSbIndex, sbsInFrame, ppcs.encoderBitDepth);
+    cyclicRefreshSetup(cr, me);
+
+    const int width = ppcs.frameWidth;
+    const int height = ppcs.frameHeight;
+    const double rcf = rtcGetRateCorrectionFactor(rc, ppcs, width, height);
+
+    const auto evalFrameSize = [&](int q) {
+        return estimateFrameSize(rc, rcCfg, cr, keyFrame, q, rcf, width, height, me.b64TotalCount, true,
+                                 ppcs.encoderBitDepth);
+    };
+
+    const int qindex = findClosestArg(ppcs.thisFrameTarget, minQindex, maxQindex, evalFrameSize);
+    return clampQindex(rcCfg, qindex);
+}
+
 } // namespace l15_rc
