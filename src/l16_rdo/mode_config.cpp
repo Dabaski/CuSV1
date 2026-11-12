@@ -3966,5 +3966,188 @@ void setCoeffShavingCtrls(CoeffShavingCtrls& ctrls, std::uint8_t coeffShavingLev
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Batch C rung 4: the txt + interpolation-search setters.
+// ---------------------------------------------------------------------------
+
+// svt_aom_set_txt_controls (enc_mode_config.c:3964-4137), 1:1.
+void setTxtCtrls(TxtCtrls& ctrls, std::uint8_t txtLevel) {
+    switch (txtLevel) {
+    case 0:
+        ctrls.enabled                  = 0;
+        ctrls.txtGroupInterLt16x16     = 1;
+        ctrls.txtGroupInterGtEq16x16   = 1;
+        ctrls.txtGroupIntraLt16x16     = 1;
+        ctrls.txtGroupIntraGtEq16x16   = 1;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 0;
+        ctrls.satdEarlyExitThInter     = 0;
+        ctrls.satdThQWeight            = 0;
+        ctrls.txtRateCostTh            = 0;
+        break;
+    case 1:
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupInterGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 0;
+        ctrls.satdEarlyExitThInter     = 0;
+        ctrls.satdThQWeight            = 0;
+        ctrls.txtRateCostTh            = 0;
+        break;
+    case 2:
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupInterGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 20;
+        ctrls.satdEarlyExitThInter     = 20;
+        ctrls.satdThQWeight            = 1;
+        ctrls.txtRateCostTh            = 250;
+        break;
+    case 3:
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupInterGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 15;
+        ctrls.satdEarlyExitThInter     = 15;
+        ctrls.satdThQWeight            = 1;
+        ctrls.txtRateCostTh            = 250;
+        break;
+    case 4:
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupInterGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 10;
+        ctrls.satdEarlyExitThInter     = 10;
+        ctrls.satdThQWeight            = 1;
+        ctrls.txtRateCostTh            = 250;
+        break;
+    case 5:
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupInterGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 10;
+        ctrls.satdEarlyExitThInter     = 5;
+        ctrls.satdThQWeight            = 1;
+        ctrls.txtRateCostTh            = 100;
+        break;
+    case 6:
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupInterGtEq16x16   = 5;
+        ctrls.txtGroupIntraLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 10;
+        ctrls.satdEarlyExitThInter     = 5;
+        ctrls.satdThQWeight            = 1;
+        ctrls.txtRateCostTh            = 100;
+        break;
+    case 7:
+        // ref lvl_5
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = 5;
+        ctrls.txtGroupInterGtEq16x16   = 5;
+        ctrls.txtGroupIntraLt16x16     = kMaxTxTypeGroup;
+        ctrls.txtGroupIntraGtEq16x16   = kMaxTxTypeGroup;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 10;
+        ctrls.satdEarlyExitThInter     = 5;
+        ctrls.satdThQWeight            = 1;
+        ctrls.txtRateCostTh            = 100;
+        break;
+    case 8:
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = 4;
+        ctrls.txtGroupInterGtEq16x16   = 3;
+        ctrls.txtGroupIntraLt16x16     = 5;
+        ctrls.txtGroupIntraGtEq16x16   = 4;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 10;
+        ctrls.satdEarlyExitThInter     = 5;
+        ctrls.satdThQWeight            = 1;
+        ctrls.txtRateCostTh            = 100;
+        break;
+    case 9:
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = 3;
+        ctrls.txtGroupInterGtEq16x16   = 2;
+        ctrls.txtGroupIntraLt16x16     = 4;
+        ctrls.txtGroupIntraGtEq16x16   = 3;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 10;
+        ctrls.satdEarlyExitThInter     = 5;
+        ctrls.satdThQWeight            = 1;
+        ctrls.txtRateCostTh            = 65;
+        break;
+    case 10:
+        ctrls.enabled                  = 1;
+        ctrls.txtGroupInterLt16x16     = 2;
+        ctrls.txtGroupInterGtEq16x16   = 1;
+        ctrls.txtGroupIntraLt16x16     = 3;
+        ctrls.txtGroupIntraGtEq16x16   = 2;
+        ctrls.earlyExitDistTh          = 0;
+        ctrls.earlyExitCoeffTh         = 0;
+        ctrls.satdEarlyExitThIntra     = 10;
+        ctrls.satdEarlyExitThInter     = 5;
+        ctrls.satdThQWeight            = 1;
+        ctrls.txtRateCostTh            = 50;
+        break;
+    default:
+        // The reference assert(0)s (:4133-4135) and writes nothing.
+        break;
+    }
+}
+
+// set_interpolation_search_level_ctrls (enc_mode_config.c:4139-4162), 1:1.
+void setInterpolationSearchLevelCtrls(InterpolationSearchCtrls& ctrls,
+                                      std::uint8_t interpolationSearchLevel) {
+    switch (interpolationSearchLevel) {
+    case 0:
+        ctrls.level = (std::uint8_t)IFS_OFF;
+        break;
+    case 1:
+        ctrls.level = (std::uint8_t)IFS_MDS0;
+        break;
+    case 2:
+        ctrls.level = (std::uint8_t)IFS_MDS1;
+        break;
+    case 3:
+        ctrls.level = (std::uint8_t)IFS_MDS2;
+        break;
+    case 4:
+        ctrls.level = (std::uint8_t)IFS_MDS3;
+        break;
+    default:
+        // The reference assert(0)s (:4158-4160) and writes nothing.
+        break;
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

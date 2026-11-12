@@ -4291,3 +4291,67 @@ TEST_CASE("set_coeff_shaving_controls - the three levels, whole-struct") {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Batch C rung 4: the txt + interpolation-search setters (:3964-4162).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_txt_controls - the eleven levels, whole-struct") {
+    // :3964-4137. All eleven cases write ALL eleven fields (level 0 writes
+    // enabled = 0 plus the ten controls); the default arm assert(0)s and
+    // writes nothing. The group ladders 8-10 walk inter 4/3/2/1 + intra
+    // 5/4/3/2 down to the (2,1)/(3,2) floor.
+    for (int level = 0; level <= 11; ++level) {
+        TxtCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setTxtCtrls(c, (uint8_t)level);
+        if (level <= 10) {
+            CHECK(c.enabled == (level == 0 ? 0 : 1));
+            // level 0 writes the four groups as 1 (:3971-3975); 1-5 all
+            // MAX (:3986-4047); the 6-10 ladders walk down (:4059-4125).
+            CHECK(c.txtGroupInterLt16x16 ==
+                  (level == 0 ? 1 : (level <= 6 ? kMaxTxTypeGroup :
+                                     (level == 7 ? 5 : (level == 8 ? 4 :
+                                                        (level == 9 ? 3 : 2))))));
+            CHECK(c.txtGroupInterGtEq16x16 ==
+                  (level == 0 ? 1 : (level <= 5 ? kMaxTxTypeGroup :
+                                     (level == 6 ? 5 : (level == 7 ? 5 :
+                                                        (level == 8 ? 3 : (level == 9 ? 2 : 1)))))));
+            CHECK(c.txtGroupIntraLt16x16 ==
+                  (level == 0 ? 1 : (level <= 7 ? kMaxTxTypeGroup :
+                                     (level == 8 ? 5 : (level == 9 ? 4 : 3)))));
+            CHECK(c.txtGroupIntraGtEq16x16 ==
+                  (level == 0 ? 1 : (level <= 7 ? kMaxTxTypeGroup :
+                                     (level == 8 ? 4 : (level == 9 ? 3 : 2)))));
+            CHECK(c.earlyExitDistTh == 0);
+            CHECK(c.earlyExitCoeffTh == 0);
+            // :3978/:3992 (0) :4006 (20) :4021 (15) :4036+ (10)
+            CHECK(c.satdEarlyExitThIntra ==
+                  (level <= 1 ? 0 : (level == 2 ? 20 : (level == 3 ? 15 : 10))));
+            CHECK(c.satdEarlyExitThInter ==
+                  (level == 0 ? 0 : (level == 1 ? 0 : (level == 2 ? 20 :
+                                                       (level == 3 ? 15 : (level == 4 ? 10 : 5))))));
+            CHECK(c.satdThQWeight == (level <= 1 ? 0 : 1));
+            CHECK(c.txtRateCostTh ==
+                  (level <= 1 ? 0 : (level <= 4 ? 250 : (level <= 8 ? 100 : (level == 9 ? 65 : 50)))));
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.txtRateCostTh == (uint16_t)0xAAAA);
+        }
+    }
+}
+
+TEST_CASE("set_interpolation_search_level_ctrls - the five levels") {
+    // :4139-4162. The ifs level IS the whole struct; the default arm
+    // assert(0)s and writes nothing.
+    for (int level = 0; level <= 5; ++level) {
+        InterpolationSearchCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setInterpolationSearchLevelCtrls(c, (uint8_t)level);
+        if (level <= 4) {
+            CHECK(c.level == level);  // IfsLevel is the identity map
+        } else {
+            CHECK(c.level == kPoison);
+        }
+    }
+}

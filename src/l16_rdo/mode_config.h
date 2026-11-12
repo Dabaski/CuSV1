@@ -1039,5 +1039,51 @@ struct CoeffShavingCtrls {
 // and writes nothing (documented UB).
 void setCoeffShavingCtrls(CoeffShavingCtrls& ctrls, std::uint8_t coeffShavingLevel);
 
+
+// ---------------------------------------------------------------------------
+// Batch C rung 4: svt_aom_set_txt_controls (:3964-4137) +
+// set_interpolation_search_level_ctrls (:4139-4162).
+// ---------------------------------------------------------------------------
+// MAX_TX_TYPE_GROUP (definitions.h:1055).
+constexpr std::uint8_t kMaxTxTypeGroup = 6;
+
+// TxtControls (md_process.h:140-170, verbatim field order/types).
+struct TxtCtrls {
+    std::uint8_t enabled;
+    std::uint8_t txtGroupInterLt16x16;
+    std::uint8_t txtGroupInterGtEq16x16;
+    std::uint8_t txtGroupIntraLt16x16;
+    std::uint8_t txtGroupIntraGtEq16x16;
+    std::uint32_t earlyExitDistTh;
+    std::uint32_t earlyExitCoeffTh;
+    std::uint16_t satdEarlyExitThIntra;
+    std::uint16_t satdEarlyExitThInter;
+    std::uint16_t txtRateCostTh;
+    std::uint16_t satdThQWeight;
+};
+
+// svt_aom_set_txt_controls (:3964-4137). The default case assert(0)s and
+// writes nothing (documented UB).
+void setTxtCtrls(TxtCtrls& ctrls, std::uint8_t txtLevel);
+
+// IfsLevel (definitions.h:858-864, verbatim).
+enum IfsLevel {
+    IFS_OFF = 0,
+    IFS_MDS0 = 1,
+    IFS_MDS1 = 2,
+    IFS_MDS2 = 3,
+    IFS_MDS3 = 4,
+};
+
+// InterpolationSearchCtrls (md_process.h:660-665, verbatim).
+struct InterpolationSearchCtrls {
+    std::uint8_t level;                  // IfsLevel
+};
+
+// set_interpolation_search_level_ctrls (:4139-4162). The default case
+// assert(0)s and writes nothing (documented UB).
+void setInterpolationSearchLevelCtrls(InterpolationSearchCtrls& ctrls,
+                                      std::uint8_t interpolationSearchLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo
