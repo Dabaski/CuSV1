@@ -1833,6 +1833,278 @@ void postencodeUpdateRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& pp
     }
 }
 
+// ---- RC2 Wave D3 (the vbr updater + the postencode pair + the regulated
+// pair): rc_vbr_cbr.c :1349-:1472 / :1495-:1629 / :1720-:1752 ----
+
+// av1_estimate_bits_at_q (rc_vbr_cbr.c:1349-1353): verbatim.
+int estimateBitsAtQ(int frameType, int q, int mbs, double correctionFactor, int bitDepth,
+                    bool isScreenContent) {
+    const int bpm = rcBitsPerMb(frameType, q, correctionFactor, bitDepth, isScreenContent ? 1 : 0);
+    return std::max(kFrameOverheadBits,
+                    (int)(((std::uint64_t)bpm * (std::uint64_t)mbs) >> kBperMbNormbits));
+}
+
+// av1_rc_update_rate_correction_factors (rc_vbr_cbr.c:1355-1472): verbatim.
+void rcUpdateRateCorrectionFactors(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                                   const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int width,
+                                   int height, int bitDepth) {
+    const int frameType = ppcs.frameType;
+    const int baseQIdx = ppcs.baseQIdx;
+    int correctionFactor = 100;
+    double rateCorrectionFactor = getRateCorrectionFactor(rc, rcCfg, ppcs, width, height);
+    double adjustmentLimit = 0.75;
+    const int MBs = ((width + 15) / 16) * ((height + 15) / 16);
+
+    // Do not update the rate factors for arf overlay frames.
+    if (ppcs.isOverlay) {
+        return;
+    }
+    int projectedSizeBasedOnQ = 0;
+    if (cr.applyCyclicRefresh) {
+        // Weight for non-base segments.
+        const double weightSegment1 = (double)cr.actualNumSeg1Sbs / b64TotalCount;
+        const double weightSegment2 = (double)cr.actualNumSeg2Sbs / b64TotalCount;
+
+        // Take segment weighted average for estimated bits.
+        projectedSizeBasedOnQ = (int)std::round(
+            (1.0 - weightSegment1 - weightSegment2) *
+                    estimateBitsAtQ(frameType, baseQIdx, MBs, rateCorrectionFactor, bitDepth,
+                                    ppcs.scClass1) +
+                weightSegment1 * estimateBitsAtQ(frameType, baseQIdx + cr.qindexDelta[1], MBs,
+                                                 rateCorrectionFactor, bitDepth, ppcs.scClass1) +
+                weightSegment2 * estimateBitsAtQ(frameType, baseQIdx + cr.qindexDelta[2], MBs,
+                                                 rateCorrectionFactor, bitDepth, ppcs.scClass1));
+    } else {
+        projectedSizeBasedOnQ =
+            estimateBitsAtQ(frameType, baseQIdx, MBs, rateCorrectionFactor, bitDepth, ppcs.scClass1);
+    }
+    // Work out a size correction factor.
+    if (projectedSizeBasedOnQ > kFrameOverheadBits) {
+        correctionFactor = (int)(100 * (std::int64_t)ppcs.projectedFrameSize / projectedSizeBasedOnQ);
+    }
+    // Clamp correction factor to prevent anything too extreme
+    correctionFactor = std::max(correctionFactor, 25);
+    rc.q2Frame = rc.q1Frame;
+    rc.q1Frame = baseQIdx;
+    rc.rc2Frame = rc.rc1Frame;
+    if (correctionFactor > 110) {
+        rc.rc1Frame = -1;
+    } else if (correctionFactor < 90) {
+        rc.rc1Frame = 1;
+    } else {
+        rc.rc1Frame = 0;
+    }
+    // Decide how heavily to dampen the adjustment
+    if (rcCfg.mode == kRcCbr) {
+        if (correctionFactor > 0) {
+            if (ppcs.scClass1) {
+                adjustmentLimit =
+                    0.25 + 0.5 * std::min(0.5, std::fabs(std::log10(0.01 * correctionFactor)));
+            } else {
+                adjustmentLimit =
+                    0.25 + 0.75 * std::min(0.5, std::fabs(std::log10(0.01 * correctionFactor)));
+            }
+        } else {
+            adjustmentLimit = 0.75;
+        }
+    } else {
+        if (correctionFactor > 0) {
+            adjustmentLimit = 0.25 + 0.5 * std::min(1.0, std::fabs(std::log10(0.01 * correctionFactor)));
+        } else {
+            adjustmentLimit = 0.75;
+        }
+    }
+    // Adjustment to delta Q and number of blocks updated in cyclic refresh
+    // based on over or under shoot of target in current frame.
+    if (cr.applyCyclicRefresh) {
+        if (correctionFactor > 125) {
+            rc.percentRefreshAdjustment = std::max(rc.percentRefreshAdjustment - 1, -5);
+            rc.rateRatioQdeltaAdjustment = std::max(rc.rateRatioQdeltaAdjustment - 0.05, -0.0);
+        } else if (correctionFactor < 50) {
+            rc.percentRefreshAdjustment = std::min(rc.percentRefreshAdjustment + 1, 5);
+            rc.rateRatioQdeltaAdjustment = std::min(rc.rateRatioQdeltaAdjustment + 0.05, 0.25);
+        }
+    }
+    if (correctionFactor > 101) {
+        // We are not already at the worst allowable quality
+        correctionFactor = (int)(100 + ((correctionFactor - 100) * adjustmentLimit));
+        rateCorrectionFactor = rateCorrectionFactor * correctionFactor / 100;
+        // Keep rate_correction_factor within limits
+        if (rateCorrectionFactor > kMaxBpbFactor) {
+            rateCorrectionFactor = kMaxBpbFactor;
+        }
+    } else if (correctionFactor < 99) {
+        // We are not already at the best allowable quality
+        double tmpCorrFac = 100 / (double)correctionFactor;
+        tmpCorrFac = (1.0 + ((tmpCorrFac - 1.0) * adjustmentLimit));
+        tmpCorrFac = 1.0 / tmpCorrFac;
+        correctionFactor = (int)(100 * tmpCorrFac);
+        rateCorrectionFactor = rateCorrectionFactor * correctionFactor / 100;
+
+        // Keep rate_correction_factor within limits
+        if (rateCorrectionFactor < kMinBpbFactor) {
+            rateCorrectionFactor = kMinBpbFactor;
+        }
+    }
+
+    setRateCorrectionFactor(rc, rcCfg, ppcs, rateCorrectionFactor, width, height);
+}
+
+// svt_av1_rc_postencode_update_gop_const (rc_vbr_cbr.c:1495-1561): verbatim;
+// the rolling/total bits go to the interval-param carrier; no low-motion EMA.
+void postencodeUpdateGopConst(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                              const CrRefreshCarrier& cr, RcIntervalParamCarrier& rcParam,
+                              std::uint16_t b64TotalCount, int bitDepth, int& frameUpdated) {
+    const int width = ppcs.frameWidth;
+    const int height = ppcs.frameHeight;
+    const bool isIntrnlArf = ppcs.updateType == kSvtAv1IntnlArfUpdate;
+
+    // Update rate control heuristics
+    ppcs.projectedFrameSize = (int)ppcs.totalNumBits;
+    // Post encode loop adjustment of Q prediction.
+    rcUpdateRateCorrectionFactors(rc, rcCfg, ppcs, cr, b64TotalCount, width, height, bitDepth);
+
+    // Keep a record of last Q and ambient average Q.
+    const int qindex = ppcs.baseQIdx;
+    if (ppcs.frameType == kKeyFrame) {
+        rc.avgFrameQindex[0] = (int)roundPowerOfTwo(3 * rc.avgFrameQindex[0] + qindex, 2);
+        rc.lastQ[0] = (int)convertQindexToQ(qindex, bitDepth);
+        frameUpdated = 0;
+    } else {
+        frameUpdated = frameUpdated + 1;
+        if (!ppcs.isOverlay &&
+            !(ppcs.updateType == kSvtAv1GfUpdate || ppcs.updateType == kSvtAv1ArfUpdate || isIntrnlArf)) {
+            rc.avgFrameQindex[1] = (int)roundPowerOfTwo(3 * rc.avgFrameQindex[1] + qindex, 2);
+            rc.lastQ[1] = (int)convertQindexToQ(qindex, bitDepth);
+        }
+    }
+
+    // Keep record of last boosted (KF/GF/ARF) Q value.
+    if (qindex < rc.lastBoostedQindex || ppcs.frameType == kKeyFrame ||
+        (!rc.constrainedGfGroup &&
+         (ppcs.updateType == kSvtAv1ArfUpdate || isIntrnlArf ||
+          (ppcs.updateType == kSvtAv1GfUpdate && !ppcs.isOverlay)))) {
+        rc.lastBoostedQindex = qindex;
+    }
+    updateBufferLevel(rc, ppcs, ppcs.projectedFrameSize);
+    rc.prevAvgFrameBandwidth = rc.avgFrameBandwidth;
+
+    // Rolling monitors of whether we are over or underspending used to help
+    // regulate min and Max Q in two pass.
+    if (ppcs.frameType != kKeyFrame) {
+        rcParam.rollingTargetBits =
+            (int)roundPowerOfTwo((std::int64_t)rcParam.rollingTargetBits * 3 + ppcs.thisFrameTarget, 2);
+        rcParam.rollingActualBits = (int)roundPowerOfTwo(
+            (std::int64_t)rcParam.rollingActualBits * 3 + ppcs.projectedFrameSize, 2);
+    }
+
+    // Actual bits spent
+    rcParam.totalActualBits += ppcs.projectedFrameSize;
+    rcParam.totalTargetBits += ppcs.showableFrame ? rc.avgFrameBandwidth : 0;
+
+    if (ppcs.frameType == kKeyFrame) {
+        rc.framesSinceKey = 0;
+        rc.framesSinceCdfUpdate = 0;
+    }
+}
+
+// svt_av1_rc_postencode_update (rc_vbr_cbr.c:1563-1629): verbatim; the
+// low-motion EMA sits OUTSIDE the leaf exclusion (:1618-1620).
+void postencodeUpdate(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs, const CrRefreshCarrier& cr,
+                      std::uint16_t b64TotalCount, int bitDepth, int& frameUpdated) {
+    const int width = ppcs.frameWidth;
+    const int height = ppcs.frameHeight;
+    const bool isIntrnlArf = ppcs.updateType == kSvtAv1IntnlArfUpdate;
+
+    // Update rate control heuristics
+    ppcs.projectedFrameSize = (int)ppcs.totalNumBits;
+    // Post encode loop adjustment of Q prediction.
+    rcUpdateRateCorrectionFactors(rc, rcCfg, ppcs, cr, b64TotalCount, width, height, bitDepth);
+
+    // Keep a record of last Q and ambient average Q.
+    const int qindex = ppcs.baseQIdx;
+    if (ppcs.frameType == kKeyFrame) {
+        rc.avgFrameQindex[0] = (int)roundPowerOfTwo(3 * rc.avgFrameQindex[0] + qindex, 2);
+        rc.lastQ[0] = (int)convertQindexToQ(qindex, bitDepth);
+        frameUpdated = 0;
+    } else {
+        frameUpdated = frameUpdated + 1;
+        if (!ppcs.isOverlay &&
+            !(ppcs.updateType == kSvtAv1GfUpdate || ppcs.updateType == kSvtAv1ArfUpdate || isIntrnlArf)) {
+            rc.avgFrameQindex[1] = (int)roundPowerOfTwo(3 * rc.avgFrameQindex[1] + qindex, 2);
+            rc.lastQ[1] = (int)convertQindexToQ(qindex, bitDepth);
+        }
+    }
+
+    // Keep record of last boosted (KF/GF/ARF) Q value.
+    if (qindex < rc.lastBoostedQindex || ppcs.frameType == kKeyFrame ||
+        (!rc.constrainedGfGroup &&
+         (ppcs.updateType == kSvtAv1ArfUpdate || isIntrnlArf ||
+          (ppcs.updateType == kSvtAv1GfUpdate && !ppcs.isOverlay)))) {
+        rc.lastBoostedQindex = qindex;
+    }
+    updateBufferLevel(rc, ppcs, ppcs.projectedFrameSize);
+    rc.prevAvgFrameBandwidth = rc.avgFrameBandwidth;
+
+    // Rolling monitors of whether we are over or underspending used to help
+    // regulate min and Max Q in two pass.
+    if (ppcs.frameType != kKeyFrame) {
+        rc.rollingTargetBits =
+            (int)roundPowerOfTwo((std::int64_t)rc.rollingTargetBits * 3 + ppcs.thisFrameTarget, 2);
+        rc.rollingActualBits = (int)roundPowerOfTwo(
+            (std::int64_t)rc.rollingActualBits * 3 + ppcs.projectedFrameSize, 2);
+    }
+    rc.avgFrameLowMotion = (rc.avgFrameLowMotion == 0)
+        ? ppcs.avgCntZeromv
+        : (int)((3 * rc.avgFrameLowMotion + ppcs.avgCntZeromv) / 4);
+    // Actual bits spent
+    rc.totalActualBits += ppcs.projectedFrameSize;
+    rc.totalTargetBits += ppcs.showableFrame ? rc.avgFrameBandwidth : 0;
+
+    if (ppcs.frameType == kKeyFrame) {
+        rc.framesSinceKey = 0;
+        rc.framesSinceCdfUpdate = 0;
+    }
+}
+
+// get_regulated_q_overshoot (rc_vbr_cbr.c:1720-1735): verbatim.
+int getRegulatedQOvershoot(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                           const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int qLow, int qHigh,
+                           int topIndex, int bottomIndex, int bitDepth) {
+    const int width = ppcs.frameWidth;
+    const int height = ppcs.frameHeight;
+
+    rcUpdateRateCorrectionFactors(rc, rcCfg, ppcs, cr, b64TotalCount, width, height, bitDepth);
+
+    int qRegulated = av1RcRegulateQ(rc, rcCfg, ppcs, bottomIndex, std::max(qHigh, topIndex), width, height);
+    int retries = 0;
+    while (qRegulated < qLow && retries < 10) {
+        rcUpdateRateCorrectionFactors(rc, rcCfg, ppcs, cr, b64TotalCount, width, height, bitDepth);
+        qRegulated = av1RcRegulateQ(rc, rcCfg, ppcs, bottomIndex, std::max(qHigh, topIndex), width, height);
+        retries++;
+    }
+    return qRegulated;
+}
+
+// get_regulated_q_undershoot (rc_vbr_cbr.c:1738-1752): verbatim.
+int getRegulatedQUndershoot(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                            const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int qHigh, int topIndex,
+                            int bottomIndex, int bitDepth) {
+    const int width = ppcs.frameWidth;
+    const int height = ppcs.frameHeight;
+
+    rcUpdateRateCorrectionFactors(rc, rcCfg, ppcs, cr, b64TotalCount, width, height, bitDepth);
+    int qRegulated = av1RcRegulateQ(rc, rcCfg, ppcs, bottomIndex, topIndex, width, height);
+
+    int retries = 0;
+    while (qRegulated > qHigh && retries < 10) {
+        rcUpdateRateCorrectionFactors(rc, rcCfg, ppcs, cr, b64TotalCount, width, height, bitDepth);
+        qRegulated = av1RcRegulateQ(rc, rcCfg, ppcs, bottomIndex, topIndex, width, height);
+        retries++;
+    }
+    return qRegulated;
+}
+
 // ---- RC2 Wave D (recode helpers): rc_vbr_cbr.c :1642-:1789 ----
 
 // av1_find_qindex (rc_vbr_cbr.c:1773-1789): verbatim.

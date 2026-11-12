@@ -75,6 +75,14 @@ struct RcControl {
     int resizeCount;              // rc->resize_count
     int resizeBufferUnderflow;    // rc->resize_buffer_underflow
 
+    // the Wave D3 rate-factor updater / postencode state
+    int q2Frame;                  // rc->q_2_frame
+    int rc1Frame;                 // rc->rc_1_frame
+    int rc2Frame;                 // rc->rc_2_frame
+    int lastBoostedQindex;        // rc->last_boosted_qindex
+    int percentRefreshAdjustment; // rc->percent_refresh_adjustment
+    double rateRatioQdeltaAdjustment;  // rc->rate_ratio_qdelta_adjustment
+
     // the RTC-CBR virtual mini-GoP state (RC2c Wave C)
     int avgFrameLowMotion;        // rc->avg_frame_low_motion
     double targetSizeFactors[kMaxTemporalLayers + 1];  // rc->target_size_factors
@@ -693,6 +701,56 @@ int getKfQTpl(const RcControl& rc, int targetActiveQuality, int bitDepth);
 // get_gfu_q_tpl (rc_vbr_cbr.c:1667-1688): verbatim; same prev_dif quirk
 // (:1677-1686).
 int getGfuQTpl(const RcControl& rc, int targetActiveQuality, int bitDepth);
+
+// ---- RC2 Wave D3 (the vbr updater + the postencode pair + the regulated
+// pair): rc_vbr_cbr.c :1349-:1472 / :1495-:1629 / :1720-:1752 ----
+
+// av1_estimate_bits_at_q (rc_vbr_cbr.c:1349-1353): verbatim; the frame
+// type / screen-content flags thread (the reference reads them off ppcs).
+int estimateBitsAtQ(int frameType, int q, int mbs, double correctionFactor, int bitDepth,
+                    bool isScreenContent);
+
+// av1_rc_update_rate_correction_factors (rc_vbr_cbr.c:1355-1472): verbatim;
+// the width/height thread as parameters (the reference's own signature);
+// b64_total_count threads (the C2 convention - the reference reads
+// ppcs->b64_total_count).
+void rcUpdateRateCorrectionFactors(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                                   const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int width,
+                                   int height, int bitDepth);
+
+// RateControlIntervalParamContext (pcs.h), consumed fields only - grows
+// with the slices that consume it (the carrier-grows precedent).
+struct RcIntervalParamCarrier {
+    int rollingTargetBits;       // rc_param_ptr->rolling_target_bits
+    int rollingActualBits;       // rc_param_ptr->rolling_actual_bits
+    std::int64_t totalActualBits;  // rc_param_ptr->total_actual_bits
+    std::int64_t totalTargetBits;  // rc_param_ptr->total_target_bits
+};
+
+// svt_av1_rc_postencode_update_gop_const (rc_vbr_cbr.c:1495-1561): verbatim;
+// the rolling/total bits go to the interval-param carrier; NO low-motion
+// EMA in this twin. The enc_ctx->frame_updated counter threads as an
+// int& (the frame_updated_mutex ops are the named park).
+void postencodeUpdateGopConst(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                              const CrRefreshCarrier& cr, RcIntervalParamCarrier& rcParam,
+                              std::uint16_t b64TotalCount, int bitDepth, int& frameUpdated);
+
+// svt_av1_rc_postencode_update (rc_vbr_cbr.c:1563-1629): verbatim; the
+// low-motion EMA sits OUTSIDE the leaf exclusion (:1618-1620).
+void postencodeUpdate(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                      const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int bitDepth,
+                      int& frameUpdated);
+
+// get_regulated_q_overshoot (rc_vbr_cbr.c:1720-1735): verbatim; the width/
+// height read off the carrier (the reference reads frm_size).
+int getRegulatedQOvershoot(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                           const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int qLow,
+                           int qHigh, int topIndex, int bottomIndex, int bitDepth);
+
+// get_regulated_q_undershoot (rc_vbr_cbr.c:1738-1752): verbatim.
+int getRegulatedQUndershoot(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                            const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int qHigh,
+                            int topIndex, int bottomIndex, int bitDepth);
 
 // ROUND_POWER_OF_TWO (definitions.h:457): the rounding shift.
 std::int64_t roundPowerOfTwo(std::int64_t value, int n);
