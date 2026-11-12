@@ -58,6 +58,7 @@ struct RcControl {
     // the quality window and per-frame q history (RC2c Wave B)
     int worstQuality;             // rc->worst_quality
     int bestQuality;              // rc->best_quality
+    int activeWorstQuality;       // rc->active_worst_quality
     int avgFrameQindex[2];        // rc->avg_frame_qindex[FRAME_TYPES] (0=KEY, 1=INTER)
     int lastQ[2];                 // rc->last_q[FRAME_TYPES] (0=KEY, 1=INTER)
     int q1Frame;                  // rc->q_1_frame
@@ -646,6 +647,52 @@ bool recodeDecisionRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs
 void postencodeUpdateRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
                             const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int bitDepth,
                             bool resizeDynamic);
+
+// ---- RC2 Wave D (recode helpers): rc_vbr_cbr.c :1642-:1789 ----
+
+// RecodeLoopType (definitions.h:295-307).
+constexpr int kDisallowRecode = 0;
+constexpr int kAllowRecodeKfMaxBw = 1;
+constexpr int kAllowRecodeKfArfGf = 2;
+constexpr int kAllowRecode = 3;
+
+// EbAv1SeqProfile (EbSvtAv1.h:144).
+constexpr int kMainProfile = 0;
+constexpr int kHighProfile = 1;
+constexpr int kProfessionalProfile = 2;
+
+// av1_find_qindex (rc_vbr_cbr.c:1773-1789): verbatim; the bit-depth threads
+// (the reference reads the encoder bit depth through the scs wall).
+int av1FindQindex(double desiredQ, int bitDepth, int bestQindex, int worstQindex);
+
+// av1_get_compression_ratio (rc_vbr_cbr.c:1690-1699): verbatim; the
+// frm_size / seq_header walls thread (superres_upscaled_width, frame_height,
+// seq_profile).
+double getCompressionRatio(int superresUpscaledWidth, int height, int profile,
+                           std::uint64_t encodedFrameSize);
+
+// av1_rc_compute_frame_size_bounds (rc_vbr_cbr.c:1701-1717): verbatim; the
+// enc_ctx->recode_tolerance / rc_cfg->mode / ppcs->max_frame_size /
+// ppcs->loop_count / rc->max_frame_bandwidth walls thread; the reference's
+// two out-pointers become references.
+void computeFrameSizeBounds(int mode, int recodeTolerance, int maxFrameSize, int loopCount,
+                            int frameTarget, int rcMaxFrameBandwidth, int& frameUnderShootLimit,
+                            int& frameOverShootLimit);
+
+// recode_loop_test (rc_vbr_cbr.c:1756-1771): verbatim; the
+// enc_ctx->recode_loop wall threads as recodeLoop (RecodeLoopType); the
+// kfgfarf predicate is the landed frameIsKfGfArf.
+bool recodeLoopTest(const RcControl& rc, const PcsCarrier& pcs, int recodeLoop, int highLimit,
+                    int lowLimit, int q, int maxq, int minq);
+
+// get_kf_q_tpl (rc_vbr_cbr.c:1642-1661): verbatim; the rc walls thread
+// (active_worst_quality, kf_boost). The search's prev_dif is the INITIAL
+// difference and is NOT refreshed inside the loop (:1650-1659).
+int getKfQTpl(const RcControl& rc, int targetActiveQuality, int bitDepth);
+
+// get_gfu_q_tpl (rc_vbr_cbr.c:1667-1688): verbatim; same prev_dif quirk
+// (:1677-1686).
+int getGfuQTpl(const RcControl& rc, int targetActiveQuality, int bitDepth);
 
 // ROUND_POWER_OF_TWO (definitions.h:457): the rounding shift.
 std::int64_t roundPowerOfTwo(std::int64_t value, int n);

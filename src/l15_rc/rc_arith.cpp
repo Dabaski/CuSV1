@@ -1833,4 +1833,110 @@ void postencodeUpdateRtcCbr(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& pp
     }
 }
 
+// ---- RC2 Wave D (recode helpers): rc_vbr_cbr.c :1642-:1789 ----
+
+// av1_find_qindex (rc_vbr_cbr.c:1773-1789): verbatim.
+int av1FindQindex(double desiredQ, int bitDepth, int bestQindex, int worstQindex) {
+    int low = bestQindex;
+    int high = worstQindex;
+    while (low < high) {
+        const int mid = (low + high) >> 1;
+        const double midQ = convertQindexToQ(mid, bitDepth);
+        if (midQ < desiredQ) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+// av1_get_compression_ratio (rc_vbr_cbr.c:1690-1699): verbatim.
+double getCompressionRatio(int superresUpscaledWidth, int height, int profile,
+                           std::uint64_t encodedFrameSize) {
+    const int lumaPicSize = superresUpscaledWidth * height;
+    const int picSizeProfileFactor =
+        profile == kMainProfile ? 15 : (profile == kHighProfile ? 30 : 36);
+    encodedFrameSize = (encodedFrameSize > 129 ? encodedFrameSize - 128 : 1);
+    const std::uint64_t uncompressedFrameSize =
+        (std::uint64_t)((lumaPicSize * picSizeProfileFactor) >> 3);
+    return uncompressedFrameSize / (double)encodedFrameSize;
+}
+
+// av1_rc_compute_frame_size_bounds (rc_vbr_cbr.c:1701-1717): verbatim.
+void computeFrameSizeBounds(int mode, int recodeTolerance, int maxFrameSize, int loopCount,
+                            int frameTarget, int rcMaxFrameBandwidth, int& frameUnderShootLimit,
+                            int& frameOverShootLimit) {
+    if (mode == kRcQ) {
+        const int tolerance =
+            (int)std::max<std::int64_t>(100, (std::int64_t)recodeTolerance * maxFrameSize / 100);
+        frameUnderShootLimit = loopCount ? std::max(maxFrameSize - tolerance, 0) : 0;
+        frameOverShootLimit = (int)std::min<std::int64_t>((std::int64_t)maxFrameSize + tolerance,
+                                                         (std::int64_t)INT_MAX);
+    } else {
+        const int tolerance =
+            (int)std::max<std::int64_t>(100, (std::int64_t)recodeTolerance * frameTarget / 100);
+        frameUnderShootLimit = std::max(frameTarget - tolerance, 0);
+        frameOverShootLimit = std::min(frameTarget + tolerance, rcMaxFrameBandwidth);
+    }
+}
+
+// recode_loop_test (rc_vbr_cbr.c:1756-1771): verbatim.
+bool recodeLoopTest(const RcControl& rc, const PcsCarrier& pcs, int recodeLoop, int highLimit,
+                    int lowLimit, int q, int maxq, int minq) {
+    const bool frameIsKfgfarf = frameIsKfGfArf(pcs);
+    bool forceRecode = false;
+    if ((std::int64_t)pcs.projectedFrameSize >= rc.maxFrameBandwidth || recodeLoop == kAllowRecode ||
+        (frameIsKfgfarf && recodeLoop >= kAllowRecodeKfMaxBw)) {
+        if ((pcs.projectedFrameSize > highLimit && q < maxq) ||
+            (pcs.projectedFrameSize < lowLimit && q > minq)) {
+            forceRecode = true;
+        }
+    }
+    return forceRecode;
+}
+
+// get_kf_q_tpl (rc_vbr_cbr.c:1642-1661): verbatim; the search's prev_dif is
+// the INITIAL difference and is not refreshed inside the loop.
+int getKfQTpl(const RcControl& rc, int targetActiveQuality, int bitDepth) {
+    const std::int32_t* kfLowMotionMinqCqp = minqTable("kf_low_motion_minq_cqp", bitDepth);
+    const std::int32_t* kfHighMotionMinq = minqTable("kf_high_motion_minq", bitDepth);
+    int q = rc.activeWorstQuality;
+    int activeQuality =
+        getActiveQuality(q, rc.kfBoost, kBoostKfLow, kBoostKfHigh, kfLowMotionMinqCqp, kfHighMotionMinq);
+    const int prevDif = std::abs(targetActiveQuality - activeQuality);
+    while (std::abs(targetActiveQuality - activeQuality) > 4 &&
+           std::abs(targetActiveQuality - activeQuality) <= prevDif) {
+        if (activeQuality > targetActiveQuality) {
+            q--;
+        } else {
+            q++;
+        }
+        activeQuality = getActiveQuality(q, rc.kfBoost, kBoostKfLow, kBoostKfHigh, kfLowMotionMinqCqp,
+                                         kfHighMotionMinq);
+    }
+    return q;
+}
+
+// get_gfu_q_tpl (rc_vbr_cbr.c:1667-1688): verbatim; the same prev_dif quirk.
+int getGfuQTpl(const RcControl& rc, int targetActiveQuality, int bitDepth) {
+    const std::int32_t* arfgfLowMotionMinq = minqTable("arfgf_low_motion_minq", bitDepth);
+    const std::int32_t* arfgfHighMotionMinq = minqTable("arfgf_high_motion_minq", bitDepth);
+    int q = rc.activeWorstQuality;
+    int activeQuality = getActiveQuality(q, rc.gfuBoost, kBoostGfLowTplLa, kBoostGfHighTplLa,
+                                         arfgfLowMotionMinq, arfgfHighMotionMinq);
+    const int prevDif = std::abs(targetActiveQuality - activeQuality);
+    while (std::abs(targetActiveQuality - activeQuality) > 4 &&
+           std::abs(targetActiveQuality - activeQuality) <= prevDif) {
+        if (activeQuality > targetActiveQuality) {
+            q--;
+        } else {
+            q++;
+        }
+        activeQuality = getActiveQuality(q, rc.gfuBoost, kBoostGfLowTplLa, kBoostGfHighTplLa,
+                                         arfgfLowMotionMinq, arfgfHighMotionMinq);
+    }
+    return q;
+}
+
 } // namespace l15_rc
