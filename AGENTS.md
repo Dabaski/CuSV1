@@ -336,11 +336,19 @@ Three other instruments, none of which gate a commit:
   identical, which is why a self-test is the only thing that distinguishes
   them.
 
-### Last measured state (2026-11-10, the RE7 tx-type rung landed)
+### Last measured state (2026-11-11, the RE8A driver rung landed)
 
 Quote these numbers only with their date; they are re-measured, not permanent.
 
-- **ctest: 17/17 passed, 0 failed, 371.71 s** (re-measured 2026-11-10 at
+- **Portable-C coverage: 23.7%** (see the completion metric section;
+  re-measured 2026-11-11 at the RE8A landing: 37,453 of 157,718 non-blank
+  lines, +738 from 36,715 at the TF2 landing - the A8 deblocking DRIVER
+  machinery (647 nb deblocking_filter.c + 91 deblocking_common.c,
+  span-measured; A8 prints 37%, 3,929 of 10,600; conformance-free, RE8B
+  wires). The 2026-11-09 measurement was 23.3% (36,715), +5,022 from 31,693 at the 20% line.
+- **ctest: 17/17 passed, 0 failed, 273.39 s** (re-measured 2026-11-11
+  at the RE8A landing on master 043f1ec; the earlier RE7 landing run was
+  371.71 s - re-measured 2026-11-10 at
   the RE7 landing; the suite is 17 targets since bef6904 - l16_rdo
   joined; l4_intra is the slow one; `pipeline` and
   `l3_transforms` next; the rest under 0.5 s.
@@ -382,13 +390,11 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   ecs44_coeffs, ecs44_recon_v, tu_color4). The earlier numbers are correct
   statements about their own commits. Always re-measure; `git log` carries
   stale numbers by design.
-- **Portable-C coverage: 23.3%** (see the completion metric section;
-  re-measured 2026-11-09 at the TF2 landing: 36,715 of 157,718 non-blank
-  lines, +5,022 from 31,693 at the 20% line - wave 6 (TX2 +205 in A1,
+- **Coverage history, waves 6-14** (span-measured; register entries in docs/todo.md section A0): wave 6 (TX2 +205 in A1,
   SYM1 +436 in A5 + +45 in A12) and wave 7 (IP1 +203 across A3/A13/A14,
   SUB1 +149 in A14) and wave 8 (SW1 +119 the SAD wrapper instances, HB1
   +168 the hbd twins) and wave 9 (RS2 +273 the hbd resize 1D family - the hbd park resolves, AM1+AN20 +386 the vmaf activity-masking family + the preprocessing statistics + the firstpass pure pair - the A4 RDO input side) and wave 10 (RE1 +485 in A4 - the rate-estimation core, the campaign's foundation slice, conformance-free) and wave 11 (RE2 +1,222 the optimize_b trellis + the scan/tx carries + the nz-map LUT carry - charged A1+A4+A5+A13; the JUDGE'S J3 SURVIVOR sharpened - the fast-path zbin-trim had no boundary fixture) and wave 12 (RE3 +576 the rd_cost.c symbol-cost surface - three carry double-counts struck at merge, three judge probes all killed) and wave 13 (RE4 +476 the ac_bias psy-distortion family + the intra candidate-injection family + the FI ERRATA - FILTER_INTRA_MODES 7 -> 5 with the mis-citation fixed and the fimodeToIntradir content corrected) and wave 14-partial (TF2 +234 the temporal-filtering hbd twins - the TF1 park resolves; the block-error pre-shifts are HARD-CODED >>4/>>6 at hbd, not bd-parameterized) - all span-measured; register entries in docs/todo.md
-  section A0); A1 prints 41% (11,087 of 27,008), A4 prints 8% (2,419 of 31,088), A5 prints 61% (5,167 of 8,460), A11 prints 42% (5,047 of 12,028), A13 prints 19% (1,037 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is
+  section A0); A1 prints 41% (11,087 of 27,008), A4 prints 8% (2,419 of 31,088), A5 prints 61% (5,167 of 8,460), A11 prints 42% (5,047 of 12,028), A13 prints 19% (1,037 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is COVERAGE-ONLY (it moves no conformance count). 
   PARSE-BUG EPISODE (recorded, wave 4): an embedded
   pipe in a prose sentence (get_msb(x|1)) split the A12 row's 5 fields
   and the tool silently printed A12 as 0 files/0 lines - caught by the
@@ -919,7 +925,23 @@ are partly right and I re-measured rather than restated them:
   tap row BY ADDRESS ALIGNMENT, measured offV=15) and the wiener
   stripe's w round-up rule differs from sgrproj's plain AOMMIN; 571 nb
   parked named (the highbd stripes, the Av1Common-walled filter_frame
-  pair, the tile walkers).
+  pair, the tile walkers). RE8A (2026-11-11, judge takeover) the
+  deblocking DRIVER machinery in src/l10_filters/deblock_driver.{h,cpp}
+  (struct-free, the walls threaded; CONFORMANCE-FREE, RE8B wires):
+  deblocking_common.c get_filter_level_delta_lf :46-:81 (35 nb) +
+  loop_filter_frame_init :86-:149 (56); deblocking_filter.c
+  scaled_buffer_offset :101-:108 (8), setup_pred_plane :110-:129 (19),
+  setup_dst_planes :131-:193 (63), get_transform_size :196-:211 (14),
+  set_lpf_parameters :213-:334 (111), filter_block_plane_vert :340-:466
+  (123), filter_block_plane_horz :467-:603 (131), loop_filter_sb
+  :604-:683 (72), loop_filter_frame :684-:710 (23),
+  pick_filter_level_by_q :1016-:1109 (83) = 738 nb span-measured;
+  245 cases / 33,302 assertions; the enumeration tests caught a real
+  kSsSizeLookup transcription bug (rows 19-21 [1][1] 14/15/16 ->
+  17/18/19) and pinned the chroma odd-mi read, skip-forces-depth-0, the
+  SB-local dst.buf contract and the frame-header plane gates; PARKED
+  named: the search walls :828-:953/:954-:1010/:1110-:1286 and the SD
+  copy/SSE trio :711-:822; highbd assert-parked; plane_type not carried.
 
 ## New module layer map (the wave-era layers, src/)
 
@@ -1225,7 +1247,7 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A5 | Entropy coding (CABAC/OD) | 11 | 8,460 | 61% | 5,167 |
 | A6 | Coding loop + PCS + block structures | 22 | 13,928 | 12% | 1,734 |
 | A7 | Bitstream + OBU + headers | 5 | 1,436 | 40% | 574 |
-| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 30% | 3,191 |
+| A8 | Post-filters (deblock/CDEF/restoration/grain) | 27 | 10,600 | 37% | 3,929 |
 | A9 | Rate control | 17 | 5,951 | 5% | 278 |
 | A10 | Picture management + threading | 30 | 9,662 | 0% | 0 |
 | A11 | Content analysis + temporal filtering | 16 | 12,028 | 42% | 5,047 |
@@ -1233,7 +1255,7 @@ newly added reference file lowers the percentage loudly rather than silently.
 | A13 | Utility + platform + core headers | 24 | 5,357 | 17% | 889 |
 | A14 | C_DEFAULT portable reference kernels | 15 | 1,466 | 100% | 1,466 |
 | - | excluded: `*_rtcd.*` dispatch | 4 | 7,906 | - | 0 |
-| | **TOTAL** | **254** | **157,718** | | **36,715** |
+| | **TOTAL** | **254** | **157,718** | | **37,453** |
 
 **+1.0 point = 1,577 non-blank reference lines.** So progress is legible
 arithmetically: a slice worth +1 point is worth about 1,600 lines of ported
