@@ -1,8 +1,8 @@
-add_library(av1_rdo STATIC rate_est.cpp mode_config.cpp)
+add_library(av1_rdo STATIC rate_est.cpp mode_config.cpp md_slices.cpp)
 target_include_directories(av1_rdo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(av1_rdo PUBLIC av1_core av1_transforms)
 
-add_executable(av1_l16_rdo_tests tests/test_harness.cpp tests/test_rate_est.cpp tests/test_mode_config.cpp)
+add_executable(av1_l16_rdo_tests tests/test_harness.cpp tests/test_rate_est.cpp tests/test_mode_config.cpp tests/test_md_slices.cpp)
 target_include_directories(av1_l16_rdo_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/doctest)
 target_link_libraries(av1_l16_rdo_tests PRIVATE av1_rdo)
 av1_cuda_test(l16_rdo av1_l16_rdo_tests)
