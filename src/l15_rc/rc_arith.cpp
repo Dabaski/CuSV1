@@ -807,6 +807,49 @@ void calculateActiveWorstQuality(const PcsCarrier& ppcs, const GfGroupStatsCarri
     }
 }
 
+// get_section_target_bandwidth (pass2_strategy.c:746-759): verbatim.
+int getSectionTargetBandwidth(const RcControl& rc, bool lapRc, double totalStatsCount, int pictureNumber,
+                              std::int64_t bitsLeft) {
+    int sectionTargetBandwidth;
+    const int framesLeft = (int)(totalStatsCount - pictureNumber);
+    if (lapRc) {
+        sectionTargetBandwidth = (int)rc.avgFrameBandwidth;
+    } else {
+        sectionTargetBandwidth = (int)(bitsLeft / framesLeft);
+    }
+    return sectionTargetBandwidth;
+}
+
+// MAX_MB_RATE / MAXRATE_1080P (pass2_strategy.c:875-876): the constants
+// ride the header (kMaxMbRate / kMaxRate1080P).
+
+// av1_rc_update_framerate (pass2_strategy.c:880-898): verbatim.
+void av1RcUpdateFramerate(RcControl& rc, double newFramerate, std::int64_t targetBitRate, int vbrmaxSection,
+                          int numMbs) {
+    const int MBs = numMbs;
+
+    rc.avgFrameBandwidth = (int)(targetBitRate / newFramerate);
+    // A maximum bitrate for a frame is defined.
+    // The baseline for this aligns with HW implementations that
+    // can support decode of 1080P content up to a bitrate of MAX_MB_RATE bits
+    // per 16x16 MB (averaged over a frame). However this limit is extended if
+    // a very high rate is given on the command line or the rate cannot
+    // be achieved because of a user specified max q (e.g. when the user
+    // specifies lossless encode.
+    std::int64_t vbrMaxBits = ((std::int64_t)rc.avgFrameBandwidth * vbrmaxSection) / 100;
+    vbrMaxBits = std::min(vbrMaxBits, (std::int64_t)INT_MAX);
+    rc.maxFrameBandwidth = (int)std::max(std::max((std::int64_t)(MBs * kMaxMbRate), (std::int64_t)kMaxRate1080P),
+                                         vbrMaxBits);
+}
+
+// svt_av1_new_framerate (pass2_strategy.c:901-904): verbatim (from aom
+// encoder.c, the reference comment).
+void av1NewFramerate(RcControl& rc, double& scsNewFramerate, double framerate, std::int64_t targetBitRate,
+                     int vbrmaxSection, int numMbs) {
+    scsNewFramerate = framerate < 0.1 ? 30 : framerate;
+    av1RcUpdateFramerate(rc, scsNewFramerate, targetBitRate, vbrmaxSection, numMbs);
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;

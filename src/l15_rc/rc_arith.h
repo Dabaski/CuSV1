@@ -566,6 +566,31 @@ void calculateActiveWorstQuality(const PcsCarrier& ppcs, const GfGroupStatsCarri
                                  int underShootPct, int overShootPct, bool gopConstraintRc, bool singlePass,
                                  bool twoPass);
 
+// get_section_target_bandwidth (pass2_strategy.c:746-759): static in the
+// reference; the walls thread (total_stats->count as totalStatsCount - the
+// reference derefs it without a NULL check -, pcs->picture_number,
+// scs->lap_rc, rc->avg_frame_bandwidth, twopass->bits_left).
+int getSectionTargetBandwidth(const RcControl& rc, bool lapRc, double totalStatsCount, int pictureNumber,
+                              std::int64_t bitsLeft);
+
+// MAX_MB_RATE / MAXRATE_1080P (pass2_strategy.c:875-876).
+constexpr int kMaxMbRate = 250;
+constexpr int kMaxRate1080P = 2025000;
+
+// av1_rc_update_framerate (pass2_strategy.c:880-898): static in the
+// reference; the walls thread (scs->static_config.target_bit_rate,
+// scs->new_framerate, enc_ctx->two_pass_cfg.vbrmax_section,
+// frame_info->num_mbs). NOTE: rcInit folds its own copy of this walk (the
+// RC2c Wave C2 landing) - this is the standalone reference shape, not a
+// rewiring of rcInit.
+void av1RcUpdateFramerate(RcControl& rc, double newFramerate, std::int64_t targetBitRate, int vbrmaxSection,
+                          int numMbs);
+
+// svt_av1_new_framerate (pass2_strategy.c:901-904): verbatim; the
+// scs->new_framerate mirror threads as the in/out double.
+void av1NewFramerate(RcControl& rc, double& scsNewFramerate, double framerate, std::int64_t targetBitRate,
+                     int vbrmaxSection, int numMbs);
+
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.
 bool frameIsIntraOnly(int frameType);

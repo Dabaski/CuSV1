@@ -728,3 +728,99 @@ TEST_CASE("calculate_active_worst_quality one-pass path matches the oracle") {
     }
     CHECK(bad == 0);
 }
+
+// ---- A9R C10: get_section_target_bandwidth (pass2_strategy.c:741-759) +
+// the framerate pair (:875-904) ----
+
+TEST_CASE("get_section_target_bandwidth selects the lap or the bits_left split") {
+    // lap_rc: the avg frame bandwidth passes through.
+    {
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 20000;
+        CHECK(l15_rc::getSectionTargetBandwidth(rc, true, 100.0, 40, 1234567) == 20000);
+    }
+    // non-lap: (int)(bits_left / frames_left); frames_left =
+    // (int)(total_stats->count - picture_number). 1,200,000/60 = 20000.
+    {
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 20000;
+        CHECK(l15_rc::getSectionTargetBandwidth(rc, false, 100.0, 40, 1200000) == 20000);
+    }
+    // the int64 division truncates: 1,000,009/60 = 16666.81 -> 16666.
+    {
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 20000;
+        CHECK(l15_rc::getSectionTargetBandwidth(rc, false, 100.0, 40, 1000009) == 16666);
+    }
+    // frames_left is an int cast of the double difference: 99.5 - 40 ->
+    // (int) 59.5 = 59; 1,000,009/59 = 16949.3 -> 16949.
+    {
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 20000;
+        CHECK(l15_rc::getSectionTargetBandwidth(rc, false, 99.5, 40, 1000009) == 16949);
+    }
+}
+
+TEST_CASE("av1_rc_update_framerate pins the bandwidth and the max-frame floor") {
+    {
+        // 3,000,000 @ 30 -> avg 100,000; vbrmax 250% -> 250,000;
+        // MBs 8160 * MAX_MB_RATE 250 = 2,040,000 > MAXRATE_1080P 2,025,000.
+        l15_rc::RcControl rc{};
+        l15_rc::av1RcUpdateFramerate(rc, 30.0, 3000000, 250, 8160);
+        CHECK(rc.avgFrameBandwidth == 100000);
+        CHECK(rc.maxFrameBandwidth == 2040000);
+    }
+    {
+        // small frame: the MAXRATE_1080P floor binds (25,000 < 2,025,000).
+        l15_rc::RcControl rc{};
+        l15_rc::av1RcUpdateFramerate(rc, 30.0, 1000000, 250, 100);
+        CHECK(rc.avgFrameBandwidth == 33333);
+        CHECK(rc.maxFrameBandwidth == 2025000);
+    }
+    {
+        // vbrmax above the floors: 30,000,000 @ 30 -> avg 1,000,000;
+        // 1,000,000 * 300/100 = 3,000,000 > the 2,025,000 floor (MBs 100
+        // keeps the per-MB term at 25,000) -> the vbr term binds.
+        l15_rc::RcControl rc{};
+        l15_rc::av1RcUpdateFramerate(rc, 30.0, 30000000, 300, 100);
+        CHECK(rc.avgFrameBandwidth == 1000000);
+        CHECK(rc.maxFrameBandwidth == 3000000);
+    }
+    {
+        // the INT_MAX guard: 1,500,000,000 @ 30 -> avg 50,000,000;
+        // 50,000,000 * 5000 / 100 = 2,500,000,000 -> clamped to INT_MAX.
+        l15_rc::RcControl rc{};
+        l15_rc::av1RcUpdateFramerate(rc, 30.0, 1500000000, 5000, 8160);
+        CHECK(rc.avgFrameBandwidth == 50000000);
+        CHECK(rc.maxFrameBandwidth == 2147483647);
+    }
+}
+
+TEST_CASE("svt_av1_new_framerate clamps below 0.1 and drives the update") {
+    {
+        // 0.05 -> the 30 clamp, then the update.
+        l15_rc::RcControl rc{};
+        double scsFr = 0.0;
+        l15_rc::av1NewFramerate(rc, scsFr, 0.05, 3000000, 250, 8160);
+        CHECK(scsFr == 30.0);
+        CHECK(rc.avgFrameBandwidth == 100000);
+        CHECK(rc.maxFrameBandwidth == 2040000);
+    }
+    {
+        // 24 passes through.
+        l15_rc::RcControl rc{};
+        double scsFr = 0.0;
+        l15_rc::av1NewFramerate(rc, scsFr, 24.0, 2400000, 250, 8160);
+        CHECK(scsFr == 24.0);
+        CHECK(rc.avgFrameBandwidth == 100000);
+        CHECK(rc.maxFrameBandwidth == 2040000);
+    }
+    {
+        // exactly 0.1: NOT below 0.1 -> passes through.
+        l15_rc::RcControl rc{};
+        double scsFr = 0.0;
+        l15_rc::av1NewFramerate(rc, scsFr, 0.1, 300000, 250, 8160);
+        CHECK(scsFr == 0.1);
+        CHECK(rc.avgFrameBandwidth == 3000000);
+    }
+}
