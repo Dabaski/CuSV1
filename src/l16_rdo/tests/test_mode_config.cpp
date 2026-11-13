@@ -6052,3 +6052,377 @@ TEST_CASE("set_rate_est_ctrls - the five levels, whole-struct") {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 6: get_sb_tpl_intra_stats (:6552-:6609) + set_intra_ctrls
+// (:6611-:6796).
+// ---------------------------------------------------------------------------
+
+// get_sb_tpl_intra_stats, independent transcription (:6552-6609).
+struct OracleTpl {
+    bool enable;
+    bool ready;
+    uint8_t layer;
+    uint32_t hier;
+    bool disNref;
+    uint32_t alignedW;
+    uint8_t dispenser;
+    uint8_t sbW, sbH;
+    const uint8_t* modes;
+};
+static bool oracleSbTpl(const OracleTpl& o, uint32_t ox, uint32_t oy, int* ang, uint8_t* maxIn,
+                        int* cnt) {
+    if (!(o.enable && o.ready && (o.layer < o.hier || !o.disNref))) return false;
+    const int aw = (int)((o.alignedW + 15) >> 4);
+    const int blk = o.dispenser == 0 ? 16 : o.dispenser == 1 ? 32 : 64;
+    const int step = o.dispenser == 0 ? 1 : o.dispenser == 1 ? 2 : 4;
+    const int cols = std::max(1, (int)o.sbW / blk);
+    const int rows = std::max(1, (int)o.sbH / blk);
+    int a = 0, c = 0;
+    uint8_t m = 0;
+    for (int i = 0; i < rows; ++i)
+        for (int j = 0; j < cols; ++j) {
+            const uint8_t mode = o.modes[(int)((oy >> 4) + i * step) * aw + (int)(ox >> 4) + j * step];
+            if (mode < 13) {
+                if (m < mode) m = mode;
+                c++;
+            }
+            if (mode >= 1 && mode <= 8) a++;
+        }
+    *ang = a;
+    *maxIn = m;
+    *cnt = c;
+    return true;
+}
+
+TEST_CASE("get_sb_tpl_intra_stats - the gate + the walk over all dispensers, vs the oracle") {
+    // A 128x128 picture grid (aligned16 = 8 columns of 16x16 cells); the
+    // buffer holds one best_mode byte per cell.
+    const int cells = 8 * 8;
+    std::vector<uint8_t> modes(cells);
+    for (int i = 0; i < cells; ++i) {
+        // A deterministic mix: intra (0/9/12), directional (1..8), inter (13).
+        const uint8_t pat[8] = {0, 1, 9, 13, 4, 12, 8, 13};
+        modes[i] = pat[i % 8];
+    }
+    for (int dispenser = 0; dispenser <= 2; ++dispenser)
+        for (int sbW = 64; sbW <= 128; sbW += 64)  // complete and half SBs
+            for (int gate = 0; gate <= 3; ++gate) {
+                // gate: 0 all-on, 1 enable off, 2 ready off, 3 disNref
+                // with layer >= hier (the OR keeps it on at layer < hier)
+                SbTplPcs pcs;
+                std::memset(&pcs, 0, sizeof(pcs));
+                pcs.tplEnable = gate != 1;
+                pcs.tplSrcDataReady = gate != 2;
+                pcs.temporalLayerIndex = 1;
+                pcs.hierarchicalLevels = gate == 3 ? 2 : 5;
+                pcs.disableIntraPredNref = gate == 3;
+                pcs.alignedWidth = 128;
+                pcs.dispenserSearchLevel = (uint8_t)dispenser;
+                pcs.sbGeomWidth = (uint8_t)sbW;
+                pcs.sbGeomHeight = 64;
+                pcs.tplBestModes = modes.data();
+                SbTplCtx ctx;
+                ctx.sbOriginX = 64;
+                ctx.sbOriginY = 64;
+
+                OracleTpl o;
+                o.enable = pcs.tplEnable;
+                o.ready = pcs.tplSrcDataReady;
+                o.layer = pcs.temporalLayerIndex;
+                o.hier = pcs.hierarchicalLevels;
+                o.disNref = pcs.disableIntraPredNref;
+                o.alignedW = 128;
+                o.dispenser = (uint8_t)dispenser;
+                o.sbW = (uint8_t)sbW;
+                o.sbH = 64;
+                o.modes = modes.data();
+
+                int ang = -7, cnt = -7;
+                uint8_t maxIn = 0xEE;
+                const bool got = getSbTplIntraStats(pcs, ctx, &ang, &maxIn, &cnt);
+                int eAng; uint8_t eMax; int eCnt;
+                const bool want = oracleSbTpl(o, 64, 64, &eAng, &eMax, &eCnt);
+                CHECK(got == want);
+                if (want) {
+                    CHECK(ang == eAng);
+                    CHECK(maxIn == eMax);
+                    CHECK(cnt == eCnt);
+                } else {
+                    // the gate-off arm leaves the outputs untouched
+                    CHECK(ang == -7);
+                    CHECK(maxIn == 0xEE);
+                    CHECK(cnt == -7);
+                }
+            }
+    // Hand pin: the 64x64 SB at (0,0), dispenser 0 -> 4x4 cells. The
+    // pattern repeats every 8 cells and the row stride is 8, so each
+    // walk row reads {0,1,9,13}: intra {0,1,9} x4 = 12, directional {1}
+    // x4 = 4, max intra 9.
+    SbTplPcs pcs;
+    std::memset(&pcs, 0, sizeof(pcs));
+    pcs.tplEnable = true;
+    pcs.tplSrcDataReady = true;
+    pcs.temporalLayerIndex = 0;
+    pcs.hierarchicalLevels = 5;
+    pcs.disableIntraPredNref = false;
+    pcs.alignedWidth = 128;
+    pcs.dispenserSearchLevel = 0;
+    pcs.sbGeomWidth = 64;
+    pcs.sbGeomHeight = 64;
+    pcs.tplBestModes = modes.data();
+    SbTplCtx ctx;
+    ctx.sbOriginX = 0;
+    ctx.sbOriginY = 0;
+    int ang, cnt;
+    uint8_t maxIn;
+    CHECK(getSbTplIntraStats(pcs, ctx, &ang, &maxIn, &cnt) == true);
+    CHECK(ang == 4);
+    CHECK(maxIn == 9);
+    CHECK(cnt == 12);
+}
+
+// set_intra_ctrls, independent transcription (:6611-6796). The TPL
+// modulation arms are pinned separately (the oracle caller keeps the
+// TPL surface inert); only the pure table + the pd/skip tail here.
+static void oracleIntraCtrls(IntraCtrls& c, bool* skipOut, bool skipIntra,
+                             int pdPass, int intraLevelIn, int distLevel) {
+    int intraLevel = intraLevelIn;
+    if (skipIntra) intraLevel = 0;
+    static const uint8_t apl[10] = {0, 1, 2, 2, 3, 4, 4, 4, 4, 0};
+    if (intraLevel <= 9) {
+        c.enableIntra = intraLevel == 0 ? 0 : 1;
+        uint8_t end;
+        if (intraLevel == 0 || intraLevel == 9) end = 0;
+        else if (intraLevel <= 3) end = 12;
+        else if (intraLevel == 4) end = 11;
+        else end = 9;
+        c.intraModeEnd = end;
+        c.angularPredLevel = apl[intraLevel];
+        c.pruneUsingBestMode = intraLevel >= 7 && intraLevel <= 8 ? 1 : 0;
+        c.pruneUsingEdgeInfo = intraLevel == 8;
+    }
+    if (distLevel == 0) {
+        c.skipAngularDelta1Th = -1;
+        c.skipAngularDelta2Th = -1;
+        c.skipAngularDelta3Th = -1;
+    } else if (distLevel == 1) {
+        c.skipAngularDelta1Th = 25;
+        c.skipAngularDelta2Th = 25;
+        c.skipAngularDelta3Th = 25;
+    } else if (distLevel == 2) {
+        c.skipAngularDelta1Th = 20;
+        c.skipAngularDelta2Th = 10;
+        c.skipAngularDelta3Th = 5;
+    }
+    *skipOut = pdPass == 1 ? skipIntra : (!(c.enableIntra) || skipIntra);
+}
+
+TEST_CASE("set_intra_ctrls - every level x dist level x the skip/pd walls, vs the oracle") {
+    for (int level = 0; level <= 10; ++level)
+        for (int dist = 0; dist <= 3; ++dist)
+            for (int skip = 0; skip <= 1; ++skip)
+                for (int pd = 0; pd <= 1; ++pd) {
+                    IntraCtrls c;
+                    std::memset(&c, kPoison, sizeof(c));
+                    IntraSetPcs p;
+                    std::memset(&p, 0, sizeof(p));
+                    p.skipIntra = skip == 1;
+                    p.isISlice = false;
+                    p.tplEnable = false;
+                    p.tplIntraModeEnd = 12;
+                    p.refIntraPercentage = 50;
+                    IntraSetCtx cx;
+                    cx.pdPass = (uint8_t)pd;
+                    cx.skipIntra = false;
+                    setIntraCtrls(c, p, cx, (uint8_t)level, (uint8_t)dist);
+                    IntraCtrls e;
+                    std::memset(&e, kPoison, sizeof(e));
+                    bool eSkip = false;
+                    oracleIntraCtrls(e, &eSkip, skip == 1, pd, level, dist);
+                    CHECK(c.enableIntra == e.enableIntra);
+                    CHECK(c.intraModeEnd == e.intraModeEnd);
+                    CHECK(c.angularPredLevel == e.angularPredLevel);
+                    CHECK(c.pruneUsingBestMode == e.pruneUsingBestMode);
+                    if (level <= 9 || skip == 1) {  // written arms only
+                        CHECK(c.pruneUsingEdgeInfo == e.pruneUsingEdgeInfo);
+                    }
+                    CHECK(c.skipAngularDelta1Th == e.skipAngularDelta1Th);
+                    CHECK(c.skipAngularDelta2Th == e.skipAngularDelta2Th);
+                    CHECK(c.skipAngularDelta3Th == e.skipAngularDelta3Th);
+                    CHECK(cx.skipIntra == eSkip);
+                }
+}
+
+TEST_CASE("set_intra_ctrls - the TPL modulation arms (levels 2-5)") {
+    // The stats fixture from the walk test: 5 intra / 3 angular / max 12
+    // for the 64x64 SB at (0,0), dispenser 0.
+    const int cells = 8 * 8;
+    std::vector<uint8_t> modes(cells);
+    for (int i = 0; i < cells; ++i) {
+        const uint8_t pat[8] = {0, 1, 9, 13, 4, 12, 8, 13};
+        modes[i] = pat[i % 8];
+    }
+    SbTplPcs tpl;
+    std::memset(&tpl, 0, sizeof(tpl));
+    tpl.tplEnable = true;
+    tpl.tplSrcDataReady = true;
+    tpl.temporalLayerIndex = 0;
+    tpl.hierarchicalLevels = 5;
+    tpl.alignedWidth = 128;
+    tpl.dispenserSearchLevel = 0;
+    tpl.sbGeomWidth = 64;
+    tpl.sbGeomHeight = 64;
+    tpl.tplBestModes = modes.data();
+    SbTplCtx tctx;
+    tctx.sbOriginX = 0;
+    tctx.sbOriginY = 0;
+
+    // Level 2 + TPL-on + tplIntraModeEnd == PAETH: sb_ang = 3 -> ang = 1.
+    {
+        IntraCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        IntraSetPcs p;
+        std::memset(&p, 0, sizeof(p));
+        p.tplEnable = true;
+        p.tplIntraModeEnd = 12;
+        p.tpl = tpl;
+        p.tplCtx = tctx;
+        IntraSetCtx cx;
+        cx.pdPass = kPdPass0;
+        setIntraCtrls(c, p, cx, 2, 0);
+        CHECK(c.angularPredLevel == 1);
+        CHECK(c.intraModeEnd == 12);
+    }
+    // Level 3: ang = 1 AND intra_mode_end = sb_max_intra = 9 (the
+    // fixture's walk max).
+    {
+        IntraCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        IntraSetPcs p;
+        std::memset(&p, 0, sizeof(p));
+        p.tplEnable = true;
+        p.tplIntraModeEnd = 12;
+        p.tpl = tpl;
+        p.tplCtx = tctx;
+        IntraSetCtx cx;
+        cx.pdPass = kPdPass0;
+        setIntraCtrls(c, p, cx, 3, 0);
+        CHECK(c.angularPredLevel == 1);
+        CHECK(c.intraModeEnd == 9);
+    }
+    // Level 4: rows*cols = 16, quarter = 4; sb_ang = 3 -> not > 4, > 2 ->
+    // ang = 2; end = 12.
+    {
+        IntraCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        IntraSetPcs p;
+        std::memset(&p, 0, sizeof(p));
+        p.tplEnable = true;
+        p.tplIntraModeEnd = 12;
+        p.tpl = tpl;
+        p.tplCtx = tctx;
+        IntraSetCtx cx;
+        cx.pdPass = kPdPass0;
+        setIntraCtrls(c, p, cx, 4, 0);
+        CHECK(c.angularPredLevel == 2);
+        CHECK(c.intraModeEnd == 9);
+    }
+    // Level 4 with an all-DC stats buffer: sb_ang = 0 -> ang = 4.
+    {
+        std::vector<uint8_t> dc(cells, 0);
+        SbTplPcs tpl2 = tpl;
+        tpl2.tplBestModes = dc.data();
+        IntraCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        IntraSetPcs p;
+        std::memset(&p, 0, sizeof(p));
+        p.tplEnable = true;
+        p.tplIntraModeEnd = 12;
+        p.tpl = tpl2;
+        p.tplCtx = tctx;
+        IntraSetCtx cx;
+        cx.pdPass = kPdPass0;
+        setIntraCtrls(c, p, cx, 4, 0);
+        CHECK(c.angularPredLevel == 4);
+        CHECK(c.intraModeEnd == 0);
+    }
+    // Level 5: the tplIntraModeEnd gate is NOT checked; stats give
+    // intra_count 5 > 0 -> ang = 2, end = PAETH.
+    {
+        IntraCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        IntraSetPcs p;
+        std::memset(&p, 0, sizeof(p));
+        p.tplEnable = true;
+        p.tplIntraModeEnd = 0;  // NOT PAETH - the 2-4 gate would fail
+        p.tpl = tpl;
+        p.tplCtx = tctx;
+        IntraSetCtx cx;
+        cx.pdPass = kPdPass0;
+        setIntraCtrls(c, p, cx, 5, 0);
+        CHECK(c.angularPredLevel == 2);
+        CHECK(c.intraModeEnd == 12);
+    }
+    // Level 5 with an all-inter stats buffer: intra_count = 0 and
+    // ref_intra_percentage >= 30 -> NO modulation (ang stays a_p_l[5],
+    // end stays SMOOTH); with ref_intra_percentage < 30: ang = 0, the
+    // end re-pins to SMOOTH.
+    {
+        std::vector<uint8_t> inter(cells, 13);
+        SbTplPcs tpl2 = tpl;
+        tpl2.tplBestModes = inter.data();
+        IntraCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        IntraSetPcs p;
+        std::memset(&p, 0, sizeof(p));
+        p.tplEnable = true;
+        p.refIntraPercentage = 30;
+        p.tpl = tpl2;
+        p.tplCtx = tctx;
+        IntraSetCtx cx;
+        cx.pdPass = kPdPass0;
+        setIntraCtrls(c, p, cx, 5, 0);
+        CHECK(c.angularPredLevel == 4);  // a_p_l[5]
+        CHECK(c.intraModeEnd == 9);
+        p.refIntraPercentage = 29;
+        IntraCtrls c2;
+        std::memset(&c2, kPoison, sizeof(c2));
+        setIntraCtrls(c2, p, cx, 5, 0);
+        CHECK(c2.angularPredLevel == 0);
+        CHECK(c2.intraModeEnd == 9);
+    }
+    // The gate keeper: levels 2-4 with tplIntraModeEnd != PAETH get no
+    // modulation (ang stays the table value 2 at level 2).
+    {
+        IntraCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        IntraSetPcs p;
+        std::memset(&p, 0, sizeof(p));
+        p.tplEnable = true;
+        p.tplIntraModeEnd = 0;
+        p.tpl = tpl;
+        p.tplCtx = tctx;
+        IntraSetCtx cx;
+        cx.pdPass = kPdPass0;
+        setIntraCtrls(c, p, cx, 2, 0);
+        CHECK(c.angularPredLevel == 2);  // a_p_l[2], unmodulated
+    }
+    // The pd_pass tail: PD_PASS_1 copies the pic skip; PD_PASS_0 folds
+    // the enable.
+    {
+        IntraCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        IntraSetPcs p;
+        std::memset(&p, 0, sizeof(p));
+        p.skipIntra = true;
+        IntraSetCtx cx;
+        cx.pdPass = kPdPass1;
+        setIntraCtrls(c, p, cx, 5, 0);
+        CHECK(cx.skipIntra == true);
+        IntraSetCtx cx2;
+        cx2.pdPass = kPdPass0;
+        setIntraCtrls(c, p, cx2, 5, 0);
+        CHECK(cx2.skipIntra == true);  // !enable(=0 via forced level) || skip
+    }
+}

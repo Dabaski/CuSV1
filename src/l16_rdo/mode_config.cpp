@@ -6536,5 +6536,244 @@ void setRateEstCtrls(MdRateEstCtrls& ctrls, std::uint8_t rateEstLevel) {
     }
 }
 
+// get_sb_tpl_intra_stats (enc_mode_config.c:6552-6609).
+bool getSbTplIntraStats(const SbTplPcs& pcs, const SbTplCtx& ctx, int* sbAngIntraCount,
+                        std::uint8_t* sbMaxIntra, int* sbIntraCount) {
+    // Check that TPL data is available and that INTRA was tested in TPL.
+    if (pcs.tplEnable && pcs.tplSrcDataReady &&
+        (pcs.temporalLayerIndex < pcs.hierarchicalLevels || !pcs.disableIntraPredNref)) {
+        const int      aligned16Width = (int)((pcs.alignedWidth + 15) >> 4);
+        const std::uint32_t mbOriginX = ctx.sbOriginX;
+        const std::uint32_t mbOriginY = ctx.sbOriginY;
+        const int      tplBlkSize = pcs.dispenserSearchLevel == 0 ? 16
+                                    : pcs.dispenserSearchLevel == 1 ? 32
+                                                                    : 64;
+        const int      tplBlkStep = pcs.dispenserSearchLevel == 0 ? 1
+                                    : pcs.dispenserSearchLevel == 1 ? 2
+                                                                    : 4;
+
+        // Get actual SB width (for cases of incomplete SBs)
+        const int sbCols = std::max(1, (int)pcs.sbGeomWidth / tplBlkSize);
+        const int sbRows = std::max(1, (int)pcs.sbGeomHeight / tplBlkSize);
+
+        int            angIntraCount = 0;
+        std::uint8_t   maxIntra      = kDcPred;
+        int            intraCount    = 0;
+
+        // Loop over all blocks in the SB
+        for (int i = 0; i < sbRows; i++) {
+            const int rowBase = (int)((mbOriginY >> 4) + (i * tplBlkStep)) * aligned16Width +
+                                (int)(mbOriginX >> 4);
+            for (int j = 0; j < sbCols; j++) {
+                const std::uint8_t bestMode = pcs.tplBestModes[rowBase + j * tplBlkStep];
+                if (bestMode < kIntraModeEnd) {  // is_intra_mode
+                    if (maxIntra < bestMode) maxIntra = bestMode;
+                    intraCount++;
+                }
+
+                if (bestMode >= kVPred && bestMode <= kD67Pred) {  // av1_is_directional_mode
+                    angIntraCount++;
+                }
+            }
+        }
+
+        *sbAngIntraCount = angIntraCount;
+        *sbMaxIntra      = maxIntra;
+        *sbIntraCount    = intraCount;
+        return true;
+    }
+    return false;
+}
+
+// set_intra_ctrls (enc_mode_config.c:6611-6796).
+void setIntraCtrls(IntraCtrls& ctrls, const IntraSetPcs& pcs, IntraSetCtx& ctx,
+                   std::uint8_t intraLevel, std::uint8_t distBasedAngIntraLevel) {
+    // If intra is disallowed at the pic level, must disallow at SB level
+    if (pcs.skipIntra) {
+        intraLevel = 0;
+    }
+
+    switch (intraLevel) {
+    case 0:
+        ctrls.enableIntra          = 0;
+        ctrls.intraModeEnd         = kDcPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    case 1:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kPaethPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    case 2: {
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kPaethPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        // Only use TPL info if all INTRA modes are tested
+        if (pcs.tplEnable && pcs.tplIntraModeEnd == kPaethPred) {
+            int            sbAngIntraCount;
+            std::uint8_t   sbMaxIntra;
+            int            sbIntraCount;
+            if (getSbTplIntraStats(pcs.tpl, pcs.tplCtx, &sbAngIntraCount, &sbMaxIntra,
+                                   &sbIntraCount)) {
+                // if SB has angluar modes, use full search
+                if (sbAngIntraCount) {
+                    ctrls.angularPredLevel = 1;
+                } else {
+                    ctrls.angularPredLevel = 3;
+                }
+            }
+        }
+        break;
+    }
+    case 3: {
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kPaethPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        // Only use TPL info if all INTRA modes are tested
+        if (pcs.tplEnable && pcs.tplIntraModeEnd == kPaethPred) {
+            int            sbAngIntraCount;
+            std::uint8_t   sbMaxIntra;
+            int            sbIntraCount;
+            if (getSbTplIntraStats(pcs.tpl, pcs.tplCtx, &sbAngIntraCount, &sbMaxIntra,
+                                   &sbIntraCount)) {
+                // if SB has angluar modes, use full search
+                if (sbAngIntraCount) {
+                    ctrls.angularPredLevel = 1;
+                } else {
+                    ctrls.angularPredLevel = 3;
+                }
+                ctrls.intraModeEnd = sbMaxIntra;
+            }
+        }
+        break;
+    }
+    case 4: {
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothHPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        // Only use TPL info if all INTRA modes are tested
+        if (pcs.tplEnable && pcs.tplIntraModeEnd == kPaethPred) {
+            int            sbAngIntraCount;
+            std::uint8_t   sbMaxIntra;
+            int            sbIntraCount;
+            if (getSbTplIntraStats(pcs.tpl, pcs.tplCtx, &sbAngIntraCount, &sbMaxIntra,
+                                   &sbIntraCount)) {
+                const int tplBlkSize = pcs.tpl.dispenserSearchLevel == 0 ? 16
+                                       : pcs.tpl.dispenserSearchLevel == 1 ? 32
+                                                                           : 64;
+                // Get actual SB width (for cases of incomplete SBs)
+                const int sbCols = (int)pcs.tpl.sbGeomWidth / tplBlkSize;
+                const int sbRows = (int)pcs.tpl.sbGeomHeight / tplBlkSize;
+
+                // if more than a quarter of SB is angular, use safe intra_level
+                if (sbAngIntraCount > ((sbRows * sbCols) >> 2)) {
+                    ctrls.angularPredLevel = 1;
+                } else if (sbAngIntraCount > 2) {
+                    ctrls.angularPredLevel = 2;
+                } else {
+                    ctrls.angularPredLevel = 4;
+                }
+                ctrls.intraModeEnd = sbMaxIntra;
+            }
+        }
+        break;
+    }
+    case 5: {
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        // There is no check that all TPL modes are checked, so should only use info about
+        // general intra modes, not the specific intra mode selected or whether it's angular
+        if (pcs.tplEnable) {
+            int            sbAngIntraCount;
+            std::uint8_t   sbMaxIntra;
+            int            sbIntraCount;
+            if (getSbTplIntraStats(pcs.tpl, pcs.tplCtx, &sbAngIntraCount, &sbMaxIntra,
+                                   &sbIntraCount)) {
+                if (sbIntraCount > 0) {
+                    ctrls.angularPredLevel = 2;
+                    ctrls.intraModeEnd     = kPaethPred;
+                } else if (pcs.refIntraPercentage < 30) {
+                    ctrls.angularPredLevel = 0;
+                    ctrls.intraModeEnd     = kSmoothPred;
+                }
+            }
+        }
+        break;
+    }
+    case 6:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    case 7:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 1;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    case 8:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 1;
+        ctrls.pruneUsingEdgeInfo   = true;
+        break;
+    case kMaxIntraLevel - 1:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kDcPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+    switch (distBasedAngIntraLevel) {
+    case 0:
+        ctrls.skipAngularDelta1Th = -1;
+        ctrls.skipAngularDelta2Th = -1;
+        ctrls.skipAngularDelta3Th = -1;
+        break;
+    case 1:
+        ctrls.skipAngularDelta1Th = 25;
+        ctrls.skipAngularDelta2Th = 25;
+        ctrls.skipAngularDelta3Th = 25;
+        break;
+    case 2:
+        ctrls.skipAngularDelta1Th = 20;
+        ctrls.skipAngularDelta2Th = 10;
+        ctrls.skipAngularDelta3Th = 5;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+    /* For PD1, the ability to skip intra must be set at the pic level to ensure all SBs
+    perform inverse TX and generate the recon. */
+    if (ctx.pdPass == kPdPass1) {
+        ctx.skipIntra = pcs.skipIntra;
+
+    } else {
+        ctx.skipIntra = !(ctrls.enableIntra) || pcs.skipIntra;
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

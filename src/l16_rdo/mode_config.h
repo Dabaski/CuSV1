@@ -1614,5 +1614,86 @@ struct MdRateEstCtrls {
 // writes nothing (documented UB).
 void setRateEstCtrls(MdRateEstCtrls& ctrls, std::uint8_t rateEstLevel);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 6: get_sb_tpl_intra_stats (:6552-:6609) + set_intra_ctrls
+// (:6611-:6796).
+// ---------------------------------------------------------------------------
+// PredictionMode ordinals consumed here (definitions.h:1168-1204):
+// DC_PRED = 0, V_PRED = 1 .. D67_PRED = 8 (the directional band),
+// SMOOTH_PRED = 9, SMOOTH_V_PRED = 10, SMOOTH_H_PRED = 11,
+// PAETH_PRED = 12, INTRA_MODE_END = 13.
+constexpr std::uint8_t kDcPred = 0;
+constexpr std::uint8_t kVPred = 1;
+constexpr std::uint8_t kD67Pred = 8;
+constexpr std::uint8_t kSmoothPred = 9;
+constexpr std::uint8_t kSmoothHPred = 11;
+constexpr std::uint8_t kPaethPred = 12;
+constexpr std::uint8_t kIntraModeEnd = 13;
+
+// The TPL wall surface of get_sb_tpl_intra_stats (:6552-6609). The
+// reference walks ppcs->pa_me_data->tpl_src_stats_buffer (one TplSrcStats
+// per 16x16 cell, row stride = aligned16_width cells); the carrier
+// compacts the consumed best_mode column into its own array (the named
+// fold - the struct deref reduces to the best_mode field).
+struct SbTplPcs {
+    bool tplEnable;                    // ppcs->tpl_ctrls.enable
+    bool tplSrcDataReady;              // ppcs->tpl_src_data_ready
+    std::uint8_t temporalLayerIndex;   // pcs->temporal_layer_index
+    std::uint32_t hierarchicalLevels;  // ppcs->hierarchical_levels
+    bool disableIntraPredNref;         // ppcs->tpl_ctrls.disable_intra_pred_nref
+    std::uint32_t alignedWidth;        // ppcs->aligned_width
+    std::uint8_t dispenserSearchLevel;  // ppcs->tpl_ctrls.dispenser_search_level
+    std::uint8_t sbGeomWidth;          // ppcs->sb_geom[ctx->sb_index].width
+    std::uint8_t sbGeomHeight;         // ... .height
+    const std::uint8_t* tplBestModes;  // compacted best_mode per 16x16 cell
+};
+struct SbTplCtx {
+    std::uint32_t sbOriginX;  // ctx->sb_origin_x
+    std::uint32_t sbOriginY;  // ctx->sb_origin_y
+};
+
+// get_sb_tpl_intra_stats (:6552-6609). Returns 1 with the three outputs
+// written when TPL data is usable; returns 0 with the outputs untouched
+// otherwise (the gate :6565-:6567).
+bool getSbTplIntraStats(const SbTplPcs& pcs, const SbTplCtx& ctx, int* sbAngIntraCount,
+                        std::uint8_t* sbMaxIntra, int* sbIntraCount);
+
+// IntraCtrls (md_process.h:778-789, verbatim field order/types).
+struct IntraCtrls {
+    std::uint8_t enableIntra;
+    std::uint8_t intraModeEnd;
+    std::uint8_t angularPredLevel;
+    std::uint8_t pruneUsingBestMode;
+    bool pruneUsingEdgeInfo;
+    std::int8_t skipAngularDelta1Th;
+    std::int8_t skipAngularDelta2Th;
+    std::int8_t skipAngularDelta3Th;
+};
+
+// The pcs/ppcs wall surface of set_intra_ctrls (:6611-6796). The TPL
+// sub-surface is the getSbTplIntraStats carrier embedded.
+struct IntraSetPcs {
+    bool skipIntra;                     // pcs->skip_intra
+    bool isISlice;                      // pcs->slice_type == I_SLICE
+    bool tplEnable;                     // ppcs->tpl_ctrls.enable
+    std::uint8_t tplIntraModeEnd;       // ppcs->tpl_ctrls.intra_mode_end
+    std::uint8_t refIntraPercentage;    // pcs->ref_intra_percentage
+    SbTplPcs tpl;                       // the stats surface
+    SbTplCtx tplCtx;                    // ctx->sb_origin/sb_index fold
+};
+
+// The ctx surface: pd_pass read; skip_intra written (:6789-:6795).
+struct IntraSetCtx {
+    std::uint8_t pdPass;
+    bool skipIntra;
+};
+
+// set_intra_ctrls (:6611-6796), 1:1. The reference's
+// assert(IMPLIES(islice, intra_level > 0)) (:6620) is a debug-only
+// contract on the CALLER (the port drops it, named); the default arms
+// assert(0) and write nothing (documented UB).
+void setIntraCtrls(IntraCtrls& ctrls, const IntraSetPcs& pcs, IntraSetCtx& ctx,
+                   std::uint8_t intraLevel, std::uint8_t distBasedAngIntraLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo
