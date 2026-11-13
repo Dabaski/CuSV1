@@ -5402,5 +5402,539 @@ void setNsqSearchCtrls(NsqSearchCtrls& ctrls, NsqPsqTxsCtrls& psqTxsCtrls, const
     setSqTxsCtrls(psqTxsCtrls, ctrls.psqTxsLvl);
 }
 
+// svt_aom_get_intra_mode_levels_default (enc_mode_config.c:5377-5404).
+void getIntraModeLevelsDefault(EncMode encMode, bool isISlice, bool isBase, int transitionPresent,
+                               std::uint32_t* intraLevel, std::uint32_t* distBasedAngIntraLevel) {
+    std::uint32_t intraLevelL;
+    std::uint32_t distBasedAngIntraLevelL;
+
+    if (encMode <= ENC_MR) {
+        intraLevelL                = isBase ? 1 : 2;
+        distBasedAngIntraLevelL    = 0;
+    } else if (encMode <= ENC_M2) {
+        intraLevelL                = isBase ? 1 : 2;
+        distBasedAngIntraLevelL    = isBase ? 0 : 1;
+    } else if (encMode <= ENC_M5) {
+        intraLevelL                = isBase ? 1 : 6;
+        distBasedAngIntraLevelL    = isISlice ? 0 : 2;
+    } else if (encMode <= ENC_M7) {
+        intraLevelL                = isBase ? 2 : 6;
+        distBasedAngIntraLevelL    = isISlice ? 0 : 2;
+    } else if (encMode <= ENC_M11) {
+        intraLevelL                = (isISlice || transitionPresent == 1) ? 4 : 6;
+        distBasedAngIntraLevelL    = isISlice ? 0 : 2;
+    } else {
+        intraLevelL                = kMaxIntraLevel - 1;
+        distBasedAngIntraLevelL    = 0;
+    }
+
+    *intraLevel                = intraLevelL;
+    *distBasedAngIntraLevel    = distBasedAngIntraLevelL;
+}
+
+// svt_aom_get_intra_mode_levels_rtc (enc_mode_config.c:5406-5427).
+void getIntraModeLevelsRtc(EncMode encMode, bool isISlice, int transitionPresent, bool useFlatIpp,
+                           std::uint32_t* intraLevel, std::uint32_t* distBasedAngIntraLevel) {
+    std::uint32_t intraLevelL;
+    std::uint32_t distBasedAngIntraLevelL;
+
+    if ((!useFlatIpp && encMode <= ENC_M7) || (useFlatIpp && encMode <= ENC_M9)) {
+        intraLevelL                = (isISlice || transitionPresent == 1) ? 1 : 6;
+        distBasedAngIntraLevelL    = 1;
+    } else if (encMode <= ENC_M8) {
+        intraLevelL                = (isISlice || transitionPresent == 1) ? 4 : 6;
+        distBasedAngIntraLevelL    = 1;
+    } else if (encMode <= ENC_M10) {
+        intraLevelL                = (isISlice || transitionPresent == 1) ? 4 : 6;
+        distBasedAngIntraLevelL    = 2;
+    } else {
+        intraLevelL                = kMaxIntraLevel - 1;
+        distBasedAngIntraLevelL    = 0;
+    }
+
+    *intraLevel                = intraLevelL;
+    *distBasedAngIntraLevel    = distBasedAngIntraLevelL;
+}
+
+// set_inter_intra_ctrls (enc_mode_config.c:5455-5481).
+void setInterIntraCtrls(InterIntraCompCtrls& ctrls, std::uint8_t interIntraLevel) {
+    switch (interIntraLevel) {
+    case 0:
+        ctrls.enabled        = 0;
+        ctrls.useRdModel     = 0;
+        ctrls.wedgeModeSq    = 0;
+        ctrls.wedgeModeNsq   = 0;
+        break;
+    case 1:
+        ctrls.enabled        = 1;
+        ctrls.useRdModel     = 1;
+        ctrls.wedgeModeSq    = 1;
+        ctrls.wedgeModeNsq   = 1;
+        break;
+    case 2:
+        ctrls.enabled        = 1;
+        ctrls.useRdModel     = 0;
+        ctrls.wedgeModeSq    = 0;
+        ctrls.wedgeModeNsq   = 2;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_pd0_ctrls (enc_mode_config.c:5483-5601).
+void setPd0Ctrls(Pd0Ctrls& ctrls, std::uint8_t lpd0Lvl, std::uint8_t hbdMd) {
+    if (hbdMd) {  // SVT_EFFECTIVE_HBD_MD is the identity in the pinned build
+        ctrls.pd0Level = 0;  // PD0_LVL_0
+        return;
+    }
+    switch (lpd0Lvl) {
+    case 0:
+        ctrls.pd0Level        = 0;  // PD0_LVL_0
+        ctrls.usePd0Detector[0] = 0;
+        break;
+    case 1:
+        ctrls.pd0Level        = 1;  // PD0_LVL_1
+        ctrls.usePd0Detector[0] = 0;
+        ctrls.usePd0Detector[1] = 0;
+        break;
+    case 2:
+        ctrls.pd0Level        = 2;  // PD0_LVL_2
+        ctrls.usePd0Detector[0] = 0;
+        ctrls.usePd0Detector[1] = 0;
+        ctrls.usePd0Detector[2] = 0;
+        break;
+    case 3:
+        ctrls.pd0Level        = 3;  // PD0_LVL_3
+        ctrls.usePd0Detector[0] = 0;
+        ctrls.usePd0Detector[1] = 0;
+        ctrls.usePd0Detector[2] = 0;
+        ctrls.usePd0Detector[3] = 0;
+        break;
+    case 4:
+        ctrls.pd0Level            = 4;  // PD0_LVL_4
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 1;
+        ctrls.useRefInfo[4]       = 2;
+        ctrls.me8x8CostVarianceTh[4] = 250000;
+        ctrls.edgeDistTh[4]       = 16384;
+        ctrls.neighMeDistShift[4] = 3;
+        break;
+    case 5:
+        ctrls.pd0Level            = 5;  // PD0_LVL_5
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 1;
+        ctrls.useRefInfo[4]       = 2;
+        ctrls.me8x8CostVarianceTh[4] = 250000;
+        ctrls.edgeDistTh[4]       = 16384;
+        ctrls.neighMeDistShift[4] = 3;
+
+        ctrls.usePd0Detector[5]   = 1;
+        ctrls.useRefInfo[5]       = 1;
+        ctrls.me8x8CostVarianceTh[5] = 250000 >> 1;
+        ctrls.edgeDistTh[5]       = 16384;
+        ctrls.neighMeDistShift[5] = 2;
+        break;
+    case 6:
+        ctrls.pd0Level            = 5;  // PD0_LVL_5
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 0;
+        ctrls.usePd0Detector[5]   = 1;
+        ctrls.useRefInfo[5]       = 0;
+        ctrls.me8x8CostVarianceTh[5] = 500000;
+        ctrls.edgeDistTh[5]       = 16384;
+        ctrls.neighMeDistShift[5] = 2;
+        break;
+    case 7:
+        ctrls.pd0Level = 6;  // PD0_LVL_6
+
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 0;
+        ctrls.usePd0Detector[5]   = 1;
+        ctrls.useRefInfo[5]       = 0;
+        ctrls.me8x8CostVarianceTh[5] = 500000 << 1;
+        ctrls.edgeDistTh[5]       = (std::uint32_t)~0;
+        ctrls.neighMeDistShift[5] = (std::uint16_t)~0;
+
+        // Set VERY_LIGHT_PD0 controls
+        ctrls.usePd0Detector[6]   = 1;
+        ctrls.useRefInfo[6]       = 1;
+        ctrls.me8x8CostVarianceTh[6] = 250000;
+        ctrls.edgeDistTh[6]       = 16384;
+        ctrls.neighMeDistShift[6] = 2;
+        break;
+    case 8:
+        ctrls.pd0Level = 6;  // PD0_LVL_6
+
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 0;
+        ctrls.usePd0Detector[5]   = 1;
+        ctrls.useRefInfo[5]       = 0;
+        ctrls.me8x8CostVarianceTh[5] = 500000 << 1;
+        ctrls.edgeDistTh[5]       = (std::uint32_t)~0;
+        ctrls.neighMeDistShift[5] = (std::uint16_t)~0;
+
+        // Set VERY_LIGHT_PD0 controls
+        ctrls.usePd0Detector[6]   = 1;
+        ctrls.useRefInfo[6]       = 2;
+        ctrls.me8x8CostVarianceTh[6] = 250000;
+        ctrls.edgeDistTh[6]       = 16384;
+        ctrls.neighMeDistShift[6] = 2;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_lpd1_ctrls (enc_mode_config.c:5603-5937).
+void setLpd1Ctrls(Lpd1Ctrls& ctrls, std::uint8_t lpd1Lvl) {
+    switch (lpd1Lvl) {
+    case 0:
+        ctrls.pd1Level = (std::uint8_t)REGULAR_PD1;  // Light-PD1 path not used
+        break;
+    case 1:
+        ctrls.pd1Level = LPD1_LVL_0;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 1;
+        ctrls.costThDist[0]            = 25;
+        ctrls.costThRate[0]            = 6000 + 40 * 500;
+        ctrls.nzCoeffTh[0]             = 0;
+        ctrls.maxMvLength[0]           = 300;
+        ctrls.me8x8CostVarianceTh[0]   = 250000 >> 3;
+        ctrls.skipPd0EdgeDistTh[0]     = 1024;
+        ctrls.skipPd0MeShift[0]        = 1;
+        break;
+    case 2:
+        ctrls.pd1Level = LPD1_LVL_0;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 1;
+        ctrls.costThDist[0]            = 25;
+        ctrls.costThRate[0]            = 6000 + 40 * 500;
+        ctrls.nzCoeffTh[0]             = 16;
+        ctrls.maxMvLength[0]           = 300;
+        ctrls.me8x8CostVarianceTh[0]   = 250000 >> 3;
+        ctrls.skipPd0EdgeDistTh[0]     = 1024;
+        ctrls.skipPd0MeShift[0]        = 1;
+        break;
+    case 3:
+        ctrls.pd1Level = LPD1_LVL_0;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 35;
+        ctrls.costThRate[0]            = 6000 + 100 * 500;
+        ctrls.nzCoeffTh[0]             = 16;
+        ctrls.maxMvLength[0]           = 900;
+        ctrls.me8x8CostVarianceTh[0]   = 750000 >> 3;
+        ctrls.skipPd0EdgeDistTh[0]     = 16384;
+        ctrls.skipPd0MeShift[0]        = 3;
+        break;
+    case 4:
+        ctrls.pd1Level = LPD1_LVL_1;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 4;
+        ctrls.costThRate[0]            = 6000 + 512 * 500;
+        ctrls.nzCoeffTh[0]             = 32;
+        ctrls.maxMvLength[0]           = 2048;
+        ctrls.me8x8CostVarianceTh[0]   = 500000;
+        ctrls.skipPd0EdgeDistTh[0]     = 16384;
+        ctrls.skipPd0MeShift[0]        = 3;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 1;
+        ctrls.costThDist[1]            = 256 << 1;
+        ctrls.costThRate[1]            = 6000 + 125 * 500;
+        ctrls.nzCoeffTh[1]             = 32;
+        ctrls.maxMvLength[1]           = 1600;
+        ctrls.me8x8CostVarianceTh[1]   = 500000 >> 3;
+        ctrls.skipPd0EdgeDistTh[1]     = 16384;
+        ctrls.skipPd0MeShift[1]        = 3;
+        break;
+    case 5:
+        ctrls.pd1Level = LPD1_LVL_3;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 10;
+        ctrls.costThRate[0]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[0]             = 512;
+        ctrls.maxMvLength[0]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[0]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[0]     = 16384 * 7;
+        ctrls.skipPd0MeShift[0]        = 5;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 0;
+        ctrls.costThDist[1]            = 256 << 8;
+        ctrls.costThRate[1]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[1]             = 256;
+        ctrls.maxMvLength[1]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[1]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[1]     = 16384 * 6;
+        ctrls.skipPd0MeShift[1]        = 5;
+
+        // Set LPD1 level 2 controls
+        ctrls.useLpd1Detector[2]       = 1;
+        ctrls.useRefInfo[2]            = 0;
+        ctrls.costThDist[2]            = 256 << 8;
+        ctrls.costThRate[2]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[2]             = 164;
+        ctrls.maxMvLength[2]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[2]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[2]     = 16384 * 6;
+        ctrls.skipPd0MeShift[2]        = 5;
+
+        // Set LPD1 level 3 controls
+        ctrls.useLpd1Detector[3]       = 1;
+        ctrls.useRefInfo[3]            = 1;
+        ctrls.costThDist[3]            = 256 << 8;
+        ctrls.costThRate[3]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[3]             = 128;
+        ctrls.maxMvLength[3]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[3]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[3]     = 16384 * 6;
+        ctrls.skipPd0MeShift[3]        = 5;
+        break;
+    case 6:
+        ctrls.pd1Level = LPD1_LVL_4;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 10;
+        ctrls.costThRate[0]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[0]             = 512;
+        ctrls.maxMvLength[0]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[0]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[0]     = 16384 * 7;
+        ctrls.skipPd0MeShift[0]        = 5;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 0;
+        ctrls.costThDist[1]            = 256 << 10;
+        ctrls.costThRate[1]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[1]             = 512;
+        ctrls.maxMvLength[1]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[1]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[1]     = 16384 * 7;
+        ctrls.skipPd0MeShift[1]        = 5;
+
+        // Set LPD1 level 2 controls
+        ctrls.useLpd1Detector[2]       = 1;
+        ctrls.useRefInfo[2]            = 0;
+        ctrls.costThDist[2]            = 256 << 10;
+        ctrls.costThRate[2]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[2]             = 256;
+        ctrls.maxMvLength[2]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[2]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[2]     = 16384 * 7;
+        ctrls.skipPd0MeShift[2]        = 5;
+
+        // Set LPD1 level 3 controls
+        ctrls.useLpd1Detector[3]       = 1;
+        ctrls.useRefInfo[3]            = 0;
+        ctrls.costThDist[3]            = 256 << 10;
+        ctrls.costThRate[3]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[3]             = 164;
+        ctrls.maxMvLength[3]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[3]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[3]     = 16384 * 7;
+        ctrls.skipPd0MeShift[3]        = 5;
+
+        // Set LPD1 level 4 controls
+        ctrls.useLpd1Detector[4]       = 1;
+        ctrls.useRefInfo[4]            = 1;
+        ctrls.costThDist[4]            = 256 << 4;
+        ctrls.costThRate[4]            = 6000 + 1024 * 500;
+        ctrls.nzCoeffTh[4]             = 128;
+        ctrls.maxMvLength[4]           = 2048;
+        ctrls.me8x8CostVarianceTh[4]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[4]     = 16384 * 2;
+        ctrls.skipPd0MeShift[4]        = 3;
+        break;
+    case 7:
+        ctrls.pd1Level = LPD1_LVL_5;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 10;
+        ctrls.costThRate[0]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[0]             = 256;
+        ctrls.maxMvLength[0]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[0]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[0]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[0]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 0;
+        ctrls.costThDist[1]            = 256 << 10;
+        ctrls.costThRate[1]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[1]             = 128;
+        ctrls.maxMvLength[1]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[1]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[1]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[1]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 2 controls
+        ctrls.useLpd1Detector[2]       = 1;
+        ctrls.useRefInfo[2]            = 0;
+        ctrls.costThDist[2]            = 256 << 10;
+        ctrls.costThRate[2]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[2]             = 96;
+        ctrls.maxMvLength[2]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[2]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[2]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[2]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 3 controls
+        ctrls.useLpd1Detector[3]       = 1;
+        ctrls.useRefInfo[3]            = 0;
+        ctrls.costThDist[3]            = 256 << 10;
+        ctrls.costThRate[3]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[3]             = 96;
+        ctrls.maxMvLength[3]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[3]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[3]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[3]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 4 controls
+        ctrls.useLpd1Detector[4]       = 1;
+        ctrls.useRefInfo[4]            = 1;
+        ctrls.costThDist[4]            = 256 << 8;
+        ctrls.costThRate[4]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[4]             = 64;
+        ctrls.maxMvLength[4]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[4]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[4]     = 16384 * 6;
+        ctrls.skipPd0MeShift[4]        = 5;
+
+        // Set LPD1 level 5 controls
+        ctrls.useLpd1Detector[5]       = 1;
+        ctrls.useRefInfo[5]            = 1;
+        ctrls.costThDist[5]            = 256 << 8;
+        ctrls.costThRate[5]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[5]             = 64;
+        ctrls.maxMvLength[5]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[5]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[5]     = 16384 * 6;
+        ctrls.skipPd0MeShift[5]        = 5;
+        break;
+    case 8:
+        ctrls.pd1Level = LPD1_LVL_6;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 10;
+        ctrls.costThRate[0]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[0]             = 256;
+        ctrls.maxMvLength[0]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[0]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[0]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[0]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 0;
+        ctrls.costThDist[1]            = 256 << 10;
+        ctrls.costThRate[1]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[1]             = 128;
+        ctrls.maxMvLength[1]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[1]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[1]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[1]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 2 controls
+        ctrls.useLpd1Detector[2]       = 1;
+        ctrls.useRefInfo[2]            = 0;
+        ctrls.costThDist[2]            = 256 << 10;
+        ctrls.costThRate[2]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[2]             = 96;
+        ctrls.maxMvLength[2]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[2]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[2]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[2]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 3 controls
+        ctrls.useLpd1Detector[3]       = 1;
+        ctrls.useRefInfo[3]            = 0;
+        ctrls.costThDist[3]            = 256 << 10;
+        ctrls.costThRate[3]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[3]             = 96;
+        ctrls.maxMvLength[3]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[3]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[3]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[3]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 4 controls
+        ctrls.useLpd1Detector[4]       = 1;
+        ctrls.useRefInfo[4]            = 1;
+        ctrls.costThDist[4]            = 256 << 8;
+        ctrls.costThRate[4]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[4]             = 64;
+        ctrls.maxMvLength[4]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[4]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[4]     = 16384 * 6;
+        ctrls.skipPd0MeShift[4]        = 5;
+
+        // Set LPD1 level 5 controls
+        ctrls.useLpd1Detector[5]       = 1;
+        ctrls.useRefInfo[5]            = 1;
+        ctrls.costThDist[5]            = 256 << 8;
+        ctrls.costThRate[5]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[5]             = 64;
+        ctrls.maxMvLength[5]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[5]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[5]     = 16384 * 6;
+        ctrls.skipPd0MeShift[5]        = 5;
+
+        // Set LPD1 level 6 controls
+        ctrls.useLpd1Detector[6]       = 1;
+        ctrls.useRefInfo[6]            = 1;
+        ctrls.costThDist[6]            = 256 << 8;
+        ctrls.costThRate[6]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[6]             = 64;
+        ctrls.maxMvLength[6]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[6]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[6]     = 16384 * 6;
+        ctrls.skipPd0MeShift[6]        = 5;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

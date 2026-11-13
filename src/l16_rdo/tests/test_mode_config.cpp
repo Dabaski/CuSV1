@@ -5332,3 +5332,356 @@ TEST_CASE("set_nsq_search_ctrls - the mimic gate, the me-dist bump and its cap")
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 3: the intra-mode level getters (:5377-:5427),
+// set_inter_intra_ctrls (:5455-:5481), set_pd0_ctrls (:5483-:5601),
+// set_lpd1_ctrls (:5603-:5937).
+// ---------------------------------------------------------------------------
+
+// Independent transcriptions (:5377-:5427). MAX_INTRA_LEVEL - 1 = 9.
+static void oracleIntraLevelsDefault(int em, bool isISlice, bool isBase, int trans, uint32_t* intra,
+                                     uint32_t* distAng) {
+    uint32_t i, d;
+    if (em <= (int)ENC_MR) {
+        i = isBase ? 1 : 2;
+        d = 0;
+    } else if (em <= (int)ENC_M2) {
+        i = isBase ? 1 : 2;
+        d = isBase ? 0 : 1;
+    } else if (em <= (int)ENC_M5) {
+        i = isBase ? 1 : 6;
+        d = isISlice ? 0 : 2;
+    } else if (em <= (int)ENC_M7) {
+        i = isBase ? 2 : 6;
+        d = isISlice ? 0 : 2;
+    } else if (em <= (int)ENC_M11) {
+        i = (isISlice || trans == 1) ? 4 : 6;
+        d = isISlice ? 0 : 2;
+    } else {
+        i = 9;
+        d = 0;
+    }
+    *intra = i;
+    *distAng = d;
+}
+static void oracleIntraLevelsRtc(int em, bool isISlice, int trans, bool flat, uint32_t* intra,
+                                 uint32_t* distAng) {
+    uint32_t i, d;
+    if ((!flat && em <= (int)ENC_M7) || (flat && em <= (int)ENC_M9)) {
+        i = (isISlice || trans == 1) ? 1 : 6;
+        d = 1;
+    } else if (em <= (int)ENC_M8) {
+        i = (isISlice || trans == 1) ? 4 : 6;
+        d = 1;
+    } else if (em <= (int)ENC_M10) {
+        i = (isISlice || trans == 1) ? 4 : 6;
+        d = 2;
+    } else {
+        i = 9;
+        d = 0;
+    }
+    *intra = i;
+    *distAng = d;
+}
+
+TEST_CASE("get_intra_mode_levels_{default,rtc} - the full wall grid, vs the oracle") {
+    for (int em = (int)ENC_MR; em <= (int)ENC_M13; ++em)
+        for (int islice = 0; islice <= 1; ++islice)
+            for (int base = 0; base <= 1; ++base)
+                for (int trans = 0; trans <= 1; ++trans) {
+                    uint32_t intra, distAng, eIntra, eDistAng;
+                    getIntraModeLevelsDefault((EncMode)em, islice == 1, base == 1, trans,
+                                              &intra, &distAng);
+                    oracleIntraLevelsDefault(em, islice == 1, base == 1, trans, &eIntra, &eDistAng);
+                    CHECK(intra == eIntra);
+                    CHECK(distAng == eDistAng);
+                    for (int flat = 0; flat <= 1; ++flat) {
+                        getIntraModeLevelsRtc((EncMode)em, islice == 1, trans, flat == 1, &intra,
+                                              &distAng);
+                        oracleIntraLevelsRtc(em, islice == 1, trans, flat == 1, &eIntra, &eDistAng);
+                        CHECK(intra == eIntra);
+                        CHECK(distAng == eDistAng);
+                    }
+                }
+    // Hand pins on the band edges (the :5391/:5412 flat-ipp splits).
+    uint32_t intra, distAng, eIntra, eDistAng;
+    getIntraModeLevelsRtc(ENC_M8, false, 0, true, &intra, &distAng);
+    oracleIntraLevelsRtc((int)ENC_M8, false, 0, true, &eIntra, &eDistAng);
+    CHECK(intra == eIntra);  // flat M8 -> first band
+    getIntraModeLevelsRtc(ENC_M8, false, 0, false, &intra, &distAng);
+    oracleIntraLevelsRtc((int)ENC_M8, false, 0, false, &eIntra, &eDistAng);
+    CHECK(intra == eIntra);  // non-flat M8 -> the <= M8 band
+    getIntraModeLevelsDefault(ENC_M13, false, 1, 0, &intra, &distAng);
+    CHECK(intra == 9);
+    CHECK(distAng == 0);
+}
+
+TEST_CASE("set_inter_intra_ctrls - the three levels, whole-struct") {
+    // :5455-5481. Level 0 all zero; level 1 (1,1,1,1); level 2
+    // (1,0,0,2); default writes nothing.
+    for (int level = 0; level <= 3; ++level) {
+        InterIntraCompCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setInterIntraCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.useRdModel == 0);
+            CHECK(c.wedgeModeSq == 0);
+            CHECK(c.wedgeModeNsq == 0);
+        } else if (level == 1) {
+            CHECK(c.enabled == 1);
+            CHECK(c.useRdModel == 1);
+            CHECK(c.wedgeModeSq == 1);
+            CHECK(c.wedgeModeNsq == 1);
+        } else if (level == 2) {
+            CHECK(c.enabled == 1);
+            CHECK(c.useRdModel == 0);
+            CHECK(c.wedgeModeSq == 0);
+            CHECK(c.wedgeModeNsq == 2);
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.useRdModel == kPoison);
+            CHECK(c.wedgeModeSq == kPoison);
+            CHECK(c.wedgeModeNsq == kPoison);
+        }
+    }
+}
+
+TEST_CASE("set_pd0_ctrls - every level x the hbd early-out, whole-struct") {
+    // :5483-5601. PD0_LVL_* = 0..6. The detector/ref/var/edge/shift
+    // arrays: unwritten slots keep poison; written slots per the switch.
+    const uint16_t poison16 = 0xAAAA;
+    for (int hbd = 0; hbd <= 1; ++hbd)
+        for (int level = 0; level <= 9; ++level) {
+            Pd0Ctrls c;
+            std::memset(&c, kPoison, sizeof(c));
+            setPd0Ctrls(c, (uint8_t)level, (uint8_t)hbd);
+            if (hbd) {
+                // :5487-5490 - the early-out: pd0_level forced to
+                // PD0_LVL_0, everything else untouched.
+                CHECK(c.pd0Level == 0);
+                CHECK(c.useRefInfo[0] == kPoison);
+                CHECK(c.me8x8CostVarianceTh[6] == 0xAAAAAAAAu);
+                continue;
+            }
+            int eLevel = -1;
+            int eDet[7], eRef[7];
+            uint32_t eVar[7], eEdge[7];
+            uint16_t eShift[7];
+            for (int i = 0; i < 7; ++i) {
+                eDet[i] = -1; eRef[i] = -1; eVar[i] = 0xAAAAAAAAu;
+                eEdge[i] = 0xAAAAAAAAu; eShift[i] = poison16;
+            }
+            if (level == 0) {
+                eLevel = 0; eDet[0] = 0;
+            } else if (level == 1) {
+                eLevel = 1; eDet[0] = 0; eDet[1] = 0;
+            } else if (level == 2) {
+                eLevel = 2; eDet[0] = 0; eDet[1] = 0; eDet[2] = 0;
+            } else if (level == 3) {
+                eLevel = 3; eDet[0] = 0; eDet[1] = 0; eDet[2] = 0; eDet[3] = 0;
+            } else if (level == 4) {
+                eLevel = 4;
+                eDet[0] = 0; eDet[1] = 0; eDet[2] = 0; eDet[3] = 0; eDet[4] = 1;
+                eRef[4] = 2; eVar[4] = 250000; eEdge[4] = 16384; eShift[4] = 3;
+            } else if (level == 5) {
+                eLevel = 5;
+                eDet[0] = 0; eDet[1] = 0; eDet[2] = 0; eDet[3] = 0; eDet[4] = 1;
+                eRef[4] = 2; eVar[4] = 250000; eEdge[4] = 16384; eShift[4] = 3;
+                eDet[5] = 1; eRef[5] = 1; eVar[5] = 250000 >> 1; eEdge[5] = 16384; eShift[5] = 2;
+            } else if (level == 6) {
+                eLevel = 5;
+                eDet[0] = 0; eDet[1] = 0; eDet[2] = 0; eDet[3] = 0; eDet[4] = 0; eDet[5] = 1;
+                eRef[5] = 0; eVar[5] = 500000; eEdge[5] = 16384; eShift[5] = 2;
+            } else if (level == 7) {
+                eLevel = 6;
+                eDet[0] = 0; eDet[1] = 0; eDet[2] = 0; eDet[3] = 0; eDet[4] = 0; eDet[5] = 1;
+                eRef[5] = 0; eVar[5] = 500000 << 1; eEdge[5] = (uint32_t)~0; eShift[5] = (uint16_t)~0;
+                eDet[6] = 1; eRef[6] = 1; eVar[6] = 250000; eEdge[6] = 16384; eShift[6] = 2;
+            } else if (level == 8) {
+                eLevel = 6;
+                eDet[0] = 0; eDet[1] = 0; eDet[2] = 0; eDet[3] = 0; eDet[4] = 0; eDet[5] = 1;
+                eRef[5] = 0; eVar[5] = 500000 << 1; eEdge[5] = (uint32_t)~0; eShift[5] = (uint16_t)~0;
+                eDet[6] = 1; eRef[6] = 2; eVar[6] = 250000; eEdge[6] = 16384; eShift[6] = 2;
+            }  // level 9: the default arm writes nothing
+            if (level <= 8) {
+                CHECK(c.pd0Level == (uint8_t)eLevel);
+                for (int i = 0; i < 7; ++i) {
+                    if (eDet[i] >= 0) CHECK(c.usePd0Detector[i] == (eDet[i] != 0));
+                    if (eRef[i] >= 0) CHECK(c.useRefInfo[i] == (uint8_t)eRef[i]);
+                    CHECK(c.me8x8CostVarianceTh[i] == eVar[i]);
+                    CHECK(c.edgeDistTh[i] == eEdge[i]);
+                    CHECK(c.neighMeDistShift[i] == eShift[i]);
+                }
+            } else {
+                CHECK(c.pd0Level == kPoison);
+                CHECK(c.me8x8CostVarianceTh[4] == 0xAAAAAAAAu);
+                CHECK(c.edgeDistTh[5] == 0xAAAAAAAAu);
+            }
+        }
+}
+
+// set_lpd1_ctrls, independent transcription (:5603-5937). Per case, the
+// written sub-rows; written[k] = false means poison stands.
+struct OracleLpd1Row {
+    bool written;
+    int det, ref;
+    uint32_t dist, rate, nz;
+    uint16_t mv;
+    uint32_t var;
+    uint32_t skip;
+    uint16_t shift;
+};
+static const uint64_t kRate26000 = 6000 + 40 * 500;
+static const uint64_t kRate56000 = 6000 + 100 * 500;
+static const uint64_t kRate262000 = 6000 + 512 * 500;
+static const uint64_t kRate68500 = 6000 + 125 * 500;
+static const uint64_t kRate4102000 = 6000 + 8192 * 500;
+static const uint64_t kRate2054000 = 6000 + 4096 * 500;
+static const uint64_t kRate518000 = 6000 + 1024 * 500;
+
+static OracleLpd1Row oracleLpd1Rows(int level, int row) {
+    OracleLpd1Row r = {};
+    r.written = false;
+    r.det = -1; r.ref = -1;
+    r.dist = 0xAAAAAAAAu; r.rate = 0xAAAAAAAAu; r.nz = 0xAAAAAAAAu;
+    r.mv = 0xAAAA; r.var = 0xAAAAAAAAu; r.skip = 0xAAAAAAAAu; r.shift = 0xAAAA;
+    // Case N writes detector rows [0..pd1_level]; the pd1_level mapping
+    // is the ePd1 table below (cases 1-3 sit on LPD1_LVL_0, case 5 jumps
+    // to LPD1_LVL_3), NOT level-1.
+    static const int ePd1[9] = {-1, 0, 0, 0, 1, 3, 4, 5, 6};
+    if (level < 1 || level > 8 || row > ePd1[level]) return r;
+    r.written = true;
+    r.det = 1;
+    switch (level) {
+    case 1:
+        r.ref = 1; r.dist = 25; r.rate = (uint32_t)kRate26000; r.nz = 0; r.mv = 300;
+        r.var = 250000 >> 3; r.skip = 1024; r.shift = 1;
+        break;
+    case 2:
+        r.ref = 1; r.dist = 25; r.rate = (uint32_t)kRate26000; r.nz = 16; r.mv = 300;
+        r.var = 250000 >> 3; r.skip = 1024; r.shift = 1;
+        break;
+    case 3:
+        r.ref = 0; r.dist = 35; r.rate = (uint32_t)kRate56000; r.nz = 16; r.mv = 900;
+        r.var = 750000 >> 3; r.skip = 16384; r.shift = 3;
+        break;
+    case 4:
+        if (row == 0) {
+            r.ref = 0; r.dist = 256 << 4; r.rate = (uint32_t)kRate262000; r.nz = 32; r.mv = 2048;
+            r.var = 500000; r.skip = 16384; r.shift = 3;
+        } else {
+            r.ref = 1; r.dist = 256 << 1; r.rate = (uint32_t)kRate68500; r.nz = 32; r.mv = 1600;
+            r.var = 500000 >> 3; r.skip = 16384; r.shift = 3;
+        }
+        break;
+    case 5:
+        if (row == 0) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 512;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = 16384 * 7; r.shift = 5;
+        } else if (row == 1) {
+            r.ref = 0; r.dist = 256 << 8; r.rate = (uint32_t)kRate2054000; r.nz = 256;
+            r.mv = 2048 * 8; r.var = (uint32_t)~0; r.skip = 16384 * 6; r.shift = 5;
+        } else if (row == 2) {
+            r.ref = 0; r.dist = 256 << 8; r.rate = (uint32_t)kRate2054000; r.nz = 164;
+            r.mv = 2048 * 8; r.var = (uint32_t)~0; r.skip = 16384 * 6; r.shift = 5;
+        } else {
+            r.ref = 1; r.dist = 256 << 8; r.rate = (uint32_t)kRate2054000; r.nz = 128;
+            r.mv = 2048 * 8; r.var = (uint32_t)~0; r.skip = 16384 * 6; r.shift = 5;
+        }
+        break;
+    case 6:
+        if (row <= 1) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 512;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = 16384 * 7; r.shift = 5;
+        } else if (row == 2) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 256;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = 16384 * 7; r.shift = 5;
+        } else if (row == 3) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 164;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = 16384 * 7; r.shift = 5;
+        } else {
+            r.ref = 1; r.dist = 256 << 4; r.rate = (uint32_t)kRate518000; r.nz = 128; r.mv = 2048;
+            r.var = (uint32_t)~0; r.skip = 16384 * 2; r.shift = 3;
+        }
+        break;
+    case 7:
+        if (row == 0) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 256;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = (uint32_t)~0; r.shift = (uint16_t)~0;
+        } else if (row == 1) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 128;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = (uint32_t)~0; r.shift = (uint16_t)~0;
+        } else if (row == 2 || row == 3) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 96;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = (uint32_t)~0; r.shift = (uint16_t)~0;
+        } else {
+            r.ref = 1; r.dist = 256 << 8; r.rate = (uint32_t)kRate2054000; r.nz = 64;
+            r.mv = 2048 * 8; r.var = (uint32_t)~0; r.skip = 16384 * 6; r.shift = 5;
+        }
+        break;
+    case 8:
+        if (row == 0) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 256;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = (uint32_t)~0; r.shift = (uint16_t)~0;
+        } else if (row == 1) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 128;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = (uint32_t)~0; r.shift = (uint16_t)~0;
+        } else if (row == 2 || row == 3) {
+            r.ref = 0; r.dist = 256 << 10; r.rate = (uint32_t)kRate4102000; r.nz = 96;
+            r.mv = 2048 * 16; r.var = (uint32_t)~0; r.skip = (uint32_t)~0; r.shift = (uint16_t)~0;
+        } else {  // rows 4-6 identical
+            r.ref = 1; r.dist = 256 << 8; r.rate = (uint32_t)kRate2054000; r.nz = 64;
+            r.mv = 2048 * 8; r.var = (uint32_t)~0; r.skip = 16384 * 6; r.shift = 5;
+        }
+        break;
+    }
+    return r;
+}
+
+TEST_CASE("set_lpd1_ctrls - every level x every sub-row, vs the oracle") {
+    // :5603-5937. Case N writes pd1_level = LPD1_LVL_{N-1} and rows
+    // [0..N-1]; case 0 writes ONLY pd1_level = REGULAR_PD1; the default
+    // arm (9) writes nothing.
+    for (int level = 0; level <= 9; ++level) {
+        Lpd1Ctrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setLpd1Ctrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.pd1Level == (uint8_t)REGULAR_PD1);
+            CHECK(c.useRefInfo[0] == kPoison);
+            CHECK(c.costThDist[6] == 0xAAAAAAAAu);
+            continue;
+        }
+        if (level <= 8) {
+            // The pd1_level mapping is NOT level-1: cases 1-3 all sit on
+            // LPD1_LVL_0 (they refine row 0 only), case 5 jumps to
+            // LPD1_LVL_3 (:5690), cases 6-8 continue 4/5/6.
+            static const int ePd1[9] = {-1, 0, 0, 0, 1, 3, 4, 5, 6};
+            CHECK(c.pd1Level == (uint8_t)ePd1[level]);
+            for (int row = 0; row < 7; ++row) {
+                const OracleLpd1Row& r = oracleLpd1Rows(level, row);
+                if (r.written) {
+                    CHECK(c.useLpd1Detector[row] == (r.det != 0));
+                    CHECK(c.useRefInfo[row] == (uint8_t)r.ref);
+                    CHECK(c.costThDist[row] == r.dist);
+                    CHECK(c.costThRate[row] == r.rate);
+                    CHECK(c.nzCoeffTh[row] == r.nz);
+                    CHECK(c.maxMvLength[row] == r.mv);
+                    CHECK(c.me8x8CostVarianceTh[row] == r.var);
+                    CHECK(c.skipPd0EdgeDistTh[row] == r.skip);
+                    CHECK(c.skipPd0MeShift[row] == r.shift);
+                } else {
+                    CHECK(c.costThDist[row] == 0xAAAAAAAAu);
+                    CHECK(c.skipPd0EdgeDistTh[row] == 0xAAAAAAAAu);
+                    CHECK(c.skipPd0MeShift[row] == 0xAAAA);
+                }
+            }
+        } else {
+            CHECK(c.pd1Level == kPoison);
+            CHECK(c.costThDist[0] == 0xAAAAAAAAu);
+            CHECK(c.skipPd0MeShift[6] == 0xAAAA);
+        }
+    }
+}

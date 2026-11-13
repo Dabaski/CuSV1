@@ -1393,5 +1393,68 @@ struct NsqSearchPcs {
 void setNsqSearchCtrls(NsqSearchCtrls& ctrls, NsqPsqTxsCtrls& psqTxsCtrls, const NsqSearchPcs& pcs,
                        std::uint8_t nsqSearchLevel);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 3: the intra-mode level getters (:5377-:5427),
+// set_inter_intra_ctrls (:5455-:5481), set_pd0_ctrls (:5483-:5601) and
+// set_lpd1_ctrls (:5603-:5937).
+// ---------------------------------------------------------------------------
+
+// svt_aom_get_intra_mode_levels_default (:5377-5404) / _rtc
+// (:5406-5427). (get_intra_mode_levels_allintra landed in EMC1.)
+void getIntraModeLevelsDefault(EncMode encMode, bool isISlice, bool isBase, int transitionPresent,
+                               std::uint32_t* intraLevel, std::uint32_t* distBasedAngIntraLevel);
+void getIntraModeLevelsRtc(EncMode encMode, bool isISlice, int transitionPresent, bool useFlatIpp,
+                           std::uint32_t* intraLevel, std::uint32_t* distBasedAngIntraLevel);
+
+// InterIntraCompCtrls (md_process.h:81-86, verbatim field order/types).
+struct InterIntraCompCtrls {
+    std::uint8_t enabled;
+    std::uint8_t useRdModel;   // 1: curvefit model, 0: SSE
+    std::uint8_t wedgeModeSq;  // 0: no wedge, 1: inj. wedge II, 2: only if better
+    std::uint8_t wedgeModeNsq;
+};
+
+// set_inter_intra_ctrls (:5455-5481). The default case assert(0)s and
+// writes nothing (documented UB).
+void setInterIntraCtrls(InterIntraCompCtrls& ctrls, std::uint8_t interIntraLevel);
+
+// Pd0Ctrls (md_process.h:691-703, verbatim field order/types).
+constexpr int kPd0Levels = 7;  // PD0_LEVELS (definitions.h:749)
+struct Pd0Ctrls {
+    std::uint8_t pd0Level;  // Pd0Level
+    bool usePd0Detector[kPd0Levels];
+    std::uint8_t useRefInfo[kPd0Levels];
+    std::uint32_t me8x8CostVarianceTh[kPd0Levels];
+    std::uint32_t edgeDistTh[kPd0Levels];
+    std::uint16_t neighMeDistShift[kPd0Levels];
+};
+
+// set_pd0_ctrls (:5483-5601). hbdMd is ctx->hbd_md (SVT_EFFECTIVE_HBD_MD
+// is the identity in the pinned build, EbConfigMacros.h:295): the hbd
+// early-out forces PD0_LVL_0 and returns (:5487-5490). The default case
+// assert(0)s and writes nothing (documented UB).
+void setPd0Ctrls(Pd0Ctrls& ctrls, std::uint8_t lpd0Lvl, std::uint8_t hbdMd);
+
+// Lpd1Ctrls (md_process.h:706-728, verbatim field order/types).
+constexpr int kLpd1Levels = 7;  // LPD1_LEVELS (definitions.h:762)
+struct Lpd1Ctrls {
+    std::uint8_t pd1Level;  // Pd1Level
+    bool useLpd1Detector[kLpd1Levels];
+    std::uint8_t useRefInfo[kLpd1Levels];
+    std::uint32_t costThDist[kLpd1Levels];
+    std::uint32_t costThRate[kLpd1Levels];
+    std::uint32_t nzCoeffTh[kLpd1Levels];
+    std::uint16_t maxMvLength[kLpd1Levels];
+    std::uint32_t me8x8CostVarianceTh[kLpd1Levels];
+    std::uint32_t skipPd0EdgeDistTh[kLpd1Levels];
+    std::uint16_t skipPd0MeShift[kLpd1Levels];
+};
+
+// set_lpd1_ctrls (:5603-5937). Case N (1-8) writes pd1_level =
+// LPD1_LVL_{N-1} and fills detector rows [0..N-1]; unwritten rows keep
+// the struct's prior state (as in the reference). The default case
+// assert(0)s and writes nothing (documented UB).
+void setLpd1Ctrls(Lpd1Ctrls& ctrls, std::uint8_t lpd1Lvl);
+
 }  // namespace mode_config
 }  // namespace l16_rdo
