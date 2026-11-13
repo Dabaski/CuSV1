@@ -1,4 +1,5 @@
 #include <doctest.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -475,4 +476,255 @@ TEST_CASE("calculate_gf_stats constrained by frames_to_key and the no-total-stat
         CHECK(gs.gfGroupErr == 0.0);
         CHECK(gs.gfGroupRawError == 10.0);
     }
+}
+
+// ---- A9R C9: get_twopass_worst_quality (pass2_strategy.c:125-166) +
+// the RC_FACTOR constants (:309-312) + calculate_active_worst_quality
+// (:392-455) ----
+
+namespace {
+
+// test-side transcription of get_twopass_worst_quality over the C7 oracle
+// search and the parsed ac table (bd 8).
+int oracleTwopassWq(bool firstPassDownsample, int w, int h, double sectionErr, double inactiveZone,
+                    int sbw, double gwf, int under, int over, int best, int worst,
+                    const std::vector<double>& powTerm, const std::vector<int>& ac) {
+    std::uint32_t mbCols, mbRows;
+    if (firstPassDownsample) {
+        mbCols = 2 * (w + 16 - 1) / 16;
+        mbRows = 2 * (h + 16 - 1) / 16;
+    } else {
+        mbCols = (w + 16 - 1) / 16;
+        mbRows = (h + 16 - 1) / 16;
+    }
+    inactiveZone = inactiveZone < 0.0 ? 0.0 : (inactiveZone > 1.0 ? 1.0 : inactiveZone);
+    if (sbw <= 0) {
+        return worst;
+    }
+    const int numMbs = (int)(mbCols * mbRows);
+    const int activeMbs = std::max(1, numMbs - (int)(numMbs * inactiveZone));
+    const double avErrPerMb = sectionErr / activeMbs;
+    const int targetNormBitsPerMb = (int)(((std::uint64_t)sbw << 9) / activeMbs);
+    const int rateErrTol = std::min(under, over);
+    return oracleFindQWithCorrection(targetNormBitsPerMb, avErrPerMb, gwf, rateErrTol, best, worst, powTerm, ac);
+}
+
+l15_rc::GfGroupStatsCarrier wqStats(double rawError, double skipPct, double zoneRows, std::uint8_t worstQindex,
+                                    double groupErr) {
+    l15_rc::GfGroupStatsCarrier gs{};
+    gs.gfGroupRawError = rawError;
+    gs.gfGroupSkipPct = skipPct;
+    gs.gfGroupInactiveZoneRows = zoneRows;
+    gs.gfStatStruct.worstQindex = worstQindex;
+    gs.gfGroupErr = groupErr;
+    return gs;
+}
+
+l15_rc::RcControl awqRc() {
+    l15_rc::RcControl rc{};
+    rc.baselineGfInterval = 8;
+    rc.bestQuality = 0;
+    rc.worstQuality = 255;
+    rc.activeWorstQuality = 100;
+    rc.gfGroupBits = 3920000;
+    return rc;
+}
+
+l15_rc::PcsCarrier awqPcs() {
+    l15_rc::PcsCarrier pcs{};
+    return pcs;
+}
+
+}  // namespace
+
+TEST_CASE("get_twopass_worst_quality structural edges") {
+    // sbw <= 0 -> the highest value allowed.
+    CHECK(l15_rc::getTwopassWorstQuality(false, 1920, 1080, 100.0, 0.0, 0, 1.0, 8, 50, 40, 10, 200) == 200);
+    CHECK(l15_rc::getTwopassWorstQuality(false, 1920, 1080, 100.0, 0.0, -5, 1.0, 8, 50, 40, 10, 200) == 200);
+    // degenerate range.
+    CHECK(l15_rc::getTwopassWorstQuality(false, 1920, 1080, 100.0, 0.0, 1000, 1.0, 8, 50, 40, 77, 77) == 77);
+}
+
+TEST_CASE("get_twopass_worst_quality matches the oracle over the parameter grid") {
+    const std::vector<double> powTerm = qPowTerm();
+    const std::vector<int> ac = acTable();
+    const int dims[4][2] = {{320, 240}, {1920, 1080}, {1280, 720}, {64, 64}};
+    int bad = 0;
+    for (int ds = 0; ds <= 1; ++ds) {
+        for (int d = 0; d < 4; ++d) {
+            for (double zone : {-0.5, 0.0, 0.25, 0.5, 1.5}) {
+                for (int sbw : {1000, 81600, 500000}) {
+                    for (double gwf : {0.75, 1.0, 1.5}) {
+                        for (int tolCase = 0; tolCase < 2; ++tolCase) {
+                            const int under = tolCase == 0 ? 50 : 30;
+                            const int over = tolCase == 0 ? 40 : 45;
+                            const int got = l15_rc::getTwopassWorstQuality(ds != 0, dims[d][0], dims[d][1],
+                                                                           8160.0, zone, sbw, gwf, 8, under,
+                                                                           over, 0, 255);
+                            const int want = oracleTwopassWq(ds != 0, dims[d][0], dims[d][1], 8160.0, zone,
+                                                             sbw, gwf, under, over, 0, 255, powTerm, ac);
+                            if (got != want) ++bad;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CHECK(bad == 0);
+}
+
+TEST_CASE("calculate_active_worst_quality is a no-op below baseline_gf_interval 2") {
+    l15_rc::RcControl rc = awqRc();
+    rc.baselineGfInterval = 1;
+    const l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+    l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 0, 68, 8, false, 1920, 1080, 50, 40, false, true,
+                                        false);
+    CHECK(rc.activeWorstQuality == 100);  // untouched
+    rc.baselineGfInterval = 0;
+    l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 0, 68, 8, false, 1920, 1080, 50, 40, false, true,
+                                        false);
+    CHECK(rc.activeWorstQuality == 100);
+}
+
+TEST_CASE("calculate_active_worst_quality rc_factor bands") {
+    // The rc_factor arithmetic is observable through the two-pass override
+    // search (it multiplies ref_gf_group_bits * ref_q * rc_factor).
+    // ref: worst_qindex 100 -> ref_q = ac[100]/4 = 28; gf_group_err 280000
+    // -> numerator 7,840,000 * rc_factor; target gf_group_bits 3,920,000.
+    // rc_factor 1.0 -> the first q with bits <= 3,920,000 is q=1
+    // (ac[1]=8 -> 2.0 -> 3,920,000, NOT >): tmp_q = 1.
+    // active_worst = max(tmp_q, 100 >> 1) = 50.
+    {
+        l15_rc::RcControl rc = awqRc();
+        // bits > 0, rate_error 50 (over target): single pass min = 1 ->
+        // rc_factor = max(1, 0.5) = 1.0.
+        rc.vbrBitsOffTarget = 50000000;
+        l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+        l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 1000000, 68, 8, false, 1920, 1080, 50, 40,
+                                            false, true, true);
+        CHECK(rc.activeWorstQuality == 50);
+    }
+    {
+        // gop_constraint min 0.5 -> rc_factor = max(0.5, 0.5) = 0.5:
+        // numerator 3,920,000: the first q with bits <= 3,920,000:
+        // q=0: 3,920,000 <= target (NOT >) -> high=0 -> tmp_q = 0.
+        // active_worst = max(0, 50) = 50.
+        l15_rc::RcControl rc = awqRc();
+        rc.vbrBitsOffTarget = 50000000;
+        l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+        l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 1000000, 68, 8, false, 1920, 1080, 50, 40, true,
+                                            true, true);
+        CHECK(rc.activeWorstQuality == 50);
+    }
+    {
+        // two-pass (not single, not gop) min 0.75 -> rc_factor 0.75:
+        // numerator 5,880,000: q=0: 5,880,000 > 3,920,000 -> low=1;
+        // q=1: 2,940,000 <= -> tmp_q 1 -> max(1, 50) = 50.
+        l15_rc::RcControl rc = awqRc();
+        rc.vbrBitsOffTarget = 50000000;
+        l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+        l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 1000000, 68, 8, false, 1920, 1080, 50, 40,
+                                            false, false, true);
+        CHECK(rc.activeWorstQuality == 50);
+    }
+    {
+        // rate_error -50 (underspend): rc_factor = min(2, 1.5) = 1.5:
+        // numerator 11,760,000: q=1: 5,880,000 > 3,920,000 -> low=2;
+        // q=2: ac[2]=9 -> 2.25 -> 5,226,666 > -> low=3; q=3: ac[3]=10 ->
+        // 2.5 -> 4,704,000 > -> low=4; q=4: ac[4]=11 -> 2.75 -> 4,276,363
+        // > -> low=5; q=5: ac[5]=12 -> 3.0 -> 3,920,000 <= -> tmp_q 5.
+        // active_worst = max(5, 50) = 50.
+        l15_rc::RcControl rc = awqRc();
+        rc.vbrBitsOffTarget = -50000000;
+        l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+        l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 1000000, 68, 8, false, 1920, 1080, 50, 40,
+                                            false, true, true);
+        CHECK(rc.activeWorstQuality == 50);
+    }
+    {
+        // bits <= 0: rc_factor stays 1.0 -> tmp_q 1 -> max(1, 50) = 50.
+        l15_rc::RcControl rc = awqRc();
+        l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+        l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 0, 68, 8, false, 1920, 1080, 50, 40, false,
+                                            true, true);
+        CHECK(rc.activeWorstQuality == 50);
+    }
+    {
+        // the max() floor: active_worst 5 -> max(tmp_q 1, 5 >> 1 = 2) = 2.
+        l15_rc::RcControl rc = awqRc();
+        rc.activeWorstQuality = 5;
+        l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+        l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 0, 68, 8, false, 1920, 1080, 50, 40, false,
+                                            true, true);
+        CHECK(rc.activeWorstQuality == 2);
+    }
+    {
+        // the single-pass min DISCRIMINATOR: target gf_group_bits 3,000,000
+        // with active_worst 3 (floor max(tmp_q, 1)): rate_error 50 ->
+        // single-pass rc_factor = max(1, 0.5) = 1.0 -> numerator 7,840,000:
+        // bits(1)=3.92M >, bits(2)=3.48M >, bits(3)=3.14M >, bits(4)=2.85M
+        // <= -> tmp_q 4 -> active_worst 4. (A two-pass min 0.75 would give
+        // numerator 5,880,000 -> bits(1)=2.94M <= -> tmp_q 1 -> 1.)
+        l15_rc::RcControl rc = awqRc();
+        rc.activeWorstQuality = 3;
+        rc.gfGroupBits = 3000000;
+        rc.vbrBitsOffTarget = 50000000;
+        l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+        l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 1000000, 68, 8, false, 1920, 1080, 50, 40,
+                                            false, true, true);
+        CHECK(rc.activeWorstQuality == 4);
+    }
+    {
+        // the two-pass search driving tmp_q to 4 with a tighter target:
+        // gf_group_bits 3,000,000 -> numerator 7,840,000 (rc_factor 1):
+        // q=1: 3,920,000 > 3,000,000; q=2: 3,484,444 >; q=3: 3,136,000 >;
+        // q=4: ac[4]=11 -> 2.75 -> 2,850,909 <= -> tmp_q 4 -> max(4, 50).
+        l15_rc::RcControl rc = awqRc();
+        rc.gfGroupBits = 3000000;
+        l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+        l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 0, 68, 8, false, 1920, 1080, 50, 40, false,
+                                            true, true);
+        CHECK(rc.activeWorstQuality == 50);
+        CHECK(rc.gfGroupBits == 3000000);
+    }
+}
+
+TEST_CASE("calculate_active_worst_quality one-pass path matches the oracle") {
+    const std::vector<double> powTerm = qPowTerm();
+    const std::vector<int> ac = acTable();
+    int bad = 0;
+    // the one-pass path feeds get_twopass_worst_quality; pin the composed
+    // result against the oracle for a few (vbrBitsOffTarget, gfGroupBits)
+    // states at baseline 8, mb_rows 68, w 1920 h 1080, zone 0.25.
+    for (int vbr : {50000000, -50000000, 0}) {
+        for (std::int64_t gfBits : {1000000, 3920000}) {
+            l15_rc::RcControl rc = awqRc();
+            rc.vbrBitsOffTarget = vbr;
+            rc.gfGroupBits = gfBits;
+            l15_rc::GfGroupStatsCarrier gs = wqStats(80.0, 10.0, 4.0, 100, 280000.0);
+            l15_rc::calculateActiveWorstQuality(awqPcs(), gs, rc, 1000000, 68, 8, false, 1920, 1080, 50, 40,
+                                                false, true, false);
+            // oracle: rc_factor first, then the twopass-wq transcription.
+            double rcFactor = 1.0;
+            {
+                int rateError = (int)((vbr * 100) / 1000000);
+                rateError = rateError < -100 ? -100 : (rateError > 100 ? 100 : rateError);
+                if (rateError > 0) {
+                    rcFactor = std::max(1.0, (double)(100 - rateError) / 100.0);
+                } else {
+                    rcFactor = std::min(2.0, (double)(100 - rateError) / 100.0);
+                }
+            }
+            const int vbrGroupBitsPerFrame = (int)(gfBits / rc.baselineGfInterval);
+            const double groupAvErr = 80.0 / 8;
+            const double groupAvSkipPct = 10.0 / 8;
+            const double groupAvZone = (4.0 * 2) / (8 * 68.0);
+            const int want = oracleTwopassWq(false, 1920, 1080, groupAvErr, groupAvSkipPct + groupAvZone,
+                                             vbrGroupBitsPerFrame, rcFactor, 50, 40, 0, 255, powTerm, ac);
+            // the port already applied the max with the PRE-call value 100;
+            // emulate: max(want, 50).
+            if (rc.activeWorstQuality != std::max(want, 50)) ++bad;
+        }
+    }
+    CHECK(bad == 0);
 }

@@ -98,6 +98,11 @@ struct RcControl {
     std::int64_t totalActualBits;  // rc->total_actual_bits
     std::int64_t totalTargetBits;  // rc->total_target_bits
     int framesSinceCdfUpdate;     // rc->frames_since_cdf_update
+
+    // the A9R calculate_active_worst_quality consumes
+    // (pass2_strategy.c:392-455; rc_process.h:124, :167).
+    std::int64_t gfGroupBits;       // rc->gf_group_bits
+    std::int64_t vbrBitsOffTarget;  // rc->vbr_bits_off_target
 };
 
 // RateControlCfg carrier (the enc_ctx->rc_cfg mirrors the bodies consume;
@@ -532,6 +537,34 @@ void initGfStats(GfGroupStatsCarrier& gfStats);
 // the twopass walk rides TwoPassCarrier.
 void calculateGfStats(const PcsCarrier& ppcs, RcControl& rc, GfGroupStatsCarrier& gfStats,
                       FirstpassStatsCarrier& thisFrame, int& useAltRef, TwoPassCarrier& twopass);
+
+// RC_FACTOR_MIN_GOP_CONST / RC_FACTOR_MIN_1P_VBR / RC_FACTOR_MIN /
+// RC_FACTOR_MAX (pass2_strategy.c:309-312).
+constexpr double kRcFactorMinGopConst = 0.5;
+constexpr double kRcFactorMin1PVbr = 1;
+constexpr double kRcFactorMin = 0.75;
+constexpr double kRcFactorMax = 2;
+
+// get_twopass_worst_quality (pass2_strategy.c:125-166): static in the
+// reference; exported for testability (the DF1 precedent). The scs/pcs
+// walls thread (first_pass_downsample, max_input_luma_*, encoder_bit_depth,
+// rc_cfg under/over_shoot_pct, rc best/worst quality).
+int getTwopassWorstQuality(bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight,
+                           double sectionErr, double inactiveZone, int sectionTargetBandwidth,
+                           double groupWeightFactor, int encoderBitDepth, int underShootPct, int overShootPct,
+                           int bestQuality, int worstQuality);
+
+// calculate_active_worst_quality (pass2_strategy.c:392-455): static in the
+// reference; the walls thread: static_config.target_bit_rate,
+// frame_info->mb_rows, encoder_bit_depth, first_pass_downsample +
+// max_input_luma_* (into get_twopass_worst_quality), the rc_cfg
+// under/over_shoot_pct, the static_config.gop_constraint_rc /
+// pass == ENC_SINGLE_PASS / twopass.passes == 2 gates as booleans.
+void calculateActiveWorstQuality(const PcsCarrier& ppcs, const GfGroupStatsCarrier& gfStats, RcControl& rc,
+                                 std::int64_t targetBitRate, int mbRows, int encoderBitDepth,
+                                 bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight,
+                                 int underShootPct, int overShootPct, bool gopConstraintRc, bool singlePass,
+                                 bool twoPass);
 
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.

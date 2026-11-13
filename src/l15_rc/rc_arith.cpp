@@ -687,6 +687,126 @@ void calculateGfStats(const PcsCarrier& ppcs, RcControl& rc, GfGroupStatsCarrier
     twopass.statsInPos = startPos;
 }
 
+// ---- A9R: pass2_strategy.c (the active-worst-quality estimate) ----
+
+namespace {
+
+// clamp (definitions.h): the integer clamp macro.
+static int clampInt(int value, int low, int hi) {
+    return value < low ? low : (value > hi ? hi : value);
+}
+
+}  // namespace
+
+// get_twopass_worst_quality (pass2_strategy.c:125-166): verbatim; the walls
+// thread (the declaration comment names the carriers).
+int getTwopassWorstQuality(bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight,
+                           double sectionErr, double inactiveZone, int sectionTargetBandwidth,
+                           double groupWeightFactor, int encoderBitDepth, int underShootPct, int overShootPct,
+                           int bestQuality, int worstQuality) {
+    std::uint32_t mbCols;
+    std::uint32_t mbRows;
+    if (firstPassDownsample) {
+        mbCols = 2 * (maxInputLumaWidth + 16 - 1) / 16;
+        mbRows = 2 * (maxInputLumaHeight + 16 - 1) / 16;
+    } else {
+        mbCols = (maxInputLumaWidth + 16 - 1) / 16;
+        mbRows = (maxInputLumaHeight + 16 - 1) / 16;
+    }
+    inactiveZone = fclamp(inactiveZone, 0.0, 1.0);
+
+    if (sectionTargetBandwidth <= 0) {
+        return worstQuality;  // Highest value allowed
+    }
+
+    const int numMbs = (int)(mbCols * mbRows);
+    //(oxcf->resize_cfg.resize_mode != RESIZE_NONE)
+    //    ? cpi->initial_mbs
+    //    : cpi->common.mi_params.MBs;
+    const int activeMbs = std::max(1, numMbs - (int)(numMbs * inactiveZone));
+    const double avErrPerMb = sectionErr / activeMbs;
+    const int targetNormBitsPerMb =
+        (int)(((std::uint64_t)sectionTargetBandwidth << kBperMbNormbits) / activeMbs);
+
+    const int rateErrTol = std::min(underShootPct, overShootPct);
+
+    // Try and pick a max Q that will be high enough to encode the
+    // content at the given rate.
+    return findQindexByRateWithCorrection(targetNormBitsPerMb, encoderBitDepth, avErrPerMb, groupWeightFactor,
+                                          rateErrTol, bestQuality, worstQuality);
+}
+
+// calculate_active_worst_quality (pass2_strategy.c:392-455): verbatim; the
+// walls thread (the declaration comment names the carriers).
+void calculateActiveWorstQuality(const PcsCarrier& ppcs, const GfGroupStatsCarrier& gfStats, RcControl& rc,
+                                 std::int64_t targetBitRate, int mbRows, int encoderBitDepth,
+                                 bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight,
+                                 int underShootPct, int overShootPct, bool gopConstraintRc, bool singlePass,
+                                 bool twoPass) {
+    (void)ppcs;
+
+    // Calculate an estimate of the maxq needed for the group.
+    // We are more agressive about correcting for sections
+    // where there could be significant overshoot than for easier
+    // sections where we do not wish to risk creating an overshoot
+    // of the allocated bit budget.
+    if (rc.baselineGfInterval > 1) {
+        const int vbrGroupBitsPerFrame = (int)(rc.gfGroupBits / rc.baselineGfInterval);
+        const double groupAvErr = gfStats.gfGroupRawError / rc.baselineGfInterval;
+        const double groupAvSkipPct = gfStats.gfGroupSkipPct / rc.baselineGfInterval;
+        const double groupAvInactiveZone =
+            ((gfStats.gfGroupInactiveZoneRows * 2) / (rc.baselineGfInterval * (double)mbRows));
+
+        int tmpQ;
+        // rc factor is a weight factor that corrects for local rate control drift.
+        double rcFactor = 1.0;
+        const std::int64_t bits = targetBitRate;  // oxcf->target_bandwidth
+
+        if (bits > 0) {
+            int rateError;
+
+            rateError = (int)((rc.vbrBitsOffTarget * 100) / bits);
+            rateError = clampInt(rateError, -100, 100);
+            if (rateError > 0) {
+                const double rcFactorMin = gopConstraintRc ? kRcFactorMinGopConst
+                    : singlePass                           ? kRcFactorMin1PVbr
+                                                           : kRcFactorMin;
+                rcFactor = std::max(rcFactorMin, (double)(100 - rateError) / 100.0);
+            } else {
+                rcFactor = std::min(kRcFactorMax, (double)(100 - rateError) / 100.0);
+            }
+        }
+        tmpQ = getTwopassWorstQuality(firstPassDownsample, maxInputLumaWidth, maxInputLumaHeight, groupAvErr,
+                                      (groupAvSkipPct + groupAvInactiveZone), vbrGroupBitsPerFrame, rcFactor,
+                                      encoderBitDepth, underShootPct, overShootPct, rc.bestQuality,
+                                      rc.worstQuality);
+        if (twoPass) {
+            const int refQindex = gfStats.gfStatStruct.worstQindex;
+            const double refQ = convertQindexToQ(refQindex, encoderBitDepth);
+            const std::int64_t refGfGroupBits = (std::int64_t)(gfStats.gfGroupErr);
+            const std::int64_t targetGfGroupBits = rc.gfGroupBits;
+            {
+                int low = rc.bestQuality;
+                int high = rc.worstQuality;
+
+                while (low < high) {
+                    const int mid = (low + high) >> 1;
+                    const double q = convertQindexToQ(mid, encoderBitDepth);
+                    const int midBits = (int)(refGfGroupBits * refQ * rcFactor / q);
+
+                    if (midBits > targetGfGroupBits) {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+                tmpQ = low;
+            }
+        }
+        rc.activeWorstQuality = std::max(tmpQ, rc.activeWorstQuality >> 1);
+    }
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;
