@@ -98,6 +98,11 @@ struct RcControl {
     std::int64_t totalActualBits;  // rc->total_actual_bits
     std::int64_t totalTargetBits;  // rc->total_target_bits
     int framesSinceCdfUpdate;     // rc->frames_since_cdf_update
+
+    // the A9R calculate_active_worst_quality consumes
+    // (pass2_strategy.c:392-455; rc_process.h:124, :167).
+    std::int64_t gfGroupBits;       // rc->gf_group_bits
+    std::int64_t vbrBitsOffTarget;  // rc->vbr_bits_off_target
 };
 
 // RateControlCfg carrier (the enc_ctx->rc_cfg mirrors the bodies consume;
@@ -173,6 +178,15 @@ struct PcsCarrier {
     int superresUpscaledWidth;       // av1_cm->frm_size.superres_upscaled_width
     int seqProfile;                  // scs->seq_header.seq_profile (EbAv1SeqProfile)
     int maxFrameSize;                // ppcs->max_frame_size (the Q-mode bounds)
+
+    // the A9R update_lambda consumes (rc_process.c:398-441): the frm_hdr
+    // delta-q gate and the r0-delta-qp-md flag ride the ppcs wall.
+    bool deltaQPresent;              // ppcs->frm_hdr.delta_q_params.delta_q_present
+    bool r0DeltaQpMd;                // ppcs->r0_delta_qp_md
+
+    // the A9R calculate_gf_stats consumes (pass2_strategy.c:341-390).
+    int gfInterval;                  // pcs->gf_interval
+    bool idrFlag;                    // pcs->idr_flag
 };
 
 // ASSIGN_MINQ_TABLE (rc_tables.h:36-39, the CONFIG_ENABLE_HIGH_BIT_DEPTH=0
@@ -255,6 +269,17 @@ constexpr int kSvtAv1IntnlArfUpdate = 6;
 
 // ResolutionRange (definitions.h:1808-1818).
 constexpr int kInputSize720pRange = 3;
+constexpr int kInputSize480pRange = 2;
+constexpr int kInputSize4KRange = 5;
+
+// EncMode (EbSvtAv1Enc.h:44-61): the band boundaries the tpl level pair
+// consumes (ENC_MR is the research mode).
+constexpr int kEncMr = -1;
+constexpr int kEncM2 = 2;
+constexpr int kEncM5 = 5;
+constexpr int kEncM7 = 7;
+constexpr int kEncM8 = 8;
+constexpr int kEncM13 = 13;
 
 // SliceType (definitions.h:1874-1878).
 constexpr int kBslice = 0;
@@ -337,6 +362,234 @@ int getGfuBoostFromR0Lap(double minFactor, double maxFactor, double r0, int fram
 
 // svt_av1_calculate_boost_bits (rc_process.c:641-667): verbatim.
 int calculateBoostBits(int frameCount, int boost, std::int64_t totalGroupBits);
+
+// ---- A9R (the remaining pure arithmetic): rc_process.c rd-multiplier
+// family ----
+
+// def_inter_rd_multiplier (rc_process.c:346-348): static in the reference;
+// exported for testability (the DF1 signedCharClamp precedent).
+double defInterRdMultiplier(int qindex);
+
+// def_arf_rd_multiplier (rc_process.c:353-355): static in the reference.
+double defArfRdMultiplier(int qindex);
+
+// def_kf_rd_multiplier (rc_process.c:360-362): static in the reference.
+double defKfRdMultiplier(int qindex);
+
+// svt_aom_compute_rd_mult_based_on_qindex (rc_process.c:364-392): verbatim;
+// the 10/12-bit branches ride on the dcQuantQtx HBD park (see its note).
+int computeRdMultBasedOnQindex(int bitDepth, int updateType, int qindex);
+
+// rd_frame_type_factor (rc_process.c:394-395), row [0] = 8-bit, row [1] =
+// the 10/12-bit rows.
+extern const int kRdFrameTypeFactor[2][7];
+
+// RTC_KF_LAMBDA_BOOST (rc_process.c:396).
+constexpr int kRtcKfLambdaBoost = 100;
+
+// update_lambda (rc_process.c:398-441): static in the reference; exported
+// for testability. The pcs walls thread: the ppcs frame fields ride on
+// PcsCarrier (frameType, temporalLayerIndex, hierarchicalLevels, baseQIdx,
+// deltaQPresent, r0DeltaQpMd); the scs->static_config.rtc /
+// stats_based_sb_lambda_modulation gates thread as booleans.
+std::uint32_t updateLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                           std::int64_t rdmult, bool rtc, bool statsBasedSbLambdaModulation);
+
+// svt_aom_compute_rd_mult (rc_process.c:446-451): verbatim; the walls thread
+// as for updateLambda (the reference reads pcs->ppcs->update_type off the
+// carrier).
+std::uint32_t computeRdMult(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                            bool rtc, bool statsBasedSbLambdaModulation);
+
+// svt_aom_compute_fast_lambda (rc_process.c:453-464): verbatim; the
+// CONFIG_ENABLE_HIGH_BIT_DEPTH branch is the named park (the 10/12-bit SAD
+// tables are dead in the pinned RTC 8-bit build), so every depth reads
+// kLambdaModeDecision8BitSad.
+std::uint32_t computeFastLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                                bool rtc, bool statsBasedSbLambdaModulation);
+
+// svt_aom_lambda_assign (rc_process.c:466-496): verbatim; lambdaScaleFactor
+// threads static_config.lambda_scale_factors[update_type] (the enc_settings
+// default is 128 per entry); multiply_lambda is dead in the 8-bit build
+// ((void)'d in the reference). For bit depths 10/12 the assert-removed else
+// leaves the caller's values in place and only the scale shift applies.
+void lambdaAssign(const PcsCarrier& pcs, std::uint32_t& fastLambda, std::uint32_t& fullLambda, int bitDepth,
+                  std::uint8_t qpIndex, bool multiplyLambda, std::uint64_t lambdaScaleFactor, bool rtc,
+                  bool statsBasedSbLambdaModulation);
+
+// ---- A9R: initial_rc_process.c ----
+
+// svt_aom_get_tpl_group_level (initial_rc_process.c:190-202): verbatim.
+std::uint8_t getTplGroupLevel(std::uint8_t tpl, std::int8_t encMode);
+
+// get_tpl_params_level (initial_rc_process.c:307-317): static in the
+// reference; exported for testability (the DF1 signedCharClamp precedent).
+std::uint8_t getTplParamsLevel(std::int8_t encMode);
+
+// initial_rc_process.c:631-633.
+constexpr int kHigh8x8DistVarTh = 50000;
+constexpr int kMinAvgMeDist = 1000;
+constexpr int kVbrCodedErrorFactor = 30;
+
+// StatStruct (definitions.h:2155-2162).
+struct StatStructCarrier {
+    std::uint64_t poc;
+    std::uint64_t totalNumBits;
+    std::uint8_t qindex;
+    std::uint8_t worstQindex;
+    std::uint8_t temporalLayerIndex;
+};
+
+// FIRSTPASS_STATS (firstpass.h:29-55): the fields the two-pass arithmetic
+// consumes (the StatStruct rides inside, definitions.h StatStruct).
+struct FirstpassStatsCarrier {
+    double frame;
+    double codedError;
+    double duration;
+    double count;
+    StatStructCarrier statStruct;
+};
+
+// set_1pvbr_param's consumed walls threaded (initial_rc_process.c:638-666):
+// the pcs fields it reads, the pcs->stat_struct mirror it copies BEFORE the
+// entry rewrite, and the ONE stats_in_start[picture_number] entry it
+// rewrites (the carrier owns it as `entry` - a self-referential pointer
+// would dangle across the struct's copy). The
+// svt_block_on_mutex/svt_release_mutex pair (:639, :667) is the named park.
+struct P1vbrCarrier {
+    int sliceType;                    // pcs->slice_type
+    std::uint64_t pictureNumber;      // pcs->picture_number
+    std::uint16_t b64TotalCount;      // pcs->b64_total_count
+    const std::uint32_t* rcMeDistortion;      // pcs->rc_me_distortion
+    const std::uint32_t* me8x8CostVariance;   // pcs->me_8x8_cost_variance
+    int inputResolution;              // scs->input_resolution (ResolutionRange)
+    StatStructCarrier statStruct;     // pcs->stat_struct (the mirror)
+    FirstpassStatsCarrier entry;      // stats_in_start[picture_number]
+};
+
+// set_1pvbr_param (initial_rc_process.c:638-666): verbatim.
+void set1pVbrParam(P1vbrCarrier& pcs);
+
+// ---- A9R: pass2_strategy.c (the two-pass stats arithmetic) ----
+
+// calculate_modified_err (pass2_strategy.c:23-31): verbatim; the
+// twopass->stats_buf_ctx->total_stats NULL gate threads as hasTotalStats
+// (the body reads this_frame->stat_struct.total_num_bits only).
+double calculateModifiedErr(bool hasTotalStats, std::uint64_t thisFrameTotalNumBits);
+
+// subtract_stats (pass2_strategy.c:47-53): verbatim.
+void subtractStats(FirstpassStatsCarrier& section, const FirstpassStatsCarrier& frame);
+
+// q_pow_term (pass2_strategy.c:60) + ERR_DIVISOR (:61).
+extern const double kQpowTerm[(kQindexRange >> 5) + 1];
+extern const double kErrDivisor;
+
+// calc_correction_factor (pass2_strategy.c:63-70): static in the reference;
+// exported for testability (the DF1 precedent). The assert(error_term >= 0)
+// gate is removed under NDEBUG - negative inputs are the named NDEBUG park.
+double calcCorrectionFactor(double errPerMb, int q);
+
+// qbpm_enumerator (pass2_strategy.c:72-74): static in the reference.
+int qbpmEnumerator(int rateErrTol);
+
+// find_qindex_by_rate_with_correction (pass2_strategy.c:78-99): static in
+// the reference; exported for testability (the DF1 precedent). The
+// assert(best <= worst) gate is removed under NDEBUG.
+int findQindexByRateWithCorrection(int desiredBitsPerMb, int bitDepth, double errorPerMb,
+                                   double groupWeightFactor, int rateErrTol, int bestQindex,
+                                   int worstQindex);
+
+// GF_GROUP_STATS (pass2_strategy.h:26-33).
+struct GfGroupStatsCarrier {
+    double gfGroupErr;
+    StatStructCarrier gfStatStruct;
+    double gfGroupRawError;
+    double gfGroupSkipPct;
+    double gfGroupInactiveZoneRows;
+};
+
+// The TWO_PASS stats walk (firstpass.h:80-118): the FIRSTPASS_STATS read
+// window (twopass->stats_in .. stats_buf_ctx->stats_in_end) threaded as a
+// base pointer + count + walk position (input_stats pass2_strategy.c:37-45
+// and reset_fpf_position :33-35 ride it).
+struct TwoPassCarrier {
+    const FirstpassStatsCarrier* statsIn;  // twopass->stats_in (walk base)
+    int statsInCount;                      // stats_in_end - stats_in_start
+    int statsInPos;                        // the walk position
+    bool hasTotalStats;                    // stats_buf_ctx->total_stats != NULL
+    std::int64_t bitsLeft;                 // twopass->bits_left
+};
+
+// accumulate_this_frame_stats (pass2_strategy.c:168-171): verbatim.
+void accumulateThisFrameStats(const FirstpassStatsCarrier& stats, double modFrameErr,
+                              GfGroupStatsCarrier& gfStats);
+
+// set_baseline_gf_interval (pass2_strategy.c:314-324): verbatim; the
+// ppcs->gf_interval / idr_flag walls thread on PcsCarrier.
+void setBaselineGfInterval(const PcsCarrier& pcs, int arfPosition, RcControl& rc);
+
+// init_gf_stats (pass2_strategy.c:326-339): verbatim.
+void initGfStats(GfGroupStatsCarrier& gfStats);
+
+// calculate_gf_stats (pass2_strategy.c:341-390): verbatim; the ppcs walls
+// thread (frameType via frameIsIntraOnly, gfInterval), the rc walls ride
+// RcControl (constrained_gf_group, frames_to_key, baseline_gf_interval) and
+// the twopass walk rides TwoPassCarrier.
+void calculateGfStats(const PcsCarrier& ppcs, RcControl& rc, GfGroupStatsCarrier& gfStats,
+                      FirstpassStatsCarrier& thisFrame, int& useAltRef, TwoPassCarrier& twopass);
+
+// RC_FACTOR_MIN_GOP_CONST / RC_FACTOR_MIN_1P_VBR / RC_FACTOR_MIN /
+// RC_FACTOR_MAX (pass2_strategy.c:309-312).
+constexpr double kRcFactorMinGopConst = 0.5;
+constexpr double kRcFactorMin1PVbr = 1;
+constexpr double kRcFactorMin = 0.75;
+constexpr double kRcFactorMax = 2;
+
+// get_twopass_worst_quality (pass2_strategy.c:125-166): static in the
+// reference; exported for testability (the DF1 precedent). The scs/pcs
+// walls thread (first_pass_downsample, max_input_luma_*, encoder_bit_depth,
+// rc_cfg under/over_shoot_pct, rc best/worst quality).
+int getTwopassWorstQuality(bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight,
+                           double sectionErr, double inactiveZone, int sectionTargetBandwidth,
+                           double groupWeightFactor, int encoderBitDepth, int underShootPct, int overShootPct,
+                           int bestQuality, int worstQuality);
+
+// calculate_active_worst_quality (pass2_strategy.c:392-455): static in the
+// reference; the walls thread: static_config.target_bit_rate,
+// frame_info->mb_rows, encoder_bit_depth, first_pass_downsample +
+// max_input_luma_* (into get_twopass_worst_quality), the rc_cfg
+// under/over_shoot_pct, the static_config.gop_constraint_rc /
+// pass == ENC_SINGLE_PASS / twopass.passes == 2 gates as booleans.
+void calculateActiveWorstQuality(const PcsCarrier& ppcs, const GfGroupStatsCarrier& gfStats, RcControl& rc,
+                                 std::int64_t targetBitRate, int mbRows, int encoderBitDepth,
+                                 bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight,
+                                 int underShootPct, int overShootPct, bool gopConstraintRc, bool singlePass,
+                                 bool twoPass);
+
+// get_section_target_bandwidth (pass2_strategy.c:746-759): static in the
+// reference; the walls thread (total_stats->count as totalStatsCount - the
+// reference derefs it without a NULL check -, pcs->picture_number,
+// scs->lap_rc, rc->avg_frame_bandwidth, twopass->bits_left).
+int getSectionTargetBandwidth(const RcControl& rc, bool lapRc, double totalStatsCount, int pictureNumber,
+                              std::int64_t bitsLeft);
+
+// MAX_MB_RATE / MAXRATE_1080P (pass2_strategy.c:875-876).
+constexpr int kMaxMbRate = 250;
+constexpr int kMaxRate1080P = 2025000;
+
+// av1_rc_update_framerate (pass2_strategy.c:880-898): static in the
+// reference; the walls thread (scs->static_config.target_bit_rate,
+// scs->new_framerate, enc_ctx->two_pass_cfg.vbrmax_section,
+// frame_info->num_mbs). NOTE: rcInit folds its own copy of this walk (the
+// RC2c Wave C2 landing) - this is the standalone reference shape, not a
+// rewiring of rcInit.
+void av1RcUpdateFramerate(RcControl& rc, double newFramerate, std::int64_t targetBitRate, int vbrmaxSection,
+                          int numMbs);
+
+// svt_av1_new_framerate (pass2_strategy.c:901-904): verbatim; the
+// scs->new_framerate mirror threads as the in/out double.
+void av1NewFramerate(RcControl& rc, double& scsNewFramerate, double framerate, std::int64_t targetBitRate,
+                     int vbrmaxSection, int numMbs);
 
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.

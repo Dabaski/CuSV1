@@ -327,6 +327,529 @@ int calculateBoostBits(int frameCount, int boost, std::int64_t totalGroupBits) {
     return std::max((int)(((std::int64_t)boost * totalGroupBits) / allocationChunks), 0);
 }
 
+// ---- A9R: rc_process.c rd-multiplier family ----
+
+// def_inter_rd_multiplier (rc_process.c:346-348): verbatim.
+double defInterRdMultiplier(int qindex) {
+    return 3.2 + 0.0015 * qindex;
+}
+
+// def_arf_rd_multiplier (rc_process.c:353-355): verbatim.
+double defArfRdMultiplier(int qindex) {
+    return 3.25 + 0.0015 * qindex;
+}
+
+// def_kf_rd_multiplier (rc_process.c:360-362): verbatim.
+double defKfRdMultiplier(int qindex) {
+    return 3.3 + 0.0015 * qindex;
+}
+
+// svt_aom_compute_rd_mult_based_on_qindex (rc_process.c:364-392): verbatim.
+// The 10/12-bit table cases of the dc_quant callee are the
+// CONFIG_ENABLE_HIGH_BIT_DEPTH=0 park (dcQuantQtx -> -1), so the rdmult is
+// 3 there and the ROUND_POWER_OF_TWO shift drives it to 0 -> the "> 0"
+// test fails -> 1. The default branch returns -1 (assert removed under
+// NDEBUG).
+int computeRdMultBasedOnQindex(int bitDepth, int updateType, int qindex) {
+    const int q = dcQuantQtx(qindex, 0, bitDepth);
+    std::int64_t rdmult;
+
+    // Scale rdmult based on frame type
+    if (updateType == kSvtAv1KfUpdate) {
+        rdmult = (std::int64_t)(defKfRdMultiplier(q) * q * q);
+    } else if (updateType == kSvtAv1GfUpdate || updateType == kSvtAv1ArfUpdate) {
+        rdmult = (std::int64_t)(defArfRdMultiplier(q) * q * q);
+    } else {
+        rdmult = (std::int64_t)(defInterRdMultiplier(q) * q * q);
+    }
+
+    switch (bitDepth) {
+    case kEbEightBit:
+        break;
+    case kEbTenBit:
+        rdmult = roundPowerOfTwo(rdmult, 4);
+        break;
+    case kEbTwelveBit:
+        rdmult = roundPowerOfTwo(rdmult, 8);
+        break;
+    default:
+        return -1;
+    }
+
+    return rdmult > 0 ? (int)std::min(rdmult, (std::int64_t)INT_MAX) : 1;
+}
+
+// rd_frame_type_factor (rc_process.c:394-395): verbatim.
+const int kRdFrameTypeFactor[2][7] = {{150, 180, 150, 150, 180, 180, 150},
+                                      {128, 144, 128, 128, 144, 144, 128}};
+
+// update_lambda (rc_process.c:398-441): verbatim; the pcs walls thread (the
+// declaration comment names the consumed carriers).
+std::uint32_t updateLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                           std::int64_t rdmult, bool rtc, bool statsBasedSbLambdaModulation) {
+    const int frameType = pcs.frameType;
+    const int temporalLayerIndex = pcs.temporalLayerIndex;
+    const int maxTemporalLayer = pcs.hierarchicalLevels;
+
+    // Update rdmult based on the frame's position in the miniGOP
+    const int gfUpdateType = frameType == kKeyFrame ? kSvtAv1KfUpdate
+        : temporalLayerIndex == 0                   ? kSvtAv1ArfUpdate
+        : temporalLayerIndex < maxTemporalLayer     ? kSvtAv1IntnlArfUpdate
+                                                    : kSvtAv1LfUpdate;
+    rdmult = (rdmult * kRdFrameTypeFactor[bitDepth != kEbEightBit ? 1 : 0][gfUpdateType]) >> 7;
+    if (rtc && frameType == kKeyFrame) {
+        rdmult = (rdmult * kRtcKfLambdaBoost) >> 7;
+    }
+    if (statsBasedSbLambdaModulation) {
+        int factor = 128;
+        if (rtc) {
+            const int qdiff = meQIndex - pcs.baseQIdx;
+            if (qdiff < 0) {
+                factor = (qdiff <= -4) ? 100 : 115;
+            }
+        } else if (pcs.deltaQPresent || pcs.r0DeltaQpMd) {
+            const int qdiff = qIndex - pcs.baseQIdx;
+            if (qdiff < 0) {
+                factor = (qdiff <= -8) ? 90 : 115;
+            } else if (qdiff > 0) {
+                factor = (qdiff <= 8) ? 135 : 150;
+            }
+        } else {
+            const int qdiff = meQIndex - pcs.baseQIdx;
+            if (qdiff < 0) {
+                factor = (qdiff <= -4) ? 100 : 115;
+            } else if (qdiff > 0) {
+                factor = (qdiff <= 4) ? 135 : 150;
+            }
+        }
+
+        rdmult = (rdmult * factor) >> 7;
+    }
+    return (std::uint32_t)rdmult;
+}
+
+// svt_aom_compute_rd_mult (rc_process.c:446-451): verbatim.
+std::uint32_t computeRdMult(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                            bool rtc, bool statsBasedSbLambdaModulation) {
+    // Always use q_index for the derivation of the initial rdmult (i.e. don't use me_q_index)
+    const std::int64_t rdmult = computeRdMultBasedOnQindex(bitDepth, pcs.updateType, qIndex);
+    return updateLambda(pcs, qIndex, meQIndex, bitDepth, rdmult, rtc, statsBasedSbLambdaModulation);
+}
+
+// svt_aom_compute_fast_lambda (rc_process.c:453-464): verbatim; the HBD
+// table branch is the named park - the pinned RTC build is 8-bit only.
+std::uint32_t computeFastLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                                bool rtc, bool statsBasedSbLambdaModulation) {
+    // Always use q_index for the derivation of the initial rdmult (i.e. don't use me_q_index)
+    const std::int64_t rdmult = kLambdaModeDecision8BitSad[qIndex];
+    return updateLambda(pcs, qIndex, meQIndex, bitDepth, rdmult, rtc, statsBasedSbLambdaModulation);
+}
+
+// svt_aom_lambda_assign (rc_process.c:466-496): verbatim; the
+// CONFIG_ENABLE_HIGH_BIT_DEPTH=0 build keeps only the 8-bit branch, so for
+// bit depths 10/12 the assert-removed else leaves the caller's values and
+// only the scale shift applies (the C1/C3 park convention).
+void lambdaAssign(const PcsCarrier& pcs, std::uint32_t& fastLambda, std::uint32_t& fullLambda, int bitDepth,
+                  std::uint8_t qpIndex, bool multiplyLambda, std::uint64_t lambdaScaleFactor, bool rtc,
+                  bool statsBasedSbLambdaModulation) {
+    (void)multiplyLambda;  // only used by the 10/12-bit paths (compiled out in 8-bit RTC)
+    if (bitDepth == kEbEightBit) {
+        fullLambda = computeRdMult(pcs, qpIndex, qpIndex, bitDepth, rtc, statsBasedSbLambdaModulation);
+        fastLambda = kLambdaModeDecision8BitSad[qpIndex];
+    } else {
+        // assert(0) in the reference - removed under NDEBUG.
+    }
+
+    // NM: To be done: tune lambda based on the picture type and layer.
+    fullLambda = (std::uint32_t)((fullLambda * lambdaScaleFactor) >> 7);
+    fastLambda = (std::uint32_t)((fastLambda * lambdaScaleFactor) >> 7);
+}
+
+// ---- A9R: initial_rc_process.c ----
+
+// svt_aom_get_tpl_group_level (initial_rc_process.c:190-202): verbatim.
+std::uint8_t getTplGroupLevel(std::uint8_t tpl, std::int8_t encMode) {
+    std::uint8_t tplGroupLevel;
+    if (!tpl) {
+        tplGroupLevel = 0;
+    } else if (encMode <= kEncM5) {
+        tplGroupLevel = 1;
+    } else if (encMode <= kEncM8) {
+        tplGroupLevel = 3;
+    } else {
+        tplGroupLevel = 4;
+    }
+    return tplGroupLevel;
+}
+
+// get_tpl_params_level (initial_rc_process.c:307-317): verbatim.
+std::uint8_t getTplParamsLevel(std::int8_t encMode) {
+    std::uint8_t tplParamsLevel;
+    if (encMode <= kEncM2) {
+        tplParamsLevel = 1;
+    } else if (encMode <= kEncM7) {
+        tplParamsLevel = 4;
+    } else {
+        tplParamsLevel = 5;
+    }
+    return tplParamsLevel;
+}
+
+// set_1pvbr_param (initial_rc_process.c:638-666): verbatim (the mutex
+// block/release is the named park; the declaration comment names the
+// threaded walls).
+void set1pVbrParam(P1vbrCarrier& pcs) {
+    pcs.statStruct = pcs.entry.statStruct;
+    if (pcs.sliceType != kIslice) {
+        std::uint64_t avgMeDist = 0;
+        std::uint64_t avgVarianceMeDist = 0;
+        for (int b64Idx = 0; b64Idx < pcs.b64TotalCount; ++b64Idx) {
+            avgMeDist += pcs.rcMeDistortion[b64Idx];
+            avgVarianceMeDist += pcs.me8x8CostVariance[b64Idx];
+        }
+        avgMeDist /= pcs.b64TotalCount;
+        avgVarianceMeDist /= pcs.b64TotalCount;
+
+        double weight = 1;
+        if (avgVarianceMeDist > kHigh8x8DistVarTh) {
+            weight = 1.5;
+        }
+
+        if (pcs.inputResolution <= kInputSize480pRange) {
+            weight = 1.5 * weight;
+        }
+        pcs.statStruct.poc = pcs.pictureNumber;
+        pcs.entry.statStruct.totalNumBits = std::max<std::uint64_t>(kMinAvgMeDist, avgMeDist);
+        pcs.entry.codedError = (double)avgMeDist * pcs.b64TotalCount * weight / kVbrCodedErrorFactor;
+        pcs.entry.statStruct.poc = pcs.pictureNumber;
+    }
+}
+
+// ---- A9R: pass2_strategy.c (the two-pass stats arithmetic) ----
+
+// calculate_modified_err (pass2_strategy.c:23-31): verbatim.
+double calculateModifiedErr(bool hasTotalStats, std::uint64_t thisFrameTotalNumBits) {
+    if (!hasTotalStats) {
+        return 0;
+    }
+    return (double)thisFrameTotalNumBits;
+}
+
+// subtract_stats (pass2_strategy.c:47-53): verbatim.
+void subtractStats(FirstpassStatsCarrier& section, const FirstpassStatsCarrier& frame) {
+    section.frame -= frame.frame;
+    section.codedError -= frame.codedError;
+    section.count -= frame.count;
+    section.duration -= frame.duration;
+}
+
+// fclamp (definitions.h): the double clamp macro.
+static double fclamp(double x, double low, double hi) {
+    return x < low ? low : (x > hi ? hi : x);
+}
+
+// q_pow_term (pass2_strategy.c:60): verbatim.
+const double kQpowTerm[(kQindexRange >> 5) + 1] = {0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.95, 0.95};
+
+// ERR_DIVISOR (pass2_strategy.c:61).
+const double kErrDivisor = 96.0;
+
+// calc_correction_factor (pass2_strategy.c:63-70): verbatim (the assert
+// gate is the named NDEBUG park).
+double calcCorrectionFactor(double errPerMb, int q) {
+    const double errorTerm = errPerMb / kErrDivisor;
+    const int index = q >> 5;
+    // Adjustment to power term based on qindex
+    const double powerTerm =
+        kQpowTerm[index] + (((kQpowTerm[index + 1] - kQpowTerm[index]) * (q % 32)) / 32.0);
+    return fclamp(std::pow(errorTerm, powerTerm), 0.05, 5.0);
+}
+
+// qbpm_enumerator (pass2_strategy.c:72-74): verbatim.
+int qbpmEnumerator(int rateErrTol) {
+    return 1250000 + ((300000 * std::min(75, std::max(rateErrTol - 25, 0))) / 75);
+}
+
+// find_qindex_by_rate_with_correction (pass2_strategy.c:78-99): verbatim
+// (the assert gate is the named NDEBUG park).
+int findQindexByRateWithCorrection(int desiredBitsPerMb, int bitDepth, double errorPerMb,
+                                   double groupWeightFactor, int rateErrTol, int bestQindex,
+                                   int worstQindex) {
+    int low = bestQindex;
+    int high = worstQindex;
+
+    while (low < high) {
+        const int mid = (low + high) >> 1;
+        const double midFactor = calcCorrectionFactor(errorPerMb, mid);
+        const double q = convertQindexToQ(mid, bitDepth);
+        const int enumerator = qbpmEnumerator(rateErrTol);
+        const int midBitsPerMb = (int)((enumerator * midFactor * groupWeightFactor) / q);
+
+        if (midBitsPerMb > desiredBitsPerMb) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+// ---- A9R: pass2_strategy.c (the GF-stats walk) ----
+
+namespace {
+
+// input_stats (pass2_strategy.c:37-45): verbatim; the EOF convention is
+// the reference's (-1 / 1).
+int inputStats(TwoPassCarrier& p, FirstpassStatsCarrier& fps) {
+    if (p.statsInPos >= p.statsInCount) {
+        return EOF;
+    }
+
+    fps = p.statsIn[p.statsInPos];
+    ++p.statsInPos;
+    return 1;
+}
+
+}  // namespace
+
+// accumulate_this_frame_stats (pass2_strategy.c:168-171): verbatim.
+void accumulateThisFrameStats(const FirstpassStatsCarrier& stats, double modFrameErr,
+                              GfGroupStatsCarrier& gfStats) {
+    gfStats.gfGroupErr += modFrameErr;
+    gfStats.gfGroupRawError += stats.codedError;
+}
+
+// set_baseline_gf_interval (pass2_strategy.c:314-324): verbatim.
+void setBaselineGfInterval(const PcsCarrier& pcs, int arfPosition, RcControl& rc) {
+    if (frameIsIntraOnly(pcs.frameType) && pcs.idrFlag) {
+        rc.baselineGfInterval = std::max(arfPosition - 1, 1);
+    } else {
+        rc.baselineGfInterval = pcs.gfInterval;
+    }
+}
+
+// init_gf_stats (pass2_strategy.c:326-339): verbatim.
+void initGfStats(GfGroupStatsCarrier& gfStats) {
+    gfStats.gfGroupErr = 0.0;
+    gfStats.gfStatStruct.poc = 0;
+    gfStats.gfStatStruct.totalNumBits = 1;
+    gfStats.gfStatStruct.qindex = 172;
+    gfStats.gfStatStruct.worstQindex = 172;
+    gfStats.gfGroupRawError = 0.0;
+    gfStats.gfGroupSkipPct = 0.0;
+    gfStats.gfGroupInactiveZoneRows = 0.0;
+}
+
+// calculate_gf_stats (pass2_strategy.c:341-390): verbatim; the walls thread
+// (the declaration comment names the carriers).
+void calculateGfStats(const PcsCarrier& ppcs, RcControl& rc, GfGroupStatsCarrier& gfStats,
+                      FirstpassStatsCarrier& thisFrame, int& useAltRef, TwoPassCarrier& twopass) {
+    // SequenceControlSet* scs = ppcs->scs; ... (walls threaded)
+    FirstpassStatsCarrier nextFrame;
+    const int startPos = twopass.statsInPos;
+
+    initGfStats(gfStats);
+
+    // Load stats for the current frame.
+    double modFrameErr = calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+
+    // Note the error of the frame at the start of the group. This will be
+    // the GF frame error if we code a normal gf.
+
+    // If this is a key frame or the overlay from a previous arf then
+    // the error score / cost of this frame has already been accounted for.
+    // There is no overlay support for now
+    if (frameIsIntraOnly(ppcs.frameType)) {
+        gfStats.gfGroupErr -= modFrameErr;
+        gfStats.gfGroupRawError -= thisFrame.codedError;
+    }
+    gfStats.gfStatStruct = thisFrame.statStruct;
+    int i = 0;
+    while (i < ppcs.gfInterval) {
+        ++i;
+        // Accumulate error score of frames in this gf group.
+        modFrameErr = calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+        // accumulate stats for this frame
+        accumulateThisFrameStats(thisFrame, modFrameErr, gfStats);
+
+        // read in the next frame
+        if (EOF == inputStats(twopass, nextFrame)) {
+            break;
+        }
+        thisFrame = nextFrame;
+    }
+
+    // Was the group length constrained by the requirement for a new KF?
+    rc.constrainedGfGroup = (i >= rc.framesToKey) ? 1 : 0;
+    useAltRef = (i > 2);
+    setBaselineGfInterval(ppcs, i, rc);
+    // Reset the file position.
+    twopass.statsInPos = startPos;
+}
+
+// ---- A9R: pass2_strategy.c (the active-worst-quality estimate) ----
+
+namespace {
+
+// clamp (definitions.h): the integer clamp macro.
+static int clampInt(int value, int low, int hi) {
+    return value < low ? low : (value > hi ? hi : value);
+}
+
+}  // namespace
+
+// get_twopass_worst_quality (pass2_strategy.c:125-166): verbatim; the walls
+// thread (the declaration comment names the carriers).
+int getTwopassWorstQuality(bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight,
+                           double sectionErr, double inactiveZone, int sectionTargetBandwidth,
+                           double groupWeightFactor, int encoderBitDepth, int underShootPct, int overShootPct,
+                           int bestQuality, int worstQuality) {
+    std::uint32_t mbCols;
+    std::uint32_t mbRows;
+    if (firstPassDownsample) {
+        mbCols = 2 * (maxInputLumaWidth + 16 - 1) / 16;
+        mbRows = 2 * (maxInputLumaHeight + 16 - 1) / 16;
+    } else {
+        mbCols = (maxInputLumaWidth + 16 - 1) / 16;
+        mbRows = (maxInputLumaHeight + 16 - 1) / 16;
+    }
+    inactiveZone = fclamp(inactiveZone, 0.0, 1.0);
+
+    if (sectionTargetBandwidth <= 0) {
+        return worstQuality;  // Highest value allowed
+    }
+
+    const int numMbs = (int)(mbCols * mbRows);
+    //(oxcf->resize_cfg.resize_mode != RESIZE_NONE)
+    //    ? cpi->initial_mbs
+    //    : cpi->common.mi_params.MBs;
+    const int activeMbs = std::max(1, numMbs - (int)(numMbs * inactiveZone));
+    const double avErrPerMb = sectionErr / activeMbs;
+    const int targetNormBitsPerMb =
+        (int)(((std::uint64_t)sectionTargetBandwidth << kBperMbNormbits) / activeMbs);
+
+    const int rateErrTol = std::min(underShootPct, overShootPct);
+
+    // Try and pick a max Q that will be high enough to encode the
+    // content at the given rate.
+    return findQindexByRateWithCorrection(targetNormBitsPerMb, encoderBitDepth, avErrPerMb, groupWeightFactor,
+                                          rateErrTol, bestQuality, worstQuality);
+}
+
+// calculate_active_worst_quality (pass2_strategy.c:392-455): verbatim; the
+// walls thread (the declaration comment names the carriers).
+void calculateActiveWorstQuality(const PcsCarrier& ppcs, const GfGroupStatsCarrier& gfStats, RcControl& rc,
+                                 std::int64_t targetBitRate, int mbRows, int encoderBitDepth,
+                                 bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight,
+                                 int underShootPct, int overShootPct, bool gopConstraintRc, bool singlePass,
+                                 bool twoPass) {
+    (void)ppcs;
+
+    // Calculate an estimate of the maxq needed for the group.
+    // We are more agressive about correcting for sections
+    // where there could be significant overshoot than for easier
+    // sections where we do not wish to risk creating an overshoot
+    // of the allocated bit budget.
+    if (rc.baselineGfInterval > 1) {
+        const int vbrGroupBitsPerFrame = (int)(rc.gfGroupBits / rc.baselineGfInterval);
+        const double groupAvErr = gfStats.gfGroupRawError / rc.baselineGfInterval;
+        const double groupAvSkipPct = gfStats.gfGroupSkipPct / rc.baselineGfInterval;
+        const double groupAvInactiveZone =
+            ((gfStats.gfGroupInactiveZoneRows * 2) / (rc.baselineGfInterval * (double)mbRows));
+
+        int tmpQ;
+        // rc factor is a weight factor that corrects for local rate control drift.
+        double rcFactor = 1.0;
+        const std::int64_t bits = targetBitRate;  // oxcf->target_bandwidth
+
+        if (bits > 0) {
+            int rateError;
+
+            rateError = (int)((rc.vbrBitsOffTarget * 100) / bits);
+            rateError = clampInt(rateError, -100, 100);
+            if (rateError > 0) {
+                const double rcFactorMin = gopConstraintRc ? kRcFactorMinGopConst
+                    : singlePass                           ? kRcFactorMin1PVbr
+                                                           : kRcFactorMin;
+                rcFactor = std::max(rcFactorMin, (double)(100 - rateError) / 100.0);
+            } else {
+                rcFactor = std::min(kRcFactorMax, (double)(100 - rateError) / 100.0);
+            }
+        }
+        tmpQ = getTwopassWorstQuality(firstPassDownsample, maxInputLumaWidth, maxInputLumaHeight, groupAvErr,
+                                      (groupAvSkipPct + groupAvInactiveZone), vbrGroupBitsPerFrame, rcFactor,
+                                      encoderBitDepth, underShootPct, overShootPct, rc.bestQuality,
+                                      rc.worstQuality);
+        if (twoPass) {
+            const int refQindex = gfStats.gfStatStruct.worstQindex;
+            const double refQ = convertQindexToQ(refQindex, encoderBitDepth);
+            const std::int64_t refGfGroupBits = (std::int64_t)(gfStats.gfGroupErr);
+            const std::int64_t targetGfGroupBits = rc.gfGroupBits;
+            {
+                int low = rc.bestQuality;
+                int high = rc.worstQuality;
+
+                while (low < high) {
+                    const int mid = (low + high) >> 1;
+                    const double q = convertQindexToQ(mid, encoderBitDepth);
+                    const int midBits = (int)(refGfGroupBits * refQ * rcFactor / q);
+
+                    if (midBits > targetGfGroupBits) {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+                tmpQ = low;
+            }
+        }
+        rc.activeWorstQuality = std::max(tmpQ, rc.activeWorstQuality >> 1);
+    }
+}
+
+// get_section_target_bandwidth (pass2_strategy.c:746-759): verbatim.
+int getSectionTargetBandwidth(const RcControl& rc, bool lapRc, double totalStatsCount, int pictureNumber,
+                              std::int64_t bitsLeft) {
+    int sectionTargetBandwidth;
+    const int framesLeft = (int)(totalStatsCount - pictureNumber);
+    if (lapRc) {
+        sectionTargetBandwidth = (int)rc.avgFrameBandwidth;
+    } else {
+        sectionTargetBandwidth = (int)(bitsLeft / framesLeft);
+    }
+    return sectionTargetBandwidth;
+}
+
+// MAX_MB_RATE / MAXRATE_1080P (pass2_strategy.c:875-876): the constants
+// ride the header (kMaxMbRate / kMaxRate1080P).
+
+// av1_rc_update_framerate (pass2_strategy.c:880-898): verbatim.
+void av1RcUpdateFramerate(RcControl& rc, double newFramerate, std::int64_t targetBitRate, int vbrmaxSection,
+                          int numMbs) {
+    const int MBs = numMbs;
+
+    rc.avgFrameBandwidth = (int)(targetBitRate / newFramerate);
+    // A maximum bitrate for a frame is defined.
+    // The baseline for this aligns with HW implementations that
+    // can support decode of 1080P content up to a bitrate of MAX_MB_RATE bits
+    // per 16x16 MB (averaged over a frame). However this limit is extended if
+    // a very high rate is given on the command line or the rate cannot
+    // be achieved because of a user specified max q (e.g. when the user
+    // specifies lossless encode.
+    std::int64_t vbrMaxBits = ((std::int64_t)rc.avgFrameBandwidth * vbrmaxSection) / 100;
+    vbrMaxBits = std::min(vbrMaxBits, (std::int64_t)INT_MAX);
+    rc.maxFrameBandwidth = (int)std::max(std::max((std::int64_t)(MBs * kMaxMbRate), (std::int64_t)kMaxRate1080P),
+                                         vbrMaxBits);
+}
+
+// svt_av1_new_framerate (pass2_strategy.c:901-904): verbatim (from aom
+// encoder.c, the reference comment).
+void av1NewFramerate(RcControl& rc, double& scsNewFramerate, double framerate, std::int64_t targetBitRate,
+                     int vbrmaxSection, int numMbs) {
+    scsNewFramerate = framerate < 0.1 ? 30 : framerate;
+    av1RcUpdateFramerate(rc, scsNewFramerate, targetBitRate, vbrmaxSection, numMbs);
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;
