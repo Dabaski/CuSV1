@@ -260,6 +260,16 @@ constexpr int kSvtAv1IntnlArfUpdate = 6;
 
 // ResolutionRange (definitions.h:1808-1818).
 constexpr int kInputSize720pRange = 3;
+constexpr int kInputSize480pRange = 2;
+
+// EncMode (EbSvtAv1Enc.h:44-61): the band boundaries the tpl level pair
+// consumes (ENC_MR is the research mode).
+constexpr int kEncMr = -1;
+constexpr int kEncM2 = 2;
+constexpr int kEncM5 = 5;
+constexpr int kEncM7 = 7;
+constexpr int kEncM8 = 8;
+constexpr int kEncM13 = 13;
 
 // SliceType (definitions.h:1874-1878).
 constexpr int kBslice = 0;
@@ -396,6 +406,15 @@ std::uint32_t computeFastLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std:
 void lambdaAssign(const PcsCarrier& pcs, std::uint32_t& fastLambda, std::uint32_t& fullLambda, int bitDepth,
                   std::uint8_t qpIndex, bool multiplyLambda, std::uint64_t lambdaScaleFactor, bool rtc,
                   bool statsBasedSbLambdaModulation);
+
+// ---- A9R: initial_rc_process.c ----
+
+// svt_aom_get_tpl_group_level (initial_rc_process.c:190-202): verbatim.
+std::uint8_t getTplGroupLevel(std::uint8_t tpl, std::int8_t encMode);
+
+// get_tpl_params_level (initial_rc_process.c:307-317): static in the
+// reference; exported for testability (the DF1 signedCharClamp precedent).
+std::uint8_t getTplParamsLevel(std::int8_t encMode);
 
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.

@@ -6,7 +6,8 @@ add_executable(av1_l15_rc_tests tests/test_harness.cpp tests/test_rc.cpp tests/t
                                tests/test_rc_aq.cpp tests/test_rc_alloc.cpp tests/test_rc_rtc.cpp tests/test_rc_driver.cpp
                                tests/test_rc_recode.cpp tests/test_rc_updater.cpp tests/test_rc_recode_loop.cpp
                                tests/test_rc_cr.cpp
-                               tests/test_rc_lambda.cpp)
+                               tests/test_rc_lambda.cpp
+                               tests/test_rc_tpl.cpp)
 target_include_directories(av1_l15_rc_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/doctest)
 target_compile_definitions(av1_l15_rc_tests PRIVATE REPO_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(av1_l15_rc_tests PRIVATE av1_rc)

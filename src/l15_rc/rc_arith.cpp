@@ -465,6 +465,36 @@ void lambdaAssign(const PcsCarrier& pcs, std::uint32_t& fastLambda, std::uint32_
     fastLambda = (std::uint32_t)((fastLambda * lambdaScaleFactor) >> 7);
 }
 
+// ---- A9R: initial_rc_process.c ----
+
+// svt_aom_get_tpl_group_level (initial_rc_process.c:190-202): verbatim.
+std::uint8_t getTplGroupLevel(std::uint8_t tpl, std::int8_t encMode) {
+    std::uint8_t tplGroupLevel;
+    if (!tpl) {
+        tplGroupLevel = 0;
+    } else if (encMode <= kEncM5) {
+        tplGroupLevel = 1;
+    } else if (encMode <= kEncM8) {
+        tplGroupLevel = 3;
+    } else {
+        tplGroupLevel = 4;
+    }
+    return tplGroupLevel;
+}
+
+// get_tpl_params_level (initial_rc_process.c:307-317): verbatim.
+std::uint8_t getTplParamsLevel(std::int8_t encMode) {
+    std::uint8_t tplParamsLevel;
+    if (encMode <= kEncM2) {
+        tplParamsLevel = 1;
+    } else if (encMode <= kEncM7) {
+        tplParamsLevel = 4;
+    } else {
+        tplParamsLevel = 5;
+    }
+    return tplParamsLevel;
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;
