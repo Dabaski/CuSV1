@@ -338,6 +338,23 @@ int getGfuBoostFromR0Lap(double minFactor, double maxFactor, double r0, int fram
 // svt_av1_calculate_boost_bits (rc_process.c:641-667): verbatim.
 int calculateBoostBits(int frameCount, int boost, std::int64_t totalGroupBits);
 
+// ---- A9R (the remaining pure arithmetic): rc_process.c rd-multiplier
+// family ----
+
+// def_inter_rd_multiplier (rc_process.c:346-348): static in the reference;
+// exported for testability (the DF1 signedCharClamp precedent).
+double defInterRdMultiplier(int qindex);
+
+// def_arf_rd_multiplier (rc_process.c:353-355): static in the reference.
+double defArfRdMultiplier(int qindex);
+
+// def_kf_rd_multiplier (rc_process.c:360-362): static in the reference.
+double defKfRdMultiplier(int qindex);
+
+// svt_aom_compute_rd_mult_based_on_qindex (rc_process.c:364-392): verbatim;
+// the 10/12-bit branches ride on the dcQuantQtx HBD park (see its note).
+int computeRdMultBasedOnQindex(int bitDepth, int updateType, int qindex);
+
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.
 bool frameIsIntraOnly(int frameType);

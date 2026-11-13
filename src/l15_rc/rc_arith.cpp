@@ -327,6 +327,58 @@ int calculateBoostBits(int frameCount, int boost, std::int64_t totalGroupBits) {
     return std::max((int)(((std::int64_t)boost * totalGroupBits) / allocationChunks), 0);
 }
 
+// ---- A9R: rc_process.c rd-multiplier family ----
+
+// def_inter_rd_multiplier (rc_process.c:346-348): verbatim.
+double defInterRdMultiplier(int qindex) {
+    return 3.2 + 0.0015 * qindex;
+}
+
+// def_arf_rd_multiplier (rc_process.c:353-355): verbatim.
+double defArfRdMultiplier(int qindex) {
+    return 3.25 + 0.0015 * qindex;
+}
+
+// def_kf_rd_multiplier (rc_process.c:360-362): verbatim.
+double defKfRdMultiplier(int qindex) {
+    return 3.3 + 0.0015 * qindex;
+}
+
+// svt_aom_compute_rd_mult_based_on_qindex (rc_process.c:364-392): verbatim.
+// The 10/12-bit table cases of the dc_quant callee are the
+// CONFIG_ENABLE_HIGH_BIT_DEPTH=0 park (dcQuantQtx -> -1), so the rdmult is
+// 3 there and the ROUND_POWER_OF_TWO shift drives it to 0 -> the "> 0"
+// test fails -> 1. The default branch returns -1 (assert removed under
+// NDEBUG).
+int computeRdMultBasedOnQindex(int bitDepth, int updateType, int qindex) {
+    const int q = dcQuantQtx(qindex, 0, bitDepth);
+    std::int64_t rdmult;
+
+    // Scale rdmult based on frame type
+    if (updateType == kSvtAv1KfUpdate) {
+        rdmult = (std::int64_t)(defKfRdMultiplier(q) * q * q);
+    } else if (updateType == kSvtAv1GfUpdate || updateType == kSvtAv1ArfUpdate) {
+        rdmult = (std::int64_t)(defArfRdMultiplier(q) * q * q);
+    } else {
+        rdmult = (std::int64_t)(defInterRdMultiplier(q) * q * q);
+    }
+
+    switch (bitDepth) {
+    case kEbEightBit:
+        break;
+    case kEbTenBit:
+        rdmult = roundPowerOfTwo(rdmult, 4);
+        break;
+    case kEbTwelveBit:
+        rdmult = roundPowerOfTwo(rdmult, 8);
+        break;
+    default:
+        return -1;
+    }
+
+    return rdmult > 0 ? (int)std::min(rdmult, (std::int64_t)INT_MAX) : 1;
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;
