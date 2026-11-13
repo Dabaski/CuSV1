@@ -173,6 +173,11 @@ struct PcsCarrier {
     int superresUpscaledWidth;       // av1_cm->frm_size.superres_upscaled_width
     int seqProfile;                  // scs->seq_header.seq_profile (EbAv1SeqProfile)
     int maxFrameSize;                // ppcs->max_frame_size (the Q-mode bounds)
+
+    // the A9R update_lambda consumes (rc_process.c:398-441): the frm_hdr
+    // delta-q gate and the r0-delta-qp-md flag ride the ppcs wall.
+    bool deltaQPresent;              // ppcs->frm_hdr.delta_q_params.delta_q_present
+    bool r0DeltaQpMd;                // ppcs->r0_delta_qp_md
 };
 
 // ASSIGN_MINQ_TABLE (rc_tables.h:36-39, the CONFIG_ENABLE_HIGH_BIT_DEPTH=0
@@ -354,6 +359,21 @@ double defKfRdMultiplier(int qindex);
 // svt_aom_compute_rd_mult_based_on_qindex (rc_process.c:364-392): verbatim;
 // the 10/12-bit branches ride on the dcQuantQtx HBD park (see its note).
 int computeRdMultBasedOnQindex(int bitDepth, int updateType, int qindex);
+
+// rd_frame_type_factor (rc_process.c:394-395), row [0] = 8-bit, row [1] =
+// the 10/12-bit rows.
+extern const int kRdFrameTypeFactor[2][7];
+
+// RTC_KF_LAMBDA_BOOST (rc_process.c:396).
+constexpr int kRtcKfLambdaBoost = 100;
+
+// update_lambda (rc_process.c:398-441): static in the reference; exported
+// for testability. The pcs walls thread: the ppcs frame fields ride on
+// PcsCarrier (frameType, temporalLayerIndex, hierarchicalLevels, baseQIdx,
+// deltaQPresent, r0DeltaQpMd); the scs->static_config.rtc /
+// stats_based_sb_lambda_modulation gates thread as booleans.
+std::uint32_t updateLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                           std::int64_t rdmult, bool rtc, bool statsBasedSbLambdaModulation);
 
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.

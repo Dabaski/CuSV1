@@ -379,6 +379,55 @@ int computeRdMultBasedOnQindex(int bitDepth, int updateType, int qindex) {
     return rdmult > 0 ? (int)std::min(rdmult, (std::int64_t)INT_MAX) : 1;
 }
 
+// rd_frame_type_factor (rc_process.c:394-395): verbatim.
+const int kRdFrameTypeFactor[2][7] = {{150, 180, 150, 150, 180, 180, 150},
+                                      {128, 144, 128, 128, 144, 144, 128}};
+
+// update_lambda (rc_process.c:398-441): verbatim; the pcs walls thread (the
+// declaration comment names the consumed carriers).
+std::uint32_t updateLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                           std::int64_t rdmult, bool rtc, bool statsBasedSbLambdaModulation) {
+    const int frameType = pcs.frameType;
+    const int temporalLayerIndex = pcs.temporalLayerIndex;
+    const int maxTemporalLayer = pcs.hierarchicalLevels;
+
+    // Update rdmult based on the frame's position in the miniGOP
+    const int gfUpdateType = frameType == kKeyFrame ? kSvtAv1KfUpdate
+        : temporalLayerIndex == 0                   ? kSvtAv1ArfUpdate
+        : temporalLayerIndex < maxTemporalLayer     ? kSvtAv1IntnlArfUpdate
+                                                    : kSvtAv1LfUpdate;
+    rdmult = (rdmult * kRdFrameTypeFactor[bitDepth != kEbEightBit ? 1 : 0][gfUpdateType]) >> 7;
+    if (rtc && frameType == kKeyFrame) {
+        rdmult = (rdmult * kRtcKfLambdaBoost) >> 7;
+    }
+    if (statsBasedSbLambdaModulation) {
+        int factor = 128;
+        if (rtc) {
+            const int qdiff = meQIndex - pcs.baseQIdx;
+            if (qdiff < 0) {
+                factor = (qdiff <= -4) ? 100 : 115;
+            }
+        } else if (pcs.deltaQPresent || pcs.r0DeltaQpMd) {
+            const int qdiff = qIndex - pcs.baseQIdx;
+            if (qdiff < 0) {
+                factor = (qdiff <= -8) ? 90 : 115;
+            } else if (qdiff > 0) {
+                factor = (qdiff <= 8) ? 135 : 150;
+            }
+        } else {
+            const int qdiff = meQIndex - pcs.baseQIdx;
+            if (qdiff < 0) {
+                factor = (qdiff <= -4) ? 100 : 115;
+            } else if (qdiff > 0) {
+                factor = (qdiff <= 4) ? 135 : 150;
+            }
+        }
+
+        rdmult = (rdmult * factor) >> 7;
+    }
+    return (std::uint32_t)rdmult;
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;
