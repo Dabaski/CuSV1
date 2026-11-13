@@ -1292,7 +1292,8 @@ TEST_CASE("updateASepSym matches the transcription oracle and pins failure") {
         std::int64_t* mc[7];
         std::int64_t* hc[49];
         for (int i = 0; i < 7; ++i) mc[i] = M.data() + i * 7;
-        for (int i = 0; i < 49; ++i) hc[i] = H.data() + i * 7;
+        for (int i = 0; i < 7; ++i)
+            for (int j = 0; j < 7; ++j) hc[i * 7 + j] = H.data() + (size_t)i * 7 * 49 + (size_t)j * 7;
         std::int32_t b[7] = {1536, -3584, 7680, 54272, 7680, -3584, 1536};
         std::int32_t a[7] = {91, 82, 73, 64, 55, 46, 37};
         const std::int32_t before[7] = {91, 82, 73, 64, 55, 46, 37};
@@ -1310,7 +1311,8 @@ TEST_CASE("updateASepSym matches the transcription oracle and pins failure") {
         std::vector<std::int64_t> A(halfwin1, 0), B(halfwin1 * halfwin1, 0);
         std::vector<const std::int64_t*> mc(win), hc(win2);
         for (int i = 0; i < win; ++i) mc[i] = &M[i * win];
-        for (int i = 0; i < win2; ++i) hc[i] = &H[i * win];
+        for (int i = 0; i < win; ++i)
+            for (int j = 0; j < win; ++j) hc[i * win + j] = &H[(size_t)i * win * win2 + (size_t)j * win];
         auto wi = [](int idx, int w) {
             const int h1 = (w >> 1) + 1;
             return idx >= h1 ? w - 1 - idx : idx;
@@ -1396,7 +1398,8 @@ TEST_CASE("updateASepSym matches the transcription oracle and pins failure") {
             std::int64_t* mc[7];
             std::int64_t* hc[49];
             for (int i = 0; i < win; ++i) mc[i] = M.data() + i * win;
-            for (int i = 0; i < win2; ++i) hc[i] = H.data() + (size_t)i * win;
+            for (int i = 0; i < win; ++i)
+                for (int j = 0; j < win; ++j) hc[i * win + j] = H.data() + (size_t)i * win * win2 + (size_t)j * win;
             updateASepSym(win, mc, hc, aPort, b);
             const bool expOk = oracle(win, M, H, b, aExp);
             const bool portChanged = aPort[0] != -1;
@@ -1433,7 +1436,8 @@ TEST_CASE("updateBSepSym matches the twin oracle and differs from the a-update")
         std::vector<std::int64_t> A(halfwin1, 0), B(halfwin1 * halfwin1, 0);
         std::vector<const std::int64_t*> Mc(win), hc(win2);
         for (int i = 0; i < win; ++i) Mc[i] = &M[i * win];
-        for (int i = 0; i < win2; ++i) hc[i] = &H[i * win];
+        for (int i = 0; i < win; ++i)
+            for (int j = 0; j < win; ++j) hc[i * win + j] = &H[(size_t)i * win * win2 + (size_t)j * win];
         auto wi = [](int idx, int w) {
             const int h1 = (w >> 1) + 1;
             return idx >= h1 ? w - 1 - idx : idx;
@@ -1519,7 +1523,8 @@ TEST_CASE("updateBSepSym matches the twin oracle and differs from the a-update")
             std::int64_t* mc[7];
             std::int64_t* hc[49];
             for (int i = 0; i < win; ++i) mc[i] = M.data() + i * win;
-            for (int i = 0; i < win2; ++i) hc[i] = H.data() + (size_t)i * win;
+            for (int i = 0; i < win; ++i)
+                for (int j = 0; j < win; ++j) hc[i * win + j] = H.data() + (size_t)i * win * win2 + (size_t)j * win;
             std::int32_t bPort[7] = {-1, -1, -1, -1, -1, -1, -1}, bExp[7] = {-2, -2, -2, -2, -2, -2, -2};
             updateBSepSym(win, mc, hc, a, bPort);
             const bool expOk = oracleB(win, M, H, a, bExp);

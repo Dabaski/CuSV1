@@ -496,7 +496,7 @@ TEST_CASE("l10 grain generateLumaGrainBlock: lag 0 white-noise oracle") {
     params.random_seed = 0x1234;
 
     const int W = 4, H = 3, STRIDE = 6; // ragged stride on purpose
-    std::vector<std::int32_t> block(W * H, -999);
+    std::vector<std::int32_t> block(H * STRIDE, -999);
 
     l10_filters::grain::initRandomGenerator(0, params.random_seed);
     l10_filters::grain::generateLumaGrainBlock(&params, nullptr,
