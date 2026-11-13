@@ -4341,5 +4341,652 @@ void setCandReductionCtrls(CandReductionCtrls& ctrls, std::uint8_t candReduction
     }
 }
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 1: the SB128 walls (enc_mode_config.c:63-:145), the
+// :3937-:3963 gap (set_sq_txs_ctrls), set_chroma_controls (:4396-:4463),
+// set_wm_controls (:4467-:4521), the nic level getters (:4521-:4586) and
+// svt_aom_set_nic_controls (:4588-:4966).
+// ---------------------------------------------------------------------------
+
+// get_sb128_me_data (enc_mode_config.c:63-115).
+void getSb128MeData(const Sb128Pcs& pcs, const Sb128Ctx& ctx, std::uint32_t* me64x64Dist,
+                    std::uint32_t* me32x32Dist, std::uint32_t* me16x16Dist, std::uint32_t* me8x8Dist,
+                    std::uint32_t* me8x8CostVar) {
+    const std::uint32_t meSbSize          = pcs.b64Size;
+    const std::uint32_t mePicWidthInSb    = (pcs.alignedWidth + meSbSize - 1) / meSbSize;
+    const std::uint32_t mePicHeightInSb   = (pcs.alignedHeight + meSbSize - 1) / meSbSize;
+    const std::uint32_t meSbX             = (ctx.sbOriginX / meSbSize);
+    const std::uint32_t meSbY             = (ctx.sbOriginY / meSbSize);
+    const std::uint32_t meSbAddr          = meSbX + meSbY * mePicWidthInSb;
+
+    std::uint32_t dist64              = pcs.me64x64Distortion[meSbAddr];
+    std::uint32_t dist32              = pcs.me32x32Distortion[meSbAddr];
+    std::uint32_t dist16              = pcs.me16x16Distortion[meSbAddr];
+    std::uint32_t dist8               = pcs.me8x8Distortion[meSbAddr];
+    std::uint32_t me8x8CostVariance   = pcs.me8x8CostVariance[meSbAddr];
+    int           count               = 1;
+    if (meSbX + 1 < mePicWidthInSb) {
+        dist64 += pcs.me64x64Distortion[meSbAddr + 1];
+        dist32 += pcs.me32x32Distortion[meSbAddr + 1];
+        dist16 += pcs.me16x16Distortion[meSbAddr + 1];
+        dist8 += pcs.me8x8Distortion[meSbAddr + 1];
+        me8x8CostVariance = std::max(me8x8CostVariance, pcs.me8x8CostVariance[meSbAddr + 1]);
+        count++;
+    }
+    if (meSbY + 1 < mePicHeightInSb) {
+        dist64 += pcs.me64x64Distortion[meSbAddr + mePicWidthInSb];
+        dist32 += pcs.me32x32Distortion[meSbAddr + mePicWidthInSb];
+        dist16 += pcs.me16x16Distortion[meSbAddr + mePicWidthInSb];
+        dist8 += pcs.me8x8Distortion[meSbAddr + mePicWidthInSb];
+        me8x8CostVariance = std::max(me8x8CostVariance,
+                                     pcs.me8x8CostVariance[meSbAddr + mePicWidthInSb]);
+        count++;
+    }
+    if (meSbX + 1 < mePicWidthInSb && meSbY + 1 < mePicHeightInSb) {
+        dist64 += pcs.me64x64Distortion[meSbAddr + mePicWidthInSb + 1];
+        dist32 += pcs.me32x32Distortion[meSbAddr + mePicWidthInSb + 1];
+        dist16 += pcs.me16x16Distortion[meSbAddr + mePicWidthInSb + 1];
+        dist8 += pcs.me8x8Distortion[meSbAddr + mePicWidthInSb + 1];
+        me8x8CostVariance = std::max(me8x8CostVariance,
+                                     pcs.me8x8CostVariance[meSbAddr + mePicWidthInSb + 1]);
+        count++;
+    }
+    dist64 /= count;
+    dist32 /= count;
+    dist16 /= count;
+    dist8 /= count;
+
+    *me64x64Dist = dist64;
+    *me32x32Dist = dist32;
+    *me16x16Dist = dist16;
+    *me8x8Dist   = dist8;
+    *me8x8CostVar = me8x8CostVariance;
+}
+
+// get_sb128_variance (enc_mode_config.c:120-145).
+void getSb128Variance(const Sb128VarPcs& pcs, const Sb128Ctx& ctx, std::uint16_t* variance) {
+    const std::uint32_t b64Size       = pcs.b64Size;
+    const std::uint32_t b64PicWidth   = (pcs.alignedWidth + b64Size - 1) / b64Size;
+    const std::uint32_t b64PicHeight  = (pcs.alignedHeight + b64Size - 1) / b64Size;
+    const std::uint32_t b64X          = (ctx.sbOriginX / b64Size);
+    const std::uint32_t b64Y          = (ctx.sbOriginY / b64Size);
+    const std::uint32_t b64Index      = b64X + b64Y * b64PicWidth;
+    const std::uint32_t stride        = pcs.varianceStride;
+    std::uint16_t var64 = pcs.variance64[b64Index * stride + kMeTierZeroPu64x64];
+    std::uint8_t  count = 1;
+    if (b64X + 1 < b64PicWidth) {
+        var64 += pcs.variance64[(b64Index + 1) * stride + kMeTierZeroPu64x64];
+        count++;
+    }
+    if (b64Y + 1 < b64PicHeight) {
+        var64 += pcs.variance64[(b64Index + b64PicWidth) * stride + kMeTierZeroPu64x64];
+        count++;
+    }
+    if (b64X + 1 < b64PicWidth && b64Y + 1 < b64PicHeight) {
+        var64 += pcs.variance64[(b64Index + b64PicWidth + 1) * stride + kMeTierZeroPu64x64];
+        count++;
+    }
+    var64 /= count;
+    *variance = var64;
+}
+
+// set_sq_txs_ctrls (enc_mode_config.c:3937-3963).
+void setSqTxsCtrls(NsqPsqTxsCtrls& ctrls, std::uint8_t psqTxsLvl) {
+    switch (psqTxsLvl) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled   = 1;
+        ctrls.hvToSqTh  = 1000;
+        ctrls.hToVTh    = 100;
+        break;
+    case 2:
+        ctrls.enabled   = 1;
+        ctrls.hvToSqTh  = 250;
+        ctrls.hToVTh    = 25;
+        break;
+    case 3:
+        ctrls.enabled   = 1;
+        ctrls.hvToSqTh  = 150;
+        ctrls.hToVTh    = 15;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// svt_aom_set_chroma_controls (enc_mode_config.c:4396-4463).
+std::uint8_t setChromaCtrls(UvCtrls& ctrls, std::uint8_t uvLevel) {
+    std::uint8_t uvMode = 0;
+
+    switch (uvLevel) {
+    case 0:
+        uvMode = kChromaMode2;
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        uvMode = kChromaMode0;
+        ctrls.enabled             = 1;
+        ctrls.indUvLastMds        = 0;
+        ctrls.interVsIntraCostTh  = 0;
+        ctrls.skipIndUvIfOnlyDc   = 0;
+        ctrls.uvNicScalingNum     = 16;
+        break;
+    case 2:
+        uvMode = kChromaMode0;
+        ctrls.enabled             = 1;
+        ctrls.indUvLastMds        = 1;
+        ctrls.interVsIntraCostTh  = 0;
+        ctrls.skipIndUvIfOnlyDc   = 0;
+        ctrls.uvNicScalingNum     = 8;
+        break;
+    case 3:
+        uvMode = kChromaMode0;
+        ctrls.enabled             = 1;
+        ctrls.indUvLastMds        = 1;
+        ctrls.interVsIntraCostTh  = 100;
+        ctrls.skipIndUvIfOnlyDc   = 0;
+        ctrls.uvNicScalingNum     = 1;
+        break;
+    case 4:
+        uvMode = kChromaMode0;
+        ctrls.enabled             = 1;
+        ctrls.indUvLastMds        = 2;
+        ctrls.interVsIntraCostTh  = 100;
+        ctrls.skipIndUvIfOnlyDc   = 1;
+        ctrls.uvNicScalingNum     = 1;
+        break;
+    case 5:
+        uvMode = kChromaMode1;
+        ctrls.enabled = 1;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+
+    ctrls.uvMode = uvMode;
+    return uvMode;
+}
+
+// svt_aom_set_wm_controls (enc_mode_config.c:4467-4521).
+void setWmCtrls(WmCtrls& ctrls, std::uint8_t wmLevel) {
+    switch (wmLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled               = 1;
+        ctrls.useWmForMvp           = 1;
+        ctrls.refinementIterations  = 16;
+        ctrls.refineDiag            = 1;
+        ctrls.refineLevel           = 0;
+        ctrls.lowerBandTh           = 0;
+        ctrls.upperBandTh           = (std::uint16_t)~0;
+        ctrls.shutApproxIfNotMds0   = 0;
+        break;
+    case 2:
+        ctrls.enabled               = 1;
+        ctrls.useWmForMvp           = 1;
+        ctrls.refinementIterations  = 8;
+        ctrls.refineDiag            = 0;
+        ctrls.refineLevel           = 1;
+        ctrls.lowerBandTh           = 0;
+        ctrls.upperBandTh           = (std::uint16_t)~0;
+        ctrls.shutApproxIfNotMds0   = 1;
+        break;
+    case 3:
+        ctrls.enabled               = 1;
+        ctrls.useWmForMvp           = 1;
+        ctrls.refinementIterations  = 8;
+        ctrls.refineDiag            = 0;
+        ctrls.refineLevel           = 1;
+        ctrls.lowerBandTh           = 1 << 10;
+        ctrls.upperBandTh           = (std::uint16_t)~0;
+        ctrls.shutApproxIfNotMds0   = 1;
+        break;
+    case kMaxWarpLvl:
+        ctrls.enabled               = 1;
+        ctrls.useWmForMvp           = 0;
+        ctrls.refinementIterations  = 0;
+        ctrls.refineDiag            = 0;
+        ctrls.refineLevel           = 1;
+        ctrls.lowerBandTh           = 0;
+        ctrls.upperBandTh           = (std::uint16_t)~0;
+        ctrls.shutApproxIfNotMds0   = 0;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// svt_aom_get_nic_level_default (enc_mode_config.c:4521-4545).
+std::uint8_t getNicLevelDefault(EncMode encMode, std::uint8_t isBase) {
+    std::uint8_t nicLevel;
+    if (encMode <= ENC_MR) {
+        nicLevel = isBase ? 1 : 2;
+    } else if (encMode <= ENC_M0) {
+        nicLevel = isBase ? 2 : 4;
+    } else if (encMode <= ENC_M1) {
+        nicLevel = isBase ? 4 : 5;
+    } else if (encMode <= ENC_M3) {
+        nicLevel = isBase ? 5 : 6;
+    } else if (encMode <= ENC_M5) {
+        nicLevel = 7;
+    } else if (encMode <= ENC_M6) {
+        nicLevel = 8;
+    } else if (encMode <= ENC_M7) {
+        nicLevel = isBase ? 8 : 9;
+    } else if (encMode <= ENC_M8) {
+        nicLevel = 9;
+    } else if (encMode <= ENC_M9) {
+        nicLevel = isBase ? 9 : 11;
+    } else {
+        nicLevel = 11;
+    }
+    return nicLevel;
+}
+
+// svt_aom_get_nic_level_rtc (enc_mode_config.c:4547-4557).
+std::uint8_t getNicLevelRtc(EncMode encMode) {
+    std::uint8_t nicLevel;
+    if (encMode <= ENC_M8) {
+        nicLevel = 9;
+    } else if (encMode <= ENC_M9) {
+        nicLevel = 10;
+    } else {
+        nicLevel = 11;
+    }
+    return nicLevel;
+}
+
+// svt_aom_get_nic_level_allintra (enc_mode_config.c:4559-4586).
+std::uint8_t getNicLevelAllIntra(EncMode encMode) {
+    std::uint8_t nicLevel;
+    if (encMode <= ENC_M0) {
+        nicLevel = 1;
+    } else if (encMode <= ENC_M2) {
+        nicLevel = 3;
+    } else if (encMode <= ENC_M4) {
+        nicLevel = 5;
+    } else if (encMode <= ENC_M6) {
+        nicLevel = 6;
+    } else if (encMode <= ENC_M7) {
+        nicLevel = 7;
+    } else {
+        nicLevel = 11;
+    }
+
+    return nicLevel;
+}
+
+// MD_STAGE_NICS_SCAL_NUM (definitions.h:798-817, verbatim; the S0 column
+// kept for positional indexing - the consumers read [..][1..3]).
+const std::uint8_t kMdStageNicsScalNum[16][4] = {
+    {0, 20, 20, 20},  // LEVEL 0
+    {0, 18, 18, 18},  // LEVEL 1
+    {0, 16, 16, 16},  // LEVEL 2
+    {0, 12, 12, 12},  // LEVEL 3
+    {0, 10, 10, 10},  // LEVEL 4
+    {0, 8, 8, 8},     // LEVEL 5
+    {0, 6, 6, 6},     // LEVEL 6
+    {0, 4, 5, 5},     // LEVEL 7
+    {0, 4, 4, 4},     // LEVEL 8
+    {0, 3, 4, 4},     // LEVEL 9
+    {0, 3, 3, 3},     // LEVEL 10
+    {0, 3, 2, 2},     // LEVEL 11
+    {0, 3, 1, 1},     // LEVEL 12
+    {0, 2, 1, 1},     // LEVEL 13
+    {0, 2, 0, 0},     // LEVEL 14
+    {0, 0, 0, 0},     // LEVEL 15
+};
+
+// svt_aom_set_nic_controls (enc_mode_config.c:4588-4966).
+std::uint8_t setNicCtrls(NicCtrls* ctrls, std::uint8_t nicLevel) {
+    NicPruningCtrls* nicPruningCtrls = ctrls ? &ctrls->pruningCtrls : nullptr;
+    std::uint8_t     nicScalingLevel = 0;
+    std::uint8_t     mdStagingMode   = kMdStagingMode0;
+
+    switch (nicLevel) {
+    case 0:  // MAX NIC scaling; no pruning
+        nicScalingLevel = 0;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh        = (std::uint64_t)~0;
+            nicPruningCtrls->mds2ClassTh        = (std::uint64_t)~0;
+            nicPruningCtrls->mds3ClassTh        = (std::uint64_t)~0;
+            nicPruningCtrls->iMds3ClassThMult   = 0;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = (std::uint64_t)~0;
+            nicPruningCtrls->mds1CandBaseThInter  = (std::uint64_t)~0;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = (std::uint64_t)~0;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = (std::uint64_t)~0;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 1:
+        nicScalingLevel = 0;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = (std::uint64_t)~0;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 4;
+
+            nicPruningCtrls->mds3ClassTh        = 25;
+            nicPruningCtrls->mds3BandCnt        = 4;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = (std::uint64_t)~0;
+            nicPruningCtrls->mds1CandBaseThInter  = (std::uint64_t)~0;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 50;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 50;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 2:
+        nicScalingLevel = 1;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = (std::uint64_t)~0;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 4;
+
+            nicPruningCtrls->mds3ClassTh        = 25;
+            nicPruningCtrls->mds3BandCnt        = 8;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 500;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 30;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 30;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 3:
+        nicScalingLevel = 3;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = (std::uint64_t)~0;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 4;
+
+            nicPruningCtrls->mds3ClassTh        = 25;
+            nicPruningCtrls->mds3BandCnt        = 8;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 500;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 30;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 25;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 4:
+        nicScalingLevel = 3;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 500;
+            nicPruningCtrls->mds1BandCnt = 3;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 8;
+
+            nicPruningCtrls->mds3ClassTh        = 20;
+            nicPruningCtrls->mds3BandCnt        = 12;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 20;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 15;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 5:
+        nicScalingLevel = 6;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 300;
+            nicPruningCtrls->mds1BandCnt = 4;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 15;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 20;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 15;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 6:
+        nicScalingLevel = 6;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 200;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 10;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 15;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 15;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 7:
+        nicScalingLevel = 8;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 200;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 10;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 15;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 15;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 8:
+        nicScalingLevel = 13;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 200;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 10;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 1;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 300;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 3;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 3;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 9:
+        nicScalingLevel = 14;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 200;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 10;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 1;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 100;
+            nicPruningCtrls->mds1CandBaseThInter  = 100;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 1;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 1;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 10:
+        nicScalingLevel = 15;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 150;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 5;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 1;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1;
+            nicPruningCtrls->mds1CandBaseThInter  = 1;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 1;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 1;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 11:
+        nicScalingLevel = 15;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 75;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 0;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 0;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 1;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1;
+            nicPruningCtrls->mds1CandBaseThInter  = 1;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 1;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 1;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+
+    if (ctrls) {
+        ctrls->scalingCtrls.stage1ScalingNum = kMdStageNicsScalNum[nicScalingLevel][kMdStage1];
+        ctrls->scalingCtrls.stage2ScalingNum = kMdStageNicsScalNum[nicScalingLevel][kMdStage2];
+        ctrls->scalingCtrls.stage3ScalingNum = kMdStageNicsScalNum[nicScalingLevel][kMdStage3];
+        ctrls->mdStagingMode                 = mdStagingMode;
+    }
+    // return NIC scaling level that can be used for memory allocation
+    return nicScalingLevel;
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

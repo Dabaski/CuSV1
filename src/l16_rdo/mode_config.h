@@ -1163,5 +1163,164 @@ void setCandReductionCtrls(CandReductionCtrls& ctrls, std::uint8_t candReduction
                            std::uint32_t me64x64Distortion, std::uint8_t l0WasSkip,
                            std::uint8_t l1WasSkip, std::uint8_t refSkipPerc);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 1: the unported :63-:145 SB128 walls + the :3937-:3963 gap
+// (set_sq_txs_ctrls, a set_nsq_search_ctrls dependency) + the first
+// :4396+ setters.
+// ---------------------------------------------------------------------------
+// ME_TIER_ZERO_PU_64x64 (me_context.h:47) = 0.
+constexpr std::uint32_t kMeTierZeroPu64x64 = 0;
+
+// The pcs wall of get_sb128_me_data (:63-115): the b64 grid + the five ME
+// arrays (pcs.h:866-870; the DepthRemovalPcs precedent - the caller
+// supplies arrays of me_pic_width_in_sb * me_pic_height_in_sb entries).
+struct Sb128Pcs {
+    std::uint32_t b64Size;  // pcs->scs->b64_size
+    std::uint32_t alignedWidth;
+    std::uint32_t alignedHeight;
+    const std::uint32_t* me64x64Distortion;
+    const std::uint32_t* me32x32Distortion;
+    const std::uint32_t* me16x16Distortion;
+    const std::uint32_t* me8x8Distortion;
+    const std::uint32_t* me8x8CostVariance;
+};
+// The ctx wall (:67-:68): sb_origin_x/sb_origin_y (md_process.h:1180-1181).
+struct Sb128Ctx {
+    std::uint32_t sbOriginX;
+    std::uint32_t sbOriginY;
+};
+
+// get_sb128_me_data (enc_mode_config.c:63-115): average the 2x2 (max) of
+// b64 cells covering the SB; dist = sum/count, cost-var = elementwise MAX.
+void getSb128MeData(const Sb128Pcs& pcs, const Sb128Ctx& ctx, std::uint32_t* me64x64Dist,
+                    std::uint32_t* me32x32Dist, std::uint32_t* me16x16Dist, std::uint32_t* me8x8Dist,
+                    std::uint32_t* me8x8CostVar);
+
+// The pcs wall of get_sb128_variance (:120-145). variance is ppcs->
+// variance[b64_index][tier]; the carrier takes the flattened tier column
+// (the address of [0][ME_TIER_ZERO_PU_64x64]) + the tier-count row stride.
+struct Sb128VarPcs {
+    std::uint32_t b64Size;
+    std::uint32_t alignedWidth;
+    std::uint32_t alignedHeight;
+    const std::uint16_t* variance64;  // &variance[0][kMeTierZeroPu64x64]
+    std::uint32_t varianceStride;     // the tier count (row stride)
+};
+
+// get_sb128_variance (enc_mode_config.c:120-145): sum the 2x2 (max-count)
+// b64 variances and divide by the count. uint16 wrap-cast on the sum, as
+// in the reference.
+void getSb128Variance(const Sb128VarPcs& pcs, const Sb128Ctx& ctx, std::uint16_t* variance);
+
+// NsqPsqTxsCtrls (md_process.h:420-427, verbatim).
+struct NsqPsqTxsCtrls {
+    std::uint8_t enabled;
+    std::uint32_t hvToSqTh;
+    std::uint32_t hToVTh;
+};
+
+// set_sq_txs_ctrls (enc_mode_config.c:3937-3963). The default case
+// assert(0)s and writes nothing (documented UB).
+void setSqTxsCtrls(NsqPsqTxsCtrls& ctrls, std::uint8_t psqTxsLvl);
+
+// CHROMA_MODE_* (definitions.h:2053-2055).
+constexpr std::uint8_t kChromaMode0 = 0;
+constexpr std::uint8_t kChromaMode1 = 1;
+constexpr std::uint8_t kChromaMode2 = 2;
+
+// UvCtrls (md_process.h:810-825, verbatim field order/types).
+struct UvCtrls {
+    std::uint8_t enabled;
+    std::uint8_t uvMode;  // CHROMA_MODE_0/1/2
+    std::uint8_t indUvLastMds;
+    std::uint8_t skipIndUvIfOnlyDc;
+    std::uint8_t uvNicScalingNum;
+    std::uint32_t interVsIntraCostTh;
+};
+
+// svt_aom_set_chroma_controls (:4396-4463). The ctx NULL arm (the
+// memory-allocation call shape) is threaded out - the port always has the
+// carrier, and the returned uv_mode is the ctx->uv_ctrls.uv_mode write.
+// The default case assert(0)s in the reference and writes nothing but the
+// trailing uv_mode write still happens there (uv_mode keeps its 0 init);
+// the port returns the same 0 (documented).
+std::uint8_t setChromaCtrls(UvCtrls& ctrls, std::uint8_t uvLevel);
+
+// WmCtrls (md_process.h:591-606, verbatim field order/types).
+struct WmCtrls {
+    std::uint8_t enabled;
+    std::uint8_t useWmForMvp;
+    std::uint8_t refinementIterations;
+    std::uint8_t refineDiag;
+    std::uint8_t refineLevel;  // 0: before MDS0, 1: at MDS1, 2: at MDS3
+    std::uint16_t lowerBandTh;
+    std::uint16_t upperBandTh;
+    bool shutApproxIfNotMds0;
+};
+
+// MAX_WARP_LVL (enc_mode_config.c:4465).
+constexpr std::uint8_t kMaxWarpLvl = 4;
+
+// svt_aom_set_wm_controls (:4467-4521). The default case assert(0)s and
+// writes nothing (documented UB).
+void setWmCtrls(WmCtrls& ctrls, std::uint8_t wmLevel);
+
+// svt_aom_get_nic_level_default (:4521-4545) / _rtc (:4547-4557) /
+// _allintra (:4559-4586).
+std::uint8_t getNicLevelDefault(EncMode encMode, std::uint8_t isBase);
+std::uint8_t getNicLevelRtc(EncMode encMode);
+std::uint8_t getNicLevelAllIntra(EncMode encMode);
+
+// MdStage / MdStagingMode (definitions.h:775-782, verbatim ordinals).
+constexpr std::uint8_t kMdStage1 = 1;
+constexpr std::uint8_t kMdStage2 = 2;
+constexpr std::uint8_t kMdStage3 = 3;
+constexpr std::uint8_t kMdStagingMode0 = 0;
+constexpr std::uint8_t kMdStagingMode1 = 1;
+
+// MD_STAGE_NICS_SCAL_NUM (definitions.h:798-817, verbatim; 16 levels x
+// [S0,S1,S2,S3]; the port drops the always-unread S0 column).
+extern const std::uint8_t kMdStageNicsScalNum[16][4];
+
+// NicScalingCtrls (md_process.h:450-457, verbatim).
+struct NicScalingCtrls {
+    std::uint8_t stage1ScalingNum;  // <x>/16 post-stage 0 NICS
+    std::uint8_t stage2ScalingNum;  // <x>/16 post-stage 1 NICS
+    std::uint8_t stage3ScalingNum;  // <x>/16 post-stage 2 NICS
+};
+
+// NicPruningCtrls (md_process.h:459-514, verbatim field order/types).
+struct NicPruningCtrls {
+    std::uint64_t mds1ClassTh;
+    std::uint8_t mds1BandCnt;
+    std::uint64_t mds2ClassTh;
+    std::uint8_t mds2BandCnt;
+    std::uint64_t mds3ClassTh;
+    std::uint8_t iMds3ClassThMult;
+    std::uint8_t mds3BandCnt;
+    std::uint64_t mds1CandBaseThIntra;
+    std::uint64_t mds1CandBaseThInter;
+    std::uint16_t mds1CandThRankFactor;
+    std::uint64_t mds2CandBaseTh;
+    std::uint16_t mds2CandThRankFactor;
+    std::uint16_t mds2RelativeDevTh;
+    std::uint64_t mds3CandBaseTh;
+    bool enableSkippingMds1;
+    std::uint8_t mergeInterCandsMult;
+};
+
+// NicCtrls (md_process.h:516-521, verbatim).
+struct NicCtrls {
+    NicPruningCtrls pruningCtrls;
+    NicScalingCtrls scalingCtrls;
+    std::uint8_t mdStagingMode;
+};
+
+// svt_aom_set_nic_controls (:4588-4966), 1:1. ctx may be NULL (the
+// memory-allocation call shape - the reference's own contract); the
+// return is the nic_scaling_level index into MD_STAGE_NICS_SCAL_NUM.
+// The default case assert(0)s and writes nothing (documented UB).
+std::uint8_t setNicCtrls(NicCtrls* ctrls, std::uint8_t nicLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

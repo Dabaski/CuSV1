@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cmath>
 #include <initializer_list>
+#include <vector>
 #include "mode_config.h"
 
 using namespace l16_rdo::mode_config;
@@ -4473,4 +4474,528 @@ TEST_CASE("set_cand_reduction_ctrls - the tail gate over every count pair") {
                     CHECK(c.lpd1MvpBestMeList ==
                           (uint8_t)(gate ? (level == 5 ? 1 : kPoison) : 0));
                 }
+}
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 1: the SB128 walls (:63-:145), the :3937-:3963 gap
+// (set_sq_txs_ctrls), set_chroma_controls (:4396-:4463), set_wm_controls
+// (:4467-:4521), the nic level getters (:4521-:4586) and
+// svt_aom_set_nic_controls (:4588-:4966).
+// ---------------------------------------------------------------------------
+
+// get_sb128_me_data, independent transcription (enc_mode_config.c:63-115).
+struct OracleSb128 {
+    uint32_t meSbSize;
+    uint32_t picW;
+    uint32_t picH;
+    const uint32_t* d64;
+    const uint32_t* d32;
+    const uint32_t* d16;
+    const uint32_t* d8;
+    const uint32_t* cv;
+};
+static void oracleSb128MeData(const OracleSb128& o, uint32_t ox, uint32_t oy, uint32_t* r64,
+                              uint32_t* r32, uint32_t* r16, uint32_t* r8, uint32_t* rcv) {
+    const uint32_t w = (o.picW + o.meSbSize - 1) / o.meSbSize;
+    const uint32_t h = (o.picH + o.meSbSize - 1) / o.meSbSize;
+    const uint32_t x = ox / o.meSbSize;
+    const uint32_t y = oy / o.meSbSize;
+    const uint32_t a = x + y * w;
+    uint32_t v64 = o.d64[a], v32 = o.d32[a], v16 = o.d16[a], v8 = o.d8[a], vc = o.cv[a];
+    int count = 1;
+    if (x + 1 < w) {
+        v64 += o.d64[a + 1];
+        v32 += o.d32[a + 1];
+        v16 += o.d16[a + 1];
+        v8 += o.d8[a + 1];
+        vc = oracleMaxU32(vc, o.cv[a + 1]);
+        count++;
+    }
+    if (y + 1 < h) {
+        v64 += o.d64[a + w];
+        v32 += o.d32[a + w];
+        v16 += o.d16[a + w];
+        v8 += o.d8[a + w];
+        vc = oracleMaxU32(vc, o.cv[a + w]);
+        count++;
+    }
+    if (x + 1 < w && y + 1 < h) {
+        v64 += o.d64[a + w + 1];
+        v32 += o.d32[a + w + 1];
+        v16 += o.d16[a + w + 1];
+        v8 += o.d8[a + w + 1];
+        vc = oracleMaxU32(vc, o.cv[a + w + 1]);
+        count++;
+    }
+    *r64 = v64 / count;
+    *r32 = v32 / count;
+    *r16 = v16 / count;
+    *r8 = v8 / count;
+    *rcv = vc;
+}
+
+TEST_CASE("get_sb128_me_data - the 2x2 gather over every grid position, vs the oracle") {
+    // A 192x128 picture (me grid 3x2 at b64_size 64): every SB position
+    // exercises a different neighbor-mask arm (interior, right edge,
+    // bottom edge, bottom-right corner).
+    const uint32_t n = 6;
+    std::vector<uint32_t> d64(n), d32(n), d16(n), d8(n), cv(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        d64[i] = 1000u * (i + 1) + 7;
+        d32[i] = 500u * (i + 1) + 3;
+        d16[i] = 250u * (i + 1) + 11;
+        d8[i] = 125u * (i + 1) + 5;
+        cv[i] = 97u * (i + 1) + 1;
+    }
+    Sb128Pcs pcs;
+    pcs.b64Size = 64;
+    pcs.alignedWidth = 192;
+    pcs.alignedHeight = 128;
+    pcs.me64x64Distortion = d64.data();
+    pcs.me32x32Distortion = d32.data();
+    pcs.me16x16Distortion = d16.data();
+    pcs.me8x8Distortion = d8.data();
+    pcs.me8x8CostVariance = cv.data();
+    OracleSb128 o;
+    o.meSbSize = 64;
+    o.picW = 192;
+    o.picH = 128;
+    o.d64 = d64.data();
+    o.d32 = d32.data();
+    o.d16 = d16.data();
+    o.d8 = d8.data();
+    o.cv = cv.data();
+    for (uint32_t oy = 0; oy < 128; oy += 64)
+        for (uint32_t ox = 0; ox < 192; ox += 64) {
+            Sb128Ctx ctx;
+            ctx.sbOriginX = ox;
+            ctx.sbOriginY = oy;
+            uint32_t r64, r32, r16, r8, rcv;
+            getSb128MeData(pcs, ctx, &r64, &r32, &r16, &r8, &rcv);
+            uint32_t e64, e32, e16, e8, ecv;
+            oracleSb128MeData(o, ox, oy, &e64, &e32, &e16, &e8, &ecv);
+            CHECK(r64 == e64);
+            CHECK(r32 == e32);
+            CHECK(r16 == e16);
+            CHECK(r8 == e8);
+            CHECK(rcv == ecv);
+        }
+}
+
+TEST_CASE("get_sb128_me_data - the interior 4-cell average hand pin") {
+    // SB (64,0): me_sb (1,0) of the 3x2 grid -> cells {1,2,4,5} ->
+    // dist_64 = (2007+3007+5007+6007)/4.
+    const uint32_t n = 6;
+    std::vector<uint32_t> d64(n), d32(n), d16(n), d8(n), cv(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        d64[i] = 1000u * (i + 1) + 7;
+        d32[i] = 500u * (i + 1) + 3;
+        d16[i] = 250u * (i + 1) + 11;
+        d8[i] = 125u * (i + 1) + 5;
+        cv[i] = 97u * (i + 1) + 1;
+    }
+    Sb128Pcs pcs;
+    pcs.b64Size = 64;
+    pcs.alignedWidth = 192;
+    pcs.alignedHeight = 128;
+    pcs.me64x64Distortion = d64.data();
+    pcs.me32x32Distortion = d32.data();
+    pcs.me16x16Distortion = d16.data();
+    pcs.me8x8Distortion = d8.data();
+    pcs.me8x8CostVariance = cv.data();
+    Sb128Ctx ctx;
+    ctx.sbOriginX = 64;
+    ctx.sbOriginY = 0;
+    uint32_t r64, r32, r16, r8, rcv;
+    getSb128MeData(pcs, ctx, &r64, &r32, &r16, &r8, &rcv);
+    CHECK(r64 == (2007u + 3007u + 5007u + 6007u) / 4);
+    CHECK(r32 == (1003u + 1503u + 2503u + 3003u) / 4);
+    CHECK(r16 == (511u + 761u + 1261u + 1511u) / 4);
+    CHECK(r8 == (255u + 380u + 630u + 755u) / 4);
+    CHECK(rcv == 583);  // MAX(cv[1], cv[2], cv[4], cv[5]) = 97*5+1
+}
+
+TEST_CASE("get_sb128_variance - the uint16 average over every grid position, vs the oracle") {
+    // Stride 3 (the tier count); the [ME_TIER_ZERO_PU_64x64] = 0 column is
+    // the one consumed. 128x128 picture -> 2x2 b64 grid.
+    const uint32_t n = 4, stride = 3;
+    std::vector<uint16_t> var(n * stride);
+    for (uint32_t i = 0; i < n; ++i)
+        for (uint32_t t = 0; t < stride; ++t)
+            var[i * stride + t] = (uint16_t)(400u * (i + 1) + 100u * t + 9u);
+    Sb128VarPcs pcs;
+    pcs.b64Size = 64;
+    pcs.alignedWidth = 128;
+    pcs.alignedHeight = 128;
+    pcs.variance64 = var.data();  // &variance[0][0], stride 3
+    pcs.varianceStride = stride;
+    for (uint32_t oy = 0; oy < 128; oy += 64)
+        for (uint32_t ox = 0; ox < 128; ox += 64) {
+            Sb128Ctx ctx;
+            ctx.sbOriginX = ox;
+            ctx.sbOriginY = oy;
+            uint16_t v;
+            getSb128Variance(pcs, ctx, &v);
+            const uint32_t w = (128 + 63) / 64, h = w;
+            const uint32_t x = ox / 64, y = oy / 64, a = x + y * w;
+            uint32_t acc = var[a * stride + 0], cnt = 1;
+            if (x + 1 < w) { acc += var[(a + 1) * stride + 0]; cnt++; }
+            if (y + 1 < h) { acc += var[(a + w) * stride + 0]; cnt++; }
+            if (x + 1 < w && y + 1 < h) { acc += var[(a + w + 1) * stride + 0]; cnt++; }
+            CHECK(v == (uint16_t)(acc / cnt));
+        }
+}
+
+TEST_CASE("set_sq_txs_ctrls - the four levels, whole-struct") {
+    // :3937-3963. Level 0 writes ONLY enabled; levels 1-3 write the full
+    // surface; the default arm (4) writes nothing.
+    for (int level = 0; level <= 4; ++level) {
+        NsqPsqTxsCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setSqTxsCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.hvToSqTh == 0xAAAAAAAAu);
+            CHECK(c.hToVTh == 0xAAAAAAAAu);
+        } else if (level == 1) {
+            CHECK(c.enabled == 1);
+            CHECK(c.hvToSqTh == 1000);
+            CHECK(c.hToVTh == 100);
+        } else if (level == 2) {
+            CHECK(c.enabled == 1);
+            CHECK(c.hvToSqTh == 250);
+            CHECK(c.hToVTh == 25);
+        } else if (level == 3) {
+            CHECK(c.enabled == 1);
+            CHECK(c.hvToSqTh == 150);
+            CHECK(c.hToVTh == 15);
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.hvToSqTh == 0xAAAAAAAAu);
+            CHECK(c.hToVTh == 0xAAAAAAAAu);
+        }
+    }
+}
+
+TEST_CASE("set_chroma_controls - the six levels, whole-struct + returned uv_mode") {
+    // :4396-4463. CHROMA_MODE_2 = 2, CHROMA_MODE_0 = 0, CHROMA_MODE_1 = 1
+    // (definitions.h:2053-2055). Level 0: mode 2 + enabled 0; levels 1-4:
+    // mode 0 with the descending (ind_uv_last_mds, nic num, cost th)
+    // ladders; level 5: mode 1 + enabled 1 ONLY; default: uv_mode 0 (the
+    // :4455-4457 trailing write on the unswitched local).
+    for (int level = 0; level <= 6; ++level) {
+        UvCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        const uint8_t uvMode = setChromaCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(uvMode == 2);
+            CHECK(c.uvMode == 2);
+            CHECK(c.enabled == 0);
+            CHECK(c.indUvLastMds == kPoison);
+            CHECK(c.skipIndUvIfOnlyDc == kPoison);
+            CHECK(c.uvNicScalingNum == kPoison);
+            CHECK(c.interVsIntraCostTh == 0xAAAAAAAAu);
+        } else if (level == 1) {
+            CHECK(uvMode == 0);
+            CHECK(c.uvMode == 0);
+            CHECK(c.enabled == 1);
+            CHECK(c.indUvLastMds == 0);
+            CHECK(c.skipIndUvIfOnlyDc == 0);
+            CHECK(c.uvNicScalingNum == 16);
+            CHECK(c.interVsIntraCostTh == 0);
+        } else if (level == 2) {
+            CHECK(uvMode == 0);
+            CHECK(c.enabled == 1);
+            CHECK(c.indUvLastMds == 1);
+            CHECK(c.skipIndUvIfOnlyDc == 0);
+            CHECK(c.uvNicScalingNum == 8);
+            CHECK(c.interVsIntraCostTh == 0);
+        } else if (level == 3) {
+            CHECK(uvMode == 0);
+            CHECK(c.enabled == 1);
+            CHECK(c.indUvLastMds == 1);
+            CHECK(c.skipIndUvIfOnlyDc == 0);
+            CHECK(c.uvNicScalingNum == 1);
+            CHECK(c.interVsIntraCostTh == 100);
+        } else if (level == 4) {
+            CHECK(uvMode == 0);
+            CHECK(c.enabled == 1);
+            CHECK(c.indUvLastMds == 2);
+            CHECK(c.skipIndUvIfOnlyDc == 1);
+            CHECK(c.uvNicScalingNum == 1);
+            CHECK(c.interVsIntraCostTh == 100);
+        } else if (level == 5) {
+            CHECK(uvMode == 1);
+            CHECK(c.uvMode == 1);
+            CHECK(c.enabled == 1);
+            CHECK(c.indUvLastMds == kPoison);
+            CHECK(c.skipIndUvIfOnlyDc == kPoison);
+            CHECK(c.uvNicScalingNum == kPoison);
+            CHECK(c.interVsIntraCostTh == 0xAAAAAAAAu);
+        } else {
+            // default arm: switch writes nothing, uv_mode keeps its 0 init
+            // and the trailing write stores 0.
+            CHECK(uvMode == 0);
+            CHECK(c.uvMode == 0);
+            CHECK(c.enabled == kPoison);
+            CHECK(c.indUvLastMds == kPoison);
+            CHECK(c.uvNicScalingNum == kPoison);
+        }
+    }
+}
+
+TEST_CASE("set_wm_controls - the five levels, whole-struct") {
+    // :4467-4521 with MAX_WARP_LVL = 4 (:4465). Level 0 writes ONLY
+    // enabled; levels 1-4 write the full surface (case 4 = MAX_WARP_LVL:
+    // use_wm_for_mvp 0, iterations 0); default writes nothing.
+    for (int level = 0; level <= 5; ++level) {
+        WmCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setWmCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.useWmForMvp == kPoison);
+            CHECK(c.refinementIterations == kPoison);
+            CHECK(c.refineDiag == kPoison);
+            CHECK(c.refineLevel == kPoison);
+            CHECK(c.lowerBandTh == 0xAAAA);
+            CHECK(c.upperBandTh == 0xAAAA);
+            // :4476-4477 - only enabled is written; shut_approx_if_not_mds0
+            // keeps its poison byte and stays unread (the intrabc-test
+            // precedent: a 0xAA bool compares unequal to both true and
+            // false, so it cannot be CHECKed).
+        } else if (level == 1) {
+            CHECK(c.enabled == 1);
+            CHECK(c.useWmForMvp == 1);
+            CHECK(c.refinementIterations == 16);
+            CHECK(c.refineDiag == 1);
+            CHECK(c.refineLevel == 0);
+            CHECK(c.lowerBandTh == 0);
+            CHECK(c.upperBandTh == (uint16_t)~0);
+            CHECK(c.shutApproxIfNotMds0 == false);
+        } else if (level == 2) {
+            CHECK(c.enabled == 1);
+            CHECK(c.useWmForMvp == 1);
+            CHECK(c.refinementIterations == 8);
+            CHECK(c.refineDiag == 0);
+            CHECK(c.refineLevel == 1);
+            CHECK(c.lowerBandTh == 0);
+            CHECK(c.upperBandTh == (uint16_t)~0);
+            CHECK(c.shutApproxIfNotMds0 == true);
+        } else if (level == 3) {
+            CHECK(c.enabled == 1);
+            CHECK(c.useWmForMvp == 1);
+            CHECK(c.refinementIterations == 8);
+            CHECK(c.refineDiag == 0);
+            CHECK(c.refineLevel == 1);
+            CHECK(c.lowerBandTh == (1 << 10));
+            CHECK(c.upperBandTh == (uint16_t)~0);
+            CHECK(c.shutApproxIfNotMds0 == true);
+        } else if (level == 4) {
+            CHECK(c.enabled == 1);
+            CHECK(c.useWmForMvp == 0);
+            CHECK(c.refinementIterations == 0);
+            CHECK(c.refineDiag == 0);
+            CHECK(c.refineLevel == 1);
+            CHECK(c.lowerBandTh == 0);
+            CHECK(c.upperBandTh == (uint16_t)~0);
+            CHECK(c.shutApproxIfNotMds0 == false);
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.useWmForMvp == kPoison);
+            CHECK(c.refinementIterations == kPoison);
+            CHECK(c.refineDiag == kPoison);
+            CHECK(c.refineLevel == kPoison);
+            CHECK(c.lowerBandTh == 0xAAAA);
+            CHECK(c.upperBandTh == 0xAAAA);
+        }
+    }
+}
+
+// nic level getters, independent transcriptions (:4521-:4586).
+static uint8_t oracleNicLevelDefault(int em, int isBase) {
+    uint8_t lvl;
+    if (em <= (int)ENC_MR) lvl = isBase ? 1 : 2;
+    else if (em <= (int)ENC_M0) lvl = isBase ? 2 : 4;
+    else if (em <= (int)ENC_M1) lvl = isBase ? 4 : 5;
+    else if (em <= (int)ENC_M3) lvl = isBase ? 5 : 6;
+    else if (em <= (int)ENC_M5) lvl = 7;
+    else if (em <= (int)ENC_M6) lvl = 8;
+    else if (em <= (int)ENC_M7) lvl = isBase ? 8 : 9;
+    else if (em <= (int)ENC_M8) lvl = 9;
+    else if (em <= (int)ENC_M9) lvl = isBase ? 9 : 11;
+    else lvl = 11;
+    return lvl;
+}
+static uint8_t oracleNicLevelRtc(int em) {
+    if (em <= (int)ENC_M8) return 9;
+    if (em <= (int)ENC_M9) return 10;
+    return 11;
+}
+static uint8_t oracleNicLevelAllIntra(int em) {
+    uint8_t lvl;
+    if (em <= (int)ENC_M0) lvl = 1;
+    else if (em <= (int)ENC_M2) lvl = 3;
+    else if (em <= (int)ENC_M4) lvl = 5;
+    else if (em <= (int)ENC_M6) lvl = 6;
+    else if (em <= (int)ENC_M7) lvl = 7;
+    else lvl = 11;
+    return lvl;
+}
+
+TEST_CASE("get_nic_level_{default,rtc,allintra} - every preset x is_base, vs the oracle") {
+    for (int em = (int)ENC_MR; em <= (int)ENC_M13; ++em) {
+        for (int base = 0; base <= 1; ++base) {
+            CHECK(getNicLevelDefault((EncMode)em, (uint8_t)base) == oracleNicLevelDefault(em, base));
+        }
+        CHECK(getNicLevelRtc((EncMode)em) == oracleNicLevelRtc(em));
+        CHECK(getNicLevelAllIntra((EncMode)em) == oracleNicLevelAllIntra(em));
+    }
+    // Hand pins on the is_base boundaries (the :4531/:4534/:4543 8/9/11
+    // splits).
+    CHECK(getNicLevelDefault(ENC_M7, 1) == 8);
+    CHECK(getNicLevelDefault(ENC_M7, 0) == 9);
+    CHECK(getNicLevelDefault(ENC_M9, 1) == 9);
+    CHECK(getNicLevelDefault(ENC_M9, 0) == 11);
+    CHECK(getNicLevelRtc(ENC_M8) == 9);
+    CHECK(getNicLevelRtc(ENC_M9) == 10);
+    CHECK(getNicLevelRtc(ENC_M10) == 11);
+}
+
+// MD_STAGE_NICS_SCAL_NUM, independent transcription
+// (definitions.h:798-817, S0..S3 columns).
+static const uint8_t oracleNicsScalNum[16][4] = {
+    {0, 20, 20, 20}, {0, 18, 18, 18}, {0, 16, 16, 16}, {0, 12, 12, 12},
+    {0, 10, 10, 10}, {0, 8, 8, 8},   {0, 6, 6, 6},    {0, 4, 5, 5},
+    {0, 4, 4, 4},    {0, 3, 4, 4},   {0, 3, 3, 3},    {0, 3, 2, 2},
+    {0, 3, 1, 1},    {0, 2, 1, 1},   {0, 2, 0, 0},    {0, 0, 0, 0},
+};
+
+TEST_CASE("kMdStageNicsScalNum - all 64 cells, vs the oracle") {
+    for (int lvl = 0; lvl < 16; ++lvl)
+        for (int s = 0; s < 4; ++s)
+            CHECK(kMdStageNicsScalNum[lvl][s] == oracleNicsScalNum[lvl][s]);
+}
+
+// svt_aom_set_nic_controls, independent transcription of the 12-level
+// switch (:4593-:4956). Rows: {scaling, mds1_class_th, mds1_band_cnt,
+// mds2_class_th, mds2_band_cnt, mds3_class_th, mds3_band_cnt,
+// i_mds3_mult, skip_mds1, th_intra, th_inter, mds1_rank, mds2_base,
+// mds2_rank, mds2_dev, mds3_base, merge_mult}.
+struct OracleNicRow {
+    uint8_t scaling;
+    uint64_t mds1ClassTh;
+    int mds1BandCnt;   // -1 = not written
+    uint64_t mds2ClassTh;
+    int mds2BandCnt;   // -1 = not written
+    uint64_t mds3ClassTh;
+    int mds3BandCnt;   // -1 = not written
+    uint8_t iMds3Mult;
+    int skipMds1;
+    uint64_t thIntra;
+    uint64_t thInter;
+    int mds1Rank;      // -1 = not written
+    uint64_t mds2Base;
+    int mds2Rank;
+    int mds2Dev;
+    uint64_t mds3Base;
+    int mergeMult;     // -1 = not written
+    int staging;
+};
+static const OracleNicRow oracleNicRows[12] = {
+    // level 0: everything wide-open
+    {0, ~(uint64_t)0, -1, ~(uint64_t)0, -1, ~(uint64_t)0, -1, 0, 0,
+     ~(uint64_t)0, ~(uint64_t)0, 0, ~(uint64_t)0, 0, 0, ~(uint64_t)0, (uint8_t)~0, 1},
+    // level 1
+    {0, ~(uint64_t)0, -1, 25, 4, 25, 4, 50, 0,
+     ~(uint64_t)0, ~(uint64_t)0, 0, 50, 0, 0, 50, (uint8_t)~0, 1},
+    // level 2
+    {1, ~(uint64_t)0, -1, 25, 4, 25, 8, 50, 0,
+     1200, 500, 0, 30, 0, 0, 30, (uint8_t)~0, 1},
+    // level 3
+    {3, ~(uint64_t)0, -1, 25, 4, 25, 8, 50, 0,
+     1200, 500, 0, 30, 0, 0, 25, (uint8_t)~0, 1},
+    // level 4
+    {3, 500, 3, 25, 8, 20, 12, 50, 0,
+     1200, 300, 0, 20, 0, 0, 15, (uint8_t)~0, 1},
+    // level 5
+    {6, 300, 4, 25, 10, 15, 16, 50, 0,
+     1200, 300, 0, 20, 0, 0, 15, (uint8_t)~0, 1},
+    // level 6
+    {6, 200, 16, 10, 10, 5, 16, 50, 0,
+     1200, 300, 3, 15, 1, 5, 15, 4, 1},
+    // level 7
+    {8, 200, 16, 10, 10, 5, 16, 50, 0,
+     1200, 300, 3, 15, 1, 5, 15, 4, 1},
+    // level 8
+    {13, 200, 16, 10, 10, 5, 16, 50, 1,
+     300, 300, 3, 3, 1, 5, 3, 4, 1},
+    // level 9
+    {14, 200, 16, 10, 10, 5, 16, 50, 1,
+     100, 100, 3, 1, 1, 5, 1, 4, 1},
+    // level 10
+    {15, 150, 16, 5, 10, 5, 16, 50, 1,
+     1, 1, 3, 1, 1, 5, 1, 4, 1},
+    // level 11
+    {15, 75, 16, 0, 10, 0, 16, 50, 1,
+     1, 1, 3, 1, 1, 5, 1, 4, 1},
+};
+
+TEST_CASE("set_nic_controls - every level x null/nonnull ctx, vs the oracle") {
+    for (int level = 0; level <= 12; ++level) {
+        NicCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        const uint8_t scaling = setNicCtrls(&c, (uint8_t)level);
+        if (level <= 11) {
+            const OracleNicRow& r = oracleNicRows[level];
+            CHECK(scaling == r.scaling);
+            CHECK(c.mdStagingMode == (uint8_t)r.staging);
+            CHECK(c.pruningCtrls.mds1ClassTh == r.mds1ClassTh);
+            if (r.mds1BandCnt >= 0) CHECK(c.pruningCtrls.mds1BandCnt == (uint8_t)r.mds1BandCnt);
+            else CHECK(c.pruningCtrls.mds1BandCnt == kPoison);
+            CHECK(c.pruningCtrls.mds2ClassTh == r.mds2ClassTh);
+            if (r.mds2BandCnt >= 0) CHECK(c.pruningCtrls.mds2BandCnt == (uint8_t)r.mds2BandCnt);
+            else CHECK(c.pruningCtrls.mds2BandCnt == kPoison);
+            CHECK(c.pruningCtrls.mds3ClassTh == r.mds3ClassTh);
+            if (r.mds3BandCnt >= 0) CHECK(c.pruningCtrls.mds3BandCnt == (uint8_t)r.mds3BandCnt);
+            else CHECK(c.pruningCtrls.mds3BandCnt == kPoison);
+            CHECK(c.pruningCtrls.iMds3ClassThMult == r.iMds3Mult);
+            CHECK(c.pruningCtrls.enableSkippingMds1 == (r.skipMds1 != 0));
+            CHECK(c.pruningCtrls.mds1CandBaseThIntra == r.thIntra);
+            CHECK(c.pruningCtrls.mds1CandBaseThInter == r.thInter);
+            CHECK(c.pruningCtrls.mds1CandThRankFactor == (uint16_t)r.mds1Rank);
+            CHECK(c.pruningCtrls.mds2CandBaseTh == r.mds2Base);
+            CHECK(c.pruningCtrls.mds2CandThRankFactor == (uint16_t)r.mds2Rank);
+            CHECK(c.pruningCtrls.mds2RelativeDevTh == (uint16_t)r.mds2Dev);
+            CHECK(c.pruningCtrls.mds3CandBaseTh == r.mds3Base);
+            if (r.mergeMult >= 0) CHECK(c.pruningCtrls.mergeInterCandsMult == (uint8_t)r.mergeMult);
+            else CHECK(c.pruningCtrls.mergeInterCandsMult == kPoison);
+            // The scaling triple follows the MD_STAGE_NICS_SCAL_NUM row.
+            CHECK(c.scalingCtrls.stage1ScalingNum ==
+                  oracleNicsScalNum[r.scaling][(int)kMdStage1]);
+            CHECK(c.scalingCtrls.stage2ScalingNum ==
+                  oracleNicsScalNum[r.scaling][(int)kMdStage2]);
+            CHECK(c.scalingCtrls.stage3ScalingNum ==
+                  oracleNicsScalNum[r.scaling][(int)kMdStage3]);
+        } else {
+            // :4957-4964 - the trailing ctx write is OUTSIDE the switch:
+            // it runs on the default arm too, from the locals' inits
+            // (scaling 0, staging MD_STAGING_MODE_0). The pruning surface
+            // keeps its poison.
+            CHECK(scaling == 0);
+            CHECK(c.mdStagingMode == 0);
+            CHECK(c.pruningCtrls.mds1ClassTh == 0xAAAAAAAAAAAAAAAAull);
+            CHECK(c.pruningCtrls.mds1CandBaseThIntra == 0xAAAAAAAAAAAAAAAAull);
+            CHECK(c.scalingCtrls.stage1ScalingNum == oracleNicsScalNum[0][1]);
+            CHECK(c.scalingCtrls.stage2ScalingNum == oracleNicsScalNum[0][2]);
+            CHECK(c.scalingCtrls.stage3ScalingNum == oracleNicsScalNum[0][3]);
+        }
+    }
+}
+
+TEST_CASE("set_nic_controls - the null-ctx arm returns the scaling level and writes nothing") {
+    for (int level = 0; level <= 11; ++level) {
+        CHECK(setNicCtrls(nullptr, (uint8_t)level) == oracleNicRows[level].scaling);
+    }
+    CHECK(setNicCtrls(nullptr, 12) == 0);
 }
