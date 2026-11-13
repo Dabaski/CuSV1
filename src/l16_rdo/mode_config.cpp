@@ -7040,5 +7040,214 @@ void setBlockBasedDepthRefinementCtrls(DepthRefinementCtrls& ctrls,
     }
 }
 
+// get_max_block_size_default (enc_mode_config.c:7067-7069).
+std::uint32_t getMaxBlockSizeDefault(std::uint32_t superBlockSize) {
+    return superBlockSize;
+}
+
+// get_max_block_size_rtc (enc_mode_config.c:7071-7116).
+std::uint32_t getMaxBlockSizeRtc(const MaxBlkPcs& pcs) {
+    // For incomplete edge SBs, keep the cap at the super-block size so that the root
+    // SB can still be encoded as a single non-split block.
+    if (pcs.sbGeomWidth < pcs.superBlockSize || pcs.sbGeomHeight < pcs.superBlockSize) {
+        return pcs.superBlockSize;
+    }
+
+    // I-slices have no ME data; fall back to the default (no cap).
+    if (pcs.isISlice) {
+        return pcs.superBlockSize;
+    }
+
+    const EncMode encMode = pcs.encMode;
+
+    std::uint32_t baseMeVarTh;
+    if (encMode <= ENC_M8) {
+        baseMeVarTh = (std::uint32_t)~0;
+    } else {
+        baseMeVarTh = kHigh8x8DistVarTh;
+    }
+
+    // QP-based scaling
+    std::uint32_t qWeight, qWeightDenom;
+    getQpBasedThScalingFactors(pcs.capMaxSizeQpScaling, &qWeight, &qWeightDenom, pcs.qp);
+
+    const std::uint32_t meVarTh = (baseMeVarTh == (std::uint32_t)~0)
+                                      ? baseMeVarTh
+                                      : (std::uint32_t)(((std::uint64_t)baseMeVarTh * qWeight +
+                                                         (qWeightDenom >> 1)) /
+                                                        qWeightDenom);
+
+    // Collect ME data at the SB (handles both 64x64 and 128x128 SB sizes).
+    std::uint32_t me8x8CostVar;
+    if (pcs.superBlockSize == 64) {
+        me8x8CostVar = pcs.me8x8CostVariance[pcs.sbIndex];
+    } else {
+        std::uint32_t dist64, dist32, dist16, dist8;
+        Sb128Ctx sb128Ctx;
+        sb128Ctx.sbOriginX = pcs.sbOriginX;
+        sb128Ctx.sbOriginY = pcs.sbOriginY;
+        getSb128MeData(pcs.sb128, sb128Ctx, &dist64, &dist32, &dist16, &dist8, &me8x8CostVar);
+    }
+
+    // Set max block size
+    return (me8x8CostVar <= meVarTh) ? pcs.superBlockSize : pcs.superBlockSize >> 1;
+}
+
+// get_max_block_size_allintra (enc_mode_config.c:7118-7143).
+std::uint32_t getMaxBlockSizeAllIntra(const MaxBlkPcs& pcs) {
+    // For incomplete edge SBs, keep the cap at the super-block size so that the root
+    // SB can still be encoded as a single non-split block.
+    if (pcs.sbGeomWidth < pcs.superBlockSize || pcs.sbGeomHeight < pcs.superBlockSize) {
+        return pcs.superBlockSize;
+    }
+    const EncMode encMode = pcs.encMode;
+    // Base threshold
+    std::uint16_t baseVarThCap;
+
+    if (encMode <= ENC_M7) {
+        baseVarThCap = (std::uint16_t)~0;
+    } else {
+        baseVarThCap = 7500;
+    }
+
+    // QP-based scaling
+    std::uint32_t qWeight, qWeightDenom;
+    getQpBasedThScalingFactors(pcs.capMaxSizeQpScaling, &qWeight, &qWeightDenom, pcs.qp);
+
+    const std::uint16_t varThCap = (baseVarThCap == (std::uint16_t)~0)
+        ? baseVarThCap
+        : (std::uint16_t)(((std::uint32_t)baseVarThCap * qWeight + (qWeightDenom >> 1)) /
+                          qWeightDenom);
+
+    // Get variance
+    std::uint16_t variance;
+    if (pcs.superBlockSize == 64) {
+        variance = pcs.variance64[pcs.sbIndex * pcs.varianceStride + kMeTierZeroPu64x64];
+    } else {
+        Sb128VarPcs varPcs;
+        varPcs.b64Size = pcs.sb128.b64Size;
+        varPcs.alignedWidth = pcs.sb128.alignedWidth;
+        varPcs.alignedHeight = pcs.sb128.alignedHeight;
+        varPcs.variance64 = pcs.variance64;
+        varPcs.varianceStride = pcs.varianceStride;
+        Sb128Ctx varCtx;
+        varCtx.sbOriginX = pcs.sbOriginX;
+        varCtx.sbOriginY = pcs.sbOriginY;
+        getSb128Variance(varPcs, varCtx, &variance);
+    }
+
+    // Set max block size
+    return (variance <= varThCap) ? pcs.superBlockSize : pcs.superBlockSize >> 1;
+}
+
+// set_depth_early_exit_ctrls (enc_mode_config.c:7258-7281).
+void setDepthEarlyExitCtrls(DepthEarlyExitCtrls& ctrls, std::uint8_t earlyExitLevel) {
+    switch (earlyExitLevel) {
+    case 0:
+        ctrls.splitCostTh = 0;
+        ctrls.earlyExitTh = 0;
+        break;
+    case 1:
+        ctrls.splitCostTh = 50;
+        ctrls.earlyExitTh = 0;
+        break;
+    case 2:
+        ctrls.splitCostTh = 50;
+        ctrls.earlyExitTh = 900;
+        break;
+
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// svt_aom_get_disallow_4x4_default (enc_mode_config.c:8245-8252).
+bool getDisallow4x4Default(EncMode encMode) {
+    if (encMode <= ENC_M2) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+// svt_aom_get_disallow_4x4_rtc (enc_mode_config.c:8253-8256).
+bool getDisallow4x4Rtc() {
+    return true;
+}
+
+// svt_aom_get_disallow_4x4_allintra (enc_mode_config.c:8257-8264).
+bool getDisallow4x4AllIntra(EncMode encMode) {
+    if (encMode <= ENC_M3) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+// svt_aom_get_disallow_8x8_default (enc_mode_config.c:8272-8275).
+bool getDisallow8x8Default() {
+    return false;
+}
+
+// svt_aom_get_disallow_8x8_rtc (enc_mode_config.c:8276-8287).
+bool getDisallow8x8Rtc(EncMode encMode, std::uint16_t alignedWidth, std::uint16_t alignedHeight) {
+    if (dimensionsRequire8x8(alignedWidth, alignedHeight)) {
+        return false;
+    }
+
+    if (encMode <= ENC_M9) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+// svt_aom_get_disallow_8x8_allintra (enc_mode_config.c:8288-8290).
+bool getDisallow8x8AllIntra() {
+    return false;
+}
+
+// svt_aom_get_nsq_geom_level_default (enc_mode_config.c:8292-8311).
+std::uint8_t getNsqGeomLevelDefault(EncMode encMode, std::uint8_t coeffLvl) {
+    std::uint8_t nsqGeomLevel;
+    if (encMode <= ENC_M0) {
+        if (coeffLvl == HIGH_LVL) {
+            nsqGeomLevel = 2;
+        } else {  // regular or low
+            nsqGeomLevel = 1;
+        }
+    } else if (encMode <= ENC_M5) {
+        if (coeffLvl == HIGH_LVL) {
+            nsqGeomLevel = 3;
+        } else {  // regular or low
+            nsqGeomLevel = 2;
+        }
+    } else {
+        nsqGeomLevel = 3;
+    }
+    return nsqGeomLevel;
+}
+
+// svt_aom_get_nsq_geom_level_rtc (enc_mode_config.c:8312-8315).
+std::uint8_t getNsqGeomLevelRtc() {
+    return 3;
+}
+
+// svt_aom_get_nsq_geom_level_allintra (enc_mode_config.c:8316-8330).
+std::uint8_t getNsqGeomLevelAllIntra(EncMode encMode) {
+    std::uint8_t nsqGeomLevel;
+    if (encMode <= ENC_MR) {
+        nsqGeomLevel = 1;
+    } else if (encMode <= ENC_M3) {
+        nsqGeomLevel = 2;
+    } else if (encMode <= ENC_M6) {
+        nsqGeomLevel = 3;
+    } else {
+        nsqGeomLevel = 0;
+    }
+    return nsqGeomLevel;
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

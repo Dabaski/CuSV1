@@ -6642,3 +6642,179 @@ TEST_CASE("set_block_based_depth_refinement_controls - every level, vs the oracl
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 8: max-block-size trio + depth-early-exit + disallow /
+// nsq-geom getters.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("get_max_block_size_rtc/allintra - the full wall grid, vs the oracle") {
+    // :7067-7160. Enumerate: sb size {64,128} x edge/int SB geometry x
+    // I-slice x preset band x qp scaling x qp x variance regime - the
+    // oracle transcribes both functions independently. The HIGH-
+    // variance fixtures (above the 50000 / 7500 thresholds) are what
+    // make the preset-band arm observable at M8/M9.
+    const uint32_t n = 4;
+    for (int regime = 0; regime <= 1; ++regime) {
+        // regime 0: variances below every threshold; regime 1: above
+        // (the M8/M9 50000 band and the allintra M7 7500 band both
+        // observable).
+        std::vector<uint32_t> cv(n), d(n * 4);
+        std::vector<uint16_t> varHi(4 * 2);
+        for (uint32_t i = 0; i < n; ++i) cv[i] = regime ? 900000u + 1000u * i : 1000u * (i + 1);
+        for (uint32_t i = 0; i < d.size(); ++i) d[i] = 500u * (i + 1);
+        for (uint32_t i = 0; i < 8; ++i)
+            varHi[i] = regime ? (uint16_t)(9000u + 100u * i) : (uint16_t)(400u * (i + 1) + 1u);
+        const std::vector<uint16_t>& var = varHi;
+
+        for (int sbSize = 64; sbSize <= 128; sbSize += 64)
+            for (int edge = 0; edge <= 1; ++edge)
+                for (int islice = 0; islice <= 1; ++islice)
+                    for (int em = (int)ENC_M7; em <= (int)ENC_M9; ++em)
+                        for (int scale = 0; scale <= 1; ++scale)
+                            for (uint32_t qp : {0u, 30u, 50u}) {
+                                MaxBlkPcs p;
+                                std::memset(&p, 0, sizeof(p));
+                                p.superBlockSize = (uint32_t)sbSize;
+                                p.sbGeomWidth = edge ? 48 : (uint8_t)sbSize;  // an incomplete SB
+                                p.sbGeomHeight = (uint8_t)sbSize;
+                                p.isISlice = islice == 1;
+                                p.encMode = (EncMode)em;
+                                p.capMaxSizeQpScaling = scale == 1;
+                                p.qp = qp;
+                                p.sbIndex = 1;
+                                p.me8x8CostVariance = cv.data();
+                                p.sb128.b64Size = 64;
+                                p.sb128.alignedWidth = 128;
+                                p.sb128.alignedHeight = 128;
+                                p.sb128.me64x64Distortion = d.data();
+                                p.sb128.me32x32Distortion = d.data();
+                                p.sb128.me16x16Distortion = d.data();
+                                p.sb128.me8x8Distortion = d.data();
+                                p.sb128.me8x8CostVariance = cv.data();
+                                p.variance64 = var.data();
+                                p.varianceStride = 2;
+
+                                // Independent oracle for the RTC body.
+                                uint32_t wantRtc;
+                                if (edge || islice) {
+                                    wantRtc = (uint32_t)sbSize;
+                                } else {
+                                    uint32_t base = em <= (int)ENC_M8 ? 0xFFFFFFFFu : 50000u;
+                                    uint32_t w = 1, den = 1;
+                                    if (scale) oracleQpThScaling(true, &w, &den, qp);
+                                    uint32_t th = base == 0xFFFFFFFFu
+                                                      ? base
+                                                      : oracleDivRound((uint64_t)base * w, den);
+                                    uint32_t cvv;
+                                    if (sbSize == 64) cvv = cv[1];
+                                    else {
+                                        // SB128 gather at origin (0,0) of the 2x2 grid:
+                                        // the dist columns average, the var column takes
+                                        // the elementwise MAX.
+                                        cvv = std::max(std::max(cv[0], cv[1]),
+                                                       std::max(cv[2], cv[3]));
+                                    }
+                                    wantRtc = (cvv <= th) ? (uint32_t)sbSize : (uint32_t)sbSize >> 1;
+                                }
+                                CHECK(getMaxBlockSizeRtc(p) == wantRtc);
+
+                                // Independent oracle for the allintra body.
+                                uint32_t wantAi;
+                                if (edge) {
+                                    wantAi = (uint32_t)sbSize;
+                                } else {
+                                    uint16_t base = em <= (int)ENC_M7 ? (uint16_t)0xFFFF : 7500;
+                                    uint32_t w = 1, den = 1;
+                                    if (scale) oracleQpThScaling(true, &w, &den, qp);
+                                    uint32_t th = base == (uint16_t)0xFFFF
+                                                      ? base
+                                                      : oracleDivRound((uint64_t)base * w, den);
+                                    uint16_t v;
+                                    if (sbSize == 64) v = var[1 * 2 + 0];
+                                    else {
+                                        // 128x128 picture -> 2x2 b64 grid, origin (0,0):
+                                        // average of the 4 cells.
+                                        const uint32_t acc = var[0] + var[2] + var[4] + var[6];
+                                        v = (uint16_t)(acc / 4);
+                                    }
+                                    wantAi = (v <= th) ? (uint32_t)sbSize : (uint32_t)sbSize >> 1;
+                                }
+                                CHECK(getMaxBlockSizeAllIntra(p) == wantAi);
+                            }
+    }
+    // The default body: the cap IS the SB size.
+    CHECK(getMaxBlockSizeDefault(64) == 64);
+    CHECK(getMaxBlockSizeDefault(128) == 128);
+}
+
+TEST_CASE("set_depth_early_exit_ctrls - the three levels, whole-struct") {
+    // :7258-7281.
+    for (int level = 0; level <= 3; ++level) {
+        DepthEarlyExitCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setDepthEarlyExitCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.splitCostTh == 0);
+            CHECK(c.earlyExitTh == 0);
+        } else if (level == 1) {
+            CHECK(c.splitCostTh == 50);
+            CHECK(c.earlyExitTh == 0);
+        } else if (level == 2) {
+            CHECK(c.splitCostTh == 50);
+            CHECK(c.earlyExitTh == 900);
+        } else {
+            CHECK(c.splitCostTh == 0xAAAA);
+            CHECK(c.earlyExitTh == 0xAAAA);
+        }
+    }
+}
+
+TEST_CASE("the disallow_4x4/8x8 getters - the full preset x dimension domain") {
+    // :8245-8290. dimensions_require_8x8 (EMC1) drives the rtc 8x8 arm.
+    for (int em = (int)ENC_MR; em <= (int)ENC_M13; ++em) {
+        CHECK(getDisallow4x4Default((EncMode)em) == (em <= (int)ENC_M2 ? false : true));
+        CHECK(getDisallow4x4Rtc() == true);
+        CHECK(getDisallow4x4AllIntra((EncMode)em) == (em <= (int)ENC_M3 ? false : true));
+        CHECK(getDisallow8x8Default() == false);
+        CHECK(getDisallow8x8AllIntra() == false);
+        // rtc: the dimensions gate short-circuits the preset band.
+        for (uint16_t w = 8; w <= 72; w += 8)
+            for (uint16_t h = 8; h <= 72; h += 8) {
+                const bool need8 = dimensionsRequire8x8(w, h);
+                const bool want = need8 ? false : (em <= (int)ENC_M9 ? false : true);
+                CHECK(getDisallow8x8Rtc((EncMode)em, w, h) == want);
+            }
+    }
+    // Hand pins on the band edges.
+    CHECK(getDisallow4x4Default(ENC_M2) == false);
+    CHECK(getDisallow4x4Default(ENC_M3) == true);
+    CHECK(getDisallow4x4AllIntra(ENC_M3) == false);
+    CHECK(getDisallow4x4AllIntra(ENC_M4) == true);
+    CHECK(getDisallow8x8Rtc(ENC_M9, 64, 64) == false);
+    CHECK(getDisallow8x8Rtc(ENC_M10, 64, 64) == true);
+    // The conformance edge: 64x8 forces 8x8 (no 16-64 block fits the
+    // leftover 8), so even M13 disallow flips off; 64x60 does NOT
+    // (a 32-tall block fits the leftover 60), M13 keeps the disallow.
+    CHECK(getDisallow8x8Rtc(ENC_M13, 64, 8) == false);
+    CHECK(getDisallow8x8Rtc(ENC_M13, 64, 60) == true);
+}
+
+TEST_CASE("the nsq_geom_level getters - the full preset x coeff domain") {
+    // :8292-8330. InputCoeffLvl: VLOW 0, LOW 1, NORMAL 2, HIGH 3.
+    for (int em = (int)ENC_MR; em <= (int)ENC_M13; ++em)
+        for (int coeff = 0; coeff <= 3; ++coeff) {
+            uint8_t want;
+            if (em <= (int)ENC_M0) want = coeff == 3 ? 2 : 1;
+            else if (em <= (int)ENC_M5) want = coeff == 3 ? 3 : 2;
+            else want = 3;
+            CHECK(getNsqGeomLevelDefault((EncMode)em, (uint8_t)coeff) == want);
+            CHECK(getNsqGeomLevelRtc() == 3);
+            uint8_t wantAi;
+            if (em <= (int)ENC_MR) wantAi = 1;
+            else if (em <= (int)ENC_M3) wantAi = 2;
+            else if (em <= (int)ENC_M6) wantAi = 3;
+            else wantAi = 0;
+            CHECK(getNsqGeomLevelAllIntra((EncMode)em) == wantAi);
+        }
+}

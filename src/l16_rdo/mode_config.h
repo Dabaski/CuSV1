@@ -1773,5 +1773,65 @@ struct DepthRefinementCtrls {
 void setBlockBasedDepthRefinementCtrls(DepthRefinementCtrls& ctrls,
                                        std::uint8_t blockBasedDepthRefinementLevel);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 8: get_max_block_size_{default,rtc,allintra} (:7067-:7160),
+// set_depth_early_exit_ctrls (:7258-:7281), the disallow_4x4/8x8
+// getters (:8245-:8290) and the nsq_geom_level getters (:8292-:8330).
+// ---------------------------------------------------------------------------
+// The pcs/scs wall surface of get_max_block_size_rtc/allintra
+// (:7071-:7160). The SB64 path reads ppcs->me_8x8_cost_variance /
+// ppcs->variance at [ctx->sb_index]; the SB128 path gathers through
+// getSb128MeData / getSb128Variance.
+struct MaxBlkPcs {
+    std::uint32_t superBlockSize;   // scs->super_block_size
+    std::uint8_t sbGeomWidth;       // ppcs->sb_geom[ctx->sb_index].width
+    std::uint8_t sbGeomHeight;      // ... .height
+    bool isISlice;                  // pcs->slice_type == I_SLICE (rtc only)
+    EncMode encMode;                // pcs->enc_mode
+    bool capMaxSizeQpScaling;  // scs->qp_based_th_scaling_ctrls.
+                               //   cap_max_size_qp_based_th_scaling
+    std::uint32_t qp;               // scs->static_config.qp
+    std::uint32_t sbIndex;          // ctx->sb_index (SB64 path)
+    const std::uint32_t* me8x8CostVariance;  // ppcs-> (SB64 path)
+    Sb128Pcs sb128;                 // the SB128 ME gather surface
+    std::uint32_t sbOriginX;        // ctx->sb_origin (SB128 path)
+    std::uint32_t sbOriginY;
+    const std::uint16_t* variance64;  // &ppcs->variance[0][tier0] (allintra)
+    std::uint32_t varianceStride;     // the tier-count row stride
+};
+
+// get_max_block_size_default (:7067-7069): the cap IS the SB size.
+std::uint32_t getMaxBlockSizeDefault(std::uint32_t superBlockSize);
+// get_max_block_size_rtc (:7071-7116).
+std::uint32_t getMaxBlockSizeRtc(const MaxBlkPcs& pcs);
+// get_max_block_size_allintra (:7118-7143).
+std::uint32_t getMaxBlockSizeAllIntra(const MaxBlkPcs& pcs);
+
+// DepthEarlyExitCtrls (md_process.h:586-595, verbatim).
+struct DepthEarlyExitCtrls {
+    std::uint16_t splitCostTh;  // percentage * 10
+    std::uint16_t earlyExitTh;  // percentage * 10
+};
+
+// set_depth_early_exit_ctrls (:7258-7281). The default case assert(0)s
+// and writes nothing (documented UB).
+void setDepthEarlyExitCtrls(DepthEarlyExitCtrls& ctrls, std::uint8_t earlyExitLevel);
+
+// svt_aom_get_disallow_4x4_{default,rtc,allintra} (:8245-:8270).
+bool getDisallow4x4Default(EncMode encMode);
+bool getDisallow4x4Rtc();
+bool getDisallow4x4AllIntra(EncMode encMode);
+// svt_aom_get_disallow_8x8_{default,rtc,allintra} (:8272-:8290). The
+// rtc variant consumes dimensions_require_8x8 (EMC1).
+bool getDisallow8x8Default();
+bool getDisallow8x8Rtc(EncMode encMode, std::uint16_t alignedWidth, std::uint16_t alignedHeight);
+bool getDisallow8x8AllIntra();
+
+// svt_aom_get_nsq_geom_level_{default,rtc,allintra} (:8292-:8330).
+// coeffLvl is the InputCoeffLvl ordinal (HIGH_LVL = 3).
+std::uint8_t getNsqGeomLevelDefault(EncMode encMode, std::uint8_t coeffLvl);
+std::uint8_t getNsqGeomLevelRtc();
+std::uint8_t getNsqGeomLevelAllIntra(EncMode encMode);
+
 }  // namespace mode_config
 }  // namespace l16_rdo
