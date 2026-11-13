@@ -495,6 +495,36 @@ std::uint8_t getTplParamsLevel(std::int8_t encMode) {
     return tplParamsLevel;
 }
 
+// set_1pvbr_param (initial_rc_process.c:638-666): verbatim (the mutex
+// block/release is the named park; the declaration comment names the
+// threaded walls).
+void set1pVbrParam(P1vbrCarrier& pcs) {
+    pcs.statStruct = pcs.entry.statStruct;
+    if (pcs.sliceType != kIslice) {
+        std::uint64_t avgMeDist = 0;
+        std::uint64_t avgVarianceMeDist = 0;
+        for (int b64Idx = 0; b64Idx < pcs.b64TotalCount; ++b64Idx) {
+            avgMeDist += pcs.rcMeDistortion[b64Idx];
+            avgVarianceMeDist += pcs.me8x8CostVariance[b64Idx];
+        }
+        avgMeDist /= pcs.b64TotalCount;
+        avgVarianceMeDist /= pcs.b64TotalCount;
+
+        double weight = 1;
+        if (avgVarianceMeDist > kHigh8x8DistVarTh) {
+            weight = 1.5;
+        }
+
+        if (pcs.inputResolution <= kInputSize480pRange) {
+            weight = 1.5 * weight;
+        }
+        pcs.statStruct.poc = pcs.pictureNumber;
+        pcs.entry.statStruct.totalNumBits = std::max<std::uint64_t>(kMinAvgMeDist, avgMeDist);
+        pcs.entry.codedError = (double)avgMeDist * pcs.b64TotalCount * weight / kVbrCodedErrorFactor;
+        pcs.entry.statStruct.poc = pcs.pictureNumber;
+    }
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;

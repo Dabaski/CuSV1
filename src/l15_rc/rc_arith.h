@@ -261,6 +261,7 @@ constexpr int kSvtAv1IntnlArfUpdate = 6;
 // ResolutionRange (definitions.h:1808-1818).
 constexpr int kInputSize720pRange = 3;
 constexpr int kInputSize480pRange = 2;
+constexpr int kInputSize4KRange = 5;
 
 // EncMode (EbSvtAv1Enc.h:44-61): the band boundaries the tpl level pair
 // consumes (ENC_MR is the research mode).
@@ -415,6 +416,50 @@ std::uint8_t getTplGroupLevel(std::uint8_t tpl, std::int8_t encMode);
 // get_tpl_params_level (initial_rc_process.c:307-317): static in the
 // reference; exported for testability (the DF1 signedCharClamp precedent).
 std::uint8_t getTplParamsLevel(std::int8_t encMode);
+
+// initial_rc_process.c:631-633.
+constexpr int kHigh8x8DistVarTh = 50000;
+constexpr int kMinAvgMeDist = 1000;
+constexpr int kVbrCodedErrorFactor = 30;
+
+// StatStruct (definitions.h:2155-2162).
+struct StatStructCarrier {
+    std::uint64_t poc;
+    std::uint64_t totalNumBits;
+    std::uint8_t qindex;
+    std::uint8_t worstQindex;
+    std::uint8_t temporalLayerIndex;
+};
+
+// FIRSTPASS_STATS (firstpass.h:29-55): the fields the two-pass arithmetic
+// consumes (the StatStruct rides inside, definitions.h StatStruct).
+struct FirstpassStatsCarrier {
+    double frame;
+    double codedError;
+    double duration;
+    double count;
+    StatStructCarrier statStruct;
+};
+
+// set_1pvbr_param's consumed walls threaded (initial_rc_process.c:638-666):
+// the pcs fields it reads, the pcs->stat_struct mirror it copies BEFORE the
+// entry rewrite, and the ONE stats_in_start[picture_number] entry it
+// rewrites (the carrier owns it as `entry` - a self-referential pointer
+// would dangle across the struct's copy). The
+// svt_block_on_mutex/svt_release_mutex pair (:639, :667) is the named park.
+struct P1vbrCarrier {
+    int sliceType;                    // pcs->slice_type
+    std::uint64_t pictureNumber;      // pcs->picture_number
+    std::uint16_t b64TotalCount;      // pcs->b64_total_count
+    const std::uint32_t* rcMeDistortion;      // pcs->rc_me_distortion
+    const std::uint32_t* me8x8CostVariance;   // pcs->me_8x8_cost_variance
+    int inputResolution;              // scs->input_resolution (ResolutionRange)
+    StatStructCarrier statStruct;     // pcs->stat_struct (the mirror)
+    FirstpassStatsCarrier entry;      // stats_in_start[picture_number]
+};
+
+// set_1pvbr_param (initial_rc_process.c:638-666): verbatim.
+void set1pVbrParam(P1vbrCarrier& pcs);
 
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.
