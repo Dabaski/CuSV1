@@ -570,6 +570,30 @@ int qbpmEnumerator(int rateErrTol) {
     return 1250000 + ((300000 * std::min(75, std::max(rateErrTol - 25, 0))) / 75);
 }
 
+// find_qindex_by_rate_with_correction (pass2_strategy.c:78-99): verbatim
+// (the assert gate is the named NDEBUG park).
+int findQindexByRateWithCorrection(int desiredBitsPerMb, int bitDepth, double errorPerMb,
+                                   double groupWeightFactor, int rateErrTol, int bestQindex,
+                                   int worstQindex) {
+    int low = bestQindex;
+    int high = worstQindex;
+
+    while (low < high) {
+        const int mid = (low + high) >> 1;
+        const double midFactor = calcCorrectionFactor(errorPerMb, mid);
+        const double q = convertQindexToQ(mid, bitDepth);
+        const int enumerator = qbpmEnumerator(rateErrTol);
+        const int midBitsPerMb = (int)((enumerator * midFactor * groupWeightFactor) / q);
+
+        if (midBitsPerMb > desiredBitsPerMb) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;

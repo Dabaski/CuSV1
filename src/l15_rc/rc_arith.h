@@ -483,6 +483,13 @@ double calcCorrectionFactor(double errPerMb, int q);
 // qbpm_enumerator (pass2_strategy.c:72-74): static in the reference.
 int qbpmEnumerator(int rateErrTol);
 
+// find_qindex_by_rate_with_correction (pass2_strategy.c:78-99): static in
+// the reference; exported for testability (the DF1 precedent). The
+// assert(best <= worst) gate is removed under NDEBUG.
+int findQindexByRateWithCorrection(int desiredBitsPerMb, int bitDepth, double errorPerMb,
+                                   double groupWeightFactor, int rateErrTol, int bestQindex,
+                                   int worstQindex);
+
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.
 bool frameIsIntraOnly(int frameType);

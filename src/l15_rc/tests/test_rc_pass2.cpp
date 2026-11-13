@@ -161,3 +161,96 @@ TEST_CASE("qbpm_enumerator pins the clamp band over the full domain") {
     CHECK(l15_rc::qbpmEnumerator(150) == 1550000);
     CHECK(l15_rc::qbpmEnumerator(0) == 1250000);
 }
+
+// ---- A9R C7: find_qindex_by_rate_with_correction (pass2_strategy.c:78-99)
+// ----
+
+namespace {
+
+std::vector<int> acTable() {
+    const std::string text = refText("/third_party/SVT-AV1/Source/Lib/Codec/inv_transforms.c");
+    const std::string decl = "static const int16_t ac_qlookup_QTX[QINDEX_RANGE] = {";
+    const std::size_t at = text.find(decl);
+    REQUIRE_MESSAGE(at != std::string::npos, decl);
+    const std::size_t start = at + decl.size();
+    const std::size_t end = text.find("};", start);
+    REQUIRE(end != std::string::npos);
+    std::vector<int> ref;
+    std::string num;
+    for (std::size_t i = start; i < end; ++i) {
+        const char c = text[i];
+        if ((c >= '0' && c <= '9') || c == '-') {
+            num += c;
+        } else if (!num.empty()) {
+            ref.push_back(std::atoi(num.c_str()));
+            num.clear();
+        }
+    }
+    if (!num.empty()) ref.push_back(std::atoi(num.c_str()));
+    REQUIRE((int)ref.size() == 256);
+    return ref;
+}
+
+// test-side transcription of find_qindex_by_rate_with_correction over the
+// oracle correction factor and the PARSED ac table (bd 8: q = ac/4).
+int oracleFindQWithCorrection(int desired, double errPerMb, double gwf, int tol, int best, int worst,
+                              const std::vector<double>& powTerm, const std::vector<int>& ac) {
+    int low = best;
+    int high = worst;
+    while (low < high) {
+        const int mid = (low + high) >> 1;
+        const double midFactor = oracleCorrectionFactor(errPerMb, mid, powTerm);
+        const double q = ac[mid] / 4.0;
+        const int enumerator = 1250000 + ((300000 * std::min(75, std::max(tol - 25, 0))) / 75);
+        const int midBits = (int)((enumerator * midFactor * gwf) / q);
+        if (midBits > desired) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+}  // namespace
+
+TEST_CASE("find_qindex_by_rate_with_correction structural edges") {
+    // degenerate range: the loop never runs.
+    CHECK(l15_rc::findQindexByRateWithCorrection(1000, 8, 4.0, 1.0, 100, 200, 200) == 200);
+    // desired INT_MAX: every mid_bits <= desired (max ~7.75M at q=1) ->
+    // collapses to best.
+    CHECK(l15_rc::findQindexByRateWithCorrection(INT32_MAX, 8, 4.0, 1.0, 100, 40, 255) == 40);
+    // desired -1: every mid_bits > desired -> climbs to worst.
+    CHECK(l15_rc::findQindexByRateWithCorrection(-1, 8, 4.0, 1.0, 100, 40, 255) == 255);
+}
+
+TEST_CASE("find_qindex_by_rate_with_correction matches the oracle over the parameter grid") {
+    const std::vector<double> powTerm = qPowTerm();
+    const std::vector<int> ac = acTable();
+    const double errs[4] = {0.1, 4.0, 96.0, 1000.0};
+    int bad = 0;
+    for (int errCase = 0; errCase < 4; ++errCase) {
+        const double err = errs[errCase];
+        for (double gwf : {0.5, 1.0, 1.75}) {
+            for (int tol : {25, 40, 100}) {
+                for (int best : {0, 40, 120}) {
+                    for (int desired : {500, 5000, 50000, 200000, 800000}) {
+                        if (l15_rc::findQindexByRateWithCorrection(desired, 8, err, gwf, tol, best, 255) !=
+                            oracleFindQWithCorrection(desired, err, gwf, tol, best, 255, powTerm, ac))
+                            ++bad;
+                    }
+                }
+            }
+        }
+    }
+    CHECK(bad == 0);
+}
+
+TEST_CASE("find_qindex_by_rate_with_correction pins the bd-10 park collapse") {
+    // CONFIG_ENABLE_HIGH_BIT_DEPTH=0: convert_qindex_to_q returns -1/16 for
+    // bd 10, so every mid_bits is negative and the search collapses to
+    // best_qindex (the deterministic park outcome; the real 10-bit table is
+    // the named HBD park).
+    CHECK(l15_rc::findQindexByRateWithCorrection(50000, 10, 4.0, 1.0, 100, 0, 255) == 0);
+    CHECK(l15_rc::findQindexByRateWithCorrection(50000, 10, 4.0, 1.0, 100, 40, 220) == 40);
+}
