@@ -1,8 +1,8 @@
-add_library(av1_transforms STATIC transform.cpp)
+add_library(av1_transforms STATIC transform.cpp transform_hbd.cpp)
 target_include_directories(av1_transforms PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(av1_transforms PUBLIC av1_core av1_gpurt)
 
-add_executable(av1_l3_transforms_tests tests/test_harness.cpp tests/test_transform.cpp tests/test_txshapes.cpp)
+add_executable(av1_l3_transforms_tests tests/test_harness.cpp tests/test_transform.cpp tests/test_txshapes.cpp tests/test_transform_hbd.cpp)
 target_include_directories(av1_l3_transforms_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party/doctest)
 target_link_libraries(av1_l3_transforms_tests PRIVATE av1_transforms)
 av1_cuda_test(l3_transforms av1_l3_transforms_tests)

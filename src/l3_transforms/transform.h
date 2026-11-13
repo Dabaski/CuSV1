@@ -97,6 +97,31 @@ void idct16(const std::int32_t input[16], std::int32_t output[16]);
 // consumed at stages 3/5/7; no all-zero early-out at 16
 void iadst16(const std::int32_t input[16], std::int32_t output[16]);
 
+// TXH1: the stage-range-parameterized forms of the landed inverse 1D kernels
+// (the reference's own signature: svt_av1_idct16_new(input, output, cos_bit,
+// stage_range)). The landed 2-arg forms above are the {16,...} bd-8 overloads
+// (gen_inv_stage_range at bd=8 writes 16 into every stage); the Hb forms
+// consume the bd-dependent opt arrays (row 18 at bd 10 / 20 at bd 12, col 16
+// at bd 10 / 18 at bd 12). The bodies are the landed verbatim bodies.
+void idct4Hb(const std::int32_t input[4], std::int32_t output[4], const std::int8_t* stageRange);
+void iadst4Hb(const std::int32_t input[4], std::int32_t output[4], const std::int8_t* stageRange);
+void idct8Hb(const std::int32_t input[8], std::int32_t output[8], const std::int8_t* stageRange);
+void iadst8Hb(const std::int32_t input[8], std::int32_t output[8], const std::int8_t* stageRange);
+void idct16Hb(const std::int32_t input[16], std::int32_t output[16], const std::int8_t* stageRange);
+void iadst16Hb(const std::int32_t input[16], std::int32_t output[16], const std::int8_t* stageRange);
+void idct32Hb(const std::int32_t input[32], std::int32_t output[32], const std::int8_t* stageRange);
+void iadst32Hb(const std::int32_t input[32], std::int32_t output[32], const std::int8_t* stageRange);
+void idct64Hb(const std::int32_t input[64], std::int32_t output[64], const std::int8_t* stageRange);
+
+// TXH1: the identity kernels take a stage_range pointer for signature
+// uniformity with the Hb 1D table and ignore it (the reference iidentity*_c
+// carry the parameter without consuming it)
+void invIdentity4Hb(const std::int32_t input[4], std::int32_t output[4], const std::int8_t* stageRange);
+void invIdentity8Hb(const std::int32_t input[8], std::int32_t output[8], const std::int8_t* stageRange);
+void invIdentity16Hb(const std::int32_t input[16], std::int32_t output[16], const std::int8_t* stageRange);
+void invIdentity32Hb(const std::int32_t input[32], std::int32_t output[32], const std::int8_t* stageRange);
+void invIdentity64Hb(const std::int32_t input[64], std::int32_t output[64], const std::int8_t* stageRange);
+
 // TX2: the full TxType list, verbatim order of definitions.h:1031-1047 (the
 // landed four are the first four; the enum values are the reference's, so
 // vtx_tab/htx_tab and the ext-tx tables index correctly)

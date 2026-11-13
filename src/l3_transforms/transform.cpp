@@ -104,10 +104,12 @@ std::int32_t roundShift(std::int64_t value, int bit) {
     return static_cast<std::int32_t>((value + (1LL << (bit - 1))) >> bit);
 }
 
-// svt_av1_idct4_new (inv_transforms.c:97), cos_bit = 12 (INV_COS_BIT)
-void idct4(const std::int32_t input[4], std::int32_t output[4]) {
+// svt_av1_idct4_new (inv_transforms.c:97), cos_bit = 12 (INV_COS_BIT). TXH1:
+// the stage_range shim became a parameter - the landed 2-arg form below is the
+// {16,...} bd-8 overload (kInvClampBit), the Hb form consumes the
+// gen_inv_stage_range arrays (bd 10: row 18, bd 12: row 20)
+void idct4Hb(const std::int32_t input[4], std::int32_t output[4], const std::int8_t* stageRange) {
     const int8_t cosBit = 12;
-    const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
     std::int32_t bf0[4];
     std::int32_t bf1[4];
     std::int32_t step[4];
@@ -131,9 +133,17 @@ void idct4(const std::int32_t input[4], std::int32_t output[4]) {
     output[3] = clampValue(step[0] - step[3], stageRange[3]);
 }
 
+// TXH1: the landed 2-arg bd-8 overload (the {16,...} shim array)
+void idct4(const std::int32_t input[4], std::int32_t output[4]) {
+    static constexpr std::int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    idct4Hb(input, output, stageRange);
+}
+
 // svt_av1_iadst4_new (inv_transforms.c:729), cos_bit = 12 (incl. all-zero
-// early-out; stage_range unused)
-void iadst4(const std::int32_t input[4], std::int32_t output[4]) {
+// early-out; stage_range unused). TXH1: the stage_range parameter exists for
+// signature uniformity with the Hb 1D table and is (void)'d like the reference
+void iadst4Hb(const std::int32_t input[4], std::int32_t output[4], const std::int8_t* stageRange) {
+    (void)stageRange;
     const int bit   = 12;
     const std::int32_t x0 = input[0];
     const std::int32_t x1 = input[1];
@@ -176,12 +186,18 @@ void iadst4(const std::int32_t input[4], std::int32_t output[4]) {
     output[3] = roundShift(y3, bit);
 }
 
+// TXH1: the landed 2-arg bd-8 overload (stage_range unused in the reference)
+void iadst4(const std::int32_t input[4], std::int32_t output[4]) {
+    static constexpr std::int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    iadst4Hb(input, output, stageRange);
+}
+
 // svt_av1_idct8_new (inv_transforms.c:136), cos_bit = 12 (INV_COS_BIT).
 // stage_range: {16,...} shim confirmed exact by gen_inv_range_8x8_dct gate
-// line (B1) -" all 6 stages clamp at bit 16 for bd=8.
-void idct8(const std::int32_t input[8], std::int32_t output[8]) {
+// line (B1) - all 6 stages clamp at bit 16 for bd=8. TXH1: the shim became a
+// parameter; the 2-arg form below is the bd-8 overload
+void idct8Hb(const std::int32_t input[8], std::int32_t output[8], const std::int8_t* stageRange) {
     const int8_t cosBit = 12;
-    const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
     std::int32_t bf0[8];
     std::int32_t step[8];
 
@@ -236,13 +252,18 @@ void idct8(const std::int32_t input[8], std::int32_t output[8]) {
     output[7] = clampValue(step[0] - step[7], stageRange[5]);
 }
 
+// TXH1: the landed 2-arg bd-8 overload (the {16,...} shim array)
+void idct8(const std::int32_t input[8], std::int32_t output[8]) {
+    static constexpr std::int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    idct8Hb(input, output, stageRange);
+}
+
 // svt_av1_iadst8_new (inv_transforms.c:822), cos_bit = 12 (INV_COS_BIT).
 // Unlike iadst4, iadst8 HAS clamp_value at stages 3 and 5 -" mirrored exactly.
 // stage_range: {16,...} shim confirmed exact by gen_inv_range_8x8_adst gate
 // line (B1) -" all 8 stages clamp at bit 16 for bd=8.
-void iadst8(const std::int32_t input[8], std::int32_t output[8]) {
+void iadst8Hb(const std::int32_t input[8], std::int32_t output[8], const std::int8_t* stageRange) {
     const int8_t cosBit = 12;
-    const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
     std::int32_t bf0[8];
     std::int32_t step[8];
 
@@ -317,12 +338,18 @@ void iadst8(const std::int32_t input[8], std::int32_t output[8]) {
     output[7] = -step[1];
 }
 
+// TXH1: the landed 2-arg bd-8 overload (the {16,...} shim array)
+void iadst8(const std::int32_t input[8], std::int32_t output[8]) {
+    static constexpr std::int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    iadst8Hb(input, output, stageRange);
+}
+
 // svt_av1_idct16_new (inv_transforms.c:215-376), cos_bit = 12 (INV_COS_BIT);
 // stage_range consumed at stages 3-7 (clamp_value on the butterfly adds),
-// shim {16,...} proven by gen_inv_range_16x16_dct
-void idct16(const std::int32_t input[16], std::int32_t output[16]) {
+// shim {16,...} proven by gen_inv_range_16x16_dct. TXH1: the shim became a
+// parameter; the 2-arg form below is the bd-8 overload
+void idct16Hb(const std::int32_t input[16], std::int32_t output[16], const std::int8_t* stageRange) {
     const int8_t cosBit = 12;
-    const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
     std::int32_t bf0[16];
     std::int32_t step[16];
 
@@ -453,11 +480,17 @@ void idct16(const std::int32_t input[16], std::int32_t output[16]) {
     output[15] = clampValue(step[0] - step[15], stageRange[7]);
 }
 
+// TXH1: the landed 2-arg bd-8 overload (the {16,...} shim array)
+void idct16(const std::int32_t input[16], std::int32_t output[16]) {
+    static constexpr std::int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    idct16Hb(input, output, stageRange);
+}
+
 // svt_av1_iadst16_new (inv_transforms.c:927-1130), cos_bit = 12; stage_range
-// consumed at stages 3/5/7; no all-zero early-out at 16
-void iadst16(const std::int32_t input[16], std::int32_t output[16]) {
+// consumed at stages 3/5/7; no all-zero early-out at 16. TXH1: the shim became
+// a parameter; the 2-arg form below is the bd-8 overload
+void iadst16Hb(const std::int32_t input[16], std::int32_t output[16], const std::int8_t* stageRange) {
     const int8_t cosBit = 12;
-    const int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
     std::int32_t bf0[16];
     std::int32_t step[16];
 
@@ -623,6 +656,12 @@ void iadst16(const std::int32_t input[16], std::int32_t output[16]) {
     output[13] = -step[13];
     output[14] = step[9];
     output[15] = -step[1];
+}
+
+// TXH1: the landed 2-arg bd-8 overload (the {16,...} shim array)
+void iadst16(const std::int32_t input[16], std::int32_t output[16]) {
+    static constexpr std::int8_t stageRange[8] = {16, 16, 16, 16, 16, 16, 16, 16};
+    iadst16Hb(input, output, stageRange);
 }
 
 // svt_av1_fdct8_new (transforms.c:196) with the reference's cos_bit parameter
@@ -2141,11 +2180,11 @@ void fdct64B(const std::int32_t input[64], std::int32_t output[64], int cosBit) 
 // svt_av1_idct64_new (inv_transforms.c:1567), cos_bit = 12; clamp_value at
 // the audited stages via stageRange (gen_inv_range_64x64_dct = 12 x 16);
 // VERBATIM body ported mechanically from svt_gen.c (clamp_value ->
-// clampValue)
-void idct64(const std::int32_t input[64], std::int32_t output[64]) {
+// clampValue). TXH1: the shim became a parameter; the 2-arg form below is
+// the bd-8 overload
+void idct64Hb(const std::int32_t input[64], std::int32_t output[64], const std::int8_t* stageRange) {
     const int8_t cosBit = 12;
     const std::int32_t* cospi = kCospi12;
-    const int8_t stageRange[12] = {16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};
     std::int32_t step[64];
     std::int32_t* bf0;
     std::int32_t* bf1;
@@ -2925,6 +2964,12 @@ void idct64(const std::int32_t input[64], std::int32_t output[64]) {
     bf1[63] = clampValue(bf0[0] - bf0[63], stageRange[stage]);
 }
 
+// TXH1: the landed 2-arg bd-8 overload (the {16,...} shim array)
+void idct64(const std::int32_t input[64], std::int32_t output[64]) {
+    static constexpr std::int8_t stageRange[12] = {16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};
+    idct64Hb(input, output, stageRange);
+}
+
 // static av1_fadst32_new (transforms.c:1908-2314) with the reference's
 // cos_bit parameter (TX1: fwd_cos_bit_row[3][2] = 13 at the TX_32X16 ADST row
 // pass, [3][4]/[4][3] = 11 at the TX_32X64 / TX_64X32 ADST row passes)
@@ -3114,11 +3159,11 @@ void fadst32(const std::int32_t input[32], std::int32_t output[32]) {
 // svt_av1_idct32_new (inv_transforms.c:378-727), cos_bit = 12 (INV_COS_BIT);
 // stage_range audit (verified against the verbatim source, L3): clamp_value
 // on the butterfly adds at stages 3-9 only; stage 1-2 range checks are
-// commented out in SVT itself
-void idct32(const std::int32_t input[32], std::int32_t output[32]) {
+// commented out in SVT itself. TXH1: the shim became a parameter; the 2-arg
+// form below is the bd-8 overload
+void idct32Hb(const std::int32_t input[32], std::int32_t output[32], const std::int8_t* stageRange) {
     const int8_t cosBit = 12;
     const std::int32_t* cospi = kCospi12;
-    const int8_t stageRange[10] = {16, 16, 16, 16, 16, 16, 16, 16, 16, 16};
     std::int32_t bf0[32];
     std::int32_t step[32];
 
@@ -3361,12 +3406,21 @@ void idct32(const std::int32_t input[32], std::int32_t output[32]) {
     }
 }
 
+// TXH1: the landed 2-arg bd-8 overload (the {16,...} shim array)
+void idct32(const std::int32_t input[32], std::int32_t output[32]) {
+    static constexpr std::int8_t stageRange[10] = {16, 16, 16, 16, 16, 16, 16, 16, 16, 16};
+    idct32Hb(input, output, stageRange);
+}
+
 // static av1_iadst32_new (inv_transforms.c:1132-1565), cos_bit = 12;
 // stage_range audit (L3): clamp_buf on EVERY stage (SVT applies clamp_buf to
 // the whole 32-vector after each stage: stage 0 input clamp :1141, stages
 // 1-11 :1179,:1218,:1256,:1295,:1333,:1372,:1410,:1449,:1487,:1526,:1564);
-// NO all-zero early-out at 32
-void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
+// NO all-zero early-out at 32. TXH1: the fixed-16 clamps became
+// stage_range-parameterized (stage 0 stays implicit - the 2D core's pre-clamp
+// bit equals opt_range at every bd, so the reference's stage-0 clamp is dead
+// in context; named deviation shared with the landed form)
+void iadst32Hb(const std::int32_t input[32], std::int32_t output[32], const std::int8_t* stageRange) {
     const int8_t cosBit = 12;
     const std::int32_t* cospi = kCospi12;
     std::int32_t bf0[32];
@@ -3375,14 +3429,14 @@ void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
     // stage 0: clamp_buf on the input (the host callers pre-clamp to 16 in
     // the 2D core; the helper's own clamp_buf(input, 32, 16) is a no-op
     // there - kept implicit, values arrive within range)
-    // stage 1 (fixed sign-permutation; clamp 16)
+    // stage 1 (fixed sign-permutation; clamp at stageRange[1])
     static const int idxTab[32] = {0, -32, -16, 16, -8, 24, 8, -24, -4, 28, 12, -20, 4, -28, -12, 20,
                                    -2, 30, 14, -18, 6, -26, -10, 22, 2, -30, -14, 18, -6, 26, 10, -22};
     for (int i = 0; i < 32; ++i) {
         const int j = idxTab[i];
         bf0[i] = j >= 0 ? input[j] : -input[-1 - j];
     }
-    clampBufIv(bf0, 32, kInvClampBit);
+    clampBufIv(bf0, 32, stageRange[1]);
 
     // stage 2 (verbatim pattern: copies at 0,1,4,5,8,9,12,13,16,17,20,21,24,25,
     // 28,29; cospi32 pairs at (2,3),(6,7),(10,11),(14,15),(18,19),(22,23),
@@ -3397,7 +3451,7 @@ void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
             step[base + 1] = halfBtf(cospi[32], bf0[base], -cospi[32], bf0[base + 1], cosBit);
         }
     }
-    clampBufIv(step, 32, kInvClampBit);
+    clampBufIv(step, 32, stageRange[2]);
 
     // stage 3 (pairwise sum/diff on (0,2),(1,3)... groups of 2 within 4)
     for (int q = 0; q < 8; ++q) {
@@ -3407,7 +3461,7 @@ void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
         bf0[base + 2] = step[base] - step[base + 2];
         bf0[base + 3] = step[base + 1] - step[base + 3];
     }
-    clampBufIv(bf0, 32, kInvClampBit);
+    clampBufIv(bf0, 32, stageRange[3]);
 
     // stage 4 (half_btf groups at 4-7, 12-15, 20-23, 28-31; copies elsewhere)
     for (int q = 0; q < 4; ++q) {
@@ -3421,7 +3475,7 @@ void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
         step[base + 6] = halfBtf(-cospi[48], bf0[base + 6], cospi[16], bf0[base + 7], cosBit);
         step[base + 7] = halfBtf(cospi[16], bf0[base + 6], cospi[48], bf0[base + 7], cosBit);
     }
-    clampBufIv(step, 32, kInvClampBit);
+    clampBufIv(step, 32, stageRange[4]);
 
     // stage 5 (group-of-8 sum/diff: [0..3]+/-[4..7])
     for (int q = 0; q < 4; ++q) {
@@ -3431,7 +3485,7 @@ void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
             bf0[base + 4 + i] = step[base + i] - step[base + 4 + i];
         }
     }
-    clampBufIv(bf0, 32, kInvClampBit);
+    clampBufIv(bf0, 32, stageRange[5]);
 
     // stage 6 (half_btf groups at 8-15 and 24-31; copies elsewhere)
     for (int i = 0; i < 8; ++i) step[i] = bf0[i];
@@ -3452,7 +3506,7 @@ void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
     step[29] = halfBtf(cospi[8], bf0[28], cospi[56], bf0[29], cosBit);
     step[30] = halfBtf(-cospi[24], bf0[30], cospi[40], bf0[31], cosBit);
     step[31] = halfBtf(cospi[40], bf0[30], cospi[24], bf0[31], cosBit);
-    clampBufIv(step, 32, kInvClampBit);
+    clampBufIv(step, 32, stageRange[6]);
 
     // stage 7 (group-of-16 sum/diff: [0..7]+/-[8..15], [16..23]+/-[24..31])
     for (int h = 0; h < 2; ++h) {
@@ -3462,7 +3516,7 @@ void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
             bf0[base + 8 + i] = step[base + i] - step[base + 8 + i];
         }
     }
-    clampBufIv(bf0, 32, kInvClampBit);
+    clampBufIv(bf0, 32, stageRange[7]);
 
     // stage 8 (half_btf at 16-31; copies at 0-15)
     for (int i = 0; i < 16; ++i) step[i] = bf0[i];
@@ -3482,14 +3536,14 @@ void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
     step[29] = halfBtf(cospi[36], bf0[28], cospi[28], bf0[29], cosBit);
     step[30] = halfBtf(-cospi[12], bf0[30], cospi[52], bf0[31], cosBit);
     step[31] = halfBtf(cospi[52], bf0[30], cospi[12], bf0[31], cosBit);
-    clampBufIv(step, 32, kInvClampBit);
+    clampBufIv(step, 32, stageRange[8]);
 
     // stage 9 (group-of-32 sum/diff: [0..15]+/-[16..31])
     for (int i = 0; i < 16; ++i) {
         bf0[i] = step[i] + step[16 + i];
         bf0[16 + i] = step[i] - step[16 + i];
     }
-    clampBufIv(bf0, 32, kInvClampBit);
+    clampBufIv(bf0, 32, stageRange[9]);
 
     // stage 10 (full 32 half_btf sweep, cospi pairs (1,63),(5,59)...(61,3))
     for (int k = 0; k < 16; ++k) {
@@ -3497,13 +3551,19 @@ void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
         step[2 * k]     = halfBtf(cospi[c1], bf0[2 * k], cospi[64 - c1], bf0[2 * k + 1], cosBit);
         step[2 * k + 1] = halfBtf(cospi[64 - c1], bf0[2 * k], -cospi[c1], bf0[2 * k + 1], cosBit);
     }
-    clampBufIv(step, 32, kInvClampBit);
+    clampBufIv(step, 32, stageRange[10]);
 
     // stage 11 (final permutation; clamp)
     static const int permTab[32] = {1, 30, 3, 28, 5, 26, 7, 24, 9, 22, 11, 20, 13, 18, 15, 16,
                                     17, 14, 19, 12, 21, 10, 23, 8, 25, 6, 27, 4, 29, 2, 31, 0};
     for (int i = 0; i < 32; ++i) output[i] = step[permTab[i]];
-    clampBufIv(output, 32, kInvClampBit);
+    clampBufIv(output, 32, stageRange[11]);
+}
+
+// TXH1: the landed 2-arg bd-8 overload (fixed-16 clamps at every stage)
+void iadst32(const std::int32_t input[32], std::int32_t output[32]) {
+    static constexpr std::int8_t stageRange[12] = {16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16};
+    iadst32Hb(input, output, stageRange);
 }
 
 // svt_av1_fdct4_new (transforms.c:162) with the reference's cos_bit parameter
@@ -3947,6 +4007,33 @@ void invIdentity64(const std::int32_t input[64], std::int32_t output[64], int co
     for (int i = 0; i < 64; ++i) {
         output[i] = roundShift(static_cast<std::int64_t>(5793) * 4 * input[i], 12);
     }
+}
+
+// TXH1: the identity Hb wrappers (the reference iidentity*_c carry a
+// stage_range parameter without consuming it)
+void invIdentity4Hb(const std::int32_t input[4], std::int32_t output[4], const std::int8_t* stageRange) {
+    (void)stageRange;
+    invIdentity4(input, output, 0);
+}
+
+void invIdentity8Hb(const std::int32_t input[8], std::int32_t output[8], const std::int8_t* stageRange) {
+    (void)stageRange;
+    invIdentity8(input, output, 0);
+}
+
+void invIdentity16Hb(const std::int32_t input[16], std::int32_t output[16], const std::int8_t* stageRange) {
+    (void)stageRange;
+    invIdentity16(input, output, 0);
+}
+
+void invIdentity32Hb(const std::int32_t input[32], std::int32_t output[32], const std::int8_t* stageRange) {
+    (void)stageRange;
+    invIdentity32(input, output, 0);
+}
+
+void invIdentity64Hb(const std::int32_t input[64], std::int32_t output[64], const std::int8_t* stageRange) {
+    (void)stageRange;
+    invIdentity64(input, output, 0);
 }
 
 namespace {
