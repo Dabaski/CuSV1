@@ -6426,3 +6426,219 @@ TEST_CASE("set_intra_ctrls - the TPL modulation arms (levels 2-5)") {
         CHECK(cx2.skipIntra == true);  // !enable(=0 via forced level) || skip
     }
 }
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 7: tx_shortcut / mds0 / skip_sub_depth / block-based depth
+// refinement.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_tx_shortcut_ctrls - the four levels, whole-struct") {
+    // :6798-6838.
+    for (int level = 0; level <= 4; ++level) {
+        TxShortcutCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setTxShortcutCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.bypassTxTh == 0);
+            CHECK(c.applyPfOnCoeffs == 0);
+            CHECK(c.useMds3ShortcutsTh == 0);
+            CHECK(c.chromaDetectorLevel == 0);
+        } else if (level == 1) {
+            CHECK(c.bypassTxTh == 4);
+            CHECK(c.applyPfOnCoeffs == 1);
+            CHECK(c.useMds3ShortcutsTh == 0);
+            CHECK(c.chromaDetectorLevel == 1);
+        } else if (level == 2) {
+            CHECK(c.bypassTxTh == 1);
+            CHECK(c.applyPfOnCoeffs == 1);
+            CHECK(c.useMds3ShortcutsTh == 0);
+            CHECK(c.chromaDetectorLevel == 1);
+        } else if (level == 3) {
+            CHECK(c.bypassTxTh == 1);
+            CHECK(c.applyPfOnCoeffs == 1);
+            CHECK(c.useMds3ShortcutsTh == 10);
+            CHECK(c.chromaDetectorLevel == 1);
+        } else {
+            CHECK(c.bypassTxTh == 0xAAAAAAAAu);
+            CHECK(c.chromaDetectorLevel == kPoison);
+        }
+    }
+}
+
+TEST_CASE("set_mds0_controls - the three levels, whole-struct") {
+    // :6840-6861. Level 1 writes pruning + per_class[0..3] (class 4
+    // keeps poison); level 2 writes pruning + dist_to_cost_th (the
+    // per_class array keeps poison).
+    for (int level = 0; level <= 3; ++level) {
+        Mds0Ctrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setMds0Ctrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.pruningMethodTh == 0);
+            CHECK(c.perClassDistToCostTh[0] == 0xAAAA);
+            CHECK(c.distToCostTh == 0xAAAA);
+        } else if (level == 1) {
+            CHECK(c.pruningMethodTh == 100);
+            CHECK(c.perClassDistToCostTh[0] == 50);
+            CHECK(c.perClassDistToCostTh[1] == 10);
+            CHECK(c.perClassDistToCostTh[2] == 10);
+            CHECK(c.perClassDistToCostTh[3] == 50);
+            CHECK(c.perClassDistToCostTh[4] == 0xAAAA);  // not written
+            CHECK(c.distToCostTh == 0xAAAA);             // not written
+        } else if (level == 2) {
+            CHECK(c.pruningMethodTh == (uint8_t)~0);
+            CHECK(c.perClassDistToCostTh[0] == 0xAAAA);
+            CHECK(c.distToCostTh == 0);
+        } else {
+            CHECK(c.pruningMethodTh == kPoison);
+        }
+    }
+}
+
+TEST_CASE("set_skip_sub_depth_ctrls - the three levels, whole-struct") {
+    // :6863-6890.
+    for (int level = 0; level <= 3; ++level) {
+        SkipSubDepthCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setSkipSubDepthCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.maxSize == kPoison);
+        } else if (level == 1) {
+            CHECK(c.enabled == 1);
+            CHECK(c.maxSize == 16);
+            CHECK(c.quadDeviationTh == 250);
+            CHECK(c.coeffPerc == 15);
+        } else if (level == 2) {
+            CHECK(c.enabled == 1);
+            CHECK(c.maxSize == 16);
+            CHECK(c.quadDeviationTh == 250);
+            CHECK(c.coeffPerc == 25);
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.quadDeviationTh == (int)0xAAAAAAAA);
+        }
+    }
+}
+
+// set_block_based_depth_refinement_controls, independent transcription
+// (:6892-7065). Per level: written-field expectations; -1 = poison.
+struct OracleDepthRefineRow {
+    int mode;   // -1 = not written
+    int s1, s2, e1, e2;
+    int pmult, coeffMod, bandMod, maxMult, maxBand;
+    int64_t decr[8];
+    int lower, split, limit, ref, q;
+    int unavail;
+};
+static OracleDepthRefineRow oracleDepthRefine(int level) {
+    OracleDepthRefineRow r = {};
+    r.mode = -1; r.s1 = -1; r.s2 = -1; r.e1 = -1; r.e2 = -1;
+    r.pmult = -1; r.coeffMod = -1; r.bandMod = -1; r.maxMult = -1; r.maxBand = -1;
+    for (int i = 0; i < 8; ++i) r.decr[i] = (int64_t)0xAAAAAAAAAAAAAAAAull;
+    r.lower = -1; r.split = -1; r.limit = -1; r.ref = -1; r.q = -1; r.unavail = -1;
+    const int64_t maxSigned = 2147483647;
+    switch (level) {
+    case 0:
+        r.mode = 0;
+        break;
+    case 1:
+        r.mode = 1; r.s1 = 200; r.s2 = 0; r.e1 = 200; r.e2 = 0; r.pmult = 10;
+        r.coeffMod = 1; r.bandMod = 0; r.lower = 0; r.split = 0; r.limit = 0;
+        r.ref = 0; r.q = 1; r.unavail = 2;
+        break;
+    case 2:
+        r.mode = 1; r.s1 = 90; r.s2 = 0; r.e1 = 90; r.e2 = 0; r.pmult = 10;
+        r.coeffMod = 1; r.bandMod = 0; r.lower = 10; r.split = 10; r.limit = 0;
+        r.ref = 0; r.q = 1; r.unavail = 2;
+        break;
+    case 3:
+        r.mode = 1; r.s1 = 60; r.s2 = 0; r.e1 = 60; r.e2 = 0; r.pmult = 10;
+        r.coeffMod = 1; r.bandMod = 0; r.lower = 10; r.split = 10; r.limit = 0;
+        r.ref = 0; r.q = 1; r.unavail = 2;
+        break;
+    case 4:
+        r.mode = 1; r.s1 = 30; r.s2 = 0; r.e1 = 30; r.e2 = 0; r.pmult = 10;
+        r.coeffMod = 1; r.bandMod = 0; r.lower = 10; r.split = 10; r.limit = 0;
+        r.ref = 0; r.q = 1; r.unavail = 2;
+        break;
+    case 5:
+        r.mode = 1; r.s1 = 30; r.s2 = 255; r.e1 = 30; r.e2 = 255; r.pmult = 10;
+        r.coeffMod = 1; r.bandMod = 0; r.lower = 10; r.split = 10; r.limit = 2;
+        r.ref = 0; r.q = 1; r.unavail = 2;
+        break;
+    case 6:
+        r.mode = 1; r.s1 = 15; r.s2 = 255; r.e1 = 15; r.e2 = 255; r.pmult = 10;
+        r.coeffMod = 1; r.bandMod = 0; r.lower = 20; r.split = 10; r.limit = 1;
+        r.ref = 0; r.q = 1; r.unavail = 2;
+        break;
+    case 7:
+        r.mode = 1; r.s1 = 15; r.s2 = 255; r.e1 = 15; r.e2 = 255; r.pmult = 0;
+        r.bandMod = 1; r.maxMult = 400; r.maxBand = 4;
+        r.decr[0] = maxSigned; r.decr[1] = maxSigned; r.decr[2] = 10; r.decr[3] = 5;
+        r.coeffMod = 1; r.lower = 20; r.split = 5; r.limit = 1;
+        r.ref = 1; r.q = 1; r.unavail = 2;
+        break;
+    case 8:
+        r.mode = 1; r.s1 = 10; r.s2 = 255; r.e1 = 10; r.e2 = 255; r.pmult = 0;
+        r.bandMod = 1; r.maxMult = 400; r.maxBand = 4;
+        r.decr[0] = maxSigned; r.decr[1] = maxSigned; r.decr[2] = 10; r.decr[3] = 5;
+        r.coeffMod = 1; r.lower = 25; r.split = 5; r.limit = 1;
+        r.ref = 1; r.q = 1; r.unavail = 0;
+        break;
+    case 9:
+        r.mode = 1; r.s1 = 10; r.s2 = 255; r.e1 = 10; r.e2 = 255; r.pmult = 0;
+        r.bandMod = 1; r.maxMult = 400; r.maxBand = 4;
+        r.decr[0] = maxSigned; r.decr[1] = maxSigned; r.decr[2] = 10; r.decr[3] = 5;
+        r.coeffMod = 1; r.lower = 100; r.split = 5; r.limit = 1;
+        r.ref = 1; r.q = 1; r.unavail = 0;
+        break;
+    case 10:
+        r.mode = 2;
+        break;
+    }
+    return r;
+}
+
+TEST_CASE("set_block_based_depth_refinement_controls - every level, vs the oracle") {
+    // :6892-7065. The switch has NO default arm: levels > 10 write
+    // nothing.
+    for (int level = 0; level <= 11; ++level) {
+        DepthRefinementCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setBlockBasedDepthRefinementCtrls(c, (uint8_t)level);
+        const OracleDepthRefineRow& r = oracleDepthRefine(level);
+        if (level <= 10) {
+            CHECK(c.mode == (uint8_t)r.mode);
+            if (r.s1 >= 0) {
+                CHECK(c.s1ParentToCurrentTh == (uint8_t)r.s1);
+                CHECK(c.s2ParentToCurrentTh == (uint8_t)r.s2);
+                CHECK(c.e1SubToCurrentTh == (uint8_t)r.e1);
+                CHECK(c.e2SubToCurrentTh == (uint8_t)r.e2);
+                CHECK(c.parentMaxCostThMult == (uint16_t)r.pmult);
+                CHECK(c.coeffLvlModulation == (uint8_t)r.coeffMod);
+                CHECK(c.costBandBasedModulation == (uint8_t)r.bandMod);
+                if (r.maxMult >= 0) {
+                    CHECK(c.maxCostMultiplier == (uint16_t)r.maxMult);
+                    CHECK(c.maxBandCnt == (uint8_t)r.maxBand);
+                    for (int i = 0; i < 4; ++i) CHECK(c.decrementPerBand[i] == r.decr[i]);
+                    for (int i = 4; i < 8; ++i)
+                        CHECK(c.decrementPerBand[i] == (int64_t)0xAAAAAAAAAAAAAAAAull);
+                } else {
+                    CHECK(c.maxCostMultiplier == (uint16_t)0xAAAA);
+                    CHECK(c.maxBandCnt == kPoison);
+                    CHECK(c.decrementPerBand[2] == (int64_t)0xAAAAAAAAAAAAAAAAull);
+                }
+                CHECK(c.lowerDepthSplitCostTh == (uint32_t)r.lower);
+                CHECK(c.splitRateTh == (uint32_t)r.split);
+                CHECK(c.limitMaxMinToPd0 == (uint8_t)r.limit);
+                CHECK(c.useRefInfo == (uint8_t)r.ref);
+                CHECK(c.qWeight == (uint8_t)r.q);
+                CHECK(c.pd0UnavailModeDepth == (uint32_t)r.unavail);
+            }
+        } else {
+            CHECK(c.mode == kPoison);
+            CHECK(c.lowerDepthSplitCostTh == 0xAAAAAAAAu);
+        }
+    }
+}

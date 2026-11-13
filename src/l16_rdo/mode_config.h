@@ -1695,5 +1695,83 @@ struct IntraSetCtx {
 void setIntraCtrls(IntraCtrls& ctrls, const IntraSetPcs& pcs, IntraSetCtx& ctx,
                    std::uint8_t intraLevel, std::uint8_t distBasedAngIntraLevel);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 7: set_tx_shortcut_ctrls (:6798-:6838), set_mds0_controls
+// (:6840-:6861), set_skip_sub_depth_ctrls (:6863-:6890) and
+// set_block_based_depth_refinement_controls (:6892-:7065).
+// ---------------------------------------------------------------------------
+// TxShortcutCtrls (md_process.h:791-802, verbatim field order/types).
+struct TxShortcutCtrls {
+    std::uint32_t bypassTxTh;
+    std::uint8_t applyPfOnCoeffs;
+    std::uint8_t chromaDetectorLevel;
+    std::uint32_t useMds3ShortcutsTh;
+};
+
+// set_tx_shortcut_ctrls (:6798-6838). The trailing debug assert
+// (:6832-:6837) is a level-configuration invariant (chroma detector on
+// for ref frames at <= M9) compiled out under NDEBUG in the tested
+// config - named, nothing to thread. The default case assert(0)s and
+// writes nothing (documented UB).
+void setTxShortcutCtrls(TxShortcutCtrls& ctrls, std::uint8_t txShortcutLevel);
+
+// Mds0Ctrls (md_process.h:804-810, verbatim).
+constexpr int kCandClassTotal = 5;  // CAND_CLASS_TOTAL (definitions.h:772)
+struct Mds0Ctrls {
+    std::uint8_t pruningMethodTh;
+    std::uint16_t perClassDistToCostTh[kCandClassTotal];
+    std::uint16_t distToCostTh;
+};
+
+// set_mds0_controls (:6840-6861). Level 1 does NOT write
+// per_class_dist_to_cost_th[CAND_CLASS_4]; level 2 does NOT write the
+// per_class array. The default case assert(0)s and writes nothing
+// (documented UB).
+void setMds0Ctrls(Mds0Ctrls& ctrls, std::uint8_t mds0Level);
+
+// SkipSubDepthCtrls (md_process.h:823-833, verbatim).
+struct SkipSubDepthCtrls {
+    std::uint8_t enabled;
+    std::uint8_t maxSize;
+    int quadDeviationTh;
+    std::uint8_t coeffPerc;
+};
+
+// set_skip_sub_depth_ctrls (:6863-6890). The default case assert(0)s
+// and writes nothing (documented UB).
+void setSkipSubDepthCtrls(SkipSubDepthCtrls& ctrls, std::uint8_t skipSubDepthLvl);
+
+// DepthRefinementCtrls (md_process.h:231-276, verbatim field order/
+// types). MAX_RANGE_CNT = 8 (md_process.h:225).
+constexpr int kMaxRangeCnt = 8;
+// PD0_DEPTH_* (md_process.h:227-229).
+constexpr std::uint8_t kPd0DepthNoRestriction = 0;
+constexpr std::uint8_t kPd0DepthAdaptive = 1;
+constexpr std::uint8_t kPd0DepthPredPartOnly = 2;
+struct DepthRefinementCtrls {
+    std::uint8_t mode;
+    std::uint8_t s1ParentToCurrentTh;
+    std::uint8_t s2ParentToCurrentTh;
+    std::uint8_t e1SubToCurrentTh;
+    std::uint8_t e2SubToCurrentTh;
+    std::uint16_t parentMaxCostThMult;
+    std::uint8_t coeffLvlModulation;
+    std::uint8_t costBandBasedModulation;
+    std::uint16_t maxCostMultiplier;
+    std::uint8_t maxBandCnt;
+    std::int64_t decrementPerBand[kMaxRangeCnt];
+    std::uint32_t lowerDepthSplitCostTh;
+    std::uint32_t splitRateTh;
+    std::uint8_t limitMaxMinToPd0;
+    std::uint8_t useRefInfo;
+    std::uint8_t qWeight;
+    std::uint32_t pd0UnavailModeDepth;
+};
+
+// set_block_based_depth_refinement_controls (:6892-7065). The switch
+// has NO default arm - levels > 10 write nothing (documented).
+void setBlockBasedDepthRefinementCtrls(DepthRefinementCtrls& ctrls,
+                                       std::uint8_t blockBasedDepthRefinementLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

@@ -6775,5 +6775,270 @@ void setIntraCtrls(IntraCtrls& ctrls, const IntraSetPcs& pcs, IntraSetCtx& ctx,
     }
 }
 
+// set_tx_shortcut_ctrls (enc_mode_config.c:6798-6838).
+void setTxShortcutCtrls(TxShortcutCtrls& ctrls, std::uint8_t txShortcutLevel) {
+    switch (txShortcutLevel) {
+    case 0:
+        ctrls.bypassTxTh          = 0;
+        ctrls.applyPfOnCoeffs     = 0;
+        ctrls.useMds3ShortcutsTh  = 0;
+        ctrls.chromaDetectorLevel = 0;
+        break;
+    case 1:
+        ctrls.bypassTxTh          = 4;
+        ctrls.applyPfOnCoeffs     = 1;
+        ctrls.useMds3ShortcutsTh  = 0;
+        ctrls.chromaDetectorLevel = 1;
+        break;
+    case 2:
+        ctrls.bypassTxTh          = 1;
+        ctrls.applyPfOnCoeffs     = 1;
+        ctrls.useMds3ShortcutsTh  = 0;
+        ctrls.chromaDetectorLevel = 1;
+        break;
+    case 3:
+        ctrls.bypassTxTh          = 1;
+        ctrls.applyPfOnCoeffs     = 1;
+        ctrls.useMds3ShortcutsTh  = 10;
+        ctrls.chromaDetectorLevel = 1;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+
+    // :6832-6837 - the trailing assert (chroma detector on for ref
+    // frames at <= M9) is a level-configuration invariant compiled out
+    // under NDEBUG in the tested config (named deviation).
+}
+
+// set_mds0_controls (enc_mode_config.c:6840-6861).
+void setMds0Ctrls(Mds0Ctrls& ctrls, std::uint8_t mds0Level) {
+    switch (mds0Level) {
+    case 0:
+        ctrls.pruningMethodTh = 0;
+        break;
+    case 1:
+        ctrls.pruningMethodTh                       = 100;
+        ctrls.perClassDistToCostTh[0]               = 50;  // CAND_CLASS_0
+        ctrls.perClassDistToCostTh[1]               = 10;  // CAND_CLASS_1
+        ctrls.perClassDistToCostTh[2]               = 10;  // CAND_CLASS_2
+        ctrls.perClassDistToCostTh[3]               = 50;  // CAND_CLASS_3
+        break;
+    case 2:
+        ctrls.pruningMethodTh = (std::uint8_t)~0;
+        ctrls.distToCostTh    = 0;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_skip_sub_depth_ctrls (enc_mode_config.c:6863-6890).
+void setSkipSubDepthCtrls(SkipSubDepthCtrls& ctrls, std::uint8_t skipSubDepthLvl) {
+    switch (skipSubDepthLvl) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+
+    case 1:
+        ctrls.enabled = 1;
+        // Cond1 ctrls
+        ctrls.maxSize          = 16;
+        ctrls.quadDeviationTh  = 250;
+        ctrls.coeffPerc        = 15;
+
+        break;
+    case 2:
+
+        ctrls.enabled = 1;
+        // Cond1 ctrls
+        ctrls.maxSize          = 16;
+        ctrls.quadDeviationTh  = 250;
+        ctrls.coeffPerc        = 25;
+
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_block_based_depth_refinement_controls (enc_mode_config.c:6892-7065).
+void setBlockBasedDepthRefinementCtrls(DepthRefinementCtrls& ctrls,
+                                       std::uint8_t blockBasedDepthRefinementLevel) {
+    switch (blockBasedDepthRefinementLevel) {
+    case 0:
+        ctrls.mode = kPd0DepthNoRestriction;
+        break;
+    case 1:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 200;
+        ctrls.s2ParentToCurrentTh     = 0;
+        ctrls.e1SubToCurrentTh        = 200;
+        ctrls.e2SubToCurrentTh        = 0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 0;
+        ctrls.splitRateTh             = 0;
+        ctrls.limitMaxMinToPd0        = 0;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 2:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 90;
+        ctrls.s2ParentToCurrentTh     = 0;
+        ctrls.e1SubToCurrentTh        = 90;
+        ctrls.e2SubToCurrentTh        = 0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 0;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 3:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 60;
+        ctrls.s2ParentToCurrentTh     = 0;
+        ctrls.e1SubToCurrentTh        = 60;
+        ctrls.e2SubToCurrentTh        = 0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 0;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 4:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 30;
+        ctrls.s2ParentToCurrentTh     = 0;
+        ctrls.e1SubToCurrentTh        = 30;
+        ctrls.e2SubToCurrentTh        = 0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 0;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 5:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 30;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 30;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 2;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 6:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 15;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 15;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 20;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 1;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 7:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 15;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 15;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 0;
+        ctrls.costBandBasedModulation = 1;
+        ctrls.maxCostMultiplier       = 400;
+        ctrls.maxBandCnt              = 4;
+        ctrls.decrementPerBand[0]     = kMaxSignedValue;
+        ctrls.decrementPerBand[1]     = kMaxSignedValue;
+        ctrls.decrementPerBand[2]     = 10;
+        ctrls.decrementPerBand[3]     = 5;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.lowerDepthSplitCostTh   = 20;
+        ctrls.splitRateTh             = 5;
+        ctrls.limitMaxMinToPd0        = 1;
+        ctrls.useRefInfo              = 1;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 8:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 10;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 10;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 0;
+        ctrls.costBandBasedModulation = 1;
+        ctrls.maxCostMultiplier       = 400;
+        ctrls.maxBandCnt              = 4;
+        ctrls.decrementPerBand[0]     = kMaxSignedValue;
+        ctrls.decrementPerBand[1]     = kMaxSignedValue;
+        ctrls.decrementPerBand[2]     = 10;
+        ctrls.decrementPerBand[3]     = 5;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.lowerDepthSplitCostTh   = 25;
+        ctrls.splitRateTh             = 5;
+        ctrls.limitMaxMinToPd0        = 1;
+        ctrls.useRefInfo              = 1;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 0;
+        break;
+    case 9:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 10;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 10;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 0;
+        ctrls.costBandBasedModulation = 1;
+        ctrls.maxCostMultiplier       = 400;
+        ctrls.maxBandCnt              = 4;
+        ctrls.decrementPerBand[0]     = kMaxSignedValue;
+        ctrls.decrementPerBand[1]     = kMaxSignedValue;
+        ctrls.decrementPerBand[2]     = 10;
+        ctrls.decrementPerBand[3]     = 5;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.lowerDepthSplitCostTh   = 100;
+        ctrls.splitRateTh             = 5;
+        ctrls.limitMaxMinToPd0        = 1;
+        ctrls.useRefInfo              = 1;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 0;
+        break;
+    case 10:
+        ctrls.mode = kPd0DepthPredPartOnly;
+        break;
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo
