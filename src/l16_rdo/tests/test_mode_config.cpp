@@ -8655,3 +8655,391 @@ TEST_CASE("sig_deriv_enc_dec_{default,rtc,allintra} - the composition grid, vs t
                             CHECK(c.tuneSsimLevel == e.tuneSsimLevel);
                         }
 }
+
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 12: the getters + pic-level setters.
+// ---------------------------------------------------------------------------
+
+// get_nsq_search_level_default/rtc/allintra, independent transcription
+// (:8330-8492). r0_tab = {0.10, 0.15, 0.20, 0.25, 0.25, 0.25}.
+static uint8_t oracleNsqSearchLvl(int em, bool isBase, bool r0Gen, bool isISlice, double r0,
+                                  uint8_t layer, uint8_t coeff, uint8_t seqQpMod, uint32_t qp,
+                                  int variant) {
+    int lvl;
+    if (variant == 0) {  // default
+        if (em <= (int)ENC_M0) lvl = isBase ? 2 : 3;
+        else if (em <= (int)ENC_M2) lvl = 7;
+        else if (em <= (int)ENC_M3) lvl = 9;
+        else if (em <= (int)ENC_M4) lvl = 12;
+        else if (em <= (int)ENC_M6) lvl = 15;
+        else if (em <= (int)ENC_M7) lvl = 18;
+        else lvl = 19;
+    } else if (variant == 1) {  // rtc
+        lvl = 19;
+    } else {  // allintra
+        if (em <= (int)ENC_M0) lvl = 3;
+        else if (em <= (int)ENC_M1) lvl = 10;
+        else if (em <= (int)ENC_M2) lvl = 14;
+        else if (em <= (int)ENC_M3) lvl = 16;
+        else lvl = 0;
+        // the allintra coeff arm is gated on em <= MR
+        if ((coeff == 0 || coeff == 1) && em <= (int)ENC_MR) lvl = std::max(lvl - 3, 1);
+    }
+    if (variant == 0) {
+        // the r0 modulation (default ONLY - rtc starts at 19 with no r0
+        // arm, :8407-8437)
+        if (lvl > 8 && r0Gen) {
+            static const double r0Tab[6] = {0.10, 0.15, 0.20, 0.25, 0.25, 0.25};
+            const double r0Th = isISlice ? 0.05 : r0Tab[layer];
+            if (r0 < r0Th) {
+                lvl = std::min(lvl, std::max(8, std::max(lvl - 4, 1)));
+            }
+        }
+        // the coeff arm (default + rtc)
+        if (lvl != 0) {
+            if (coeff == 3) lvl = lvl + 2 > 19 ? 0 : lvl + 2;
+            else if (coeff == 0 || coeff == 1) lvl = std::max(lvl - 3, 1);
+        }
+        if (lvl == 0) return (uint8_t)lvl;
+    } else {
+        // rtc / allintra: the coeff arm only
+        if (lvl != 0) {
+            if (variant == 1) {
+                if (coeff == 3) lvl = lvl + 2 > 19 ? 0 : lvl + 2;
+                else if (coeff == 0 || coeff == 1) lvl = std::max(lvl - 3, 1);
+            }
+        }
+        if (lvl == 0) return (uint8_t)lvl;
+    }
+    // the seq-qp arm
+    if (seqQpMod) {
+        if (variant == 0) {
+            if (em <= (int)ENC_M6) {
+                if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) lvl = lvl + 3 > 19 ? 0 : lvl + 3;
+                else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 45) lvl = lvl + 2 > 19 ? 0 : lvl + 2;
+                else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) lvl = lvl + 1 > 19 ? 0 : lvl + 1;
+                else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 59) lvl = std::max(lvl - 1, 1);
+            } else {
+                if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) lvl = lvl + 3 > 19 ? 0 : lvl + 3;
+                else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) lvl = lvl + 2 > 19 ? 0 : lvl + 2;
+                else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) lvl = lvl + 1 > 19 ? 0 : lvl + 1;
+                else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 56) lvl = std::max(lvl - 1, 1);
+            }
+        } else if (variant == 1) {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) lvl = lvl + 3 > 19 ? 0 : lvl + 3;
+            else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) lvl = lvl + 2 > 19 ? 0 : lvl + 2;
+            else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) lvl = lvl + 1 > 19 ? 0 : lvl + 1;
+            else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 56) lvl = std::max(lvl - 1, 1);
+        } else {
+            if (em <= (int)ENC_M5) {
+                if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) lvl = lvl + 3 > 19 ? 0 : lvl + 3;
+                else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 45) lvl = lvl + 2 > 19 ? 0 : lvl + 2;
+                else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) lvl = lvl + 1 > 19 ? 0 : lvl + 1;
+                else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 59) lvl = std::max(lvl - 1, 1);
+            } else {
+                if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) lvl = lvl + 3 > 19 ? 0 : lvl + 3;
+                else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) lvl = lvl + 2 > 19 ? 0 : lvl + 2;
+                else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) lvl = lvl + 1 > 19 ? 0 : lvl + 1;
+                else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 56) lvl = std::max(lvl - 1, 1);
+            }
+        }
+    }
+    return (uint8_t)lvl;
+}
+
+TEST_CASE("the nsq_search_level getters - the full wall grid, vs the oracle") {
+    // :8330-8492.
+    NsqSearchLvlPcs pcs;
+    std::memset(&pcs, 0, sizeof(pcs));
+    for (int em = (int)ENC_MR; em <= (int)ENC_M13; ++em)
+        for (int coeff = 0; coeff <= 3; ++coeff)
+            for (uint32_t qp : {0u, 30u, 50u})
+                for (int mod = 0; mod <= 3; ++mod)
+                    for (int r0Gen = 0; r0Gen <= 1; ++r0Gen)
+                        for (int islice = 0; islice <= 1; ++islice)
+                            for (int layer = 0; layer < 6; ++layer)
+                                for (double r0 : {0.0, 0.12, 0.3}) {
+                                    pcs.isBase = false;
+                                    pcs.r0Gen = r0Gen == 1;
+                                    pcs.isISlice = islice == 1;
+                                    pcs.r0 = r0;
+                                    pcs.temporalLayerIndex = (uint8_t)layer;
+                                    pcs.seqQpMod = (uint8_t)mod;
+                                    const uint8_t d = getNsqSearchLevelDefault(
+                                        (EncMode)em, pcs, (uint8_t)coeff, qp);
+                                    const uint8_t r = getNsqSearchLevelRtc(pcs, (uint8_t)coeff, qp);
+                                    const uint8_t a = getNsqSearchLevelAllIntra(
+                                        pcs, (EncMode)em, (uint8_t)coeff, qp);
+                                    CHECK(d == oracleNsqSearchLvl(em, false, r0Gen == 1,
+                                                                  islice == 1, r0, (uint8_t)layer,
+                                                                  (uint8_t)coeff, (uint8_t)mod, qp,
+                                                                  0));
+                                    CHECK(r == oracleNsqSearchLvl(em, false, r0Gen == 1,
+                                                                  islice == 1, r0, (uint8_t)layer,
+                                                                  (uint8_t)coeff, (uint8_t)mod, qp,
+                                                                  1));
+                                    CHECK(a == oracleNsqSearchLvl(em, false, r0Gen == 1,
+                                                                  islice == 1, r0, (uint8_t)layer,
+                                                                  (uint8_t)coeff, (uint8_t)mod, qp,
+                                                                  2));
+                                }
+    // The default's isBase split (M0 only) - separate pin.
+    pcs.r0Gen = false;
+    pcs.seqQpMod = 0;
+    pcs.isISlice = true;
+    pcs.temporalLayerIndex = 0;
+    pcs.r0 = 1.0;
+    pcs.isBase = true;
+    CHECK(getNsqSearchLevelDefault(ENC_M0, pcs, 2, 30) == 2);   // base
+    CHECK(getNsqSearchLevelDefault(ENC_M0, pcs, 2, 30) ==
+          oracleNsqSearchLvl((int)ENC_M0, true, false, true, 1.0, 0, 2, 0, 30, 0));
+    pcs.isBase = false;
+    CHECK(getNsqSearchLevelDefault(ENC_M0, pcs, 2, 30) == 3);   // non-base
+    pcs.isBase = true;
+}
+
+TEST_CASE("the bypass_encdec + update_cdf + chroma_level getters - the full domain") {
+    // :8494-8672.
+    for (int em = (int)ENC_MR; em <= (int)ENC_M13; ++em) {
+        for (int bd : {8, 10}) {
+            const uint8_t wantD = (em <= (int)(bd == 8 ? ENC_M2 : ENC_M7)) ? 0 : 1;
+            CHECK(getBypassEncdecDefault((EncMode)em, (uint8_t)bd) == wantD);
+            CHECK(getBypassEncdecRtc((EncMode)em, (uint8_t)bd) == wantD);
+        }
+        CHECK(getBypassEncdecAllIntra((EncMode)em) == (em <= (int)ENC_M3 ? 0 : 1));
+        for (int slice = 0; slice <= 1; ++slice)
+            for (int base = 0; base <= 1; ++base) {
+                uint8_t want;
+                if (em <= (int)ENC_M0) want = 1;
+                else if (em <= (int)ENC_M3) want = base ? 1 : 2;
+                else if (em <= (int)ENC_M8) want = slice ? 1 : 0;
+                else want = 0;
+                CHECK(getUpdateCdfLevelDefault((EncMode)em, slice == 1, (uint8_t)base) == want);
+                const uint8_t wantR = em <= (int)ENC_M8 ? (slice ? 1 : 0) : 0;
+                CHECK(getUpdateCdfLevelRtc((EncMode)em, slice == 1) == wantR);
+                CHECK(getChromaLevelDefault((EncMode)em, slice == 1) ==
+                      (em <= (int)ENC_MR ? 1
+                       : em <= (int)ENC_M0 ? (slice ? 1 : 4)
+                       : em <= (int)ENC_M5 ? 4 : 5));
+                CHECK(getChromaLevelRtc((EncMode)em) == (em <= (int)ENC_M10 ? 4 : 5));
+                CHECK(getChromaLevelAllIntra((EncMode)em) ==
+                      (em <= (int)ENC_M0 ? 1 : em <= (int)ENC_M1 ? 2
+                       : em <= (int)ENC_M5 ? 4 : 5));
+            }
+        const uint8_t wantAiCdf = em <= (int)ENC_M3 ? 1 : em <= (int)ENC_M6 ? 2 : 0;
+        CHECK(getUpdateCdfLevelAllIntra((EncMode)em) == wantAiCdf);
+    }
+}
+
+TEST_CASE("set_cdf_controls - the four levels x the walls, whole-struct") {
+    // :8544-8585.
+    for (int level = 0; level <= 4; ++level)
+        for (int slice = 0; slice <= 1; ++slice)
+            for (int rl = 0; rl <= 1; ++rl)
+                for (int rq = 0; rq <= 1; ++rq) {
+                    CdfCtrls c;
+                    std::memset(&c, kPoison, sizeof(c));
+                    CdfSetPcs p;
+                    p.isISlice = slice == 1;
+                    p.rateEstLevel = rl;
+                    p.rdoqLevel = (uint8_t)rq;
+                    setCdfCtrls(c, p, (uint8_t)level);
+                    if (level <= 3) {
+                        uint8_t mv, se, coef;
+                        if (level == 0) { mv = 0; se = 0; coef = 0; }
+                        else if (level == 1) { mv = 1; se = 1; coef = (rl || rq) ? 1 : 0; }
+                        else if (level == 2) { mv = 0; se = 1; coef = (rl || rq) ? 1 : 0; }
+                        else { mv = 0; se = 1; coef = 0; }
+                        if (slice) mv = 0;
+                        c.updateMv = mv;
+                        c.updateSe = se;
+                        c.updateCoef = coef;
+                        CHECK(c.updateMv == mv);
+                        CHECK(c.updateSe == se);
+                        CHECK(c.updateCoef == coef);
+                        CHECK(c.enabled == (mv | se | coef));
+                    } else {
+                        // :8582-8584 - the trailing I-slice fold + enabled
+                        // write run OUTSIDE the switch: on the default arm
+                        // update_mv keeps its poison (non-I-slice) or
+                        // becomes 0 (I-slice).
+                        CHECK(c.updateMv == (slice ? 0 : kPoison));
+                    }
+                }
+}
+
+// set_pic_pd0_lvl_{default,rtc,allintra}, independent transcription
+// (:8673-8838).
+static uint8_t oraclePicPd0(int em, bool base, bool trans, uint8_t coeff, int res, uint8_t mod,
+                            uint32_t qp, uint32_t sbSize, bool isISlice, int variant) {
+    const uint8_t ldp0Offset[4] = {2, 2, 1, 0};
+    int qpBand = 0;
+    if (qp <= 27) qpBand = 0;
+    else if (qp <= 39) qpBand = 1;
+    else if (qp <= 43) qpBand = 2;
+    else qpBand = 3;
+    int lvl = 0;
+    if (variant == 0) {  // default
+        if (em <= (int)ENC_M2) lvl = 0;
+        else if (em <= (int)ENC_M3) lvl = 1;
+        else if (em <= (int)ENC_M7) {
+            if (res <= (int)INPUT_SIZE_360p_RANGE) lvl = 3;
+            else if (res <= (int)INPUT_SIZE_480p_RANGE)
+                lvl = (base || trans) ? 3 : 5;
+            else {
+                if (coeff == 3) lvl = (base || trans) ? 7 : 8;
+                else if (coeff == 2) lvl = (base || trans) ? 4 : 6;
+                else lvl = (base || trans) ? 3 : 5;
+            }
+        } else if (em <= (int)ENC_M8) {
+            const int off = mod <= 1 ? 0 : std::max((int)ldp0Offset[qpBand] - 1, 0);
+            if (res <= (int)INPUT_SIZE_360p_RANGE) {
+                const int offA = mod <= 1 ? 0 : (int)ldp0Offset[qpBand];
+                lvl = std::min(8, 3 + offA);
+            } else if (res <= (int)INPUT_SIZE_480p_RANGE) {
+                lvl = (base || trans) ? std::min(8, 3 + off) : std::min(8, 5 + off);
+            } else {
+                if (coeff == 3) lvl = (base || trans) ? std::min(8, 7 + off) : std::min(8, 8 + off);
+                else if (coeff == 2) lvl = (base || trans) ? std::min(8, 5 + off) : std::min(8, 7 + off);
+                else lvl = (base || trans) ? std::min(8, 3 + off) : std::min(8, 5 + off);
+            }
+        } else if (em <= (int)ENC_M10) {
+            const int off = mod <= 1 ? 0 : (int)ldp0Offset[qpBand];
+            if (res <= (int)INPUT_SIZE_360p_RANGE) {
+                if (coeff == 0 || coeff == 1) lvl = (base || trans) ? std::min(8, 3 + off) : std::min(8, 5 + off);
+                else if (coeff == 2) lvl = (base || trans) ? std::min(8, 4 + off) : std::min(8, 6 + off);
+                else lvl = (base || trans) ? std::min(8, 5 + off) : std::min(8, 7 + off);
+            } else {
+                if (coeff == 3) lvl = (base || trans) ? std::min(8, 7 + off) : std::min(8, 8 + off);
+                else if (coeff == 2) lvl = (base || trans) ? std::min(8, 5 + off) : std::min(8, 7 + off);
+                else lvl = (base || trans) ? std::min(8, 3 + off) : std::min(8, 5 + off);
+            }
+        } else {
+            const int off = mod <= 1 ? 0 : (int)ldp0Offset[qpBand];
+            if (res <= (int)INPUT_SIZE_360p_RANGE) {
+                if (coeff == 0 || coeff == 1) lvl = (base || trans) ? std::min(8, 3 + off) : std::min(8, 5 + off);
+                else if (coeff == 2) lvl = (base || trans) ? std::min(8, 4 + off) : std::min(8, 6 + off);
+                else lvl = (base || trans) ? std::min(8, 5 + off) : std::min(8, 7 + off);
+            } else {
+                if (coeff == 3) lvl = 7;
+                else lvl = (isISlice || trans) ? 6 : 7;
+            }
+        }
+    } else if (variant == 1) {  // rtc
+        if (em <= (int)ENC_M7) lvl = res <= (int)INPUT_SIZE_360p_RANGE ? 1 : (base ? 3 : 4);
+        else if (em <= (int)ENC_M8) {
+            lvl = res <= (int)INPUT_SIZE_360p_RANGE ? (base ? 1 : 3) : (base ? 3 : 5);
+        } else if (em <= (int)ENC_M9) lvl = base ? 5 : 7;
+        else lvl = (isISlice || trans) ? 6 : 7;
+    } else {  // allintra
+        if (em <= (int)ENC_M1) lvl = 0;
+        else if (em <= (int)ENC_M8) lvl = 1;
+        else lvl = 7;
+    }
+    // the SB128 cap
+    if (sbSize == 128) lvl = 0;
+    return (uint8_t)lvl;
+}
+
+TEST_CASE("set_pic_pd0_lvl_{default,rtc,allintra} - the ladder grid, vs the oracle") {
+    // :8673-8838.
+    for (int em = (int)ENC_MR; em <= (int)ENC_M13; ++em)
+        for (int variant = 0; variant <= 2; ++variant)
+            for (int base = 0; base <= 1; ++base)
+                for (int trans = 0; trans <= 1; ++trans)
+                    for (int coeff = 0; coeff <= 3; ++coeff)
+                        for (int res : {(int)INPUT_SIZE_360p_RANGE, (int)INPUT_SIZE_480p_RANGE,
+                                        (int)INPUT_SIZE_1080p_RANGE})
+                            for (int mod = 0; mod <= 2; ++mod)
+                                for (uint32_t qp : {25u, 35u, 41u, 45u})
+                                    for (uint32_t sb : {64u, 128u})
+                                        for (int islice = 0; islice <= 1; ++islice) {
+                                            PicPd0Pcs p;
+                                            std::memset(&p, 0, sizeof(p));
+                                            p.temporalLayerIndex = (uint8_t)base;
+                                            p.isISlice = islice == 1;
+                                            p.transitionPresent = (uint8_t)trans;
+                                            p.coeffLvl = (uint8_t)coeff;
+                                            p.inputResolution = (ResolutionRange)res;
+                                            p.seqQpMod = (uint8_t)mod;
+                                            p.qp = qp;
+                                            p.superBlockSize = sb;
+                                            p.isBase = base == 1;
+                                            if (variant == 0) setPicPd0LvlDefault(p, (EncMode)em);
+                                            else if (variant == 1) setPicPd0LvlRtc(p, (EncMode)em);
+                                            else setPicPd0LvlAllIntra(p, (EncMode)em);
+                                            // The default variant derives is_base from
+                                            // temporal_layer_index == 0 (:8676); the rtc
+                                            // variant threads frame_is_boosted through
+                                            // p.isBase (:8795).
+                                            const bool eBase =
+                                                variant == 0 ? (base == 0) : (base == 1);
+                                            const uint8_t want = oraclePicPd0(
+                                                em, eBase, trans == 1, (uint8_t)coeff, res,
+                                                (uint8_t)mod, qp, sb, islice == 1, variant);
+                                            CHECK(p.picPd0Lvl == want);
+                                        }
+}
+
+TEST_CASE("get_obmc_level + mfmv_controls - the full domain, vs the oracle") {
+    // :8896-8933 / :8934-8980.
+    for (int em = (int)ENC_MR; em <= (int)ENC_M13; ++em)
+        for (uint32_t qp = 30; qp <= 65; qp += 5)
+            for (int mod = 0; mod <= 3; ++mod) {
+                int lvl;
+                if (em <= (int)ENC_MR) lvl = 1;
+                else if (em <= (int)ENC_M1) lvl = 3;
+                else if (em <= (int)ENC_M5) lvl = 5;
+                else if (em <= (int)ENC_M8) lvl = 6;
+                else lvl = 0;
+                if (!(em <= (int)ENC_M0) && lvl && mod) {
+                    if (em <= (int)ENC_M3) {
+                        if ((mod == 2 || mod == 3) && qp <= 43) lvl += 2;
+                        else if ((mod == 2 || mod == 3) && qp <= 53) lvl += 1;
+                        else if ((mod == 1 || mod == 2) && qp > 60) lvl = lvl == 1 ? 1 : lvl - 1;
+                    } else {
+                        if ((mod == 2 || mod == 3) && qp <= 43) lvl += 2;
+                        else if ((mod == 2 || mod == 3) && qp <= 55) lvl += 1;
+                        else if ((mod == 1 || mod == 2) && qp > 59) lvl = lvl == 1 ? 1 : lvl - 1;
+                    }
+                }
+                CHECK(getObmcLevel((EncMode)em, qp, (uint8_t)mod) == (uint8_t)lvl);
+            }
+    for (int level = 0; level <= 5; ++level)
+        for (int tpl = 0; tpl <= 1; ++tpl)
+            for (int r0Gen = 0; r0Gen <= 1; ++r0Gen)
+                for (int isBase = 0; isBase <= 1; ++isBase)
+                    for (int islice = 0; islice <= 1; ++islice)
+                        for (int bslice = 0; bslice <= 1; ++bslice)
+                            for (int cnt1 = 0; cnt1 <= 1; ++cnt1)
+                                for (int l0m = 0; l0m <= 1; ++l0m)
+                                    for (int l1m = 0; l1m <= 1; ++l1m)
+                                        for (double r0 : {0.05, 0.2}) {
+                                            MfmvPcs p;
+                                            std::memset(&p, 0, sizeof(p));
+                                            p.isBase = isBase == 1;
+                                            p.scsTpl = tpl == 1;
+                                            p.r0Gen = r0Gen == 1;
+                                            p.r0 = r0;
+                                            p.isISlice = islice == 1;
+                                            p.isBSlice = bslice == 1;
+                                            p.refList1CountTry = (uint8_t)cnt1;
+                                            p.refL0MfmvUsed = l0m == 1;
+                                            p.refL1MfmvUsed = l1m == 1;
+                                            mfmvCtrls(p, (uint8_t)level);
+                                            bool want = false;
+                                            if (level == 1) want = true;
+                                            else if (level >= 2 && level <= 4) {
+                                                const double th = tpl == 1 ? (level == 2 ? 0.15
+                                                               : level == 3 ? 0.13 : 0.10) : 0.0;
+                                                if (th) {
+                                                    if (r0Gen && isBase && r0 < th) want = true;
+                                                    if (l0m) want = true;
+                                                    if (bslice && cnt1 && l1m) want = true;
+                                                }
+                                            }
+                                            // the leading write: level 0 leaves false
+                                            CHECK(p.useRefFrameMvs == want);
+                                        }
+}

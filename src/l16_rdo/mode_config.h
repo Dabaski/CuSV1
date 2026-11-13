@@ -2169,5 +2169,122 @@ void sigDerivEncDecRtc(EncDecTunePcs& pcs, EncDecTuneCtx& ctx);
 // svt_aom_sig_deriv_enc_dec_allintra (:8121-8243), 1:1.
 void sigDerivEncDecAllIntra(EncDecTunePcs& pcs, EncDecTuneCtx& ctx);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 12: the nsq_search-level getters (:8330-:8493), the
+// bypass-encdec getters (:8494-:8543), set_cdf_controls (:8544-:8585),
+// the update_cdf-level getters (:8591-:8627), the chroma-level getters
+// (:8628-:8672), set_pic_pd0_lvl_{default,rtc,allintra}
+// (:8673-:8838), get_obmc_level (:8896-:8933) and mfmv_controls
+// (:8934-:8980).
+// ---------------------------------------------------------------------------
+// MAX_TEMPORAL_LAYERS (definitions.h:2030).
+constexpr int kMaxTemporalLayers = 6;
+
+// The pcs/ppcs wall surface of the three nsq_search-level getters.
+struct NsqSearchLvlPcs {
+    bool isBase;                      // ppcs->temporal_layer_index == 0 (default)
+    bool r0Gen;                       // ppcs->r0_gen
+    bool isISlice;                    // pcs->slice_type == I_SLICE
+    double r0;                        // ppcs->r0
+    std::uint8_t temporalLayerIndex;  // pcs->temporal_layer_index
+    std::uint8_t seqQpMod;            // scs->seq_qp_mod
+};
+
+// svt_aom_get_nsq_search_level_default (:8330-8405).
+std::uint8_t getNsqSearchLevelDefault(EncMode encMode, const NsqSearchLvlPcs& pcs,
+                                      std::uint8_t coeffLvl, std::uint32_t qp);
+// svt_aom_get_nsq_search_level_rtc (:8407-8437).
+std::uint8_t getNsqSearchLevelRtc(const NsqSearchLvlPcs& pcs, std::uint8_t coeffLvl,
+                                  std::uint32_t qp);
+// svt_aom_get_nsq_search_level_allintra (:8439-8492).
+std::uint8_t getNsqSearchLevelAllIntra(const NsqSearchLvlPcs& pcs, EncMode encMode,
+                                       std::uint8_t coeffLvl, std::uint32_t qp);
+
+// NSQ_MODULATION_MIN_LEVEL (enc_mode_config.c:8356).
+constexpr int kNsqModulationMinLevel = 8;
+
+// svt_aom_get_bypass_encdec_{default,rtc,allintra} (:8494-:8543).
+// SVT_EFFECTIVE_BIT_DEPTH is the identity in the pinned build
+// (EbConfigMacros.h:293); EB_EIGHT_BIT = 8.
+std::uint8_t getBypassEncdecDefault(EncMode encMode, std::uint8_t encoderBitDepth);
+std::uint8_t getBypassEncdecRtc(EncMode encMode, std::uint8_t encoderBitDepth);
+std::uint8_t getBypassEncdecAllIntra(EncMode encMode);
+
+// CdfControls (pcs.h:130-135, verbatim).
+struct CdfCtrls {
+    std::uint8_t updateMv;
+    std::uint8_t updateSe;
+    std::uint8_t updateCoef;
+    std::uint8_t enabled;
+};
+
+// The pcs wall surface of set_cdf_controls (:8544-8585).
+struct CdfSetPcs {
+    bool isISlice;           // pcs->slice_type == I_SLICE
+    std::uint32_t rateEstLevel;  // pcs->rate_est_level
+    std::uint8_t rdoqLevel;  // pcs->rdoq_level
+};
+
+// set_cdf_controls (:8544-8585). The CONFIG_ENABLE_MD_CDF_UPDATE
+// trailing assert is a runtime invariant compiled out in the pinned
+// build (named, nothing to thread). The default case assert(0)s and
+// writes nothing (documented UB).
+void setCdfCtrls(CdfCtrls& ctrls, const CdfSetPcs& pcs, std::uint8_t updateCdfLevel);
+
+// svt_aom_get_update_cdf_level_{default,rtc,allintra} (:8591-:8627).
+// isIslice is the SliceType == I_SLICE fold.
+std::uint8_t getUpdateCdfLevelDefault(EncMode encMode, bool isIslice, std::uint8_t isBase);
+std::uint8_t getUpdateCdfLevelRtc(EncMode encMode, bool isIslice);
+std::uint8_t getUpdateCdfLevelAllIntra(EncMode encMode);
+
+// svt_aom_get_chroma_level_{default,rtc,allintra} (:8628-:8672).
+std::uint8_t getChromaLevelDefault(EncMode encMode, bool isIslice);
+std::uint8_t getChromaLevelRtc(EncMode encMode);
+std::uint8_t getChromaLevelAllIntra(EncMode encMode);
+
+// The pcs/ppcs wall surface of the three set_pic_pd0_lvl setters.
+struct PicPd0Pcs {
+    std::uint8_t temporalLayerIndex;  // ppcs->temporal_layer_index (default)
+    bool isISlice;                    // pcs->slice_type == I_SLICE
+    std::uint8_t transitionPresent;   // ppcs->transition_present
+    std::uint8_t coeffLvl;            // pcs->coeff_lvl
+    ResolutionRange inputResolution;  // ppcs->input_resolution
+    std::uint8_t seqQpMod;            // scs->seq_qp_mod
+    std::uint32_t qp;                 // scs->static_config.qp
+    std::uint32_t superBlockSize;     // scs->super_block_size
+    bool isBase;                      // rtc: frame_is_boosted(ppcs)
+    // write:
+    std::uint8_t picPd0Lvl;
+};
+
+// set_pic_pd0_lvl_default (:8673-8791).
+void setPicPd0LvlDefault(PicPd0Pcs& pcs, EncMode encMode);
+// set_pic_pd0_lvl_rtc (:8793-8822).
+void setPicPd0LvlRtc(PicPd0Pcs& pcs, EncMode encMode);
+// set_pic_pd0_lvl_allintra (:8824-8838).
+void setPicPd0LvlAllIntra(PicPd0Pcs& pcs, EncMode encMode);
+
+// svt_aom_get_obmc_level (:8896-8933).
+std::uint8_t getObmcLevel(EncMode encMode, std::uint32_t qp, std::uint8_t seqQpMod);
+
+// The pcs/ppcs/ref-object wall surface of mfmv_controls (:8934-8980).
+struct MfmvPcs {
+    bool isBase;                    // ppcs->temporal_layer_index == 0
+    bool scsTpl;                    // ppcs->scs->tpl
+    bool r0Gen;                     // pcs->ppcs->r0_gen
+    double r0;                      // pcs->ppcs->r0
+    bool isISlice;                  // pcs->slice_type == I_SLICE
+    bool isBSlice;                  // pcs->slice_type == B_SLICE
+    std::uint8_t refList1CountTry;  // ppcs->ref_list1_count_try
+    bool refL0MfmvUsed;             // ref_obj_l0->is_mfmv_used
+    bool refL1MfmvUsed;             // ref_obj_l1->is_mfmv_used
+    // write:
+    bool useRefFrameMvs;            // ppcs->frm_hdr.use_ref_frame_mvs
+};
+
+// mfmv_controls (:8934-8980). The default case assert(0)s and writes
+// nothing but the leading use_ref_frame_mvs = 0 (:8940) (documented).
+void mfmvCtrls(MfmvPcs& pcs, std::uint8_t mfmvLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

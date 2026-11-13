@@ -8175,3 +8175,594 @@ void sigDerivEncDecAllIntra(EncDecTunePcs& pcs, EncDecTuneCtx& ctx) {
 
 }  // namespace mode_config
 }  // namespace l16_rdo
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 12: the getters + pic-level setters
+// (enc_mode_config.c:8330-8980).
+// ---------------------------------------------------------------------------
+namespace l16_rdo {
+namespace mode_config {
+
+// svt_aom_get_nsq_search_level_default (enc_mode_config.c:8330-8405).
+std::uint8_t getNsqSearchLevelDefault(EncMode encMode, const NsqSearchLvlPcs& pcs,
+                                      std::uint8_t coeffLvl, std::uint32_t qp) {
+    int nsqSearchLevel;
+
+    if (encMode <= ENC_M0) {
+        const std::uint8_t isBase = pcs.isBase;
+        nsqSearchLevel            = isBase ? 2 : 3;
+    } else if (encMode <= ENC_M2) {
+        nsqSearchLevel = 7;
+    } else if (encMode <= ENC_M3) {
+        nsqSearchLevel = 9;
+    } else if (encMode <= ENC_M4) {
+        nsqSearchLevel = 12;
+    } else if (encMode <= ENC_M6) {
+        nsqSearchLevel = 15;
+    } else if (encMode <= ENC_M7) {
+        nsqSearchLevel = 18;
+    } else {
+        nsqSearchLevel = 19;
+    }
+
+    // If NSQ search is off, don't apply offsets
+    if (nsqSearchLevel == 0) {
+        return (std::uint8_t)nsqSearchLevel;
+    }
+
+    if (nsqSearchLevel > kNsqModulationMinLevel) {
+        if (pcs.r0Gen) {
+            const double r0Tab[kMaxTemporalLayers] = {0.10, 0.15, 0.20, 0.25, 0.25, 0.25};
+            const double r0Th = pcs.isISlice ? 0.05 : r0Tab[pcs.temporalLayerIndex];
+            if (pcs.r0 < r0Th) {
+                nsqSearchLevel = std::min(nsqSearchLevel,
+                                          std::max(kNsqModulationMinLevel,
+                                                   std::max(nsqSearchLevel - 4, 1)));
+            }
+        }
+    }
+
+    // offset level based on coeff_lvl
+    if (coeffLvl == HIGH_LVL) {
+        nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+    } else if (coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) {
+        nsqSearchLevel = std::max(nsqSearchLevel - 3, 1);
+    }
+
+    // If NSQ search is off, don't apply QP offsets
+    if (nsqSearchLevel == 0) {
+        return (std::uint8_t)nsqSearchLevel;
+    }
+
+    const std::uint8_t seqQpMod = pcs.seqQpMod;
+    // offset level based on sequence QP
+    if (seqQpMod) {
+        if (encMode <= ENC_M6) {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+                nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 45) {
+                nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+                nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 59) {
+                nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+            }
+        } else {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+                nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+                nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+                nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 56) {
+                nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+            }
+        }
+    }
+    return (std::uint8_t)nsqSearchLevel;
+}
+
+// svt_aom_get_nsq_search_level_rtc (enc_mode_config.c:8407-8437).
+std::uint8_t getNsqSearchLevelRtc(const NsqSearchLvlPcs& pcs, std::uint8_t coeffLvl,
+                                  std::uint32_t qp) {
+    int nsqSearchLevel;
+    nsqSearchLevel = 19;
+
+    // offset level based on coeff_lvl
+    if (coeffLvl == HIGH_LVL) {
+        nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+    } else if (coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) {
+        nsqSearchLevel = std::max(nsqSearchLevel - 3, 1);
+    }
+
+    // If NSQ search is off, don't apply QP offsets
+    if (nsqSearchLevel == 0) {
+        return (std::uint8_t)nsqSearchLevel;
+    }
+
+    const std::uint8_t seqQpMod = pcs.seqQpMod;
+    // offset level based on sequence QP
+    if (seqQpMod) {
+        if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+            nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+        } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+            nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+        } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+            nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+        } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 56) {
+            nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+        }
+    }
+    return (std::uint8_t)nsqSearchLevel;
+}
+
+// svt_aom_get_nsq_search_level_allintra (enc_mode_config.c:8439-8492).
+std::uint8_t getNsqSearchLevelAllIntra(const NsqSearchLvlPcs& pcs, EncMode encMode,
+                                       std::uint8_t coeffLvl, std::uint32_t qp) {
+    int nsqSearchLevel;
+
+    if (encMode <= ENC_M0) {
+        nsqSearchLevel = 3;
+    } else if (encMode <= ENC_M1) {
+        nsqSearchLevel = 10;
+    } else if (encMode <= ENC_M2) {
+        nsqSearchLevel = 14;
+    } else if (encMode <= ENC_M3) {
+        nsqSearchLevel = 16;
+    } else {
+        nsqSearchLevel = 0;
+    }
+
+    if ((coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) && (encMode <= ENC_MR)) {
+        nsqSearchLevel = std::max(nsqSearchLevel - 3, 1);
+    }
+
+    // If NSQ search is off, don't apply offsets
+    if (nsqSearchLevel == 0) {
+        return (std::uint8_t)nsqSearchLevel;
+    }
+
+    const std::uint8_t seqQpMod = pcs.seqQpMod;
+    // offset level based on sequence QP
+    if (seqQpMod) {
+        if (encMode <= ENC_M5) {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+                nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 45) {
+                nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+                nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 59) {
+                nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+            }
+        } else {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+                nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+                nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+                nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 56) {
+                nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+            }
+        }
+    }
+    return (std::uint8_t)nsqSearchLevel;
+}
+
+// svt_aom_get_bypass_encdec_default (enc_mode_config.c:8494-8513).
+std::uint8_t getBypassEncdecDefault(EncMode encMode, std::uint8_t encoderBitDepth) {
+    std::uint8_t bypassEncdec = 1;
+    if (encoderBitDepth == 8) {  // EB_EIGHT_BIT; SVT_EFFECTIVE_BIT_DEPTH is the identity
+        // 8bit settings
+        if (encMode <= ENC_M2) {
+            bypassEncdec = 0;
+        } else {
+            bypassEncdec = 1;
+        }
+    } else {
+        // 10bit settings
+        if (encMode <= ENC_M7) {
+            bypassEncdec = 0;
+        } else {
+            bypassEncdec = 1;
+        }
+    }
+    return bypassEncdec;
+}
+
+// svt_aom_get_bypass_encdec_rtc (enc_mode_config.c:8514-8533).
+std::uint8_t getBypassEncdecRtc(EncMode encMode, std::uint8_t encoderBitDepth) {
+    return getBypassEncdecDefault(encMode, encoderBitDepth);  // the identical body
+}
+
+// svt_aom_get_bypass_encdec_allintra (enc_mode_config.c:8534-8543).
+std::uint8_t getBypassEncdecAllIntra(EncMode encMode) {
+    std::uint8_t bypassEncdec = 1;
+    if (encMode <= ENC_M3) {
+        bypassEncdec = 0;
+    } else {
+        bypassEncdec = 1;
+    }
+    return bypassEncdec;
+}
+
+// set_cdf_controls (enc_mode_config.c:8544-8585).
+void setCdfCtrls(CdfCtrls& ctrls, const CdfSetPcs& pcs, std::uint8_t updateCdfLevel) {
+    switch (updateCdfLevel) {
+    case 0:
+        ctrls.updateMv   = 0;
+        ctrls.updateSe   = 0;
+        ctrls.updateCoef = 0;
+        break;
+    case 1:
+        ctrls.updateMv   = 1;
+        ctrls.updateSe   = 1;
+        ctrls.updateCoef = (pcs.rateEstLevel || pcs.rdoqLevel) ? 1 : 0;
+        break;
+    case 2:
+        ctrls.updateMv   = 0;
+        ctrls.updateSe   = 1;
+        ctrls.updateCoef = (pcs.rateEstLevel || pcs.rdoqLevel) ? 1 : 0;
+        break;
+    case 3:
+        ctrls.updateMv   = 0;
+        ctrls.updateSe   = 1;
+        ctrls.updateCoef = 0;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+
+    ctrls.updateMv = pcs.isISlice ? 0 : ctrls.updateMv;
+    ctrls.enabled  = ctrls.updateCoef | ctrls.updateMv | ctrls.updateSe;
+    // :8579-8583 - the CONFIG_ENABLE_MD_CDF_UPDATE trailing assert is a
+    // runtime invariant compiled out in the pinned build (named).
+}
+
+// svt_aom_get_update_cdf_level_default (enc_mode_config.c:8591-8604).
+std::uint8_t getUpdateCdfLevelDefault(EncMode encMode, bool isIslice, std::uint8_t isBase) {
+    std::uint8_t updateCdfLevel;
+    if (encMode <= ENC_M0) {
+        updateCdfLevel = 1;
+    } else if (encMode <= ENC_M3) {
+        updateCdfLevel = isBase ? 1 : 2;
+    } else if (encMode <= ENC_M8) {
+        updateCdfLevel = isIslice ? 1 : 0;
+    } else {
+        updateCdfLevel = 0;
+    }
+    return updateCdfLevel;
+}
+
+// svt_aom_get_update_cdf_level_rtc (enc_mode_config.c:8605-8614).
+std::uint8_t getUpdateCdfLevelRtc(EncMode encMode, bool isIslice) {
+    std::uint8_t updateCdfLevel;
+    if (encMode <= ENC_M8) {
+        updateCdfLevel = isIslice ? 1 : 0;
+    } else {
+        updateCdfLevel = 0;
+    }
+    return updateCdfLevel;
+}
+
+// svt_aom_get_update_cdf_level_allintra (enc_mode_config.c:8615-8627).
+std::uint8_t getUpdateCdfLevelAllIntra(EncMode encMode) {
+    std::uint8_t updateCdfLevel;
+    if (encMode <= ENC_M3) {
+        updateCdfLevel = 1;
+    } else if (encMode <= ENC_M6) {
+        updateCdfLevel = 2;
+    } else {
+        updateCdfLevel = 0;
+    }
+
+    return updateCdfLevel;
+}
+
+// svt_aom_get_chroma_level_default (enc_mode_config.c:8628-8643).
+std::uint8_t getChromaLevelDefault(EncMode encMode, bool isIslice) {
+    std::uint8_t chromaLevel;
+
+    if (encMode <= ENC_MR) {
+        chromaLevel = 1;
+    } else if (encMode <= ENC_M0) {
+        chromaLevel = isIslice ? 1 : 4;
+    } else if (encMode <= ENC_M5) {
+        chromaLevel = 4;
+    } else {
+        chromaLevel = 5;
+    }
+
+    return chromaLevel;
+}
+
+// svt_aom_get_chroma_level_rtc (enc_mode_config.c:8644-8653).
+std::uint8_t getChromaLevelRtc(EncMode encMode) {
+    std::uint8_t chromaLevel;
+    if (encMode <= ENC_M10) {
+        chromaLevel = 4;
+    } else {
+        chromaLevel = 5;
+    }
+    return chromaLevel;
+}
+
+// svt_aom_get_chroma_level_allintra (enc_mode_config.c:8654-8672).
+std::uint8_t getChromaLevelAllIntra(EncMode encMode) {
+    std::uint8_t chromaLevel;
+
+    if (encMode <= ENC_M0) {
+        chromaLevel = 1;
+    } else if (encMode <= ENC_M1) {
+        chromaLevel = 2;
+    } else if (encMode <= ENC_M5) {
+        chromaLevel = 4;
+    } else {
+        chromaLevel = 5;
+    }
+
+    return chromaLevel;
+}
+
+// set_pic_pd0_lvl_default (enc_mode_config.c:8673-8791).
+void setPicPd0LvlDefault(PicPd0Pcs& pcs, EncMode encMode) {
+    const std::uint8_t isBase            = pcs.temporalLayerIndex == 0;
+    const std::uint8_t isIslice          = pcs.isISlice;
+    const bool transitionPresent         = (pcs.transitionPresent == 1);
+    const InputCoeffLvl coeffLvl         = (InputCoeffLvl)pcs.coeffLvl;
+    const ResolutionRange inputResolution = pcs.inputResolution;
+    const std::uint8_t ldp0LvlOffset[4]  = {2, 2, 1, 0};
+    std::uint8_t qpBandIdx               = 0;
+    const std::uint8_t seqQpMod          = pcs.seqQpMod;
+
+    if (pcs.qp <= 27) {
+        qpBandIdx = 0;
+    } else if (pcs.qp <= 39) {
+        qpBandIdx = 1;
+    } else if (pcs.qp <= 43) {
+        qpBandIdx = 2;
+    } else {
+        qpBandIdx = 3;
+    }
+
+    if (encMode <= ENC_M2) {
+        pcs.picPd0Lvl = 0;
+    } else if (encMode <= ENC_M3) {
+        pcs.picPd0Lvl = 1;
+    } else if (encMode <= ENC_M7) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            pcs.picPd0Lvl = 3;
+        } else if (inputResolution <= INPUT_SIZE_480p_RANGE) {
+            pcs.picPd0Lvl = (isBase || transitionPresent) ? 3 : 5;
+        } else {
+            if (coeffLvl == HIGH_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent) ? 7 : 8;
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent) ? 4 : 6;
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent) ? 3 : 5;
+            }
+        }
+    } else if (encMode <= ENC_M8) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : (int)ldp0LvlOffset[qpBandIdx];
+            pcs.picPd0Lvl      = (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset);
+        } else if (inputResolution <= INPUT_SIZE_480p_RANGE) {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : std::max((int)((int)ldp0LvlOffset[qpBandIdx] - 1), 0);
+            pcs.picPd0Lvl      = (isBase || transitionPresent)
+                ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+        } else {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : std::max((int)((int)ldp0LvlOffset[qpBandIdx] - 1), 0);
+            if (coeffLvl == HIGH_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 8 + qpOffset);
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset);
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+            }
+        }
+    } else if (encMode <= ENC_M10) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : (int)ldp0LvlOffset[qpBandIdx];
+            if (coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 4 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 6 + qpOffset);
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset);
+            }
+        } else {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : (int)ldp0LvlOffset[qpBandIdx];
+            if (coeffLvl == HIGH_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 8 + qpOffset);
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset);
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+            }
+        }
+    } else {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : (int)ldp0LvlOffset[qpBandIdx];
+            if (coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 4 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 6 + qpOffset);
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset);
+            }
+        } else {
+            if (coeffLvl == HIGH_LVL) {
+                pcs.picPd0Lvl = 7;
+            } else {
+                pcs.picPd0Lvl = (isIslice || transitionPresent) ? 6 : 7;
+            }
+        }
+    }
+
+    // SB128 is conservatively capped to PD0_LVL_0
+    if (pcs.superBlockSize == 128) {
+        pcs.picPd0Lvl = 0;
+    }
+}
+
+// set_pic_pd0_lvl_rtc (enc_mode_config.c:8793-8822).
+void setPicPd0LvlRtc(PicPd0Pcs& pcs, EncMode encMode) {
+    const std::uint8_t isBase            = pcs.isBase;  // frame_is_boosted(ppcs)
+    const std::uint8_t isIslice          = pcs.isISlice;
+    const bool transitionPresent         = (pcs.transitionPresent == 1);
+    const ResolutionRange inputResolution = pcs.inputResolution;
+
+    if (encMode <= ENC_M7) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            pcs.picPd0Lvl = 1;
+        } else {
+            pcs.picPd0Lvl = isBase ? 3 : 4;
+        }
+    } else if (encMode <= ENC_M8) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            pcs.picPd0Lvl = isBase ? 1 : 3;
+        } else {
+            pcs.picPd0Lvl = isBase ? 3 : 5;
+        }
+    } else if (encMode <= ENC_M9) {
+        pcs.picPd0Lvl = isBase ? 5 : 7;
+    } else {
+        pcs.picPd0Lvl = (isIslice || transitionPresent) ? 6 : 7;
+    }
+
+    // SB128 is conservatively capped to PD0_LVL_0
+    if (pcs.superBlockSize == 128) {
+        pcs.picPd0Lvl = 0;
+    }
+}
+
+// set_pic_pd0_lvl_allintra (enc_mode_config.c:8824-8838).
+void setPicPd0LvlAllIntra(PicPd0Pcs& pcs, EncMode encMode) {
+    if (encMode <= ENC_M1) {
+        pcs.picPd0Lvl = 0;
+    } else if (encMode <= ENC_M8) {
+        pcs.picPd0Lvl = 1;
+    } else {
+        pcs.picPd0Lvl = 7;
+    }
+
+    // SB128 is conservatively capped to PD0_LVL_0
+    if (pcs.superBlockSize == 128) {
+        pcs.picPd0Lvl = 0;
+    }
+}
+
+// svt_aom_get_obmc_level (enc_mode_config.c:8896-8933).
+std::uint8_t getObmcLevel(EncMode encMode, std::uint32_t qp, std::uint8_t seqQpMod) {
+    std::uint8_t obmcLevel = 0;
+
+    if (encMode <= ENC_MR) {
+        obmcLevel = 1;
+    } else if (encMode <= ENC_M1) {
+        obmcLevel = 3;
+    } else if (encMode <= ENC_M5) {
+        obmcLevel = 5;
+    } else if (encMode <= ENC_M8) {
+        obmcLevel = 6;
+    } else {
+        obmcLevel = 0;
+    }
+    // QP-banding
+    if (!(encMode <= ENC_M0) && obmcLevel && seqQpMod) {
+        if (encMode <= ENC_M3) {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+                obmcLevel = obmcLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 53) {
+                obmcLevel = obmcLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 60) {
+                obmcLevel = obmcLevel == 1 ? 1 : obmcLevel - 1;
+            }
+        } else {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+                obmcLevel = obmcLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 55) {
+                obmcLevel = obmcLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 59) {
+                obmcLevel = obmcLevel == 1 ? 1 : obmcLevel - 1;
+            }
+        }
+    }
+
+    return obmcLevel;
+}
+
+// mfmv_controls (enc_mode_config.c:8934-8980).
+void mfmvCtrls(MfmvPcs& pcs, std::uint8_t mfmvLevel) {
+    const std::uint8_t isBase = pcs.isBase;
+    double r0Th               = 0;
+    pcs.useRefFrameMvs        = false;
+    switch (mfmvLevel) {
+    case 0:
+        pcs.useRefFrameMvs = false;
+        break;
+    case 1:
+        pcs.useRefFrameMvs = true;
+        break;
+    case 2:
+        r0Th = pcs.scsTpl ? 0.15 : 0;
+        break;
+    case 3:
+        r0Th = pcs.scsTpl ? 0.13 : 0;
+        break;
+    case 4:
+        r0Th = pcs.scsTpl ? 0.10 : 0;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing but the
+        // leading use_ref_frame_mvs = 0 (documented).
+        break;
+    }
+
+    if (r0Th) {
+        if (pcs.r0Gen && isBase) {
+            if (pcs.r0 < r0Th) {
+                pcs.useRefFrameMvs = true;
+            }
+        }
+        // Maintain using mfmv if at least 1 of the closest refefrace frame(s) has mfmv enabled
+        if (pcs.refL0MfmvUsed) {
+            pcs.useRefFrameMvs = true;
+        }
+        if (pcs.isBSlice && pcs.refList1CountTry) {
+            if (pcs.refL1MfmvUsed) {
+                pcs.useRefFrameMvs = true;
+            }
+        }
+    }
+}
+
+}  // namespace mode_config
+}  // namespace l16_rdo
