@@ -5720,11 +5720,19 @@ TEST_CASE("CS4: the chroma-emitting Q walk matches the ecs4 gate lines") {
                     break;
                 }
             }
-            if (S == 16 || S == 32) {
-                // the controls: grid <= 2 admits no above-right violation at
-                // all (the owner leaf always precedes its depender in
-                // Z-order there), so a bare zero cannot be read as a
-                // content-dependent zero.
+            if (S == 4) {
+                // The c4 fixture's ONE qualifying leaf: 14 structural
+                // violations, 13 of which decide modes that never read the
+                // above-right stretch. Pinning the leaf EXACTLY means the
+                // prefix/diff evidence below cannot silently vanish if the
+                // mode decisions drift (the CS7 twin's REQUIRE at :5607 is
+                // the same guard, looser).
+                REQUIRE(boundary == 41);
+            } else {
+                // S = 8: the two structural-violation leaves decide
+                // SMOOTH_H and DC, neither reads above-right. S = 16/32:
+                // grid <= 2 admits no above-right violation at all. These
+                // zeros are content-pinned, not vacuous.
                 REQUIRE(boundary < 0);
             }
             if (boundary >= 0) {

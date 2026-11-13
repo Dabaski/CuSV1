@@ -264,8 +264,11 @@ TEST_CASE("calcQindexRtcCbr full_update: inverse bucket and the flat init") {
     // CBR mode: target_size_factors[0] = starting_buffer_level / (2.0 *
     // avg_frame_bandwidth) = 3000000 / (2.0 * 33333) = 45.00045000450005.
     CHECK(std::fabs(rc.targetSizeFactors[0] - 3000000.0 / (2.0 * 33333.0)) <= 1e-9);
-    // base_q_idx is written.
-    CHECK(pcs.baseQIdx >= 0);
+    // base_q_idx is the RTC search's terminal write: qindex 104 for this
+    // fixture (measured from the green C2 implementation, whose
+    // calculateQindexRtc is covered pointwise by the C2 oracles). Pinned
+    // exactly - the old >= 0 proved only that SOME write happened.
+    CHECK(pcs.baseQIdx == 104);
 }
 
 TEST_CASE("calcQindexRtcCbr soft_update: bandwidth recompute only") {

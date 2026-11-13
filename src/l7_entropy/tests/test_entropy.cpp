@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <pixels.h>
@@ -1733,15 +1734,62 @@ TEST_CASE("seg feature write/read grid roundtrip") {
 // av1_neg_deinterleave twin (decodemv.c:261-277),
 // svt_av1_update_segmentation_map (:4843-4861), write_segment_id
 // (:4863-4883) + the aom read_segment_id reader twin (decodemv.c:280-303).
-TEST_CASE("negInterleave/negDeinterleave inverse over the full grid") {
+//
+// The pair is anchored on the REFERENCE formula, not on each other: the
+// inverse-only roundtrip admits a matching identity pair on both sides
+// (interleave returns x, deinterleave returns diff). oracleNegInterleave /
+// oracleNegDeinterleave are this file's independent transcription of
+// entropy_coding.c:4802-4818 and decodemv.c:261-277.
+static int oracleNegInterleave(int x, int ref, int max) {
+    const int diff = x - ref;
+    if (!ref) return x;
+    if (ref >= (max - 1)) return -x + max - 1;
+    if (2 * ref < max) {
+        if (std::abs(diff) <= ref) return diff > 0 ? (diff << 1) - 1 : ((-diff) << 1);
+        return x;
+    }
+    if (std::abs(diff) < (max - ref)) return diff > 0 ? (diff << 1) - 1 : ((-diff) << 1);
+    return (max - x) - 1;
+}
+static int oracleNegDeinterleave(int diff, int ref, int max) {
+    if (!ref) return diff;
+    if (ref >= (max - 1)) return max - diff - 1;
+    if (2 * ref < max) {
+        if (diff <= 2 * ref) {
+            if (diff & 1) return ref + ((diff + 1) >> 1);
+            return ref - (diff >> 1);
+        }
+        return diff;
+    }
+    if (diff <= 2 * (max - ref - 1)) {
+        if (diff & 1) return ref + ((diff + 1) >> 1);
+        return ref - (diff >> 1);
+    }
+    return max - (diff + 1);
+}
+TEST_CASE("negInterleave/negDeinterleave match the reference formula over the full grid") {
     for (int max = 1; max <= MAX_SEGMENTS; ++max) {
         for (int ref = 0; ref < max; ++ref) {
             for (int x = 0; x < max; ++x) {
                 const int coded = entropy::negInterleave(x, ref, max);
+                CHECK(coded == oracleNegInterleave(x, ref, max));
                 CHECK(entropy::negDeinterleave(coded, ref, max) == x);
+                CHECK(entropy::negDeinterleave(coded, ref, max) ==
+                      oracleNegDeinterleave(coded, ref, max));
             }
         }
     }
+    // Literal anchors spanning the three branches, worked by hand from the
+    // reference: !ref shortcut; the 2*ref < max fallthrough (return x);
+    // the 2*ref >= max map; and the ref >= max-1 mirror.
+    CHECK(entropy::negInterleave(3, 0, 8) == 3);
+    CHECK(entropy::negInterleave(2, 5, 8) == 5);
+    CHECK(entropy::negInterleave(7, 5, 8) == 3);
+    CHECK(entropy::negInterleave(6, 7, 8) == 1);
+    CHECK(entropy::negDeinterleave(3, 0, 8) == 3);
+    CHECK(entropy::negDeinterleave(5, 5, 8) == 2);
+    CHECK(entropy::negDeinterleave(3, 5, 8) == 7);
+    CHECK(entropy::negDeinterleave(1, 7, 8) == 6);
 }
 
 TEST_CASE("getSegmentId min-walk + updateSegmentationMap roundtrip") {
@@ -1790,6 +1838,35 @@ TEST_CASE("writeSegmentId/readSegmentId block-walk roundtrip") {
                                 blocks[b].skip);
     }
     entropy::odEcStopEncode(&w);
+    // THE INDEPENDENT ANCHOR: the symbol stream is not empty and it
+    // DEPENDS on the segment ids. A matched identity pair (the writer emits
+    // nothing, the reader returns the prediction) passes the roundtrip
+    // below but leaves w.pos == 0 and makes the two streams below equal.
+    REQUIRE(w.pos > 0);
+    {
+        // The same walk with every non-skip id changed (same predictions),
+        // in a second context. Identical ids -> identical stream; changed
+        // ids -> a different stream. Identity does not distinguish them.
+        entropy::EcFrameContext fc2;
+        entropy::initDefaultEcFrameContext(&fc2, 0);
+        entropy::AomWriter w2{};
+        unsigned char buf2[64] = {0};
+        w2.ec.buf = buf2;
+        entropy::odEcEncReset(&w2.ec);
+        w2.allow_update_cdf = 1;
+        w2.pos = 0;
+        std::uint8_t map2[6 * 5] = {0};
+        for (int b = 0; b < 6; ++b) {
+            entropy::writeSegmentId(&w2, &fc2, entropy::BLOCK_8X8, map2, miCols, miRows, blocks[b].r,
+                                    blocks[b].c, blocks[b].up, blocks[b].left,
+                                    blocks[b].id ^ 1, 7, blocks[b].skip);
+        }
+        entropy::odEcStopEncode(&w2);
+        REQUIRE(w2.pos > 0);
+        bool streamDiffers = (w.pos != w2.pos);
+        if (!streamDiffers) streamDiffers = memcmp(buf, buf2, w.pos) != 0;
+        CHECK(streamDiffers);
+    }
     entropy::AomReader r;
     REQUIRE(entropy::odEcReaderInit(&r, buf, w.pos) == 0);
     r.allow_update_cdf = 1;

@@ -1,72 +1,91 @@
 #include <doctest.h>
 #include <transform.h>
 
-TEST_CASE("l3 txshapes scaffold boots") {
-    CHECK(true);
-}
-
-TEST_CASE("fdct32B at cos_bit 12 matches the landed fdct32") {
-    const std::int32_t in[32] = {5, 3, 7, 1, 9, 2, 8, 4, 6, 0, 11, 13, 10, 12, 14, 15,
-                                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+// The six 1D B-form cases are anchored on the GOLDEN GATE, not on the
+// facade: the facade is built FROM the B form, so comparing the two cannot
+// see an interior bug in either. Each fixture below is the generator's own
+// input, and each expected row is the committed gate line
+// (tools/golden_gen/expected_primitives.txt, generator main_primitives.c:
+// fdct4/fadst4 at :46-53, fdct8/fadst8 at :82-89, fdct32/fadst32 at the
+// in32 block). The facade equality is kept alongside (the cos_bit
+// parameterization claim).
+TEST_CASE("fdct32B at cos_bit 12 matches the gate golden and the landed fdct32") {
+    const std::int32_t in[32] = {200, 80, -50, 30, 100, -20, 60, 10, -35, 95, 5, -70, 45, 25, -15, 55,
+                                 65, -85, 15, -5, 75, -60, 40, 90, -25, 35, 50, -45, 20, -10, 70, -30};
+    // expected_primitives.txt:36 (fdct32 @ cos_bit 12)
+    static const std::int32_t want[32] = {
+        506, 277, 261, 268, 104, 214, 115, 26, 291, 218, 103, 114, 222, 443, 171, 203,
+        173, 159, -308, 442, 342, -132, -210, -417, -231, 222, -297, 233, 124, -16, -126, 253};
     std::int32_t got[32] = {0};
     std::int32_t ref[32] = {0};
     transforms::fdct32B(in, got, 12);
     transforms::fdct32(in, ref);
-    CHECK(got[0] == ref[0]);
-    CHECK(got[31] == ref[31]);
+    for (int i = 0; i < 32; ++i) CHECK(got[i] == want[i]);
+    for (int i = 0; i < 32; ++i) CHECK(got[i] == ref[i]);
 }
 
-TEST_CASE("fdct8B at cos_bit 13 matches the landed fdct8") {
-    const std::int32_t in[8] = {5, 3, 7, 1, 9, 2, 8, 4};
+TEST_CASE("fdct8B at cos_bit 13 matches the gate golden and the landed fdct8") {
+    const std::int32_t in[8] = {200, 80, -50, 30, 100, -20, 60, 10};
+    // expected_primitives.txt:14 (fdct8 @ cos_bit 13)
+    static const std::int32_t want[8] = {290, 173, 154, 222, 191, 22, -163, 70};
     std::int32_t got[8] = {0};
     std::int32_t ref[8] = {0};
     transforms::fdct8B(in, got, 13);
     transforms::fdct8(in, ref);
-    CHECK(got[0] == ref[0]);
-    CHECK(got[7] == ref[7]);
+    for (int i = 0; i < 8; ++i) CHECK(got[i] == want[i]);
+    for (int i = 0; i < 8; ++i) CHECK(got[i] == ref[i]);
 }
 
-TEST_CASE("fdct4B at cos_bit 13 matches the landed fdct4") {
+TEST_CASE("fdct4B at cos_bit 13 matches the gate golden and the landed fdct4") {
     const std::int32_t in[4] = {5, 3, 7, 1};
+    // expected_primitives.txt:7 (fdct4 @ cos_bit 13)
+    static const std::int32_t want[4] = {11, 2, -3, 5};
     std::int32_t got[4] = {0};
     std::int32_t ref[4] = {0};
     transforms::fdct4B(in, got, 13);
     transforms::fdct4(in, ref);
-    CHECK(got[0] == ref[0]);
-    CHECK(got[3] == ref[3]);
+    for (int i = 0; i < 4; ++i) CHECK(got[i] == want[i]);
+    for (int i = 0; i < 4; ++i) CHECK(got[i] == ref[i]);
 }
 
-TEST_CASE("fadst4B at cos_bit 13 matches the landed fadst4") {
+TEST_CASE("fadst4B at cos_bit 13 matches the gate golden and the landed fadst4") {
     const std::int32_t in[4] = {5, 3, 7, 1};
+    // expected_primitives.txt:8 (fadst4 @ cos_bit 13)
+    static const std::int32_t want[4] = {10, 6, -1, 6};
     std::int32_t got[4] = {0};
     std::int32_t ref[4] = {0};
     transforms::fadst4B(in, got, 13);
     transforms::fadst4(in, ref);
-    CHECK(got[0] == ref[0]);
-    CHECK(got[3] == ref[3]);
+    for (int i = 0; i < 4; ++i) CHECK(got[i] == want[i]);
+    for (int i = 0; i < 4; ++i) CHECK(got[i] == ref[i]);
 }
 
-TEST_CASE("fadst8B at cos_bit 13 matches the landed fadst8") {
-    const std::int32_t in[8] = {5, 3, 7, 1, 9, 2, 8, 4};
+TEST_CASE("fadst8B at cos_bit 13 matches the gate golden and the landed fadst8") {
+    const std::int32_t in[8] = {200, 80, -50, 30, 100, -20, 60, 10};
+    // expected_primitives.txt:15 (fadst8 @ cos_bit 13)
+    static const std::int32_t want[8] = {165, 97, 67, 173, 296, 275, -2, 146};
     std::int32_t got[8] = {0};
     std::int32_t ref[8] = {0};
     transforms::fadst8B(in, got, 13);
     transforms::fadst8(in, ref);
-    CHECK(got[0] == ref[0]);
-    CHECK(got[7] == ref[7]);
+    for (int i = 0; i < 8; ++i) CHECK(got[i] == want[i]);
+    for (int i = 0; i < 8; ++i) CHECK(got[i] == ref[i]);
 }
 
-TEST_CASE("fadst32B at cos_bit 12 matches the landed fadst32") {
-    const std::int32_t in[32] = {5, 3, 7, 1, 9, 2, 8, 4, 6, 0, 11, 13, 10, 12, 14, 15,
-                                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+TEST_CASE("fadst32B at cos_bit 12 matches the gate golden and the landed fadst32") {
+    const std::int32_t in[32] = {200, 80, -50, 30, 100, -20, 60, 10, -35, 95, 5, -70, 45, 25, -15, 55,
+                                 65, -85, 15, -5, 75, -60, 40, 90, -25, 35, 50, -45, 20, -10, 70, -30};
+    // expected_primitives.txt:37 (fadst32 @ cos_bit 12)
+    static const std::int32_t want[32] = {
+        295, 149, 138, 223, 71, 169, 129, -84, 119, 173, 78, -6, -19, 322, 209, 255,
+        287, 465, -238, 302, 646, 422, 352, -19, -213, 305, -244, 125, 218, 172, -94, 297};
     std::int32_t got[32] = {0};
     std::int32_t ref[32] = {0};
     transforms::fadst32B(in, got, 12);
     transforms::fadst32(in, ref);
-    CHECK(got[0] == ref[0]);
-    CHECK(got[31] == ref[31]);
+    for (int i = 0; i < 32; ++i) CHECK(got[i] == want[i]);
+    for (int i = 0; i < 32; ++i) CHECK(got[i] == ref[i]);
 }
-
 TEST_CASE("rect tx log ratio over every TxSize (common_utils.c:116-132)") {
     const int wide[19] = {4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64};
     const int high[19] = {4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16};

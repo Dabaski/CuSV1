@@ -324,26 +324,31 @@ TEST_CASE("convertToTransPrec matches the reference shifts") {
 // ===========================================================================
 
 TEST_CASE("av1SetRefFrame expands single types and the 21 compound rows") {
-    // inter_prediction.h:487-496 + ref_frame_map :461-485.
+    // inter_prediction.h:487-496 + ref_frame_map :461-485. All SEVEN single
+    // types and all 21 compound rows, transcribed from the reference table
+    // in its own order.
     int rf[2] = {0, 0};
-    av1SetRefFrame(rf, kLastFrame);
-    CHECK(rf[0] == kLastFrame);
-    CHECK(rf[1] == kNoneFrame);
-    av1SetRefFrame(rf, kAltrefFrame);
-    CHECK(rf[0] == kAltrefFrame);
-    CHECK(rf[1] == kNoneFrame);
-    av1SetRefFrame(rf, kTotalRefsPerFrame + 0);  // { LAST, BWDREF }
-    CHECK(rf[0] == kLastFrame);
-    CHECK(rf[1] == kBwdrefFrame);
-    av1SetRefFrame(rf, kTotalRefsPerFrame + 12);  // { LAST, LAST2 }
-    CHECK(rf[0] == kLastFrame);
-    CHECK(rf[1] == kLast2Frame);
-    av1SetRefFrame(rf, kTotalRefsPerFrame + 20);  // { ALTREF2, ALTREF }
-    CHECK(rf[0] == kAltref2Frame);
-    CHECK(rf[1] == kAltrefFrame);
-    av1SetRefFrame(rf, kTotalRefsPerFrame + 15);  // { BWDREF, ALTREF }
-    CHECK(rf[0] == kBwdrefFrame);
-    CHECK(rf[1] == kAltrefFrame);
+    static const int singles[7] = {kLastFrame,    kLast2Frame,  kLast3Frame, kGoldenFrame,
+                                   kBwdrefFrame,  kAltref2Frame, kAltrefFrame};
+    for (int s = 0; s < 7; ++s) {
+        av1SetRefFrame(rf, (std::int8_t)singles[s]);
+        CHECK(rf[0] == singles[s]);
+        CHECK(rf[1] == kNoneFrame);
+    }
+    static const int comp[21][2] = {
+        {kLastFrame, kBwdrefFrame},   {kLast2Frame, kBwdrefFrame},  {kLast3Frame, kBwdrefFrame},
+        {kGoldenFrame, kBwdrefFrame}, {kLastFrame, kAltref2Frame},  {kLast2Frame, kAltref2Frame},
+        {kLast3Frame, kAltref2Frame}, {kGoldenFrame, kAltref2Frame}, {kLastFrame, kAltrefFrame},
+        {kLast2Frame, kAltrefFrame},  {kLast3Frame, kAltrefFrame},  {kGoldenFrame, kAltrefFrame},
+        {kLastFrame, kLast2Frame},    {kLastFrame, kLast3Frame},    {kLastFrame, kGoldenFrame},
+        {kBwdrefFrame, kAltrefFrame}, {kLast2Frame, kLast3Frame},   {kLast2Frame, kGoldenFrame},
+        {kLast3Frame, kGoldenFrame},  {kBwdrefFrame, kAltref2Frame}, {kAltref2Frame, kAltrefFrame},
+    };
+    for (int c = 0; c < 21; ++c) {
+        av1SetRefFrame(rf, (std::int8_t)(kTotalRefsPerFrame + c));
+        CHECK(rf[0] == comp[c][0]);
+        CHECK(rf[1] == comp[c][1]);
+    }
 }
 
 TEST_CASE("getListIdx and getRefFrameIdx match the reference tables") {

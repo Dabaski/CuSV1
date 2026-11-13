@@ -219,8 +219,13 @@ TEST_CASE("cdefComputeDist8bit 4x4 two blocks") {
 }
 
 // joint_strength_search_dual (enc_cdef.c:787): two strengths over a small
-// synthetic mse table, the refine loop for the search. The search returns
-// the best mse.
+// synthetic mse table, the refine loop for the search. Expected values are
+// ORACLE-DERIVED: an independent python mirror of the reference's own
+// greedy+refine loops (enc_cdef.c:714-818) answers lev {3,3}/{0,3} at 35
+// (a first hand-trace was wrong in the refine loop and the port disagreed
+// with the hand-trace, not with the oracle). Pinned exactly, and the
+// strict-< tie-break is load-bearing: the measured <= mutant answers
+// lev1 {3,0} where the reference answers {0,3}.
 TEST_CASE("cdefJointStrengthSearchDual greedy and refine") {
     std::uint64_t luma[2][4] = {{100, 90, 50, 10}, {60, 40, 30, 5}};
     std::uint64_t chroma[2][4] = {{10, 20, 30, 40}, {40, 30, 20, 10}};
@@ -230,9 +235,14 @@ TEST_CASE("cdefJointStrengthSearchDual greedy and refine") {
     std::int32_t lev0[4] = {-1, -1, -1, -1};
     std::int32_t lev1[4] = {-1, -1, -1, -1};
     const std::uint64_t res = l10_filters::cdefJointStrengthSearchDual(lev0, lev1, 2, mse, 2, 0, 4);
-    CHECK(res > 0);
-    CHECK(lev0[0] >= 0);
-    CHECK(lev1[0] >= 0);
+    CHECK(res == 35);
+    CHECK(lev0[0] == 3);
+    CHECK(lev1[0] == 0);
+    CHECK(lev0[1] == 3);
+    CHECK(lev1[1] == 3);
+    // the search writes exactly nbStrengths entries
+    CHECK(lev0[2] == -1);
+    CHECK(lev1[2] == -1);
 }
 
 // fill_rect trivial known answer: 2x3 fill of 0x1234 in a 10-stride dst.

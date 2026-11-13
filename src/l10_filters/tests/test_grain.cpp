@@ -183,10 +183,6 @@ const std::int32_t kGaussB[2048] = {
 } // namespace
 
 
-TEST_CASE("l10 grain scaffold boots") {
-    CHECK(true);
-}
-
 // Hand anchors read directly from grainSynthesis.c:29-:32 and :156 (entry 0,
 // entry 15, entry 16, entry 31, entry 2047).
 TEST_CASE("l10 grain gaussian table: count, hand anchors, range scan") {
@@ -982,13 +978,16 @@ TEST_CASE("l10 grain addFilmGrainRun: 64x64 determinism + first block") {
         CHECK_LE((int)lumaA[i], 255);
     }
     CHECK(changed);
+    // (c2) the chroma planes changed too: compare against the INITIAL
+    // pattern (the run's own inputs), not against the deterministic copy.
     bool chromaChanged = false;
     for (int i = 0; i < (H / 2) * CS; ++i) {
-        if (cbA[i] != cbB[i] + 1 && cbA[i] != (std::uint8_t)(120 + (i * 7) % 40)) {
+        if (cbA[i] != (std::uint8_t)(120 + (i * 7) % 40) ||
+            crA[i] != (std::uint8_t)(100 + (i * 11) % 60)) {
             chromaChanged = true;
         }
     }
-    (void)chromaChanged;
+    CHECK(chromaChanged);
 }
 
 // Driver with clip_to_restricted_range = 1: all outputs in the studio

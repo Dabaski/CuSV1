@@ -4,10 +4,6 @@
 
 #include "palette.h"
 
-TEST_CASE("l13_palette scaffold boots") {
-    CHECK(true);
-}
-
 TEST_CASE("intComparer orders two ints ascending") {
     // 1:1 target: int_comparer (palette.c:62-66): the subtraction itself,
     // qsort's comparer contract (negative / 0 / positive).
@@ -423,8 +419,12 @@ TEST_CASE("kMeansDim1 and kMeansDim2 hold exact-mean inits over k 2..8") {
     // populated, calc_indices keeps the assignment, calc_centroids
     // reproduces the means (DIVIDE_AND_ROUND of the exact sums), and the
     // memcmp break fires at i=0 - for EVERY admitted k (2..8, the
-    // palette.c:518 drive range). Any centroid-update or dist bug moves
-    // at least one centroid.
+    // palette.c:518 drive range). The centroid pins alone are blind to a
+    // no-op (the init IS the answer), so the INDICES are asserted too:
+    // data point 2j sits 7 away from centroid j and >= 93 from every
+    // other centroid, so the assignment is j for both of its points. An
+    // early-return implementation leaves the zero-initialized indices and
+    // fails idx[2] == 1 for every k >= 2.
     for (int k = 2; k <= l13_palette::paletteMaxSize; ++k) {
         // dim 1: cluster j holds {100j, 100j+14} -> mean 100j + 7.
         int data1[2 * l13_palette::paletteMaxSize];
@@ -440,6 +440,8 @@ TEST_CASE("kMeansDim1 and kMeansDim2 hold exact-mean inits over k 2..8") {
         l13_palette::kMeansDim1(data1, cent1, idx1, 2 * k, k, 5);
         for (int j = 0; j < k; ++j) {
             CHECK(cent1[j] == init1[j]);
+            CHECK(idx1[2 * j] == j);
+            CHECK(idx1[2 * j + 1] == j);
         }
         // dim 2: cluster j holds {(100j, 100j), (100j+14, 100j+6)}
         // -> mean (100j + 7, 100j + 3).
@@ -459,6 +461,10 @@ TEST_CASE("kMeansDim1 and kMeansDim2 hold exact-mean inits over k 2..8") {
         l13_palette::kMeansDim2(data2, cent2, idx2, 2 * k, k, 5);
         for (int j = 0; j < 2 * k; ++j) {
             CHECK(cent2[j] == init2[j]);
+        }
+        for (int j = 0; j < k; ++j) {
+            CHECK(idx2[2 * j] == j);
+            CHECK(idx2[2 * j + 1] == j);
         }
     }
 }

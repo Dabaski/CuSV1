@@ -78,8 +78,6 @@ static l16_rdo::MvClassType oracleGetMvClass(std::int32_t z, std::int32_t* offse
     return c;
 }
 
-TEST_CASE("cwd probe") { std::printf("cwd=%s\n", std::filesystem::current_path().string().c_str()); }
-
 TEST_CASE("l16_rdo costSymbol at p15=16384 equals 512") {
     CHECK(l16_rdo::costSymbol(16384) == 512);
 }
@@ -2398,23 +2396,50 @@ TEST_CASE("l16_rdo fastOptimizeB matches its oracle and equals the full path on 
                 CHECK(std::memcmp(dP, dW, sizeof(std::int32_t) * n) == 0);
             }
     // Degenerate equivalence (d): both paths are no-ops on perfect +-1
-    // tokens with large coefficients.
+    // tokens with large coefficients (dqcoeff == coeff -> zero distortion,
+    // so keep is a strict optimum at any lambda). The FULL path is called
+    // for real here - the earlier form compared against nothing.
     {
-        const std::int16_t* scan = so[0][0].scan;
+        FcTokenCdfs fc;
+        fillFcTokenCdfs(&fc);
+        static l16_rdo::MdRateEstimationContext meDeg;
+        std::memset(&meDeg, 0, sizeof(meDeg));
+        l16_rdo::estimateCoefficientsRate(&meDeg, &fc);
+        alignas(64) static std::uint8_t scratchDeg[TX_PAD_2D];
         const std::int16_t dequant[2] = {100, 100};
-        std::int32_t cP[16], qP[16], dP[16];
+        std::int32_t cP[16], cF[16], qP[16], qF[16], dP[16], dF[16];
         for (int i = 0; i < 16; ++i) {
             cP[i] = 5000 * ((i % 2) ? -1 : 1);
             qP[i] = (i % 2) ? -1 : 1;
             dP[i] = cP[i];
         }
+        std::memcpy(qF, qP, sizeof(qP));
+        std::memcpy(dF, dP, sizeof(dP));
+        std::memcpy(cF, cP, sizeof(cP));
         std::uint16_t eobFast = 16, eobFull = 16;
         l16_rdo::fastOptimizeB(cP, dequant, qP, dP, &eobFast, 0, 0);
         CHECK(eobFast == 16);
-    // The full path's own degeneracy is checked in the driver test's
-    // all-keep fixtures; here pin the fast-side no-op.
-        (void)eobFull;
-        (void)scan;
+        CHECK(std::memcmp(qP, qF, sizeof(qP)) == 0);
+        CHECK(std::memcmp(dP, dF, sizeof(dP)) == 0);
+        l16_rdo::OptimizeBArgs args{};
+        args.coeff = cF;
+        args.qcoeff = qF;
+        args.dqcoeff = dF;
+        args.eob = &eobFull;
+        args.txSize = 0;
+        args.txType = 0;
+        args.plane = 0;
+        args.me = &meDeg;
+        args.dequant = dequant;
+        args.iqm = nullptr;
+        args.txbSkipContext = 5;
+        args.dcSignContext = 1;
+        args.levelsBuf = scratchDeg;
+        args.lambda = 881173u;
+        l16_rdo::optimizeB(args);
+        CHECK(eobFull == 16);
+        CHECK(std::memcmp(qF, qP, sizeof(qF)) == 0);
+        CHECK(std::memcmp(dF, dP, sizeof(dF)) == 0);
     }
 }
 
