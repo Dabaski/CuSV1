@@ -5796,3 +5796,259 @@ TEST_CASE("set_dist_based_ref_pruning_controls - every level x all 11 groups, vs
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 5: txs / filter-intra / spatial-sse / compute_th /
+// lpd1-tx / cfl / rate-est setters.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_txs_controls - the seven arms x the mimic wall, whole-struct") {
+    // :6233-6303. The mimic wall forces level 1; cases 0-4 + 5
+    // (MAX_TXS_LEVEL-1) write their tables; the DEFAULT arm writes
+    // enabled = 0 (NOT assert(0)).
+    for (int mimic = 0; mimic <= 1; ++mimic)
+        for (int level = 0; level <= 6; ++level) {
+            TxsCtrls c;
+            std::memset(&c, kPoison, sizeof(c));
+            setTxsCtrls(c, (uint8_t)level, mimic == 1);
+            const int eff = mimic ? 1 : level;
+            if (eff == 0) {
+                CHECK(c.enabled == 0);
+                CHECK(c.prevDepthCoeffExitTh == kPoison);
+                CHECK(c.quadrantThSf == (int32_t)0xAAAAAAAA);
+            } else if (eff == 1) {
+                CHECK(c.enabled == 1);
+                CHECK(c.prevDepthCoeffExitTh == 1);
+                CHECK(c.intraClassMaxDepthSq == 2);
+                CHECK(c.intraClassMaxDepthNsq == 2);
+                CHECK(c.interClassMaxDepthSq == 2);
+                CHECK(c.interClassMaxDepthNsq == 2);
+                CHECK(c.depth1TxtGroupOffset == 0);
+                CHECK(c.depth2TxtGroupOffset == 0);
+                CHECK(c.quadrantThSf == 0);
+            } else if (eff == 2) {
+                CHECK(c.enabled == 1);
+                CHECK(c.prevDepthCoeffExitTh == 1);
+                CHECK(c.intraClassMaxDepthSq == 2);
+                CHECK(c.intraClassMaxDepthNsq == 2);
+                CHECK(c.interClassMaxDepthSq == 1);
+                CHECK(c.interClassMaxDepthNsq == 1);
+                CHECK(c.depth1TxtGroupOffset == 0);
+                CHECK(c.depth2TxtGroupOffset == 0);
+                CHECK(c.quadrantThSf == 0);
+            } else if (eff == 3) {
+                CHECK(c.enabled == 1);
+                CHECK(c.prevDepthCoeffExitTh == 1);
+                CHECK(c.intraClassMaxDepthSq == 1);
+                CHECK(c.intraClassMaxDepthNsq == 0);
+                CHECK(c.interClassMaxDepthSq == 1);
+                CHECK(c.interClassMaxDepthNsq == 0);
+                CHECK(c.depth1TxtGroupOffset == 3);
+                CHECK(c.depth2TxtGroupOffset == 3);
+                CHECK(c.quadrantThSf == 0);
+            } else if (eff == 4) {
+                CHECK(c.enabled == 1);
+                CHECK(c.prevDepthCoeffExitTh == 2);
+                CHECK(c.intraClassMaxDepthSq == 1);
+                CHECK(c.intraClassMaxDepthNsq == 1);
+                CHECK(c.interClassMaxDepthSq == 0);
+                CHECK(c.interClassMaxDepthNsq == 0);
+                CHECK(c.depth1TxtGroupOffset == 4);
+                CHECK(c.depth2TxtGroupOffset == 4);
+                CHECK(c.quadrantThSf == 100);
+            } else if (eff == 5) {
+                CHECK(c.enabled == 1);
+                CHECK(c.prevDepthCoeffExitTh == 100);
+                CHECK(c.intraClassMaxDepthSq == 1);
+                CHECK(c.intraClassMaxDepthNsq == 1);
+                CHECK(c.interClassMaxDepthSq == 0);
+                CHECK(c.interClassMaxDepthNsq == 0);
+                CHECK(c.depth1TxtGroupOffset == 4);
+                CHECK(c.depth2TxtGroupOffset == 4);
+                CHECK(c.quadrantThSf == 100);
+            } else {
+                // the default arm writes enabled = 0 only
+                CHECK(c.enabled == 0);
+                CHECK(c.prevDepthCoeffExitTh == kPoison);
+                CHECK(c.intraClassMaxDepthSq == kPoison);
+                CHECK(c.quadrantThSf == (int32_t)0xAAAAAAAA);
+            }
+        }
+}
+
+TEST_CASE("set_filter_intra_ctrls - the three levels, whole-struct") {
+    // :6305-6324. FILTER_PAETH_PRED = 4, FILTER_DC_PRED = 0.
+    for (int level = 0; level <= 3; ++level) {
+        FilterIntraCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setFilterIntraCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == false);
+            CHECK(c.maxFilterIntraMode == kPoison);
+        } else if (level == 1) {
+            CHECK(c.enabled == true);
+            CHECK(c.maxFilterIntraMode == 4);
+        } else if (level == 2) {
+            CHECK(c.enabled == true);
+            CHECK(c.maxFilterIntraMode == 0);
+        } else {
+            // :6319-6321 - the default arm writes nothing; enabled keeps
+            // its poison byte and stays unread (0xAA bools cannot be
+            // CHECKed against either literal).
+            CHECK(c.maxFilterIntraMode == kPoison);
+        }
+    }
+}
+
+TEST_CASE("set_spatial_sse_full_loop_level - the four levels") {
+    // :6326-6347. SSSE_OFF = 3.
+    for (int level = 0; level <= 4; ++level) {
+        SpatialSseCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setSpatialSseFullLoopLevel(c, (uint8_t)level);
+        if (level == 0) CHECK(c.level == 3);
+        else if (level == 1) CHECK(c.level == 0);
+        else if (level == 2) CHECK(c.level == 1);
+        else if (level == 3) CHECK(c.level == 2);
+        else CHECK(c.level == kPoison);
+    }
+}
+
+// RDCOST, independent transcription (rd_cost.h:36-38 +
+// definitions.h:457).
+static uint64_t oracleRdCost(uint64_t rm, uint64_t r, uint64_t d) {
+    uint64_t prod = r * rm;
+    uint64_t round = (prod + (((uint64_t)1 << 9) >> 1)) >> 9;
+    return round + (d << 7);
+}
+
+TEST_CASE("compute_intra_pd0_th / compute_subres_th - the identical bodies over the lambda grid") {
+    // :6349-6370. fast_lambda = hbd ? [EB_10_BIT_MD] : [EB_8_BIT_MD];
+    // sb_size = super_block_size^2; cost_th_rate = 1 << 13.
+    for (int hbd = 0; hbd <= 1; ++hbd)
+        for (uint32_t sbSize : {64u, 128u})
+            for (uint32_t l8 : {100u, 5333u, 100000u})
+                for (uint32_t l10 : {200u, 7777u, 200000u}) {
+                    RdCostCtx ctx;
+                    ctx.fastLambdaMd[0] = l8;
+                    ctx.fastLambdaMd[1] = l10;
+                    ctx.hbdMd = (uint8_t)hbd;
+                    const uint64_t got = computeIntraPd0Th(sbSize, ctx);
+                    const uint32_t lam = hbd ? l10 : l8;
+                    const uint64_t want = oracleRdCost(lam, 1ull << 13, (uint64_t)sbSize * sbSize * 6);
+                    CHECK(got == want);
+                    CHECK(computeSubresTh(sbSize, ctx) == want);  // the same body
+                    CHECK(computeIntraPd0Th(sbSize, ctx) == computeSubresTh(sbSize, ctx));
+                }
+}
+
+TEST_CASE("set_lpd1_tx_skip_decision_ctrls - the six levels, whole-struct") {
+    // :6372-6408.
+    for (int level = 0; level <= 6; ++level) {
+        Lpd1TxSkipDecisionCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setLpd1TxSkipDecisionCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.skipTxScoreTh == 0);
+            CHECK(c.distEnergyTh == 0xAAAA);
+            CHECK(c.rdSkipTh == 0xAAAA);
+        } else if (level == 1) {
+            CHECK(c.skipTxScoreTh == 125);
+            CHECK(c.distEnergyTh == 30);
+            CHECK(c.rdSkipTh == 100);
+        } else if (level == 2) {
+            CHECK(c.skipTxScoreTh == 125);
+            CHECK(c.distEnergyTh == 30);
+            CHECK(c.rdSkipTh == 200);
+        } else if (level == 3) {
+            CHECK(c.skipTxScoreTh == 70);
+            CHECK(c.distEnergyTh == 30);
+            CHECK(c.rdSkipTh == 200);
+        } else if (level == 4) {
+            CHECK(c.skipTxScoreTh == 50);
+            CHECK(c.distEnergyTh == 30);
+            CHECK(c.rdSkipTh == 200);
+        } else if (level == 5) {
+            CHECK(c.skipTxScoreTh == 50);
+            CHECK(c.distEnergyTh == 40);
+            CHECK(c.rdSkipTh == 200);
+        } else {
+            CHECK(c.skipTxScoreTh == (int)0xAAAAAAAA);
+            CHECK(c.distEnergyTh == 0xAAAA);
+            CHECK(c.rdSkipTh == 0xAAAA);
+        }
+    }
+}
+
+TEST_CASE("set_lpd1_tx_ctrls - the seven levels, whole-struct") {
+    // :6410-6460. Level 0 all zero; 1-6 enabled variants; default
+    // writes nothing.
+    for (int level = 0; level <= 7; ++level) {
+        Lpd1TxCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setLpd1TxCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.zeroYCoeffExit == 0);
+            CHECK(c.chromaDetectorLevel == 0);
+            CHECK(c.useUvShortcutsOnYCoeffs == 0);
+            CHECK(c.useMds3ShortcutsTh == 0);
+        } else if (level <= 6) {
+            CHECK(c.zeroYCoeffExit == 1);
+            // The reference ladder (:6449-:6456): 1, 1, 2, 3, 4, then 0
+            // at level 6.
+            CHECK(c.chromaDetectorLevel == (level == 6 ? 0 : (level <= 2 ? 1 : level - 1)));
+            CHECK(c.useUvShortcutsOnYCoeffs == 1);
+            CHECK(c.useMds3ShortcutsTh == 30);
+        } else {
+            CHECK(c.zeroYCoeffExit == kPoison);
+            CHECK(c.useMds3ShortcutsTh == 0xAAAAAAAAu);
+        }
+    }
+}
+
+TEST_CASE("set_cfl_ctrls - the six levels, whole-struct") {
+    // :6462-6498.
+    for (int level = 0; level <= 6; ++level) {
+        CflCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setCflCtrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == false);
+            CHECK(c.itrTh == kPoison);
+        } else if (level <= 5) {
+            CHECK(c.enabled == true);
+            CHECK(c.itrTh == (level == 1 ? 2 : 1));
+            const uint8_t cplx[6] = {0, 0, 0, 5, 10, 55};
+            CHECK(c.cplxTh == cplx[level]);
+        } else {
+            // :6493-6495 - the default arm writes nothing; the poisoned
+            // enabled bool stays unread.
+            CHECK(c.itrTh == kPoison);
+            CHECK(c.cplxTh == kPoison);
+        }
+    }
+}
+
+TEST_CASE("set_rate_est_ctrls - the five levels, whole-struct") {
+    // :6500-6547.
+    for (int level = 0; level <= 5; ++level) {
+        MdRateEstCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setRateEstCtrls(c, (uint8_t)level);
+        if (level <= 4) {
+            int eCtx[5] = {0, 1, 1, 1, 0};
+            int eCoeff[5] = {0, 1, 0, 0, 0};
+            int eLvl[5] = {0, 1, 1, 2, 2};
+            int eOff[5] = {8, 0, 0, 0, 0};
+            int eFast[5] = {2, 1, 2, 2, 2};
+            CHECK(c.updateSkipCtxDcSignCtx == (eCtx[level] != 0));
+            CHECK(c.updateSkipCoeffCtx == (eCoeff[level] != 0));
+            CHECK(c.coeffRateEstLvl == eLvl[level]);
+            CHECK(c.lpd0QpOffset == eOff[level]);
+            CHECK(c.pd0FastCoeffEstLevel == eFast[level]);
+        } else {
+            CHECK(c.coeffRateEstLvl == kPoison);
+            CHECK(c.lpd0QpOffset == (int8_t)kPoison);
+        }
+    }
+}

@@ -6228,5 +6228,313 @@ void setDistBasedRefPruningCtrls(RefPruningCtrls& ctrls, std::uint8_t distBasedR
     }
 }
 
+// set_txs_controls (enc_mode_config.c:6233-6303).
+void setTxsCtrls(TxsCtrls& ctrls, std::uint8_t txsLevel, bool mimicOnlyTx4x4) {
+    if (mimicOnlyTx4x4) {
+        txsLevel = 1;
+    }
+
+    switch (txsLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 1;
+        ctrls.intraClassMaxDepthSq     = 2;
+        ctrls.intraClassMaxDepthNsq    = 2;
+        ctrls.interClassMaxDepthSq     = 2;
+        ctrls.interClassMaxDepthNsq    = 2;
+        ctrls.depth1TxtGroupOffset     = 0;
+        ctrls.depth2TxtGroupOffset     = 0;
+        ctrls.quadrantThSf             = 0;
+        break;
+    case 2:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 1;
+        ctrls.intraClassMaxDepthSq     = 2;
+        ctrls.intraClassMaxDepthNsq    = 2;
+        ctrls.interClassMaxDepthSq     = 1;
+        ctrls.interClassMaxDepthNsq    = 1;
+        ctrls.depth1TxtGroupOffset     = 0;
+        ctrls.depth2TxtGroupOffset     = 0;
+        ctrls.quadrantThSf             = 0;
+        break;
+    case 3:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 1;
+        ctrls.intraClassMaxDepthSq     = 1;
+        ctrls.intraClassMaxDepthNsq    = 0;
+        ctrls.interClassMaxDepthSq     = 1;
+        ctrls.interClassMaxDepthNsq    = 0;
+        ctrls.depth1TxtGroupOffset     = 3;
+        ctrls.depth2TxtGroupOffset     = 3;
+        ctrls.quadrantThSf             = 0;
+        break;
+    case 4:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 2;
+        ctrls.intraClassMaxDepthSq     = 1;
+        ctrls.intraClassMaxDepthNsq    = 1;
+        ctrls.interClassMaxDepthSq     = 0;
+        ctrls.interClassMaxDepthNsq    = 0;
+        ctrls.depth1TxtGroupOffset     = 4;
+        ctrls.depth2TxtGroupOffset     = 4;
+        ctrls.quadrantThSf             = 100;
+        break;
+    case kMaxTxsLevel - 1:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 100;
+        ctrls.intraClassMaxDepthSq     = 1;
+        ctrls.intraClassMaxDepthNsq    = 1;
+        ctrls.interClassMaxDepthSq     = 0;
+        ctrls.interClassMaxDepthNsq    = 0;
+        ctrls.depth1TxtGroupOffset     = 4;
+        ctrls.depth2TxtGroupOffset     = 4;
+        ctrls.quadrantThSf             = 100;
+        break;
+    default:
+        ctrls.enabled = 0;
+        break;
+    }
+}
+
+// set_filter_intra_ctrls (enc_mode_config.c:6305-6324).
+void setFilterIntraCtrls(FilterIntraCtrls& ctrls, std::uint8_t fiLvl) {
+    switch (fiLvl) {
+    case 0:
+        ctrls.enabled = false;
+        break;
+    case 1:
+        ctrls.enabled            = true;
+        ctrls.maxFilterIntraMode = 4;  // FILTER_PAETH_PRED
+        break;
+    case 2:
+        ctrls.enabled            = true;
+        ctrls.maxFilterIntraMode = 0;  // FILTER_DC_PRED
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_spatial_sse_full_loop_level (enc_mode_config.c:6326-6347).
+void setSpatialSseFullLoopLevel(SpatialSseCtrls& ctrls, std::uint8_t spatialSseFullLoopLevel) {
+    switch (spatialSseFullLoopLevel) {
+    case 0:
+        ctrls.level = 3;  // SSSE_OFF
+        break;
+    case 1:
+        ctrls.level = 0;  // SSSE_MDS1
+        break;
+    case 2:
+        ctrls.level = 1;  // SSSE_MDS2
+        break;
+    case 3:
+        ctrls.level = 2;  // SSSE_MDS3
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// The shared body of compute_intra_pd0_th / compute_subres_th
+// (enc_mode_config.c:6349-6370).
+static std::uint64_t computeIntraPd0ThImpl(std::uint32_t superBlockSize, const RdCostCtx& ctx) {
+    const std::uint32_t fastLambda = ctx.hbdMd ? ctx.fastLambdaMd[kEb10BitMd]
+                                               : ctx.fastLambdaMd[kEb8BitMd];
+    const std::uint32_t sbSize     = superBlockSize * superBlockSize;
+    const std::uint64_t costThRate = 1 << 13;
+
+    // RDCOST(fast_lambda, cost_th_rate, sb_size * 6)
+    const std::uint64_t prod =
+        costThRate * (std::uint64_t)fastLambda;
+    const std::uint64_t round = (prod + (((std::uint64_t)1 << kAv1ProbCostShift) >> 1)) >>
+                                kAv1ProbCostShift;
+    return round + ((std::uint64_t)sbSize * 6 << kRddivBits);
+}
+
+// compute_intra_pd0_th (enc_mode_config.c:6349-6360).
+std::uint64_t computeIntraPd0Th(std::uint32_t superBlockSize, const RdCostCtx& ctx) {
+    return computeIntraPd0ThImpl(superBlockSize, ctx);
+}
+
+// compute_subres_th (enc_mode_config.c:6361-6370) - the same arithmetic
+// as compute_intra_pd0_th in the reference (two identical bodies).
+std::uint64_t computeSubresTh(std::uint32_t superBlockSize, const RdCostCtx& ctx) {
+    return computeIntraPd0ThImpl(superBlockSize, ctx);
+}
+
+// set_lpd1_tx_skip_decision_ctrls (enc_mode_config.c:6372-6408).
+void setLpd1TxSkipDecisionCtrls(Lpd1TxSkipDecisionCtrls& ctrls, std::uint8_t level) {
+    switch (level) {
+    case 0:
+        ctrls.skipTxScoreTh = 0;
+        break;
+    case 1:
+        ctrls.skipTxScoreTh = 125;
+        ctrls.distEnergyTh  = 30;
+        ctrls.rdSkipTh      = 100;
+        break;
+    case 2:
+        ctrls.skipTxScoreTh = 125;
+        ctrls.distEnergyTh  = 30;
+        ctrls.rdSkipTh      = 200;
+        break;
+    case 3:
+        ctrls.skipTxScoreTh = 70;
+        ctrls.distEnergyTh  = 30;
+        ctrls.rdSkipTh      = 200;
+        break;
+    case 4:
+        ctrls.skipTxScoreTh = 50;
+        ctrls.distEnergyTh  = 30;
+        ctrls.rdSkipTh      = 200;
+        break;
+    case 5:
+        ctrls.skipTxScoreTh = 50;
+        ctrls.distEnergyTh  = 40;
+        ctrls.rdSkipTh      = 200;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_lpd1_tx_ctrls (enc_mode_config.c:6410-6460).
+void setLpd1TxCtrls(Lpd1TxCtrls& ctrls, std::uint8_t lpd1TxLevel) {
+    switch (lpd1TxLevel) {
+    case 0:
+        ctrls.zeroYCoeffExit            = 0;
+        ctrls.chromaDetectorLevel       = 0;
+        ctrls.useUvShortcutsOnYCoeffs   = 0;
+        ctrls.useMds3ShortcutsTh        = 0;
+        break;
+    case 1:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 1;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 2:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 1;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 3:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 2;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 4:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 3;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 5:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 4;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 6:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 0;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_cfl_ctrls (enc_mode_config.c:6462-6498).
+void setCflCtrls(CflCtrls& ctrls, std::uint8_t cflLevel) {
+    switch (cflLevel) {
+    case 0:
+        ctrls.enabled = false;
+        break;
+    case 1:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 2;
+        ctrls.cplxTh  = 0;
+        break;
+    case 2:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 1;
+        ctrls.cplxTh  = 0;
+        break;
+    case 3:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 1;
+        ctrls.cplxTh  = 5;
+        break;
+    case 4:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 1;
+        ctrls.cplxTh  = 10;
+        break;
+    case 5:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 1;
+        ctrls.cplxTh  = 55;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_rate_est_ctrls (enc_mode_config.c:6500-6547).
+void setRateEstCtrls(MdRateEstCtrls& ctrls, std::uint8_t rateEstLevel) {
+    switch (rateEstLevel) {
+    case 0:
+        ctrls.updateSkipCtxDcSignCtx = false;
+        ctrls.updateSkipCoeffCtx     = false;
+        ctrls.coeffRateEstLvl        = 0;
+        ctrls.lpd0QpOffset           = 8;
+        ctrls.pd0FastCoeffEstLevel   = 2;
+        break;
+    case 1:
+        ctrls.updateSkipCtxDcSignCtx = true;
+        ctrls.updateSkipCoeffCtx     = true;
+        ctrls.coeffRateEstLvl        = 1;
+        ctrls.lpd0QpOffset           = 0;
+        ctrls.pd0FastCoeffEstLevel   = 1;
+        break;
+    case 2:
+        ctrls.updateSkipCtxDcSignCtx = true;
+        ctrls.updateSkipCoeffCtx     = false;
+        ctrls.coeffRateEstLvl        = 1;
+        ctrls.lpd0QpOffset           = 0;
+        ctrls.pd0FastCoeffEstLevel   = 2;
+        break;
+    case 3:
+        ctrls.updateSkipCtxDcSignCtx = true;
+        ctrls.updateSkipCoeffCtx     = false;
+        ctrls.coeffRateEstLvl        = 2;
+        ctrls.lpd0QpOffset           = 0;
+        ctrls.pd0FastCoeffEstLevel   = 2;
+        break;
+    case 4:
+        ctrls.updateSkipCtxDcSignCtx = false;
+        ctrls.updateSkipCoeffCtx     = false;
+        ctrls.coeffRateEstLvl        = 2;
+        ctrls.lpd0QpOffset           = 0;
+        ctrls.pd0FastCoeffEstLevel   = 2;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

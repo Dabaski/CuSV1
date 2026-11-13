@@ -1499,5 +1499,120 @@ struct RefPruningCtrls {
 // case assert(0)s and writes nothing (documented UB).
 void setDistBasedRefPruningCtrls(RefPruningCtrls& ctrls, std::uint8_t distBasedRefPruningLevel);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 5: set_txs_controls (:6233-:6303), set_filter_intra_ctrls
+// (:6305-:6324), set_spatial_sse_full_loop_level (:6326-:6347),
+// compute_intra_pd0_th / compute_subres_th (:6349-:6370),
+// set_lpd1_tx_skip_decision_ctrls (:6372-:6408), set_lpd1_tx_ctrls
+// (:6410-:6460), set_cfl_ctrls (:6462-:6498), set_rate_est_ctrls
+// (:6500-:6547).
+// ---------------------------------------------------------------------------
+// TxsControls (md_process.h:487-507, verbatim field order/types).
+struct TxsCtrls {
+    std::uint8_t enabled;
+    std::uint8_t prevDepthCoeffExitTh;
+    std::uint8_t intraClassMaxDepthSq;
+    std::uint8_t intraClassMaxDepthNsq;
+    std::uint8_t interClassMaxDepthSq;
+    std::uint8_t interClassMaxDepthNsq;
+    int depth1TxtGroupOffset;
+    int depth2TxtGroupOffset;
+    std::int32_t quadrantThSf;
+};
+
+// set_txs_controls (:6233-6303). The pcs->mimic_only_tx_4x4 wall forces
+// level 1 (:6238-6240). NOTE: the default arm is NOT assert(0) - it
+// writes enabled = 0 (:6297-6299). Case MAX_TXS_LEVEL - 1 = 5.
+void setTxsCtrls(TxsCtrls& ctrls, std::uint8_t txsLevel, bool mimicOnlyTx4x4);
+
+// FilterIntraCtrls (md_process.h:835-840, verbatim).
+// FILTER_DC_PRED = 0 .. FILTER_PAETH_PRED = 4 (definitions.h:1296-1302).
+struct FilterIntraCtrls {
+    bool enabled;
+    std::uint8_t maxFilterIntraMode;
+};
+
+// set_filter_intra_ctrls (:6305-6324). The default case assert(0)s and
+// writes nothing (documented UB).
+void setFilterIntraCtrls(FilterIntraCtrls& ctrls, std::uint8_t fiLvl);
+
+// SpatialSseLevel (definitions.h:864-869, verbatim ordinals):
+// SSSE_MDS1 = 0, SSSE_MDS2 = 1, SSSE_MDS3 = 2, SSSE_OFF = 3.
+struct SpatialSseCtrls {
+    std::uint8_t level;  // SpatialSseLevel
+};
+
+// set_spatial_sse_full_loop_level (:6326-6347). The default case
+// assert(0)s and writes nothing (documented UB).
+void setSpatialSseFullLoopLevel(SpatialSseCtrls& ctrls, std::uint8_t spatialSseFullLoopLevel);
+
+// The RDCOST fold (rd_cost.h:36-38): ROUND_POWER_OF_TWO(R*RM,
+// AV1_PROB_COST_SHIFT) + D<<RDDIV_BITS, with AV1_PROB_COST_SHIFT = 9
+// (md_rate_estimation.h:29) and RDDIV_BITS = 7 (rd_cost.h:35).
+constexpr int kAv1ProbCostShift = 9;
+constexpr int kRddivBits = 7;
+constexpr int kEb8BitMd = 0;   // definitions.h:1857
+constexpr int kEb10BitMd = 1;  // definitions.h:1858
+
+// The ctx surface of compute_intra_pd0_th / compute_subres_th: the
+// fast-lambda pair + hbd_md; scs->super_block_size threads as the
+// scalar (the two reference bodies are the same arithmetic).
+struct RdCostCtx {
+    std::uint32_t fastLambdaMd[2];
+    std::uint8_t hbdMd;
+};
+
+// compute_intra_pd0_th (:6349-6360).
+std::uint64_t computeIntraPd0Th(std::uint32_t superBlockSize, const RdCostCtx& ctx);
+// compute_subres_th (:6361-6370).
+std::uint64_t computeSubresTh(std::uint32_t superBlockSize, const RdCostCtx& ctx);
+
+// Lpd1TxSkipDecisionCtrls (md_process.h:730-740, verbatim).
+struct Lpd1TxSkipDecisionCtrls {
+    int skipTxScoreTh;
+    std::uint16_t distEnergyTh;
+    std::uint16_t rdSkipTh;
+};
+
+// set_lpd1_tx_skip_decision_ctrls (:6372-6408). The default case
+// assert(0)s and writes nothing (documented UB).
+void setLpd1TxSkipDecisionCtrls(Lpd1TxSkipDecisionCtrls& ctrls, std::uint8_t level);
+
+// Lpd1TxCtrls (md_process.h:742-750, verbatim field order/types).
+struct Lpd1TxCtrls {
+    std::uint8_t zeroYCoeffExit;
+    std::uint8_t chromaDetectorLevel;
+    std::uint32_t useMds3ShortcutsTh;
+    std::uint8_t useUvShortcutsOnYCoeffs;
+};
+
+// set_lpd1_tx_ctrls (:6410-6460). The default case assert(0)s and
+// writes nothing (documented UB).
+void setLpd1TxCtrls(Lpd1TxCtrls& ctrls, std::uint8_t lpd1TxLevel);
+
+// CflCtrls (md_process.h:756-761, verbatim).
+struct CflCtrls {
+    bool enabled;
+    std::uint8_t itrTh;
+    std::uint8_t cplxTh;
+};
+
+// set_cfl_ctrls (:6462-6498). The default case assert(0)s and writes
+// nothing (documented UB).
+void setCflCtrls(CflCtrls& ctrls, std::uint8_t cflLevel);
+
+// MdRateEstCtrls (md_process.h:763-776, verbatim field order/types).
+struct MdRateEstCtrls {
+    bool updateSkipCtxDcSignCtx;
+    bool updateSkipCoeffCtx;
+    std::uint8_t coeffRateEstLvl;  // 0: OFF, 1: full, 2: low-nz approx
+    std::int8_t lpd0QpOffset;
+    std::uint8_t pd0FastCoeffEstLevel;
+};
+
+// set_rate_est_ctrls (:6500-6547). The default case assert(0)s and
+// writes nothing (documented UB).
+void setRateEstCtrls(MdRateEstCtrls& ctrls, std::uint8_t rateEstLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo
