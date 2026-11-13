@@ -5936,5 +5936,297 @@ void setLpd1Ctrls(Lpd1Ctrls& ctrls, std::uint8_t lpd1Lvl) {
     }
 }
 
+// svt_aom_set_bipred3x3_controls (enc_mode_config.c:5939-5974).
+void setBipred3x3Ctrls(Bipred3x3Ctrls& ctrls, std::uint8_t bipred3x3Injection) {
+    switch (bipred3x3Injection) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled       = 1;
+        ctrls.searchDiag    = 1;
+        ctrls.useBestList   = 0;
+        ctrls.useL0L1Dev    = (std::uint8_t)~0;
+        break;
+    case 2:
+        ctrls.enabled       = 1;
+        ctrls.searchDiag    = 0;
+        ctrls.useBestList   = 0;
+        ctrls.useL0L1Dev    = (std::uint8_t)~0;
+        break;
+    case 3:
+        ctrls.enabled       = 1;
+        ctrls.searchDiag    = 0;
+        ctrls.useBestList   = 1;
+        ctrls.useL0L1Dev    = (std::uint8_t)~0;
+        break;
+    case 4:
+        ctrls.enabled       = 1;
+        ctrls.searchDiag    = 0;
+        ctrls.useBestList   = 1;
+        ctrls.useL0L1Dev    = 20;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// svt_aom_set_dist_based_ref_pruning_controls (enc_mode_config.c:5976-6231).
+void setDistBasedRefPruningCtrls(RefPruningCtrls& ctrls, std::uint8_t distBasedRefPruningLevel) {
+    switch (distBasedRefPruningLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kUni3x3Group]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kBi3x3Group]        = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNearGroup]     = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kPredMeGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterCompGroup]    = (std::uint32_t)~0;
+
+        ctrls.useTplInfoOffset      = 0;
+        ctrls.checkClosestMultiplier = 0;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+
+    case 2:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kUni3x3Group]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kBi3x3Group]        = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNearGroup]     = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kPredMeGroup]       = 150;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterCompGroup]    = (std::uint32_t)~0;
+
+        ctrls.useTplInfoOffset      = 0;
+        ctrls.checkClosestMultiplier = 0;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 3:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = 30;
+        ctrls.maxDevToBest[kUni3x3Group]       = 30;
+        ctrls.maxDevToBest[kBi3x3Group]        = 30;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNearGroup]     = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kPredMeGroup]       = 60;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = 30;
+        ctrls.maxDevToBest[kInterCompGroup]    = 30;
+
+        ctrls.useTplInfoOffset      = 0;
+        ctrls.checkClosestMultiplier = 0;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 4:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = 30;
+        ctrls.maxDevToBest[kUni3x3Group]       = 30;
+        ctrls.maxDevToBest[kBi3x3Group]        = 30;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = 30;
+        ctrls.maxDevToBest[kNrstNearGroup]     = 30;
+        ctrls.maxDevToBest[kPredMeGroup]       = 30;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = 30;
+        ctrls.maxDevToBest[kInterCompGroup]    = 30;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 5:
+        ctrls.enabled                             = 1;
+        ctrls.maxDevToBest[kPaMeGroup]            = 30;
+        ctrls.maxDevToBest[kUni3x3Group]          = 0;
+        ctrls.maxDevToBest[kBi3x3Group]           = 30;
+        ctrls.maxDevToBest[kNrstNewNearGroup]     = 30;
+        ctrls.maxDevToBest[kNrstNearGroup]        = 30;
+        ctrls.maxDevToBest[kPredMeGroup]          = 30;
+        ctrls.maxDevToBest[kGlobalGroup]          = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]      = 30;
+        ctrls.maxDevToBest[kInterCompGroup]       = 0;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 6:
+        ctrls.enabled                             = 1;
+        ctrls.maxDevToBest[kPaMeGroup]            = 30;
+        ctrls.maxDevToBest[kUni3x3Group]          = 0;
+        ctrls.maxDevToBest[kBi3x3Group]           = 30;
+        ctrls.maxDevToBest[kNrstNewNearGroup]     = 30;
+        ctrls.maxDevToBest[kNrstNearGroup]        = 30;
+        ctrls.maxDevToBest[kPredMeGroup]          = 30;
+        ctrls.maxDevToBest[kGlobalGroup]          = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]      = 30;
+        ctrls.maxDevToBest[kInterCompGroup]       = 0;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+        break;
+    case 7:
+        ctrls.enabled                             = 1;
+        ctrls.maxDevToBest[kPaMeGroup]            = 10;
+        ctrls.maxDevToBest[kUni3x3Group]          = 0;
+        ctrls.maxDevToBest[kBi3x3Group]           = 10;
+        ctrls.maxDevToBest[kNrstNewNearGroup]     = 10;
+        ctrls.maxDevToBest[kNrstNearGroup]        = 10;
+        ctrls.maxDevToBest[kPredMeGroup]          = 10;
+        ctrls.maxDevToBest[kGlobalGroup]          = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]            = 10;
+        ctrls.maxDevToBest[kInterIntraGroup]      = 10;
+        ctrls.maxDevToBest[kInterCompGroup]       = 0;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 8:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = 0;
+        ctrls.maxDevToBest[kUni3x3Group]       = 0;
+        ctrls.maxDevToBest[kBi3x3Group]        = 0;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = 0;
+        ctrls.maxDevToBest[kNrstNearGroup]     = 0;
+        ctrls.maxDevToBest[kPredMeGroup]       = 0;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = 0;
+        ctrls.maxDevToBest[kObmcGroup]         = 0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = 0;
+        ctrls.maxDevToBest[kInterCompGroup]    = 0;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

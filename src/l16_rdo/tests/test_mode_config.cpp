@@ -5685,3 +5685,114 @@ TEST_CASE("set_lpd1_ctrls - every level x every sub-row, vs the oracle") {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 4: set_bipred3x3_controls (:5939-:5974) +
+// set_dist_based_ref_pruning_controls (:5976-:6231).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_bipred3x3_controls - the five levels, whole-struct") {
+    // :5939-5974. Level 0 writes ONLY enabled; 1-4 the full surface;
+    // default writes nothing.
+    for (int level = 0; level <= 5; ++level) {
+        Bipred3x3Ctrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setBipred3x3Ctrls(c, (uint8_t)level);
+        if (level == 0) {
+            CHECK(c.enabled == 0);
+            CHECK(c.searchDiag == kPoison);
+            CHECK(c.useBestList == kPoison);
+            CHECK(c.useL0L1Dev == kPoison);
+        } else if (level == 1) {
+            CHECK(c.enabled == 1);
+            CHECK(c.searchDiag == 1);
+            CHECK(c.useBestList == 0);
+            CHECK(c.useL0L1Dev == (uint8_t)~0);
+        } else if (level == 2) {
+            CHECK(c.enabled == 1);
+            CHECK(c.searchDiag == 0);
+            CHECK(c.useBestList == 0);
+            CHECK(c.useL0L1Dev == (uint8_t)~0);
+        } else if (level == 3) {
+            CHECK(c.enabled == 1);
+            CHECK(c.searchDiag == 0);
+            CHECK(c.useBestList == 1);
+            CHECK(c.useL0L1Dev == (uint8_t)~0);
+        } else if (level == 4) {
+            CHECK(c.enabled == 1);
+            CHECK(c.searchDiag == 0);
+            CHECK(c.useBestList == 1);
+            CHECK(c.useL0L1Dev == 20);
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.useL0L1Dev == kPoison);
+        }
+    }
+}
+
+// set_dist_based_ref_pruning_controls, independent transcription
+// (:5976-6231). Per level: the 11 max_dev_to_best entries (0xFFFFFFFF =
+// (uint32)~0), tpl offset, check multiplier, closest flag.
+struct OracleRefPruneRow {
+    int en;
+    uint32_t dev[11];
+    int tpl;      // -1 = not written
+    int check;    // -1 = not written
+    int closest;  // -1 = not written
+};
+static const OracleRefPruneRow oracleRefPruneRows[9] = {
+    // level 0: enabled 0 only (the dev/tpl/check/closest surface keeps
+    // the struct's prior state - poison in the test)
+    {0, {0xAAAAAAAAu, 0xAAAAAAAAu, 0xAAAAAAAAu, 0xAAAAAAAAu, 0xAAAAAAAAu, 0xAAAAAAAAu,
+         0xAAAAAAAAu, 0xAAAAAAAAu, 0xAAAAAAAAu, 0xAAAAAAAAu, 0xAAAAAAAAu},
+     0xAA, 0xAA, 0xAA},
+    // level 1: everything wide open
+    {1, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+         0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu},
+     0, 0, 1},
+    // level 2: PRED_ME capped at 150
+    {1, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 150,
+         0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu},
+     0, 0, 1},
+    // level 3
+    {1, {30, 30, 30, 0xFFFFFFFFu, 0xFFFFFFFFu, 60, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 30, 30},
+     0, 0, 1},
+    // level 4
+    {1, {30, 30, 30, 30, 30, 30, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 30, 30},
+     20, 1, 1},
+    // level 5
+    {1, {30, 0, 30, 30, 30, 30, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 30, 0},
+     20, 1, 1},
+    // level 6
+    {1, {30, 0, 30, 30, 30, 30, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 30, 0},
+     20, 1, 1},
+    // level 7
+    {1, {10, 0, 10, 10, 10, 10, 0xFFFFFFFFu, 0xFFFFFFFFu, 10, 10, 0},
+     20, 1, 1},
+    // level 8: only GLOBAL stays open
+    {1, {0, 0, 0, 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0},
+     20, 1, 1},
+};
+
+TEST_CASE("set_dist_based_ref_pruning_controls - every level x all 11 groups, vs the oracle") {
+    // :5976-6231. Level 0 writes ONLY enabled; 1-8 write the full
+    // surface; the default arm (9) writes nothing.
+    for (int level = 0; level <= 9; ++level) {
+        RefPruningCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        setDistBasedRefPruningCtrls(c, (uint8_t)level);
+        if (level <= 8) {
+            const OracleRefPruneRow& r = oracleRefPruneRows[level];
+            CHECK(c.enabled == r.en);
+            for (int g = 0; g < 11; ++g) CHECK(c.maxDevToBest[g] == r.dev[g]);
+            CHECK(c.useTplInfoOffset == (uint8_t)r.tpl);
+            CHECK(c.checkClosestMultiplier == (uint8_t)r.check);
+            for (int g = 0; g < 11; ++g) CHECK(c.closestRefs[g] == (uint8_t)r.closest);
+        } else {
+            CHECK(c.enabled == kPoison);
+            CHECK(c.maxDevToBest[kPaMeGroup] == 0xAAAAAAAAu);
+            CHECK(c.useTplInfoOffset == kPoison);
+            CHECK(c.closestRefs[kInterCompGroup] == kPoison);
+        }
+    }
+}

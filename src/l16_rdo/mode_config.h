@@ -1456,5 +1456,48 @@ struct Lpd1Ctrls {
 // assert(0)s and writes nothing (documented UB).
 void setLpd1Ctrls(Lpd1Ctrls& ctrls, std::uint8_t lpd1Lvl);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 4: set_bipred3x3_controls (:5939-:5974) +
+// set_dist_based_ref_pruning_controls (:5976-:6231).
+// ---------------------------------------------------------------------------
+// Bipred3x3Controls (md_process.h:190-200, verbatim field order/types).
+struct Bipred3x3Ctrls {
+    std::uint8_t enabled;      // refine the ME-MV(s) of bipred @ mds0
+    std::uint8_t searchDiag;
+    std::uint8_t useBestList;
+    std::uint8_t useL0L1Dev;
+};
+
+// svt_aom_set_bipred3x3_controls (:5939-5974). The default case
+// assert(0)s and writes nothing (documented UB).
+void setBipred3x3Ctrls(Bipred3x3Ctrls& ctrls, std::uint8_t bipred3x3Injection);
+
+// InterCandGroup (md_process.h:65-78, verbatim ordinals).
+constexpr int kTotInterGroup = 11;
+constexpr int kPaMeGroup = 0;
+constexpr int kUni3x3Group = 1;
+constexpr int kBi3x3Group = 2;
+constexpr int kNrstNewNearGroup = 3;
+constexpr int kNrstNearGroup = 4;
+constexpr int kPredMeGroup = 5;
+constexpr int kGlobalGroup = 6;
+constexpr int kWarpGroup = 7;
+constexpr int kObmcGroup = 8;
+constexpr int kInterIntraGroup = 9;
+constexpr int kInterCompGroup = 10;
+
+// RefPruningControls (md_process.h:202-211, verbatim field order/types).
+struct RefPruningCtrls {
+    std::uint8_t enabled;
+    std::uint32_t maxDevToBest[kTotInterGroup];
+    std::uint8_t useTplInfoOffset;
+    std::uint8_t checkClosestMultiplier;
+    std::uint8_t closestRefs[kTotInterGroup];
+};
+
+// svt_aom_set_dist_based_ref_pruning_controls (:5976-6231). The default
+// case assert(0)s and writes nothing (documented UB).
+void setDistBasedRefPruningCtrls(RefPruningCtrls& ctrls, std::uint8_t distBasedRefPruningLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo
