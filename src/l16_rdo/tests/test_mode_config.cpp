@@ -7399,3 +7399,780 @@ TEST_CASE("sig_deriv_enc_dec_pd0 - the composition over the pd0 grid, vs the ora
                                                 }
                                             }
 }
+
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 10: sig_deriv_enc_dec_light_pd1_{default,rtc}.
+// ---------------------------------------------------------------------------
+
+// set_rdoq_controls, independent table fill (:3851-3906).
+static void oracleFillRdoq(RdoqCtrls& c, int level) {
+    if (level > 5) return;
+    c.enabled = level != 0;
+    if (level == 0) return;
+    if (level == 1) {
+        c.cutOffNum = 0;
+    } else if (level == 2) {
+        c.cutOffNum = 80;
+        c.cutOffDenum = 100;
+    } else {
+        c.cutOffNum = 60;
+        c.cutOffDenum = 100;
+    }
+    c.skipUv = level >= 3;
+    c.dctDctOnly = level >= 3;
+    c.eobTh = level == 5 ? 85 : (uint8_t)~0;
+    c.eobFastTh = level == 5 ? 0 : level == 4 ? 30 : (uint8_t)~0;
+}
+
+// set_coeff_shaving_controls, independent table fill (:3911-3935).
+static void oracleFillShaving(CoeffShavingCtrls& c, int level) {
+    c.enabled = level != 0;
+    if (level == 0) return;
+    c.levelThreshold = 1;
+    c.zeroGapThreshold = 8;
+    c.rdZeroStrength = level == 1 ? 32 : 0;
+}
+
+// md_subpel_me_controls, independent table fill (:3633-3774). Only the
+// fields the reference writes; the caller poisons the struct first.
+static void oracleFillSubpel(MdSubPelSearchCtrls& c, int level) {
+    if (level > 10) return;
+    c.enabled = level != 0;
+    if (level == 0) return;
+    if (level <= 6) {
+        c.subpelSearchType = level == 1 ? 3 : 2;  // USE_8_TAPS / USE_4_TAPS
+        c.subpelItersPerStep = level == 6 ? 1 : 2;
+        c.maxPrecision = level == 6 ? 1 : 0;      // QUARTER_PEL / EIGHTH_PEL
+        c.subpelSearchMethod = level <= 3 ? 0 : 1;  // TREE / TREE_PRUNED
+        c.predVarianceTh = 0;
+        c.absThMult = 0;
+        c.roundDevTh = 2147483647;
+        c.skipDiagRefinement = level == 6 ? 3 : 0;
+        c.minBlkSz = level == 1 ? 0 : 4;
+        c.mvpTh = level == 1 ? 0 : level == 6 ? 12 : 18;
+        c.hpMvTh = level == 1 ? 2147483647 : 32;
+        c.biasFp = level == 1 ? 0 : level == 2 ? 0 : level == 3 || level == 4 ? 104 : 110;
+    } else {
+        c.maxPrecision = 1;                        // QUARTER_PEL
+        c.subpelSearchMethod = 2;                  // SUBPEL_FIXED_STAGE_SEARCH
+        c.predVarianceTh = level == 7 || level == 8 ? 0 : 100;
+        c.absThMult = level == 7 ? 0 : level == 8 ? 10 : level == 9 ? 20 : 25;
+        c.minBlkSz = 4;
+        c.biasFp = 110;
+    }
+}
+
+// set_cand_reduction_ctrls, independent transcription (:4164-4394).
+static void oracleFillCandReduction(CandReductionCtrls& c, int level, uint32_t qp,
+                                    uint32_t meVar, uint32_t meDist, uint8_t l0s, uint8_t l1s,
+                                    uint8_t perc, bool isLpd1, bool flatIpp, bool notLast,
+                                    uint8_t l0c, uint8_t l1c, bool bestOnly) {
+    const bool isNotLast = notLast;
+    switch (level) {
+    case 0:
+        c.reduceFilterIntra = 0;
+        c.redundantCandCtrls.scoreTh = 0;
+        c.useNeighbouringModeCtrls.enabled = 0;
+        c.nearCountCtrls.enabled = 0;
+        c.lpd1MvpBestMeList = 0;
+        c.candEliminationCtrls.enabled = 0;
+        c.reduceUnipredCandidates = 0;
+        break;
+    case 1:
+        c.reduceFilterIntra = 1;
+        c.redundantCandCtrls.scoreTh = 0;
+        c.useNeighbouringModeCtrls.enabled = 0;
+        c.nearCountCtrls.enabled = 1;
+        c.nearCountCtrls.nearCount = 3;
+        c.nearCountCtrls.nearNearCount = 3;
+        c.lpd1MvpBestMeList = 0;
+        c.candEliminationCtrls.enabled = 0;
+        c.reduceUnipredCandidates = 0;
+        break;
+    case 2:
+        c.reduceFilterIntra = 1;
+        c.redundantCandCtrls.scoreTh = 0;
+        c.useNeighbouringModeCtrls.enabled = 1;
+        c.nearCountCtrls.enabled = 1;
+        c.nearCountCtrls.nearCount = 3;
+        c.nearCountCtrls.nearNearCount = 3;
+        c.lpd1MvpBestMeList = 0;
+        c.candEliminationCtrls.enabled = 1;
+        c.candEliminationCtrls.dcOnlyTh =
+            (uint16_t)(isLpd1 ? (flatIpp ? 200 : notLast ? 30 : 200)
+                              : (notLast ? 10 : 200));
+        c.candEliminationCtrls.skipDcTh = 0;
+        c.reduceUnipredCandidates = 0;
+        break;
+    case 3:
+        c.reduceFilterIntra = 1;
+        c.redundantCandCtrls.scoreTh = 0;
+        c.useNeighbouringModeCtrls.enabled = 1;
+        c.nearCountCtrls.enabled = 1;
+        c.nearCountCtrls.nearCount = 1;
+        c.nearCountCtrls.nearNearCount = 3;
+        c.lpd1MvpBestMeList = 0;
+        c.candEliminationCtrls.enabled = 1;
+        c.candEliminationCtrls.dcOnlyTh =
+            (uint16_t)(isLpd1 ? (flatIpp ? 200 : notLast ? 30 : 200)
+                              : (notLast ? 10 : 200));
+        c.candEliminationCtrls.skipDcTh = 0;
+        c.reduceUnipredCandidates = 1;
+        break;
+    case 4:
+        c.reduceFilterIntra = 1;
+        c.redundantCandCtrls.scoreTh = 8;
+        c.redundantCandCtrls.magTh = 64;
+        c.useNeighbouringModeCtrls.enabled = 1;
+        c.nearCountCtrls.enabled = 1;
+        c.nearCountCtrls.nearCount = 1;
+        c.nearCountCtrls.nearNearCount = 1;
+        c.lpd1MvpBestMeList = 0;
+        c.candEliminationCtrls.enabled = 1;
+        c.candEliminationCtrls.dcOnlyTh =
+            (uint16_t)(isLpd1 ? (flatIpp ? 600 : notLast ? 30 : 600)
+                              : (notLast ? 10 : 200));
+        c.candEliminationCtrls.skipDcTh = 0;
+        c.reduceUnipredCandidates = 1;
+        break;
+    case 5:
+        c.reduceFilterIntra = 1;
+        c.redundantCandCtrls.scoreTh = 8;
+        c.redundantCandCtrls.magTh = 64;
+        c.useNeighbouringModeCtrls.enabled = 1;
+        c.nearCountCtrls.enabled = 1;
+        c.nearCountCtrls.nearCount = 1;
+        c.nearCountCtrls.nearNearCount = 1;
+        c.lpd1MvpBestMeList = 1;
+        c.candEliminationCtrls.enabled = 1;
+        c.candEliminationCtrls.dcOnlyTh =
+            (uint16_t)(isLpd1 ? (flatIpp ? 800 : notLast ? 30 : 600)
+                              : (notLast ? 10 : 200));
+        c.candEliminationCtrls.skipDcTh = (uint16_t)(isNotLast ? 5 : 15);
+        c.reduceUnipredCandidates =
+            (uint8_t)(!isNotLast ||
+                      ((l0s && l1s && perc > 35) && meVar < 500 * qp && meDist < 500 * qp)
+                          ? 2
+                          : 1);
+        break;
+    case 6:
+        c.reduceFilterIntra = 1;
+        c.redundantCandCtrls.scoreTh = 8;
+        c.redundantCandCtrls.magTh = 64;
+        c.useNeighbouringModeCtrls.enabled = 1;
+        c.nearCountCtrls.enabled = 1;
+        c.nearCountCtrls.nearCount = 0;
+        c.nearCountCtrls.nearNearCount = 1;
+        c.lpd1MvpBestMeList = 1;
+        c.candEliminationCtrls.enabled = 1;
+        c.candEliminationCtrls.dcOnlyTh =
+            (uint16_t)(isLpd1 ? (flatIpp ? 800 : notLast ? 30 : 600)
+                              : (notLast ? 10 : 200));
+        c.candEliminationCtrls.skipDcTh = (uint16_t)(isNotLast ? 5 : 15);
+        c.reduceUnipredCandidates =
+            (uint8_t)(!isNotLast ||
+                      ((l0s && l1s && perc > 35) && meVar < 500 * qp && meDist < 500 * qp)
+                          ? 2
+                          : 1);
+        break;
+    default:
+        return;
+    }
+    if (!(l0c == 1 && l1c == 1 && bestOnly)) {
+        c.lpd1MvpBestMeList = 0;
+    }
+}
+
+// set_intra_ctrls, independent table fill (the TPL walls inert).
+static void oracleFillIntraLpd1(IntraCtrls& c, int level, bool skipIntra) {
+    if (skipIntra) level = 0;
+    static const uint8_t apl[10] = {0, 1, 2, 2, 3, 4, 4, 4, 4, 0};
+    if (level <= 9) {
+        c.enableIntra = level == 0 ? 0 : 1;
+        c.intraModeEnd = (level == 0 || level == 9) ? 0 : level <= 3 ? 12 : level == 4 ? 11 : 9;
+        c.angularPredLevel = apl[level];
+        c.pruneUsingBestMode = level >= 7 && level <= 8 ? 1 : 0;
+        c.pruneUsingEdgeInfo = level == 8;
+    }
+    // dist_based_ang_intra_level = 2
+    c.skipAngularDelta1Th = 20;
+    c.skipAngularDelta2Th = 10;
+    c.skipAngularDelta3Th = 5;
+}
+
+// The light-PD1 default composition, independent transcription
+// (:7456-7653).
+static void oracleLightPd1Default(LightPd1Ctx& c, const LightPd1Pcs& p) {
+    const int lpd1 = (int8_t)c.lpd1Ctrls.pd1Level;
+    c.lpd1GlobalmvBypassTh = 0;
+    // cand reduction level derivation (:7502-7520)
+    int candLvl = 0;
+    if (p.candReductionLevel) {
+        if (lpd1 <= LPD1_LVL_0) candLvl = 2;
+        else if (lpd1 <= LPD1_LVL_2) candLvl = 3;
+        else if (lpd1 <= LPD1_LVL_3) candLvl = 4;
+        else candLvl = 5;
+        if (candLvl) candLvl = std::max(candLvl, (int)p.candReductionLevel);
+    }
+    oracleFillCandReduction(c.candReductionCtrls, candLvl, p.pictureQp, p.me8x8CostVariance,
+                            p.me64x64Distortion, p.l0WasSkip, p.l1WasSkip, p.refSkipPerc, true,
+                            false, p.isNotLastLayer, p.refList0CountTry, p.refList1CountTry,
+                            p.useBestMeUnipredCandOnly);
+    // rdoq (:7522-7539)
+    int rdoqLvl = 0;
+    if (p.rdoqLevel) {
+        if (p.encMode <= ENC_M8) {
+            rdoqLvl = lpd1 <= LPD1_LVL_4 ? 1 : 0;
+        } else {
+            rdoqLvl = lpd1 <= LPD1_LVL_0 ? 4 : lpd1 <= LPD1_LVL_4 ? 5 : 0;
+        }
+        if (rdoqLvl) rdoqLvl = std::max(rdoqLvl, (int)p.rdoqLevel);
+    }
+    oracleFillRdoq(c.rdoqCtrls, rdoqLvl);
+    // coeff shaving pass-through (:7541)
+    oracleFillShaving(c.coeffShavingCtrls, p.coeffShavingLevel);
+    // me subpel (:7543-7573)
+    int subpelLvl = 0;
+    if (p.meSubpelLevel) {
+        if (lpd1 <= LPD1_LVL_0) {
+            subpelLvl = p.inputResolution <= INPUT_SIZE_480p_RANGE ? 7
+                : p.inputResolution <= INPUT_SIZE_1080p_RANGE ? 8 : 10;
+        } else {
+            subpelLvl = p.inputResolution <= INPUT_SIZE_480p_RANGE ? 8
+                : p.inputResolution <= INPUT_SIZE_1080p_RANGE ? 9 : 10;
+            if (((p.l0WasSkip && p.l1WasSkip && p.refSkipPerc > 50) ||
+                 (p.l0Was64x64Mvp && p.l1Was64x64Mvp)) &&
+                p.me8x8CostVariance < 200 * p.pictureQp &&
+                p.me64x64Distortion < 200 * p.pictureQp) {
+                subpelLvl = 0;
+            }
+        }
+        if (subpelLvl) subpelLvl = std::max(subpelLvl, (int)p.meSubpelLevel);
+    }
+    oracleFillSubpel(c.mdSubPelCtrls, subpelLvl);
+    // tx skip decision (:7575-7591)
+    int txdLvl;
+    if (lpd1 <= LPD1_LVL_2) {
+        txdLvl = 2;
+    } else {
+        txdLvl = 3;
+        if (((p.l0WasSkip && p.l1WasSkip && p.refSkipPerc > 35) &&
+             p.me8x8CostVariance < 800 * p.pictureQp &&
+             p.me64x64Distortion < 800 * p.pictureQp) ||
+            (p.me8x8CostVariance < 100 * p.pictureQp &&
+             p.me64x64Distortion < 100 * p.pictureQp)) {
+            txdLvl = 4;
+        }
+    }
+    // set_lpd1_tx_skip_decision_ctrls
+    if (txdLvl == 0) c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 0;
+    else if (txdLvl == 1) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 125;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 30;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 100;
+    } else if (txdLvl == 2) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 125;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 30;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 200;
+    } else if (txdLvl == 3) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 70;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 30;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 200;
+    } else if (txdLvl == 4) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 50;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 30;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 200;
+    } else if (txdLvl == 5) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 50;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 40;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 200;
+    }
+    // lpd1 tx (:7593-7612)
+    int txLvl;
+    if (lpd1 <= LPD1_LVL_2) {
+        txLvl = 3;
+    } else {
+        txLvl = 4;
+        if ((((p.l0WasSkip && p.l1WasSkip && p.refSkipPerc > 35) &&
+              p.me8x8CostVariance < 800 * p.pictureQp &&
+              p.me64x64Distortion < 800 * p.pictureQp) ||
+             (p.me8x8CostVariance < 100 * p.pictureQp &&
+              p.me64x64Distortion < 100 * p.pictureQp))) {
+            txLvl = 6;
+        }
+    }
+    // set_lpd1_tx_ctrls
+    {
+        const int t = txLvl;
+        c.lpd1TxCtrls.zeroYCoeffExit = t == 0 ? 0 : 1;
+        c.lpd1TxCtrls.chromaDetectorLevel =
+            (uint8_t)(t == 0 ? 0 : t == 6 ? 0 : t <= 2 ? 1 : t - 1);
+        c.lpd1TxCtrls.useUvShortcutsOnYCoeffs = t == 0 ? 0 : 1;
+        c.lpd1TxCtrls.useMds3ShortcutsTh = t == 0 ? 0 : 30;
+    }
+    // rd pct + chroma energy (:7614-7617)
+    c.lpd1BlkSkipLumaRdPct = lpd1 <= LPD1_LVL_2 ? 0 : 90;
+    c.lpd1ChromaSkipEnergyTh = 0;
+    // rate est (:7619-7633)
+    int rateLvl = 0;
+    if (p.rateEstLevel) {
+        rateLvl = lpd1 <= LPD1_LVL_0 ? 4 : 0;
+        if (rateLvl) rateLvl = std::max(rateLvl, (int)p.rateEstLevel);
+    }
+    {
+        static const int eCtx[5] = {0, 1, 1, 1, 0};
+        static const int eCoeff[5] = {0, 1, 0, 0, 0};
+        static const int eLvl[5] = {0, 1, 1, 2, 2};
+        static const int eOff[5] = {8, 0, 0, 0, 0};
+        static const int eFast[5] = {2, 1, 2, 2, 2};
+        c.rateEstCtrls.updateSkipCtxDcSignCtx = eCtx[rateLvl] != 0;
+        c.rateEstCtrls.updateSkipCoeffCtx = eCoeff[rateLvl] != 0;
+        c.rateEstCtrls.coeffRateEstLvl = (uint8_t)eLvl[rateLvl];
+        c.rateEstCtrls.lpd0QpOffset = (int8_t)eOff[rateLvl];
+        c.rateEstCtrls.pd0FastCoeffEstLevel = (uint8_t)eFast[rateLvl];
+    }
+    c.approxInterRate = std::max((uint8_t)1, p.approxInterRate);
+    // pf (:7637)
+    c.pfCtrls.pfShape = 0;
+    // intra (:7639-7652)
+    int intraLvl = 0;
+    if (p.intraLevel) {
+        intraLvl = lpd1 <= LPD1_LVL_2 ? 6 : 9;
+        if (intraLvl) intraLvl = std::max(intraLvl, (int)p.intraLevel);
+    }
+    oracleFillIntraLpd1(c.intraCtrls, intraLvl, p.skipIntra);
+    c.intraSetCtx.skipIntra = !(c.intraCtrls.enableIntra) || p.skipIntra;
+    // the tail (:7654-7675)
+    c.shutFastRate = false;
+    c.uvCtrls.enabled = 1;
+    c.uvCtrls.uvMode = 1;
+    c.cflCtrls.enabled = false;
+    c.mdDisallowNsqSearch = true;
+    c.newNearestInjection = true;
+    c.blkSkipDecision = true;
+    c.rateEstCtrls.updateSkipCtxDcSignCtx = false;
+    c.rateEstCtrls.updateSkipCoeffCtx = false;
+    c.subresCtrls.oddToEvenDeviationTh = 0;
+    c.interIntraCtrls.enabled = 0;
+    c.interIntraCtrls.useRdModel = 0;
+    c.interIntraCtrls.wedgeModeSq = 0;
+    c.interIntraCtrls.wedgeModeNsq = 0;
+}
+
+TEST_CASE("sig_deriv_enc_dec_light_pd1_default - the composition grid, vs the oracle") {
+    // :7456-7653. 6 pd1 levels x 4 presets x 3 resolutions x 3 qps x 4
+    // skip/mvp walls x 3 skip-perc x 3 variance regimes = 7,776 cells.
+    for (int pd1 : {-1, 0, 2, 3, 5, 6})
+        for (int em : {(int)ENC_M7, (int)ENC_M8, (int)ENC_M9, (int)ENC_M10})
+            for (int res : {INPUT_SIZE_480p_RANGE, INPUT_SIZE_1080p_RANGE, INPUT_SIZE_4K_RANGE})
+                for (uint32_t qp : {0u, 30u, 60u})
+                    for (int l0s = 0; l0s <= 1; ++l0s)
+                        for (int l1m = 0; l1m <= 1; ++l1m)
+                            for (int perc : {20, 40, 60})
+                                for (int vr : {0, 1, 2}) {
+                                    LightPd1Pcs p;
+                                    std::memset(&p, 0, sizeof(p));
+                                    p.encMode = (EncMode)em;
+                                    p.useFlatIpp = false;
+                                    p.inputResolution = (ResolutionRange)res;
+                                    p.pictureQp = qp;
+                                    p.me8x8CostVariance =
+                                        vr == 0 ? 0xFFFFFFFFu : vr == 1 ? 99u : 999999u;
+                                    p.me64x64Distortion =
+                                        vr == 0 ? 0xFFFFFFFFu : vr == 1 ? 99u : 999999u;
+                                    p.l0WasSkip = (uint8_t)l0s;
+                                    p.l1WasSkip = 1;
+                                    p.l0Was64x64Mvp = (uint8_t)l1m;
+                                    p.l1Was64x64Mvp = 1;
+                                    p.refSkipPerc = (uint8_t)perc;
+                                    p.candReductionLevel = 1;
+                                    p.rdoqLevel = 1;
+                                    p.coeffShavingLevel = 1;
+                                    p.meSubpelLevel = 1;
+                                    p.rateEstLevel = 1;
+                                    p.approxInterRate = 2;
+                                    p.intraLevel = 1;
+                                    p.skipIntra = false;
+                                    p.refList0CountTry = 1;
+                                    p.refList1CountTry = 1;
+                                    p.useBestMeUnipredCandOnly = true;
+                                    p.isNotLastLayer = false;
+                                    p.rtcTune = false;
+                                    p.hierarchicalLevels = 3;
+                                    p.tplEnable = false;
+                                    LightPd1Ctx c;
+                                    std::memset(&c, 0xA5, sizeof(c));
+                                    c.lpd1Ctrls.pd1Level = (uint8_t)pd1;
+                                    c.lpd1Ctrls.costThDist[0] = 1;
+                                    sigDerivEncDecLightPd1Default(p, c);
+
+                                    LightPd1Ctx e;
+                                    std::memset(&e, 0xA5, sizeof(e));
+                                    e.lpd1Ctrls.pd1Level = (uint8_t)pd1;
+                                    e.lpd1Ctrls.costThDist[0] = 1;
+                                    oracleLightPd1Default(e, p);
+
+                                    CHECK(c.lpd1GlobalmvBypassTh == e.lpd1GlobalmvBypassTh);
+                                    CHECK(c.candReductionCtrls.lpd1MvpBestMeList ==
+                                          e.candReductionCtrls.lpd1MvpBestMeList);
+                                    CHECK(c.candReductionCtrls.reduceUnipredCandidates ==
+                                          e.candReductionCtrls.reduceUnipredCandidates);
+                                    CHECK(c.candReductionCtrls.reduceFilterIntra ==
+                                          e.candReductionCtrls.reduceFilterIntra);
+                                    CHECK(c.candReductionCtrls.nearCountCtrls.nearCount ==
+                                          e.candReductionCtrls.nearCountCtrls.nearCount);
+                                    CHECK(c.candReductionCtrls.candEliminationCtrls.dcOnlyTh ==
+                                          e.candReductionCtrls.candEliminationCtrls.dcOnlyTh);
+                                    CHECK(c.candReductionCtrls.candEliminationCtrls.skipDcTh ==
+                                          e.candReductionCtrls.candEliminationCtrls.skipDcTh);
+                                    CHECK(c.rdoqCtrls.enabled == e.rdoqCtrls.enabled);
+                                    CHECK(c.rdoqCtrls.cutOffNum == e.rdoqCtrls.cutOffNum);
+                                    CHECK(c.rdoqCtrls.eobTh == e.rdoqCtrls.eobTh);
+                                    CHECK(c.rdoqCtrls.eobFastTh == e.rdoqCtrls.eobFastTh);
+                                    CHECK(c.rdoqCtrls.skipUv == e.rdoqCtrls.skipUv);
+                                    CHECK(c.coeffShavingCtrls.enabled ==
+                                          e.coeffShavingCtrls.enabled);
+                                    CHECK(c.coeffShavingCtrls.rdZeroStrength ==
+                                          e.coeffShavingCtrls.rdZeroStrength);
+                                    CHECK(c.mdSubPelCtrls.enabled == e.mdSubPelCtrls.enabled);
+                                    CHECK(c.mdSubPelCtrls.subpelSearchType ==
+                                          e.mdSubPelCtrls.subpelSearchType);
+                                    CHECK(c.mdSubPelCtrls.subpelItersPerStep ==
+                                          e.mdSubPelCtrls.subpelItersPerStep);
+                                    CHECK(c.mdSubPelCtrls.maxPrecision ==
+                                          e.mdSubPelCtrls.maxPrecision);
+                                    CHECK(c.mdSubPelCtrls.subpelSearchMethod ==
+                                          e.mdSubPelCtrls.subpelSearchMethod);
+                                    CHECK(c.mdSubPelCtrls.predVarianceTh ==
+                                          e.mdSubPelCtrls.predVarianceTh);
+                                    CHECK(c.mdSubPelCtrls.absThMult == e.mdSubPelCtrls.absThMult);
+                                    CHECK(c.mdSubPelCtrls.minBlkSz == e.mdSubPelCtrls.minBlkSz);
+                                    CHECK(c.mdSubPelCtrls.biasFp == e.mdSubPelCtrls.biasFp);
+                                    CHECK(c.mdSubPelCtrls.skipDiagRefinement ==
+                                          e.mdSubPelCtrls.skipDiagRefinement);
+                                    CHECK(c.mdSubPelCtrls.mvpTh == e.mdSubPelCtrls.mvpTh);
+                                    CHECK(c.lpd1TxSkipDecisionCtrls.skipTxScoreTh ==
+                                          e.lpd1TxSkipDecisionCtrls.skipTxScoreTh);
+                                    CHECK(c.lpd1TxSkipDecisionCtrls.distEnergyTh ==
+                                          e.lpd1TxSkipDecisionCtrls.distEnergyTh);
+                                    CHECK(c.lpd1TxSkipDecisionCtrls.rdSkipTh ==
+                                          e.lpd1TxSkipDecisionCtrls.rdSkipTh);
+                                    CHECK(c.lpd1TxCtrls.zeroYCoeffExit ==
+                                          e.lpd1TxCtrls.zeroYCoeffExit);
+                                    CHECK(c.lpd1TxCtrls.chromaDetectorLevel ==
+                                          e.lpd1TxCtrls.chromaDetectorLevel);
+                                    CHECK(c.lpd1TxCtrls.useUvShortcutsOnYCoeffs ==
+                                          e.lpd1TxCtrls.useUvShortcutsOnYCoeffs);
+                                    CHECK(c.lpd1TxCtrls.useMds3ShortcutsTh ==
+                                          e.lpd1TxCtrls.useMds3ShortcutsTh);
+                                    CHECK(c.lpd1BlkSkipLumaRdPct == e.lpd1BlkSkipLumaRdPct);
+                                    CHECK(c.lpd1ChromaSkipEnergyTh ==
+                                          e.lpd1ChromaSkipEnergyTh);
+                                    CHECK(c.rateEstCtrls.coeffRateEstLvl ==
+                                          e.rateEstCtrls.coeffRateEstLvl);
+                                    CHECK(c.rateEstCtrls.updateSkipCtxDcSignCtx ==
+                                          e.rateEstCtrls.updateSkipCtxDcSignCtx);
+                                    CHECK(c.rateEstCtrls.updateSkipCoeffCtx ==
+                                          e.rateEstCtrls.updateSkipCoeffCtx);
+                                    CHECK(c.approxInterRate == e.approxInterRate);
+                                    CHECK(c.pfCtrls.pfShape == e.pfCtrls.pfShape);
+                                    CHECK(c.intraCtrls.enableIntra == e.intraCtrls.enableIntra);
+                                    CHECK(c.intraCtrls.intraModeEnd == e.intraCtrls.intraModeEnd);
+                                    CHECK(c.intraCtrls.angularPredLevel ==
+                                          e.intraCtrls.angularPredLevel);
+                                    CHECK(c.intraCtrls.skipAngularDelta1Th ==
+                                          e.intraCtrls.skipAngularDelta1Th);
+                                    CHECK(c.intraSetCtx.skipIntra == e.intraSetCtx.skipIntra);
+                                    CHECK(c.uvCtrls.enabled == e.uvCtrls.enabled);
+                                    CHECK(c.uvCtrls.uvMode == e.uvCtrls.uvMode);
+                                    CHECK(c.cflCtrls.enabled == e.cflCtrls.enabled);
+                                    CHECK(c.mdDisallowNsqSearch == e.mdDisallowNsqSearch);
+                                    CHECK(c.newNearestInjection == e.newNearestInjection);
+                                    CHECK(c.blkSkipDecision == e.blkSkipDecision);
+                                    CHECK(c.subresCtrls.oddToEvenDeviationTh ==
+                                          e.subresCtrls.oddToEvenDeviationTh);
+                                    CHECK(c.interIntraCtrls.enabled == e.interIntraCtrls.enabled);
+                                }
+}
+
+
+// The light-PD1 rtc composition, independent transcription
+// (:7655-7889).
+static void oracleLightPd1Rtc(LightPd1Ctx& c, const LightPd1Pcs& p) {
+    const int lpd1 = (int8_t)c.lpd1Ctrls.pd1Level;
+    c.lpd1GlobalmvBypassTh = 0;
+    int candLvl = 0;
+    if (p.candReductionLevel) {
+        if (lpd1 <= LPD1_LVL_0) candLvl = 2;
+        else if (lpd1 <= LPD1_LVL_2) candLvl = 3;
+        else if (lpd1 <= LPD1_LVL_3) candLvl = 4;
+        else candLvl = 5;
+        if (candLvl) candLvl = std::max(candLvl, (int)p.candReductionLevel);
+    }
+    oracleFillCandReduction(c.candReductionCtrls, candLvl, p.pictureQp, p.me8x8CostVariance,
+                            p.me64x64Distortion, p.l0WasSkip, p.l1WasSkip, p.refSkipPerc, true,
+                            p.useFlatIpp, p.isNotLastLayer, p.refList0CountTry,
+                            p.refList1CountTry, p.useBestMeUnipredCandOnly);
+    int rdoqLvl = 0;
+    if (p.rdoqLevel) {
+        rdoqLvl = lpd1 <= LPD1_LVL_4 ? 1 : 0;
+        if (rdoqLvl) rdoqLvl = std::max(rdoqLvl, (int)p.rdoqLevel);
+    }
+    oracleFillRdoq(c.rdoqCtrls, rdoqLvl);
+    oracleFillShaving(c.coeffShavingCtrls, p.coeffShavingLevel);
+    int subpelLvl = 0;
+    if (p.meSubpelLevel) {
+        if (p.useFlatIpp) {
+            if (p.encMode <= ENC_M8) {
+                if (lpd1 <= LPD1_LVL_0) subpelLvl = 4;
+                else if (lpd1 <= LPD1_LVL_3) subpelLvl = 7;
+                else {
+                    subpelLvl = 8;
+                    if (((p.l0WasSkip && p.l1WasSkip && p.refSkipPerc > 50) ||
+                         (p.l0Was64x64Mvp && p.l1Was64x64Mvp)) &&
+                        p.me8x8CostVariance < 200 * p.pictureQp &&
+                        p.me64x64Distortion < 200 * p.pictureQp) {
+                        subpelLvl = 0;
+                    }
+                }
+            } else {
+                if (lpd1 <= LPD1_LVL_0) subpelLvl = 6;
+                else if (lpd1 <= LPD1_LVL_3) subpelLvl = 7;
+                else {
+                    subpelLvl = 8;
+                    if (((p.l0WasSkip && p.l1WasSkip && p.refSkipPerc > 50) ||
+                         (p.l0Was64x64Mvp && p.l1Was64x64Mvp)) &&
+                        p.me8x8CostVariance < 200 * p.pictureQp &&
+                        p.me64x64Distortion < 200 * p.pictureQp) {
+                        subpelLvl = 0;
+                    }
+                }
+            }
+        } else {
+            if (lpd1 <= LPD1_LVL_0) subpelLvl = 6;
+            else if (lpd1 <= LPD1_LVL_3) subpelLvl = 7;
+            else {
+                subpelLvl = 8;
+                if (((p.l0WasSkip && p.l1WasSkip && p.refSkipPerc > 50) ||
+                     (p.l0Was64x64Mvp && p.l1Was64x64Mvp)) &&
+                    p.me8x8CostVariance < 200 * p.pictureQp &&
+                    p.me64x64Distortion < 200 * p.pictureQp) {
+                    subpelLvl = 0;
+                }
+            }
+        }
+        if (subpelLvl) subpelLvl = std::max(subpelLvl, (int)p.meSubpelLevel);
+    }
+    oracleFillSubpel(c.mdSubPelCtrls, subpelLvl);
+    // tx skip decision (:7772-7796)
+    int txdLvl;
+    if (lpd1 <= LPD1_LVL_0) {
+        txdLvl = 1;
+    } else if (lpd1 <= LPD1_LVL_2) {
+        txdLvl = 2;
+    } else if (lpd1 <= LPD1_LVL_4) {
+        txdLvl = 3;
+    } else {
+        const uint32_t strict = p.pictureQp * (lpd1 <= LPD1_LVL_5 ? 100 : 800);
+        const uint32_t relaxed = p.pictureQp * (lpd1 <= LPD1_LVL_5 ? 800 : 1200);
+        const uint32_t distRelaxed = p.pictureQp * (lpd1 <= LPD1_LVL_5 ? 800 : 1200);
+        const int cand = lpd1 <= LPD1_LVL_5 ? 4 : 5;
+        txdLvl = 3;
+        if (p.me8x8CostVariance < strict ||
+            (p.me8x8CostVariance < relaxed && p.me64x64Distortion < distRelaxed)) {
+            txdLvl = cand;
+        }
+    }
+    if (txdLvl == 0) c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 0;
+    else if (txdLvl == 1) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 125;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 30;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 100;
+    } else if (txdLvl == 2) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 125;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 30;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 200;
+    } else if (txdLvl == 3) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 70;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 30;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 200;
+    } else if (txdLvl == 4) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 50;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 30;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 200;
+    } else if (txdLvl == 5) {
+        c.lpd1TxSkipDecisionCtrls.skipTxScoreTh = 50;
+        c.lpd1TxSkipDecisionCtrls.distEnergyTh = 40;
+        c.lpd1TxSkipDecisionCtrls.rdSkipTh = 200;
+    }
+    // lpd1 tx (:7798-7814)
+    int txLvl;
+    if (p.useFlatIpp && p.encMode <= ENC_M7) {
+        if (lpd1 <= LPD1_LVL_0) txLvl = 0;
+        else if (lpd1 <= LPD1_LVL_4) txLvl = 5;
+        else txLvl = 6;
+    } else {
+        if (lpd1 <= LPD1_LVL_4) txLvl = 5;
+        else txLvl = 6;
+    }
+    {
+        const int t = txLvl;
+        c.lpd1TxCtrls.zeroYCoeffExit = t == 0 ? 0 : 1;
+        c.lpd1TxCtrls.chromaDetectorLevel =
+            (uint8_t)(t == 0 ? 0 : t == 6 ? 0 : t <= 2 ? 1 : t - 1);
+        c.lpd1TxCtrls.useUvShortcutsOnYCoeffs = t == 0 ? 0 : 1;
+        c.lpd1TxCtrls.useMds3ShortcutsTh = t == 0 ? 0 : 30;
+    }
+    // rd pct + chroma energy (:7816-7823)
+    c.lpd1BlkSkipLumaRdPct = lpd1 <= LPD1_LVL_2 ? 90 : lpd1 <= LPD1_LVL_4 ? 75 : 60;
+    c.lpd1ChromaSkipEnergyTh = 5;
+    int rateLvl = 0;
+    if (p.rateEstLevel) {
+        rateLvl = lpd1 <= LPD1_LVL_0 ? 4 : 0;
+        if (rateLvl) rateLvl = std::max(rateLvl, (int)p.rateEstLevel);
+    }
+    {
+        static const int eCtx[5] = {0, 1, 1, 1, 0};
+        static const int eCoeff[5] = {0, 1, 0, 0, 0};
+        static const int eLvl[5] = {0, 1, 1, 2, 2};
+        static const int eOff[5] = {8, 0, 0, 0, 0};
+        static const int eFast[5] = {2, 1, 2, 2, 2};
+        c.rateEstCtrls.updateSkipCtxDcSignCtx = eCtx[rateLvl] != 0;
+        c.rateEstCtrls.updateSkipCoeffCtx = eCoeff[rateLvl] != 0;
+        c.rateEstCtrls.coeffRateEstLvl = (uint8_t)eLvl[rateLvl];
+        c.rateEstCtrls.lpd0QpOffset = (int8_t)eOff[rateLvl];
+        c.rateEstCtrls.pd0FastCoeffEstLevel = (uint8_t)eFast[rateLvl];
+    }
+    c.approxInterRate = std::max((uint8_t)1, p.approxInterRate);
+    c.pfCtrls.pfShape = 0;
+    // intra (:7840-7862): up to LPD1_LVL_5 configure; 6 = VLPD1
+    if (lpd1 <= LPD1_LVL_5) {
+        int intraLvl = 0;
+        if (p.intraLevel) {
+            intraLvl = lpd1 <= LPD1_LVL_2 ? 6 : 9;
+            if (intraLvl) intraLvl = std::max(intraLvl, (int)p.intraLevel);
+        }
+        oracleFillIntraLpd1(c.intraCtrls, intraLvl, p.skipIntra);
+        c.intraSetCtx.skipIntra = !(c.intraCtrls.enableIntra) || p.skipIntra;
+    } else {
+        c.intraCtrls.enableIntra = (p.intraLevel && !p.skipIntra) ? 1 : 0;
+        c.intraSetCtx.skipIntra = p.skipIntra;
+    }
+    c.shutFastRate = false;
+    c.uvCtrls.enabled = 1;
+    c.uvCtrls.uvMode = 1;
+    c.cflCtrls.enabled = false;
+    c.mdDisallowNsqSearch = true;
+    c.newNearestInjection = true;
+    c.blkSkipDecision = true;
+    c.rateEstCtrls.updateSkipCtxDcSignCtx = false;
+    c.rateEstCtrls.updateSkipCoeffCtx = false;
+    c.subresCtrls.oddToEvenDeviationTh = 0;
+    c.interIntraCtrls.enabled = 0;
+    c.interIntraCtrls.useRdModel = 0;
+    c.interIntraCtrls.wedgeModeSq = 0;
+    c.interIntraCtrls.wedgeModeNsq = 0;
+}
+
+TEST_CASE("sig_deriv_enc_dec_light_pd1_rtc - the composition grid, vs the oracle") {
+    // :7655-7889. 7 pd1 levels x 3 presets x 2 flat-ipp x 3 qps x 4
+    // walls x 3 perc x 3 variances = 15,120 cells.
+    for (int pd1 : {-1, 0, 2, 3, 5, 6})
+        for (int em : {(int)ENC_M6, (int)ENC_M7, (int)ENC_M9})
+            for (int flat = 0; flat <= 1; ++flat)
+                for (uint32_t qp : {0u, 30u, 60u})
+                    for (int l0s = 0; l0s <= 1; ++l0s)
+                        for (int l1m = 0; l1m <= 1; ++l1m)
+                            for (int perc : {20, 40, 60})
+                                for (int vr : {0, 1, 2}) {
+                                    LightPd1Pcs p;
+                                    std::memset(&p, 0, sizeof(p));
+                                    p.encMode = (EncMode)em;
+                                    p.useFlatIpp = flat == 1;
+                                    p.inputResolution = INPUT_SIZE_1080p_RANGE;
+                                    p.pictureQp = qp;
+                                    p.me8x8CostVariance =
+                                        vr == 0 ? 0xFFFFFFFFu : vr == 1 ? 99u : 999999u;
+                                    p.me64x64Distortion =
+                                        vr == 0 ? 0xFFFFFFFFu : vr == 1 ? 99u : 999999u;
+                                    p.l0WasSkip = (uint8_t)l0s;
+                                    p.l1WasSkip = 1;
+                                    p.l0Was64x64Mvp = (uint8_t)l1m;
+                                    p.l1Was64x64Mvp = 1;
+                                    p.refSkipPerc = (uint8_t)perc;
+                                    p.candReductionLevel = 1;
+                                    p.rdoqLevel = 1;
+                                    p.coeffShavingLevel = 1;
+                                    p.meSubpelLevel = 1;
+                                    p.rateEstLevel = 1;
+                                    p.approxInterRate = 2;
+                                    p.intraLevel = 1;
+                                    p.skipIntra = false;
+                                    p.refList0CountTry = 1;
+                                    p.refList1CountTry = 1;
+                                    p.useBestMeUnipredCandOnly = true;
+                                    p.isNotLastLayer = false;
+                                    p.rtcTune = true;
+                                    p.hierarchicalLevels = flat == 1 ? 0 : 3;
+                                    p.tplEnable = false;
+                                    LightPd1Ctx c;
+                                    std::memset(&c, 0xA5, sizeof(c));
+                                    c.lpd1Ctrls.pd1Level = (uint8_t)pd1;
+                                    c.lpd1Ctrls.costThDist[0] = 1;
+                                    sigDerivEncDecLightPd1Rtc(p, c);
+
+                                    LightPd1Ctx e;
+                                    std::memset(&e, 0xA5, sizeof(e));
+                                    e.lpd1Ctrls.pd1Level = (uint8_t)pd1;
+                                    e.lpd1Ctrls.costThDist[0] = 1;
+                                    oracleLightPd1Rtc(e, p);
+
+                                    CHECK(c.lpd1GlobalmvBypassTh == e.lpd1GlobalmvBypassTh);
+                                    CHECK(c.candReductionCtrls.lpd1MvpBestMeList ==
+                                          e.candReductionCtrls.lpd1MvpBestMeList);
+                                    CHECK(c.candReductionCtrls.reduceUnipredCandidates ==
+                                          e.candReductionCtrls.reduceUnipredCandidates);
+                                    CHECK(c.candReductionCtrls.candEliminationCtrls.dcOnlyTh ==
+                                          e.candReductionCtrls.candEliminationCtrls.dcOnlyTh);
+                                    CHECK(c.rdoqCtrls.enabled == e.rdoqCtrls.enabled);
+                                    CHECK(c.rdoqCtrls.cutOffNum == e.rdoqCtrls.cutOffNum);
+                                    CHECK(c.rdoqCtrls.eobTh == e.rdoqCtrls.eobTh);
+                                    CHECK(c.mdSubPelCtrls.enabled == e.mdSubPelCtrls.enabled);
+                                    CHECK(c.mdSubPelCtrls.subpelSearchMethod ==
+                                          e.mdSubPelCtrls.subpelSearchMethod);
+                                    CHECK(c.mdSubPelCtrls.maxPrecision ==
+                                          e.mdSubPelCtrls.maxPrecision);
+                                    CHECK(c.mdSubPelCtrls.absThMult == e.mdSubPelCtrls.absThMult);
+                                    CHECK(c.mdSubPelCtrls.predVarianceTh ==
+                                          e.mdSubPelCtrls.predVarianceTh);
+                                    CHECK(c.mdSubPelCtrls.biasFp == e.mdSubPelCtrls.biasFp);
+                                    CHECK(c.mdSubPelCtrls.minBlkSz == e.mdSubPelCtrls.minBlkSz);
+                                    CHECK(c.lpd1TxSkipDecisionCtrls.skipTxScoreTh ==
+                                          e.lpd1TxSkipDecisionCtrls.skipTxScoreTh);
+                                    CHECK(c.lpd1TxSkipDecisionCtrls.rdSkipTh ==
+                                          e.lpd1TxSkipDecisionCtrls.rdSkipTh);
+                                    CHECK(c.lpd1TxCtrls.zeroYCoeffExit ==
+                                          e.lpd1TxCtrls.zeroYCoeffExit);
+                                    CHECK(c.lpd1TxCtrls.chromaDetectorLevel ==
+                                          e.lpd1TxCtrls.chromaDetectorLevel);
+                                    CHECK(c.lpd1TxCtrls.useMds3ShortcutsTh ==
+                                          e.lpd1TxCtrls.useMds3ShortcutsTh);
+                                    CHECK(c.lpd1BlkSkipLumaRdPct == e.lpd1BlkSkipLumaRdPct);
+                                    CHECK(c.lpd1ChromaSkipEnergyTh == e.lpd1ChromaSkipEnergyTh);
+                                    CHECK(c.rateEstCtrls.coeffRateEstLvl ==
+                                          e.rateEstCtrls.coeffRateEstLvl);
+                                    CHECK(c.approxInterRate == e.approxInterRate);
+                                    CHECK(c.intraCtrls.enableIntra == e.intraCtrls.enableIntra);
+                                    CHECK(c.intraCtrls.intraModeEnd == e.intraCtrls.intraModeEnd);
+                                    CHECK(c.intraCtrls.angularPredLevel ==
+                                          e.intraCtrls.angularPredLevel);
+                                    CHECK(c.intraSetCtx.skipIntra == e.intraSetCtx.skipIntra);
+                                    CHECK(c.uvCtrls.uvMode == e.uvCtrls.uvMode);
+                                    CHECK(c.mdDisallowNsqSearch == e.mdDisallowNsqSearch);
+                                    CHECK(c.blkSkipDecision == e.blkSkipDecision);
+                                    CHECK(c.subresCtrls.oddToEvenDeviationTh ==
+                                          e.subresCtrls.oddToEvenDeviationTh);
+                                    CHECK(c.interIntraCtrls.enabled == e.interIntraCtrls.enabled);
+                                }
+}

@@ -1956,5 +1956,80 @@ struct EncDecPd0Ctx {
 // rate-est tail unwritten (pinned by test).
 void sigDerivEncDecPd0(EncDecPd0Pcs& pcs, const EncDecPd0Scs& scs, EncDecPd0Ctx& ctx);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 10: svt_aom_sig_deriv_enc_dec_light_pd1_default
+// (:7456-:7653) and svt_aom_sig_deriv_enc_dec_light_pd1_rtc
+// (:7655-:7889).
+// ---------------------------------------------------------------------------
+// The pcs/ppcs wall surface of both light-PD1 compositions. The ref-
+// object reads (:7487-:7499 / :7683-:7695) thread as the pre-read
+// scalars + the two is_ref_same_size gates (the EbReferenceObject wall
+// folded - the MeModeCfg precedent).
+struct LightPd1Pcs {
+    EncMode encMode;                    // pcs->enc_mode
+    bool useFlatIpp;                    // ppcs->hierarchical_levels == 0 (rtc)
+    ResolutionRange inputResolution;    // ppcs->input_resolution (default)
+    std::uint32_t pictureQp;            // ppcs->picture_qp
+    std::uint32_t me8x8CostVariance;    // pre-read; ~0 when no ref (:7477)
+    std::uint32_t me64x64Distortion;    // pre-read; ~0 when no ref (:7478)
+    std::uint8_t l0WasSkip, l1WasSkip;
+    std::uint8_t l0Was64x64Mvp, l1Was64x64Mvp;
+    std::uint8_t refSkipPerc;           // pcs->ref_skip_percentage
+    std::uint8_t candReductionLevel;    // pcs->cand_reduction_level
+    std::uint8_t rdoqLevel;             // pcs->rdoq_level
+    std::uint8_t coeffShavingLevel;     // pcs->coeff_shaving_level
+    std::uint8_t meSubpelLevel;         // pcs->me_subpel_level
+    std::uint32_t rateEstLevel;         // pcs->rate_est_level
+    std::uint8_t approxInterRate;       // pcs->approx_inter_rate
+    std::uint8_t intraLevel;            // pcs->intra_level
+    bool skipIntra;                     // pcs->skip_intra
+    // the set_cand_reduction_ctrls wall (EMC2-C0 / EMC1 carrier fields):
+    std::uint8_t refList0CountTry;
+    std::uint8_t refList1CountTry;
+    bool useBestMeUnipredCandOnly;
+    bool isNotLastLayer;                // !frame_is_leaf(pcs->ppcs)
+    bool rtcTune;                       // pcs->scs->static_config.rtc
+    std::uint8_t hierarchicalLevels;    // ppcs->hierarchical_levels
+    // the set_intra_ctrls wall (embedded):
+    bool tplEnable;
+    std::uint8_t tplIntraModeEnd;
+    std::uint8_t refIntraPercentage;
+    SbTplPcs tpl;
+    SbTplCtx tplCtx;
+};
+
+// The written ctx surface of both light-PD1 compositions (each field
+// cites its write site; L = default :7502-:7652, R = rtc :7699-:7888).
+struct LightPd1Ctx {
+    Lpd1Ctrls lpd1Ctrls;                // read: pd1_level (:7459/:7658)
+    std::uint16_t lpd1GlobalmvBypassTh; // = 0 (:7500/:7697)
+    CandReductionCtrls candReductionCtrls;
+    RdoqCtrls rdoqCtrls;
+    CoeffShavingCtrls coeffShavingCtrls;
+    MdSubPelSearchCtrls mdSubPelCtrls;
+    Lpd1TxSkipDecisionCtrls lpd1TxSkipDecisionCtrls;
+    Lpd1TxCtrls lpd1TxCtrls;
+    std::uint8_t lpd1BlkSkipLumaRdPct;  // (:7593-:7599 / :7816-:7822)
+    std::uint8_t lpd1ChromaSkipEnergyTh;
+    MdRateEstCtrls rateEstCtrls;
+    std::uint8_t approxInterRate;
+    PfCtrls pfCtrls;
+    IntraCtrls intraCtrls;
+    IntraSetCtx intraSetCtx;
+    bool shutFastRate;
+    UvCtrls uvCtrls;
+    CflCtrls cflCtrls;
+    bool mdDisallowNsqSearch;
+    bool newNearestInjection;
+    bool blkSkipDecision;
+    SubresCtrls subresCtrls;
+    InterIntraCompCtrls interIntraCtrls;
+};
+
+// svt_aom_sig_deriv_enc_dec_light_pd1_default (:7456-7653), 1:1.
+void sigDerivEncDecLightPd1Default(LightPd1Pcs& pcs, LightPd1Ctx& ctx);
+// svt_aom_sig_deriv_enc_dec_light_pd1_rtc (:7655-7889), 1:1.
+void sigDerivEncDecLightPd1Rtc(LightPd1Pcs& pcs, LightPd1Ctx& ctx);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

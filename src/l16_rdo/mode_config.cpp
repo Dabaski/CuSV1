@@ -7564,3 +7564,437 @@ void sigDerivEncDecPd0(EncDecPd0Pcs& pcs, const EncDecPd0Scs& scs, EncDecPd0Ctx&
 
 }  // namespace mode_config
 }  // namespace l16_rdo
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 10: svt_aom_sig_deriv_enc_dec_light_pd1_{default,rtc}
+// (enc_mode_config.c:7456-7653 / :7655-7889).
+// ---------------------------------------------------------------------------
+namespace l16_rdo {
+namespace mode_config {
+
+// svt_aom_sig_deriv_enc_dec_light_pd1_default (enc_mode_config.c:7456-7653).
+void sigDerivEncDecLightPd1Default(LightPd1Pcs& pcs, LightPd1Ctx& ctx) {
+    const Pd1Level lpd1Level = (Pd1Level)(std::int8_t)ctx.lpd1Ctrls.pd1Level;
+    ctx.lpd1GlobalmvBypassTh = 0;
+
+    // Set candidate reduction levels
+    std::uint8_t candReductionLevel = 0;
+    if (pcs.candReductionLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            candReductionLevel = 2;
+        } else if (lpd1Level <= LPD1_LVL_2) {
+            candReductionLevel = 3;
+        } else if (lpd1Level <= LPD1_LVL_3) {
+            candReductionLevel = 4;
+        } else {
+            candReductionLevel = 5;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (candReductionLevel) {
+            candReductionLevel =
+                (std::uint8_t)std::max((int)candReductionLevel, (int)pcs.candReductionLevel);
+        }
+    }
+
+    {
+        CandReductionPcs crPcs;
+        crPcs.refList0CountTry = pcs.refList0CountTry;
+        crPcs.refList1CountTry = pcs.refList1CountTry;
+        crPcs.useBestMeUnipredCandOnly = pcs.useBestMeUnipredCandOnly;
+        CandReductionCtx crCtx;
+        crCtx.pd1Level = ctx.lpd1Ctrls.pd1Level;
+        crCtx.isNotLastLayer = pcs.isNotLastLayer;
+        crCtx.rtc = pcs.rtcTune;
+        crCtx.hierarchicalLevels = pcs.hierarchicalLevels;
+        setCandReductionCtrls(ctx.candReductionCtrls, candReductionLevel, crPcs, crCtx,
+                              pcs.pictureQp, pcs.me8x8CostVariance, pcs.me64x64Distortion,
+                              pcs.l0WasSkip, pcs.l1WasSkip, pcs.refSkipPerc);
+    }
+
+    std::uint8_t rdoqLevel = 0;
+    if (pcs.rdoqLevel) {
+        if (pcs.encMode <= ENC_M8) {
+            if (lpd1Level <= LPD1_LVL_4) {
+                rdoqLevel = 1;
+            } else {
+                rdoqLevel = 0;
+            }
+        } else {
+            if (lpd1Level <= LPD1_LVL_0) {
+                rdoqLevel = 4;
+            } else if (lpd1Level <= LPD1_LVL_4) {
+                rdoqLevel = 5;
+            } else {
+                rdoqLevel = 0;
+            }
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (rdoqLevel) {
+            rdoqLevel = (std::uint8_t)std::max((int)rdoqLevel, (int)pcs.rdoqLevel);
+        }
+    }
+    setRdoqCtrls(ctx.rdoqCtrls, rdoqLevel);
+
+    setCoeffShavingCtrls(ctx.coeffShavingCtrls, pcs.coeffShavingLevel);
+
+    std::uint8_t meSubpelLevel = 0;
+
+    if (pcs.meSubpelLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            meSubpelLevel = pcs.inputResolution <= INPUT_SIZE_480p_RANGE ? 7
+                : pcs.inputResolution <= INPUT_SIZE_1080p_RANGE          ? 8
+                                                                         : 10;
+        } else {
+            meSubpelLevel = pcs.inputResolution <= INPUT_SIZE_480p_RANGE ? 8
+                : pcs.inputResolution <= INPUT_SIZE_1080p_RANGE          ? 9
+                                                                         : 10;
+            if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 50) ||
+                 (pcs.l0Was64x64Mvp && pcs.l1Was64x64Mvp)) &&
+                pcs.me8x8CostVariance < (200 * pcs.pictureQp) &&
+                pcs.me64x64Distortion < (200 * pcs.pictureQp)) {
+                meSubpelLevel = 0;
+            }
+        }
+
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (meSubpelLevel) {
+            meSubpelLevel = (std::uint8_t)std::max((int)meSubpelLevel, (int)pcs.meSubpelLevel);
+        }
+    }
+
+    setMdSubpelMeCtrls(ctx.mdSubPelCtrls, meSubpelLevel);
+
+    std::uint8_t lpd1TxSkipDecisionLevel;
+
+    if (lpd1Level <= LPD1_LVL_2) {
+        lpd1TxSkipDecisionLevel = 2;
+    } else {
+        lpd1TxSkipDecisionLevel = 3;
+        if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 35) &&
+
+             pcs.me8x8CostVariance < (800 * pcs.pictureQp) &&
+             pcs.me64x64Distortion < (800 * pcs.pictureQp)) ||
+            (pcs.me8x8CostVariance < (100 * pcs.pictureQp) &&
+             pcs.me64x64Distortion < (100 * pcs.pictureQp))) {
+            lpd1TxSkipDecisionLevel = 4;
+        }
+    }
+
+    setLpd1TxSkipDecisionCtrls(ctx.lpd1TxSkipDecisionCtrls, lpd1TxSkipDecisionLevel);
+
+    std::uint8_t lpd1TxLevel = 0;
+    if (lpd1Level <= LPD1_LVL_2) {
+        lpd1TxLevel = 3;
+    } else {
+        lpd1TxLevel = 4;
+        if ((((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 35) &&
+              pcs.me8x8CostVariance < (800 * pcs.pictureQp) &&
+              pcs.me64x64Distortion < (800 * pcs.pictureQp)) ||
+             (pcs.me8x8CostVariance < (100 * pcs.pictureQp) &&
+              pcs.me64x64Distortion < (100 * pcs.pictureQp)))) {
+            lpd1TxLevel = 6;
+        }
+    }
+    setLpd1TxCtrls(ctx.lpd1TxCtrls, lpd1TxLevel);
+
+    if (lpd1Level <= LPD1_LVL_2) {
+        ctx.lpd1BlkSkipLumaRdPct = 0;
+    } else {
+        ctx.lpd1BlkSkipLumaRdPct = 90;
+    }
+    ctx.lpd1ChromaSkipEnergyTh = 0;
+    std::uint8_t rateEstLevel = 0;
+    if (pcs.rateEstLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            rateEstLevel = 4;
+        } else {
+            rateEstLevel = 0;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (rateEstLevel) {
+            rateEstLevel = (std::uint8_t)std::max((int)rateEstLevel, (int)pcs.rateEstLevel);
+        }
+    }
+
+    setRateEstCtrls(ctx.rateEstCtrls, rateEstLevel);
+
+    // If want to turn off approximating inter rate, must ensure that the approximation is also disabled
+    // at the pic level (pcs->approx_inter_rate)
+    // If the pic level signal is set more aggressive than the default lpd1 setting (lvl 1), use the pic level.
+    ctx.approxInterRate = (std::uint8_t)std::max(1, (int)pcs.approxInterRate);
+
+    setPfCtrls(ctx.pfCtrls, 1);
+
+    std::uint8_t intraLevel = 0;
+    if (pcs.intraLevel) {
+        if (lpd1Level <= LPD1_LVL_2) {
+            intraLevel = 6;
+        } else {
+            intraLevel = kMaxIntraLevel - 1;
+        }
+
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (intraLevel) {
+            intraLevel = (std::uint8_t)std::max((int)intraLevel, (int)pcs.intraLevel);
+        }
+    }
+    {
+        IntraSetPcs intraPcs;
+        intraPcs.skipIntra = pcs.skipIntra;
+        intraPcs.isISlice = false;
+        intraPcs.tplEnable = pcs.tplEnable;
+        intraPcs.tplIntraModeEnd = pcs.tplIntraModeEnd;
+        intraPcs.refIntraPercentage = pcs.refIntraPercentage;
+        intraPcs.tpl = pcs.tpl;
+        intraPcs.tplCtx = pcs.tplCtx;
+        setIntraCtrls(ctx.intraCtrls, intraPcs, ctx.intraSetCtx, intraLevel, 2);
+    }
+    /* Set signals that have assumed values in the light-PD1 path (but need to be initialized as they may be checked) */
+
+    // Use coeff rate and slit flag rate only (i.e. no fast rate)
+    ctx.shutFastRate   = false;
+    ctx.uvCtrls.enabled = 1;
+    ctx.uvCtrls.uvMode = kChromaMode1;
+    setCflCtrls(ctx.cflCtrls, 0);
+    ctx.mdDisallowNsqSearch   = true;
+    ctx.newNearestInjection   = true;
+    ctx.blkSkipDecision       = true;
+    ctx.rateEstCtrls.updateSkipCtxDcSignCtx = false;
+    ctx.rateEstCtrls.updateSkipCoeffCtx     = false;
+    ctx.subresCtrls.oddToEvenDeviationTh    = 0;
+    setInterIntraCtrls(ctx.interIntraCtrls, 0);
+}
+
+// svt_aom_sig_deriv_enc_dec_light_pd1_rtc (enc_mode_config.c:7655-7889).
+void sigDerivEncDecLightPd1Rtc(LightPd1Pcs& pcs, LightPd1Ctx& ctx) {
+    const Pd1Level lpd1Level = (Pd1Level)(std::int8_t)ctx.lpd1Ctrls.pd1Level;
+    const EncMode encMode = pcs.encMode;
+    const bool useFlatIpp = pcs.useFlatIpp;
+    ctx.lpd1GlobalmvBypassTh = 0;
+
+    // Set candidate reduction levels
+    std::uint8_t candReductionLevel = 0;
+    if (pcs.candReductionLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            candReductionLevel = 2;
+        } else if (lpd1Level <= LPD1_LVL_2) {
+            candReductionLevel = 3;
+        } else if (lpd1Level <= LPD1_LVL_3) {
+            candReductionLevel = 4;
+        } else {
+            candReductionLevel = 5;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (candReductionLevel) {
+            candReductionLevel =
+                (std::uint8_t)std::max((int)candReductionLevel, (int)pcs.candReductionLevel);
+        }
+    }
+    {
+        CandReductionPcs crPcs;
+        crPcs.refList0CountTry = pcs.refList0CountTry;
+        crPcs.refList1CountTry = pcs.refList1CountTry;
+        crPcs.useBestMeUnipredCandOnly = pcs.useBestMeUnipredCandOnly;
+        CandReductionCtx crCtx;
+        crCtx.pd1Level = ctx.lpd1Ctrls.pd1Level;
+        crCtx.isNotLastLayer = pcs.isNotLastLayer;
+        crCtx.rtc = pcs.rtcTune;
+        crCtx.hierarchicalLevels = pcs.hierarchicalLevels;
+        setCandReductionCtrls(ctx.candReductionCtrls, candReductionLevel, crPcs, crCtx,
+                              pcs.pictureQp, pcs.me8x8CostVariance, pcs.me64x64Distortion,
+                              pcs.l0WasSkip, pcs.l1WasSkip, pcs.refSkipPerc);
+    }
+
+    std::uint8_t rdoqLevel = 0;
+    if (pcs.rdoqLevel) {
+        if (lpd1Level <= LPD1_LVL_4) {
+            rdoqLevel = 1;
+        } else {
+            rdoqLevel = 0;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (rdoqLevel) {
+            rdoqLevel = (std::uint8_t)std::max((int)rdoqLevel, (int)pcs.rdoqLevel);
+        }
+    }
+    setRdoqCtrls(ctx.rdoqCtrls, rdoqLevel);
+
+    setCoeffShavingCtrls(ctx.coeffShavingCtrls, pcs.coeffShavingLevel);
+
+    std::uint8_t meSubpelLevel = 0;
+    if (pcs.meSubpelLevel) {
+        if (useFlatIpp) {
+            if (encMode <= ENC_M8) {
+                if (lpd1Level <= LPD1_LVL_0) {
+                    meSubpelLevel = 4;
+                } else if (lpd1Level <= LPD1_LVL_3) {
+                    meSubpelLevel = 7;
+                } else {
+                    meSubpelLevel = 8;
+                    if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 50) ||
+                         (pcs.l0Was64x64Mvp && pcs.l1Was64x64Mvp)) &&
+                        pcs.me8x8CostVariance < (200 * pcs.pictureQp) &&
+                        pcs.me64x64Distortion < (200 * pcs.pictureQp)) {
+                        meSubpelLevel = 0;
+                    }
+                }
+            } else {
+                if (lpd1Level <= LPD1_LVL_0) {
+                    meSubpelLevel = 6;
+                } else if (lpd1Level <= LPD1_LVL_3) {
+                    meSubpelLevel = 7;
+                } else {
+                    meSubpelLevel = 8;
+                    if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 50) ||
+                         (pcs.l0Was64x64Mvp && pcs.l1Was64x64Mvp)) &&
+                        pcs.me8x8CostVariance < (200 * pcs.pictureQp) &&
+                        pcs.me64x64Distortion < (200 * pcs.pictureQp)) {
+                        meSubpelLevel = 0;
+                    }
+                }
+            }
+        } else {
+            if (lpd1Level <= LPD1_LVL_0) {
+                meSubpelLevel = 6;
+            } else if (lpd1Level <= LPD1_LVL_3) {
+                meSubpelLevel = 7;
+            } else {
+                meSubpelLevel = 8;
+                if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 50) ||
+                     (pcs.l0Was64x64Mvp && pcs.l1Was64x64Mvp)) &&
+                    pcs.me8x8CostVariance < (200 * pcs.pictureQp) &&
+                    pcs.me64x64Distortion < (200 * pcs.pictureQp)) {
+                    meSubpelLevel = 0;
+                }
+            }
+        }
+
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (meSubpelLevel) {
+            meSubpelLevel = (std::uint8_t)std::max((int)meSubpelLevel, (int)pcs.meSubpelLevel);
+        }
+    }
+    setMdSubpelMeCtrls(ctx.mdSubPelCtrls, meSubpelLevel);
+
+    std::uint8_t lpd1TxSkipDecisionLevel;
+    if (lpd1Level <= LPD1_LVL_0) {
+        lpd1TxSkipDecisionLevel = 1;
+    } else if (lpd1Level <= LPD1_LVL_2) {
+        lpd1TxSkipDecisionLevel = 2;
+    } else if (lpd1Level <= LPD1_LVL_4) {
+        lpd1TxSkipDecisionLevel = 3;
+    } else {
+        const std::uint32_t varianceThresholdStrict    = pcs.pictureQp * (lpd1Level <= LPD1_LVL_5 ? 100 : 800);
+        const std::uint32_t varianceThresholdRelaxed   = pcs.pictureQp * (lpd1Level <= LPD1_LVL_5 ? 800 : 1200);
+        const std::uint32_t distortionThresholdRelaxed = pcs.pictureQp * (lpd1Level <= LPD1_LVL_5 ? 800 : 1200);
+        const std::uint32_t candidateLevel              = (lpd1Level <= LPD1_LVL_5) ? 4 : 5;
+
+        lpd1TxSkipDecisionLevel = 3;
+
+        if (pcs.me8x8CostVariance < varianceThresholdStrict ||
+            (pcs.me8x8CostVariance < varianceThresholdRelaxed &&
+             pcs.me64x64Distortion < distortionThresholdRelaxed)) {
+            lpd1TxSkipDecisionLevel = (std::uint8_t)candidateLevel;
+        }
+    }
+
+    setLpd1TxSkipDecisionCtrls(ctx.lpd1TxSkipDecisionCtrls, lpd1TxSkipDecisionLevel);
+
+    std::uint8_t lpd1TxLevel;
+    if (useFlatIpp && encMode <= ENC_M7) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            lpd1TxLevel = 0;
+        } else if (lpd1Level <= LPD1_LVL_4) {
+            lpd1TxLevel = 5;
+        } else {
+            lpd1TxLevel = 6;
+        }
+    } else {
+        if (lpd1Level <= LPD1_LVL_4) {
+            lpd1TxLevel = 5;
+        } else {
+            lpd1TxLevel = 6;
+        }
+    }
+    setLpd1TxCtrls(ctx.lpd1TxCtrls, lpd1TxLevel);
+
+    if (lpd1Level <= LPD1_LVL_2) {
+        ctx.lpd1BlkSkipLumaRdPct = 90;
+    } else if (lpd1Level <= LPD1_LVL_4) {
+        ctx.lpd1BlkSkipLumaRdPct = 75;
+    } else {
+        ctx.lpd1BlkSkipLumaRdPct = 60;
+    }
+    ctx.lpd1ChromaSkipEnergyTh = 5;
+
+    std::uint8_t rateEstLevel = 0;
+    if (pcs.rateEstLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            rateEstLevel = 4;
+        } else {
+            rateEstLevel = 0;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (rateEstLevel) {
+            rateEstLevel = (std::uint8_t)std::max((int)rateEstLevel, (int)pcs.rateEstLevel);
+        }
+    }
+    setRateEstCtrls(ctx.rateEstCtrls, rateEstLevel);
+
+    // If want to turn off approximating inter rate, must ensure that the approximation is also disabled
+    // at the pic level (pcs->approx_inter_rate)
+    // If the pic level signal is set more aggressive than the default lpd1 setting (lvl 1), use the pic level.
+    ctx.approxInterRate = (std::uint8_t)std::max(1, (int)pcs.approxInterRate);
+    setPfCtrls(ctx.pfCtrls, 1);
+
+    // Up to LPD1_LVL_5 we configure intra controls; LPD1_LVL_6 uses VLPD1 (DC-only intra)
+    if (lpd1Level <= LPD1_LVL_5) {
+        std::uint8_t intraLevel = 0;
+        if (pcs.intraLevel) {
+            if (lpd1Level <= LPD1_LVL_2) {
+                intraLevel = 6;
+            } else {
+                intraLevel = kMaxIntraLevel - 1;
+            }
+
+            // Don't use a more conservative level in LPD1 than the regular path would use
+            if (intraLevel) {
+                intraLevel = (std::uint8_t)std::max((int)intraLevel, (int)pcs.intraLevel);
+            }
+        }
+
+        {
+            IntraSetPcs intraPcs;
+            intraPcs.skipIntra = pcs.skipIntra;
+            intraPcs.isISlice = false;
+            intraPcs.tplEnable = pcs.tplEnable;
+            intraPcs.tplIntraModeEnd = pcs.tplIntraModeEnd;
+            intraPcs.refIntraPercentage = pcs.refIntraPercentage;
+            intraPcs.tpl = pcs.tpl;
+            intraPcs.tplCtx = pcs.tplCtx;
+            setIntraCtrls(ctx.intraCtrls, intraPcs, ctx.intraSetCtx, intraLevel, 2);
+        }
+    } else {
+        ctx.intraCtrls.enableIntra = (pcs.intraLevel && !pcs.skipIntra) ? 1 : 0;
+        ctx.intraSetCtx.skipIntra = pcs.skipIntra;
+    }
+
+    /* Set signals that have assumed values in the light-PD1/vlpd1 paths (but need to be initialized as they may be checked) */
+
+    // Use coeff rate and slit flag rate only (i.e. no fast rate)
+    ctx.shutFastRate   = false;
+    ctx.uvCtrls.enabled = 1;
+    ctx.uvCtrls.uvMode = kChromaMode1;
+    setCflCtrls(ctx.cflCtrls, 0);
+    ctx.mdDisallowNsqSearch   = true;
+    ctx.newNearestInjection   = true;
+    ctx.blkSkipDecision       = true;
+    ctx.rateEstCtrls.updateSkipCtxDcSignCtx = false;
+    ctx.rateEstCtrls.updateSkipCoeffCtx     = false;
+    ctx.subresCtrls.oddToEvenDeviationTh    = 0;
+    setInterIntraCtrls(ctx.interIntraCtrls, 0);
+}
+
+
+}  // namespace mode_config
+}  // namespace l16_rdo
