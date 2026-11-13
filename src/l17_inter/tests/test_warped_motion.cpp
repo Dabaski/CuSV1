@@ -154,17 +154,19 @@ std::int16_t oracleResolveDivisor64(std::uint64_t d, std::int16_t* shift) {
 
 TEST_CASE("resolve_divisor_32 matches the oracle over the dense low domain and the msb boundaries") {
     // Dense: every D in [1, 65536].
+    std::uint32_t checked = 0;
     for (std::uint32_t d = 1; d <= 65536; ++d) {
         std::int16_t shift = -1, oshift = -1;
         const std::int16_t got = l17_inter::resolveDivisor32(d, &shift);
         const std::int16_t want = oracleResolveDivisor32(d, &oshift);
+        ++checked;
         if (got != want || shift != oshift) {
             CHECK_MESSAGE(false, "dense-domain mismatch at D=" << d << ": got " << got << "/" << shift
                                                                << " want " << want << "/" << oshift);
             break;
         }
     }
-    CHECK(true);
+    CHECK_EQ(checked, 65536u);
     // Boundary band: for every msb s, {2^s, 2^s+1, 2^s + 2^(s-1), 2^(s+1)-1,
     // and the f==256 corner family 2^(s+1) - 2^(s-9)}. s stops at 30: at
     // s = 31 the reference's own ROUND_POWER_OF_TWO(e, s-8) overflows int32
