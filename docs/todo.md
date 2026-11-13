@@ -2593,6 +2593,80 @@ A0. SLICE-LEVEL STATE (the live register)
 |    open-loop/prehme/HME/integer-search DRIVERS, the intrabc hash
 |    search); l5_motion 9,360 assertions green, GATE 885,347 B diff 0,
 |    coverage 30.3% -> 31.1% (+1,361; A3 17% -> 25%).
+|  - [x] **TXH1 (2026-11-13, the highbd transform twin, commit 4611318)**:
+|    src/l3_transforms/transform_hbd.{h,cpp} - the bd-parameterized inv
+|    core (uint16 r/w split, the bd stage-range ladder, clip/check/wrap
+|    helpers), the 16-type facades, the lossless iwht pair, the
+|    recon/dispatch chain and the fwd chain; 482 nb newly charged (the
+|    TX1 surface excluded), 52 hbd TEST_CASEs / 101 CHECK sites; the
+|    rebase exposed three test-fixture defects (all test-side, the port
+|    agreed with the reference); mutation optRangeRow 18 -> 16 at bd 10
+|    killed by 5 named fixtures; parks named (wht_fwd N2/N4, the
+|    CONVERT_TO_SHORTPTR tagging, the FS5d 64x64 facade contract);
+|    coverage A1 41% -> 43% (+482).
+|  - [x] **A3W (2026-11-13, warped motion + RANSAC, commit bebc566)**:
+|    src/l17_inter/warped_motion.{h,cpp} + ransac.{h,cpp} + the
+|    warped_filter_table.inc - 1,019 nb (warped_motion.c 502 + ransac.c
+|    and carries 517); 48 new TEST_CASEs / 133,289 assertions; 10
+|    mutations killed (3 unobservable-by-construction findings recorded);
+|    parks named (the hbd warp twins, the dead USE_LIMITED_PREC_MULT
+|    branch, multiply_mat); coverage A3 17% -> 23% (+1,019).
+|  - [x] **A5E (2026-11-13, the inter symbol + context surface, commit
+|    ee95aa5)**: src/l7_entropy/inter_symbols.{h,cpp} + the 19 inter CDF
+|    default extracts - 818 nb of entropy_coding.c (the comp-index/group,
+|    skip-mode, intra-inter, motion-mode, inter-mode/drl, mv-component/
+|    encode_mv, switchable-interp, ref-mode/comp-ref/uni-ref/bwdref/
+|    single-ref context family and write_ref_frames); 24 TEST_CASEs /
+|    79,875 assertions in the target; 11 mutations killed (M11 survived
+|    its first grids and was sharpened with the REF_FRAMES=8 out-of-range
+|    ref - the range rule); parks named (the frame-header/tile writers);
+|    coverage A5 61% -> 71% (+818).
+|  - [x] **EMC2 (2026-11-13, the remaining mode-config conveyor, 12
+|    commits ae5797c..abe904f)**: src/l16_rdo/mode_config.{h,cpp} grew
+|    the enc_mode_config.c surface :4396 to the file end - 4,174 nb
+|    (the NIC/NSQ/intra/pd0/pd1/tx/cfl/rate-est/mds0/depth-refinement
+|    setters, the max-block-size and enc-dec derivation families, the
+|    disallow/nsq-geom getters and the light-pd1/default/rtc/allintra
+|    drivers); 48 new TEST_CASEs, 6,670,340 assertions; 12 mutations
+|    killed (two survived their first fixture and were sharpened); the
+|    pic-level config coordinators parked named (~1,270 nb); coverage
+|    A4 23% -> 36% (+4,174).
+|  - [x] **A6C (2026-11-13, the coding-loop pure helpers, commit
+|    431c7a6)**: src/l6_pipeline/coding_loop_helpers.{h,cpp} - 2,420 nb
+|    of product_coding_loop.c/coding_loop.c/md_process.c (the
+|    neighbour-array update/copy/reset family, set_nics/set_md_stage_
+|    counts/the stage sorts, the NSQ/subsize/uv-txsize surfaces, the
+|    MV/ME helpers, the lambda chain + av1_lambda_assign_md, setup_mds/
+|    setup_pc_tree, update_coeff_cdf and hadamard_path); 40 TEST_CASEs /
+|    7,832 assertions; mutation M1 captured (copyNeighArrPu topleft
+|    offset, CHECK(170 == 104)); the context-generation wall parked
+|    named; coverage A6 15% -> 33% (+2,420).
+|  - [x] **A8R (2026-11-13, the restoration_pick pure math, commit
+|    41536a6)**: src/l10_filters/restoration_pick.{h,cpp} - 831 nb (the
+|    proj-error/subspace family, the sgr search encode/apply/search/
+|    count, the wiener normal equations/linsolve/decompose/score/
+|    finalize/count and both hbd twins; the RestSearchCtxt/rsc drivers
+|    parked named); 23 TEST_CASEs / 38,264 assertions; 12 mutations run
+|    (11 killed, 1 recorded survivor-by-equivalence); coverage A8
+|    44% -> 52% (+831).
+|  - [x] **A9R (2026-11-13, the remaining rate-control arithmetic, 10
+|    commits 3121bc6..9dc5265)**: src/l15_rc/rc_arith.{h,cpp} grew the
+|    rc_process.c rd-multiplier/lambda family, the initial_rc_process.c
+|    tpl-level pair + set_1pvbr_param and the pass2_strategy.c two-pass
+|    stats/correction/GF arithmetic - 470 nb; 186/186 cases / 1,843
+|    assertions in the target; 10 mutations captured (2 survive-then-
+|    sharpen); the queue/PCS/SCS drivers and the TPL-lambda wall parked
+|    named; coverage A9 46% -> 54% (+470).
+|  - [x] **THE 37.6% CAMPAIGN CLOSE (2026-11-13)**: the eight slices
+|    above (TXH1, A3W, A3M, A5E, EMC2, A6C, A8R, A9R) moved the
+|    portable-C coverage 30.3% -> 37.6% (47,719 -> 59,297 of 157,718;
+|    +11,578). Two pre-existing test-fixture defects the new heap layout
+|    exposed were repaired in the close (the grain block W*H vs
+|    H*STRIDE ragged-stride allocation and the restoration-pick hc row
+|    pointer stride - both test-side, both ports agreed with the
+|    reference). MEASURED AT CLOSE: ctest 18/18 (279.32 s), GATE 427/427
+|    lines, 885,347 B, diff 0, nine artifacts untouched (content-1:1),
+|    coverage 37.6%. COVERAGE-ONLY: no bitstream or emission change.
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
@@ -2601,7 +2675,7 @@ A0. SLICE-LEVEL STATE (the live register)
 North star #1 in AGENTS.md is a QUALITY bar; the PROGRESS bar is the
 portable-C coverage percentage, defined in AGENTS.md ("Completion
 metric") and regenerated by `powershell -File tools\coverage.ps1`.
-As measured 2026-11-13 (A3M) it is **31.1%** (49,080
+As measured 2026-11-13 (the 37.6% campaign close) it is **37.6%** (59,297
 of 157,718 non-blank lines in `Source/Lib/{Codec,C_DEFAULT}`). The table
 below is REGENERATED from the live instrument at every refresh - never
 hand-typed; the full percentage history and the per-slice movement
@@ -2615,22 +2689,22 @@ completing it moves the metric. Read it before picking work.
 
 | id | SVT area | non-blank | cov% | covered | this file |
 |---|---|---|---|---|---|
-| A1 | Transform/TX | 27,008 | 41% | 11,087 | 1.3 |
+| A1 | Transform/TX | 27,008 | 43% | 11,569 | 1.3 |
 | A2 | Intra prediction | 3,478 | 91% | 3,156 | 1.1 (CFL deferred) |
-| A3 | Inter pred + ME/MC | 17,738 | 25% | 4,417 | 2.2, 2.3, 2.4 |
-| A4 | Mode decision + RDO | 31,088 | 23% | 7,041 | 1.6 (the RE-series campaign) |
-| A5 | Entropy coding | 8,460 | 61% | 5,167 | 1.3, 1.4, 2.2 |
-| A6 | Coding loop + PCS | 13,928 | 15% | 2,114 | 1.3, 1.5 |
+| A3 | Inter pred + ME/MC | 17,738 | 31% | 5,437 | 2.2, 2.3, 2.4 |
+| A4 | Mode decision + RDO | 31,088 | 36% | 11,217 | 1.6 (the RE-series campaign) |
+| A5 | Entropy coding | 8,460 | 71% | 5,985 | 1.3, 1.4, 2.2 |
+| A6 | Coding loop + PCS | 13,928 | 33% | 4,535 | 1.3, 1.5 |
 | A7 | Bitstream + OBU | 1,436 | 40% | 574 | 1.4, 1.5 |
-| A8 | Post-filters | 10,600 | 44% | 4,699 | 3 |
-| A9 | Rate control | 5,951 | 46% | 2,725 | 2.5 |
+| A8 | Post-filters | 10,600 | 52% | 5,530 | 3 |
+| A9 | Rate control | 5,951 | 54% | 3,195 | 2.5 |
 | A10 | Pic mgmt + threading | 9,662 | 0% | 0 | 2.4 |
 | A11 | Analysis + temporal | 12,028 | 42% | 5,047 | A0 (the AN-series, COMPLETE) |
 | A12 | Palette + segmentation | 1,612 | 34% | 550 | 4 |
 | A13 | Utility + headers | 5,357 | 19% | 1,037 | - |
 | A14 | C_DEFAULT kernels | 1,466 | **100%** | 1,466 | A0 (the C_DEFAULT sweep, COMPLETE) |
 | - | excluded: rtcd dispatch | 7,906 | - | 0 | - |
-| | **TOTAL** | **157,718** | | **49,080** | |
+| | **TOTAL** | **157,718** | | **59,297** | |
 
 **+1.0 point = 1,577 non-blank reference lines.** So a slice is worth
 about +1 point per 1,600 lines of ported reference surface.
@@ -2691,7 +2765,7 @@ point-decade without moving the product. If it is done at all, do it
 last and label it as table transcription, not encoder progress.
 
 ------------------------------------------------------------
-0. CURRENT STATE (re-measured 2026-11-13 at the A3M landing;
+0. CURRENT STATE (re-measured 2026-11-13 at the 37.6% campaign close;
    supersedes the 2026-11-07 reading, which predated the RE-series
    close, the AMVP1/MC1/EMC1/MD1/RC2/SRC1/A8W1 campaign and the
    AN-series waves; the live per-slice register is section A0 above)
@@ -2749,18 +2823,22 @@ last and label it as table transcription, not encoder progress.
     tools/rt7_trace_diff.ps1, tools/rt8_divergence_map.ps1
   [x] Wave-era layers (host-only unless noted): l9 analysis (AN-series
       COMPLETE + TF1/TF2/PU1/SUB1 + hbd twins), l10 filters
-      (DF1/DF2/CDEF1-3/LR1-3/GR1/RE8A/A8W1), l11 resize (+RS2 hbd),
+      (DF1/DF2/CDEF1-3/LR1-3/GR1/RE8A/A8W1/A8R), l11 resize (+RS2 hbd),
       l12 convolve (+IP1), l13 palette + segmentation (PAL1/SEG1),
       l14 utility (U1), l15 rate control (RC1 tables + RC2 arithmetic
-      waves A-D), l16 RDO (RE1-RE7 + EMC1 + MD1), l17 inter (MC1) -
-      none wired into the emission except RE5-RE7
+      waves A-D + A9R), l16 RDO (RE1-RE7 + EMC1 + EMC2 + MD1), l17
+      inter (MC1 + A3W), l5 motion (HM1/AMVP1/A3M), l6 pipeline (PO1/
+      SRC1/A6C), l7 entropy (A5E), l3 transforms (TXH1) - none wired
+      into the emission except RE5-RE7
 [x] Docs: README, AGENTS.md layer map + completion metric,
     provenance.md, decode_conformance.md, bitstream.md, color.md,
     layers.md, emission.md, cs5c_deltas.md, this file
-[x] MEASURED 2026-11-13 (A3M): l5_motion ctest green (the brief's
-    slice scope; no full ctest run), GATE 427/427 diff 0 (885,347 B),
-    portable-C coverage 31.1% (49,080/157,718), 9 committed .obu
-    artifacts (all content-1:1 on every plane; untouched by A3M)
+[x] MEASURED 2026-11-13 (the 37.6% campaign close): full ctest 18/18
+    (279.32 s), GATE 427/427 diff 0 (885,347 B), portable-C coverage
+    37.6% (59,297/157,718), 9 committed .obu artifacts (all content-1:1
+    on every plane; untouched by the campaign; the two repaired
+    test-fixture defects were test-side, the ports agreed with the
+    reference)
 
 ------------------------------------------------------------
 1. KEYFRAME ENCODER COMPLETENESS (intra-only; luma + 4:2:0 chroma since

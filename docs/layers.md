@@ -65,6 +65,8 @@ the layers above can hold it; they have no SVT counterpart.
 
 ## l3_transforms - transforms + quantizer
 
+TXH1 (2026-11-13) added the highbd twin in `transform_hbd.{h,cpp}`: the bd-parameterized inverse core over uint16 r/w buffers, the bd stage-range ladder, the 16-type facades, the lossless iwht pair, the recon/dispatch chain and the fwd chain. 482 nb newly charged; the TX1 surface is not re-counted.
+
 Fixed-point transforms at every size 4x4..64x64, verbatim SVT
 arithmetic:
 
@@ -139,6 +141,8 @@ bd 8).
 
 ## l5_motion - SAD
 
+A3M (2026-11-13) added `motion_search.{h,cpp}` (1,361 nb): the av1me.c cost/range/site family, the mcomp.c cost/subpel family, the motion_estimation.c SAD aggregation quintet and the MeCtx/PcsCtx-carried driver helpers. The full search drivers and the rtcd vtable stay parked.
+
 `sad4x4`..`sad64x64` over strided uint8: 8x8 mirrors SVT's dedicated
 8x8 kernel, the rest mirror `svt_nxm_sad_kernel_helper_c` at their
 dims. GPU kernels exist for 4x4/8x8; the 16x16/32x32/64x64 D2 policies
@@ -173,6 +177,8 @@ quartet, `init_wm_samples` and `warped_motion_parameters` stay parked
 named. 91 cases / 783 assertions.
 
 ## l6_pipeline - composition + decision
+
+A6C (2026-11-13) added `coding_loop_helpers.{h,cpp}` (2,420 nb): the neighbour-array update/copy/reset family, the stage/sort helpers, the NSQ/subsize/uv-txsize surfaces, the MV/ME helpers, the lambda chain and update_coeff_cdf. The context-generation wall stays parked.
 
 Block and frame composition at 4x4..64x64, intra-only. The pipeline
 raster order follows SVT's decode order: every block predicts from
@@ -253,6 +259,8 @@ above, not zeros).
   pad content is one call of `svt_aom_generate_padding`.
 
 ## l7_entropy - entropy coder + symbols
+
+A5E (2026-11-13) added `inter_symbols.{h,cpp}` (818 nb): the inter symbol + context surface of `entropy_coding.c` (comp/intra-inter/motion-mode/inter-mode/drl/mv/filter/ref-mode families and write_ref_frames) with the 19 inter CDF default extracts. The frame-header and tile writers stay parked.
 
 The SVT/AOM entropy coder as a host port, integer only, bit-exact vs
 the committed gate (see `docs/bitstream.md` for the narrative):
@@ -372,6 +380,8 @@ yet. The families:
 
 ## l10_filters - post-filter kernels (DF/CDEF/LR/GR)
 
+A8R (2026-11-13) added `restoration_pick.{h,cpp}` (831 nb): the pixel-projection/subspace family, the sgr search (encode/apply/search/count), the wiener normal equations/linsolve/decompose/score/finalize/count and both hbd twins. The RestSearchCtxt/rsc drivers stay parked.
+
 The deblocking, CDEF and restoration kernel families, 1:1 with the
 pinned `deblocking_common.c`, `cdef.c`/`cdef_copy.h`/`enc_cdef.c` and
 `restoration.c`, host only.
@@ -486,6 +496,8 @@ through the algorithm) pin the tables. Host only.
 
 ## l15_rc - rate-control tables + arithmetic (RC1/RC2)
 
+A9R (2026-11-13) added 470 nb: the rc_process.c rd-multiplier/lambda family, the initial_rc_process.c tpl-level pair + set_1pvbr_param, and the pass2_strategy.c two-pass stats/correction/GF arithmetic. The queue/PCS/SCS drivers and the TPL-lambda wall stay parked.
+
 `rc_tables.h` in `src/l15_rc`: the 18 qindex-mapping tables x 256
 entries (278 nb), mechanically extracted from the pinned reference
 with a runtime diff-verify test that parses the reference file itself.
@@ -509,6 +521,8 @@ the mutex ops, the debug prints and the pick-q/rate-allocation shell
 stay parked named.
 
 ## l16_rdo - rate estimation + trellis + symbol costs (RE-series)
+
+EMC2 (2026-11-13) completed the `enc_mode_config.c` conveyor in `mode_config.{h,cpp}` (4,174 nb): the remaining NIC/NSQ/intra/pd0/pd1/tx/cfl/rate-est/mds0/depth-refinement setters, the max-block-size and enc-dec derivation families, and the light-pd1/default/rtc/allintra drivers. The pic-level config coordinators stay parked.
 
 The A4 golden-regeneration campaign, in `src/l16_rdo` (namespace
 `l16_rdo`; the scaffold links av1_transforms). RE1-RE4 are the
@@ -622,6 +636,16 @@ mode-config conveyor and the pure-arithmetic mode-decision helpers).
   tables, `have_newmv_in_inter_mode`, `get_max_drl_index`,
   `mv_is_already_injected`, the uni/bipred validity pairs). 23
   TEST_CASEs; coverage-only.
+
+## l17_inter - inter prediction (MC1 + A3W)
+
+MC1 (2026-11-12) landed the inter-prediction compound/dist-weighted/scale
+surface and the sr-convolve family in `inter_prediction.{h,cpp}` (524 nb).
+A3W (2026-11-13) added the warped-motion + RANSAC surface in
+`warped_motion.{h,cpp}` + `ransac.{h,cpp}` (1,019 nb): the div lut, the
+projection/affine/shear fit, the 8-bit warp, the shear params, the sample
+selection, and the RANSAC scoring/fitting/internal walk. The hbd warp twins
+and the dead `USE_LIMITED_PREC_MULT` branch stay parked. Host only.
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 

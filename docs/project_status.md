@@ -9,8 +9,8 @@ implementations are ported from the pinned SVT-AV1 snapshot in
 `fd116158a00986d923db8a1fdddd0dbd5fd0e240`, 2026-08-15); CUDA kernels are
 JIT-compiled with NVRTC.
 
-**Portable-C coverage: 30.3%**, measured 2026-11-12 by
-`powershell -File tools\coverage.ps1` (47,719 of 157,718 non-blank reference
+**Portable-C coverage: 37.6%**, measured 2026-11-13 by
+`powershell -File tools\coverage.ps1` (59,297 of 157,718 non-blank reference
 lines). This is a source-coverage progress measure, not an overall completion
 or production-readiness claim. The denominator, exclusions, per-area
 judgements, and paired conformance measure are documented by the coverage
@@ -19,10 +19,10 @@ instrument and `AGENTS.md`.
 ## Verified milestones
 
 - The project has 18 CTest targets. The full Release suite last measured
-  18/18 passing on 2026-11-12 (281.39 s).
+  18/18 passing on 2026-11-13 (279.32 s).
 - The golden primitive gate last measured 427/427 lines with a zero diff on
-  2026-11-12 (885,347 B; the RE7 tx-type regen, unchanged by the
-  conformance-free 30.3% campaign).
+  2026-11-13 (885,347 B; the RE7 tx-type regen, unchanged by the
+  conformance-free 37.6% campaign).
 - Nine committed structural AV1 artifacts cover five grayscale geometries and
   four 4:2:0 color geometries. Their decoder acceptance and reconstruction
   comparisons are recorded per artifact and plane in
@@ -38,12 +38,13 @@ full SVT-AV1 encoder behavior or conformance for every possible input.
 
 The current stack includes shared types and pixel planes, a CUDA driver/NVRTC
 runtime, transforms and quantization, intra prediction, motion primitives and
-adaptive-MV-prediction candidates, inter-prediction compound/dist-weighted/
+adaptive-MV-prediction candidates, the pure motion-search and warped-motion/
+RANSAC surfaces, inter-prediction compound/dist-weighted/
 scaled prediction, frame composition, entropy coding, structural bitstream
 assembly, content analysis, post-filter kernels, resize and convolution
 kernels, palette and segmentation utilities, general utilities, rate-control
-tables and arithmetic, and the mode-config and mode-decision surfaces of the
-RDO layer.
+tables and arithmetic, the coding-loop helpers, the inter symbol surface, and
+the mode-config and mode-decision surfaces of the RDO layer.
 
 The detailed layer-by-layer inventory and boundaries are in
 [the layer stack](layers.md). Emission order is in [emission walks](emission.md),
