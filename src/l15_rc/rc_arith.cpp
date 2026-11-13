@@ -594,6 +594,99 @@ int findQindexByRateWithCorrection(int desiredBitsPerMb, int bitDepth, double er
     return low;
 }
 
+// ---- A9R: pass2_strategy.c (the GF-stats walk) ----
+
+namespace {
+
+// input_stats (pass2_strategy.c:37-45): verbatim; the EOF convention is
+// the reference's (-1 / 1).
+int inputStats(TwoPassCarrier& p, FirstpassStatsCarrier& fps) {
+    if (p.statsInPos >= p.statsInCount) {
+        return EOF;
+    }
+
+    fps = p.statsIn[p.statsInPos];
+    ++p.statsInPos;
+    return 1;
+}
+
+}  // namespace
+
+// accumulate_this_frame_stats (pass2_strategy.c:168-171): verbatim.
+void accumulateThisFrameStats(const FirstpassStatsCarrier& stats, double modFrameErr,
+                              GfGroupStatsCarrier& gfStats) {
+    gfStats.gfGroupErr += modFrameErr;
+    gfStats.gfGroupRawError += stats.codedError;
+}
+
+// set_baseline_gf_interval (pass2_strategy.c:314-324): verbatim.
+void setBaselineGfInterval(const PcsCarrier& pcs, int arfPosition, RcControl& rc) {
+    if (frameIsIntraOnly(pcs.frameType) && pcs.idrFlag) {
+        rc.baselineGfInterval = std::max(arfPosition - 1, 1);
+    } else {
+        rc.baselineGfInterval = pcs.gfInterval;
+    }
+}
+
+// init_gf_stats (pass2_strategy.c:326-339): verbatim.
+void initGfStats(GfGroupStatsCarrier& gfStats) {
+    gfStats.gfGroupErr = 0.0;
+    gfStats.gfStatStruct.poc = 0;
+    gfStats.gfStatStruct.totalNumBits = 1;
+    gfStats.gfStatStruct.qindex = 172;
+    gfStats.gfStatStruct.worstQindex = 172;
+    gfStats.gfGroupRawError = 0.0;
+    gfStats.gfGroupSkipPct = 0.0;
+    gfStats.gfGroupInactiveZoneRows = 0.0;
+}
+
+// calculate_gf_stats (pass2_strategy.c:341-390): verbatim; the walls thread
+// (the declaration comment names the carriers).
+void calculateGfStats(const PcsCarrier& ppcs, RcControl& rc, GfGroupStatsCarrier& gfStats,
+                      FirstpassStatsCarrier& thisFrame, int& useAltRef, TwoPassCarrier& twopass) {
+    // SequenceControlSet* scs = ppcs->scs; ... (walls threaded)
+    FirstpassStatsCarrier nextFrame;
+    const int startPos = twopass.statsInPos;
+
+    initGfStats(gfStats);
+
+    // Load stats for the current frame.
+    double modFrameErr = calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+
+    // Note the error of the frame at the start of the group. This will be
+    // the GF frame error if we code a normal gf.
+
+    // If this is a key frame or the overlay from a previous arf then
+    // the error score / cost of this frame has already been accounted for.
+    // There is no overlay support for now
+    if (frameIsIntraOnly(ppcs.frameType)) {
+        gfStats.gfGroupErr -= modFrameErr;
+        gfStats.gfGroupRawError -= thisFrame.codedError;
+    }
+    gfStats.gfStatStruct = thisFrame.statStruct;
+    int i = 0;
+    while (i < ppcs.gfInterval) {
+        ++i;
+        // Accumulate error score of frames in this gf group.
+        modFrameErr = calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+        // accumulate stats for this frame
+        accumulateThisFrameStats(thisFrame, modFrameErr, gfStats);
+
+        // read in the next frame
+        if (EOF == inputStats(twopass, nextFrame)) {
+            break;
+        }
+        thisFrame = nextFrame;
+    }
+
+    // Was the group length constrained by the requirement for a new KF?
+    rc.constrainedGfGroup = (i >= rc.framesToKey) ? 1 : 0;
+    useAltRef = (i > 2);
+    setBaselineGfInterval(ppcs, i, rc);
+    // Reset the file position.
+    twopass.statsInPos = startPos;
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;

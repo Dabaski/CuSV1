@@ -178,6 +178,10 @@ struct PcsCarrier {
     // delta-q gate and the r0-delta-qp-md flag ride the ppcs wall.
     bool deltaQPresent;              // ppcs->frm_hdr.delta_q_params.delta_q_present
     bool r0DeltaQpMd;                // ppcs->r0_delta_qp_md
+
+    // the A9R calculate_gf_stats consumes (pass2_strategy.c:341-390).
+    int gfInterval;                  // pcs->gf_interval
+    bool idrFlag;                    // pcs->idr_flag
 };
 
 // ASSIGN_MINQ_TABLE (rc_tables.h:36-39, the CONFIG_ENABLE_HIGH_BIT_DEPTH=0
@@ -489,6 +493,45 @@ int qbpmEnumerator(int rateErrTol);
 int findQindexByRateWithCorrection(int desiredBitsPerMb, int bitDepth, double errorPerMb,
                                    double groupWeightFactor, int rateErrTol, int bestQindex,
                                    int worstQindex);
+
+// GF_GROUP_STATS (pass2_strategy.h:26-33).
+struct GfGroupStatsCarrier {
+    double gfGroupErr;
+    StatStructCarrier gfStatStruct;
+    double gfGroupRawError;
+    double gfGroupSkipPct;
+    double gfGroupInactiveZoneRows;
+};
+
+// The TWO_PASS stats walk (firstpass.h:80-118): the FIRSTPASS_STATS read
+// window (twopass->stats_in .. stats_buf_ctx->stats_in_end) threaded as a
+// base pointer + count + walk position (input_stats pass2_strategy.c:37-45
+// and reset_fpf_position :33-35 ride it).
+struct TwoPassCarrier {
+    const FirstpassStatsCarrier* statsIn;  // twopass->stats_in (walk base)
+    int statsInCount;                      // stats_in_end - stats_in_start
+    int statsInPos;                        // the walk position
+    bool hasTotalStats;                    // stats_buf_ctx->total_stats != NULL
+    std::int64_t bitsLeft;                 // twopass->bits_left
+};
+
+// accumulate_this_frame_stats (pass2_strategy.c:168-171): verbatim.
+void accumulateThisFrameStats(const FirstpassStatsCarrier& stats, double modFrameErr,
+                              GfGroupStatsCarrier& gfStats);
+
+// set_baseline_gf_interval (pass2_strategy.c:314-324): verbatim; the
+// ppcs->gf_interval / idr_flag walls thread on PcsCarrier.
+void setBaselineGfInterval(const PcsCarrier& pcs, int arfPosition, RcControl& rc);
+
+// init_gf_stats (pass2_strategy.c:326-339): verbatim.
+void initGfStats(GfGroupStatsCarrier& gfStats);
+
+// calculate_gf_stats (pass2_strategy.c:341-390): verbatim; the ppcs walls
+// thread (frameType via frameIsIntraOnly, gfInterval), the rc walls ride
+// RcControl (constrained_gf_group, frames_to_key, baseline_gf_interval) and
+// the twopass walk rides TwoPassCarrier.
+void calculateGfStats(const PcsCarrier& ppcs, RcControl& rc, GfGroupStatsCarrier& gfStats,
+                      FirstpassStatsCarrier& thisFrame, int& useAltRef, TwoPassCarrier& twopass);
 
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.
