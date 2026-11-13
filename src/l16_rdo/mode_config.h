@@ -1322,5 +1322,76 @@ struct NicCtrls {
 // The default case assert(0)s and writes nothing (documented UB).
 std::uint8_t setNicCtrls(NicCtrls* ctrls, std::uint8_t nicLevel);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 2: set_nsq_geom_ctrls (:4968-:5022) + set_nsq_search_ctrls
+// (:5024-:5375).
+// ---------------------------------------------------------------------------
+// NsqGeomCtrls (md_process.h:535-544, verbatim field order/types).
+struct NsqGeomCtrls {
+    bool enabled;
+    std::uint8_t minNsqBlockSize;  // e.g. 8 = 8x8, 16 = 16x16
+    std::uint8_t allowHv4;         // disallow H4/V4 when off
+    std::uint8_t allowHvaHvb;      // disallow HA/HB/VA/VB when off
+};
+
+// svt_aom_set_nsq_geom_ctrls (:4968-5022), 1:1. The reference builds a
+// zero-initialized LOCAL, switches, then writes the three out-params (if
+// non-NULL) and memcpy's the local into ctx. The out-params keep the
+// reference's nullable contract; the ctx NULL arm is threaded out (the
+// memcpy always runs). The default case assert(0)s in the reference and
+// writes the zero-init local through (documented).
+void setNsqGeomCtrls(NsqGeomCtrls& ctrls, std::uint8_t nsqGeomLevel, std::uint8_t* allowHvaHvb,
+                     std::uint8_t* allowHv4, std::uint8_t* minNsqBsize);
+
+// PdPass (definitions.h:736-739, verbatim ordinals).
+constexpr std::uint8_t kPdPass0 = 0;
+constexpr std::uint8_t kPdPass1 = 1;
+
+// NsqSearchCtrls (md_process.h:546-584, verbatim field order/types).
+struct NsqSearchCtrls {
+    bool enabled;
+    std::uint32_t sqWeight;               // (uint32_t)~0 = off
+    std::uint32_t hvWeight;               // only active when sqWeight on
+    std::uint32_t maxPart0ToPart1Dev;
+    std::uint32_t nsqSplitCostTh;         // percentage * 10
+    std::uint32_t lowerDepthSplitCostTh;  // percentage * 100
+    std::uint32_t hVsVSplitRateTh;
+    std::uint32_t nonHvSplitRateTh;
+    std::uint32_t rateThOffsetLte16;
+    std::uint32_t componentMultipleTh;
+    std::uint8_t psqTxsLvl;
+    std::uint8_t subDepthBlockLvl;
+};
+
+// The pcs/scs wall surface of set_nsq_search_ctrls (:5024-:5375). The
+// SB64 path reads ppcs->me_8x8_distortion / me_8x8_cost_variance
+// [ctx->sb_index]; the SB128 path calls get_sb128_me_data on the
+// embedded Sb128Pcs surface. Each field cites its reference path.
+struct NsqSearchPcs {
+    bool isISlice;                   // pcs->slice_type == I_SLICE
+    EncMode encMode;                 // pcs->enc_mode
+    bool mimicOnlyTx4x4;             // pcs->mimic_only_tx_4x4
+    std::uint32_t sbSize;            // pcs->scs->super_block_size
+    std::uint32_t sbIndex;           // ctx->sb_index (SB64 path)
+    const std::uint32_t* me8x8Distortion;    // ppcs-> (SB64 path)
+    const std::uint32_t* me8x8CostVariance;  // ppcs-> (SB64 path)
+    Sb128Pcs sb128;                  // the SB128 gather surface
+    std::uint32_t sbOriginX;         // ctx->sb_origin_x (SB128 gather)
+    std::uint32_t sbOriginY;         // ctx->sb_origin_y
+    std::uint32_t qp;                // scs->static_config.qp
+    bool nsqQpBasedThScaling;        // scs->qp_based_th_scaling_ctrls.
+                                     //   nsq_qp_based_th_scaling
+    std::uint8_t pdPass;             // ctx->pd_pass (PdPass ordinal)
+};
+
+// set_nsq_search_ctrls (:5024-5375), 1:1: the mimic/me-dist level
+// modulation (:5029-:5053), the 20-row switch (:5055-:5336), the QP
+// scaling tail (:5338-:5349), the PD_PASS_0 overwrite (:5351-:5362) and
+// the set_sq_txs_ctrls chaining (:5364). The default case assert(0)s
+// and writes nothing, but the QP tail still runs on the untouched
+// fields (as in the reference).
+void setNsqSearchCtrls(NsqSearchCtrls& ctrls, NsqPsqTxsCtrls& psqTxsCtrls, const NsqSearchPcs& pcs,
+                       std::uint8_t nsqSearchLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

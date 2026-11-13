@@ -4999,3 +4999,336 @@ TEST_CASE("set_nic_controls - the null-ctx arm returns the scaling level and wri
     }
     CHECK(setNicCtrls(nullptr, 12) == 0);
 }
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 2: set_nsq_geom_ctrls (:4968-:5022) + set_nsq_search_ctrls
+// (:5024-:5375).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("set_nsq_geom_ctrls - every level, whole-struct + the nullable out-params") {
+    // :4968-5022. The local is zero-init THEN switched, so every level
+    // (0-4) leaves all four fields written; the default arm (5) writes
+    // the zero-init local through (all zeros, enabled = 0/false). The
+    // out-params mirror the final local; a NULL out-param is untouched.
+    for (int level = 0; level <= 5; ++level) {
+        NsqGeomCtrls c;
+        std::memset(&c, kPoison, sizeof(c));
+        uint8_t hva = kPoison, hv4 = kPoison, minB = kPoison;
+        setNsqGeomCtrls(c, (uint8_t)level, &hva, &hv4, &minB);
+        uint8_t eHva = 0, eHv4 = 0, eMin = 0;
+        bool eEn = false;
+        if (level == 0) {
+            eEn = false; eMin = 0; eHv4 = 0; eHva = 0;
+        } else if (level == 1) {
+            eEn = true; eMin = 0; eHv4 = 1; eHva = 1;
+        } else if (level == 2) {
+            eEn = true; eMin = 0; eHv4 = 1; eHva = 0;
+        } else if (level == 3) {
+            eEn = true; eMin = 8; eHv4 = 0; eHva = 0;
+        } else if (level == 4) {
+            eEn = true; eMin = 16; eHv4 = 0; eHva = 0;
+        }  // level 5: the zero-init local flows through (all zeros)
+        CHECK(c.enabled == eEn);
+        CHECK(c.minNsqBlockSize == eMin);
+        CHECK(c.allowHv4 == eHv4);
+        CHECK(c.allowHvaHvb == eHva);
+        CHECK(hva == eHva);
+        CHECK(hv4 == eHv4);
+        CHECK(minB == eMin);
+    }
+    // NULL out-params: the call neither reads nor writes them.
+    NsqGeomCtrls c;
+    std::memset(&c, kPoison, sizeof(c));
+    setNsqGeomCtrls(c, 2, nullptr, nullptr, nullptr);
+    CHECK(c.enabled == true);
+    CHECK(c.minNsqBlockSize == 0);
+    CHECK(c.allowHv4 == 1);
+    CHECK(c.allowHvaHvb == 0);
+}
+
+// The 20-row switch, independent transcription (:5055-:5336). Columns:
+// {en, sq, part0, split, lower, hvv, nhv, off16, psq, sub, comp, hv};
+// (uint32)~0 encoded as 0xFFFFFFFFu.
+struct OracleNsqSearchRow {
+    int en;
+    uint32_t sq, part0, split, lower, hvv, nhv, off16, psq, sub, comp, hv;
+};
+static const OracleNsqSearchRow oracleNsqSearchRows[20] = {
+    {0, 0xFFFFFFFFu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFFFFFFFFu},
+    {1, 105, 0, 0, 0, 0, 0, 0, 0, 0, 0, 115},
+    {1, 105, 0, 150, 3, 0, 0, 10, 0, 0, 0, 115},
+    {1, 105, 0, 100, 3, 0, 0, 10, 0, 1, 0, 115},
+    {1, 100, 0, 100, 3, 0, 0, 10, 0, 1, 80, 115},
+    {1, 100, 0, 100, 5, 0, 0, 10, 0, 1, 80, 110},
+    {1, 100, 0, 100, 5, 0, 0, 10, 0, 1, 80, 100},
+    {1, 95, 0, 80, 5, 0, 0, 10, 0, 1, 80, 100},
+    {1, 95, 0, 80, 5, 30, 20, 10, 0, 1, 80, 100},
+    {1, 95, 0, 80, 5, 40, 30, 10, 0, 1, 60, 100},
+    {1, 95, 0, 60, 10, 40, 30, 10, 0, 1, 60, 100},
+    {1, 95, 0, 60, 10, 50, 30, 10, 0, 1, 40, 100},
+    {1, 95, 0, 60, 10, 50, 30, 10, 0, 1, 20, 100},
+    {1, 95, 0, 60, 10, 60, 40, 10, 0, 1, 20, 100},
+    {1, 95, 5, 50, 10, 60, 40, 10, 0, 1, 20, 100},
+    {1, 90, 20, 40, 20, 60, 50, 10, 0, 1, 15, 75},
+    {1, 90, 50, 40, 20, 70, 60, 10, 0, 1, 15, 75},
+    {1, 90, 50, 40, 20, 70, 60, 15, 1, 1, 10, 75},
+    {1, 90, 75, 40, 20, 80, 70, 15, 1, 1, 5, 75},
+    {1, 90, 80, 35, 20, 85, 70, 15, 1, 1, 5, 75},
+};
+
+// DIVIDE_AND_ROUND (utility.h:96).
+static uint32_t oracleDivRound(uint64_t x, uint32_t y) {
+    return (uint32_t)((x + (y >> 1)) / y);
+}
+
+// set_nsq_search_ctrls, independent transcription of the level choice +
+// QP tail + PD_PASS_0 overwrite (:5024-:5364).
+static void oracleNsqSearch(NsqSearchCtrls& c, NsqPsqTxsCtrls& t, bool isISlice, int em,
+                            bool mimic, uint32_t sbSize, uint32_t dist8, uint32_t var8, uint32_t qp,
+                            bool qpScale, int pdPass, int levelIn) {
+    bool meDistMod = false;
+    if (!isISlice && em > (int)ENC_MR) meDistMod = true;
+    int level = (int)levelIn;
+    if (mimic) {
+        level = 0;
+    } else if (meDistMod && level) {
+        if (dist8 <= sbSize * sbSize * 3 && var8 <= 10000) {
+            level = level + 1 < 19 ? level + 1 : 19;
+        }
+    }
+    if (level <= 19) {
+        const OracleNsqSearchRow& r = oracleNsqSearchRows[level];
+        c.enabled = r.en != 0;
+        c.sqWeight = r.sq;
+        c.hvWeight = r.hv;
+        c.maxPart0ToPart1Dev = r.part0;
+        c.nsqSplitCostTh = r.split;
+        c.lowerDepthSplitCostTh = r.lower;
+        c.hVsVSplitRateTh = r.hvv;
+        c.nonHvSplitRateTh = r.nhv;
+        c.rateThOffsetLte16 = r.off16;
+        c.psqTxsLvl = (uint8_t)r.psq;
+        c.subDepthBlockLvl = (uint8_t)r.sub;
+        c.componentMultipleTh = r.comp;
+    }
+    uint32_t w = 1, d = 1;
+    if (qpScale) {
+        w = oracleMaxU32(10u, qp);
+        d = 63u;
+        if (qp >= 46) {
+            double ex = -(std::max(40.0, (double)qp) - 35) / 10;
+            double qi = std::exp(ex);
+            qi = 1.05 - qi;
+            qi *= 10000;
+            w = (uint32_t)qi;
+            d = 10000u;
+        }
+    }
+    c.componentMultipleTh = oracleDivRound((uint64_t)c.componentMultipleTh * w, d);
+    c.nsqSplitCostTh = oracleDivRound((uint64_t)c.nsqSplitCostTh * w, d);
+    int off = 5;
+    off = (int)oracleDivRound((uint64_t)off * w, d);
+    c.maxPart0ToPart1Dev = (uint32_t)std::max((int)((int)c.maxPart0ToPart1Dev - off), 0);
+    if (pdPass == (int)kPdPass0) {
+        c.sqWeight = 90;
+        c.maxPart0ToPart1Dev = 0;
+        c.nsqSplitCostTh = 60;
+        c.lowerDepthSplitCostTh = 10;
+        c.hVsVSplitRateTh = 60;
+        c.nonHvSplitRateTh = 60;
+        c.rateThOffsetLte16 = 10;
+        c.psqTxsLvl = 0;
+        c.subDepthBlockLvl = 0;
+        c.componentMultipleTh = 10;
+        c.hvWeight = 90;
+    }
+    // set_sq_txs_ctrls chaining.
+    if (c.psqTxsLvl == 0) t.enabled = 0;
+    else if (c.psqTxsLvl == 1) { t.enabled = 1; t.hvToSqTh = 1000; t.hToVTh = 100; }
+    else if (c.psqTxsLvl == 2) { t.enabled = 1; t.hvToSqTh = 250; t.hToVTh = 25; }
+    else if (c.psqTxsLvl == 3) { t.enabled = 1; t.hvToSqTh = 150; t.hToVTh = 15; }
+}
+
+TEST_CASE("set_nsq_search_ctrls - the 20-row switch + QP tail + pd0 overwrite, vs the oracle") {
+    // Neutral walls (I-slice: me_dist_mod off; no mimic; SB64 arrays
+    // hostile so the bump cannot fire) enumerate the switch rows 0-19
+    // plus the default arm (20) under both qp-scaling flags and
+    // PD_PASS_0/1.
+    const uint32_t n = 4;
+    std::vector<uint32_t> d8(n), cv(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        d8[i] = 0xFFFFFFFFu;  // never <= 12288, so no bump
+        cv[i] = 0xFFFFFFFFu;  // never <= 10000
+    }
+    for (int level = 0; level <= 20; ++level)
+        for (int qpScale = 0; qpScale <= 1; ++qpScale)
+            for (int pdPass = 0; pdPass <= 1; ++pdPass) {
+                NsqSearchCtrls c;
+                std::memset(&c, kPoison, sizeof(c));
+                NsqPsqTxsCtrls t;
+                std::memset(&t, kPoison, sizeof(t));
+                NsqSearchPcs pcs;
+                std::memset(&pcs, 0, sizeof(pcs));
+                pcs.isISlice = true;  // me_dist_mod off
+                pcs.encMode = ENC_M0;
+                pcs.mimicOnlyTx4x4 = false;
+                pcs.sbSize = 64;
+                pcs.sbIndex = 1;
+                pcs.me8x8Distortion = d8.data();
+                pcs.me8x8CostVariance = cv.data();
+                pcs.sb128.b64Size = 64;
+                pcs.sb128.alignedWidth = 64;
+                pcs.sb128.alignedHeight = 64;
+                pcs.sb128.me64x64Distortion = d8.data();
+                pcs.sb128.me32x32Distortion = d8.data();
+                pcs.sb128.me16x16Distortion = d8.data();
+                pcs.sb128.me8x8Distortion = d8.data();
+                pcs.sb128.me8x8CostVariance = cv.data();
+                pcs.qp = 50;
+                pcs.nsqQpBasedThScaling = qpScale == 1;
+                pcs.pdPass = (uint8_t)pdPass;
+                setNsqSearchCtrls(c, t, pcs, (uint8_t)level);
+                NsqSearchCtrls e;
+                std::memset(&e, kPoison, sizeof(e));
+                NsqPsqTxsCtrls et;
+                std::memset(&et, kPoison, sizeof(et));
+                oracleNsqSearch(e, et, true, (int)ENC_M0, false, 64, 0, 0, 50, qpScale == 1,
+                                pdPass, level);
+                CHECK(c.enabled == e.enabled);
+                CHECK(c.sqWeight == e.sqWeight);
+                CHECK(c.hvWeight == e.hvWeight);
+                CHECK(c.maxPart0ToPart1Dev == e.maxPart0ToPart1Dev);
+                CHECK(c.nsqSplitCostTh == e.nsqSplitCostTh);
+                CHECK(c.lowerDepthSplitCostTh == e.lowerDepthSplitCostTh);
+                CHECK(c.hVsVSplitRateTh == e.hVsVSplitRateTh);
+                CHECK(c.nonHvSplitRateTh == e.nonHvSplitRateTh);
+                CHECK(c.rateThOffsetLte16 == e.rateThOffsetLte16);
+                CHECK(c.componentMultipleTh == e.componentMultipleTh);
+                CHECK(c.psqTxsLvl == e.psqTxsLvl);
+                CHECK(c.subDepthBlockLvl == e.subDepthBlockLvl);
+                CHECK(t.enabled == et.enabled);
+                CHECK(t.hvToSqTh == et.hvToSqTh);
+                CHECK(t.hToVTh == et.hToVTh);
+                // Hand pin on the one row where the QP tail actually
+                // bites: level 4 (comp 80, split 100, part0 0) at qp 50,
+                // scaling on -> comp (80*8268+5000)/10000, split
+                // (100*8268+5000)/10000, part0 max(0-4,0) = 0.
+                if (level == 4 && qpScale == 1 && pdPass == 1) {
+                    CHECK(c.componentMultipleTh == oracleDivRound(80ull * 8268, 10000));
+                    CHECK(c.nsqSplitCostTh == oracleDivRound(100ull * 8268, 10000));
+                    CHECK(c.maxPart0ToPart1Dev == 0);
+                }
+            }
+}
+
+TEST_CASE("set_nsq_search_ctrls - the mimic gate, the me-dist bump and its cap") {
+    const uint32_t n = 4;
+    std::vector<uint32_t> d8(n), cv(n);
+    // SB (1,0) of the 2x2 grid: cells {1,2,3} -> avg dist 1200 / var 60
+    // (the SB128 gather averages three cells here).
+    d8[0] = 1000; d8[1] = 1100; d8[2] = 1200; d8[3] = 1300;
+    cv[0] = 10; cv[1] = 20; cv[2] = 90; cv[3] = 200;
+    for (int sbSize = 64; sbSize <= 128; sbSize += 64) {
+        // mimic_only_tx_4x4 forces row 0 regardless of the level.
+        {
+            NsqSearchCtrls c;
+            std::memset(&c, kPoison, sizeof(c));
+            NsqPsqTxsCtrls t;
+            std::memset(&t, kPoison, sizeof(t));
+            NsqSearchPcs pcs;
+            std::memset(&pcs, 0, sizeof(pcs));
+            pcs.isISlice = false;
+            pcs.encMode = ENC_M10;  // me_dist_mod on
+            pcs.mimicOnlyTx4x4 = true;
+            pcs.sbSize = (uint32_t)sbSize;
+            pcs.sbIndex = 1;
+            pcs.me8x8Distortion = d8.data();
+            pcs.me8x8CostVariance = cv.data();
+            pcs.sb128.b64Size = 64;
+            pcs.sb128.alignedWidth = 128;
+            pcs.sb128.alignedHeight = 128;
+            pcs.sb128.me64x64Distortion = d8.data();
+            pcs.sb128.me32x32Distortion = d8.data();
+            pcs.sb128.me16x16Distortion = d8.data();
+            pcs.sb128.me8x8Distortion = d8.data();
+            pcs.sb128.me8x8CostVariance = cv.data();
+            pcs.pdPass = kPdPass1;
+            setNsqSearchCtrls(c, t, pcs, 9);
+            CHECK(c.enabled == false);
+            CHECK(c.sqWeight == 0xFFFFFFFFu);
+            CHECK(c.hvWeight == 0xFFFFFFFFu);
+        }
+        // The bump: easy SB -> level + 1 (row 6 from 5).
+        {
+            NsqSearchCtrls c;
+            std::memset(&c, kPoison, sizeof(c));
+            NsqPsqTxsCtrls t;
+            std::memset(&t, kPoison, sizeof(t));
+            NsqSearchPcs pcs;
+            std::memset(&pcs, 0, sizeof(pcs));
+            pcs.isISlice = false;
+            pcs.encMode = ENC_M10;
+            pcs.mimicOnlyTx4x4 = false;
+            pcs.sbSize = (uint32_t)sbSize;
+            pcs.sbIndex = 1;
+            pcs.me8x8Distortion = d8.data();
+            pcs.me8x8CostVariance = cv.data();
+            pcs.sb128.b64Size = 64;
+            pcs.sb128.alignedWidth = 128;
+            pcs.sb128.alignedHeight = 128;
+            pcs.sb128.me64x64Distortion = d8.data();
+            pcs.sb128.me32x32Distortion = d8.data();
+            pcs.sb128.me16x16Distortion = d8.data();
+            pcs.sb128.me8x8Distortion = d8.data();
+            pcs.sb128.me8x8CostVariance = cv.data();
+            pcs.pdPass = kPdPass1;
+            setNsqSearchCtrls(c, t, pcs, 5);
+            const OracleNsqSearchRow& r6 = oracleNsqSearchRows[6];
+            CHECK(c.enabled == true);
+            CHECK(c.sqWeight == r6.sq);
+            CHECK(c.nsqSplitCostTh == r6.split);
+            CHECK(c.componentMultipleTh == r6.comp);
+            CHECK(c.hvWeight == r6.hv);
+            // The cap: level 19 + bump stays 19. The QP tail is always
+            // on for part0: qp 0 -> weight 1 -> offset 5 -> 80 - 5 = 75.
+            setNsqSearchCtrls(c, t, pcs, 19);
+            const OracleNsqSearchRow& r19 = oracleNsqSearchRows[19];
+            CHECK(c.nsqSplitCostTh == r19.split);
+            CHECK(c.maxPart0ToPart1Dev == r19.part0 - 5);
+        }
+        // No bump: hard SB -> the row as-is.
+        {
+            std::vector<uint32_t> hd8(n), hcv(n);
+            for (uint32_t i = 0; i < n; ++i) {
+                hd8[i] = 999999u;
+                hcv[i] = 999999u;
+            }
+            NsqSearchCtrls c;
+            std::memset(&c, kPoison, sizeof(c));
+            NsqPsqTxsCtrls t;
+            std::memset(&t, kPoison, sizeof(t));
+            NsqSearchPcs pcs;
+            std::memset(&pcs, 0, sizeof(pcs));
+            pcs.isISlice = false;
+            pcs.encMode = ENC_M10;
+            pcs.mimicOnlyTx4x4 = false;
+            pcs.sbSize = (uint32_t)sbSize;
+            pcs.sbIndex = 1;
+            pcs.me8x8Distortion = hd8.data();
+            pcs.me8x8CostVariance = hcv.data();
+            pcs.sb128.b64Size = 64;
+            pcs.sb128.alignedWidth = 128;
+            pcs.sb128.alignedHeight = 128;
+            pcs.sb128.me64x64Distortion = hd8.data();
+            pcs.sb128.me32x32Distortion = hd8.data();
+            pcs.sb128.me16x16Distortion = hd8.data();
+            pcs.sb128.me8x8Distortion = hd8.data();
+            pcs.sb128.me8x8CostVariance = hcv.data();
+            pcs.pdPass = kPdPass1;
+            setNsqSearchCtrls(c, t, pcs, 5);
+            const OracleNsqSearchRow& r5 = oracleNsqSearchRows[5];
+            CHECK(c.sqWeight == r5.sq);
+            CHECK(c.hvWeight == r5.hv);
+        }
+    }
+}

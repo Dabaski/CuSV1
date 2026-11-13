@@ -4988,5 +4988,419 @@ std::uint8_t setNicCtrls(NicCtrls* ctrls, std::uint8_t nicLevel) {
     return nicScalingLevel;
 }
 
+// svt_aom_set_nsq_geom_ctrls (enc_mode_config.c:4968-5022).
+void setNsqGeomCtrls(NsqGeomCtrls& ctrls, std::uint8_t nsqGeomLevel, std::uint8_t* allowHvaHvb,
+                     std::uint8_t* allowHv4, std::uint8_t* minNsqBsize) {
+    NsqGeomCtrls local = {};  // the reference's {0} local
+    switch (nsqGeomLevel) {
+    case 0:
+        local.enabled        = 0;
+        local.minNsqBlockSize = 0;
+        local.allowHv4       = 0;
+        local.allowHvaHvb    = 0;
+        break;
+
+    case 1:
+        local.enabled        = 1;
+        local.minNsqBlockSize = 0;
+        local.allowHv4       = 1;
+        local.allowHvaHvb    = 1;
+        break;
+
+    case 2:
+        local.enabled        = 1;
+        local.minNsqBlockSize = 0;
+        local.allowHv4       = 1;
+        local.allowHvaHvb    = 0;
+        break;
+    case 3:
+        local.enabled        = 1;
+        local.minNsqBlockSize = 8;
+        local.allowHv4       = 0;
+        local.allowHvaHvb    = 0;
+        break;
+    case 4:
+        local.enabled        = 1;
+        local.minNsqBlockSize = 16;
+        local.allowHv4       = 0;
+        local.allowHvaHvb    = 0;
+        break;
+    default:
+        // The reference assert(0)s here and falls through to the writes
+        // with the zero-init local (documented).
+        break;
+    }
+
+    if (allowHvaHvb) {
+        *allowHvaHvb = local.allowHvaHvb;
+    }
+    if (allowHv4) {
+        *allowHv4 = local.allowHv4;
+    }
+    if (minNsqBsize) {
+        *minNsqBsize = local.minNsqBlockSize;
+    }
+    ctrls = local;  // the memcpy
+}
+
+// svt_aom_set_nsq_search_ctrls (enc_mode_config.c:5024-5375).
+void setNsqSearchCtrls(NsqSearchCtrls& ctrls, NsqPsqTxsCtrls& psqTxsCtrls, const NsqSearchPcs& pcs,
+                       std::uint8_t nsqSearchLevel) {
+    bool meDistMod;
+    // Whether or not to modulate the nsq_search_level using me-distortion
+    if (pcs.isISlice) {
+        meDistMod = false;
+    } else {
+        if (pcs.encMode <= ENC_MR) {
+            meDistMod = false;
+        } else {
+            meDistMod = true;
+        }
+    }
+    if (pcs.mimicOnlyTx4x4) {
+        nsqSearchLevel = 0;
+    } else if (meDistMod && nsqSearchLevel) {
+        std::uint32_t dist8, me8x8CostVariance;
+        if (pcs.sbSize == 64) {
+            dist8               = pcs.me8x8Distortion[pcs.sbIndex];
+            me8x8CostVariance   = pcs.me8x8CostVariance[pcs.sbIndex];
+        } else {
+            std::uint32_t dist64, dist32, dist16;
+            Sb128Ctx sb128Ctx;
+            sb128Ctx.sbOriginX = pcs.sbOriginX;
+            sb128Ctx.sbOriginY = pcs.sbOriginY;
+            getSb128MeData(pcs.sb128, sb128Ctx, &dist64, &dist32, &dist16, &dist8,
+                           &me8x8CostVariance);
+        }
+
+        const int errorPerSample = 3;
+        if (dist8 <= (pcs.sbSize * pcs.sbSize * errorPerSample) && me8x8CostVariance <= 10000) {
+            nsqSearchLevel = (std::uint8_t)std::min((int)nsqSearchLevel + 1, 19);
+        }
+    }
+
+    switch (nsqSearchLevel) {
+    case 0:
+        ctrls.enabled                = 0;
+        ctrls.sqWeight               = (std::uint32_t)~0;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 0;
+        ctrls.lowerDepthSplitCostTh  = 0;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 0;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 0;
+        ctrls.componentMultipleTh    = 0;
+        ctrls.hvWeight               = (std::uint32_t)~0;
+        break;
+
+    case 1:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 105;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 0;
+        ctrls.lowerDepthSplitCostTh  = 0;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 0;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 0;
+        ctrls.componentMultipleTh    = 0;
+        ctrls.hvWeight               = 115;
+        break;
+
+    case 2:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 105;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 150;
+        ctrls.lowerDepthSplitCostTh  = 3;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 0;
+        ctrls.componentMultipleTh    = 0;
+        ctrls.hvWeight               = 115;
+        break;
+
+    case 3:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 105;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 100;
+        ctrls.lowerDepthSplitCostTh  = 3;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 0;
+        ctrls.hvWeight               = 115;
+        break;
+
+    case 4:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 100;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 100;
+        ctrls.lowerDepthSplitCostTh  = 3;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 115;
+        break;
+
+    case 5:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 100;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 100;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 110;
+        break;
+    case 6:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 100;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 100;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 100;
+        break;
+
+    case 7:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 80;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 100;
+        break;
+    case 8:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 80;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 30;
+        ctrls.nonHvSplitRateTh       = 20;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 100;
+        break;
+    case 9:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 80;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 40;
+        ctrls.nonHvSplitRateTh       = 30;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 60;
+        ctrls.hvWeight               = 100;
+        break;
+    case 10:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 60;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 40;
+        ctrls.nonHvSplitRateTh       = 30;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 60;
+        ctrls.hvWeight               = 100;
+        break;
+    case 11:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 60;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 50;
+        ctrls.nonHvSplitRateTh       = 30;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 40;
+        ctrls.hvWeight               = 100;
+        break;
+    case 12:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 60;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 50;
+        ctrls.nonHvSplitRateTh       = 30;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 20;
+        ctrls.hvWeight               = 100;
+        break;
+    case 13:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 60;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 60;
+        ctrls.nonHvSplitRateTh       = 40;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 20;
+        ctrls.hvWeight               = 100;
+        break;
+    case 14:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 5;
+        ctrls.nsqSplitCostTh         = 50;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 60;
+        ctrls.nonHvSplitRateTh       = 40;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 20;
+        ctrls.hvWeight               = 100;
+        break;
+    case 15:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 20;
+        ctrls.nsqSplitCostTh         = 40;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 60;
+        ctrls.nonHvSplitRateTh       = 50;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 15;
+        ctrls.hvWeight               = 75;
+        break;
+    case 16:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 50;
+        ctrls.nsqSplitCostTh         = 40;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 70;
+        ctrls.nonHvSplitRateTh       = 60;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 15;
+        ctrls.hvWeight               = 75;
+        break;
+    case 17:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 50;
+        ctrls.nsqSplitCostTh         = 40;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 70;
+        ctrls.nonHvSplitRateTh       = 60;
+        ctrls.rateThOffsetLte16      = 15;
+        ctrls.psqTxsLvl              = 1;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 10;
+        ctrls.hvWeight               = 75;
+        break;
+    case 18:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 75;
+        ctrls.nsqSplitCostTh         = 40;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 80;
+        ctrls.nonHvSplitRateTh       = 70;
+        ctrls.rateThOffsetLte16      = 15;
+        ctrls.psqTxsLvl              = 1;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 5;
+        ctrls.hvWeight               = 75;
+        break;
+    case 19:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 80;
+        ctrls.nsqSplitCostTh         = 35;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 85;
+        ctrls.nonHvSplitRateTh       = 70;
+        ctrls.rateThOffsetLte16      = 15;
+        ctrls.psqTxsLvl              = 1;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 5;
+        ctrls.hvWeight               = 75;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing; the QP tail
+        // below still runs on the untouched fields (documented).
+        break;
+    }
+    std::uint32_t qWeight, qWeightDenom;
+    getQpBasedThScalingFactors(pcs.nsqQpBasedThScaling, &qWeight, &qWeightDenom, pcs.qp);
+    ctrls.componentMultipleTh = (std::uint32_t)(((std::uint64_t)ctrls.componentMultipleTh * qWeight +
+                                                 (qWeightDenom >> 1)) /
+                                                qWeightDenom);
+    ctrls.nsqSplitCostTh      = (std::uint32_t)(((std::uint64_t)ctrls.nsqSplitCostTh * qWeight +
+                                            (qWeightDenom >> 1)) /
+                                           qWeightDenom);
+    int maxPart0ToPart1DevOffset = 5;
+    maxPart0ToPart1DevOffset =
+        (int)(((std::uint64_t)maxPart0ToPart1DevOffset * qWeight + (qWeightDenom >> 1)) /
+              qWeightDenom);
+    ctrls.maxPart0ToPart1Dev =
+        (std::uint32_t)std::max((int)((int)ctrls.maxPart0ToPart1Dev - maxPart0ToPart1DevOffset), 0);
+    if (pcs.pdPass == kPdPass0) {
+        ctrls.sqWeight                = 90;
+        ctrls.maxPart0ToPart1Dev      = 0;
+        ctrls.nsqSplitCostTh          = 60;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.hVsVSplitRateTh         = 60;
+        ctrls.nonHvSplitRateTh        = 60;
+        ctrls.rateThOffsetLte16       = 10;
+        ctrls.psqTxsLvl               = 0;
+        ctrls.subDepthBlockLvl        = 0;
+        ctrls.componentMultipleTh     = 10;
+        ctrls.hvWeight                = 90;
+    }
+
+    setSqTxsCtrls(psqTxsCtrls, ctrls.psqTxsLvl);
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo
