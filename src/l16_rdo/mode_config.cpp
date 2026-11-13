@@ -4341,5 +4341,4428 @@ void setCandReductionCtrls(CandReductionCtrls& ctrls, std::uint8_t candReduction
     }
 }
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 1: the SB128 walls (enc_mode_config.c:63-:145), the
+// :3937-:3963 gap (set_sq_txs_ctrls), set_chroma_controls (:4396-:4463),
+// set_wm_controls (:4467-:4521), the nic level getters (:4521-:4586) and
+// svt_aom_set_nic_controls (:4588-:4966).
+// ---------------------------------------------------------------------------
+
+// get_sb128_me_data (enc_mode_config.c:63-115).
+void getSb128MeData(const Sb128Pcs& pcs, const Sb128Ctx& ctx, std::uint32_t* me64x64Dist,
+                    std::uint32_t* me32x32Dist, std::uint32_t* me16x16Dist, std::uint32_t* me8x8Dist,
+                    std::uint32_t* me8x8CostVar) {
+    const std::uint32_t meSbSize          = pcs.b64Size;
+    const std::uint32_t mePicWidthInSb    = (pcs.alignedWidth + meSbSize - 1) / meSbSize;
+    const std::uint32_t mePicHeightInSb   = (pcs.alignedHeight + meSbSize - 1) / meSbSize;
+    const std::uint32_t meSbX             = (ctx.sbOriginX / meSbSize);
+    const std::uint32_t meSbY             = (ctx.sbOriginY / meSbSize);
+    const std::uint32_t meSbAddr          = meSbX + meSbY * mePicWidthInSb;
+
+    std::uint32_t dist64              = pcs.me64x64Distortion[meSbAddr];
+    std::uint32_t dist32              = pcs.me32x32Distortion[meSbAddr];
+    std::uint32_t dist16              = pcs.me16x16Distortion[meSbAddr];
+    std::uint32_t dist8               = pcs.me8x8Distortion[meSbAddr];
+    std::uint32_t me8x8CostVariance   = pcs.me8x8CostVariance[meSbAddr];
+    int           count               = 1;
+    if (meSbX + 1 < mePicWidthInSb) {
+        dist64 += pcs.me64x64Distortion[meSbAddr + 1];
+        dist32 += pcs.me32x32Distortion[meSbAddr + 1];
+        dist16 += pcs.me16x16Distortion[meSbAddr + 1];
+        dist8 += pcs.me8x8Distortion[meSbAddr + 1];
+        me8x8CostVariance = std::max(me8x8CostVariance, pcs.me8x8CostVariance[meSbAddr + 1]);
+        count++;
+    }
+    if (meSbY + 1 < mePicHeightInSb) {
+        dist64 += pcs.me64x64Distortion[meSbAddr + mePicWidthInSb];
+        dist32 += pcs.me32x32Distortion[meSbAddr + mePicWidthInSb];
+        dist16 += pcs.me16x16Distortion[meSbAddr + mePicWidthInSb];
+        dist8 += pcs.me8x8Distortion[meSbAddr + mePicWidthInSb];
+        me8x8CostVariance = std::max(me8x8CostVariance,
+                                     pcs.me8x8CostVariance[meSbAddr + mePicWidthInSb]);
+        count++;
+    }
+    if (meSbX + 1 < mePicWidthInSb && meSbY + 1 < mePicHeightInSb) {
+        dist64 += pcs.me64x64Distortion[meSbAddr + mePicWidthInSb + 1];
+        dist32 += pcs.me32x32Distortion[meSbAddr + mePicWidthInSb + 1];
+        dist16 += pcs.me16x16Distortion[meSbAddr + mePicWidthInSb + 1];
+        dist8 += pcs.me8x8Distortion[meSbAddr + mePicWidthInSb + 1];
+        me8x8CostVariance = std::max(me8x8CostVariance,
+                                     pcs.me8x8CostVariance[meSbAddr + mePicWidthInSb + 1]);
+        count++;
+    }
+    dist64 /= count;
+    dist32 /= count;
+    dist16 /= count;
+    dist8 /= count;
+
+    *me64x64Dist = dist64;
+    *me32x32Dist = dist32;
+    *me16x16Dist = dist16;
+    *me8x8Dist   = dist8;
+    *me8x8CostVar = me8x8CostVariance;
+}
+
+// get_sb128_variance (enc_mode_config.c:120-145).
+void getSb128Variance(const Sb128VarPcs& pcs, const Sb128Ctx& ctx, std::uint16_t* variance) {
+    const std::uint32_t b64Size       = pcs.b64Size;
+    const std::uint32_t b64PicWidth   = (pcs.alignedWidth + b64Size - 1) / b64Size;
+    const std::uint32_t b64PicHeight  = (pcs.alignedHeight + b64Size - 1) / b64Size;
+    const std::uint32_t b64X          = (ctx.sbOriginX / b64Size);
+    const std::uint32_t b64Y          = (ctx.sbOriginY / b64Size);
+    const std::uint32_t b64Index      = b64X + b64Y * b64PicWidth;
+    const std::uint32_t stride        = pcs.varianceStride;
+    std::uint16_t var64 = pcs.variance64[b64Index * stride + kMeTierZeroPu64x64];
+    std::uint8_t  count = 1;
+    if (b64X + 1 < b64PicWidth) {
+        var64 += pcs.variance64[(b64Index + 1) * stride + kMeTierZeroPu64x64];
+        count++;
+    }
+    if (b64Y + 1 < b64PicHeight) {
+        var64 += pcs.variance64[(b64Index + b64PicWidth) * stride + kMeTierZeroPu64x64];
+        count++;
+    }
+    if (b64X + 1 < b64PicWidth && b64Y + 1 < b64PicHeight) {
+        var64 += pcs.variance64[(b64Index + b64PicWidth + 1) * stride + kMeTierZeroPu64x64];
+        count++;
+    }
+    var64 /= count;
+    *variance = var64;
+}
+
+// set_sq_txs_ctrls (enc_mode_config.c:3937-3963).
+void setSqTxsCtrls(NsqPsqTxsCtrls& ctrls, std::uint8_t psqTxsLvl) {
+    switch (psqTxsLvl) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled   = 1;
+        ctrls.hvToSqTh  = 1000;
+        ctrls.hToVTh    = 100;
+        break;
+    case 2:
+        ctrls.enabled   = 1;
+        ctrls.hvToSqTh  = 250;
+        ctrls.hToVTh    = 25;
+        break;
+    case 3:
+        ctrls.enabled   = 1;
+        ctrls.hvToSqTh  = 150;
+        ctrls.hToVTh    = 15;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// svt_aom_set_chroma_controls (enc_mode_config.c:4396-4463).
+std::uint8_t setChromaCtrls(UvCtrls& ctrls, std::uint8_t uvLevel) {
+    std::uint8_t uvMode = 0;
+
+    switch (uvLevel) {
+    case 0:
+        uvMode = kChromaMode2;
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        uvMode = kChromaMode0;
+        ctrls.enabled             = 1;
+        ctrls.indUvLastMds        = 0;
+        ctrls.interVsIntraCostTh  = 0;
+        ctrls.skipIndUvIfOnlyDc   = 0;
+        ctrls.uvNicScalingNum     = 16;
+        break;
+    case 2:
+        uvMode = kChromaMode0;
+        ctrls.enabled             = 1;
+        ctrls.indUvLastMds        = 1;
+        ctrls.interVsIntraCostTh  = 0;
+        ctrls.skipIndUvIfOnlyDc   = 0;
+        ctrls.uvNicScalingNum     = 8;
+        break;
+    case 3:
+        uvMode = kChromaMode0;
+        ctrls.enabled             = 1;
+        ctrls.indUvLastMds        = 1;
+        ctrls.interVsIntraCostTh  = 100;
+        ctrls.skipIndUvIfOnlyDc   = 0;
+        ctrls.uvNicScalingNum     = 1;
+        break;
+    case 4:
+        uvMode = kChromaMode0;
+        ctrls.enabled             = 1;
+        ctrls.indUvLastMds        = 2;
+        ctrls.interVsIntraCostTh  = 100;
+        ctrls.skipIndUvIfOnlyDc   = 1;
+        ctrls.uvNicScalingNum     = 1;
+        break;
+    case 5:
+        uvMode = kChromaMode1;
+        ctrls.enabled = 1;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+
+    ctrls.uvMode = uvMode;
+    return uvMode;
+}
+
+// svt_aom_set_wm_controls (enc_mode_config.c:4467-4521).
+void setWmCtrls(WmCtrls& ctrls, std::uint8_t wmLevel) {
+    switch (wmLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled               = 1;
+        ctrls.useWmForMvp           = 1;
+        ctrls.refinementIterations  = 16;
+        ctrls.refineDiag            = 1;
+        ctrls.refineLevel           = 0;
+        ctrls.lowerBandTh           = 0;
+        ctrls.upperBandTh           = (std::uint16_t)~0;
+        ctrls.shutApproxIfNotMds0   = 0;
+        break;
+    case 2:
+        ctrls.enabled               = 1;
+        ctrls.useWmForMvp           = 1;
+        ctrls.refinementIterations  = 8;
+        ctrls.refineDiag            = 0;
+        ctrls.refineLevel           = 1;
+        ctrls.lowerBandTh           = 0;
+        ctrls.upperBandTh           = (std::uint16_t)~0;
+        ctrls.shutApproxIfNotMds0   = 1;
+        break;
+    case 3:
+        ctrls.enabled               = 1;
+        ctrls.useWmForMvp           = 1;
+        ctrls.refinementIterations  = 8;
+        ctrls.refineDiag            = 0;
+        ctrls.refineLevel           = 1;
+        ctrls.lowerBandTh           = 1 << 10;
+        ctrls.upperBandTh           = (std::uint16_t)~0;
+        ctrls.shutApproxIfNotMds0   = 1;
+        break;
+    case kMaxWarpLvl:
+        ctrls.enabled               = 1;
+        ctrls.useWmForMvp           = 0;
+        ctrls.refinementIterations  = 0;
+        ctrls.refineDiag            = 0;
+        ctrls.refineLevel           = 1;
+        ctrls.lowerBandTh           = 0;
+        ctrls.upperBandTh           = (std::uint16_t)~0;
+        ctrls.shutApproxIfNotMds0   = 0;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// svt_aom_get_nic_level_default (enc_mode_config.c:4521-4545).
+std::uint8_t getNicLevelDefault(EncMode encMode, std::uint8_t isBase) {
+    std::uint8_t nicLevel;
+    if (encMode <= ENC_MR) {
+        nicLevel = isBase ? 1 : 2;
+    } else if (encMode <= ENC_M0) {
+        nicLevel = isBase ? 2 : 4;
+    } else if (encMode <= ENC_M1) {
+        nicLevel = isBase ? 4 : 5;
+    } else if (encMode <= ENC_M3) {
+        nicLevel = isBase ? 5 : 6;
+    } else if (encMode <= ENC_M5) {
+        nicLevel = 7;
+    } else if (encMode <= ENC_M6) {
+        nicLevel = 8;
+    } else if (encMode <= ENC_M7) {
+        nicLevel = isBase ? 8 : 9;
+    } else if (encMode <= ENC_M8) {
+        nicLevel = 9;
+    } else if (encMode <= ENC_M9) {
+        nicLevel = isBase ? 9 : 11;
+    } else {
+        nicLevel = 11;
+    }
+    return nicLevel;
+}
+
+// svt_aom_get_nic_level_rtc (enc_mode_config.c:4547-4557).
+std::uint8_t getNicLevelRtc(EncMode encMode) {
+    std::uint8_t nicLevel;
+    if (encMode <= ENC_M8) {
+        nicLevel = 9;
+    } else if (encMode <= ENC_M9) {
+        nicLevel = 10;
+    } else {
+        nicLevel = 11;
+    }
+    return nicLevel;
+}
+
+// svt_aom_get_nic_level_allintra (enc_mode_config.c:4559-4586).
+std::uint8_t getNicLevelAllIntra(EncMode encMode) {
+    std::uint8_t nicLevel;
+    if (encMode <= ENC_M0) {
+        nicLevel = 1;
+    } else if (encMode <= ENC_M2) {
+        nicLevel = 3;
+    } else if (encMode <= ENC_M4) {
+        nicLevel = 5;
+    } else if (encMode <= ENC_M6) {
+        nicLevel = 6;
+    } else if (encMode <= ENC_M7) {
+        nicLevel = 7;
+    } else {
+        nicLevel = 11;
+    }
+
+    return nicLevel;
+}
+
+// MD_STAGE_NICS_SCAL_NUM (definitions.h:798-817, verbatim; the S0 column
+// kept for positional indexing - the consumers read [..][1..3]).
+const std::uint8_t kMdStageNicsScalNum[16][4] = {
+    {0, 20, 20, 20},  // LEVEL 0
+    {0, 18, 18, 18},  // LEVEL 1
+    {0, 16, 16, 16},  // LEVEL 2
+    {0, 12, 12, 12},  // LEVEL 3
+    {0, 10, 10, 10},  // LEVEL 4
+    {0, 8, 8, 8},     // LEVEL 5
+    {0, 6, 6, 6},     // LEVEL 6
+    {0, 4, 5, 5},     // LEVEL 7
+    {0, 4, 4, 4},     // LEVEL 8
+    {0, 3, 4, 4},     // LEVEL 9
+    {0, 3, 3, 3},     // LEVEL 10
+    {0, 3, 2, 2},     // LEVEL 11
+    {0, 3, 1, 1},     // LEVEL 12
+    {0, 2, 1, 1},     // LEVEL 13
+    {0, 2, 0, 0},     // LEVEL 14
+    {0, 0, 0, 0},     // LEVEL 15
+};
+
+// svt_aom_set_nic_controls (enc_mode_config.c:4588-4966).
+std::uint8_t setNicCtrls(NicCtrls* ctrls, std::uint8_t nicLevel) {
+    NicPruningCtrls* nicPruningCtrls = ctrls ? &ctrls->pruningCtrls : nullptr;
+    std::uint8_t     nicScalingLevel = 0;
+    std::uint8_t     mdStagingMode   = kMdStagingMode0;
+
+    switch (nicLevel) {
+    case 0:  // MAX NIC scaling; no pruning
+        nicScalingLevel = 0;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh        = (std::uint64_t)~0;
+            nicPruningCtrls->mds2ClassTh        = (std::uint64_t)~0;
+            nicPruningCtrls->mds3ClassTh        = (std::uint64_t)~0;
+            nicPruningCtrls->iMds3ClassThMult   = 0;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = (std::uint64_t)~0;
+            nicPruningCtrls->mds1CandBaseThInter  = (std::uint64_t)~0;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = (std::uint64_t)~0;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = (std::uint64_t)~0;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 1:
+        nicScalingLevel = 0;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = (std::uint64_t)~0;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 4;
+
+            nicPruningCtrls->mds3ClassTh        = 25;
+            nicPruningCtrls->mds3BandCnt        = 4;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = (std::uint64_t)~0;
+            nicPruningCtrls->mds1CandBaseThInter  = (std::uint64_t)~0;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 50;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 50;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 2:
+        nicScalingLevel = 1;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = (std::uint64_t)~0;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 4;
+
+            nicPruningCtrls->mds3ClassTh        = 25;
+            nicPruningCtrls->mds3BandCnt        = 8;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 500;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 30;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 30;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 3:
+        nicScalingLevel = 3;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = (std::uint64_t)~0;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 4;
+
+            nicPruningCtrls->mds3ClassTh        = 25;
+            nicPruningCtrls->mds3BandCnt        = 8;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 500;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 30;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 25;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 4:
+        nicScalingLevel = 3;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 500;
+            nicPruningCtrls->mds1BandCnt = 3;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 8;
+
+            nicPruningCtrls->mds3ClassTh        = 20;
+            nicPruningCtrls->mds3BandCnt        = 12;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 20;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 15;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 5:
+        nicScalingLevel = 6;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 300;
+            nicPruningCtrls->mds1BandCnt = 4;
+
+            nicPruningCtrls->mds2ClassTh = 25;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 15;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 0;
+            nicPruningCtrls->mds2CandBaseTh       = 20;
+            nicPruningCtrls->mds2CandThRankFactor = 0;
+            nicPruningCtrls->mds2RelativeDevTh    = 0;
+            nicPruningCtrls->mds3CandBaseTh       = 15;
+
+            nicPruningCtrls->mergeInterCandsMult = (std::uint8_t)~0;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 6:
+        nicScalingLevel = 6;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 200;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 10;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 15;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 15;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 7:
+        nicScalingLevel = 8;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 200;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 10;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 0;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1200;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 15;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 15;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    case 8:
+        nicScalingLevel = 13;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 200;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 10;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 1;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 300;
+            nicPruningCtrls->mds1CandBaseThInter  = 300;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 3;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 3;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 9:
+        nicScalingLevel = 14;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 200;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 10;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 1;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 100;
+            nicPruningCtrls->mds1CandBaseThInter  = 100;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 1;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 1;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 10:
+        nicScalingLevel = 15;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 150;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 5;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 5;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 1;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1;
+            nicPruningCtrls->mds1CandBaseThInter  = 1;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 1;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 1;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+
+    case 11:
+        nicScalingLevel = 15;
+
+        if (nicPruningCtrls) {
+            nicPruningCtrls->mds1ClassTh = 75;
+            nicPruningCtrls->mds1BandCnt = 16;
+
+            nicPruningCtrls->mds2ClassTh = 0;
+            nicPruningCtrls->mds2BandCnt = 10;
+
+            nicPruningCtrls->mds3ClassTh        = 0;
+            nicPruningCtrls->mds3BandCnt        = 16;
+            nicPruningCtrls->iMds3ClassThMult   = 50;
+            nicPruningCtrls->enableSkippingMds1 = 1;
+
+            nicPruningCtrls->mds1CandBaseThIntra  = 1;
+            nicPruningCtrls->mds1CandBaseThInter  = 1;
+            nicPruningCtrls->mds1CandThRankFactor = 3;
+            nicPruningCtrls->mds2CandBaseTh       = 1;
+            nicPruningCtrls->mds2CandThRankFactor = 1;
+            nicPruningCtrls->mds2RelativeDevTh    = 5;
+            nicPruningCtrls->mds3CandBaseTh       = 1;
+
+            nicPruningCtrls->mergeInterCandsMult = 4;
+        }
+        mdStagingMode = kMdStagingMode1;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+
+    if (ctrls) {
+        ctrls->scalingCtrls.stage1ScalingNum = kMdStageNicsScalNum[nicScalingLevel][kMdStage1];
+        ctrls->scalingCtrls.stage2ScalingNum = kMdStageNicsScalNum[nicScalingLevel][kMdStage2];
+        ctrls->scalingCtrls.stage3ScalingNum = kMdStageNicsScalNum[nicScalingLevel][kMdStage3];
+        ctrls->mdStagingMode                 = mdStagingMode;
+    }
+    // return NIC scaling level that can be used for memory allocation
+    return nicScalingLevel;
+}
+
+// svt_aom_set_nsq_geom_ctrls (enc_mode_config.c:4968-5022).
+void setNsqGeomCtrls(NsqGeomCtrls& ctrls, std::uint8_t nsqGeomLevel, std::uint8_t* allowHvaHvb,
+                     std::uint8_t* allowHv4, std::uint8_t* minNsqBsize) {
+    NsqGeomCtrls local = {};  // the reference's {0} local
+    switch (nsqGeomLevel) {
+    case 0:
+        local.enabled        = 0;
+        local.minNsqBlockSize = 0;
+        local.allowHv4       = 0;
+        local.allowHvaHvb    = 0;
+        break;
+
+    case 1:
+        local.enabled        = 1;
+        local.minNsqBlockSize = 0;
+        local.allowHv4       = 1;
+        local.allowHvaHvb    = 1;
+        break;
+
+    case 2:
+        local.enabled        = 1;
+        local.minNsqBlockSize = 0;
+        local.allowHv4       = 1;
+        local.allowHvaHvb    = 0;
+        break;
+    case 3:
+        local.enabled        = 1;
+        local.minNsqBlockSize = 8;
+        local.allowHv4       = 0;
+        local.allowHvaHvb    = 0;
+        break;
+    case 4:
+        local.enabled        = 1;
+        local.minNsqBlockSize = 16;
+        local.allowHv4       = 0;
+        local.allowHvaHvb    = 0;
+        break;
+    default:
+        // The reference assert(0)s here and falls through to the writes
+        // with the zero-init local (documented).
+        break;
+    }
+
+    if (allowHvaHvb) {
+        *allowHvaHvb = local.allowHvaHvb;
+    }
+    if (allowHv4) {
+        *allowHv4 = local.allowHv4;
+    }
+    if (minNsqBsize) {
+        *minNsqBsize = local.minNsqBlockSize;
+    }
+    ctrls = local;  // the memcpy
+}
+
+// svt_aom_set_nsq_search_ctrls (enc_mode_config.c:5024-5375).
+void setNsqSearchCtrls(NsqSearchCtrls& ctrls, NsqPsqTxsCtrls& psqTxsCtrls, const NsqSearchPcs& pcs,
+                       std::uint8_t nsqSearchLevel) {
+    bool meDistMod;
+    // Whether or not to modulate the nsq_search_level using me-distortion
+    if (pcs.isISlice) {
+        meDistMod = false;
+    } else {
+        if (pcs.encMode <= ENC_MR) {
+            meDistMod = false;
+        } else {
+            meDistMod = true;
+        }
+    }
+    if (pcs.mimicOnlyTx4x4) {
+        nsqSearchLevel = 0;
+    } else if (meDistMod && nsqSearchLevel) {
+        std::uint32_t dist8, me8x8CostVariance;
+        if (pcs.sbSize == 64) {
+            dist8               = pcs.me8x8Distortion[pcs.sbIndex];
+            me8x8CostVariance   = pcs.me8x8CostVariance[pcs.sbIndex];
+        } else {
+            std::uint32_t dist64, dist32, dist16;
+            Sb128Ctx sb128Ctx;
+            sb128Ctx.sbOriginX = pcs.sbOriginX;
+            sb128Ctx.sbOriginY = pcs.sbOriginY;
+            getSb128MeData(pcs.sb128, sb128Ctx, &dist64, &dist32, &dist16, &dist8,
+                           &me8x8CostVariance);
+        }
+
+        const int errorPerSample = 3;
+        if (dist8 <= (pcs.sbSize * pcs.sbSize * errorPerSample) && me8x8CostVariance <= 10000) {
+            nsqSearchLevel = (std::uint8_t)std::min((int)nsqSearchLevel + 1, 19);
+        }
+    }
+
+    switch (nsqSearchLevel) {
+    case 0:
+        ctrls.enabled                = 0;
+        ctrls.sqWeight               = (std::uint32_t)~0;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 0;
+        ctrls.lowerDepthSplitCostTh  = 0;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 0;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 0;
+        ctrls.componentMultipleTh    = 0;
+        ctrls.hvWeight               = (std::uint32_t)~0;
+        break;
+
+    case 1:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 105;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 0;
+        ctrls.lowerDepthSplitCostTh  = 0;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 0;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 0;
+        ctrls.componentMultipleTh    = 0;
+        ctrls.hvWeight               = 115;
+        break;
+
+    case 2:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 105;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 150;
+        ctrls.lowerDepthSplitCostTh  = 3;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 0;
+        ctrls.componentMultipleTh    = 0;
+        ctrls.hvWeight               = 115;
+        break;
+
+    case 3:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 105;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 100;
+        ctrls.lowerDepthSplitCostTh  = 3;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 0;
+        ctrls.hvWeight               = 115;
+        break;
+
+    case 4:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 100;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 100;
+        ctrls.lowerDepthSplitCostTh  = 3;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 115;
+        break;
+
+    case 5:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 100;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 100;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 110;
+        break;
+    case 6:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 100;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 100;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 100;
+        break;
+
+    case 7:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 80;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 0;
+        ctrls.nonHvSplitRateTh       = 0;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 100;
+        break;
+    case 8:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 80;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 30;
+        ctrls.nonHvSplitRateTh       = 20;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 80;
+        ctrls.hvWeight               = 100;
+        break;
+    case 9:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 80;
+        ctrls.lowerDepthSplitCostTh  = 5;
+        ctrls.hVsVSplitRateTh        = 40;
+        ctrls.nonHvSplitRateTh       = 30;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 60;
+        ctrls.hvWeight               = 100;
+        break;
+    case 10:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 60;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 40;
+        ctrls.nonHvSplitRateTh       = 30;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 60;
+        ctrls.hvWeight               = 100;
+        break;
+    case 11:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 60;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 50;
+        ctrls.nonHvSplitRateTh       = 30;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 40;
+        ctrls.hvWeight               = 100;
+        break;
+    case 12:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 60;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 50;
+        ctrls.nonHvSplitRateTh       = 30;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 20;
+        ctrls.hvWeight               = 100;
+        break;
+    case 13:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 0;
+        ctrls.nsqSplitCostTh         = 60;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 60;
+        ctrls.nonHvSplitRateTh       = 40;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 20;
+        ctrls.hvWeight               = 100;
+        break;
+    case 14:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 95;
+        ctrls.maxPart0ToPart1Dev     = 5;
+        ctrls.nsqSplitCostTh         = 50;
+        ctrls.lowerDepthSplitCostTh  = 10;
+        ctrls.hVsVSplitRateTh        = 60;
+        ctrls.nonHvSplitRateTh       = 40;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 20;
+        ctrls.hvWeight               = 100;
+        break;
+    case 15:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 20;
+        ctrls.nsqSplitCostTh         = 40;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 60;
+        ctrls.nonHvSplitRateTh       = 50;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 15;
+        ctrls.hvWeight               = 75;
+        break;
+    case 16:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 50;
+        ctrls.nsqSplitCostTh         = 40;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 70;
+        ctrls.nonHvSplitRateTh       = 60;
+        ctrls.rateThOffsetLte16      = 10;
+        ctrls.psqTxsLvl              = 0;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 15;
+        ctrls.hvWeight               = 75;
+        break;
+    case 17:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 50;
+        ctrls.nsqSplitCostTh         = 40;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 70;
+        ctrls.nonHvSplitRateTh       = 60;
+        ctrls.rateThOffsetLte16      = 15;
+        ctrls.psqTxsLvl              = 1;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 10;
+        ctrls.hvWeight               = 75;
+        break;
+    case 18:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 75;
+        ctrls.nsqSplitCostTh         = 40;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 80;
+        ctrls.nonHvSplitRateTh       = 70;
+        ctrls.rateThOffsetLte16      = 15;
+        ctrls.psqTxsLvl              = 1;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 5;
+        ctrls.hvWeight               = 75;
+        break;
+    case 19:
+        ctrls.enabled                = 1;
+        ctrls.sqWeight               = 90;
+        ctrls.maxPart0ToPart1Dev     = 80;
+        ctrls.nsqSplitCostTh         = 35;
+        ctrls.lowerDepthSplitCostTh  = 20;
+        ctrls.hVsVSplitRateTh        = 85;
+        ctrls.nonHvSplitRateTh       = 70;
+        ctrls.rateThOffsetLte16      = 15;
+        ctrls.psqTxsLvl              = 1;
+        ctrls.subDepthBlockLvl       = 1;
+        ctrls.componentMultipleTh    = 5;
+        ctrls.hvWeight               = 75;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing; the QP tail
+        // below still runs on the untouched fields (documented).
+        break;
+    }
+    std::uint32_t qWeight, qWeightDenom;
+    getQpBasedThScalingFactors(pcs.nsqQpBasedThScaling, &qWeight, &qWeightDenom, pcs.qp);
+    ctrls.componentMultipleTh = (std::uint32_t)(((std::uint64_t)ctrls.componentMultipleTh * qWeight +
+                                                 (qWeightDenom >> 1)) /
+                                                qWeightDenom);
+    ctrls.nsqSplitCostTh      = (std::uint32_t)(((std::uint64_t)ctrls.nsqSplitCostTh * qWeight +
+                                            (qWeightDenom >> 1)) /
+                                           qWeightDenom);
+    int maxPart0ToPart1DevOffset = 5;
+    maxPart0ToPart1DevOffset =
+        (int)(((std::uint64_t)maxPart0ToPart1DevOffset * qWeight + (qWeightDenom >> 1)) /
+              qWeightDenom);
+    ctrls.maxPart0ToPart1Dev =
+        (std::uint32_t)std::max((int)((int)ctrls.maxPart0ToPart1Dev - maxPart0ToPart1DevOffset), 0);
+    if (pcs.pdPass == kPdPass0) {
+        ctrls.sqWeight                = 90;
+        ctrls.maxPart0ToPart1Dev      = 0;
+        ctrls.nsqSplitCostTh          = 60;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.hVsVSplitRateTh         = 60;
+        ctrls.nonHvSplitRateTh        = 60;
+        ctrls.rateThOffsetLte16       = 10;
+        ctrls.psqTxsLvl               = 0;
+        ctrls.subDepthBlockLvl        = 0;
+        ctrls.componentMultipleTh     = 10;
+        ctrls.hvWeight                = 90;
+    }
+
+    setSqTxsCtrls(psqTxsCtrls, ctrls.psqTxsLvl);
+}
+
+// svt_aom_get_intra_mode_levels_default (enc_mode_config.c:5377-5404).
+void getIntraModeLevelsDefault(EncMode encMode, bool isISlice, bool isBase, int transitionPresent,
+                               std::uint32_t* intraLevel, std::uint32_t* distBasedAngIntraLevel) {
+    std::uint32_t intraLevelL;
+    std::uint32_t distBasedAngIntraLevelL;
+
+    if (encMode <= ENC_MR) {
+        intraLevelL                = isBase ? 1 : 2;
+        distBasedAngIntraLevelL    = 0;
+    } else if (encMode <= ENC_M2) {
+        intraLevelL                = isBase ? 1 : 2;
+        distBasedAngIntraLevelL    = isBase ? 0 : 1;
+    } else if (encMode <= ENC_M5) {
+        intraLevelL                = isBase ? 1 : 6;
+        distBasedAngIntraLevelL    = isISlice ? 0 : 2;
+    } else if (encMode <= ENC_M7) {
+        intraLevelL                = isBase ? 2 : 6;
+        distBasedAngIntraLevelL    = isISlice ? 0 : 2;
+    } else if (encMode <= ENC_M11) {
+        intraLevelL                = (isISlice || transitionPresent == 1) ? 4 : 6;
+        distBasedAngIntraLevelL    = isISlice ? 0 : 2;
+    } else {
+        intraLevelL                = kMaxIntraLevel - 1;
+        distBasedAngIntraLevelL    = 0;
+    }
+
+    *intraLevel                = intraLevelL;
+    *distBasedAngIntraLevel    = distBasedAngIntraLevelL;
+}
+
+// svt_aom_get_intra_mode_levels_rtc (enc_mode_config.c:5406-5427).
+void getIntraModeLevelsRtc(EncMode encMode, bool isISlice, int transitionPresent, bool useFlatIpp,
+                           std::uint32_t* intraLevel, std::uint32_t* distBasedAngIntraLevel) {
+    std::uint32_t intraLevelL;
+    std::uint32_t distBasedAngIntraLevelL;
+
+    if ((!useFlatIpp && encMode <= ENC_M7) || (useFlatIpp && encMode <= ENC_M9)) {
+        intraLevelL                = (isISlice || transitionPresent == 1) ? 1 : 6;
+        distBasedAngIntraLevelL    = 1;
+    } else if (encMode <= ENC_M8) {
+        intraLevelL                = (isISlice || transitionPresent == 1) ? 4 : 6;
+        distBasedAngIntraLevelL    = 1;
+    } else if (encMode <= ENC_M10) {
+        intraLevelL                = (isISlice || transitionPresent == 1) ? 4 : 6;
+        distBasedAngIntraLevelL    = 2;
+    } else {
+        intraLevelL                = kMaxIntraLevel - 1;
+        distBasedAngIntraLevelL    = 0;
+    }
+
+    *intraLevel                = intraLevelL;
+    *distBasedAngIntraLevel    = distBasedAngIntraLevelL;
+}
+
+// set_inter_intra_ctrls (enc_mode_config.c:5455-5481).
+void setInterIntraCtrls(InterIntraCompCtrls& ctrls, std::uint8_t interIntraLevel) {
+    switch (interIntraLevel) {
+    case 0:
+        ctrls.enabled        = 0;
+        ctrls.useRdModel     = 0;
+        ctrls.wedgeModeSq    = 0;
+        ctrls.wedgeModeNsq   = 0;
+        break;
+    case 1:
+        ctrls.enabled        = 1;
+        ctrls.useRdModel     = 1;
+        ctrls.wedgeModeSq    = 1;
+        ctrls.wedgeModeNsq   = 1;
+        break;
+    case 2:
+        ctrls.enabled        = 1;
+        ctrls.useRdModel     = 0;
+        ctrls.wedgeModeSq    = 0;
+        ctrls.wedgeModeNsq   = 2;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_pd0_ctrls (enc_mode_config.c:5483-5601).
+void setPd0Ctrls(Pd0Ctrls& ctrls, std::uint8_t lpd0Lvl, std::uint8_t hbdMd) {
+    if (hbdMd) {  // SVT_EFFECTIVE_HBD_MD is the identity in the pinned build
+        ctrls.pd0Level = 0;  // PD0_LVL_0
+        return;
+    }
+    switch (lpd0Lvl) {
+    case 0:
+        ctrls.pd0Level        = 0;  // PD0_LVL_0
+        ctrls.usePd0Detector[0] = 0;
+        break;
+    case 1:
+        ctrls.pd0Level        = 1;  // PD0_LVL_1
+        ctrls.usePd0Detector[0] = 0;
+        ctrls.usePd0Detector[1] = 0;
+        break;
+    case 2:
+        ctrls.pd0Level        = 2;  // PD0_LVL_2
+        ctrls.usePd0Detector[0] = 0;
+        ctrls.usePd0Detector[1] = 0;
+        ctrls.usePd0Detector[2] = 0;
+        break;
+    case 3:
+        ctrls.pd0Level        = 3;  // PD0_LVL_3
+        ctrls.usePd0Detector[0] = 0;
+        ctrls.usePd0Detector[1] = 0;
+        ctrls.usePd0Detector[2] = 0;
+        ctrls.usePd0Detector[3] = 0;
+        break;
+    case 4:
+        ctrls.pd0Level            = 4;  // PD0_LVL_4
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 1;
+        ctrls.useRefInfo[4]       = 2;
+        ctrls.me8x8CostVarianceTh[4] = 250000;
+        ctrls.edgeDistTh[4]       = 16384;
+        ctrls.neighMeDistShift[4] = 3;
+        break;
+    case 5:
+        ctrls.pd0Level            = 5;  // PD0_LVL_5
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 1;
+        ctrls.useRefInfo[4]       = 2;
+        ctrls.me8x8CostVarianceTh[4] = 250000;
+        ctrls.edgeDistTh[4]       = 16384;
+        ctrls.neighMeDistShift[4] = 3;
+
+        ctrls.usePd0Detector[5]   = 1;
+        ctrls.useRefInfo[5]       = 1;
+        ctrls.me8x8CostVarianceTh[5] = 250000 >> 1;
+        ctrls.edgeDistTh[5]       = 16384;
+        ctrls.neighMeDistShift[5] = 2;
+        break;
+    case 6:
+        ctrls.pd0Level            = 5;  // PD0_LVL_5
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 0;
+        ctrls.usePd0Detector[5]   = 1;
+        ctrls.useRefInfo[5]       = 0;
+        ctrls.me8x8CostVarianceTh[5] = 500000;
+        ctrls.edgeDistTh[5]       = 16384;
+        ctrls.neighMeDistShift[5] = 2;
+        break;
+    case 7:
+        ctrls.pd0Level = 6;  // PD0_LVL_6
+
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 0;
+        ctrls.usePd0Detector[5]   = 1;
+        ctrls.useRefInfo[5]       = 0;
+        ctrls.me8x8CostVarianceTh[5] = 500000 << 1;
+        ctrls.edgeDistTh[5]       = (std::uint32_t)~0;
+        ctrls.neighMeDistShift[5] = (std::uint16_t)~0;
+
+        // Set VERY_LIGHT_PD0 controls
+        ctrls.usePd0Detector[6]   = 1;
+        ctrls.useRefInfo[6]       = 1;
+        ctrls.me8x8CostVarianceTh[6] = 250000;
+        ctrls.edgeDistTh[6]       = 16384;
+        ctrls.neighMeDistShift[6] = 2;
+        break;
+    case 8:
+        ctrls.pd0Level = 6;  // PD0_LVL_6
+
+        ctrls.usePd0Detector[0]   = 0;
+        ctrls.usePd0Detector[1]   = 0;
+        ctrls.usePd0Detector[2]   = 0;
+        ctrls.usePd0Detector[3]   = 0;
+        ctrls.usePd0Detector[4]   = 0;
+        ctrls.usePd0Detector[5]   = 1;
+        ctrls.useRefInfo[5]       = 0;
+        ctrls.me8x8CostVarianceTh[5] = 500000 << 1;
+        ctrls.edgeDistTh[5]       = (std::uint32_t)~0;
+        ctrls.neighMeDistShift[5] = (std::uint16_t)~0;
+
+        // Set VERY_LIGHT_PD0 controls
+        ctrls.usePd0Detector[6]   = 1;
+        ctrls.useRefInfo[6]       = 2;
+        ctrls.me8x8CostVarianceTh[6] = 250000;
+        ctrls.edgeDistTh[6]       = 16384;
+        ctrls.neighMeDistShift[6] = 2;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_lpd1_ctrls (enc_mode_config.c:5603-5937).
+void setLpd1Ctrls(Lpd1Ctrls& ctrls, std::uint8_t lpd1Lvl) {
+    switch (lpd1Lvl) {
+    case 0:
+        ctrls.pd1Level = (std::uint8_t)REGULAR_PD1;  // Light-PD1 path not used
+        break;
+    case 1:
+        ctrls.pd1Level = LPD1_LVL_0;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 1;
+        ctrls.costThDist[0]            = 25;
+        ctrls.costThRate[0]            = 6000 + 40 * 500;
+        ctrls.nzCoeffTh[0]             = 0;
+        ctrls.maxMvLength[0]           = 300;
+        ctrls.me8x8CostVarianceTh[0]   = 250000 >> 3;
+        ctrls.skipPd0EdgeDistTh[0]     = 1024;
+        ctrls.skipPd0MeShift[0]        = 1;
+        break;
+    case 2:
+        ctrls.pd1Level = LPD1_LVL_0;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 1;
+        ctrls.costThDist[0]            = 25;
+        ctrls.costThRate[0]            = 6000 + 40 * 500;
+        ctrls.nzCoeffTh[0]             = 16;
+        ctrls.maxMvLength[0]           = 300;
+        ctrls.me8x8CostVarianceTh[0]   = 250000 >> 3;
+        ctrls.skipPd0EdgeDistTh[0]     = 1024;
+        ctrls.skipPd0MeShift[0]        = 1;
+        break;
+    case 3:
+        ctrls.pd1Level = LPD1_LVL_0;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 35;
+        ctrls.costThRate[0]            = 6000 + 100 * 500;
+        ctrls.nzCoeffTh[0]             = 16;
+        ctrls.maxMvLength[0]           = 900;
+        ctrls.me8x8CostVarianceTh[0]   = 750000 >> 3;
+        ctrls.skipPd0EdgeDistTh[0]     = 16384;
+        ctrls.skipPd0MeShift[0]        = 3;
+        break;
+    case 4:
+        ctrls.pd1Level = LPD1_LVL_1;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 4;
+        ctrls.costThRate[0]            = 6000 + 512 * 500;
+        ctrls.nzCoeffTh[0]             = 32;
+        ctrls.maxMvLength[0]           = 2048;
+        ctrls.me8x8CostVarianceTh[0]   = 500000;
+        ctrls.skipPd0EdgeDistTh[0]     = 16384;
+        ctrls.skipPd0MeShift[0]        = 3;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 1;
+        ctrls.costThDist[1]            = 256 << 1;
+        ctrls.costThRate[1]            = 6000 + 125 * 500;
+        ctrls.nzCoeffTh[1]             = 32;
+        ctrls.maxMvLength[1]           = 1600;
+        ctrls.me8x8CostVarianceTh[1]   = 500000 >> 3;
+        ctrls.skipPd0EdgeDistTh[1]     = 16384;
+        ctrls.skipPd0MeShift[1]        = 3;
+        break;
+    case 5:
+        ctrls.pd1Level = LPD1_LVL_3;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 10;
+        ctrls.costThRate[0]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[0]             = 512;
+        ctrls.maxMvLength[0]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[0]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[0]     = 16384 * 7;
+        ctrls.skipPd0MeShift[0]        = 5;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 0;
+        ctrls.costThDist[1]            = 256 << 8;
+        ctrls.costThRate[1]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[1]             = 256;
+        ctrls.maxMvLength[1]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[1]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[1]     = 16384 * 6;
+        ctrls.skipPd0MeShift[1]        = 5;
+
+        // Set LPD1 level 2 controls
+        ctrls.useLpd1Detector[2]       = 1;
+        ctrls.useRefInfo[2]            = 0;
+        ctrls.costThDist[2]            = 256 << 8;
+        ctrls.costThRate[2]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[2]             = 164;
+        ctrls.maxMvLength[2]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[2]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[2]     = 16384 * 6;
+        ctrls.skipPd0MeShift[2]        = 5;
+
+        // Set LPD1 level 3 controls
+        ctrls.useLpd1Detector[3]       = 1;
+        ctrls.useRefInfo[3]            = 1;
+        ctrls.costThDist[3]            = 256 << 8;
+        ctrls.costThRate[3]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[3]             = 128;
+        ctrls.maxMvLength[3]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[3]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[3]     = 16384 * 6;
+        ctrls.skipPd0MeShift[3]        = 5;
+        break;
+    case 6:
+        ctrls.pd1Level = LPD1_LVL_4;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 10;
+        ctrls.costThRate[0]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[0]             = 512;
+        ctrls.maxMvLength[0]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[0]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[0]     = 16384 * 7;
+        ctrls.skipPd0MeShift[0]        = 5;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 0;
+        ctrls.costThDist[1]            = 256 << 10;
+        ctrls.costThRate[1]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[1]             = 512;
+        ctrls.maxMvLength[1]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[1]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[1]     = 16384 * 7;
+        ctrls.skipPd0MeShift[1]        = 5;
+
+        // Set LPD1 level 2 controls
+        ctrls.useLpd1Detector[2]       = 1;
+        ctrls.useRefInfo[2]            = 0;
+        ctrls.costThDist[2]            = 256 << 10;
+        ctrls.costThRate[2]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[2]             = 256;
+        ctrls.maxMvLength[2]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[2]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[2]     = 16384 * 7;
+        ctrls.skipPd0MeShift[2]        = 5;
+
+        // Set LPD1 level 3 controls
+        ctrls.useLpd1Detector[3]       = 1;
+        ctrls.useRefInfo[3]            = 0;
+        ctrls.costThDist[3]            = 256 << 10;
+        ctrls.costThRate[3]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[3]             = 164;
+        ctrls.maxMvLength[3]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[3]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[3]     = 16384 * 7;
+        ctrls.skipPd0MeShift[3]        = 5;
+
+        // Set LPD1 level 4 controls
+        ctrls.useLpd1Detector[4]       = 1;
+        ctrls.useRefInfo[4]            = 1;
+        ctrls.costThDist[4]            = 256 << 4;
+        ctrls.costThRate[4]            = 6000 + 1024 * 500;
+        ctrls.nzCoeffTh[4]             = 128;
+        ctrls.maxMvLength[4]           = 2048;
+        ctrls.me8x8CostVarianceTh[4]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[4]     = 16384 * 2;
+        ctrls.skipPd0MeShift[4]        = 3;
+        break;
+    case 7:
+        ctrls.pd1Level = LPD1_LVL_5;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 10;
+        ctrls.costThRate[0]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[0]             = 256;
+        ctrls.maxMvLength[0]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[0]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[0]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[0]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 0;
+        ctrls.costThDist[1]            = 256 << 10;
+        ctrls.costThRate[1]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[1]             = 128;
+        ctrls.maxMvLength[1]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[1]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[1]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[1]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 2 controls
+        ctrls.useLpd1Detector[2]       = 1;
+        ctrls.useRefInfo[2]            = 0;
+        ctrls.costThDist[2]            = 256 << 10;
+        ctrls.costThRate[2]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[2]             = 96;
+        ctrls.maxMvLength[2]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[2]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[2]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[2]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 3 controls
+        ctrls.useLpd1Detector[3]       = 1;
+        ctrls.useRefInfo[3]            = 0;
+        ctrls.costThDist[3]            = 256 << 10;
+        ctrls.costThRate[3]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[3]             = 96;
+        ctrls.maxMvLength[3]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[3]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[3]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[3]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 4 controls
+        ctrls.useLpd1Detector[4]       = 1;
+        ctrls.useRefInfo[4]            = 1;
+        ctrls.costThDist[4]            = 256 << 8;
+        ctrls.costThRate[4]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[4]             = 64;
+        ctrls.maxMvLength[4]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[4]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[4]     = 16384 * 6;
+        ctrls.skipPd0MeShift[4]        = 5;
+
+        // Set LPD1 level 5 controls
+        ctrls.useLpd1Detector[5]       = 1;
+        ctrls.useRefInfo[5]            = 1;
+        ctrls.costThDist[5]            = 256 << 8;
+        ctrls.costThRate[5]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[5]             = 64;
+        ctrls.maxMvLength[5]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[5]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[5]     = 16384 * 6;
+        ctrls.skipPd0MeShift[5]        = 5;
+        break;
+    case 8:
+        ctrls.pd1Level = LPD1_LVL_6;
+
+        // Set LPD1 level 0 controls
+        ctrls.useLpd1Detector[0]       = 1;
+        ctrls.useRefInfo[0]            = 0;
+        ctrls.costThDist[0]            = 256 << 10;
+        ctrls.costThRate[0]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[0]             = 256;
+        ctrls.maxMvLength[0]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[0]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[0]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[0]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 1 controls
+        ctrls.useLpd1Detector[1]       = 1;
+        ctrls.useRefInfo[1]            = 0;
+        ctrls.costThDist[1]            = 256 << 10;
+        ctrls.costThRate[1]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[1]             = 128;
+        ctrls.maxMvLength[1]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[1]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[1]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[1]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 2 controls
+        ctrls.useLpd1Detector[2]       = 1;
+        ctrls.useRefInfo[2]            = 0;
+        ctrls.costThDist[2]            = 256 << 10;
+        ctrls.costThRate[2]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[2]             = 96;
+        ctrls.maxMvLength[2]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[2]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[2]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[2]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 3 controls
+        ctrls.useLpd1Detector[3]       = 1;
+        ctrls.useRefInfo[3]            = 0;
+        ctrls.costThDist[3]            = 256 << 10;
+        ctrls.costThRate[3]            = 6000 + 8192 * 500;
+        ctrls.nzCoeffTh[3]             = 96;
+        ctrls.maxMvLength[3]           = 2048 * 16;
+        ctrls.me8x8CostVarianceTh[3]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[3]     = (std::uint32_t)~0;
+        ctrls.skipPd0MeShift[3]        = (std::uint16_t)~0;
+
+        // Set LPD1 level 4 controls
+        ctrls.useLpd1Detector[4]       = 1;
+        ctrls.useRefInfo[4]            = 1;
+        ctrls.costThDist[4]            = 256 << 8;
+        ctrls.costThRate[4]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[4]             = 64;
+        ctrls.maxMvLength[4]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[4]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[4]     = 16384 * 6;
+        ctrls.skipPd0MeShift[4]        = 5;
+
+        // Set LPD1 level 5 controls
+        ctrls.useLpd1Detector[5]       = 1;
+        ctrls.useRefInfo[5]            = 1;
+        ctrls.costThDist[5]            = 256 << 8;
+        ctrls.costThRate[5]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[5]             = 64;
+        ctrls.maxMvLength[5]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[5]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[5]     = 16384 * 6;
+        ctrls.skipPd0MeShift[5]        = 5;
+
+        // Set LPD1 level 6 controls
+        ctrls.useLpd1Detector[6]       = 1;
+        ctrls.useRefInfo[6]            = 1;
+        ctrls.costThDist[6]            = 256 << 8;
+        ctrls.costThRate[6]            = 6000 + 4096 * 500;
+        ctrls.nzCoeffTh[6]             = 64;
+        ctrls.maxMvLength[6]           = 2048 * 8;
+        ctrls.me8x8CostVarianceTh[6]   = (std::uint32_t)~0;
+        ctrls.skipPd0EdgeDistTh[6]     = 16384 * 6;
+        ctrls.skipPd0MeShift[6]        = 5;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// svt_aom_set_bipred3x3_controls (enc_mode_config.c:5939-5974).
+void setBipred3x3Ctrls(Bipred3x3Ctrls& ctrls, std::uint8_t bipred3x3Injection) {
+    switch (bipred3x3Injection) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled       = 1;
+        ctrls.searchDiag    = 1;
+        ctrls.useBestList   = 0;
+        ctrls.useL0L1Dev    = (std::uint8_t)~0;
+        break;
+    case 2:
+        ctrls.enabled       = 1;
+        ctrls.searchDiag    = 0;
+        ctrls.useBestList   = 0;
+        ctrls.useL0L1Dev    = (std::uint8_t)~0;
+        break;
+    case 3:
+        ctrls.enabled       = 1;
+        ctrls.searchDiag    = 0;
+        ctrls.useBestList   = 1;
+        ctrls.useL0L1Dev    = (std::uint8_t)~0;
+        break;
+    case 4:
+        ctrls.enabled       = 1;
+        ctrls.searchDiag    = 0;
+        ctrls.useBestList   = 1;
+        ctrls.useL0L1Dev    = 20;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// svt_aom_set_dist_based_ref_pruning_controls (enc_mode_config.c:5976-6231).
+void setDistBasedRefPruningCtrls(RefPruningCtrls& ctrls, std::uint8_t distBasedRefPruningLevel) {
+    switch (distBasedRefPruningLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kUni3x3Group]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kBi3x3Group]        = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNearGroup]     = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kPredMeGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterCompGroup]    = (std::uint32_t)~0;
+
+        ctrls.useTplInfoOffset      = 0;
+        ctrls.checkClosestMultiplier = 0;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+
+    case 2:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kUni3x3Group]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kBi3x3Group]        = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNearGroup]     = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kPredMeGroup]       = 150;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterCompGroup]    = (std::uint32_t)~0;
+
+        ctrls.useTplInfoOffset      = 0;
+        ctrls.checkClosestMultiplier = 0;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 3:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = 30;
+        ctrls.maxDevToBest[kUni3x3Group]       = 30;
+        ctrls.maxDevToBest[kBi3x3Group]        = 30;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kNrstNearGroup]     = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kPredMeGroup]       = 60;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = 30;
+        ctrls.maxDevToBest[kInterCompGroup]    = 30;
+
+        ctrls.useTplInfoOffset      = 0;
+        ctrls.checkClosestMultiplier = 0;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 4:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = 30;
+        ctrls.maxDevToBest[kUni3x3Group]       = 30;
+        ctrls.maxDevToBest[kBi3x3Group]        = 30;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = 30;
+        ctrls.maxDevToBest[kNrstNearGroup]     = 30;
+        ctrls.maxDevToBest[kPredMeGroup]       = 30;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]         = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = 30;
+        ctrls.maxDevToBest[kInterCompGroup]    = 30;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 5:
+        ctrls.enabled                             = 1;
+        ctrls.maxDevToBest[kPaMeGroup]            = 30;
+        ctrls.maxDevToBest[kUni3x3Group]          = 0;
+        ctrls.maxDevToBest[kBi3x3Group]           = 30;
+        ctrls.maxDevToBest[kNrstNewNearGroup]     = 30;
+        ctrls.maxDevToBest[kNrstNearGroup]        = 30;
+        ctrls.maxDevToBest[kPredMeGroup]          = 30;
+        ctrls.maxDevToBest[kGlobalGroup]          = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]      = 30;
+        ctrls.maxDevToBest[kInterCompGroup]       = 0;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 6:
+        ctrls.enabled                             = 1;
+        ctrls.maxDevToBest[kPaMeGroup]            = 30;
+        ctrls.maxDevToBest[kUni3x3Group]          = 0;
+        ctrls.maxDevToBest[kBi3x3Group]           = 30;
+        ctrls.maxDevToBest[kNrstNewNearGroup]     = 30;
+        ctrls.maxDevToBest[kNrstNearGroup]        = 30;
+        ctrls.maxDevToBest[kPredMeGroup]          = 30;
+        ctrls.maxDevToBest[kGlobalGroup]          = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kInterIntraGroup]      = 30;
+        ctrls.maxDevToBest[kInterCompGroup]       = 0;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+        break;
+    case 7:
+        ctrls.enabled                             = 1;
+        ctrls.maxDevToBest[kPaMeGroup]            = 10;
+        ctrls.maxDevToBest[kUni3x3Group]          = 0;
+        ctrls.maxDevToBest[kBi3x3Group]           = 10;
+        ctrls.maxDevToBest[kNrstNewNearGroup]     = 10;
+        ctrls.maxDevToBest[kNrstNearGroup]        = 10;
+        ctrls.maxDevToBest[kPredMeGroup]          = 10;
+        ctrls.maxDevToBest[kGlobalGroup]          = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]            = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kObmcGroup]            = 10;
+        ctrls.maxDevToBest[kInterIntraGroup]      = 10;
+        ctrls.maxDevToBest[kInterCompGroup]       = 0;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+
+        break;
+    case 8:
+        ctrls.enabled = 1;
+
+        ctrls.maxDevToBest[kPaMeGroup]         = 0;
+        ctrls.maxDevToBest[kUni3x3Group]       = 0;
+        ctrls.maxDevToBest[kBi3x3Group]        = 0;
+        ctrls.maxDevToBest[kNrstNewNearGroup]  = 0;
+        ctrls.maxDevToBest[kNrstNearGroup]     = 0;
+        ctrls.maxDevToBest[kPredMeGroup]       = 0;
+        ctrls.maxDevToBest[kGlobalGroup]       = (std::uint32_t)~0;
+        ctrls.maxDevToBest[kWarpGroup]         = 0;
+        ctrls.maxDevToBest[kObmcGroup]         = 0;
+        ctrls.maxDevToBest[kInterIntraGroup]   = 0;
+        ctrls.maxDevToBest[kInterCompGroup]    = 0;
+
+        ctrls.useTplInfoOffset      = 20;
+        ctrls.checkClosestMultiplier = 1;
+
+        ctrls.closestRefs[kPaMeGroup]         = 1;
+        ctrls.closestRefs[kUni3x3Group]       = 1;
+        ctrls.closestRefs[kBi3x3Group]        = 1;
+        ctrls.closestRefs[kNrstNewNearGroup]  = 1;
+        ctrls.closestRefs[kNrstNearGroup]     = 1;
+        ctrls.closestRefs[kPredMeGroup]       = 1;
+        ctrls.closestRefs[kGlobalGroup]       = 1;
+        ctrls.closestRefs[kWarpGroup]         = 1;
+        ctrls.closestRefs[kObmcGroup]         = 1;
+        ctrls.closestRefs[kInterIntraGroup]   = 1;
+        ctrls.closestRefs[kInterCompGroup]    = 1;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_txs_controls (enc_mode_config.c:6233-6303).
+void setTxsCtrls(TxsCtrls& ctrls, std::uint8_t txsLevel, bool mimicOnlyTx4x4) {
+    if (mimicOnlyTx4x4) {
+        txsLevel = 1;
+    }
+
+    switch (txsLevel) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+    case 1:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 1;
+        ctrls.intraClassMaxDepthSq     = 2;
+        ctrls.intraClassMaxDepthNsq    = 2;
+        ctrls.interClassMaxDepthSq     = 2;
+        ctrls.interClassMaxDepthNsq    = 2;
+        ctrls.depth1TxtGroupOffset     = 0;
+        ctrls.depth2TxtGroupOffset     = 0;
+        ctrls.quadrantThSf             = 0;
+        break;
+    case 2:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 1;
+        ctrls.intraClassMaxDepthSq     = 2;
+        ctrls.intraClassMaxDepthNsq    = 2;
+        ctrls.interClassMaxDepthSq     = 1;
+        ctrls.interClassMaxDepthNsq    = 1;
+        ctrls.depth1TxtGroupOffset     = 0;
+        ctrls.depth2TxtGroupOffset     = 0;
+        ctrls.quadrantThSf             = 0;
+        break;
+    case 3:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 1;
+        ctrls.intraClassMaxDepthSq     = 1;
+        ctrls.intraClassMaxDepthNsq    = 0;
+        ctrls.interClassMaxDepthSq     = 1;
+        ctrls.interClassMaxDepthNsq    = 0;
+        ctrls.depth1TxtGroupOffset     = 3;
+        ctrls.depth2TxtGroupOffset     = 3;
+        ctrls.quadrantThSf             = 0;
+        break;
+    case 4:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 2;
+        ctrls.intraClassMaxDepthSq     = 1;
+        ctrls.intraClassMaxDepthNsq    = 1;
+        ctrls.interClassMaxDepthSq     = 0;
+        ctrls.interClassMaxDepthNsq    = 0;
+        ctrls.depth1TxtGroupOffset     = 4;
+        ctrls.depth2TxtGroupOffset     = 4;
+        ctrls.quadrantThSf             = 100;
+        break;
+    case kMaxTxsLevel - 1:
+        ctrls.enabled                  = 1;
+        ctrls.prevDepthCoeffExitTh     = 100;
+        ctrls.intraClassMaxDepthSq     = 1;
+        ctrls.intraClassMaxDepthNsq    = 1;
+        ctrls.interClassMaxDepthSq     = 0;
+        ctrls.interClassMaxDepthNsq    = 0;
+        ctrls.depth1TxtGroupOffset     = 4;
+        ctrls.depth2TxtGroupOffset     = 4;
+        ctrls.quadrantThSf             = 100;
+        break;
+    default:
+        ctrls.enabled = 0;
+        break;
+    }
+}
+
+// set_filter_intra_ctrls (enc_mode_config.c:6305-6324).
+void setFilterIntraCtrls(FilterIntraCtrls& ctrls, std::uint8_t fiLvl) {
+    switch (fiLvl) {
+    case 0:
+        ctrls.enabled = false;
+        break;
+    case 1:
+        ctrls.enabled            = true;
+        ctrls.maxFilterIntraMode = 4;  // FILTER_PAETH_PRED
+        break;
+    case 2:
+        ctrls.enabled            = true;
+        ctrls.maxFilterIntraMode = 0;  // FILTER_DC_PRED
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_spatial_sse_full_loop_level (enc_mode_config.c:6326-6347).
+void setSpatialSseFullLoopLevel(SpatialSseCtrls& ctrls, std::uint8_t spatialSseFullLoopLevel) {
+    switch (spatialSseFullLoopLevel) {
+    case 0:
+        ctrls.level = 3;  // SSSE_OFF
+        break;
+    case 1:
+        ctrls.level = 0;  // SSSE_MDS1
+        break;
+    case 2:
+        ctrls.level = 1;  // SSSE_MDS2
+        break;
+    case 3:
+        ctrls.level = 2;  // SSSE_MDS3
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// The shared body of compute_intra_pd0_th / compute_subres_th
+// (enc_mode_config.c:6349-6370).
+static std::uint64_t computeIntraPd0ThImpl(std::uint32_t superBlockSize, const RdCostCtx& ctx) {
+    const std::uint32_t fastLambda = ctx.hbdMd ? ctx.fastLambdaMd[kEb10BitMd]
+                                               : ctx.fastLambdaMd[kEb8BitMd];
+    const std::uint32_t sbSize     = superBlockSize * superBlockSize;
+    const std::uint64_t costThRate = 1 << 13;
+
+    // RDCOST(fast_lambda, cost_th_rate, sb_size * 6)
+    const std::uint64_t prod =
+        costThRate * (std::uint64_t)fastLambda;
+    const std::uint64_t round = (prod + (((std::uint64_t)1 << kAv1ProbCostShift) >> 1)) >>
+                                kAv1ProbCostShift;
+    return round + ((std::uint64_t)sbSize * 6 << kRddivBits);
+}
+
+// compute_intra_pd0_th (enc_mode_config.c:6349-6360).
+std::uint64_t computeIntraPd0Th(std::uint32_t superBlockSize, const RdCostCtx& ctx) {
+    return computeIntraPd0ThImpl(superBlockSize, ctx);
+}
+
+// compute_subres_th (enc_mode_config.c:6361-6370) - the same arithmetic
+// as compute_intra_pd0_th in the reference (two identical bodies).
+std::uint64_t computeSubresTh(std::uint32_t superBlockSize, const RdCostCtx& ctx) {
+    return computeIntraPd0ThImpl(superBlockSize, ctx);
+}
+
+// set_lpd1_tx_skip_decision_ctrls (enc_mode_config.c:6372-6408).
+void setLpd1TxSkipDecisionCtrls(Lpd1TxSkipDecisionCtrls& ctrls, std::uint8_t level) {
+    switch (level) {
+    case 0:
+        ctrls.skipTxScoreTh = 0;
+        break;
+    case 1:
+        ctrls.skipTxScoreTh = 125;
+        ctrls.distEnergyTh  = 30;
+        ctrls.rdSkipTh      = 100;
+        break;
+    case 2:
+        ctrls.skipTxScoreTh = 125;
+        ctrls.distEnergyTh  = 30;
+        ctrls.rdSkipTh      = 200;
+        break;
+    case 3:
+        ctrls.skipTxScoreTh = 70;
+        ctrls.distEnergyTh  = 30;
+        ctrls.rdSkipTh      = 200;
+        break;
+    case 4:
+        ctrls.skipTxScoreTh = 50;
+        ctrls.distEnergyTh  = 30;
+        ctrls.rdSkipTh      = 200;
+        break;
+    case 5:
+        ctrls.skipTxScoreTh = 50;
+        ctrls.distEnergyTh  = 40;
+        ctrls.rdSkipTh      = 200;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_lpd1_tx_ctrls (enc_mode_config.c:6410-6460).
+void setLpd1TxCtrls(Lpd1TxCtrls& ctrls, std::uint8_t lpd1TxLevel) {
+    switch (lpd1TxLevel) {
+    case 0:
+        ctrls.zeroYCoeffExit            = 0;
+        ctrls.chromaDetectorLevel       = 0;
+        ctrls.useUvShortcutsOnYCoeffs   = 0;
+        ctrls.useMds3ShortcutsTh        = 0;
+        break;
+    case 1:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 1;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 2:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 1;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 3:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 2;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 4:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 3;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 5:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 4;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    case 6:
+        ctrls.zeroYCoeffExit            = 1;
+        ctrls.chromaDetectorLevel       = 0;
+        ctrls.useUvShortcutsOnYCoeffs   = 1;
+        ctrls.useMds3ShortcutsTh        = 30;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_cfl_ctrls (enc_mode_config.c:6462-6498).
+void setCflCtrls(CflCtrls& ctrls, std::uint8_t cflLevel) {
+    switch (cflLevel) {
+    case 0:
+        ctrls.enabled = false;
+        break;
+    case 1:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 2;
+        ctrls.cplxTh  = 0;
+        break;
+    case 2:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 1;
+        ctrls.cplxTh  = 0;
+        break;
+    case 3:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 1;
+        ctrls.cplxTh  = 5;
+        break;
+    case 4:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 1;
+        ctrls.cplxTh  = 10;
+        break;
+    case 5:
+        ctrls.enabled = true;
+        ctrls.itrTh   = 1;
+        ctrls.cplxTh  = 55;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_rate_est_ctrls (enc_mode_config.c:6500-6547).
+void setRateEstCtrls(MdRateEstCtrls& ctrls, std::uint8_t rateEstLevel) {
+    switch (rateEstLevel) {
+    case 0:
+        ctrls.updateSkipCtxDcSignCtx = false;
+        ctrls.updateSkipCoeffCtx     = false;
+        ctrls.coeffRateEstLvl        = 0;
+        ctrls.lpd0QpOffset           = 8;
+        ctrls.pd0FastCoeffEstLevel   = 2;
+        break;
+    case 1:
+        ctrls.updateSkipCtxDcSignCtx = true;
+        ctrls.updateSkipCoeffCtx     = true;
+        ctrls.coeffRateEstLvl        = 1;
+        ctrls.lpd0QpOffset           = 0;
+        ctrls.pd0FastCoeffEstLevel   = 1;
+        break;
+    case 2:
+        ctrls.updateSkipCtxDcSignCtx = true;
+        ctrls.updateSkipCoeffCtx     = false;
+        ctrls.coeffRateEstLvl        = 1;
+        ctrls.lpd0QpOffset           = 0;
+        ctrls.pd0FastCoeffEstLevel   = 2;
+        break;
+    case 3:
+        ctrls.updateSkipCtxDcSignCtx = true;
+        ctrls.updateSkipCoeffCtx     = false;
+        ctrls.coeffRateEstLvl        = 2;
+        ctrls.lpd0QpOffset           = 0;
+        ctrls.pd0FastCoeffEstLevel   = 2;
+        break;
+    case 4:
+        ctrls.updateSkipCtxDcSignCtx = false;
+        ctrls.updateSkipCoeffCtx     = false;
+        ctrls.coeffRateEstLvl        = 2;
+        ctrls.lpd0QpOffset           = 0;
+        ctrls.pd0FastCoeffEstLevel   = 2;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// get_sb_tpl_intra_stats (enc_mode_config.c:6552-6609).
+bool getSbTplIntraStats(const SbTplPcs& pcs, const SbTplCtx& ctx, int* sbAngIntraCount,
+                        std::uint8_t* sbMaxIntra, int* sbIntraCount) {
+    // Check that TPL data is available and that INTRA was tested in TPL.
+    if (pcs.tplEnable && pcs.tplSrcDataReady &&
+        (pcs.temporalLayerIndex < pcs.hierarchicalLevels || !pcs.disableIntraPredNref)) {
+        const int      aligned16Width = (int)((pcs.alignedWidth + 15) >> 4);
+        const std::uint32_t mbOriginX = ctx.sbOriginX;
+        const std::uint32_t mbOriginY = ctx.sbOriginY;
+        const int      tplBlkSize = pcs.dispenserSearchLevel == 0 ? 16
+                                    : pcs.dispenserSearchLevel == 1 ? 32
+                                                                    : 64;
+        const int      tplBlkStep = pcs.dispenserSearchLevel == 0 ? 1
+                                    : pcs.dispenserSearchLevel == 1 ? 2
+                                                                    : 4;
+
+        // Get actual SB width (for cases of incomplete SBs)
+        const int sbCols = std::max(1, (int)pcs.sbGeomWidth / tplBlkSize);
+        const int sbRows = std::max(1, (int)pcs.sbGeomHeight / tplBlkSize);
+
+        int            angIntraCount = 0;
+        std::uint8_t   maxIntra      = kDcPred;
+        int            intraCount    = 0;
+
+        // Loop over all blocks in the SB
+        for (int i = 0; i < sbRows; i++) {
+            const int rowBase = (int)((mbOriginY >> 4) + (i * tplBlkStep)) * aligned16Width +
+                                (int)(mbOriginX >> 4);
+            for (int j = 0; j < sbCols; j++) {
+                const std::uint8_t bestMode = pcs.tplBestModes[rowBase + j * tplBlkStep];
+                if (bestMode < kIntraModeEnd) {  // is_intra_mode
+                    if (maxIntra < bestMode) maxIntra = bestMode;
+                    intraCount++;
+                }
+
+                if (bestMode >= kVPred && bestMode <= kD67Pred) {  // av1_is_directional_mode
+                    angIntraCount++;
+                }
+            }
+        }
+
+        *sbAngIntraCount = angIntraCount;
+        *sbMaxIntra      = maxIntra;
+        *sbIntraCount    = intraCount;
+        return true;
+    }
+    return false;
+}
+
+// set_intra_ctrls (enc_mode_config.c:6611-6796).
+void setIntraCtrls(IntraCtrls& ctrls, const IntraSetPcs& pcs, IntraSetCtx& ctx,
+                   std::uint8_t intraLevel, std::uint8_t distBasedAngIntraLevel) {
+    // If intra is disallowed at the pic level, must disallow at SB level
+    if (pcs.skipIntra) {
+        intraLevel = 0;
+    }
+
+    switch (intraLevel) {
+    case 0:
+        ctrls.enableIntra          = 0;
+        ctrls.intraModeEnd         = kDcPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    case 1:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kPaethPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    case 2: {
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kPaethPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        // Only use TPL info if all INTRA modes are tested
+        if (pcs.tplEnable && pcs.tplIntraModeEnd == kPaethPred) {
+            int            sbAngIntraCount;
+            std::uint8_t   sbMaxIntra;
+            int            sbIntraCount;
+            if (getSbTplIntraStats(pcs.tpl, pcs.tplCtx, &sbAngIntraCount, &sbMaxIntra,
+                                   &sbIntraCount)) {
+                // if SB has angluar modes, use full search
+                if (sbAngIntraCount) {
+                    ctrls.angularPredLevel = 1;
+                } else {
+                    ctrls.angularPredLevel = 3;
+                }
+            }
+        }
+        break;
+    }
+    case 3: {
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kPaethPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        // Only use TPL info if all INTRA modes are tested
+        if (pcs.tplEnable && pcs.tplIntraModeEnd == kPaethPred) {
+            int            sbAngIntraCount;
+            std::uint8_t   sbMaxIntra;
+            int            sbIntraCount;
+            if (getSbTplIntraStats(pcs.tpl, pcs.tplCtx, &sbAngIntraCount, &sbMaxIntra,
+                                   &sbIntraCount)) {
+                // if SB has angluar modes, use full search
+                if (sbAngIntraCount) {
+                    ctrls.angularPredLevel = 1;
+                } else {
+                    ctrls.angularPredLevel = 3;
+                }
+                ctrls.intraModeEnd = sbMaxIntra;
+            }
+        }
+        break;
+    }
+    case 4: {
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothHPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        // Only use TPL info if all INTRA modes are tested
+        if (pcs.tplEnable && pcs.tplIntraModeEnd == kPaethPred) {
+            int            sbAngIntraCount;
+            std::uint8_t   sbMaxIntra;
+            int            sbIntraCount;
+            if (getSbTplIntraStats(pcs.tpl, pcs.tplCtx, &sbAngIntraCount, &sbMaxIntra,
+                                   &sbIntraCount)) {
+                const int tplBlkSize = pcs.tpl.dispenserSearchLevel == 0 ? 16
+                                       : pcs.tpl.dispenserSearchLevel == 1 ? 32
+                                                                           : 64;
+                // Get actual SB width (for cases of incomplete SBs)
+                const int sbCols = (int)pcs.tpl.sbGeomWidth / tplBlkSize;
+                const int sbRows = (int)pcs.tpl.sbGeomHeight / tplBlkSize;
+
+                // if more than a quarter of SB is angular, use safe intra_level
+                if (sbAngIntraCount > ((sbRows * sbCols) >> 2)) {
+                    ctrls.angularPredLevel = 1;
+                } else if (sbAngIntraCount > 2) {
+                    ctrls.angularPredLevel = 2;
+                } else {
+                    ctrls.angularPredLevel = 4;
+                }
+                ctrls.intraModeEnd = sbMaxIntra;
+            }
+        }
+        break;
+    }
+    case 5: {
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        // There is no check that all TPL modes are checked, so should only use info about
+        // general intra modes, not the specific intra mode selected or whether it's angular
+        if (pcs.tplEnable) {
+            int            sbAngIntraCount;
+            std::uint8_t   sbMaxIntra;
+            int            sbIntraCount;
+            if (getSbTplIntraStats(pcs.tpl, pcs.tplCtx, &sbAngIntraCount, &sbMaxIntra,
+                                   &sbIntraCount)) {
+                if (sbIntraCount > 0) {
+                    ctrls.angularPredLevel = 2;
+                    ctrls.intraModeEnd     = kPaethPred;
+                } else if (pcs.refIntraPercentage < 30) {
+                    ctrls.angularPredLevel = 0;
+                    ctrls.intraModeEnd     = kSmoothPred;
+                }
+            }
+        }
+        break;
+    }
+    case 6:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    case 7:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 1;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    case 8:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kSmoothPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 1;
+        ctrls.pruneUsingEdgeInfo   = true;
+        break;
+    case kMaxIntraLevel - 1:
+        ctrls.enableIntra          = 1;
+        ctrls.intraModeEnd         = kDcPred;
+        ctrls.angularPredLevel     = angularPredLevel[intraLevel];
+        ctrls.pruneUsingBestMode   = 0;
+        ctrls.pruneUsingEdgeInfo   = false;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+    switch (distBasedAngIntraLevel) {
+    case 0:
+        ctrls.skipAngularDelta1Th = -1;
+        ctrls.skipAngularDelta2Th = -1;
+        ctrls.skipAngularDelta3Th = -1;
+        break;
+    case 1:
+        ctrls.skipAngularDelta1Th = 25;
+        ctrls.skipAngularDelta2Th = 25;
+        ctrls.skipAngularDelta3Th = 25;
+        break;
+    case 2:
+        ctrls.skipAngularDelta1Th = 20;
+        ctrls.skipAngularDelta2Th = 10;
+        ctrls.skipAngularDelta3Th = 5;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+    /* For PD1, the ability to skip intra must be set at the pic level to ensure all SBs
+    perform inverse TX and generate the recon. */
+    if (ctx.pdPass == kPdPass1) {
+        ctx.skipIntra = pcs.skipIntra;
+
+    } else {
+        ctx.skipIntra = !(ctrls.enableIntra) || pcs.skipIntra;
+    }
+}
+
+// set_tx_shortcut_ctrls (enc_mode_config.c:6798-6838).
+void setTxShortcutCtrls(TxShortcutCtrls& ctrls, std::uint8_t txShortcutLevel) {
+    switch (txShortcutLevel) {
+    case 0:
+        ctrls.bypassTxTh          = 0;
+        ctrls.applyPfOnCoeffs     = 0;
+        ctrls.useMds3ShortcutsTh  = 0;
+        ctrls.chromaDetectorLevel = 0;
+        break;
+    case 1:
+        ctrls.bypassTxTh          = 4;
+        ctrls.applyPfOnCoeffs     = 1;
+        ctrls.useMds3ShortcutsTh  = 0;
+        ctrls.chromaDetectorLevel = 1;
+        break;
+    case 2:
+        ctrls.bypassTxTh          = 1;
+        ctrls.applyPfOnCoeffs     = 1;
+        ctrls.useMds3ShortcutsTh  = 0;
+        ctrls.chromaDetectorLevel = 1;
+        break;
+    case 3:
+        ctrls.bypassTxTh          = 1;
+        ctrls.applyPfOnCoeffs     = 1;
+        ctrls.useMds3ShortcutsTh  = 10;
+        ctrls.chromaDetectorLevel = 1;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+
+    // :6832-6837 - the trailing assert (chroma detector on for ref
+    // frames at <= M9) is a level-configuration invariant compiled out
+    // under NDEBUG in the tested config (named deviation).
+}
+
+// set_mds0_controls (enc_mode_config.c:6840-6861).
+void setMds0Ctrls(Mds0Ctrls& ctrls, std::uint8_t mds0Level) {
+    switch (mds0Level) {
+    case 0:
+        ctrls.pruningMethodTh = 0;
+        break;
+    case 1:
+        ctrls.pruningMethodTh                       = 100;
+        ctrls.perClassDistToCostTh[0]               = 50;  // CAND_CLASS_0
+        ctrls.perClassDistToCostTh[1]               = 10;  // CAND_CLASS_1
+        ctrls.perClassDistToCostTh[2]               = 10;  // CAND_CLASS_2
+        ctrls.perClassDistToCostTh[3]               = 50;  // CAND_CLASS_3
+        break;
+    case 2:
+        ctrls.pruningMethodTh = (std::uint8_t)~0;
+        ctrls.distToCostTh    = 0;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_skip_sub_depth_ctrls (enc_mode_config.c:6863-6890).
+void setSkipSubDepthCtrls(SkipSubDepthCtrls& ctrls, std::uint8_t skipSubDepthLvl) {
+    switch (skipSubDepthLvl) {
+    case 0:
+        ctrls.enabled = 0;
+        break;
+
+    case 1:
+        ctrls.enabled = 1;
+        // Cond1 ctrls
+        ctrls.maxSize          = 16;
+        ctrls.quadDeviationTh  = 250;
+        ctrls.coeffPerc        = 15;
+
+        break;
+    case 2:
+
+        ctrls.enabled = 1;
+        // Cond1 ctrls
+        ctrls.maxSize          = 16;
+        ctrls.quadDeviationTh  = 250;
+        ctrls.coeffPerc        = 25;
+
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// set_block_based_depth_refinement_controls (enc_mode_config.c:6892-7065).
+void setBlockBasedDepthRefinementCtrls(DepthRefinementCtrls& ctrls,
+                                       std::uint8_t blockBasedDepthRefinementLevel) {
+    switch (blockBasedDepthRefinementLevel) {
+    case 0:
+        ctrls.mode = kPd0DepthNoRestriction;
+        break;
+    case 1:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 200;
+        ctrls.s2ParentToCurrentTh     = 0;
+        ctrls.e1SubToCurrentTh        = 200;
+        ctrls.e2SubToCurrentTh        = 0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 0;
+        ctrls.splitRateTh             = 0;
+        ctrls.limitMaxMinToPd0        = 0;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 2:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 90;
+        ctrls.s2ParentToCurrentTh     = 0;
+        ctrls.e1SubToCurrentTh        = 90;
+        ctrls.e2SubToCurrentTh        = 0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 0;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 3:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 60;
+        ctrls.s2ParentToCurrentTh     = 0;
+        ctrls.e1SubToCurrentTh        = 60;
+        ctrls.e2SubToCurrentTh        = 0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 0;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 4:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 30;
+        ctrls.s2ParentToCurrentTh     = 0;
+        ctrls.e1SubToCurrentTh        = 30;
+        ctrls.e2SubToCurrentTh        = 0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 0;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 5:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 30;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 30;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 10;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 2;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 6:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 15;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 15;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 10;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.costBandBasedModulation = 0;
+        ctrls.lowerDepthSplitCostTh   = 20;
+        ctrls.splitRateTh             = 10;
+        ctrls.limitMaxMinToPd0        = 1;
+        ctrls.useRefInfo              = 0;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 7:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 15;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 15;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 0;
+        ctrls.costBandBasedModulation = 1;
+        ctrls.maxCostMultiplier       = 400;
+        ctrls.maxBandCnt              = 4;
+        ctrls.decrementPerBand[0]     = kMaxSignedValue;
+        ctrls.decrementPerBand[1]     = kMaxSignedValue;
+        ctrls.decrementPerBand[2]     = 10;
+        ctrls.decrementPerBand[3]     = 5;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.lowerDepthSplitCostTh   = 20;
+        ctrls.splitRateTh             = 5;
+        ctrls.limitMaxMinToPd0        = 1;
+        ctrls.useRefInfo              = 1;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 2;
+        break;
+    case 8:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 10;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 10;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 0;
+        ctrls.costBandBasedModulation = 1;
+        ctrls.maxCostMultiplier       = 400;
+        ctrls.maxBandCnt              = 4;
+        ctrls.decrementPerBand[0]     = kMaxSignedValue;
+        ctrls.decrementPerBand[1]     = kMaxSignedValue;
+        ctrls.decrementPerBand[2]     = 10;
+        ctrls.decrementPerBand[3]     = 5;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.lowerDepthSplitCostTh   = 25;
+        ctrls.splitRateTh             = 5;
+        ctrls.limitMaxMinToPd0        = 1;
+        ctrls.useRefInfo              = 1;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 0;
+        break;
+    case 9:
+        ctrls.mode                    = kPd0DepthAdaptive;
+        ctrls.s1ParentToCurrentTh     = 10;
+        ctrls.s2ParentToCurrentTh     = (std::uint8_t)~0;
+        ctrls.e1SubToCurrentTh        = 10;
+        ctrls.e2SubToCurrentTh        = (std::uint8_t)~0;
+        ctrls.parentMaxCostThMult     = 0;
+        ctrls.costBandBasedModulation = 1;
+        ctrls.maxCostMultiplier       = 400;
+        ctrls.maxBandCnt              = 4;
+        ctrls.decrementPerBand[0]     = kMaxSignedValue;
+        ctrls.decrementPerBand[1]     = kMaxSignedValue;
+        ctrls.decrementPerBand[2]     = 10;
+        ctrls.decrementPerBand[3]     = 5;
+        ctrls.coeffLvlModulation      = 1;
+        ctrls.lowerDepthSplitCostTh   = 100;
+        ctrls.splitRateTh             = 5;
+        ctrls.limitMaxMinToPd0        = 1;
+        ctrls.useRefInfo              = 1;
+        ctrls.qWeight                 = 1;
+        ctrls.pd0UnavailModeDepth     = 0;
+        break;
+    case 10:
+        ctrls.mode = kPd0DepthPredPartOnly;
+        break;
+    }
+}
+
+// get_max_block_size_default (enc_mode_config.c:7067-7069).
+std::uint32_t getMaxBlockSizeDefault(std::uint32_t superBlockSize) {
+    return superBlockSize;
+}
+
+// get_max_block_size_rtc (enc_mode_config.c:7071-7116).
+std::uint32_t getMaxBlockSizeRtc(const MaxBlkPcs& pcs) {
+    // For incomplete edge SBs, keep the cap at the super-block size so that the root
+    // SB can still be encoded as a single non-split block.
+    if (pcs.sbGeomWidth < pcs.superBlockSize || pcs.sbGeomHeight < pcs.superBlockSize) {
+        return pcs.superBlockSize;
+    }
+
+    // I-slices have no ME data; fall back to the default (no cap).
+    if (pcs.isISlice) {
+        return pcs.superBlockSize;
+    }
+
+    const EncMode encMode = pcs.encMode;
+
+    std::uint32_t baseMeVarTh;
+    if (encMode <= ENC_M8) {
+        baseMeVarTh = (std::uint32_t)~0;
+    } else {
+        baseMeVarTh = kHigh8x8DistVarTh;
+    }
+
+    // QP-based scaling
+    std::uint32_t qWeight, qWeightDenom;
+    getQpBasedThScalingFactors(pcs.capMaxSizeQpScaling, &qWeight, &qWeightDenom, pcs.qp);
+
+    const std::uint32_t meVarTh = (baseMeVarTh == (std::uint32_t)~0)
+                                      ? baseMeVarTh
+                                      : (std::uint32_t)(((std::uint64_t)baseMeVarTh * qWeight +
+                                                         (qWeightDenom >> 1)) /
+                                                        qWeightDenom);
+
+    // Collect ME data at the SB (handles both 64x64 and 128x128 SB sizes).
+    std::uint32_t me8x8CostVar;
+    if (pcs.superBlockSize == 64) {
+        me8x8CostVar = pcs.me8x8CostVariance[pcs.sbIndex];
+    } else {
+        std::uint32_t dist64, dist32, dist16, dist8;
+        Sb128Ctx sb128Ctx;
+        sb128Ctx.sbOriginX = pcs.sbOriginX;
+        sb128Ctx.sbOriginY = pcs.sbOriginY;
+        getSb128MeData(pcs.sb128, sb128Ctx, &dist64, &dist32, &dist16, &dist8, &me8x8CostVar);
+    }
+
+    // Set max block size
+    return (me8x8CostVar <= meVarTh) ? pcs.superBlockSize : pcs.superBlockSize >> 1;
+}
+
+// get_max_block_size_allintra (enc_mode_config.c:7118-7143).
+std::uint32_t getMaxBlockSizeAllIntra(const MaxBlkPcs& pcs) {
+    // For incomplete edge SBs, keep the cap at the super-block size so that the root
+    // SB can still be encoded as a single non-split block.
+    if (pcs.sbGeomWidth < pcs.superBlockSize || pcs.sbGeomHeight < pcs.superBlockSize) {
+        return pcs.superBlockSize;
+    }
+    const EncMode encMode = pcs.encMode;
+    // Base threshold
+    std::uint16_t baseVarThCap;
+
+    if (encMode <= ENC_M7) {
+        baseVarThCap = (std::uint16_t)~0;
+    } else {
+        baseVarThCap = 7500;
+    }
+
+    // QP-based scaling
+    std::uint32_t qWeight, qWeightDenom;
+    getQpBasedThScalingFactors(pcs.capMaxSizeQpScaling, &qWeight, &qWeightDenom, pcs.qp);
+
+    const std::uint16_t varThCap = (baseVarThCap == (std::uint16_t)~0)
+        ? baseVarThCap
+        : (std::uint16_t)(((std::uint32_t)baseVarThCap * qWeight + (qWeightDenom >> 1)) /
+                          qWeightDenom);
+
+    // Get variance
+    std::uint16_t variance;
+    if (pcs.superBlockSize == 64) {
+        variance = pcs.variance64[pcs.sbIndex * pcs.varianceStride + kMeTierZeroPu64x64];
+    } else {
+        Sb128VarPcs varPcs;
+        varPcs.b64Size = pcs.sb128.b64Size;
+        varPcs.alignedWidth = pcs.sb128.alignedWidth;
+        varPcs.alignedHeight = pcs.sb128.alignedHeight;
+        varPcs.variance64 = pcs.variance64;
+        varPcs.varianceStride = pcs.varianceStride;
+        Sb128Ctx varCtx;
+        varCtx.sbOriginX = pcs.sbOriginX;
+        varCtx.sbOriginY = pcs.sbOriginY;
+        getSb128Variance(varPcs, varCtx, &variance);
+    }
+
+    // Set max block size
+    return (variance <= varThCap) ? pcs.superBlockSize : pcs.superBlockSize >> 1;
+}
+
+// set_depth_early_exit_ctrls (enc_mode_config.c:7258-7281).
+void setDepthEarlyExitCtrls(DepthEarlyExitCtrls& ctrls, std::uint8_t earlyExitLevel) {
+    switch (earlyExitLevel) {
+    case 0:
+        ctrls.splitCostTh = 0;
+        ctrls.earlyExitTh = 0;
+        break;
+    case 1:
+        ctrls.splitCostTh = 50;
+        ctrls.earlyExitTh = 0;
+        break;
+    case 2:
+        ctrls.splitCostTh = 50;
+        ctrls.earlyExitTh = 900;
+        break;
+
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+}
+
+// svt_aom_get_disallow_4x4_default (enc_mode_config.c:8245-8252).
+bool getDisallow4x4Default(EncMode encMode) {
+    if (encMode <= ENC_M2) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+// svt_aom_get_disallow_4x4_rtc (enc_mode_config.c:8253-8256).
+bool getDisallow4x4Rtc() {
+    return true;
+}
+
+// svt_aom_get_disallow_4x4_allintra (enc_mode_config.c:8257-8264).
+bool getDisallow4x4AllIntra(EncMode encMode) {
+    if (encMode <= ENC_M3) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+// svt_aom_get_disallow_8x8_default (enc_mode_config.c:8272-8275).
+bool getDisallow8x8Default() {
+    return false;
+}
+
+// svt_aom_get_disallow_8x8_rtc (enc_mode_config.c:8276-8287).
+bool getDisallow8x8Rtc(EncMode encMode, std::uint16_t alignedWidth, std::uint16_t alignedHeight) {
+    if (dimensionsRequire8x8(alignedWidth, alignedHeight)) {
+        return false;
+    }
+
+    if (encMode <= ENC_M9) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+// svt_aom_get_disallow_8x8_allintra (enc_mode_config.c:8288-8290).
+bool getDisallow8x8AllIntra() {
+    return false;
+}
+
+// svt_aom_get_nsq_geom_level_default (enc_mode_config.c:8292-8311).
+std::uint8_t getNsqGeomLevelDefault(EncMode encMode, std::uint8_t coeffLvl) {
+    std::uint8_t nsqGeomLevel;
+    if (encMode <= ENC_M0) {
+        if (coeffLvl == HIGH_LVL) {
+            nsqGeomLevel = 2;
+        } else {  // regular or low
+            nsqGeomLevel = 1;
+        }
+    } else if (encMode <= ENC_M5) {
+        if (coeffLvl == HIGH_LVL) {
+            nsqGeomLevel = 3;
+        } else {  // regular or low
+            nsqGeomLevel = 2;
+        }
+    } else {
+        nsqGeomLevel = 3;
+    }
+    return nsqGeomLevel;
+}
+
+// svt_aom_get_nsq_geom_level_rtc (enc_mode_config.c:8312-8315).
+std::uint8_t getNsqGeomLevelRtc() {
+    return 3;
+}
+
+// svt_aom_get_nsq_geom_level_allintra (enc_mode_config.c:8316-8330).
+std::uint8_t getNsqGeomLevelAllIntra(EncMode encMode) {
+    std::uint8_t nsqGeomLevel;
+    if (encMode <= ENC_MR) {
+        nsqGeomLevel = 1;
+    } else if (encMode <= ENC_M3) {
+        nsqGeomLevel = 2;
+    } else if (encMode <= ENC_M6) {
+        nsqGeomLevel = 3;
+    } else {
+        nsqGeomLevel = 0;
+    }
+    return nsqGeomLevel;
+}
+
+// svt_aom_sig_deriv_enc_dec_common (enc_mode_config.c:7162-7256).
+void sigDerivEncDecCommon(EncDecCommonPcs& pcs, const EncDecCommonScs& scs,
+                          EncDecCommonCtx& ctx, const DepthRemovalPcs& drPcs,
+                          DepthRemovalCtx& drCtx) {
+    const EncMode encMode = pcs.encMode;
+    setBlockBasedDepthRefinementCtrls(ctx.depthRefinementCtrls,
+                                      pcs.picBlockBasedDepthRefinementLevel);
+
+    // pic_pred_depth_only shouldn't be changed after this point
+    ctx.predDepthOnly = ctx.picPredDepthOnly =
+        (ctx.depthRefinementCtrls.mode == kPd0DepthPredPartOnly);
+    setPd0Ctrls(ctx.pd0Ctrls, pcs.picPd0Lvl, ctx.hbdMd);
+
+    ctx.depthRemovalCtrls.disallowBelow64x64 = 0;
+    ctx.depthRemovalCtrls.disallowBelow32x32 = 0;
+    /*
+    if disallow_below_16x16 is turned ON then enable_me_8x8 should be turned OFF for the same preset in order to save memory and cycles as that feature optimizes the me_candidate_array,
+    me_mv_array and the total_me_candidate_index arrays when 8x8 blocks are not used
+
+    if any check other than an I-SLICE check is used on disallow_below_16x16 then the enable_me_8x8 should be turned ON for the entire preset because without the 8x8 me data the non I-SLICE pictures
+    that use 8x8 blocks will lose significant BD-Rate as the parent 16x16 me data will be used for the 8x8 blocks
+    */
+    ctx.depthRemovalCtrls.disallowBelow16x16 = 0;
+    if (pcs.b64GeomWidth % 32 != 0 || pcs.b64GeomHeight % 32 != 0) {
+        ctx.depthRemovalCtrls.disallowBelow64x64 = false;
+    }
+    if (pcs.b64GeomWidth % 16 != 0 || pcs.b64GeomHeight % 16 != 0) {
+        ctx.depthRemovalCtrls.disallowBelow32x32 = false;
+    }
+    if (pcs.b64GeomWidth % 8 != 0 || pcs.b64GeomHeight % 8 != 0) {
+        ctx.depthRemovalCtrls.disallowBelow16x16 = false;
+    }
+    // Must check disallow_8x8 on an SB level. If a preset wants 8x8 off, it may still be required at the
+    // picture edge if the SB width/height is <=8 (to ensure that there is a conformant block to encode
+    // for those dimensions). Use the SB width/height so that 8x8 can still be skipped for all complete
+    // SBs and used only for the incomplete blocks that require 8x8 for conformance.
+    ctx.disallow8x8 = scs.allintra ? getDisallow8x8AllIntra()
+        : scs.rtcTune              ? getDisallow8x8Rtc(encMode, pcs.b64GeomWidth, pcs.b64GeomHeight)
+                                   : getDisallow8x8Default();
+    ctx.disallow4x4 = pcs.picDisallow4x4;
+    // Set max block-size
+    if (scs.allintra || scs.rtcTune) {
+        MaxBlkPcs mb;
+        mb.superBlockSize = drPcs.superBlockSize;
+        mb.sbGeomWidth = (std::uint8_t)pcs.b64GeomWidth;
+        mb.sbGeomHeight = (std::uint8_t)pcs.b64GeomHeight;
+        mb.isISlice = pcs.isISlice;
+        mb.encMode = pcs.encMode;
+        mb.capMaxSizeQpScaling = pcs.capMaxSizeQpScaling;
+        mb.qp = pcs.qp;
+        mb.sbIndex = 0;  // the composition carrier holds the pre-indexed scalar
+        mb.me8x8CostVariance = &pcs.me8x8CostVariance;
+        mb.sb128.b64Size = drPcs.b64Size;
+        mb.sb128.alignedWidth = drPcs.alignedWidth;
+        mb.sb128.alignedHeight = drPcs.alignedHeight;
+        mb.sb128.me64x64Distortion = drPcs.me64x64Distortion;
+        mb.sb128.me32x32Distortion = drPcs.me32x32Distortion;
+        mb.sb128.me16x16Distortion = drPcs.me16x16Distortion;
+        mb.sb128.me8x8Distortion = drPcs.me8x8Distortion;
+        mb.sb128.me8x8CostVariance = drPcs.me8x8CostVariance;
+        mb.sbOriginX = drCtx.sbOriginX;
+        mb.sbOriginY = drCtx.sbOriginY;
+        mb.variance64 = pcs.variance64;
+        mb.varianceStride = pcs.varianceStride;
+        ctx.maxBlockSize = scs.allintra ? getMaxBlockSizeAllIntra(mb) : getMaxBlockSizeRtc(mb);
+    } else {
+        ctx.maxBlockSize = getMaxBlockSizeDefault(drPcs.superBlockSize);
+    }
+    setDepthRemovalLevelCtrls(ctx.depthRemovalCtrls, drPcs, drCtx, pcs.picDepthRemovalLevel);
+    if (scs.rtcTune) {
+        int lpd1Lvl = pcs.picLpd1Lvl;
+        // For cyclic-refresh SBs signaled by negative delta-QP, use a conservative LPD1
+        if (lpd1Lvl && ctx.sbQindex < pcs.baseQIdx) {
+            lpd1Lvl = std::max(0, lpd1Lvl - 2);
+            lpd1Lvl = std::min(lpd1Lvl, ctx.isBase ? 2 : 4);
+        }
+        setLpd1Ctrls(ctx.lpd1Ctrls, (std::uint8_t)lpd1Lvl);
+    } else if (encMode <= ENC_M10) {
+        setLpd1Ctrls(ctx.lpd1Ctrls, pcs.picLpd1Lvl);
+    } else {
+        int lpd1Lvl = pcs.picLpd1Lvl;
+        if (!pcs.isISlice) {
+            const int me8x8 = (int)pcs.me8x8CostVariance;
+            const int th    = encMode <= ENC_M8 ? 3 * (int)ctx.qpIndex : 3000;
+            if (lpd1Lvl == 0) {
+                if (me8x8 < th) {
+                    lpd1Lvl += 3;
+                }
+            } else {
+                if (me8x8 < th) {
+                    lpd1Lvl += 2;
+                }
+            }
+        }
+        lpd1Lvl = std::max(0, std::min(lpd1Lvl, 7));
+        setLpd1Ctrls(ctx.lpd1Ctrls, (std::uint8_t)lpd1Lvl);
+    }
+    if (scs.rtcTune) {
+        if (encMode <= ENC_M8) {
+            ctx.pd1LvlRefinement = 0;
+        } else if (encMode <= ENC_M10) {
+            ctx.pd1LvlRefinement = ctx.isNotLastLayer ? 0 : 2;
+        } else {
+            ctx.pd1LvlRefinement = 2;
+        }
+    } else {
+        if (encMode <= ENC_M10) {
+            ctx.pd1LvlRefinement = 0;
+        } else {
+            ctx.pd1LvlRefinement = 2;
+        }
+    }
+    setNsqGeomCtrls(ctx.nsqGeomCtrls, pcs.nsqGeomLevel, nullptr, nullptr, nullptr);
+
+    if (scs.maxTxSize == 32) {
+        // Ensure we allow at least 32x32 transforms
+        ctx.depthRemovalCtrls.disallowBelow64x64 = false;
+    }
+}
+
+// svt_aom_sig_deriv_enc_dec_pd0 (enc_mode_config.c:7283-7454).
+static RdCostCtx RdCostCtxOf(const EncDecPd0Ctx& ctx) {
+    RdCostCtx rc;
+    rc.fastLambdaMd[0] = ctx.fastLambdaMd[0];
+    rc.fastLambdaMd[1] = ctx.fastLambdaMd[1];
+    rc.hbdMd = ctx.hbdMd;
+    return rc;
+}
+
+void sigDerivEncDecPd0(EncDecPd0Pcs& pcs, const EncDecPd0Scs& scs, EncDecPd0Ctx& ctx) {
+    const std::uint8_t pd0Level = ctx.pd0Ctrls.pd0Level;
+    const bool isIslice = pcs.isISlice;
+    const bool allintra = scs.allintra;
+    const bool rtcTune = scs.rtcTune;
+    ctx.mdDisallowNsqSearch = true;
+
+    // Use coeff rate and slit flag rate only (i.e. no fast rate)
+    ctx.shutFastRate = true;
+
+    std::uint32_t me64x64Dist;
+    if (pcs.sb128Path) {
+        std::uint32_t sb128D32, sb128D16, sb128D8, sb128Var;
+        Sb128Ctx sb128Ctx;
+        sb128Ctx.sbOriginX = pcs.sbOriginX;
+        sb128Ctx.sbOriginY = pcs.sbOriginY;
+        getSb128MeData(pcs.sb128, sb128Ctx, &me64x64Dist, &sb128D32, &sb128D16, &sb128D8,
+                       &sb128Var);
+    } else {
+        me64x64Dist = pcs.me64x64Distortion;
+    }
+
+    std::uint8_t depthEarlyExitLvl = 1;
+    // When only the predicted depth is used, use safe early exit THs
+    if (rtcTune && pd0Level == 6) {
+        depthEarlyExitLvl = 0;
+    } else if (pd0Level <= 1 || ctx.picPredDepthOnly) {
+        depthEarlyExitLvl = 1;
+    } else {
+        depthEarlyExitLvl = 2;
+    }
+    setDepthEarlyExitCtrls(ctx.depthEarlyExitCtrls, depthEarlyExitLvl);
+
+    std::uint8_t intraLevel = 0;
+
+    if (pcs.encMode <= (rtcTune ? ENC_M9 : ENC_M10)) {
+        if (pd0Level == 0) {
+            intraLevel = kMaxIntraLevel - 1;
+        } else if (pcs.isISlice || pcs.transitionPresent == 1) {
+            intraLevel = 1;
+        } else if (pd0Level <= 2) {
+            const std::uint64_t useIntraPd0Th = computeIntraPd0Th(64, RdCostCtxOf(ctx));
+            // RDCOST(fast_lambda, 0, me_64x64_dist) = dist << RDDIV_BITS
+            const std::uint64_t cost64x64 = (std::uint64_t)me64x64Dist << kRddivBits;
+
+            intraLevel = (cost64x64 < useIntraPd0Th) ? 0 : 1;
+        } else {
+            intraLevel = 0;
+        }
+    } else {
+        if (pcs.isISlice || pcs.transitionPresent == 1) {
+            intraLevel = 8;
+        } else {
+            intraLevel = 0;
+        }
+    }
+    {
+        IntraSetPcs intraPcs;
+        intraPcs.skipIntra = pcs.skipIntra;
+        intraPcs.isISlice = pcs.isISlice;
+        intraPcs.tplEnable = pcs.tplEnable;
+        intraPcs.tplIntraModeEnd = pcs.tplIntraModeEnd;
+        intraPcs.refIntraPercentage = pcs.refIntraPercentage;
+        intraPcs.tpl = pcs.tpl;
+        intraPcs.tplCtx = pcs.tplCtx;
+        setIntraCtrls(ctx.intraCtrls, intraPcs, ctx.intraSetCtx, intraLevel, 2);
+    }
+    ctx.parentCostBias = 1000;
+    if (!scs.allintra && pd0Level == 6) {
+        // Modulate the inter-depth bias based on the QP and the temporal complexity of the SB.
+        // bias > 1000 : inflates parent cost - favors split
+        // bias < 1000 : deflates parent cost - favors parent
+        //
+        // At low QP, the missing coeff rate is large and disproportionately penalizes the parent,
+        // so we bias towards split. At high QP, most coefficients quantize to zero, so the
+        // cost without coeff rate is already accurate : stay close to neutral.
+
+        // QP component: linear interpolation from 1100 (q=0) to 950 (q=255)
+        const std::uint32_t baseQ = pcs.baseQIdx;
+        ctx.parentCostBias = 1100 - (baseQ * 150 + 127) / 255;
+
+        // ME variance component: fine-grained modulation based on SB complexity.
+        // Complex SBs (high variance):  split is beneficial
+        // Easy SBs (low variance): parent is good enough
+        const std::uint32_t meVar = pcs.me8x8CostVariance;
+        if (pcs.pd0CostBiasWeight) {
+            // Scale the default variance offsets by a weight derived from ME distortion ratio.
+            // weight is in [512..1024] = 50%..100%, so the offset is never increased, only reduced.
+            const std::uint32_t dist64  = pcs.me64x64Distortion;
+            const std::uint32_t dist8   = std::max(pcs.me8x8Distortion, (std::uint32_t)1);
+            const std::uint32_t ratioQ4 = (dist64 * 16) / dist8;
+            const std::uint32_t w = (std::uint32_t)std::min(
+                (std::uint32_t)std::max((int)pcs.pd0CostBiasWeight, 1024),
+                (ratioQ4 - 16) * 16 + pcs.pd0CostBiasWeight);
+
+            if (meVar > 2000) {
+                ctx.parentCostBias += (75 * w) >> 10;
+            } else if (meVar > 1000) {
+                ctx.parentCostBias += (50 * w) >> 10;
+            } else if (meVar > 500) {
+                ctx.parentCostBias += (25 * w) >> 10;
+            }
+        } else {
+            if (meVar > 2000) {
+                ctx.parentCostBias += 75;
+            } else if (meVar > 1000) {
+                ctx.parentCostBias += 50;
+            } else if (meVar > 500) {
+                ctx.parentCostBias += 25;
+            }
+        }
+        // Clamp to a safe range
+        ctx.parentCostBias =
+            (std::uint32_t)std::min(1200, std::max(900, (int)ctx.parentCostBias));
+    }
+
+    if (allintra || pcs.hbdMd != 0) {
+        ctx.pd0UseSrcSamples = true;
+    } else {
+        ctx.pd0UseSrcSamples = false;
+    }
+    if (pd0Level == 6) {
+        return;
+    }
+    setChromaCtrls(ctx.uvCtrls, 0 /*chroma off*/);
+
+    // Using PF in LPD0 may cause some VQ issues
+    setPfCtrls(ctx.pfCtrls, 1);
+
+    std::uint8_t subresLevel;
+    // Use b64_geom here because LPD0 is only enabled when 64x64 SB size is used
+    // LPD0 was designed assuming 4x4 blocks were disallowed. Since LPD0 is now used in some presets where 4x4 is on
+    // check that subres is not used when 4x4 blocks are enabled.
+    if (pd0Level <= 2 || !ctx.disallow4x4 || !pcs.b64IsComplete) {
+        subresLevel = 0;
+    } else {
+        subresLevel = 0;
+        // The controls checks the deviation between: (1) the pred-to-src SAD of even rows and (2) the pred-to-src SAD of odd rows for each 64x64 to decide whether to use subres or not
+        // then applies the result to the 64x64 block and to all children, therefore if incomplete 64x64 then shut subres
+        // Use ME distortion and variance detector to enable subres
+        const std::uint64_t useSubresTh = computeSubresTh(64, RdCostCtxOf(ctx));
+        // RDCOST(fast_lambda, 0, me_64x64_dist) = dist << RDDIV_BITS
+        const std::uint64_t cost64x64 = (std::uint64_t)me64x64Dist << kRddivBits;
+        if (pd0Level <= 4) {
+            if (isIslice || pcs.transitionPresent == 1) {
+                subresLevel = 1;
+            } else {
+                subresLevel = (cost64x64 < useSubresTh) ? 1 : 0;
+            }
+        } else {
+            if (pcs.isNotLastLayer) {
+                subresLevel = ctx.disallow8x8 ||
+                        (ctx.depthRemovalCtrls.enabled &&
+                         (ctx.depthRemovalCtrls.disallowBelow16x16 ||
+                          ctx.depthRemovalCtrls.disallowBelow32x32 ||
+                          ctx.depthRemovalCtrls.disallowBelow64x64))
+                    ? 2
+                    : 1;
+            } else {
+                subresLevel = 2;
+            }
+        }
+    }
+    setSubresCtrls(ctx.subresCtrls, subresLevel);
+
+    std::uint8_t rateEstLevel = 0;
+    if (pcs.rateEstLevel) {
+        if (pd0Level <= 3) {
+            rateEstLevel = 2;
+        } else if (pd0Level <= 4) {
+            rateEstLevel = 4;
+        } else {
+            rateEstLevel = 0;
+        }
+        // Don't use a more conservative level in LPD0 than the regular path would use
+        if (rateEstLevel) {
+            rateEstLevel = (std::uint8_t)std::max((int)rateEstLevel, (int)pcs.rateEstLevel);
+        }
+    }
+    setRateEstCtrls(ctx.rateEstCtrls, rateEstLevel);
+    // set at pic-level b/c feature depends on some pic-level initializations
+    ctx.approxInterRate = true;
+}
+
+}  // namespace mode_config
+}  // namespace l16_rdo
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 10: svt_aom_sig_deriv_enc_dec_light_pd1_{default,rtc}
+// (enc_mode_config.c:7456-7653 / :7655-7889).
+// ---------------------------------------------------------------------------
+namespace l16_rdo {
+namespace mode_config {
+
+// svt_aom_sig_deriv_enc_dec_light_pd1_default (enc_mode_config.c:7456-7653).
+void sigDerivEncDecLightPd1Default(LightPd1Pcs& pcs, LightPd1Ctx& ctx) {
+    const Pd1Level lpd1Level = (Pd1Level)(std::int8_t)ctx.lpd1Ctrls.pd1Level;
+    ctx.lpd1GlobalmvBypassTh = 0;
+
+    // Set candidate reduction levels
+    std::uint8_t candReductionLevel = 0;
+    if (pcs.candReductionLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            candReductionLevel = 2;
+        } else if (lpd1Level <= LPD1_LVL_2) {
+            candReductionLevel = 3;
+        } else if (lpd1Level <= LPD1_LVL_3) {
+            candReductionLevel = 4;
+        } else {
+            candReductionLevel = 5;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (candReductionLevel) {
+            candReductionLevel =
+                (std::uint8_t)std::max((int)candReductionLevel, (int)pcs.candReductionLevel);
+        }
+    }
+
+    {
+        CandReductionPcs crPcs;
+        crPcs.refList0CountTry = pcs.refList0CountTry;
+        crPcs.refList1CountTry = pcs.refList1CountTry;
+        crPcs.useBestMeUnipredCandOnly = pcs.useBestMeUnipredCandOnly;
+        CandReductionCtx crCtx;
+        crCtx.pd1Level = ctx.lpd1Ctrls.pd1Level;
+        crCtx.isNotLastLayer = pcs.isNotLastLayer;
+        crCtx.rtc = pcs.rtcTune;
+        crCtx.hierarchicalLevels = pcs.hierarchicalLevels;
+        setCandReductionCtrls(ctx.candReductionCtrls, candReductionLevel, crPcs, crCtx,
+                              pcs.pictureQp, pcs.me8x8CostVariance, pcs.me64x64Distortion,
+                              pcs.l0WasSkip, pcs.l1WasSkip, pcs.refSkipPerc);
+    }
+
+    std::uint8_t rdoqLevel = 0;
+    if (pcs.rdoqLevel) {
+        if (pcs.encMode <= ENC_M8) {
+            if (lpd1Level <= LPD1_LVL_4) {
+                rdoqLevel = 1;
+            } else {
+                rdoqLevel = 0;
+            }
+        } else {
+            if (lpd1Level <= LPD1_LVL_0) {
+                rdoqLevel = 4;
+            } else if (lpd1Level <= LPD1_LVL_4) {
+                rdoqLevel = 5;
+            } else {
+                rdoqLevel = 0;
+            }
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (rdoqLevel) {
+            rdoqLevel = (std::uint8_t)std::max((int)rdoqLevel, (int)pcs.rdoqLevel);
+        }
+    }
+    setRdoqCtrls(ctx.rdoqCtrls, rdoqLevel);
+
+    setCoeffShavingCtrls(ctx.coeffShavingCtrls, pcs.coeffShavingLevel);
+
+    std::uint8_t meSubpelLevel = 0;
+
+    if (pcs.meSubpelLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            meSubpelLevel = pcs.inputResolution <= INPUT_SIZE_480p_RANGE ? 7
+                : pcs.inputResolution <= INPUT_SIZE_1080p_RANGE          ? 8
+                                                                         : 10;
+        } else {
+            meSubpelLevel = pcs.inputResolution <= INPUT_SIZE_480p_RANGE ? 8
+                : pcs.inputResolution <= INPUT_SIZE_1080p_RANGE          ? 9
+                                                                         : 10;
+            if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 50) ||
+                 (pcs.l0Was64x64Mvp && pcs.l1Was64x64Mvp)) &&
+                pcs.me8x8CostVariance < (200 * pcs.pictureQp) &&
+                pcs.me64x64Distortion < (200 * pcs.pictureQp)) {
+                meSubpelLevel = 0;
+            }
+        }
+
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (meSubpelLevel) {
+            meSubpelLevel = (std::uint8_t)std::max((int)meSubpelLevel, (int)pcs.meSubpelLevel);
+        }
+    }
+
+    setMdSubpelMeCtrls(ctx.mdSubPelCtrls, meSubpelLevel);
+
+    std::uint8_t lpd1TxSkipDecisionLevel;
+
+    if (lpd1Level <= LPD1_LVL_2) {
+        lpd1TxSkipDecisionLevel = 2;
+    } else {
+        lpd1TxSkipDecisionLevel = 3;
+        if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 35) &&
+
+             pcs.me8x8CostVariance < (800 * pcs.pictureQp) &&
+             pcs.me64x64Distortion < (800 * pcs.pictureQp)) ||
+            (pcs.me8x8CostVariance < (100 * pcs.pictureQp) &&
+             pcs.me64x64Distortion < (100 * pcs.pictureQp))) {
+            lpd1TxSkipDecisionLevel = 4;
+        }
+    }
+
+    setLpd1TxSkipDecisionCtrls(ctx.lpd1TxSkipDecisionCtrls, lpd1TxSkipDecisionLevel);
+
+    std::uint8_t lpd1TxLevel = 0;
+    if (lpd1Level <= LPD1_LVL_2) {
+        lpd1TxLevel = 3;
+    } else {
+        lpd1TxLevel = 4;
+        if ((((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 35) &&
+              pcs.me8x8CostVariance < (800 * pcs.pictureQp) &&
+              pcs.me64x64Distortion < (800 * pcs.pictureQp)) ||
+             (pcs.me8x8CostVariance < (100 * pcs.pictureQp) &&
+              pcs.me64x64Distortion < (100 * pcs.pictureQp)))) {
+            lpd1TxLevel = 6;
+        }
+    }
+    setLpd1TxCtrls(ctx.lpd1TxCtrls, lpd1TxLevel);
+
+    if (lpd1Level <= LPD1_LVL_2) {
+        ctx.lpd1BlkSkipLumaRdPct = 0;
+    } else {
+        ctx.lpd1BlkSkipLumaRdPct = 90;
+    }
+    ctx.lpd1ChromaSkipEnergyTh = 0;
+    std::uint8_t rateEstLevel = 0;
+    if (pcs.rateEstLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            rateEstLevel = 4;
+        } else {
+            rateEstLevel = 0;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (rateEstLevel) {
+            rateEstLevel = (std::uint8_t)std::max((int)rateEstLevel, (int)pcs.rateEstLevel);
+        }
+    }
+
+    setRateEstCtrls(ctx.rateEstCtrls, rateEstLevel);
+
+    // If want to turn off approximating inter rate, must ensure that the approximation is also disabled
+    // at the pic level (pcs->approx_inter_rate)
+    // If the pic level signal is set more aggressive than the default lpd1 setting (lvl 1), use the pic level.
+    ctx.approxInterRate = (std::uint8_t)std::max(1, (int)pcs.approxInterRate);
+
+    setPfCtrls(ctx.pfCtrls, 1);
+
+    std::uint8_t intraLevel = 0;
+    if (pcs.intraLevel) {
+        if (lpd1Level <= LPD1_LVL_2) {
+            intraLevel = 6;
+        } else {
+            intraLevel = kMaxIntraLevel - 1;
+        }
+
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (intraLevel) {
+            intraLevel = (std::uint8_t)std::max((int)intraLevel, (int)pcs.intraLevel);
+        }
+    }
+    {
+        IntraSetPcs intraPcs;
+        intraPcs.skipIntra = pcs.skipIntra;
+        intraPcs.isISlice = false;
+        intraPcs.tplEnable = pcs.tplEnable;
+        intraPcs.tplIntraModeEnd = pcs.tplIntraModeEnd;
+        intraPcs.refIntraPercentage = pcs.refIntraPercentage;
+        intraPcs.tpl = pcs.tpl;
+        intraPcs.tplCtx = pcs.tplCtx;
+        setIntraCtrls(ctx.intraCtrls, intraPcs, ctx.intraSetCtx, intraLevel, 2);
+    }
+    /* Set signals that have assumed values in the light-PD1 path (but need to be initialized as they may be checked) */
+
+    // Use coeff rate and slit flag rate only (i.e. no fast rate)
+    ctx.shutFastRate   = false;
+    ctx.uvCtrls.enabled = 1;
+    ctx.uvCtrls.uvMode = kChromaMode1;
+    setCflCtrls(ctx.cflCtrls, 0);
+    ctx.mdDisallowNsqSearch   = true;
+    ctx.newNearestInjection   = true;
+    ctx.blkSkipDecision       = true;
+    ctx.rateEstCtrls.updateSkipCtxDcSignCtx = false;
+    ctx.rateEstCtrls.updateSkipCoeffCtx     = false;
+    ctx.subresCtrls.oddToEvenDeviationTh    = 0;
+    setInterIntraCtrls(ctx.interIntraCtrls, 0);
+}
+
+// svt_aom_sig_deriv_enc_dec_light_pd1_rtc (enc_mode_config.c:7655-7889).
+void sigDerivEncDecLightPd1Rtc(LightPd1Pcs& pcs, LightPd1Ctx& ctx) {
+    const Pd1Level lpd1Level = (Pd1Level)(std::int8_t)ctx.lpd1Ctrls.pd1Level;
+    const EncMode encMode = pcs.encMode;
+    const bool useFlatIpp = pcs.useFlatIpp;
+    ctx.lpd1GlobalmvBypassTh = 0;
+
+    // Set candidate reduction levels
+    std::uint8_t candReductionLevel = 0;
+    if (pcs.candReductionLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            candReductionLevel = 2;
+        } else if (lpd1Level <= LPD1_LVL_2) {
+            candReductionLevel = 3;
+        } else if (lpd1Level <= LPD1_LVL_3) {
+            candReductionLevel = 4;
+        } else {
+            candReductionLevel = 5;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (candReductionLevel) {
+            candReductionLevel =
+                (std::uint8_t)std::max((int)candReductionLevel, (int)pcs.candReductionLevel);
+        }
+    }
+    {
+        CandReductionPcs crPcs;
+        crPcs.refList0CountTry = pcs.refList0CountTry;
+        crPcs.refList1CountTry = pcs.refList1CountTry;
+        crPcs.useBestMeUnipredCandOnly = pcs.useBestMeUnipredCandOnly;
+        CandReductionCtx crCtx;
+        crCtx.pd1Level = ctx.lpd1Ctrls.pd1Level;
+        crCtx.isNotLastLayer = pcs.isNotLastLayer;
+        crCtx.rtc = pcs.rtcTune;
+        crCtx.hierarchicalLevels = pcs.hierarchicalLevels;
+        setCandReductionCtrls(ctx.candReductionCtrls, candReductionLevel, crPcs, crCtx,
+                              pcs.pictureQp, pcs.me8x8CostVariance, pcs.me64x64Distortion,
+                              pcs.l0WasSkip, pcs.l1WasSkip, pcs.refSkipPerc);
+    }
+
+    std::uint8_t rdoqLevel = 0;
+    if (pcs.rdoqLevel) {
+        if (lpd1Level <= LPD1_LVL_4) {
+            rdoqLevel = 1;
+        } else {
+            rdoqLevel = 0;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (rdoqLevel) {
+            rdoqLevel = (std::uint8_t)std::max((int)rdoqLevel, (int)pcs.rdoqLevel);
+        }
+    }
+    setRdoqCtrls(ctx.rdoqCtrls, rdoqLevel);
+
+    setCoeffShavingCtrls(ctx.coeffShavingCtrls, pcs.coeffShavingLevel);
+
+    std::uint8_t meSubpelLevel = 0;
+    if (pcs.meSubpelLevel) {
+        if (useFlatIpp) {
+            if (encMode <= ENC_M8) {
+                if (lpd1Level <= LPD1_LVL_0) {
+                    meSubpelLevel = 4;
+                } else if (lpd1Level <= LPD1_LVL_3) {
+                    meSubpelLevel = 7;
+                } else {
+                    meSubpelLevel = 8;
+                    if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 50) ||
+                         (pcs.l0Was64x64Mvp && pcs.l1Was64x64Mvp)) &&
+                        pcs.me8x8CostVariance < (200 * pcs.pictureQp) &&
+                        pcs.me64x64Distortion < (200 * pcs.pictureQp)) {
+                        meSubpelLevel = 0;
+                    }
+                }
+            } else {
+                if (lpd1Level <= LPD1_LVL_0) {
+                    meSubpelLevel = 6;
+                } else if (lpd1Level <= LPD1_LVL_3) {
+                    meSubpelLevel = 7;
+                } else {
+                    meSubpelLevel = 8;
+                    if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 50) ||
+                         (pcs.l0Was64x64Mvp && pcs.l1Was64x64Mvp)) &&
+                        pcs.me8x8CostVariance < (200 * pcs.pictureQp) &&
+                        pcs.me64x64Distortion < (200 * pcs.pictureQp)) {
+                        meSubpelLevel = 0;
+                    }
+                }
+            }
+        } else {
+            if (lpd1Level <= LPD1_LVL_0) {
+                meSubpelLevel = 6;
+            } else if (lpd1Level <= LPD1_LVL_3) {
+                meSubpelLevel = 7;
+            } else {
+                meSubpelLevel = 8;
+                if (((pcs.l0WasSkip && pcs.l1WasSkip && pcs.refSkipPerc > 50) ||
+                     (pcs.l0Was64x64Mvp && pcs.l1Was64x64Mvp)) &&
+                    pcs.me8x8CostVariance < (200 * pcs.pictureQp) &&
+                    pcs.me64x64Distortion < (200 * pcs.pictureQp)) {
+                    meSubpelLevel = 0;
+                }
+            }
+        }
+
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (meSubpelLevel) {
+            meSubpelLevel = (std::uint8_t)std::max((int)meSubpelLevel, (int)pcs.meSubpelLevel);
+        }
+    }
+    setMdSubpelMeCtrls(ctx.mdSubPelCtrls, meSubpelLevel);
+
+    std::uint8_t lpd1TxSkipDecisionLevel;
+    if (lpd1Level <= LPD1_LVL_0) {
+        lpd1TxSkipDecisionLevel = 1;
+    } else if (lpd1Level <= LPD1_LVL_2) {
+        lpd1TxSkipDecisionLevel = 2;
+    } else if (lpd1Level <= LPD1_LVL_4) {
+        lpd1TxSkipDecisionLevel = 3;
+    } else {
+        const std::uint32_t varianceThresholdStrict    = pcs.pictureQp * (lpd1Level <= LPD1_LVL_5 ? 100 : 800);
+        const std::uint32_t varianceThresholdRelaxed   = pcs.pictureQp * (lpd1Level <= LPD1_LVL_5 ? 800 : 1200);
+        const std::uint32_t distortionThresholdRelaxed = pcs.pictureQp * (lpd1Level <= LPD1_LVL_5 ? 800 : 1200);
+        const std::uint32_t candidateLevel              = (lpd1Level <= LPD1_LVL_5) ? 4 : 5;
+
+        lpd1TxSkipDecisionLevel = 3;
+
+        if (pcs.me8x8CostVariance < varianceThresholdStrict ||
+            (pcs.me8x8CostVariance < varianceThresholdRelaxed &&
+             pcs.me64x64Distortion < distortionThresholdRelaxed)) {
+            lpd1TxSkipDecisionLevel = (std::uint8_t)candidateLevel;
+        }
+    }
+
+    setLpd1TxSkipDecisionCtrls(ctx.lpd1TxSkipDecisionCtrls, lpd1TxSkipDecisionLevel);
+
+    std::uint8_t lpd1TxLevel;
+    if (useFlatIpp && encMode <= ENC_M7) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            lpd1TxLevel = 0;
+        } else if (lpd1Level <= LPD1_LVL_4) {
+            lpd1TxLevel = 5;
+        } else {
+            lpd1TxLevel = 6;
+        }
+    } else {
+        if (lpd1Level <= LPD1_LVL_4) {
+            lpd1TxLevel = 5;
+        } else {
+            lpd1TxLevel = 6;
+        }
+    }
+    setLpd1TxCtrls(ctx.lpd1TxCtrls, lpd1TxLevel);
+
+    if (lpd1Level <= LPD1_LVL_2) {
+        ctx.lpd1BlkSkipLumaRdPct = 90;
+    } else if (lpd1Level <= LPD1_LVL_4) {
+        ctx.lpd1BlkSkipLumaRdPct = 75;
+    } else {
+        ctx.lpd1BlkSkipLumaRdPct = 60;
+    }
+    ctx.lpd1ChromaSkipEnergyTh = 5;
+
+    std::uint8_t rateEstLevel = 0;
+    if (pcs.rateEstLevel) {
+        if (lpd1Level <= LPD1_LVL_0) {
+            rateEstLevel = 4;
+        } else {
+            rateEstLevel = 0;
+        }
+        // Don't use a more conservative level in LPD1 than the regular path would use
+        if (rateEstLevel) {
+            rateEstLevel = (std::uint8_t)std::max((int)rateEstLevel, (int)pcs.rateEstLevel);
+        }
+    }
+    setRateEstCtrls(ctx.rateEstCtrls, rateEstLevel);
+
+    // If want to turn off approximating inter rate, must ensure that the approximation is also disabled
+    // at the pic level (pcs->approx_inter_rate)
+    // If the pic level signal is set more aggressive than the default lpd1 setting (lvl 1), use the pic level.
+    ctx.approxInterRate = (std::uint8_t)std::max(1, (int)pcs.approxInterRate);
+    setPfCtrls(ctx.pfCtrls, 1);
+
+    // Up to LPD1_LVL_5 we configure intra controls; LPD1_LVL_6 uses VLPD1 (DC-only intra)
+    if (lpd1Level <= LPD1_LVL_5) {
+        std::uint8_t intraLevel = 0;
+        if (pcs.intraLevel) {
+            if (lpd1Level <= LPD1_LVL_2) {
+                intraLevel = 6;
+            } else {
+                intraLevel = kMaxIntraLevel - 1;
+            }
+
+            // Don't use a more conservative level in LPD1 than the regular path would use
+            if (intraLevel) {
+                intraLevel = (std::uint8_t)std::max((int)intraLevel, (int)pcs.intraLevel);
+            }
+        }
+
+        {
+            IntraSetPcs intraPcs;
+            intraPcs.skipIntra = pcs.skipIntra;
+            intraPcs.isISlice = false;
+            intraPcs.tplEnable = pcs.tplEnable;
+            intraPcs.tplIntraModeEnd = pcs.tplIntraModeEnd;
+            intraPcs.refIntraPercentage = pcs.refIntraPercentage;
+            intraPcs.tpl = pcs.tpl;
+            intraPcs.tplCtx = pcs.tplCtx;
+            setIntraCtrls(ctx.intraCtrls, intraPcs, ctx.intraSetCtx, intraLevel, 2);
+        }
+    } else {
+        ctx.intraCtrls.enableIntra = (pcs.intraLevel && !pcs.skipIntra) ? 1 : 0;
+        ctx.intraSetCtx.skipIntra = pcs.skipIntra;
+    }
+
+    /* Set signals that have assumed values in the light-PD1/vlpd1 paths (but need to be initialized as they may be checked) */
+
+    // Use coeff rate and slit flag rate only (i.e. no fast rate)
+    ctx.shutFastRate   = false;
+    ctx.uvCtrls.enabled = 1;
+    ctx.uvCtrls.uvMode = kChromaMode1;
+    setCflCtrls(ctx.cflCtrls, 0);
+    ctx.mdDisallowNsqSearch   = true;
+    ctx.newNearestInjection   = true;
+    ctx.blkSkipDecision       = true;
+    ctx.rateEstCtrls.updateSkipCtxDcSignCtx = false;
+    ctx.rateEstCtrls.updateSkipCoeffCtx     = false;
+    ctx.subresCtrls.oddToEvenDeviationTh    = 0;
+    setInterIntraCtrls(ctx.interIntraCtrls, 0);
+}
+
+
+}  // namespace mode_config
+}  // namespace l16_rdo
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 11: svt_aom_sig_deriv_enc_dec_{default,rtc,allintra}
+// (enc_mode_config.c:7891-8007 / :8009-8120 / :8121-8243).
+// ---------------------------------------------------------------------------
+namespace l16_rdo {
+namespace mode_config {
+
+// The NsqSearchPcs wall builder (the C2 carrier assembled from the
+// tune composition's walls).
+static NsqSearchPcs NsqSearchPcsOf(const EncDecTunePcs& p) {
+    NsqSearchPcs np;
+    std::memset(&np, 0, sizeof(np));
+    np.isISlice = p.isISlice;
+    np.encMode = p.encMode;
+    np.mimicOnlyTx4x4 = p.mimicOnlyTx4x4;
+    np.sbSize = p.superBlockSize;
+    np.sbIndex = p.sbIndex;
+    np.me8x8Distortion = p.me8x8Distortion;
+    np.me8x8CostVariance = p.me8x8CostVariance;
+    np.sb128 = p.sb128;
+    np.sbOriginX = p.sbOriginX;
+    np.sbOriginY = p.sbOriginY;
+    np.qp = p.qp;
+    np.nsqQpBasedThScaling = p.nsqQpBasedThScaling;
+    np.pdPass = p.pdPass;
+    return np;
+}
+
+// The shared body: the D/R tunes differ from A in the literal zeros;
+// the depth-early-exit / skip-sub-depth bands differ per tune.
+static void sigDerivEncDecTuneImpl(EncDecTunePcs& pcs, EncDecTuneCtx& ctx, int tune) {
+    const EncMode encMode = pcs.encMode;
+    setNsqSearchCtrls(ctx.nsqSearchCtrls, ctx.nsqPsqTxsCtrls, NsqSearchPcsOf(pcs), pcs.nsqSearchLevel);
+    setNicCtrls(&ctx.nicCtrls, pcs.nicLevel);
+    {
+        CandReductionPcs crPcs;
+        crPcs.refList0CountTry = pcs.refList0CountTry;
+        crPcs.refList1CountTry = pcs.refList1CountTry;
+        crPcs.useBestMeUnipredCandOnly = pcs.useBestMeUnipredCandOnly;
+        CandReductionCtx crCtx;
+        crCtx.pd1Level = (std::int8_t)REGULAR_PD1;
+        crCtx.isNotLastLayer = pcs.isNotLastLayer;
+        crCtx.rtc = pcs.rtcTune;
+        crCtx.hierarchicalLevels = pcs.hierarchicalLevels;
+        setCandReductionCtrls(ctx.candReductionCtrls, pcs.candReductionLevel, crPcs, crCtx,
+                              pcs.pictureQp, 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0, pcs.refSkipPerc);
+    }
+
+    setTxtCtrls(ctx.txtCtrls, pcs.txtLevel);
+    setTxShortcutCtrls(ctx.txShortcutCtrls, pcs.txShortcutLevel);
+
+    setInterpolationSearchLevelCtrls(ctx.interpolationSearchCtrls,
+                                     tune == 2 ? 0 : pcs.interpolationSearchLevel);
+
+    setChromaCtrls(ctx.uvCtrls, pcs.chromaLevel);
+
+    setCflCtrls(ctx.cflCtrls, pcs.cflLevel);
+    // Update nsq settings based on the sb_class
+    ctx.mdDisallowNsqSearch =
+        !ctx.nsqGeomCtrls.enabled || !ctx.nsqSearchCtrls.enabled;
+    ctx.globalMvInjection             = tune == 2 ? false : pcs.gmEnabled;
+    ctx.newNearestInjection           = tune != 2;
+    ctx.newNearestNearCombInjection   = tune == 2 ? false : pcs.newNearestNearCombInjection;
+
+    //set Warped-Motion controls from Picture level.
+    setWmCtrls(ctx.wmCtrls, tune == 2 ? 0 : pcs.wmLevel);
+
+    ctx.unipred3x3Injection = tune == 2 ? false : pcs.unipred3x3Injection;
+    setBipred3x3Ctrls(ctx.bipred3x3Ctrls, tune == 2 ? 0 : pcs.bipred3x3Injection);
+    setInterCompCtrls(ctx.interCompCtrls, tune == 2 ? 0 : pcs.interCompoundMode);
+    setDistBasedRefPruningCtrls(ctx.refPruningCtrls, tune == 2 ? 0 : pcs.distBasedRefPruning);
+    setSpatialSseFullLoopLevel(ctx.spatialSseCtrls, pcs.spatialSseFullLoopLevel);
+    if (ctx.uvCtrls.uvMode <= kChromaMode1) {
+        ctx.blkSkipDecision = true;
+    } else {
+        ctx.blkSkipDecision = false;
+    }
+
+    setRdoqCtrls(ctx.rdoqCtrls, pcs.rdoqLevel);
+
+    setCoeffShavingCtrls(ctx.coeffShavingCtrls, pcs.coeffShavingLevel);
+    // There are only redundant blocks when HVA_HVB shapes are used
+    if (!ctx.nsqGeomCtrls.allowHvaHvb) {
+        ctx.redundantBlk = false;
+    } else {
+        ctx.redundantBlk = true;
+    }
+    {
+        const int band = tune == 0 ? (int)ENC_M6 : (int)ENC_M7;
+        const std::uint8_t depthEarlyExitLvl = encMode <= (EncMode)band ? 1 : 2;
+        setDepthEarlyExitCtrls(ctx.depthEarlyExitCtrls, depthEarlyExitLvl);
+    }
+    setObmcCtrls(ctx.obmcCtrls, tune == 2 ? 0 : pcs.picObmcLevel);
+    setInterIntraCtrls(ctx.interIntraCtrls, tune == 2 ? 0 : pcs.interIntraLevel);
+    {
+        std::uint8_t txsLevel = pcs.txsLevel;
+        // Use fastest TXS when VLPD and default TXS is off
+        if (tune == 2 && pcs.txsLevel == 0 && ctx.pd0LevelWall == 6) {
+            txsLevel = kMaxTxsLevel - 1;
+        }
+        setTxsCtrls(ctx.txsCtrls, txsLevel, pcs.mimicOnlyTx4x4);
+    }
+    setFilterIntraCtrls(ctx.filterIntraCtrls, pcs.picFilterIntraLevel);
+    // Set md_allow_intrabc @ MD
+    ctx.mdAllowIntrabc = pcs.allowIntrabc;
+
+    // Set md_palette_level @ MD
+    ctx.mdPaletteLevel = pcs.mdPaletteLevel;
+
+    setPfCtrls(ctx.pfCtrls, 1);
+    setMdSqMotionSearchCtrls(ctx.mdSqCtrls, tune == 2 ? 0 : pcs.mdSqMvSearchLevel);
+
+    setMdNsqMotionSearchCtrls(ctx.mdNsqCtrls, tune == 2 ? 0 : pcs.mdNsqMvSearchLevel);
+    setMdPmeCtrls(ctx.mdPmeCtrls, tune == 2 ? 0 : pcs.mdPmeLevel);
+
+    setMdSubpelMeCtrls(ctx.mdSubPelCtrls, tune == 2 ? 0 : pcs.meSubpelLevel);
+    setMdSubpelPmeCtrls(ctx.mdSubPelPmeCtrls, tune == 2 ? 0 : pcs.pmeSubpelLevel);
+    setRateEstCtrls(ctx.rateEstCtrls, (std::uint8_t)pcs.rateEstLevel);
+
+    // set at pic-level b/c feature depends on some pic-level initializations
+    ctx.approxInterRate = pcs.approxInterRate;
+    // Use coeff rate and slit flag rate only (i.e. no fast rate)
+    ctx.shutFastRate = false;
+
+    // intra_level must be greater than 0 for I_SLICE
+    {
+        IntraSetPcs intraPcs;
+        intraPcs.skipIntra = pcs.skipIntra;
+        intraPcs.isISlice = pcs.isISlice;
+        intraPcs.tplEnable = pcs.tplEnable;
+        intraPcs.tplIntraModeEnd = pcs.tplIntraModeEnd;
+        intraPcs.refIntraPercentage = pcs.refIntraPercentage;
+        intraPcs.tpl = pcs.tpl;
+        intraPcs.tplCtx = pcs.tplCtx;
+        setIntraCtrls(ctx.intraCtrls, intraPcs, ctx.intraSetCtx, pcs.intraLevel,
+                      pcs.distBasedAngIntraLevel);
+    }
+
+    // Use Hadamard at MDS0
+    ctx.mds0UseHadamardSb = tune == 2;
+
+    setMds0Ctrls(ctx.mds0Ctrls, pcs.mds0Level);
+    setSubresCtrls(ctx.subresCtrls, 0);
+    ctx.parentCostBias = 995;
+
+    std::uint8_t skipSubDepthLvl;
+    if (tune == 1) {
+        skipSubDepthLvl = 2;
+    } else if (tune == 2) {
+        skipSubDepthLvl = encMode <= ENC_M7 ? 1 : 2;
+    } else {
+        skipSubDepthLvl = encMode <= ENC_M1 ? 1 : 2;
+    }
+
+    setSkipSubDepthCtrls(ctx.skipSubDepthCtrls, skipSubDepthLvl);
+    ctx.tuneSsimLevel = 0;  // SSIM_LVL_0
+}
+
+
+// svt_aom_sig_deriv_enc_dec_default (enc_mode_config.c:7891-8007).
+void sigDerivEncDecDefault(EncDecTunePcs& pcs, EncDecTuneCtx& ctx) {
+    sigDerivEncDecTuneImpl(pcs, ctx, 0);
+}
+
+// svt_aom_sig_deriv_enc_dec_rtc (enc_mode_config.c:8009-8120).
+void sigDerivEncDecRtc(EncDecTunePcs& pcs, EncDecTuneCtx& ctx) {
+    sigDerivEncDecTuneImpl(pcs, ctx, 1);
+}
+
+// svt_aom_sig_deriv_enc_dec_allintra (enc_mode_config.c:8121-8243).
+void sigDerivEncDecAllIntra(EncDecTunePcs& pcs, EncDecTuneCtx& ctx) {
+    sigDerivEncDecTuneImpl(pcs, ctx, 2);
+}
+
+}  // namespace mode_config
+}  // namespace l16_rdo
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 12: the getters + pic-level setters
+// (enc_mode_config.c:8330-8980).
+// ---------------------------------------------------------------------------
+namespace l16_rdo {
+namespace mode_config {
+
+// svt_aom_get_nsq_search_level_default (enc_mode_config.c:8330-8405).
+std::uint8_t getNsqSearchLevelDefault(EncMode encMode, const NsqSearchLvlPcs& pcs,
+                                      std::uint8_t coeffLvl, std::uint32_t qp) {
+    int nsqSearchLevel;
+
+    if (encMode <= ENC_M0) {
+        const std::uint8_t isBase = pcs.isBase;
+        nsqSearchLevel            = isBase ? 2 : 3;
+    } else if (encMode <= ENC_M2) {
+        nsqSearchLevel = 7;
+    } else if (encMode <= ENC_M3) {
+        nsqSearchLevel = 9;
+    } else if (encMode <= ENC_M4) {
+        nsqSearchLevel = 12;
+    } else if (encMode <= ENC_M6) {
+        nsqSearchLevel = 15;
+    } else if (encMode <= ENC_M7) {
+        nsqSearchLevel = 18;
+    } else {
+        nsqSearchLevel = 19;
+    }
+
+    // If NSQ search is off, don't apply offsets
+    if (nsqSearchLevel == 0) {
+        return (std::uint8_t)nsqSearchLevel;
+    }
+
+    if (nsqSearchLevel > kNsqModulationMinLevel) {
+        if (pcs.r0Gen) {
+            const double r0Tab[kMaxTemporalLayers] = {0.10, 0.15, 0.20, 0.25, 0.25, 0.25};
+            const double r0Th = pcs.isISlice ? 0.05 : r0Tab[pcs.temporalLayerIndex];
+            if (pcs.r0 < r0Th) {
+                nsqSearchLevel = std::min(nsqSearchLevel,
+                                          std::max(kNsqModulationMinLevel,
+                                                   std::max(nsqSearchLevel - 4, 1)));
+            }
+        }
+    }
+
+    // offset level based on coeff_lvl
+    if (coeffLvl == HIGH_LVL) {
+        nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+    } else if (coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) {
+        nsqSearchLevel = std::max(nsqSearchLevel - 3, 1);
+    }
+
+    // If NSQ search is off, don't apply QP offsets
+    if (nsqSearchLevel == 0) {
+        return (std::uint8_t)nsqSearchLevel;
+    }
+
+    const std::uint8_t seqQpMod = pcs.seqQpMod;
+    // offset level based on sequence QP
+    if (seqQpMod) {
+        if (encMode <= ENC_M6) {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+                nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 45) {
+                nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+                nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 59) {
+                nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+            }
+        } else {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+                nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+                nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+                nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 56) {
+                nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+            }
+        }
+    }
+    return (std::uint8_t)nsqSearchLevel;
+}
+
+// svt_aom_get_nsq_search_level_rtc (enc_mode_config.c:8407-8437).
+std::uint8_t getNsqSearchLevelRtc(const NsqSearchLvlPcs& pcs, std::uint8_t coeffLvl,
+                                  std::uint32_t qp) {
+    int nsqSearchLevel;
+    nsqSearchLevel = 19;
+
+    // offset level based on coeff_lvl
+    if (coeffLvl == HIGH_LVL) {
+        nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+    } else if (coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) {
+        nsqSearchLevel = std::max(nsqSearchLevel - 3, 1);
+    }
+
+    // If NSQ search is off, don't apply QP offsets
+    if (nsqSearchLevel == 0) {
+        return (std::uint8_t)nsqSearchLevel;
+    }
+
+    const std::uint8_t seqQpMod = pcs.seqQpMod;
+    // offset level based on sequence QP
+    if (seqQpMod) {
+        if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+            nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+        } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+            nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+        } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+            nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+        } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 56) {
+            nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+        }
+    }
+    return (std::uint8_t)nsqSearchLevel;
+}
+
+// svt_aom_get_nsq_search_level_allintra (enc_mode_config.c:8439-8492).
+std::uint8_t getNsqSearchLevelAllIntra(const NsqSearchLvlPcs& pcs, EncMode encMode,
+                                       std::uint8_t coeffLvl, std::uint32_t qp) {
+    int nsqSearchLevel;
+
+    if (encMode <= ENC_M0) {
+        nsqSearchLevel = 3;
+    } else if (encMode <= ENC_M1) {
+        nsqSearchLevel = 10;
+    } else if (encMode <= ENC_M2) {
+        nsqSearchLevel = 14;
+    } else if (encMode <= ENC_M3) {
+        nsqSearchLevel = 16;
+    } else {
+        nsqSearchLevel = 0;
+    }
+
+    if ((coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) && (encMode <= ENC_MR)) {
+        nsqSearchLevel = std::max(nsqSearchLevel - 3, 1);
+    }
+
+    // If NSQ search is off, don't apply offsets
+    if (nsqSearchLevel == 0) {
+        return (std::uint8_t)nsqSearchLevel;
+    }
+
+    const std::uint8_t seqQpMod = pcs.seqQpMod;
+    // offset level based on sequence QP
+    if (seqQpMod) {
+        if (encMode <= ENC_M5) {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+                nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 45) {
+                nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+                nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 59) {
+                nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+            }
+        } else {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 39) {
+                nsqSearchLevel = nsqSearchLevel + 3 > 19 ? 0 : nsqSearchLevel + 3;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+                nsqSearchLevel = nsqSearchLevel + 2 > 19 ? 0 : nsqSearchLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 48) {
+                nsqSearchLevel = nsqSearchLevel + 1 > 19 ? 0 : nsqSearchLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 56) {
+                nsqSearchLevel = std::max(nsqSearchLevel - 1, 1);
+            }
+        }
+    }
+    return (std::uint8_t)nsqSearchLevel;
+}
+
+// svt_aom_get_bypass_encdec_default (enc_mode_config.c:8494-8513).
+std::uint8_t getBypassEncdecDefault(EncMode encMode, std::uint8_t encoderBitDepth) {
+    std::uint8_t bypassEncdec = 1;
+    if (encoderBitDepth == 8) {  // EB_EIGHT_BIT; SVT_EFFECTIVE_BIT_DEPTH is the identity
+        // 8bit settings
+        if (encMode <= ENC_M2) {
+            bypassEncdec = 0;
+        } else {
+            bypassEncdec = 1;
+        }
+    } else {
+        // 10bit settings
+        if (encMode <= ENC_M7) {
+            bypassEncdec = 0;
+        } else {
+            bypassEncdec = 1;
+        }
+    }
+    return bypassEncdec;
+}
+
+// svt_aom_get_bypass_encdec_rtc (enc_mode_config.c:8514-8533).
+std::uint8_t getBypassEncdecRtc(EncMode encMode, std::uint8_t encoderBitDepth) {
+    return getBypassEncdecDefault(encMode, encoderBitDepth);  // the identical body
+}
+
+// svt_aom_get_bypass_encdec_allintra (enc_mode_config.c:8534-8543).
+std::uint8_t getBypassEncdecAllIntra(EncMode encMode) {
+    std::uint8_t bypassEncdec = 1;
+    if (encMode <= ENC_M3) {
+        bypassEncdec = 0;
+    } else {
+        bypassEncdec = 1;
+    }
+    return bypassEncdec;
+}
+
+// set_cdf_controls (enc_mode_config.c:8544-8585).
+void setCdfCtrls(CdfCtrls& ctrls, const CdfSetPcs& pcs, std::uint8_t updateCdfLevel) {
+    switch (updateCdfLevel) {
+    case 0:
+        ctrls.updateMv   = 0;
+        ctrls.updateSe   = 0;
+        ctrls.updateCoef = 0;
+        break;
+    case 1:
+        ctrls.updateMv   = 1;
+        ctrls.updateSe   = 1;
+        ctrls.updateCoef = (pcs.rateEstLevel || pcs.rdoqLevel) ? 1 : 0;
+        break;
+    case 2:
+        ctrls.updateMv   = 0;
+        ctrls.updateSe   = 1;
+        ctrls.updateCoef = (pcs.rateEstLevel || pcs.rdoqLevel) ? 1 : 0;
+        break;
+    case 3:
+        ctrls.updateMv   = 0;
+        ctrls.updateSe   = 1;
+        ctrls.updateCoef = 0;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing (documented UB).
+        break;
+    }
+
+    ctrls.updateMv = pcs.isISlice ? 0 : ctrls.updateMv;
+    ctrls.enabled  = ctrls.updateCoef | ctrls.updateMv | ctrls.updateSe;
+    // :8579-8583 - the CONFIG_ENABLE_MD_CDF_UPDATE trailing assert is a
+    // runtime invariant compiled out in the pinned build (named).
+}
+
+// svt_aom_get_update_cdf_level_default (enc_mode_config.c:8591-8604).
+std::uint8_t getUpdateCdfLevelDefault(EncMode encMode, bool isIslice, std::uint8_t isBase) {
+    std::uint8_t updateCdfLevel;
+    if (encMode <= ENC_M0) {
+        updateCdfLevel = 1;
+    } else if (encMode <= ENC_M3) {
+        updateCdfLevel = isBase ? 1 : 2;
+    } else if (encMode <= ENC_M8) {
+        updateCdfLevel = isIslice ? 1 : 0;
+    } else {
+        updateCdfLevel = 0;
+    }
+    return updateCdfLevel;
+}
+
+// svt_aom_get_update_cdf_level_rtc (enc_mode_config.c:8605-8614).
+std::uint8_t getUpdateCdfLevelRtc(EncMode encMode, bool isIslice) {
+    std::uint8_t updateCdfLevel;
+    if (encMode <= ENC_M8) {
+        updateCdfLevel = isIslice ? 1 : 0;
+    } else {
+        updateCdfLevel = 0;
+    }
+    return updateCdfLevel;
+}
+
+// svt_aom_get_update_cdf_level_allintra (enc_mode_config.c:8615-8627).
+std::uint8_t getUpdateCdfLevelAllIntra(EncMode encMode) {
+    std::uint8_t updateCdfLevel;
+    if (encMode <= ENC_M3) {
+        updateCdfLevel = 1;
+    } else if (encMode <= ENC_M6) {
+        updateCdfLevel = 2;
+    } else {
+        updateCdfLevel = 0;
+    }
+
+    return updateCdfLevel;
+}
+
+// svt_aom_get_chroma_level_default (enc_mode_config.c:8628-8643).
+std::uint8_t getChromaLevelDefault(EncMode encMode, bool isIslice) {
+    std::uint8_t chromaLevel;
+
+    if (encMode <= ENC_MR) {
+        chromaLevel = 1;
+    } else if (encMode <= ENC_M0) {
+        chromaLevel = isIslice ? 1 : 4;
+    } else if (encMode <= ENC_M5) {
+        chromaLevel = 4;
+    } else {
+        chromaLevel = 5;
+    }
+
+    return chromaLevel;
+}
+
+// svt_aom_get_chroma_level_rtc (enc_mode_config.c:8644-8653).
+std::uint8_t getChromaLevelRtc(EncMode encMode) {
+    std::uint8_t chromaLevel;
+    if (encMode <= ENC_M10) {
+        chromaLevel = 4;
+    } else {
+        chromaLevel = 5;
+    }
+    return chromaLevel;
+}
+
+// svt_aom_get_chroma_level_allintra (enc_mode_config.c:8654-8672).
+std::uint8_t getChromaLevelAllIntra(EncMode encMode) {
+    std::uint8_t chromaLevel;
+
+    if (encMode <= ENC_M0) {
+        chromaLevel = 1;
+    } else if (encMode <= ENC_M1) {
+        chromaLevel = 2;
+    } else if (encMode <= ENC_M5) {
+        chromaLevel = 4;
+    } else {
+        chromaLevel = 5;
+    }
+
+    return chromaLevel;
+}
+
+// set_pic_pd0_lvl_default (enc_mode_config.c:8673-8791).
+void setPicPd0LvlDefault(PicPd0Pcs& pcs, EncMode encMode) {
+    const std::uint8_t isBase            = pcs.temporalLayerIndex == 0;
+    const std::uint8_t isIslice          = pcs.isISlice;
+    const bool transitionPresent         = (pcs.transitionPresent == 1);
+    const InputCoeffLvl coeffLvl         = (InputCoeffLvl)pcs.coeffLvl;
+    const ResolutionRange inputResolution = pcs.inputResolution;
+    const std::uint8_t ldp0LvlOffset[4]  = {2, 2, 1, 0};
+    std::uint8_t qpBandIdx               = 0;
+    const std::uint8_t seqQpMod          = pcs.seqQpMod;
+
+    if (pcs.qp <= 27) {
+        qpBandIdx = 0;
+    } else if (pcs.qp <= 39) {
+        qpBandIdx = 1;
+    } else if (pcs.qp <= 43) {
+        qpBandIdx = 2;
+    } else {
+        qpBandIdx = 3;
+    }
+
+    if (encMode <= ENC_M2) {
+        pcs.picPd0Lvl = 0;
+    } else if (encMode <= ENC_M3) {
+        pcs.picPd0Lvl = 1;
+    } else if (encMode <= ENC_M7) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            pcs.picPd0Lvl = 3;
+        } else if (inputResolution <= INPUT_SIZE_480p_RANGE) {
+            pcs.picPd0Lvl = (isBase || transitionPresent) ? 3 : 5;
+        } else {
+            if (coeffLvl == HIGH_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent) ? 7 : 8;
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent) ? 4 : 6;
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent) ? 3 : 5;
+            }
+        }
+    } else if (encMode <= ENC_M8) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : (int)ldp0LvlOffset[qpBandIdx];
+            pcs.picPd0Lvl      = (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset);
+        } else if (inputResolution <= INPUT_SIZE_480p_RANGE) {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : std::max((int)((int)ldp0LvlOffset[qpBandIdx] - 1), 0);
+            pcs.picPd0Lvl      = (isBase || transitionPresent)
+                ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+        } else {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : std::max((int)((int)ldp0LvlOffset[qpBandIdx] - 1), 0);
+            if (coeffLvl == HIGH_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 8 + qpOffset);
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset);
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+            }
+        }
+    } else if (encMode <= ENC_M10) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : (int)ldp0LvlOffset[qpBandIdx];
+            if (coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 4 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 6 + qpOffset);
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset);
+            }
+        } else {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : (int)ldp0LvlOffset[qpBandIdx];
+            if (coeffLvl == HIGH_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 8 + qpOffset);
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset);
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+            }
+        }
+    } else {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            const int qpOffset = (seqQpMod <= 1) ? 0 : (int)ldp0LvlOffset[qpBandIdx];
+            if (coeffLvl == VLOW_LVL || coeffLvl == LOW_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 3 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset);
+            } else if (coeffLvl == NORMAL_LVL) {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 4 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 6 + qpOffset);
+            } else {
+                pcs.picPd0Lvl = (isBase || transitionPresent)
+                    ? (std::uint8_t)std::min((int)kMaxPd0Lvl, 5 + qpOffset)
+                    : (std::uint8_t)std::min((int)kMaxPd0Lvl, 7 + qpOffset);
+            }
+        } else {
+            if (coeffLvl == HIGH_LVL) {
+                pcs.picPd0Lvl = 7;
+            } else {
+                pcs.picPd0Lvl = (isIslice || transitionPresent) ? 6 : 7;
+            }
+        }
+    }
+
+    // SB128 is conservatively capped to PD0_LVL_0
+    if (pcs.superBlockSize == 128) {
+        pcs.picPd0Lvl = 0;
+    }
+}
+
+// set_pic_pd0_lvl_rtc (enc_mode_config.c:8793-8822).
+void setPicPd0LvlRtc(PicPd0Pcs& pcs, EncMode encMode) {
+    const std::uint8_t isBase            = pcs.isBase;  // frame_is_boosted(ppcs)
+    const std::uint8_t isIslice          = pcs.isISlice;
+    const bool transitionPresent         = (pcs.transitionPresent == 1);
+    const ResolutionRange inputResolution = pcs.inputResolution;
+
+    if (encMode <= ENC_M7) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            pcs.picPd0Lvl = 1;
+        } else {
+            pcs.picPd0Lvl = isBase ? 3 : 4;
+        }
+    } else if (encMode <= ENC_M8) {
+        if (inputResolution <= INPUT_SIZE_360p_RANGE) {
+            pcs.picPd0Lvl = isBase ? 1 : 3;
+        } else {
+            pcs.picPd0Lvl = isBase ? 3 : 5;
+        }
+    } else if (encMode <= ENC_M9) {
+        pcs.picPd0Lvl = isBase ? 5 : 7;
+    } else {
+        pcs.picPd0Lvl = (isIslice || transitionPresent) ? 6 : 7;
+    }
+
+    // SB128 is conservatively capped to PD0_LVL_0
+    if (pcs.superBlockSize == 128) {
+        pcs.picPd0Lvl = 0;
+    }
+}
+
+// set_pic_pd0_lvl_allintra (enc_mode_config.c:8824-8838).
+void setPicPd0LvlAllIntra(PicPd0Pcs& pcs, EncMode encMode) {
+    if (encMode <= ENC_M1) {
+        pcs.picPd0Lvl = 0;
+    } else if (encMode <= ENC_M8) {
+        pcs.picPd0Lvl = 1;
+    } else {
+        pcs.picPd0Lvl = 7;
+    }
+
+    // SB128 is conservatively capped to PD0_LVL_0
+    if (pcs.superBlockSize == 128) {
+        pcs.picPd0Lvl = 0;
+    }
+}
+
+// svt_aom_get_obmc_level (enc_mode_config.c:8896-8933).
+std::uint8_t getObmcLevel(EncMode encMode, std::uint32_t qp, std::uint8_t seqQpMod) {
+    std::uint8_t obmcLevel = 0;
+
+    if (encMode <= ENC_MR) {
+        obmcLevel = 1;
+    } else if (encMode <= ENC_M1) {
+        obmcLevel = 3;
+    } else if (encMode <= ENC_M5) {
+        obmcLevel = 5;
+    } else if (encMode <= ENC_M8) {
+        obmcLevel = 6;
+    } else {
+        obmcLevel = 0;
+    }
+    // QP-banding
+    if (!(encMode <= ENC_M0) && obmcLevel && seqQpMod) {
+        if (encMode <= ENC_M3) {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+                obmcLevel = obmcLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 53) {
+                obmcLevel = obmcLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 60) {
+                obmcLevel = obmcLevel == 1 ? 1 : obmcLevel - 1;
+            }
+        } else {
+            if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 43) {
+                obmcLevel = obmcLevel + 2;
+            } else if ((seqQpMod == 2 || seqQpMod == 3) && qp <= 55) {
+                obmcLevel = obmcLevel + 1;
+            } else if ((seqQpMod == 1 || seqQpMod == 2) && qp > 59) {
+                obmcLevel = obmcLevel == 1 ? 1 : obmcLevel - 1;
+            }
+        }
+    }
+
+    return obmcLevel;
+}
+
+// mfmv_controls (enc_mode_config.c:8934-8980).
+void mfmvCtrls(MfmvPcs& pcs, std::uint8_t mfmvLevel) {
+    const std::uint8_t isBase = pcs.isBase;
+    double r0Th               = 0;
+    pcs.useRefFrameMvs        = false;
+    switch (mfmvLevel) {
+    case 0:
+        pcs.useRefFrameMvs = false;
+        break;
+    case 1:
+        pcs.useRefFrameMvs = true;
+        break;
+    case 2:
+        r0Th = pcs.scsTpl ? 0.15 : 0;
+        break;
+    case 3:
+        r0Th = pcs.scsTpl ? 0.13 : 0;
+        break;
+    case 4:
+        r0Th = pcs.scsTpl ? 0.10 : 0;
+        break;
+    default:
+        // The reference assert(0)s here and writes nothing but the
+        // leading use_ref_frame_mvs = 0 (documented).
+        break;
+    }
+
+    if (r0Th) {
+        if (pcs.r0Gen && isBase) {
+            if (pcs.r0 < r0Th) {
+                pcs.useRefFrameMvs = true;
+            }
+        }
+        // Maintain using mfmv if at least 1 of the closest refefrace frame(s) has mfmv enabled
+        if (pcs.refL0MfmvUsed) {
+            pcs.useRefFrameMvs = true;
+        }
+        if (pcs.isBSlice && pcs.refList1CountTry) {
+            if (pcs.refL1MfmvUsed) {
+                pcs.useRefFrameMvs = true;
+            }
+        }
+    }
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

@@ -1163,5 +1163,1128 @@ void setCandReductionCtrls(CandReductionCtrls& ctrls, std::uint8_t candReduction
                            std::uint32_t me64x64Distortion, std::uint8_t l0WasSkip,
                            std::uint8_t l1WasSkip, std::uint8_t refSkipPerc);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 1: the unported :63-:145 SB128 walls + the :3937-:3963 gap
+// (set_sq_txs_ctrls, a set_nsq_search_ctrls dependency) + the first
+// :4396+ setters.
+// ---------------------------------------------------------------------------
+// ME_TIER_ZERO_PU_64x64 (me_context.h:47) = 0.
+constexpr std::uint32_t kMeTierZeroPu64x64 = 0;
+
+// The pcs wall of get_sb128_me_data (:63-115): the b64 grid + the five ME
+// arrays (pcs.h:866-870; the DepthRemovalPcs precedent - the caller
+// supplies arrays of me_pic_width_in_sb * me_pic_height_in_sb entries).
+struct Sb128Pcs {
+    std::uint32_t b64Size;  // pcs->scs->b64_size
+    std::uint32_t alignedWidth;
+    std::uint32_t alignedHeight;
+    const std::uint32_t* me64x64Distortion;
+    const std::uint32_t* me32x32Distortion;
+    const std::uint32_t* me16x16Distortion;
+    const std::uint32_t* me8x8Distortion;
+    const std::uint32_t* me8x8CostVariance;
+};
+// The ctx wall (:67-:68): sb_origin_x/sb_origin_y (md_process.h:1180-1181).
+struct Sb128Ctx {
+    std::uint32_t sbOriginX;
+    std::uint32_t sbOriginY;
+};
+
+// get_sb128_me_data (enc_mode_config.c:63-115): average the 2x2 (max) of
+// b64 cells covering the SB; dist = sum/count, cost-var = elementwise MAX.
+void getSb128MeData(const Sb128Pcs& pcs, const Sb128Ctx& ctx, std::uint32_t* me64x64Dist,
+                    std::uint32_t* me32x32Dist, std::uint32_t* me16x16Dist, std::uint32_t* me8x8Dist,
+                    std::uint32_t* me8x8CostVar);
+
+// The pcs wall of get_sb128_variance (:120-145). variance is ppcs->
+// variance[b64_index][tier]; the carrier takes the flattened tier column
+// (the address of [0][ME_TIER_ZERO_PU_64x64]) + the tier-count row stride.
+struct Sb128VarPcs {
+    std::uint32_t b64Size;
+    std::uint32_t alignedWidth;
+    std::uint32_t alignedHeight;
+    const std::uint16_t* variance64;  // &variance[0][kMeTierZeroPu64x64]
+    std::uint32_t varianceStride;     // the tier count (row stride)
+};
+
+// get_sb128_variance (enc_mode_config.c:120-145): sum the 2x2 (max-count)
+// b64 variances and divide by the count. uint16 wrap-cast on the sum, as
+// in the reference.
+void getSb128Variance(const Sb128VarPcs& pcs, const Sb128Ctx& ctx, std::uint16_t* variance);
+
+// NsqPsqTxsCtrls (md_process.h:420-427, verbatim).
+struct NsqPsqTxsCtrls {
+    std::uint8_t enabled;
+    std::uint32_t hvToSqTh;
+    std::uint32_t hToVTh;
+};
+
+// set_sq_txs_ctrls (enc_mode_config.c:3937-3963). The default case
+// assert(0)s and writes nothing (documented UB).
+void setSqTxsCtrls(NsqPsqTxsCtrls& ctrls, std::uint8_t psqTxsLvl);
+
+// CHROMA_MODE_* (definitions.h:2053-2055).
+constexpr std::uint8_t kChromaMode0 = 0;
+constexpr std::uint8_t kChromaMode1 = 1;
+constexpr std::uint8_t kChromaMode2 = 2;
+
+// UvCtrls (md_process.h:810-825, verbatim field order/types).
+struct UvCtrls {
+    std::uint8_t enabled;
+    std::uint8_t uvMode;  // CHROMA_MODE_0/1/2
+    std::uint8_t indUvLastMds;
+    std::uint8_t skipIndUvIfOnlyDc;
+    std::uint8_t uvNicScalingNum;
+    std::uint32_t interVsIntraCostTh;
+};
+
+// svt_aom_set_chroma_controls (:4396-4463). The ctx NULL arm (the
+// memory-allocation call shape) is threaded out - the port always has the
+// carrier, and the returned uv_mode is the ctx->uv_ctrls.uv_mode write.
+// The default case assert(0)s in the reference and writes nothing but the
+// trailing uv_mode write still happens there (uv_mode keeps its 0 init);
+// the port returns the same 0 (documented).
+std::uint8_t setChromaCtrls(UvCtrls& ctrls, std::uint8_t uvLevel);
+
+// WmCtrls (md_process.h:591-606, verbatim field order/types).
+struct WmCtrls {
+    std::uint8_t enabled;
+    std::uint8_t useWmForMvp;
+    std::uint8_t refinementIterations;
+    std::uint8_t refineDiag;
+    std::uint8_t refineLevel;  // 0: before MDS0, 1: at MDS1, 2: at MDS3
+    std::uint16_t lowerBandTh;
+    std::uint16_t upperBandTh;
+    bool shutApproxIfNotMds0;
+};
+
+// MAX_WARP_LVL (enc_mode_config.c:4465).
+constexpr std::uint8_t kMaxWarpLvl = 4;
+
+// svt_aom_set_wm_controls (:4467-4521). The default case assert(0)s and
+// writes nothing (documented UB).
+void setWmCtrls(WmCtrls& ctrls, std::uint8_t wmLevel);
+
+// svt_aom_get_nic_level_default (:4521-4545) / _rtc (:4547-4557) /
+// _allintra (:4559-4586).
+std::uint8_t getNicLevelDefault(EncMode encMode, std::uint8_t isBase);
+std::uint8_t getNicLevelRtc(EncMode encMode);
+std::uint8_t getNicLevelAllIntra(EncMode encMode);
+
+// MdStage / MdStagingMode (definitions.h:775-782, verbatim ordinals).
+constexpr std::uint8_t kMdStage1 = 1;
+constexpr std::uint8_t kMdStage2 = 2;
+constexpr std::uint8_t kMdStage3 = 3;
+constexpr std::uint8_t kMdStagingMode0 = 0;
+constexpr std::uint8_t kMdStagingMode1 = 1;
+
+// MD_STAGE_NICS_SCAL_NUM (definitions.h:798-817, verbatim; 16 levels x
+// [S0,S1,S2,S3]; the port drops the always-unread S0 column).
+extern const std::uint8_t kMdStageNicsScalNum[16][4];
+
+// NicScalingCtrls (md_process.h:450-457, verbatim).
+struct NicScalingCtrls {
+    std::uint8_t stage1ScalingNum;  // <x>/16 post-stage 0 NICS
+    std::uint8_t stage2ScalingNum;  // <x>/16 post-stage 1 NICS
+    std::uint8_t stage3ScalingNum;  // <x>/16 post-stage 2 NICS
+};
+
+// NicPruningCtrls (md_process.h:459-514, verbatim field order/types).
+struct NicPruningCtrls {
+    std::uint64_t mds1ClassTh;
+    std::uint8_t mds1BandCnt;
+    std::uint64_t mds2ClassTh;
+    std::uint8_t mds2BandCnt;
+    std::uint64_t mds3ClassTh;
+    std::uint8_t iMds3ClassThMult;
+    std::uint8_t mds3BandCnt;
+    std::uint64_t mds1CandBaseThIntra;
+    std::uint64_t mds1CandBaseThInter;
+    std::uint16_t mds1CandThRankFactor;
+    std::uint64_t mds2CandBaseTh;
+    std::uint16_t mds2CandThRankFactor;
+    std::uint16_t mds2RelativeDevTh;
+    std::uint64_t mds3CandBaseTh;
+    bool enableSkippingMds1;
+    std::uint8_t mergeInterCandsMult;
+};
+
+// NicCtrls (md_process.h:516-521, verbatim).
+struct NicCtrls {
+    NicPruningCtrls pruningCtrls;
+    NicScalingCtrls scalingCtrls;
+    std::uint8_t mdStagingMode;
+};
+
+// svt_aom_set_nic_controls (:4588-4966), 1:1. ctx may be NULL (the
+// memory-allocation call shape - the reference's own contract); the
+// return is the nic_scaling_level index into MD_STAGE_NICS_SCAL_NUM.
+// The default case assert(0)s and writes nothing (documented UB).
+std::uint8_t setNicCtrls(NicCtrls* ctrls, std::uint8_t nicLevel);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 2: set_nsq_geom_ctrls (:4968-:5022) + set_nsq_search_ctrls
+// (:5024-:5375).
+// ---------------------------------------------------------------------------
+// NsqGeomCtrls (md_process.h:535-544, verbatim field order/types).
+struct NsqGeomCtrls {
+    bool enabled;
+    std::uint8_t minNsqBlockSize;  // e.g. 8 = 8x8, 16 = 16x16
+    std::uint8_t allowHv4;         // disallow H4/V4 when off
+    std::uint8_t allowHvaHvb;      // disallow HA/HB/VA/VB when off
+};
+
+// svt_aom_set_nsq_geom_ctrls (:4968-5022), 1:1. The reference builds a
+// zero-initialized LOCAL, switches, then writes the three out-params (if
+// non-NULL) and memcpy's the local into ctx. The out-params keep the
+// reference's nullable contract; the ctx NULL arm is threaded out (the
+// memcpy always runs). The default case assert(0)s in the reference and
+// writes the zero-init local through (documented).
+void setNsqGeomCtrls(NsqGeomCtrls& ctrls, std::uint8_t nsqGeomLevel, std::uint8_t* allowHvaHvb,
+                     std::uint8_t* allowHv4, std::uint8_t* minNsqBsize);
+
+// PdPass (definitions.h:736-739, verbatim ordinals).
+constexpr std::uint8_t kPdPass0 = 0;
+constexpr std::uint8_t kPdPass1 = 1;
+
+// NsqSearchCtrls (md_process.h:546-584, verbatim field order/types).
+struct NsqSearchCtrls {
+    bool enabled;
+    std::uint32_t sqWeight;               // (uint32_t)~0 = off
+    std::uint32_t hvWeight;               // only active when sqWeight on
+    std::uint32_t maxPart0ToPart1Dev;
+    std::uint32_t nsqSplitCostTh;         // percentage * 10
+    std::uint32_t lowerDepthSplitCostTh;  // percentage * 100
+    std::uint32_t hVsVSplitRateTh;
+    std::uint32_t nonHvSplitRateTh;
+    std::uint32_t rateThOffsetLte16;
+    std::uint32_t componentMultipleTh;
+    std::uint8_t psqTxsLvl;
+    std::uint8_t subDepthBlockLvl;
+};
+
+// The pcs/scs wall surface of set_nsq_search_ctrls (:5024-:5375). The
+// SB64 path reads ppcs->me_8x8_distortion / me_8x8_cost_variance
+// [ctx->sb_index]; the SB128 path calls get_sb128_me_data on the
+// embedded Sb128Pcs surface. Each field cites its reference path.
+struct NsqSearchPcs {
+    bool isISlice;                   // pcs->slice_type == I_SLICE
+    EncMode encMode;                 // pcs->enc_mode
+    bool mimicOnlyTx4x4;             // pcs->mimic_only_tx_4x4
+    std::uint32_t sbSize;            // pcs->scs->super_block_size
+    std::uint32_t sbIndex;           // ctx->sb_index (SB64 path)
+    const std::uint32_t* me8x8Distortion;    // ppcs-> (SB64 path)
+    const std::uint32_t* me8x8CostVariance;  // ppcs-> (SB64 path)
+    Sb128Pcs sb128;                  // the SB128 gather surface
+    std::uint32_t sbOriginX;         // ctx->sb_origin_x (SB128 gather)
+    std::uint32_t sbOriginY;         // ctx->sb_origin_y
+    std::uint32_t qp;                // scs->static_config.qp
+    bool nsqQpBasedThScaling;        // scs->qp_based_th_scaling_ctrls.
+                                     //   nsq_qp_based_th_scaling
+    std::uint8_t pdPass;             // ctx->pd_pass (PdPass ordinal)
+};
+
+// set_nsq_search_ctrls (:5024-5375), 1:1: the mimic/me-dist level
+// modulation (:5029-:5053), the 20-row switch (:5055-:5336), the QP
+// scaling tail (:5338-:5349), the PD_PASS_0 overwrite (:5351-:5362) and
+// the set_sq_txs_ctrls chaining (:5364). The default case assert(0)s
+// and writes nothing, but the QP tail still runs on the untouched
+// fields (as in the reference).
+void setNsqSearchCtrls(NsqSearchCtrls& ctrls, NsqPsqTxsCtrls& psqTxsCtrls, const NsqSearchPcs& pcs,
+                       std::uint8_t nsqSearchLevel);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 3: the intra-mode level getters (:5377-:5427),
+// set_inter_intra_ctrls (:5455-:5481), set_pd0_ctrls (:5483-:5601) and
+// set_lpd1_ctrls (:5603-:5937).
+// ---------------------------------------------------------------------------
+
+// svt_aom_get_intra_mode_levels_default (:5377-5404) / _rtc
+// (:5406-5427). (get_intra_mode_levels_allintra landed in EMC1.)
+void getIntraModeLevelsDefault(EncMode encMode, bool isISlice, bool isBase, int transitionPresent,
+                               std::uint32_t* intraLevel, std::uint32_t* distBasedAngIntraLevel);
+void getIntraModeLevelsRtc(EncMode encMode, bool isISlice, int transitionPresent, bool useFlatIpp,
+                           std::uint32_t* intraLevel, std::uint32_t* distBasedAngIntraLevel);
+
+// InterIntraCompCtrls (md_process.h:81-86, verbatim field order/types).
+struct InterIntraCompCtrls {
+    std::uint8_t enabled;
+    std::uint8_t useRdModel;   // 1: curvefit model, 0: SSE
+    std::uint8_t wedgeModeSq;  // 0: no wedge, 1: inj. wedge II, 2: only if better
+    std::uint8_t wedgeModeNsq;
+};
+
+// set_inter_intra_ctrls (:5455-5481). The default case assert(0)s and
+// writes nothing (documented UB).
+void setInterIntraCtrls(InterIntraCompCtrls& ctrls, std::uint8_t interIntraLevel);
+
+// Pd0Ctrls (md_process.h:691-703, verbatim field order/types).
+constexpr int kPd0Levels = 7;  // PD0_LEVELS (definitions.h:749)
+struct Pd0Ctrls {
+    std::uint8_t pd0Level;  // Pd0Level
+    bool usePd0Detector[kPd0Levels];
+    std::uint8_t useRefInfo[kPd0Levels];
+    std::uint32_t me8x8CostVarianceTh[kPd0Levels];
+    std::uint32_t edgeDistTh[kPd0Levels];
+    std::uint16_t neighMeDistShift[kPd0Levels];
+};
+
+// set_pd0_ctrls (:5483-5601). hbdMd is ctx->hbd_md (SVT_EFFECTIVE_HBD_MD
+// is the identity in the pinned build, EbConfigMacros.h:295): the hbd
+// early-out forces PD0_LVL_0 and returns (:5487-5490). The default case
+// assert(0)s and writes nothing (documented UB).
+void setPd0Ctrls(Pd0Ctrls& ctrls, std::uint8_t lpd0Lvl, std::uint8_t hbdMd);
+
+// Lpd1Ctrls (md_process.h:706-728, verbatim field order/types).
+constexpr int kLpd1Levels = 7;  // LPD1_LEVELS (definitions.h:762)
+struct Lpd1Ctrls {
+    std::uint8_t pd1Level;  // Pd1Level
+    bool useLpd1Detector[kLpd1Levels];
+    std::uint8_t useRefInfo[kLpd1Levels];
+    std::uint32_t costThDist[kLpd1Levels];
+    std::uint32_t costThRate[kLpd1Levels];
+    std::uint32_t nzCoeffTh[kLpd1Levels];
+    std::uint16_t maxMvLength[kLpd1Levels];
+    std::uint32_t me8x8CostVarianceTh[kLpd1Levels];
+    std::uint32_t skipPd0EdgeDistTh[kLpd1Levels];
+    std::uint16_t skipPd0MeShift[kLpd1Levels];
+};
+
+// set_lpd1_ctrls (:5603-5937). Case N (1-8) writes pd1_level =
+// LPD1_LVL_{N-1} and fills detector rows [0..N-1]; unwritten rows keep
+// the struct's prior state (as in the reference). The default case
+// assert(0)s and writes nothing (documented UB).
+void setLpd1Ctrls(Lpd1Ctrls& ctrls, std::uint8_t lpd1Lvl);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 4: set_bipred3x3_controls (:5939-:5974) +
+// set_dist_based_ref_pruning_controls (:5976-:6231).
+// ---------------------------------------------------------------------------
+// Bipred3x3Controls (md_process.h:190-200, verbatim field order/types).
+struct Bipred3x3Ctrls {
+    std::uint8_t enabled;      // refine the ME-MV(s) of bipred @ mds0
+    std::uint8_t searchDiag;
+    std::uint8_t useBestList;
+    std::uint8_t useL0L1Dev;
+};
+
+// svt_aom_set_bipred3x3_controls (:5939-5974). The default case
+// assert(0)s and writes nothing (documented UB).
+void setBipred3x3Ctrls(Bipred3x3Ctrls& ctrls, std::uint8_t bipred3x3Injection);
+
+// InterCandGroup (md_process.h:65-78, verbatim ordinals).
+constexpr int kTotInterGroup = 11;
+constexpr int kPaMeGroup = 0;
+constexpr int kUni3x3Group = 1;
+constexpr int kBi3x3Group = 2;
+constexpr int kNrstNewNearGroup = 3;
+constexpr int kNrstNearGroup = 4;
+constexpr int kPredMeGroup = 5;
+constexpr int kGlobalGroup = 6;
+constexpr int kWarpGroup = 7;
+constexpr int kObmcGroup = 8;
+constexpr int kInterIntraGroup = 9;
+constexpr int kInterCompGroup = 10;
+
+// RefPruningControls (md_process.h:202-211, verbatim field order/types).
+struct RefPruningCtrls {
+    std::uint8_t enabled;
+    std::uint32_t maxDevToBest[kTotInterGroup];
+    std::uint8_t useTplInfoOffset;
+    std::uint8_t checkClosestMultiplier;
+    std::uint8_t closestRefs[kTotInterGroup];
+};
+
+// svt_aom_set_dist_based_ref_pruning_controls (:5976-6231). The default
+// case assert(0)s and writes nothing (documented UB).
+void setDistBasedRefPruningCtrls(RefPruningCtrls& ctrls, std::uint8_t distBasedRefPruningLevel);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 5: set_txs_controls (:6233-:6303), set_filter_intra_ctrls
+// (:6305-:6324), set_spatial_sse_full_loop_level (:6326-:6347),
+// compute_intra_pd0_th / compute_subres_th (:6349-:6370),
+// set_lpd1_tx_skip_decision_ctrls (:6372-:6408), set_lpd1_tx_ctrls
+// (:6410-:6460), set_cfl_ctrls (:6462-:6498), set_rate_est_ctrls
+// (:6500-:6547).
+// ---------------------------------------------------------------------------
+// TxsControls (md_process.h:487-507, verbatim field order/types).
+struct TxsCtrls {
+    std::uint8_t enabled;
+    std::uint8_t prevDepthCoeffExitTh;
+    std::uint8_t intraClassMaxDepthSq;
+    std::uint8_t intraClassMaxDepthNsq;
+    std::uint8_t interClassMaxDepthSq;
+    std::uint8_t interClassMaxDepthNsq;
+    int depth1TxtGroupOffset;
+    int depth2TxtGroupOffset;
+    std::int32_t quadrantThSf;
+};
+
+// set_txs_controls (:6233-6303). The pcs->mimic_only_tx_4x4 wall forces
+// level 1 (:6238-6240). NOTE: the default arm is NOT assert(0) - it
+// writes enabled = 0 (:6297-6299). Case MAX_TXS_LEVEL - 1 = 5.
+void setTxsCtrls(TxsCtrls& ctrls, std::uint8_t txsLevel, bool mimicOnlyTx4x4);
+
+// FilterIntraCtrls (md_process.h:835-840, verbatim).
+// FILTER_DC_PRED = 0 .. FILTER_PAETH_PRED = 4 (definitions.h:1296-1302).
+struct FilterIntraCtrls {
+    bool enabled;
+    std::uint8_t maxFilterIntraMode;
+};
+
+// set_filter_intra_ctrls (:6305-6324). The default case assert(0)s and
+// writes nothing (documented UB).
+void setFilterIntraCtrls(FilterIntraCtrls& ctrls, std::uint8_t fiLvl);
+
+// SpatialSseLevel (definitions.h:864-869, verbatim ordinals):
+// SSSE_MDS1 = 0, SSSE_MDS2 = 1, SSSE_MDS3 = 2, SSSE_OFF = 3.
+struct SpatialSseCtrls {
+    std::uint8_t level;  // SpatialSseLevel
+};
+
+// set_spatial_sse_full_loop_level (:6326-6347). The default case
+// assert(0)s and writes nothing (documented UB).
+void setSpatialSseFullLoopLevel(SpatialSseCtrls& ctrls, std::uint8_t spatialSseFullLoopLevel);
+
+// The RDCOST fold (rd_cost.h:36-38): ROUND_POWER_OF_TWO(R*RM,
+// AV1_PROB_COST_SHIFT) + D<<RDDIV_BITS, with AV1_PROB_COST_SHIFT = 9
+// (md_rate_estimation.h:29) and RDDIV_BITS = 7 (rd_cost.h:35).
+constexpr int kAv1ProbCostShift = 9;
+constexpr int kRddivBits = 7;
+constexpr int kEb8BitMd = 0;   // definitions.h:1857
+constexpr int kEb10BitMd = 1;  // definitions.h:1858
+
+// The ctx surface of compute_intra_pd0_th / compute_subres_th: the
+// fast-lambda pair + hbd_md; scs->super_block_size threads as the
+// scalar (the two reference bodies are the same arithmetic).
+struct RdCostCtx {
+    std::uint32_t fastLambdaMd[2];
+    std::uint8_t hbdMd;
+};
+
+// compute_intra_pd0_th (:6349-6360).
+std::uint64_t computeIntraPd0Th(std::uint32_t superBlockSize, const RdCostCtx& ctx);
+// compute_subres_th (:6361-6370).
+std::uint64_t computeSubresTh(std::uint32_t superBlockSize, const RdCostCtx& ctx);
+
+// Lpd1TxSkipDecisionCtrls (md_process.h:730-740, verbatim).
+struct Lpd1TxSkipDecisionCtrls {
+    int skipTxScoreTh;
+    std::uint16_t distEnergyTh;
+    std::uint16_t rdSkipTh;
+};
+
+// set_lpd1_tx_skip_decision_ctrls (:6372-6408). The default case
+// assert(0)s and writes nothing (documented UB).
+void setLpd1TxSkipDecisionCtrls(Lpd1TxSkipDecisionCtrls& ctrls, std::uint8_t level);
+
+// Lpd1TxCtrls (md_process.h:742-750, verbatim field order/types).
+struct Lpd1TxCtrls {
+    std::uint8_t zeroYCoeffExit;
+    std::uint8_t chromaDetectorLevel;
+    std::uint32_t useMds3ShortcutsTh;
+    std::uint8_t useUvShortcutsOnYCoeffs;
+};
+
+// set_lpd1_tx_ctrls (:6410-6460). The default case assert(0)s and
+// writes nothing (documented UB).
+void setLpd1TxCtrls(Lpd1TxCtrls& ctrls, std::uint8_t lpd1TxLevel);
+
+// CflCtrls (md_process.h:756-761, verbatim).
+struct CflCtrls {
+    bool enabled;
+    std::uint8_t itrTh;
+    std::uint8_t cplxTh;
+};
+
+// set_cfl_ctrls (:6462-6498). The default case assert(0)s and writes
+// nothing (documented UB).
+void setCflCtrls(CflCtrls& ctrls, std::uint8_t cflLevel);
+
+// MdRateEstCtrls (md_process.h:763-776, verbatim field order/types).
+struct MdRateEstCtrls {
+    bool updateSkipCtxDcSignCtx;
+    bool updateSkipCoeffCtx;
+    std::uint8_t coeffRateEstLvl;  // 0: OFF, 1: full, 2: low-nz approx
+    std::int8_t lpd0QpOffset;
+    std::uint8_t pd0FastCoeffEstLevel;
+};
+
+// set_rate_est_ctrls (:6500-6547). The default case assert(0)s and
+// writes nothing (documented UB).
+void setRateEstCtrls(MdRateEstCtrls& ctrls, std::uint8_t rateEstLevel);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 6: get_sb_tpl_intra_stats (:6552-:6609) + set_intra_ctrls
+// (:6611-:6796).
+// ---------------------------------------------------------------------------
+// PredictionMode ordinals consumed here (definitions.h:1168-1204):
+// DC_PRED = 0, V_PRED = 1 .. D67_PRED = 8 (the directional band),
+// SMOOTH_PRED = 9, SMOOTH_V_PRED = 10, SMOOTH_H_PRED = 11,
+// PAETH_PRED = 12, INTRA_MODE_END = 13.
+constexpr std::uint8_t kDcPred = 0;
+constexpr std::uint8_t kVPred = 1;
+constexpr std::uint8_t kD67Pred = 8;
+constexpr std::uint8_t kSmoothPred = 9;
+constexpr std::uint8_t kSmoothHPred = 11;
+constexpr std::uint8_t kPaethPred = 12;
+constexpr std::uint8_t kIntraModeEnd = 13;
+
+// The TPL wall surface of get_sb_tpl_intra_stats (:6552-6609). The
+// reference walks ppcs->pa_me_data->tpl_src_stats_buffer (one TplSrcStats
+// per 16x16 cell, row stride = aligned16_width cells); the carrier
+// compacts the consumed best_mode column into its own array (the named
+// fold - the struct deref reduces to the best_mode field).
+struct SbTplPcs {
+    bool tplEnable;                    // ppcs->tpl_ctrls.enable
+    bool tplSrcDataReady;              // ppcs->tpl_src_data_ready
+    std::uint8_t temporalLayerIndex;   // pcs->temporal_layer_index
+    std::uint32_t hierarchicalLevels;  // ppcs->hierarchical_levels
+    bool disableIntraPredNref;         // ppcs->tpl_ctrls.disable_intra_pred_nref
+    std::uint32_t alignedWidth;        // ppcs->aligned_width
+    std::uint8_t dispenserSearchLevel;  // ppcs->tpl_ctrls.dispenser_search_level
+    std::uint8_t sbGeomWidth;          // ppcs->sb_geom[ctx->sb_index].width
+    std::uint8_t sbGeomHeight;         // ... .height
+    const std::uint8_t* tplBestModes;  // compacted best_mode per 16x16 cell
+};
+struct SbTplCtx {
+    std::uint32_t sbOriginX;  // ctx->sb_origin_x
+    std::uint32_t sbOriginY;  // ctx->sb_origin_y
+};
+
+// get_sb_tpl_intra_stats (:6552-6609). Returns 1 with the three outputs
+// written when TPL data is usable; returns 0 with the outputs untouched
+// otherwise (the gate :6565-:6567).
+bool getSbTplIntraStats(const SbTplPcs& pcs, const SbTplCtx& ctx, int* sbAngIntraCount,
+                        std::uint8_t* sbMaxIntra, int* sbIntraCount);
+
+// IntraCtrls (md_process.h:778-789, verbatim field order/types).
+struct IntraCtrls {
+    std::uint8_t enableIntra;
+    std::uint8_t intraModeEnd;
+    std::uint8_t angularPredLevel;
+    std::uint8_t pruneUsingBestMode;
+    bool pruneUsingEdgeInfo;
+    std::int8_t skipAngularDelta1Th;
+    std::int8_t skipAngularDelta2Th;
+    std::int8_t skipAngularDelta3Th;
+};
+
+// The pcs/ppcs wall surface of set_intra_ctrls (:6611-6796). The TPL
+// sub-surface is the getSbTplIntraStats carrier embedded.
+struct IntraSetPcs {
+    bool skipIntra;                     // pcs->skip_intra
+    bool isISlice;                      // pcs->slice_type == I_SLICE
+    bool tplEnable;                     // ppcs->tpl_ctrls.enable
+    std::uint8_t tplIntraModeEnd;       // ppcs->tpl_ctrls.intra_mode_end
+    std::uint8_t refIntraPercentage;    // pcs->ref_intra_percentage
+    SbTplPcs tpl;                       // the stats surface
+    SbTplCtx tplCtx;                    // ctx->sb_origin/sb_index fold
+};
+
+// The ctx surface: pd_pass read; skip_intra written (:6789-:6795).
+struct IntraSetCtx {
+    std::uint8_t pdPass;
+    bool skipIntra;
+};
+
+// set_intra_ctrls (:6611-6796), 1:1. The reference's
+// assert(IMPLIES(islice, intra_level > 0)) (:6620) is a debug-only
+// contract on the CALLER (the port drops it, named); the default arms
+// assert(0) and write nothing (documented UB).
+void setIntraCtrls(IntraCtrls& ctrls, const IntraSetPcs& pcs, IntraSetCtx& ctx,
+                   std::uint8_t intraLevel, std::uint8_t distBasedAngIntraLevel);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 7: set_tx_shortcut_ctrls (:6798-:6838), set_mds0_controls
+// (:6840-:6861), set_skip_sub_depth_ctrls (:6863-:6890) and
+// set_block_based_depth_refinement_controls (:6892-:7065).
+// ---------------------------------------------------------------------------
+// TxShortcutCtrls (md_process.h:791-802, verbatim field order/types).
+struct TxShortcutCtrls {
+    std::uint32_t bypassTxTh;
+    std::uint8_t applyPfOnCoeffs;
+    std::uint8_t chromaDetectorLevel;
+    std::uint32_t useMds3ShortcutsTh;
+};
+
+// set_tx_shortcut_ctrls (:6798-6838). The trailing debug assert
+// (:6832-:6837) is a level-configuration invariant (chroma detector on
+// for ref frames at <= M9) compiled out under NDEBUG in the tested
+// config - named, nothing to thread. The default case assert(0)s and
+// writes nothing (documented UB).
+void setTxShortcutCtrls(TxShortcutCtrls& ctrls, std::uint8_t txShortcutLevel);
+
+// Mds0Ctrls (md_process.h:804-810, verbatim).
+constexpr int kCandClassTotal = 5;  // CAND_CLASS_TOTAL (definitions.h:772)
+struct Mds0Ctrls {
+    std::uint8_t pruningMethodTh;
+    std::uint16_t perClassDistToCostTh[kCandClassTotal];
+    std::uint16_t distToCostTh;
+};
+
+// set_mds0_controls (:6840-6861). Level 1 does NOT write
+// per_class_dist_to_cost_th[CAND_CLASS_4]; level 2 does NOT write the
+// per_class array. The default case assert(0)s and writes nothing
+// (documented UB).
+void setMds0Ctrls(Mds0Ctrls& ctrls, std::uint8_t mds0Level);
+
+// SkipSubDepthCtrls (md_process.h:823-833, verbatim).
+struct SkipSubDepthCtrls {
+    std::uint8_t enabled;
+    std::uint8_t maxSize;
+    int quadDeviationTh;
+    std::uint8_t coeffPerc;
+};
+
+// set_skip_sub_depth_ctrls (:6863-6890). The default case assert(0)s
+// and writes nothing (documented UB).
+void setSkipSubDepthCtrls(SkipSubDepthCtrls& ctrls, std::uint8_t skipSubDepthLvl);
+
+// DepthRefinementCtrls (md_process.h:231-276, verbatim field order/
+// types). MAX_RANGE_CNT = 8 (md_process.h:225).
+constexpr int kMaxRangeCnt = 8;
+// PD0_DEPTH_* (md_process.h:227-229).
+constexpr std::uint8_t kPd0DepthNoRestriction = 0;
+constexpr std::uint8_t kPd0DepthAdaptive = 1;
+constexpr std::uint8_t kPd0DepthPredPartOnly = 2;
+struct DepthRefinementCtrls {
+    std::uint8_t mode;
+    std::uint8_t s1ParentToCurrentTh;
+    std::uint8_t s2ParentToCurrentTh;
+    std::uint8_t e1SubToCurrentTh;
+    std::uint8_t e2SubToCurrentTh;
+    std::uint16_t parentMaxCostThMult;
+    std::uint8_t coeffLvlModulation;
+    std::uint8_t costBandBasedModulation;
+    std::uint16_t maxCostMultiplier;
+    std::uint8_t maxBandCnt;
+    std::int64_t decrementPerBand[kMaxRangeCnt];
+    std::uint32_t lowerDepthSplitCostTh;
+    std::uint32_t splitRateTh;
+    std::uint8_t limitMaxMinToPd0;
+    std::uint8_t useRefInfo;
+    std::uint8_t qWeight;
+    std::uint32_t pd0UnavailModeDepth;
+};
+
+// set_block_based_depth_refinement_controls (:6892-7065). The switch
+// has NO default arm - levels > 10 write nothing (documented).
+void setBlockBasedDepthRefinementCtrls(DepthRefinementCtrls& ctrls,
+                                       std::uint8_t blockBasedDepthRefinementLevel);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 8: get_max_block_size_{default,rtc,allintra} (:7067-:7160),
+// set_depth_early_exit_ctrls (:7258-:7281), the disallow_4x4/8x8
+// getters (:8245-:8290) and the nsq_geom_level getters (:8292-:8330).
+// ---------------------------------------------------------------------------
+// The pcs/scs wall surface of get_max_block_size_rtc/allintra
+// (:7071-:7160). The SB64 path reads ppcs->me_8x8_cost_variance /
+// ppcs->variance at [ctx->sb_index]; the SB128 path gathers through
+// getSb128MeData / getSb128Variance.
+struct MaxBlkPcs {
+    std::uint32_t superBlockSize;   // scs->super_block_size
+    std::uint8_t sbGeomWidth;       // ppcs->sb_geom[ctx->sb_index].width
+    std::uint8_t sbGeomHeight;      // ... .height
+    bool isISlice;                  // pcs->slice_type == I_SLICE (rtc only)
+    EncMode encMode;                // pcs->enc_mode
+    bool capMaxSizeQpScaling;  // scs->qp_based_th_scaling_ctrls.
+                               //   cap_max_size_qp_based_th_scaling
+    std::uint32_t qp;               // scs->static_config.qp
+    std::uint32_t sbIndex;          // ctx->sb_index (SB64 path)
+    const std::uint32_t* me8x8CostVariance;  // ppcs-> (SB64 path)
+    Sb128Pcs sb128;                 // the SB128 ME gather surface
+    std::uint32_t sbOriginX;        // ctx->sb_origin (SB128 path)
+    std::uint32_t sbOriginY;
+    const std::uint16_t* variance64;  // &ppcs->variance[0][tier0] (allintra)
+    std::uint32_t varianceStride;     // the tier-count row stride
+};
+
+// get_max_block_size_default (:7067-7069): the cap IS the SB size.
+std::uint32_t getMaxBlockSizeDefault(std::uint32_t superBlockSize);
+// get_max_block_size_rtc (:7071-7116).
+std::uint32_t getMaxBlockSizeRtc(const MaxBlkPcs& pcs);
+// get_max_block_size_allintra (:7118-7143).
+std::uint32_t getMaxBlockSizeAllIntra(const MaxBlkPcs& pcs);
+
+// DepthEarlyExitCtrls (md_process.h:586-595, verbatim).
+struct DepthEarlyExitCtrls {
+    std::uint16_t splitCostTh;  // percentage * 10
+    std::uint16_t earlyExitTh;  // percentage * 10
+};
+
+// set_depth_early_exit_ctrls (:7258-7281). The default case assert(0)s
+// and writes nothing (documented UB).
+void setDepthEarlyExitCtrls(DepthEarlyExitCtrls& ctrls, std::uint8_t earlyExitLevel);
+
+// svt_aom_get_disallow_4x4_{default,rtc,allintra} (:8245-:8270).
+bool getDisallow4x4Default(EncMode encMode);
+bool getDisallow4x4Rtc();
+bool getDisallow4x4AllIntra(EncMode encMode);
+// svt_aom_get_disallow_8x8_{default,rtc,allintra} (:8272-:8290). The
+// rtc variant consumes dimensions_require_8x8 (EMC1).
+bool getDisallow8x8Default();
+bool getDisallow8x8Rtc(EncMode encMode, std::uint16_t alignedWidth, std::uint16_t alignedHeight);
+bool getDisallow8x8AllIntra();
+
+// svt_aom_get_nsq_geom_level_{default,rtc,allintra} (:8292-:8330).
+// coeffLvl is the InputCoeffLvl ordinal (HIGH_LVL = 3).
+std::uint8_t getNsqGeomLevelDefault(EncMode encMode, std::uint8_t coeffLvl);
+std::uint8_t getNsqGeomLevelRtc();
+std::uint8_t getNsqGeomLevelAllIntra(EncMode encMode);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 9: svt_aom_sig_deriv_enc_dec_common (:7162-:7256) and
+// svt_aom_sig_deriv_enc_dec_pd0 (:7283-:7454) - the per-SB
+// compositions of the rungs above.
+// ---------------------------------------------------------------------------
+// The pcs wall surface of sig_deriv_enc_dec_common. The depth-removal
+// wall threads through the caller-supplied DepthRemovalPcs/
+// DepthRemovalCtx (EMC1 carriers) as separate parameters.
+struct EncDecCommonPcs {
+    EncMode encMode;                         // pcs->enc_mode
+    bool isISlice;                           // pcs->slice_type == I_SLICE
+    std::uint8_t picBlockBasedDepthRefinementLevel;  // pcs->
+    std::uint8_t picPd0Lvl;                  // pcs->pic_pd0_lvl
+    bool picDisallow4x4;                     // pcs->pic_disallow_4x4
+    std::uint8_t picDepthRemovalLevel;       // pcs->pic_depth_removal_level
+    std::uint8_t picLpd1Lvl;                 // pcs->pic_lpd1_lvl
+    std::uint8_t nsqGeomLevel;               // pcs->nsq_geom_level
+    std::uint16_t b64GeomWidth;              // ppcs->b64_geom[ctx->sb_index].width
+    std::uint16_t b64GeomHeight;             // ... .height
+    std::uint32_t me8x8CostVariance;         // ppcs->[ctx->sb_index] (the M11 band)
+    std::uint32_t baseQIdx;                  // frm_hdr...base_q_idx (cyclic refresh)
+    // the get_max_block_size walls (:7071-:7143):
+    bool capMaxSizeQpScaling;  // scs->qp_based_th_scaling_ctrls.
+                               //   cap_max_size_qp_based_th_scaling
+    std::uint32_t qp;          // scs->static_config.qp
+    const std::uint16_t* variance64;  // &ppcs->variance[0][tier0] (allintra)
+    std::uint32_t varianceStride;
+};
+struct EncDecCommonScs {
+    bool allintra;      // scs->allintra
+    bool rtcTune;       // scs->static_config.rtc
+    std::int32_t maxTxSize;  // scs->static_config.max_tx_size
+};
+// The written-and-read ctx surface (each field cites its site).
+struct EncDecCommonCtx {
+    // walls read by the composition:
+    std::uint8_t hbdMd;       // ctx->hbd_md (set_pd0_ctrls early-out)
+    std::uint8_t sbQindex;    // ctx->sb_ptr->qindex (:7224)
+    std::uint32_t qpIndex;    // ctx->qp_index (:7242)
+    bool isBase;              // frame_is_boosted(ppcs) (:7226)
+    bool isNotLastLayer;      // !frame_is_leaf(ppcs) (:7233)
+    // written:
+    DepthRefinementCtrls depthRefinementCtrls;
+    bool predDepthOnly;
+    bool picPredDepthOnly;
+    Pd0Ctrls pd0Ctrls;
+    DepthRemovalCtrls depthRemovalCtrls;
+    bool disallow8x8;
+    bool disallow4x4;
+    std::uint32_t maxBlockSize;
+    std::uint8_t pd1LvlRefinement;
+    NsqGeomCtrls nsqGeomCtrls;
+    Lpd1Ctrls lpd1Ctrls;
+};
+
+// svt_aom_sig_deriv_enc_dec_common (:7162-7256), 1:1. drPcs/drCtx are
+// the set_depth_removal_level_controls walls (EMC1); the composition
+// owns the same lifecycle the reference does.
+void sigDerivEncDecCommon(EncDecCommonPcs& pcs, const EncDecCommonScs& scs,
+                          EncDecCommonCtx& ctx, const DepthRemovalPcs& drPcs,
+                          DepthRemovalCtx& drCtx);
+
+// The pcs wall surface of sig_deriv_enc_dec_pd0 (:7283-7454).
+struct EncDecPd0Pcs {
+    EncMode encMode;                     // pcs->enc_mode
+    bool isISlice;                       // pcs->slice_type == I_SLICE
+    std::uint8_t transitionPresent;      // ppcs->transition_present
+    std::uint8_t pd0CostBiasWeight;      // pcs->pd0_cost_bias_weight
+    std::uint32_t me64x64Distortion;     // ppcs->[ctx->sb_index] (SB64 path)
+    std::uint32_t me8x8Distortion;       // ppcs->[ctx->sb_index] (bias weight)
+    std::uint32_t me8x8CostVariance;     // ppcs->[ctx->sb_index] (bias mod)
+    std::uint8_t hbdMd;                  // pcs->hbd_md
+    std::uint32_t baseQIdx;              // frm_hdr...base_q_idx
+    bool b64IsComplete;                  // b64_geom->is_complete_b64
+    std::uint32_t rateEstLevel;          // pcs->rate_est_level
+    std::uint32_t sbIndex;               // ctx->sb_index
+    bool sb128Path;                      // seq_header.sb_size == BLOCK_128X128
+    bool isNotLastLayer;                 // !frame_is_leaf(ppcs) (:7300)
+    Sb128Pcs sb128;                      // the SB128 gather surface
+    std::uint32_t sbOriginX;
+    std::uint32_t sbOriginY;
+    // the set_intra_ctrls wall (embedded):
+    bool skipIntra;
+    bool tplEnable;
+    std::uint8_t tplIntraModeEnd;
+    std::uint8_t refIntraPercentage;
+    SbTplPcs tpl;
+    SbTplCtx tplCtx;
+};
+struct EncDecPd0Scs {
+    bool allintra;
+    bool rtcTune;
+};
+// The written-and-read ctx surface of the pd0 composition.
+struct EncDecPd0Ctx {
+    // read:
+    Pd0Ctrls pd0Ctrls;                   // pd0_level (:7290)
+    DepthRemovalCtrls depthRemovalCtrls;  // (:7424-:7430)
+    bool disallow4x4;                    // ctx->disallow_4x4 (:7408)
+    bool disallow8x8;                    // ctx->disallow_8x8 (:7425)
+    std::uint32_t fastLambdaMd[2];       // ctx->fast_lambda_md
+    std::uint8_t hbdMd;                  // ctx->hbd_md (the lambda pick)
+    bool picPredDepthOnly;               // ctx->pic_pred_depth_only (:7320)
+    // written:
+    bool mdDisallowNsqSearch;
+    bool shutFastRate;
+    DepthEarlyExitCtrls depthEarlyExitCtrls;
+    IntraCtrls intraCtrls;
+    IntraSetCtx intraSetCtx;             // the set_intra_ctrls ctx (pd_pass)
+    std::uint32_t parentCostBias;
+    bool pd0UseSrcSamples;
+    UvCtrls uvCtrls;
+    PfCtrls pfCtrls;
+    SubresCtrls subresCtrls;
+    MdRateEstCtrls rateEstCtrls;
+    bool approxInterRate;
+};
+
+// svt_aom_sig_deriv_enc_dec_pd0 (:7283-7454), 1:1. The reference's
+// early return at PD0_LVL_6 (:7385-7387) leaves the chroma/pf/subres/
+// rate-est tail unwritten (pinned by test).
+void sigDerivEncDecPd0(EncDecPd0Pcs& pcs, const EncDecPd0Scs& scs, EncDecPd0Ctx& ctx);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 10: svt_aom_sig_deriv_enc_dec_light_pd1_default
+// (:7456-:7653) and svt_aom_sig_deriv_enc_dec_light_pd1_rtc
+// (:7655-:7889).
+// ---------------------------------------------------------------------------
+// The pcs/ppcs wall surface of both light-PD1 compositions. The ref-
+// object reads (:7487-:7499 / :7683-:7695) thread as the pre-read
+// scalars + the two is_ref_same_size gates (the EbReferenceObject wall
+// folded - the MeModeCfg precedent).
+struct LightPd1Pcs {
+    EncMode encMode;                    // pcs->enc_mode
+    bool useFlatIpp;                    // ppcs->hierarchical_levels == 0 (rtc)
+    ResolutionRange inputResolution;    // ppcs->input_resolution (default)
+    std::uint32_t pictureQp;            // ppcs->picture_qp
+    std::uint32_t me8x8CostVariance;    // pre-read; ~0 when no ref (:7477)
+    std::uint32_t me64x64Distortion;    // pre-read; ~0 when no ref (:7478)
+    std::uint8_t l0WasSkip, l1WasSkip;
+    std::uint8_t l0Was64x64Mvp, l1Was64x64Mvp;
+    std::uint8_t refSkipPerc;           // pcs->ref_skip_percentage
+    std::uint8_t candReductionLevel;    // pcs->cand_reduction_level
+    std::uint8_t rdoqLevel;             // pcs->rdoq_level
+    std::uint8_t coeffShavingLevel;     // pcs->coeff_shaving_level
+    std::uint8_t meSubpelLevel;         // pcs->me_subpel_level
+    std::uint32_t rateEstLevel;         // pcs->rate_est_level
+    std::uint8_t approxInterRate;       // pcs->approx_inter_rate
+    std::uint8_t intraLevel;            // pcs->intra_level
+    bool skipIntra;                     // pcs->skip_intra
+    // the set_cand_reduction_ctrls wall (EMC2-C0 / EMC1 carrier fields):
+    std::uint8_t refList0CountTry;
+    std::uint8_t refList1CountTry;
+    bool useBestMeUnipredCandOnly;
+    bool isNotLastLayer;                // !frame_is_leaf(pcs->ppcs)
+    bool rtcTune;                       // pcs->scs->static_config.rtc
+    std::uint8_t hierarchicalLevels;    // ppcs->hierarchical_levels
+    // the set_intra_ctrls wall (embedded):
+    bool tplEnable;
+    std::uint8_t tplIntraModeEnd;
+    std::uint8_t refIntraPercentage;
+    SbTplPcs tpl;
+    SbTplCtx tplCtx;
+};
+
+// The written ctx surface of both light-PD1 compositions (each field
+// cites its write site; L = default :7502-:7652, R = rtc :7699-:7888).
+struct LightPd1Ctx {
+    Lpd1Ctrls lpd1Ctrls;                // read: pd1_level (:7459/:7658)
+    std::uint16_t lpd1GlobalmvBypassTh; // = 0 (:7500/:7697)
+    CandReductionCtrls candReductionCtrls;
+    RdoqCtrls rdoqCtrls;
+    CoeffShavingCtrls coeffShavingCtrls;
+    MdSubPelSearchCtrls mdSubPelCtrls;
+    Lpd1TxSkipDecisionCtrls lpd1TxSkipDecisionCtrls;
+    Lpd1TxCtrls lpd1TxCtrls;
+    std::uint8_t lpd1BlkSkipLumaRdPct;  // (:7593-:7599 / :7816-:7822)
+    std::uint8_t lpd1ChromaSkipEnergyTh;
+    MdRateEstCtrls rateEstCtrls;
+    std::uint8_t approxInterRate;
+    PfCtrls pfCtrls;
+    IntraCtrls intraCtrls;
+    IntraSetCtx intraSetCtx;
+    bool shutFastRate;
+    UvCtrls uvCtrls;
+    CflCtrls cflCtrls;
+    bool mdDisallowNsqSearch;
+    bool newNearestInjection;
+    bool blkSkipDecision;
+    SubresCtrls subresCtrls;
+    InterIntraCompCtrls interIntraCtrls;
+};
+
+// svt_aom_sig_deriv_enc_dec_light_pd1_default (:7456-7653), 1:1.
+void sigDerivEncDecLightPd1Default(LightPd1Pcs& pcs, LightPd1Ctx& ctx);
+// svt_aom_sig_deriv_enc_dec_light_pd1_rtc (:7655-7889), 1:1.
+void sigDerivEncDecLightPd1Rtc(LightPd1Pcs& pcs, LightPd1Ctx& ctx);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 11: svt_aom_sig_deriv_enc_dec_{default,rtc,allintra}
+// (:7891-:8007 / :8009-:8120 / :8121-:8243) - the per-SB tune
+// compositions.
+// ---------------------------------------------------------------------------
+// The shared pcs wall surface of the three compositions (each field
+// cites its site; D = default, R = rtc, A = allintra; the (A 0)
+// markers are the allintra literals).
+struct EncDecTunePcs {
+    EncMode encMode;                      // pcs->enc_mode
+    ResolutionRange inputResolution;      // ppcs->input_resolution (default)
+    std::uint32_t pictureQp;              // ppcs->picture_qp
+    std::uint8_t refSkipPerc;             // pcs->ref_skip_percentage
+    std::uint8_t nsqSearchLevel;          // pcs->nsq_search_level
+    std::uint8_t nicLevel;                // pcs->nic_level
+    std::uint8_t candReductionLevel;      // pcs->cand_reduction_level
+    std::uint8_t txtLevel;                // pcs->txt_level
+    std::uint8_t txShortcutLevel;         // pcs->tx_shortcut_level
+    std::uint8_t interpolationSearchLevel;  // pcs-> (A passes 0)
+    std::uint8_t chromaLevel;             // pcs->chroma_level
+    std::uint8_t cflLevel;                // pcs->cfl_level
+    bool newNearestNearCombInjection;     // pcs-> (A passes 0)
+    std::uint8_t wmLevel;                 // pcs->wm_level (A passes 0)
+    bool unipred3x3Injection;             // pcs-> (A passes 0)
+    std::uint8_t bipred3x3Injection;      // pcs-> (A passes 0)
+    std::uint8_t interCompoundMode;       // pcs->inter_compound_mode (A 0)
+    std::uint8_t distBasedRefPruning;     // pcs-> (A 0)
+    std::uint8_t spatialSseFullLoopLevel; // pcs->
+    std::uint8_t rdoqLevel;               // pcs->rdoq_level
+    std::uint8_t coeffShavingLevel;       // pcs->
+    std::uint8_t picObmcLevel;            // ppcs->pic_obmc_level (A 0)
+    std::uint8_t interIntraLevel;         // pcs->inter_intra_level (A 0)
+    std::uint8_t txsLevel;                // pcs->txs_level
+    std::uint8_t picFilterIntraLevel;     // pcs->pic_filter_intra_level
+    bool allowIntrabc;                    // frm_hdr->allow_intrabc
+    std::uint8_t mdPaletteLevel;          // ppcs->palette_level
+    std::uint8_t mdSqMvSearchLevel;       // pcs->md_sq_mv_search_level (A 0)
+    std::uint8_t mdNsqMvSearchLevel;      // pcs->md_nsq_mv_search_level (A 0)
+    std::uint8_t mdPmeLevel;              // pcs->md_pme_level (A 0)
+    std::uint8_t meSubpelLevel;           // pcs->me_subpel_level (A 0)
+    std::uint8_t pmeSubpelLevel;          // pcs->pme_subpel_level (A 0)
+    std::uint32_t rateEstLevel;           // pcs->rate_est_level
+    std::uint8_t approxInterRate;         // pcs->approx_inter_rate
+    std::uint8_t intraLevel;              // pcs->intra_level
+    std::uint8_t distBasedAngIntraLevel;  // pcs->dist_based_ang_intra_level
+    std::uint8_t mds0Level;               // pcs->mds0_level
+    bool gmEnabled;                       // ppcs->gm_ctrls.enabled (A: global 0)
+    bool skipIntra;                       // pcs->skip_intra (the intra wall)
+    bool tplEnable;                       // ppcs->tpl_ctrls.enable
+    std::uint8_t tplIntraModeEnd;         // ppcs->tpl_ctrls.intra_mode_end
+    std::uint8_t refIntraPercentage;      // pcs->ref_intra_percentage
+    SbTplPcs tpl;                         // the TPL stats surface
+    SbTplCtx tplCtx;
+    // the set_nsq_search_ctrls wall (EMC2-C2 carrier fields):
+    bool isISlice;                        // pcs->slice_type == I_SLICE
+    bool mimicOnlyTx4x4;                  // pcs->mimic_only_tx_4x4
+    std::uint32_t superBlockSize;         // scs->super_block_size
+    std::uint32_t sbIndex;                // ctx->sb_index
+    const std::uint32_t* me8x8Distortion;      // ppcs-> (SB64 nsq path)
+    const std::uint32_t* me8x8CostVariance;    // ppcs-> (SB64 nsq path)
+    Sb128Pcs sb128;                       // the SB128 nsq gather surface
+    std::uint32_t sbOriginX;
+    std::uint32_t sbOriginY;
+    bool nsqQpBasedThScaling;             // scs->qp_based_th_scaling_ctrls.
+    std::uint32_t qp;                     // scs->static_config.qp
+    std::uint8_t pdPass;                  // ctx->pd_pass
+    // the set_cand_reduction_ctrls wall:
+    std::uint8_t refList0CountTry;
+    std::uint8_t refList1CountTry;
+    bool useBestMeUnipredCandOnly;
+    bool isNotLastLayer;
+    bool rtcTune;
+    std::uint8_t hierarchicalLevels;
+};
+
+// The written ctx surface of the three compositions (D :7891-:8006,
+// R :8009-:8119, A :8121-:8242).
+struct EncDecTuneCtx {
+    // prior-state walls the composition reads (written by
+    // sig_deriv_enc_dec_common earlier in the SB walk):
+    NsqGeomCtrls nsqGeomCtrls;             // md_disallow_nsq_search / redundant_blk
+    std::uint8_t pd0LevelWall;             // the allintra txs fold reads pd0_level
+    NsqSearchCtrls nsqSearchCtrls;
+    NsqPsqTxsCtrls nsqPsqTxsCtrls;
+    NicCtrls nicCtrls;                     // set_nic_controls (nonnull ctx)
+    CandReductionCtrls candReductionCtrls;
+    TxtCtrls txtCtrls;
+    TxShortcutCtrls txShortcutCtrls;
+    InterpolationSearchCtrls interpolationSearchCtrls;
+    UvCtrls uvCtrls;
+    CflCtrls cflCtrls;
+    bool mdDisallowNsqSearch;
+    bool globalMvInjection;
+    bool newNearestInjection;
+    bool newNearestNearCombInjection;
+    WmCtrls wmCtrls;
+    bool unipred3x3Injection;
+    Bipred3x3Ctrls bipred3x3Ctrls;
+    InterCompCtrls interCompCtrls;
+    RefPruningCtrls refPruningCtrls;
+    SpatialSseCtrls spatialSseCtrls;
+    bool blkSkipDecision;
+    RdoqCtrls rdoqCtrls;
+    CoeffShavingCtrls coeffShavingCtrls;
+    bool redundantBlk;
+    DepthEarlyExitCtrls depthEarlyExitCtrls;
+    ObmcCtrls obmcCtrls;
+    InterIntraCompCtrls interIntraCtrls;
+    TxsCtrls txsCtrls;
+    FilterIntraCtrls filterIntraCtrls;
+    bool mdAllowIntrabc;
+    std::uint8_t mdPaletteLevel;
+    PfCtrls pfCtrls;
+    MdSqMotionSearchCtrls mdSqCtrls;
+    MdNsqMotionSearchCtrls mdNsqCtrls;
+    MdPmeCtrls mdPmeCtrls;
+    MdSubPelSearchCtrls mdSubPelCtrls;
+    MdSubPelSearchCtrls mdSubPelPmeCtrls;
+    MdRateEstCtrls rateEstCtrls;
+    std::uint8_t approxInterRate;
+    bool shutFastRate;
+    IntraCtrls intraCtrls;
+    IntraSetCtx intraSetCtx;
+    bool mds0UseHadamardSb;
+    Mds0Ctrls mds0Ctrls;
+    SubresCtrls subresCtrls;
+    std::uint32_t parentCostBias;
+    SkipSubDepthCtrls skipSubDepthCtrls;
+    std::uint8_t tuneSsimLevel;            // SSIM_LVL_0 = 0
+};
+
+// svt_aom_sig_deriv_enc_dec_default (:7891-8007), 1:1.
+void sigDerivEncDecDefault(EncDecTunePcs& pcs, EncDecTuneCtx& ctx);
+// svt_aom_sig_deriv_enc_dec_rtc (:8009-8120), 1:1.
+void sigDerivEncDecRtc(EncDecTunePcs& pcs, EncDecTuneCtx& ctx);
+// svt_aom_sig_deriv_enc_dec_allintra (:8121-8243), 1:1.
+void sigDerivEncDecAllIntra(EncDecTunePcs& pcs, EncDecTuneCtx& ctx);
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 12: the nsq_search-level getters (:8330-:8493), the
+// bypass-encdec getters (:8494-:8543), set_cdf_controls (:8544-:8585),
+// the update_cdf-level getters (:8591-:8627), the chroma-level getters
+// (:8628-:8672), set_pic_pd0_lvl_{default,rtc,allintra}
+// (:8673-:8838), get_obmc_level (:8896-:8933) and mfmv_controls
+// (:8934-:8980).
+// ---------------------------------------------------------------------------
+// MAX_TEMPORAL_LAYERS (definitions.h:2030).
+constexpr int kMaxTemporalLayers = 6;
+
+// The pcs/ppcs wall surface of the three nsq_search-level getters.
+struct NsqSearchLvlPcs {
+    bool isBase;                      // ppcs->temporal_layer_index == 0 (default)
+    bool r0Gen;                       // ppcs->r0_gen
+    bool isISlice;                    // pcs->slice_type == I_SLICE
+    double r0;                        // ppcs->r0
+    std::uint8_t temporalLayerIndex;  // pcs->temporal_layer_index
+    std::uint8_t seqQpMod;            // scs->seq_qp_mod
+};
+
+// svt_aom_get_nsq_search_level_default (:8330-8405).
+std::uint8_t getNsqSearchLevelDefault(EncMode encMode, const NsqSearchLvlPcs& pcs,
+                                      std::uint8_t coeffLvl, std::uint32_t qp);
+// svt_aom_get_nsq_search_level_rtc (:8407-8437).
+std::uint8_t getNsqSearchLevelRtc(const NsqSearchLvlPcs& pcs, std::uint8_t coeffLvl,
+                                  std::uint32_t qp);
+// svt_aom_get_nsq_search_level_allintra (:8439-8492).
+std::uint8_t getNsqSearchLevelAllIntra(const NsqSearchLvlPcs& pcs, EncMode encMode,
+                                       std::uint8_t coeffLvl, std::uint32_t qp);
+
+// NSQ_MODULATION_MIN_LEVEL (enc_mode_config.c:8356).
+constexpr int kNsqModulationMinLevel = 8;
+
+// svt_aom_get_bypass_encdec_{default,rtc,allintra} (:8494-:8543).
+// SVT_EFFECTIVE_BIT_DEPTH is the identity in the pinned build
+// (EbConfigMacros.h:293); EB_EIGHT_BIT = 8.
+std::uint8_t getBypassEncdecDefault(EncMode encMode, std::uint8_t encoderBitDepth);
+std::uint8_t getBypassEncdecRtc(EncMode encMode, std::uint8_t encoderBitDepth);
+std::uint8_t getBypassEncdecAllIntra(EncMode encMode);
+
+// CdfControls (pcs.h:130-135, verbatim).
+struct CdfCtrls {
+    std::uint8_t updateMv;
+    std::uint8_t updateSe;
+    std::uint8_t updateCoef;
+    std::uint8_t enabled;
+};
+
+// The pcs wall surface of set_cdf_controls (:8544-8585).
+struct CdfSetPcs {
+    bool isISlice;           // pcs->slice_type == I_SLICE
+    std::uint32_t rateEstLevel;  // pcs->rate_est_level
+    std::uint8_t rdoqLevel;  // pcs->rdoq_level
+};
+
+// set_cdf_controls (:8544-8585). The CONFIG_ENABLE_MD_CDF_UPDATE
+// trailing assert is a runtime invariant compiled out in the pinned
+// build (named, nothing to thread). The default case assert(0)s and
+// writes nothing (documented UB).
+void setCdfCtrls(CdfCtrls& ctrls, const CdfSetPcs& pcs, std::uint8_t updateCdfLevel);
+
+// svt_aom_get_update_cdf_level_{default,rtc,allintra} (:8591-:8627).
+// isIslice is the SliceType == I_SLICE fold.
+std::uint8_t getUpdateCdfLevelDefault(EncMode encMode, bool isIslice, std::uint8_t isBase);
+std::uint8_t getUpdateCdfLevelRtc(EncMode encMode, bool isIslice);
+std::uint8_t getUpdateCdfLevelAllIntra(EncMode encMode);
+
+// svt_aom_get_chroma_level_{default,rtc,allintra} (:8628-:8672).
+std::uint8_t getChromaLevelDefault(EncMode encMode, bool isIslice);
+std::uint8_t getChromaLevelRtc(EncMode encMode);
+std::uint8_t getChromaLevelAllIntra(EncMode encMode);
+
+// The pcs/ppcs wall surface of the three set_pic_pd0_lvl setters.
+struct PicPd0Pcs {
+    std::uint8_t temporalLayerIndex;  // ppcs->temporal_layer_index (default)
+    bool isISlice;                    // pcs->slice_type == I_SLICE
+    std::uint8_t transitionPresent;   // ppcs->transition_present
+    std::uint8_t coeffLvl;            // pcs->coeff_lvl
+    ResolutionRange inputResolution;  // ppcs->input_resolution
+    std::uint8_t seqQpMod;            // scs->seq_qp_mod
+    std::uint32_t qp;                 // scs->static_config.qp
+    std::uint32_t superBlockSize;     // scs->super_block_size
+    bool isBase;                      // rtc: frame_is_boosted(ppcs)
+    // write:
+    std::uint8_t picPd0Lvl;
+};
+
+// set_pic_pd0_lvl_default (:8673-8791).
+void setPicPd0LvlDefault(PicPd0Pcs& pcs, EncMode encMode);
+// set_pic_pd0_lvl_rtc (:8793-8822).
+void setPicPd0LvlRtc(PicPd0Pcs& pcs, EncMode encMode);
+// set_pic_pd0_lvl_allintra (:8824-8838).
+void setPicPd0LvlAllIntra(PicPd0Pcs& pcs, EncMode encMode);
+
+// svt_aom_get_obmc_level (:8896-8933).
+std::uint8_t getObmcLevel(EncMode encMode, std::uint32_t qp, std::uint8_t seqQpMod);
+
+// The pcs/ppcs/ref-object wall surface of mfmv_controls (:8934-8980).
+struct MfmvPcs {
+    bool isBase;                    // ppcs->temporal_layer_index == 0
+    bool scsTpl;                    // ppcs->scs->tpl
+    bool r0Gen;                     // pcs->ppcs->r0_gen
+    double r0;                      // pcs->ppcs->r0
+    bool isISlice;                  // pcs->slice_type == I_SLICE
+    bool isBSlice;                  // pcs->slice_type == B_SLICE
+    std::uint8_t refList1CountTry;  // ppcs->ref_list1_count_try
+    bool refL0MfmvUsed;             // ref_obj_l0->is_mfmv_used
+    bool refL1MfmvUsed;             // ref_obj_l1->is_mfmv_used
+    // write:
+    bool useRefFrameMvs;            // ppcs->frm_hdr.use_ref_frame_mvs
+};
+
+// mfmv_controls (:8934-8980). The default case assert(0)s and writes
+// nothing but the leading use_ref_frame_mvs = 0 (:8940) (documented).
+void mfmvCtrls(MfmvPcs& pcs, std::uint8_t mfmvLevel);
+
 }  // namespace mode_config
 }  // namespace l16_rdo
