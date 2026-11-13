@@ -2664,7 +2664,7 @@ A0. SLICE-LEVEL STATE (the live register)
 |    exposed were repaired in the close (the grain block W*H vs
 |    H*STRIDE ragged-stride allocation and the restoration-pick hc row
 |    pointer stride - both test-side, both ports agreed with the
-|    reference). MEASURED AT CLOSE: ctest 18/18 (279.32 s), GATE 427/427
+|    reference). MEASURED AT CLOSE: ctest 18/18 (278.70 s), GATE 427/427
 |    lines, 885,347 B, diff 0, nine artifacts untouched (content-1:1),
 |    coverage 37.6%. COVERAGE-ONLY: no bitstream or emission change.
 
@@ -2834,7 +2834,7 @@ last and label it as table transcription, not encoder progress.
     provenance.md, decode_conformance.md, bitstream.md, color.md,
     layers.md, emission.md, cs5c_deltas.md, this file
 [x] MEASURED 2026-11-13 (the 37.6% campaign close): full ctest 18/18
-    (279.32 s), GATE 427/427 diff 0 (885,347 B), portable-C coverage
+    (278.70 s), GATE 427/427 diff 0 (885,347 B), portable-C coverage
     37.6% (59,297/157,718), 9 committed .obu artifacts (all content-1:1
     on every plane; untouched by the campaign; the two repaired
     test-fixture defects were test-side, the ports agreed with the

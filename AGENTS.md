@@ -352,7 +352,7 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   (A9 46% -> 54%, 2,725 -> 3,195). The 2026-11-12 measurement was 30.3%
   (47,719), +10,266 from 37,453 at the 23.7% RE8A landing. All
   coverage-only: no conformance movement, the nine artifacts untouched.
-- **ctest: 18/18 passed, 0 failed, 279.32 s** (re-measured 2026-11-13 on
+- **ctest: 18/18 passed, 0 failed, 278.70 s** (re-measured 2026-11-13 on
   the campaign-close tree; the suite is 18 targets since 0db4ca0 -
   l17_inter joined; l4_intra is the slow one, `pipeline` (53.83 s) and
   `l3_transforms` next; the rest under 1 s). The campaign-close run also

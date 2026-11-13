@@ -19,7 +19,7 @@ instrument and `AGENTS.md`.
 ## Verified milestones
 
 - The project has 18 CTest targets. The full Release suite last measured
-  18/18 passing on 2026-11-13 (279.32 s).
+  18/18 passing on 2026-11-13 (278.70 s).
 - The golden primitive gate last measured 427/427 lines with a zero diff on
   2026-11-13 (885,347 B; the RE7 tx-type regen, unchanged by the
   conformance-free 37.6% campaign).
