@@ -2031,5 +2031,143 @@ void sigDerivEncDecLightPd1Default(LightPd1Pcs& pcs, LightPd1Ctx& ctx);
 // svt_aom_sig_deriv_enc_dec_light_pd1_rtc (:7655-7889), 1:1.
 void sigDerivEncDecLightPd1Rtc(LightPd1Pcs& pcs, LightPd1Ctx& ctx);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 11: svt_aom_sig_deriv_enc_dec_{default,rtc,allintra}
+// (:7891-:8007 / :8009-:8120 / :8121-:8243) - the per-SB tune
+// compositions.
+// ---------------------------------------------------------------------------
+// The shared pcs wall surface of the three compositions (each field
+// cites its site; D = default, R = rtc, A = allintra; the (A 0)
+// markers are the allintra literals).
+struct EncDecTunePcs {
+    EncMode encMode;                      // pcs->enc_mode
+    ResolutionRange inputResolution;      // ppcs->input_resolution (default)
+    std::uint32_t pictureQp;              // ppcs->picture_qp
+    std::uint8_t refSkipPerc;             // pcs->ref_skip_percentage
+    std::uint8_t nsqSearchLevel;          // pcs->nsq_search_level
+    std::uint8_t nicLevel;                // pcs->nic_level
+    std::uint8_t candReductionLevel;      // pcs->cand_reduction_level
+    std::uint8_t txtLevel;                // pcs->txt_level
+    std::uint8_t txShortcutLevel;         // pcs->tx_shortcut_level
+    std::uint8_t interpolationSearchLevel;  // pcs-> (A passes 0)
+    std::uint8_t chromaLevel;             // pcs->chroma_level
+    std::uint8_t cflLevel;                // pcs->cfl_level
+    bool newNearestNearCombInjection;     // pcs-> (A passes 0)
+    std::uint8_t wmLevel;                 // pcs->wm_level (A passes 0)
+    bool unipred3x3Injection;             // pcs-> (A passes 0)
+    std::uint8_t bipred3x3Injection;      // pcs-> (A passes 0)
+    std::uint8_t interCompoundMode;       // pcs->inter_compound_mode (A 0)
+    std::uint8_t distBasedRefPruning;     // pcs-> (A 0)
+    std::uint8_t spatialSseFullLoopLevel; // pcs->
+    std::uint8_t rdoqLevel;               // pcs->rdoq_level
+    std::uint8_t coeffShavingLevel;       // pcs->
+    std::uint8_t picObmcLevel;            // ppcs->pic_obmc_level (A 0)
+    std::uint8_t interIntraLevel;         // pcs->inter_intra_level (A 0)
+    std::uint8_t txsLevel;                // pcs->txs_level
+    std::uint8_t picFilterIntraLevel;     // pcs->pic_filter_intra_level
+    bool allowIntrabc;                    // frm_hdr->allow_intrabc
+    std::uint8_t mdPaletteLevel;          // ppcs->palette_level
+    std::uint8_t mdSqMvSearchLevel;       // pcs->md_sq_mv_search_level (A 0)
+    std::uint8_t mdNsqMvSearchLevel;      // pcs->md_nsq_mv_search_level (A 0)
+    std::uint8_t mdPmeLevel;              // pcs->md_pme_level (A 0)
+    std::uint8_t meSubpelLevel;           // pcs->me_subpel_level (A 0)
+    std::uint8_t pmeSubpelLevel;          // pcs->pme_subpel_level (A 0)
+    std::uint32_t rateEstLevel;           // pcs->rate_est_level
+    std::uint8_t approxInterRate;         // pcs->approx_inter_rate
+    std::uint8_t intraLevel;              // pcs->intra_level
+    std::uint8_t distBasedAngIntraLevel;  // pcs->dist_based_ang_intra_level
+    std::uint8_t mds0Level;               // pcs->mds0_level
+    bool gmEnabled;                       // ppcs->gm_ctrls.enabled (A: global 0)
+    bool skipIntra;                       // pcs->skip_intra (the intra wall)
+    bool tplEnable;                       // ppcs->tpl_ctrls.enable
+    std::uint8_t tplIntraModeEnd;         // ppcs->tpl_ctrls.intra_mode_end
+    std::uint8_t refIntraPercentage;      // pcs->ref_intra_percentage
+    SbTplPcs tpl;                         // the TPL stats surface
+    SbTplCtx tplCtx;
+    // the set_nsq_search_ctrls wall (EMC2-C2 carrier fields):
+    bool isISlice;                        // pcs->slice_type == I_SLICE
+    bool mimicOnlyTx4x4;                  // pcs->mimic_only_tx_4x4
+    std::uint32_t superBlockSize;         // scs->super_block_size
+    std::uint32_t sbIndex;                // ctx->sb_index
+    const std::uint32_t* me8x8Distortion;      // ppcs-> (SB64 nsq path)
+    const std::uint32_t* me8x8CostVariance;    // ppcs-> (SB64 nsq path)
+    Sb128Pcs sb128;                       // the SB128 nsq gather surface
+    std::uint32_t sbOriginX;
+    std::uint32_t sbOriginY;
+    bool nsqQpBasedThScaling;             // scs->qp_based_th_scaling_ctrls.
+    std::uint32_t qp;                     // scs->static_config.qp
+    std::uint8_t pdPass;                  // ctx->pd_pass
+    // the set_cand_reduction_ctrls wall:
+    std::uint8_t refList0CountTry;
+    std::uint8_t refList1CountTry;
+    bool useBestMeUnipredCandOnly;
+    bool isNotLastLayer;
+    bool rtcTune;
+    std::uint8_t hierarchicalLevels;
+};
+
+// The written ctx surface of the three compositions (D :7891-:8006,
+// R :8009-:8119, A :8121-:8242).
+struct EncDecTuneCtx {
+    // prior-state walls the composition reads (written by
+    // sig_deriv_enc_dec_common earlier in the SB walk):
+    NsqGeomCtrls nsqGeomCtrls;             // md_disallow_nsq_search / redundant_blk
+    std::uint8_t pd0LevelWall;             // the allintra txs fold reads pd0_level
+    NsqSearchCtrls nsqSearchCtrls;
+    NsqPsqTxsCtrls nsqPsqTxsCtrls;
+    NicCtrls nicCtrls;                     // set_nic_controls (nonnull ctx)
+    CandReductionCtrls candReductionCtrls;
+    TxtCtrls txtCtrls;
+    TxShortcutCtrls txShortcutCtrls;
+    InterpolationSearchCtrls interpolationSearchCtrls;
+    UvCtrls uvCtrls;
+    CflCtrls cflCtrls;
+    bool mdDisallowNsqSearch;
+    bool globalMvInjection;
+    bool newNearestInjection;
+    bool newNearestNearCombInjection;
+    WmCtrls wmCtrls;
+    bool unipred3x3Injection;
+    Bipred3x3Ctrls bipred3x3Ctrls;
+    InterCompCtrls interCompCtrls;
+    RefPruningCtrls refPruningCtrls;
+    SpatialSseCtrls spatialSseCtrls;
+    bool blkSkipDecision;
+    RdoqCtrls rdoqCtrls;
+    CoeffShavingCtrls coeffShavingCtrls;
+    bool redundantBlk;
+    DepthEarlyExitCtrls depthEarlyExitCtrls;
+    ObmcCtrls obmcCtrls;
+    InterIntraCompCtrls interIntraCtrls;
+    TxsCtrls txsCtrls;
+    FilterIntraCtrls filterIntraCtrls;
+    bool mdAllowIntrabc;
+    std::uint8_t mdPaletteLevel;
+    PfCtrls pfCtrls;
+    MdSqMotionSearchCtrls mdSqCtrls;
+    MdNsqMotionSearchCtrls mdNsqCtrls;
+    MdPmeCtrls mdPmeCtrls;
+    MdSubPelSearchCtrls mdSubPelCtrls;
+    MdSubPelSearchCtrls mdSubPelPmeCtrls;
+    MdRateEstCtrls rateEstCtrls;
+    std::uint8_t approxInterRate;
+    bool shutFastRate;
+    IntraCtrls intraCtrls;
+    IntraSetCtx intraSetCtx;
+    bool mds0UseHadamardSb;
+    Mds0Ctrls mds0Ctrls;
+    SubresCtrls subresCtrls;
+    std::uint32_t parentCostBias;
+    SkipSubDepthCtrls skipSubDepthCtrls;
+    std::uint8_t tuneSsimLevel;            // SSIM_LVL_0 = 0
+};
+
+// svt_aom_sig_deriv_enc_dec_default (:7891-8007), 1:1.
+void sigDerivEncDecDefault(EncDecTunePcs& pcs, EncDecTuneCtx& ctx);
+// svt_aom_sig_deriv_enc_dec_rtc (:8009-8120), 1:1.
+void sigDerivEncDecRtc(EncDecTunePcs& pcs, EncDecTuneCtx& ctx);
+// svt_aom_sig_deriv_enc_dec_allintra (:8121-8243), 1:1.
+void sigDerivEncDecAllIntra(EncDecTunePcs& pcs, EncDecTuneCtx& ctx);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

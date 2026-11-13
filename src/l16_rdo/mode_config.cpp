@@ -7998,3 +7998,180 @@ void sigDerivEncDecLightPd1Rtc(LightPd1Pcs& pcs, LightPd1Ctx& ctx) {
 
 }  // namespace mode_config
 }  // namespace l16_rdo
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 11: svt_aom_sig_deriv_enc_dec_{default,rtc,allintra}
+// (enc_mode_config.c:7891-8007 / :8009-8120 / :8121-8243).
+// ---------------------------------------------------------------------------
+namespace l16_rdo {
+namespace mode_config {
+
+// The NsqSearchPcs wall builder (the C2 carrier assembled from the
+// tune composition's walls).
+static NsqSearchPcs NsqSearchPcsOf(const EncDecTunePcs& p) {
+    NsqSearchPcs np;
+    std::memset(&np, 0, sizeof(np));
+    np.isISlice = p.isISlice;
+    np.encMode = p.encMode;
+    np.mimicOnlyTx4x4 = p.mimicOnlyTx4x4;
+    np.sbSize = p.superBlockSize;
+    np.sbIndex = p.sbIndex;
+    np.me8x8Distortion = p.me8x8Distortion;
+    np.me8x8CostVariance = p.me8x8CostVariance;
+    np.sb128 = p.sb128;
+    np.sbOriginX = p.sbOriginX;
+    np.sbOriginY = p.sbOriginY;
+    np.qp = p.qp;
+    np.nsqQpBasedThScaling = p.nsqQpBasedThScaling;
+    np.pdPass = p.pdPass;
+    return np;
+}
+
+// The shared body: the D/R tunes differ from A in the literal zeros;
+// the depth-early-exit / skip-sub-depth bands differ per tune.
+static void sigDerivEncDecTuneImpl(EncDecTunePcs& pcs, EncDecTuneCtx& ctx, int tune) {
+    const EncMode encMode = pcs.encMode;
+    setNsqSearchCtrls(ctx.nsqSearchCtrls, ctx.nsqPsqTxsCtrls, NsqSearchPcsOf(pcs), pcs.nsqSearchLevel);
+    setNicCtrls(&ctx.nicCtrls, pcs.nicLevel);
+    {
+        CandReductionPcs crPcs;
+        crPcs.refList0CountTry = pcs.refList0CountTry;
+        crPcs.refList1CountTry = pcs.refList1CountTry;
+        crPcs.useBestMeUnipredCandOnly = pcs.useBestMeUnipredCandOnly;
+        CandReductionCtx crCtx;
+        crCtx.pd1Level = (std::int8_t)REGULAR_PD1;
+        crCtx.isNotLastLayer = pcs.isNotLastLayer;
+        crCtx.rtc = pcs.rtcTune;
+        crCtx.hierarchicalLevels = pcs.hierarchicalLevels;
+        setCandReductionCtrls(ctx.candReductionCtrls, pcs.candReductionLevel, crPcs, crCtx,
+                              pcs.pictureQp, 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0, pcs.refSkipPerc);
+    }
+
+    setTxtCtrls(ctx.txtCtrls, pcs.txtLevel);
+    setTxShortcutCtrls(ctx.txShortcutCtrls, pcs.txShortcutLevel);
+
+    setInterpolationSearchLevelCtrls(ctx.interpolationSearchCtrls,
+                                     tune == 2 ? 0 : pcs.interpolationSearchLevel);
+
+    setChromaCtrls(ctx.uvCtrls, pcs.chromaLevel);
+
+    setCflCtrls(ctx.cflCtrls, pcs.cflLevel);
+    // Update nsq settings based on the sb_class
+    ctx.mdDisallowNsqSearch =
+        !ctx.nsqGeomCtrls.enabled || !ctx.nsqSearchCtrls.enabled;
+    ctx.globalMvInjection             = tune == 2 ? false : pcs.gmEnabled;
+    ctx.newNearestInjection           = tune != 2;
+    ctx.newNearestNearCombInjection   = tune == 2 ? false : pcs.newNearestNearCombInjection;
+
+    //set Warped-Motion controls from Picture level.
+    setWmCtrls(ctx.wmCtrls, tune == 2 ? 0 : pcs.wmLevel);
+
+    ctx.unipred3x3Injection = tune == 2 ? false : pcs.unipred3x3Injection;
+    setBipred3x3Ctrls(ctx.bipred3x3Ctrls, tune == 2 ? 0 : pcs.bipred3x3Injection);
+    setInterCompCtrls(ctx.interCompCtrls, tune == 2 ? 0 : pcs.interCompoundMode);
+    setDistBasedRefPruningCtrls(ctx.refPruningCtrls, tune == 2 ? 0 : pcs.distBasedRefPruning);
+    setSpatialSseFullLoopLevel(ctx.spatialSseCtrls, pcs.spatialSseFullLoopLevel);
+    if (ctx.uvCtrls.uvMode <= kChromaMode1) {
+        ctx.blkSkipDecision = true;
+    } else {
+        ctx.blkSkipDecision = false;
+    }
+
+    setRdoqCtrls(ctx.rdoqCtrls, pcs.rdoqLevel);
+
+    setCoeffShavingCtrls(ctx.coeffShavingCtrls, pcs.coeffShavingLevel);
+    // There are only redundant blocks when HVA_HVB shapes are used
+    if (!ctx.nsqGeomCtrls.allowHvaHvb) {
+        ctx.redundantBlk = false;
+    } else {
+        ctx.redundantBlk = true;
+    }
+    {
+        const int band = tune == 0 ? (int)ENC_M6 : (int)ENC_M7;
+        const std::uint8_t depthEarlyExitLvl = encMode <= (EncMode)band ? 1 : 2;
+        setDepthEarlyExitCtrls(ctx.depthEarlyExitCtrls, depthEarlyExitLvl);
+    }
+    setObmcCtrls(ctx.obmcCtrls, tune == 2 ? 0 : pcs.picObmcLevel);
+    setInterIntraCtrls(ctx.interIntraCtrls, tune == 2 ? 0 : pcs.interIntraLevel);
+    {
+        std::uint8_t txsLevel = pcs.txsLevel;
+        // Use fastest TXS when VLPD and default TXS is off
+        if (tune == 2 && pcs.txsLevel == 0 && ctx.pd0LevelWall == 6) {
+            txsLevel = kMaxTxsLevel - 1;
+        }
+        setTxsCtrls(ctx.txsCtrls, txsLevel, pcs.mimicOnlyTx4x4);
+    }
+    setFilterIntraCtrls(ctx.filterIntraCtrls, pcs.picFilterIntraLevel);
+    // Set md_allow_intrabc @ MD
+    ctx.mdAllowIntrabc = pcs.allowIntrabc;
+
+    // Set md_palette_level @ MD
+    ctx.mdPaletteLevel = pcs.mdPaletteLevel;
+
+    setPfCtrls(ctx.pfCtrls, 1);
+    setMdSqMotionSearchCtrls(ctx.mdSqCtrls, tune == 2 ? 0 : pcs.mdSqMvSearchLevel);
+
+    setMdNsqMotionSearchCtrls(ctx.mdNsqCtrls, tune == 2 ? 0 : pcs.mdNsqMvSearchLevel);
+    setMdPmeCtrls(ctx.mdPmeCtrls, tune == 2 ? 0 : pcs.mdPmeLevel);
+
+    setMdSubpelMeCtrls(ctx.mdSubPelCtrls, tune == 2 ? 0 : pcs.meSubpelLevel);
+    setMdSubpelPmeCtrls(ctx.mdSubPelPmeCtrls, tune == 2 ? 0 : pcs.pmeSubpelLevel);
+    setRateEstCtrls(ctx.rateEstCtrls, (std::uint8_t)pcs.rateEstLevel);
+
+    // set at pic-level b/c feature depends on some pic-level initializations
+    ctx.approxInterRate = pcs.approxInterRate;
+    // Use coeff rate and slit flag rate only (i.e. no fast rate)
+    ctx.shutFastRate = false;
+
+    // intra_level must be greater than 0 for I_SLICE
+    {
+        IntraSetPcs intraPcs;
+        intraPcs.skipIntra = pcs.skipIntra;
+        intraPcs.isISlice = pcs.isISlice;
+        intraPcs.tplEnable = pcs.tplEnable;
+        intraPcs.tplIntraModeEnd = pcs.tplIntraModeEnd;
+        intraPcs.refIntraPercentage = pcs.refIntraPercentage;
+        intraPcs.tpl = pcs.tpl;
+        intraPcs.tplCtx = pcs.tplCtx;
+        setIntraCtrls(ctx.intraCtrls, intraPcs, ctx.intraSetCtx, pcs.intraLevel,
+                      pcs.distBasedAngIntraLevel);
+    }
+
+    // Use Hadamard at MDS0
+    ctx.mds0UseHadamardSb = tune == 2;
+
+    setMds0Ctrls(ctx.mds0Ctrls, pcs.mds0Level);
+    setSubresCtrls(ctx.subresCtrls, 0);
+    ctx.parentCostBias = 995;
+
+    std::uint8_t skipSubDepthLvl;
+    if (tune == 1) {
+        skipSubDepthLvl = 2;
+    } else if (tune == 2) {
+        skipSubDepthLvl = encMode <= ENC_M7 ? 1 : 2;
+    } else {
+        skipSubDepthLvl = encMode <= ENC_M1 ? 1 : 2;
+    }
+
+    setSkipSubDepthCtrls(ctx.skipSubDepthCtrls, skipSubDepthLvl);
+    ctx.tuneSsimLevel = 0;  // SSIM_LVL_0
+}
+
+
+// svt_aom_sig_deriv_enc_dec_default (enc_mode_config.c:7891-8007).
+void sigDerivEncDecDefault(EncDecTunePcs& pcs, EncDecTuneCtx& ctx) {
+    sigDerivEncDecTuneImpl(pcs, ctx, 0);
+}
+
+// svt_aom_sig_deriv_enc_dec_rtc (enc_mode_config.c:8009-8120).
+void sigDerivEncDecRtc(EncDecTunePcs& pcs, EncDecTuneCtx& ctx) {
+    sigDerivEncDecTuneImpl(pcs, ctx, 1);
+}
+
+// svt_aom_sig_deriv_enc_dec_allintra (enc_mode_config.c:8121-8243).
+void sigDerivEncDecAllIntra(EncDecTunePcs& pcs, EncDecTuneCtx& ctx) {
+    sigDerivEncDecTuneImpl(pcs, ctx, 2);
+}
+
+}  // namespace mode_config
+}  // namespace l16_rdo
