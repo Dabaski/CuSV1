@@ -525,6 +525,51 @@ void set1pVbrParam(P1vbrCarrier& pcs) {
     }
 }
 
+// ---- A9R: pass2_strategy.c (the two-pass stats arithmetic) ----
+
+// calculate_modified_err (pass2_strategy.c:23-31): verbatim.
+double calculateModifiedErr(bool hasTotalStats, std::uint64_t thisFrameTotalNumBits) {
+    if (!hasTotalStats) {
+        return 0;
+    }
+    return (double)thisFrameTotalNumBits;
+}
+
+// subtract_stats (pass2_strategy.c:47-53): verbatim.
+void subtractStats(FirstpassStatsCarrier& section, const FirstpassStatsCarrier& frame) {
+    section.frame -= frame.frame;
+    section.codedError -= frame.codedError;
+    section.count -= frame.count;
+    section.duration -= frame.duration;
+}
+
+// fclamp (definitions.h): the double clamp macro.
+static double fclamp(double x, double low, double hi) {
+    return x < low ? low : (x > hi ? hi : x);
+}
+
+// q_pow_term (pass2_strategy.c:60): verbatim.
+const double kQpowTerm[(kQindexRange >> 5) + 1] = {0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.95, 0.95};
+
+// ERR_DIVISOR (pass2_strategy.c:61).
+const double kErrDivisor = 96.0;
+
+// calc_correction_factor (pass2_strategy.c:63-70): verbatim (the assert
+// gate is the named NDEBUG park).
+double calcCorrectionFactor(double errPerMb, int q) {
+    const double errorTerm = errPerMb / kErrDivisor;
+    const int index = q >> 5;
+    // Adjustment to power term based on qindex
+    const double powerTerm =
+        kQpowTerm[index] + (((kQpowTerm[index + 1] - kQpowTerm[index]) * (q % 32)) / 32.0);
+    return fclamp(std::pow(errorTerm, powerTerm), 0.05, 5.0);
+}
+
+// qbpm_enumerator (pass2_strategy.c:72-74): verbatim.
+int qbpmEnumerator(int rateErrTol) {
+    return 1250000 + ((300000 * std::min(75, std::max(rateErrTol - 25, 0))) / 75);
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;

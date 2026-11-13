@@ -461,6 +461,28 @@ struct P1vbrCarrier {
 // set_1pvbr_param (initial_rc_process.c:638-666): verbatim.
 void set1pVbrParam(P1vbrCarrier& pcs);
 
+// ---- A9R: pass2_strategy.c (the two-pass stats arithmetic) ----
+
+// calculate_modified_err (pass2_strategy.c:23-31): verbatim; the
+// twopass->stats_buf_ctx->total_stats NULL gate threads as hasTotalStats
+// (the body reads this_frame->stat_struct.total_num_bits only).
+double calculateModifiedErr(bool hasTotalStats, std::uint64_t thisFrameTotalNumBits);
+
+// subtract_stats (pass2_strategy.c:47-53): verbatim.
+void subtractStats(FirstpassStatsCarrier& section, const FirstpassStatsCarrier& frame);
+
+// q_pow_term (pass2_strategy.c:60) + ERR_DIVISOR (:61).
+extern const double kQpowTerm[(kQindexRange >> 5) + 1];
+extern const double kErrDivisor;
+
+// calc_correction_factor (pass2_strategy.c:63-70): static in the reference;
+// exported for testability (the DF1 precedent). The assert(error_term >= 0)
+// gate is removed under NDEBUG - negative inputs are the named NDEBUG park.
+double calcCorrectionFactor(double errPerMb, int q);
+
+// qbpm_enumerator (pass2_strategy.c:72-74): static in the reference.
+int qbpmEnumerator(int rateErrTol);
+
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.
 bool frameIsIntraOnly(int frameType);
