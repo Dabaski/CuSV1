@@ -1833,5 +1833,128 @@ std::uint8_t getNsqGeomLevelDefault(EncMode encMode, std::uint8_t coeffLvl);
 std::uint8_t getNsqGeomLevelRtc();
 std::uint8_t getNsqGeomLevelAllIntra(EncMode encMode);
 
+// ---------------------------------------------------------------------------
+// EMC2 rung 9: svt_aom_sig_deriv_enc_dec_common (:7162-:7256) and
+// svt_aom_sig_deriv_enc_dec_pd0 (:7283-:7454) - the per-SB
+// compositions of the rungs above.
+// ---------------------------------------------------------------------------
+// The pcs wall surface of sig_deriv_enc_dec_common. The depth-removal
+// wall threads through the caller-supplied DepthRemovalPcs/
+// DepthRemovalCtx (EMC1 carriers) as separate parameters.
+struct EncDecCommonPcs {
+    EncMode encMode;                         // pcs->enc_mode
+    bool isISlice;                           // pcs->slice_type == I_SLICE
+    std::uint8_t picBlockBasedDepthRefinementLevel;  // pcs->
+    std::uint8_t picPd0Lvl;                  // pcs->pic_pd0_lvl
+    bool picDisallow4x4;                     // pcs->pic_disallow_4x4
+    std::uint8_t picDepthRemovalLevel;       // pcs->pic_depth_removal_level
+    std::uint8_t picLpd1Lvl;                 // pcs->pic_lpd1_lvl
+    std::uint8_t nsqGeomLevel;               // pcs->nsq_geom_level
+    std::uint16_t b64GeomWidth;              // ppcs->b64_geom[ctx->sb_index].width
+    std::uint16_t b64GeomHeight;             // ... .height
+    std::uint32_t me8x8CostVariance;         // ppcs->[ctx->sb_index] (the M11 band)
+    std::uint32_t baseQIdx;                  // frm_hdr...base_q_idx (cyclic refresh)
+    // the get_max_block_size walls (:7071-:7143):
+    bool capMaxSizeQpScaling;  // scs->qp_based_th_scaling_ctrls.
+                               //   cap_max_size_qp_based_th_scaling
+    std::uint32_t qp;          // scs->static_config.qp
+    const std::uint16_t* variance64;  // &ppcs->variance[0][tier0] (allintra)
+    std::uint32_t varianceStride;
+};
+struct EncDecCommonScs {
+    bool allintra;      // scs->allintra
+    bool rtcTune;       // scs->static_config.rtc
+    std::int32_t maxTxSize;  // scs->static_config.max_tx_size
+};
+// The written-and-read ctx surface (each field cites its site).
+struct EncDecCommonCtx {
+    // walls read by the composition:
+    std::uint8_t hbdMd;       // ctx->hbd_md (set_pd0_ctrls early-out)
+    std::uint8_t sbQindex;    // ctx->sb_ptr->qindex (:7224)
+    std::uint32_t qpIndex;    // ctx->qp_index (:7242)
+    bool isBase;              // frame_is_boosted(ppcs) (:7226)
+    bool isNotLastLayer;      // !frame_is_leaf(ppcs) (:7233)
+    // written:
+    DepthRefinementCtrls depthRefinementCtrls;
+    bool predDepthOnly;
+    bool picPredDepthOnly;
+    Pd0Ctrls pd0Ctrls;
+    DepthRemovalCtrls depthRemovalCtrls;
+    bool disallow8x8;
+    bool disallow4x4;
+    std::uint32_t maxBlockSize;
+    std::uint8_t pd1LvlRefinement;
+    NsqGeomCtrls nsqGeomCtrls;
+    Lpd1Ctrls lpd1Ctrls;
+};
+
+// svt_aom_sig_deriv_enc_dec_common (:7162-7256), 1:1. drPcs/drCtx are
+// the set_depth_removal_level_controls walls (EMC1); the composition
+// owns the same lifecycle the reference does.
+void sigDerivEncDecCommon(EncDecCommonPcs& pcs, const EncDecCommonScs& scs,
+                          EncDecCommonCtx& ctx, const DepthRemovalPcs& drPcs,
+                          DepthRemovalCtx& drCtx);
+
+// The pcs wall surface of sig_deriv_enc_dec_pd0 (:7283-7454).
+struct EncDecPd0Pcs {
+    EncMode encMode;                     // pcs->enc_mode
+    bool isISlice;                       // pcs->slice_type == I_SLICE
+    std::uint8_t transitionPresent;      // ppcs->transition_present
+    std::uint8_t pd0CostBiasWeight;      // pcs->pd0_cost_bias_weight
+    std::uint32_t me64x64Distortion;     // ppcs->[ctx->sb_index] (SB64 path)
+    std::uint32_t me8x8Distortion;       // ppcs->[ctx->sb_index] (bias weight)
+    std::uint32_t me8x8CostVariance;     // ppcs->[ctx->sb_index] (bias mod)
+    std::uint8_t hbdMd;                  // pcs->hbd_md
+    std::uint32_t baseQIdx;              // frm_hdr...base_q_idx
+    bool b64IsComplete;                  // b64_geom->is_complete_b64
+    std::uint32_t rateEstLevel;          // pcs->rate_est_level
+    std::uint32_t sbIndex;               // ctx->sb_index
+    bool sb128Path;                      // seq_header.sb_size == BLOCK_128X128
+    bool isNotLastLayer;                 // !frame_is_leaf(ppcs) (:7300)
+    Sb128Pcs sb128;                      // the SB128 gather surface
+    std::uint32_t sbOriginX;
+    std::uint32_t sbOriginY;
+    // the set_intra_ctrls wall (embedded):
+    bool skipIntra;
+    bool tplEnable;
+    std::uint8_t tplIntraModeEnd;
+    std::uint8_t refIntraPercentage;
+    SbTplPcs tpl;
+    SbTplCtx tplCtx;
+};
+struct EncDecPd0Scs {
+    bool allintra;
+    bool rtcTune;
+};
+// The written-and-read ctx surface of the pd0 composition.
+struct EncDecPd0Ctx {
+    // read:
+    Pd0Ctrls pd0Ctrls;                   // pd0_level (:7290)
+    DepthRemovalCtrls depthRemovalCtrls;  // (:7424-:7430)
+    bool disallow4x4;                    // ctx->disallow_4x4 (:7408)
+    bool disallow8x8;                    // ctx->disallow_8x8 (:7425)
+    std::uint32_t fastLambdaMd[2];       // ctx->fast_lambda_md
+    std::uint8_t hbdMd;                  // ctx->hbd_md (the lambda pick)
+    bool picPredDepthOnly;               // ctx->pic_pred_depth_only (:7320)
+    // written:
+    bool mdDisallowNsqSearch;
+    bool shutFastRate;
+    DepthEarlyExitCtrls depthEarlyExitCtrls;
+    IntraCtrls intraCtrls;
+    IntraSetCtx intraSetCtx;             // the set_intra_ctrls ctx (pd_pass)
+    std::uint32_t parentCostBias;
+    bool pd0UseSrcSamples;
+    UvCtrls uvCtrls;
+    PfCtrls pfCtrls;
+    SubresCtrls subresCtrls;
+    MdRateEstCtrls rateEstCtrls;
+    bool approxInterRate;
+};
+
+// svt_aom_sig_deriv_enc_dec_pd0 (:7283-7454), 1:1. The reference's
+// early return at PD0_LVL_6 (:7385-7387) leaves the chroma/pf/subres/
+// rate-est tail unwritten (pinned by test).
+void sigDerivEncDecPd0(EncDecPd0Pcs& pcs, const EncDecPd0Scs& scs, EncDecPd0Ctx& ctx);
+
 }  // namespace mode_config
 }  // namespace l16_rdo

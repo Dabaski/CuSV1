@@ -7249,5 +7249,318 @@ std::uint8_t getNsqGeomLevelAllIntra(EncMode encMode) {
     return nsqGeomLevel;
 }
 
+// svt_aom_sig_deriv_enc_dec_common (enc_mode_config.c:7162-7256).
+void sigDerivEncDecCommon(EncDecCommonPcs& pcs, const EncDecCommonScs& scs,
+                          EncDecCommonCtx& ctx, const DepthRemovalPcs& drPcs,
+                          DepthRemovalCtx& drCtx) {
+    const EncMode encMode = pcs.encMode;
+    setBlockBasedDepthRefinementCtrls(ctx.depthRefinementCtrls,
+                                      pcs.picBlockBasedDepthRefinementLevel);
+
+    // pic_pred_depth_only shouldn't be changed after this point
+    ctx.predDepthOnly = ctx.picPredDepthOnly =
+        (ctx.depthRefinementCtrls.mode == kPd0DepthPredPartOnly);
+    setPd0Ctrls(ctx.pd0Ctrls, pcs.picPd0Lvl, ctx.hbdMd);
+
+    ctx.depthRemovalCtrls.disallowBelow64x64 = 0;
+    ctx.depthRemovalCtrls.disallowBelow32x32 = 0;
+    /*
+    if disallow_below_16x16 is turned ON then enable_me_8x8 should be turned OFF for the same preset in order to save memory and cycles as that feature optimizes the me_candidate_array,
+    me_mv_array and the total_me_candidate_index arrays when 8x8 blocks are not used
+
+    if any check other than an I-SLICE check is used on disallow_below_16x16 then the enable_me_8x8 should be turned ON for the entire preset because without the 8x8 me data the non I-SLICE pictures
+    that use 8x8 blocks will lose significant BD-Rate as the parent 16x16 me data will be used for the 8x8 blocks
+    */
+    ctx.depthRemovalCtrls.disallowBelow16x16 = 0;
+    if (pcs.b64GeomWidth % 32 != 0 || pcs.b64GeomHeight % 32 != 0) {
+        ctx.depthRemovalCtrls.disallowBelow64x64 = false;
+    }
+    if (pcs.b64GeomWidth % 16 != 0 || pcs.b64GeomHeight % 16 != 0) {
+        ctx.depthRemovalCtrls.disallowBelow32x32 = false;
+    }
+    if (pcs.b64GeomWidth % 8 != 0 || pcs.b64GeomHeight % 8 != 0) {
+        ctx.depthRemovalCtrls.disallowBelow16x16 = false;
+    }
+    // Must check disallow_8x8 on an SB level. If a preset wants 8x8 off, it may still be required at the
+    // picture edge if the SB width/height is <=8 (to ensure that there is a conformant block to encode
+    // for those dimensions). Use the SB width/height so that 8x8 can still be skipped for all complete
+    // SBs and used only for the incomplete blocks that require 8x8 for conformance.
+    ctx.disallow8x8 = scs.allintra ? getDisallow8x8AllIntra()
+        : scs.rtcTune              ? getDisallow8x8Rtc(encMode, pcs.b64GeomWidth, pcs.b64GeomHeight)
+                                   : getDisallow8x8Default();
+    ctx.disallow4x4 = pcs.picDisallow4x4;
+    // Set max block-size
+    if (scs.allintra || scs.rtcTune) {
+        MaxBlkPcs mb;
+        mb.superBlockSize = drPcs.superBlockSize;
+        mb.sbGeomWidth = (std::uint8_t)pcs.b64GeomWidth;
+        mb.sbGeomHeight = (std::uint8_t)pcs.b64GeomHeight;
+        mb.isISlice = pcs.isISlice;
+        mb.encMode = pcs.encMode;
+        mb.capMaxSizeQpScaling = pcs.capMaxSizeQpScaling;
+        mb.qp = pcs.qp;
+        mb.sbIndex = 0;  // the composition carrier holds the pre-indexed scalar
+        mb.me8x8CostVariance = &pcs.me8x8CostVariance;
+        mb.sb128.b64Size = drPcs.b64Size;
+        mb.sb128.alignedWidth = drPcs.alignedWidth;
+        mb.sb128.alignedHeight = drPcs.alignedHeight;
+        mb.sb128.me64x64Distortion = drPcs.me64x64Distortion;
+        mb.sb128.me32x32Distortion = drPcs.me32x32Distortion;
+        mb.sb128.me16x16Distortion = drPcs.me16x16Distortion;
+        mb.sb128.me8x8Distortion = drPcs.me8x8Distortion;
+        mb.sb128.me8x8CostVariance = drPcs.me8x8CostVariance;
+        mb.sbOriginX = drCtx.sbOriginX;
+        mb.sbOriginY = drCtx.sbOriginY;
+        mb.variance64 = pcs.variance64;
+        mb.varianceStride = pcs.varianceStride;
+        ctx.maxBlockSize = scs.allintra ? getMaxBlockSizeAllIntra(mb) : getMaxBlockSizeRtc(mb);
+    } else {
+        ctx.maxBlockSize = getMaxBlockSizeDefault(drPcs.superBlockSize);
+    }
+    setDepthRemovalLevelCtrls(ctx.depthRemovalCtrls, drPcs, drCtx, pcs.picDepthRemovalLevel);
+    if (scs.rtcTune) {
+        int lpd1Lvl = pcs.picLpd1Lvl;
+        // For cyclic-refresh SBs signaled by negative delta-QP, use a conservative LPD1
+        if (lpd1Lvl && ctx.sbQindex < pcs.baseQIdx) {
+            lpd1Lvl = std::max(0, lpd1Lvl - 2);
+            lpd1Lvl = std::min(lpd1Lvl, ctx.isBase ? 2 : 4);
+        }
+        setLpd1Ctrls(ctx.lpd1Ctrls, (std::uint8_t)lpd1Lvl);
+    } else if (encMode <= ENC_M10) {
+        setLpd1Ctrls(ctx.lpd1Ctrls, pcs.picLpd1Lvl);
+    } else {
+        int lpd1Lvl = pcs.picLpd1Lvl;
+        if (!pcs.isISlice) {
+            const int me8x8 = (int)pcs.me8x8CostVariance;
+            const int th    = encMode <= ENC_M8 ? 3 * (int)ctx.qpIndex : 3000;
+            if (lpd1Lvl == 0) {
+                if (me8x8 < th) {
+                    lpd1Lvl += 3;
+                }
+            } else {
+                if (me8x8 < th) {
+                    lpd1Lvl += 2;
+                }
+            }
+        }
+        lpd1Lvl = std::max(0, std::min(lpd1Lvl, 7));
+        setLpd1Ctrls(ctx.lpd1Ctrls, (std::uint8_t)lpd1Lvl);
+    }
+    if (scs.rtcTune) {
+        if (encMode <= ENC_M8) {
+            ctx.pd1LvlRefinement = 0;
+        } else if (encMode <= ENC_M10) {
+            ctx.pd1LvlRefinement = ctx.isNotLastLayer ? 0 : 2;
+        } else {
+            ctx.pd1LvlRefinement = 2;
+        }
+    } else {
+        if (encMode <= ENC_M10) {
+            ctx.pd1LvlRefinement = 0;
+        } else {
+            ctx.pd1LvlRefinement = 2;
+        }
+    }
+    setNsqGeomCtrls(ctx.nsqGeomCtrls, pcs.nsqGeomLevel, nullptr, nullptr, nullptr);
+
+    if (scs.maxTxSize == 32) {
+        // Ensure we allow at least 32x32 transforms
+        ctx.depthRemovalCtrls.disallowBelow64x64 = false;
+    }
+}
+
+// svt_aom_sig_deriv_enc_dec_pd0 (enc_mode_config.c:7283-7454).
+static RdCostCtx RdCostCtxOf(const EncDecPd0Ctx& ctx) {
+    RdCostCtx rc;
+    rc.fastLambdaMd[0] = ctx.fastLambdaMd[0];
+    rc.fastLambdaMd[1] = ctx.fastLambdaMd[1];
+    rc.hbdMd = ctx.hbdMd;
+    return rc;
+}
+
+void sigDerivEncDecPd0(EncDecPd0Pcs& pcs, const EncDecPd0Scs& scs, EncDecPd0Ctx& ctx) {
+    const std::uint8_t pd0Level = ctx.pd0Ctrls.pd0Level;
+    const bool isIslice = pcs.isISlice;
+    const bool allintra = scs.allintra;
+    const bool rtcTune = scs.rtcTune;
+    ctx.mdDisallowNsqSearch = true;
+
+    // Use coeff rate and slit flag rate only (i.e. no fast rate)
+    ctx.shutFastRate = true;
+
+    std::uint32_t me64x64Dist;
+    if (pcs.sb128Path) {
+        std::uint32_t sb128D32, sb128D16, sb128D8, sb128Var;
+        Sb128Ctx sb128Ctx;
+        sb128Ctx.sbOriginX = pcs.sbOriginX;
+        sb128Ctx.sbOriginY = pcs.sbOriginY;
+        getSb128MeData(pcs.sb128, sb128Ctx, &me64x64Dist, &sb128D32, &sb128D16, &sb128D8,
+                       &sb128Var);
+    } else {
+        me64x64Dist = pcs.me64x64Distortion;
+    }
+
+    std::uint8_t depthEarlyExitLvl = 1;
+    // When only the predicted depth is used, use safe early exit THs
+    if (rtcTune && pd0Level == 6) {
+        depthEarlyExitLvl = 0;
+    } else if (pd0Level <= 1 || ctx.picPredDepthOnly) {
+        depthEarlyExitLvl = 1;
+    } else {
+        depthEarlyExitLvl = 2;
+    }
+    setDepthEarlyExitCtrls(ctx.depthEarlyExitCtrls, depthEarlyExitLvl);
+
+    std::uint8_t intraLevel = 0;
+
+    if (pcs.encMode <= (rtcTune ? ENC_M9 : ENC_M10)) {
+        if (pd0Level == 0) {
+            intraLevel = kMaxIntraLevel - 1;
+        } else if (pcs.isISlice || pcs.transitionPresent == 1) {
+            intraLevel = 1;
+        } else if (pd0Level <= 2) {
+            const std::uint64_t useIntraPd0Th = computeIntraPd0Th(64, RdCostCtxOf(ctx));
+            // RDCOST(fast_lambda, 0, me_64x64_dist) = dist << RDDIV_BITS
+            const std::uint64_t cost64x64 = (std::uint64_t)me64x64Dist << kRddivBits;
+
+            intraLevel = (cost64x64 < useIntraPd0Th) ? 0 : 1;
+        } else {
+            intraLevel = 0;
+        }
+    } else {
+        if (pcs.isISlice || pcs.transitionPresent == 1) {
+            intraLevel = 8;
+        } else {
+            intraLevel = 0;
+        }
+    }
+    {
+        IntraSetPcs intraPcs;
+        intraPcs.skipIntra = pcs.skipIntra;
+        intraPcs.isISlice = pcs.isISlice;
+        intraPcs.tplEnable = pcs.tplEnable;
+        intraPcs.tplIntraModeEnd = pcs.tplIntraModeEnd;
+        intraPcs.refIntraPercentage = pcs.refIntraPercentage;
+        intraPcs.tpl = pcs.tpl;
+        intraPcs.tplCtx = pcs.tplCtx;
+        setIntraCtrls(ctx.intraCtrls, intraPcs, ctx.intraSetCtx, intraLevel, 2);
+    }
+    ctx.parentCostBias = 1000;
+    if (!scs.allintra && pd0Level == 6) {
+        // Modulate the inter-depth bias based on the QP and the temporal complexity of the SB.
+        // bias > 1000 : inflates parent cost - favors split
+        // bias < 1000 : deflates parent cost - favors parent
+        //
+        // At low QP, the missing coeff rate is large and disproportionately penalizes the parent,
+        // so we bias towards split. At high QP, most coefficients quantize to zero, so the
+        // cost without coeff rate is already accurate : stay close to neutral.
+
+        // QP component: linear interpolation from 1100 (q=0) to 950 (q=255)
+        const std::uint32_t baseQ = pcs.baseQIdx;
+        ctx.parentCostBias = 1100 - (baseQ * 150 + 127) / 255;
+
+        // ME variance component: fine-grained modulation based on SB complexity.
+        // Complex SBs (high variance):  split is beneficial
+        // Easy SBs (low variance): parent is good enough
+        const std::uint32_t meVar = pcs.me8x8CostVariance;
+        if (pcs.pd0CostBiasWeight) {
+            // Scale the default variance offsets by a weight derived from ME distortion ratio.
+            // weight is in [512..1024] = 50%..100%, so the offset is never increased, only reduced.
+            const std::uint32_t dist64  = pcs.me64x64Distortion;
+            const std::uint32_t dist8   = std::max(pcs.me8x8Distortion, (std::uint32_t)1);
+            const std::uint32_t ratioQ4 = (dist64 * 16) / dist8;
+            const std::uint32_t w = (std::uint32_t)std::min(
+                (std::uint32_t)std::max((int)pcs.pd0CostBiasWeight, 1024),
+                (ratioQ4 - 16) * 16 + pcs.pd0CostBiasWeight);
+
+            if (meVar > 2000) {
+                ctx.parentCostBias += (75 * w) >> 10;
+            } else if (meVar > 1000) {
+                ctx.parentCostBias += (50 * w) >> 10;
+            } else if (meVar > 500) {
+                ctx.parentCostBias += (25 * w) >> 10;
+            }
+        } else {
+            if (meVar > 2000) {
+                ctx.parentCostBias += 75;
+            } else if (meVar > 1000) {
+                ctx.parentCostBias += 50;
+            } else if (meVar > 500) {
+                ctx.parentCostBias += 25;
+            }
+        }
+        // Clamp to a safe range
+        ctx.parentCostBias =
+            (std::uint32_t)std::min(1200, std::max(900, (int)ctx.parentCostBias));
+    }
+
+    if (allintra || pcs.hbdMd != 0) {
+        ctx.pd0UseSrcSamples = true;
+    } else {
+        ctx.pd0UseSrcSamples = false;
+    }
+    if (pd0Level == 6) {
+        return;
+    }
+    setChromaCtrls(ctx.uvCtrls, 0 /*chroma off*/);
+
+    // Using PF in LPD0 may cause some VQ issues
+    setPfCtrls(ctx.pfCtrls, 1);
+
+    std::uint8_t subresLevel;
+    // Use b64_geom here because LPD0 is only enabled when 64x64 SB size is used
+    // LPD0 was designed assuming 4x4 blocks were disallowed. Since LPD0 is now used in some presets where 4x4 is on
+    // check that subres is not used when 4x4 blocks are enabled.
+    if (pd0Level <= 2 || !ctx.disallow4x4 || !pcs.b64IsComplete) {
+        subresLevel = 0;
+    } else {
+        subresLevel = 0;
+        // The controls checks the deviation between: (1) the pred-to-src SAD of even rows and (2) the pred-to-src SAD of odd rows for each 64x64 to decide whether to use subres or not
+        // then applies the result to the 64x64 block and to all children, therefore if incomplete 64x64 then shut subres
+        // Use ME distortion and variance detector to enable subres
+        const std::uint64_t useSubresTh = computeSubresTh(64, RdCostCtxOf(ctx));
+        // RDCOST(fast_lambda, 0, me_64x64_dist) = dist << RDDIV_BITS
+        const std::uint64_t cost64x64 = (std::uint64_t)me64x64Dist << kRddivBits;
+        if (pd0Level <= 4) {
+            if (isIslice || pcs.transitionPresent == 1) {
+                subresLevel = 1;
+            } else {
+                subresLevel = (cost64x64 < useSubresTh) ? 1 : 0;
+            }
+        } else {
+            if (pcs.isNotLastLayer) {
+                subresLevel = ctx.disallow8x8 ||
+                        (ctx.depthRemovalCtrls.enabled &&
+                         (ctx.depthRemovalCtrls.disallowBelow16x16 ||
+                          ctx.depthRemovalCtrls.disallowBelow32x32 ||
+                          ctx.depthRemovalCtrls.disallowBelow64x64))
+                    ? 2
+                    : 1;
+            } else {
+                subresLevel = 2;
+            }
+        }
+    }
+    setSubresCtrls(ctx.subresCtrls, subresLevel);
+
+    std::uint8_t rateEstLevel = 0;
+    if (pcs.rateEstLevel) {
+        if (pd0Level <= 3) {
+            rateEstLevel = 2;
+        } else if (pd0Level <= 4) {
+            rateEstLevel = 4;
+        } else {
+            rateEstLevel = 0;
+        }
+        // Don't use a more conservative level in LPD0 than the regular path would use
+        if (rateEstLevel) {
+            rateEstLevel = (std::uint8_t)std::max((int)rateEstLevel, (int)pcs.rateEstLevel);
+        }
+    }
+    setRateEstCtrls(ctx.rateEstCtrls, rateEstLevel);
+    // set at pic-level b/c feature depends on some pic-level initializations
+    ctx.approxInterRate = true;
+}
+
 }  // namespace mode_config
 }  // namespace l16_rdo

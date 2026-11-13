@@ -6818,3 +6818,584 @@ TEST_CASE("the nsq_geom_level getters - the full preset x coeff domain") {
             CHECK(getNsqGeomLevelAllIntra((EncMode)em) == wantAi);
         }
 }
+
+
+// ---------------------------------------------------------------------------
+// EMC2 rung 9: sig_deriv_enc_dec_common + sig_deriv_enc_dec_pd0.
+// ---------------------------------------------------------------------------
+
+// The pd0 setter, independent table transcription (for the composition
+// oracle; the standalone pd0 test pins it field-by-field).
+static void oracleFillPd0(Pd0Ctrls& c, int level, int hbd) {
+    if (hbd) {
+        c.pd0Level = 0;
+        return;
+    }
+    static const int lvl[9] = {0, 1, 2, 3, 4, 5, 5, 6, 6};
+    if (level > 8) return;
+    c.pd0Level = (uint8_t)lvl[level];
+    for (int i = 0; i < 7; ++i) c.usePd0Detector[i] = false;
+    if (level <= 3) {
+        for (int i = 0; i <= level; ++i) c.usePd0Detector[i] = false;
+    } else if (level == 4) {
+        c.usePd0Detector[4] = true;
+        c.useRefInfo[4] = 2;
+        c.me8x8CostVarianceTh[4] = 250000;
+        c.edgeDistTh[4] = 16384;
+        c.neighMeDistShift[4] = 3;
+    } else if (level == 5) {
+        c.usePd0Detector[4] = true;
+        c.useRefInfo[4] = 2;
+        c.me8x8CostVarianceTh[4] = 250000;
+        c.edgeDistTh[4] = 16384;
+        c.neighMeDistShift[4] = 3;
+        c.usePd0Detector[5] = true;
+        c.useRefInfo[5] = 1;
+        c.me8x8CostVarianceTh[5] = 250000 >> 1;
+        c.edgeDistTh[5] = 16384;
+        c.neighMeDistShift[5] = 2;
+    } else if (level == 6) {
+        c.usePd0Detector[5] = true;
+        c.useRefInfo[5] = 0;
+        c.me8x8CostVarianceTh[5] = 500000;
+        c.edgeDistTh[5] = 16384;
+        c.neighMeDistShift[5] = 2;
+    } else {
+        c.usePd0Detector[5] = true;
+        c.useRefInfo[5] = 0;
+        c.me8x8CostVarianceTh[5] = 500000 << 1;
+        c.edgeDistTh[5] = (uint32_t)~0;
+        c.neighMeDistShift[5] = (uint16_t)~0;
+        c.usePd0Detector[6] = true;
+        c.useRefInfo[6] = level == 7 ? 1 : 2;
+        c.me8x8CostVarianceTh[6] = 250000;
+        c.edgeDistTh[6] = 16384;
+        c.neighMeDistShift[6] = 2;
+    }
+}
+
+// The lpd1 setter as a table fill (for the composition oracle).
+static void oracleFillLpd1(Lpd1Ctrls& c, int level) {
+    if (level == 0) {
+        c.pd1Level = (uint8_t)REGULAR_PD1;
+        return;
+    }
+    if (level > 8) return;
+    static const int ePd1[9] = {-1, 0, 0, 0, 1, 3, 4, 5, 6};
+    c.pd1Level = (uint8_t)ePd1[level];
+    for (int row = 0; row < 7; ++row) {
+        const OracleLpd1Row& r = oracleLpd1Rows(level, row);
+        if (!r.written) continue;
+        c.useLpd1Detector[row] = r.det != 0;
+        c.useRefInfo[row] = (uint8_t)r.ref;
+        c.costThDist[row] = r.dist;
+        c.costThRate[row] = r.rate;
+        c.nzCoeffTh[row] = r.nz;
+        c.maxMvLength[row] = r.mv;
+        c.me8x8CostVarianceTh[row] = r.var;
+        c.skipPd0EdgeDistTh[row] = r.skip;
+        c.skipPd0MeShift[row] = r.shift;
+    }
+}
+
+// The nsq-geom setter as a table fill (for the composition oracle).
+static void oracleFillNsqGeom(NsqGeomCtrls& c, int level) {
+    c = NsqGeomCtrls{};
+    if (level == 0) return;
+    c.enabled = true;
+    if (level == 3) c.minNsqBlockSize = 8;
+    if (level == 4) c.minNsqBlockSize = 16;
+    if (level <= 2) c.allowHv4 = 1;
+    if (level == 1) c.allowHvaHvb = 1;
+}
+
+TEST_CASE("sig_deriv_enc_dec_common - the composition over the mode grid, vs the oracle") {
+    // :7162-7256. The glue: depth-refinement injection, the
+    // pred_depth_only fold, the pd0 early-out, the % gates, the 3-way
+    // disallow_8x8 tune, disallow_4x4 pass-through, the max-block tune,
+    // the depth-removal delegation, the lpd1 modulations (cyclic
+    // refresh / M11 band), the pd1 refinement band, nsq-geom and the
+    // max_tx_size gate.
+    const uint32_t n = 4;
+    std::vector<uint32_t> cv(n), d(n * 4);
+    std::vector<uint16_t> var(8);
+    for (uint32_t i = 0; i < n; ++i) cv[i] = 1000u * (i + 1);
+    for (uint32_t i = 0; i < d.size(); ++i) d[i] = 500u * (i + 1);
+    for (uint32_t i = 0; i < 8; ++i) var[i] = (uint16_t)(400u * (i + 1) + 1u);
+    for (int em = (int)ENC_MR; em <= (int)ENC_M13; ++em) {
+        for (int tune = 0; tune <= 2; ++tune) {  // 0 default, 1 rtc, 2 allintra
+            for (int islice = 0; islice <= 1; ++islice) {
+                for (int base = 0; base <= 1; ++base) {
+                    for (int picLpd1 : {0, 3, 5, 9}) {
+                        for (int cyclic = 0; cyclic <= 1; ++cyclic) {
+                            for (int meVar = 0; meVar <= 1; ++meVar) {
+                                for (int maxTx = 32; maxTx <= 64; maxTx += 32) {
+                                    for (int drLvl = 0; drLvl <= 6; drLvl += 6) {
+                                        for (int b64w = 64; b64w >= 48; b64w -= 16) {
+                                            EncDecCommonPcs p;
+                                            std::memset(&p, 0, sizeof(p));
+                                            p.encMode = (EncMode)em;
+                                            p.isISlice = islice == 1;
+                                            p.picBlockBasedDepthRefinementLevel = 8;
+                                            p.picPd0Lvl = 8;
+                                            p.picDisallow4x4 = true;
+                                            p.picDepthRemovalLevel = (uint8_t)drLvl;
+                                            p.picLpd1Lvl = (uint8_t)picLpd1;
+                                            p.nsqGeomLevel = 4;
+                                            p.b64GeomWidth = (uint16_t)b64w;
+                                            p.b64GeomHeight = 64;
+                                            p.me8x8CostVariance = meVar ? 999999u : 100u;
+                                            p.baseQIdx = 30;
+                                            p.capMaxSizeQpScaling = false;
+                                            p.qp = 30;
+                                            p.variance64 = var.data();
+                                            p.varianceStride = 2;
+                                            EncDecCommonScs s;
+                                            s.allintra = tune == 2;
+                                            s.rtcTune = tune == 1;
+                                            s.maxTxSize = maxTx;
+                                            EncDecCommonCtx c;
+                                            std::memset(&c, 0xA5, sizeof(c));
+                                            c.hbdMd = 0;
+                                            c.sbQindex = cyclic ? 10 : 30;
+                                            c.qpIndex = 10;
+                                            c.isBase = base == 1;
+                                            c.isNotLastLayer = false;
+                                            DepthRemovalPcs dp;
+                                            std::memset(&dp, 0, sizeof(dp));
+                                            dp.isISlice = islice == 1;
+                                            dp.rtc = tune == 1;
+                                            dp.superBlockSize = 64;
+                                            dp.modulateByQp = false;
+                                            dp.pictureQp = 30;
+                                            dp.me64x64Distortion = d.data();
+                                            dp.me32x32Distortion = d.data();
+                                            dp.me16x16Distortion = d.data();
+                                            dp.me8x8Distortion = d.data();
+                                            dp.me8x8CostVariance = cv.data();
+                                            dp.sbGeomWidth = (uint8_t)b64w;
+                                            dp.sbGeomHeight = 64;
+                                            DepthRemovalCtx dc;
+                                            dc.fastLambdaMd[0] = 5333;
+                                            dc.fastLambdaMd[1] = 5333;
+                                            dc.sbIndex = 1;
+                                            dc.sbOriginX = 0;
+                                            dc.sbOriginY = 0;
+                                            dc.sbQindex = c.sbQindex;
+                                            dc.disallow4x4 = 0;
+                                            sigDerivEncDecCommon(p, s, c, dp, dc);
+
+                                            // ---- the oracle ----
+                                            EncDecCommonCtx e;
+                                            std::memset(&e, 0xA5, sizeof(e));
+                                            e.hbdMd = 0;
+                                            e.sbQindex = c.sbQindex;
+                                            e.qpIndex = 10;
+                                            e.isBase = base == 1;
+                                            e.isNotLastLayer = false;
+                                            // 1. depth refinement (:7168)
+                                            const OracleDepthRefineRow& dr = oracleDepthRefine(8);
+                                            e.depthRefinementCtrls.mode = (uint8_t)dr.mode;
+                                            e.depthRefinementCtrls.s1ParentToCurrentTh = (uint8_t)dr.s1;
+                                            e.depthRefinementCtrls.s2ParentToCurrentTh = (uint8_t)dr.s2;
+                                            e.depthRefinementCtrls.e1SubToCurrentTh = (uint8_t)dr.e1;
+                                            e.depthRefinementCtrls.e2SubToCurrentTh = (uint8_t)dr.e2;
+                                            e.depthRefinementCtrls.parentMaxCostThMult = (uint16_t)dr.pmult;
+                                            e.depthRefinementCtrls.coeffLvlModulation = (uint8_t)dr.coeffMod;
+                                            e.depthRefinementCtrls.costBandBasedModulation = (uint8_t)dr.bandMod;
+                                            e.depthRefinementCtrls.maxCostMultiplier = (uint16_t)dr.maxMult;
+                                            e.depthRefinementCtrls.maxBandCnt = (uint8_t)dr.maxBand;
+                                            for (int i = 0; i < 4; ++i)
+                                                e.depthRefinementCtrls.decrementPerBand[i] = dr.decr[i];
+                                            e.depthRefinementCtrls.lowerDepthSplitCostTh = (uint32_t)dr.lower;
+                                            e.depthRefinementCtrls.splitRateTh = (uint32_t)dr.split;
+                                            e.depthRefinementCtrls.limitMaxMinToPd0 = (uint8_t)dr.limit;
+                                            e.depthRefinementCtrls.useRefInfo = (uint8_t)dr.ref;
+                                            e.depthRefinementCtrls.qWeight = (uint8_t)dr.q;
+                                            e.depthRefinementCtrls.pd0UnavailModeDepth = (uint32_t)dr.unavail;
+                                            // 2. pred_depth_only (:7171-7172)
+                                            e.predDepthOnly = e.picPredDepthOnly =
+                                                (e.depthRefinementCtrls.mode == 2);
+                                            // 3. pd0 (:7173)
+                                            oracleFillPd0(e.pd0Ctrls, 8, 0);
+                                            // 4-7. the depth-removal resets + % gates
+                                            e.depthRemovalCtrls.disallowBelow64x64 = 0;
+                                            e.depthRemovalCtrls.disallowBelow32x32 = 0;
+                                            e.depthRemovalCtrls.disallowBelow16x16 = 0;
+                                            // 8. disallow_8x8 (:7200-7202)
+                                            e.disallow8x8 = s.allintra
+                                                ? false
+                                                : s.rtcTune
+                                                ? (dimensionsRequire8x8(p.b64GeomWidth, p.b64GeomHeight)
+                                                       ? false
+                                                       : (em <= (int)ENC_M9 ? false : true))
+                                                : false;
+                                            // 9. disallow_4x4 (:7203)
+                                            e.disallow4x4 = p.picDisallow4x4;
+                                            // 10. max block size (:7205-7209): the edge SB
+                                            // (48-wide) and I-slice walls cap at 64 before
+                                            // the band check; the SB64 ME wall reads the
+                                            // scalar (999999/100) and splits only at M9
+                                            // with the high regime.
+                                            if (s.allintra) {
+                                                e.maxBlockSize = 64;
+                                            } else if (s.rtcTune) {
+                                                if (b64w < 64 || islice) e.maxBlockSize = 64;
+                                                else e.maxBlockSize =
+                                                    (em > (int)ENC_M8 && meVar) ? 32 : 64;
+                                            } else {
+                                                e.maxBlockSize = 64;
+                                            }
+                                            // 11. depth removal (:7210)
+                                            oracleSetDepthRemoval(e.depthRemovalCtrls, dp, dc,
+                                                                  (uint8_t)drLvl);
+                                            // 12. lpd1 (:7211-7236)
+                                            int lpd1 = picLpd1;
+                                            if (s.rtcTune) {
+                                                if (lpd1 && c.sbQindex < p.baseQIdx) {
+                                                    lpd1 = std::max(0, lpd1 - 2);
+                                                    lpd1 = std::min(lpd1, base ? 2 : 4);
+                                                }
+                                                oracleFillLpd1(e.lpd1Ctrls, lpd1);
+                                            } else if (em <= (int)ENC_M10) {
+                                                oracleFillLpd1(e.lpd1Ctrls, picLpd1);
+                                            } else {
+                                                if (!islice) {
+                                                    const int th = em <= (int)ENC_M8
+                                                                       ? 3 * (int)c.qpIndex
+                                                                       : 3000;
+                                                    const int me = meVar ? 999999 : 100;
+                                                    if (lpd1 == 0) {
+                                                        if (me < th) lpd1 += 3;
+                                                    } else {
+                                                        if (me < th) lpd1 += 2;
+                                                    }
+                                                }
+                                                lpd1 = std::max(0, std::min(lpd1, 7));
+                                                oracleFillLpd1(e.lpd1Ctrls, lpd1);
+                                            }
+                                            // 13. pd1_lvl_refinement (:7237-7248)
+                                            if (s.rtcTune) {
+                                                if (em <= (int)ENC_M8) e.pd1LvlRefinement = 0;
+                                                else if (em <= (int)ENC_M10)
+                                                    e.pd1LvlRefinement = e.isNotLastLayer ? 0 : 2;
+                                                else e.pd1LvlRefinement = 2;
+                                            } else {
+                                                e.pd1LvlRefinement = em <= (int)ENC_M10 ? 0 : 2;
+                                            }
+                                            // 14. nsq geom (:7249)
+                                            oracleFillNsqGeom(e.nsqGeomCtrls, 4);
+                                            // 15. the max_tx_size gate (:7251-7254)
+                                            if (s.maxTxSize == 32)
+                                                e.depthRemovalCtrls.disallowBelow64x64 = false;
+
+                                            CHECK(c.predDepthOnly == e.predDepthOnly);
+                                            CHECK(c.picPredDepthOnly == e.picPredDepthOnly);
+                                            CHECK(c.depthRefinementCtrls.mode ==
+                                                  e.depthRefinementCtrls.mode);
+                                            CHECK(c.depthRefinementCtrls.s1ParentToCurrentTh ==
+                                                  e.depthRefinementCtrls.s1ParentToCurrentTh);
+                                            CHECK(c.depthRefinementCtrls.lowerDepthSplitCostTh ==
+                                                  e.depthRefinementCtrls.lowerDepthSplitCostTh);
+                                            CHECK(c.depthRefinementCtrls.pd0UnavailModeDepth ==
+                                                  e.depthRefinementCtrls.pd0UnavailModeDepth);
+                                            CHECK(c.pd0Ctrls.pd0Level == e.pd0Ctrls.pd0Level);
+                                            CHECK(c.pd0Ctrls.useRefInfo[6] == e.pd0Ctrls.useRefInfo[6]);
+                                            CHECK(c.pd0Ctrls.me8x8CostVarianceTh[5] ==
+                                                  e.pd0Ctrls.me8x8CostVarianceTh[5]);
+                                            CHECK(c.depthRemovalCtrls.enabled ==
+                                                  e.depthRemovalCtrls.enabled);
+                                            CHECK(c.depthRemovalCtrls.disallowBelow64x64 ==
+                                                  e.depthRemovalCtrls.disallowBelow64x64);
+                                            CHECK(c.depthRemovalCtrls.disallowBelow32x32 ==
+                                                  e.depthRemovalCtrls.disallowBelow32x32);
+                                            CHECK(c.depthRemovalCtrls.disallowBelow16x16 ==
+                                                  e.depthRemovalCtrls.disallowBelow16x16);
+                                            CHECK(c.disallow8x8 == e.disallow8x8);
+                                            CHECK(c.disallow4x4 == e.disallow4x4);
+                                            CHECK(c.maxBlockSize == e.maxBlockSize);
+                                            CHECK(c.pd1LvlRefinement == e.pd1LvlRefinement);
+                                            CHECK(c.lpd1Ctrls.pd1Level == e.lpd1Ctrls.pd1Level);
+                                            CHECK(c.lpd1Ctrls.costThDist[0] == e.lpd1Ctrls.costThDist[0]);
+                                            CHECK(c.lpd1Ctrls.skipPd0MeShift[0] ==
+                                                  e.lpd1Ctrls.skipPd0MeShift[0]);
+                                            CHECK(c.nsqGeomCtrls.enabled == e.nsqGeomCtrls.enabled);
+                                            CHECK(c.nsqGeomCtrls.minNsqBlockSize ==
+                                                  e.nsqGeomCtrls.minNsqBlockSize);
+                                            CHECK(c.nsqGeomCtrls.allowHv4 == e.nsqGeomCtrls.allowHv4);
+                                            CHECK(c.nsqGeomCtrls.allowHvaHvb == e.nsqGeomCtrls.allowHvaHvb);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// sig_deriv_enc_dec_pd0, independent transcription (:7283-7454).
+static void oracleEncDecPd0(EncDecPd0Ctx& c, const EncDecPd0Pcs& p, const EncDecPd0Scs& s) {
+    const int pd0Level = c.pd0Ctrls.pd0Level;
+    const bool allintra = s.allintra;
+    const bool rtc = s.rtcTune;
+    c.mdDisallowNsqSearch = true;
+    c.shutFastRate = true;
+    uint32_t me64Dist = p.me64x64Distortion;
+    if (p.sb128Path) {
+        // the SB128 gather at origin (0,0) of the test's 2x2 grid
+        me64Dist = (p.sb128.me64x64Distortion[0] + p.sb128.me64x64Distortion[1] +
+                    p.sb128.me64x64Distortion[2] + p.sb128.me64x64Distortion[3]) / 4;
+    }
+    int depthEarlyExitLvl;
+    if (rtc && pd0Level == 6) depthEarlyExitLvl = 0;
+    else if (pd0Level <= 1 || c.picPredDepthOnly) depthEarlyExitLvl = 1;
+    else depthEarlyExitLvl = 2;
+    if (depthEarlyExitLvl == 0) {
+        c.depthEarlyExitCtrls.splitCostTh = 0;
+        c.depthEarlyExitCtrls.earlyExitTh = 0;
+    } else if (depthEarlyExitLvl == 1) {
+        c.depthEarlyExitCtrls.splitCostTh = 50;
+        c.depthEarlyExitCtrls.earlyExitTh = 0;
+    } else {
+        c.depthEarlyExitCtrls.splitCostTh = 50;
+        c.depthEarlyExitCtrls.earlyExitTh = 900;
+    }
+    const uint32_t fastLambda = c.hbdMd ? c.fastLambdaMd[1] : c.fastLambdaMd[0];
+    int intraLevel = 0;
+    if (p.encMode <= (rtc ? (int)ENC_M9 : (int)ENC_M10)) {
+        if (pd0Level == 0) {
+            intraLevel = 9;
+        } else if (p.isISlice || p.transitionPresent == 1) {
+            intraLevel = 1;
+        } else if (pd0Level <= 2) {
+            const uint64_t useTh = oracleRdCost(fastLambda, 1ull << 13, 64ull * 64 * 6);
+            const uint64_t cost64 = oracleRdCost(fastLambda, 0, me64Dist);
+            intraLevel = (cost64 < useTh) ? 0 : 1;
+        } else {
+            intraLevel = 0;
+        }
+    } else {
+        intraLevel = (p.isISlice || p.transitionPresent == 1) ? 8 : 0;
+    }
+    // set_intra_ctrls (the TPL walls inert in the test's grid), level =
+    // intraLevel, dist = 2.
+    if (p.skipIntra) intraLevel = 0;
+    static const uint8_t apl[10] = {0, 1, 2, 2, 3, 4, 4, 4, 4, 0};
+    if (intraLevel <= 9) {
+        c.intraCtrls.enableIntra = intraLevel == 0 ? 0 : 1;
+        c.intraCtrls.intraModeEnd = (intraLevel == 0 || intraLevel == 9) ? 0
+                                    : intraLevel <= 3 ? 12
+                                    : intraLevel == 4 ? 11 : 9;
+        c.intraCtrls.angularPredLevel = apl[intraLevel];
+        c.intraCtrls.pruneUsingBestMode = 0;
+        c.intraCtrls.pruneUsingEdgeInfo = false;
+    }
+    c.intraCtrls.skipAngularDelta1Th = 20;
+    c.intraCtrls.skipAngularDelta2Th = 10;
+    c.intraCtrls.skipAngularDelta3Th = 5;
+    c.intraSetCtx.skipIntra = !(c.intraCtrls.enableIntra) || p.skipIntra;
+    c.parentCostBias = 1000;
+    if (!allintra && pd0Level == 6) {
+        c.parentCostBias = 1100 - (int)((p.baseQIdx * 150 + 127) / 255);
+        const uint32_t meVar = p.me8x8CostVariance;
+        if (p.pd0CostBiasWeight) {
+            const uint32_t dist8 = std::max(p.me8x8Distortion, 1u);
+            const uint32_t ratioQ4 = (me64Dist * 16) / dist8;
+            const uint32_t w = (uint32_t)std::max((int)std::min((int)p.pd0CostBiasWeight, 1024),
+                                                  (int)std::min(1024, (int)((ratioQ4 - 16) * 16 +
+                                                                            p.pd0CostBiasWeight)));
+            uint32_t biasAdd;
+            if (meVar > 2000) biasAdd = (75 * w) >> 10;
+            else if (meVar > 1000) biasAdd = (50 * w) >> 10;
+            else if (meVar > 500) biasAdd = (25 * w) >> 10;
+            else biasAdd = 0;
+            c.parentCostBias += biasAdd;
+        } else {
+            if (meVar > 2000) c.parentCostBias += 75;
+            else if (meVar > 1000) c.parentCostBias += 50;
+            else if (meVar > 500) c.parentCostBias += 25;
+        }
+        c.parentCostBias = (uint32_t)std::max(900, std::min(1200, (int)c.parentCostBias));
+    }
+    c.pd0UseSrcSamples = allintra || p.hbdMd != 0;
+    if (pd0Level == 6) {
+        return;
+    }
+    // set_chroma_controls(ctx, 0)
+    c.uvCtrls.uvMode = 2;
+    c.uvCtrls.enabled = 0;
+    // set_pf_controls(ctx, 1) -> DEFAULT_SHAPE = 0 (:3484-3486)
+    c.pfCtrls.pfShape = 0;
+    // subres
+    int subresLevel;
+    if (pd0Level <= 2 || !c.disallow4x4 || !p.b64IsComplete) {
+        subresLevel = 0;
+    } else {
+        subresLevel = 0;
+        const uint64_t useTh = oracleRdCost(fastLambda, 1ull << 13, 64ull * 64 * 6);
+        const uint64_t cost64 = oracleRdCost(fastLambda, 0, me64Dist);
+        if (pd0Level <= 4) {
+            if (p.isISlice || p.transitionPresent == 1) subresLevel = 1;
+            else subresLevel = (cost64 < useTh) ? 1 : 0;
+        } else {
+            if (p.isNotLastLayer) {
+                subresLevel = (c.disallow8x8 ||
+                               (c.depthRemovalCtrls.enabled &&
+                                (c.depthRemovalCtrls.disallowBelow16x16 ||
+                                 c.depthRemovalCtrls.disallowBelow32x32 ||
+                                 c.depthRemovalCtrls.disallowBelow64x64)))
+                                  ? 2
+                                  : 1;
+            } else {
+                subresLevel = 2;
+            }
+        }
+    }
+    // set_subres_controls (:3453-3476): step = the level (0-2);
+    // odd_to_even_deviation_th = step == 0 ? 0 : 5.
+    if (subresLevel <= 2) c.subresCtrls.step = (uint8_t)subresLevel;
+    c.subresCtrls.oddToEvenDeviationTh = subresLevel == 0 ? 0 : 5;
+    // rate est
+    int rateEstLevel = 0;
+    if (p.rateEstLevel) {
+        if (pd0Level <= 3) rateEstLevel = 2;
+        else if (pd0Level <= 4) rateEstLevel = 4;
+        else rateEstLevel = 0;
+        if (rateEstLevel) rateEstLevel = std::max(rateEstLevel, (int)p.rateEstLevel);
+    }
+    // set_rate_est_ctrls
+    static const int eCtx[5] = {0, 1, 1, 1, 0};
+    static const int eCoeff[5] = {0, 1, 0, 0, 0};
+    static const int eLvl[5] = {0, 1, 1, 2, 2};
+    static const int eOff[5] = {8, 0, 0, 0, 0};
+    static const int eFast[5] = {2, 1, 2, 2, 2};
+    c.rateEstCtrls.updateSkipCtxDcSignCtx = eCtx[rateEstLevel] != 0;
+    c.rateEstCtrls.updateSkipCoeffCtx = eCoeff[rateEstLevel] != 0;
+    c.rateEstCtrls.coeffRateEstLvl = (uint8_t)eLvl[rateEstLevel];
+    c.rateEstCtrls.lpd0QpOffset = (int8_t)eOff[rateEstLevel];
+    c.rateEstCtrls.pd0FastCoeffEstLevel = (uint8_t)eFast[rateEstLevel];
+    c.approxInterRate = true;
+}
+
+TEST_CASE("sig_deriv_enc_dec_pd0 - the composition over the pd0 grid, vs the oracle") {
+    // :7283-7454.
+    const uint32_t n = 4;
+    std::vector<uint32_t> d64(n), d32(n), d16(n), d8(n), cv(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        d64[i] = 100000u * (i + 1);
+        d32[i] = 50000u * (i + 1);
+        d16[i] = 25000u * (i + 1);
+        d8[i] = 12500u * (i + 1);
+        cv[i] = 900u * (i + 1);
+    }
+    for (int em : {(int)ENC_M8, (int)ENC_M9, (int)ENC_M10, (int)ENC_M11})
+        for (int pd0Lvl = 0; pd0Lvl <= 6; ++pd0Lvl)
+            for (int hbd = 0; hbd <= 1; ++hbd)
+                for (int islice = 0; islice <= 1; ++islice)
+                    for (int trans = 0; trans <= 1; ++trans)
+                        for (int rtc = 0; rtc <= 1; ++rtc)
+                            for (int allintra = 0; allintra <= 1; ++allintra)
+                                for (int biasW = 0; biasW <= 1; ++biasW)
+                                    for (int meHi = 0; meHi <= 1; ++meHi)
+                                        for (int sb128 = 0; sb128 <= 1; ++sb128)
+                                            for (int complete = 0; complete <= 1; ++complete)
+                                                for (int d4 = 0; d4 <= 1; ++d4) {
+                                                EncDecPd0Pcs p;
+                                                std::memset(&p, 0, sizeof(p));
+                                                p.encMode = (EncMode)em;
+                                                p.isISlice = islice == 1;
+                                                p.transitionPresent = (uint8_t)trans;
+                                                p.pd0CostBiasWeight = (uint8_t)(biasW ? 600 : 0);
+                                                p.me64x64Distortion = d64[1];
+                                                p.me8x8Distortion = d8[1];
+                                                p.me8x8CostVariance =
+                                                    meHi ? 999999u : 700u;
+                                                p.hbdMd = (uint8_t)hbd;
+                                                p.baseQIdx = 40;
+                                                p.b64IsComplete = complete == 1;
+                                                p.rateEstLevel = 1;
+                                                p.sb128Path = sb128 == 1;
+                                                p.sb128.b64Size = 64;
+                                                p.sb128.alignedWidth = 128;
+                                                p.sb128.alignedHeight = 128;
+                                                p.sb128.me64x64Distortion = d64.data();
+                                                p.sb128.me32x32Distortion = d32.data();
+                                                p.sb128.me16x16Distortion = d16.data();
+                                                p.sb128.me8x8Distortion = d8.data();
+                                                p.sb128.me8x8CostVariance = cv.data();
+                                                p.isNotLastLayer = false;
+                                                p.skipIntra = false;
+                                                p.tplEnable = false;
+                                                EncDecPd0Scs s;
+                                                s.allintra = allintra == 1;
+                                                s.rtcTune = rtc == 1;
+                                                EncDecPd0Ctx c;
+                                                std::memset(&c, 0xA5, sizeof(c));
+                                                c.hbdMd = (uint8_t)hbd;
+                                                c.picPredDepthOnly = false;
+                                                c.fastLambdaMd[0] = 5333;
+                                                c.fastLambdaMd[1] = 5333;
+                                                c.disallow4x4 = d4 == 1;
+                                                c.disallow8x8 = false;
+                                                c.depthRemovalCtrls.enabled = 0;
+                                                // the pd0 level wall: written directly
+                                                c.pd0Ctrls.pd0Level = (uint8_t)pd0Lvl;
+                                                sigDerivEncDecPd0(p, s, c);
+
+                                                EncDecPd0Ctx e;
+                                                std::memset(&e, 0xA5, sizeof(e));
+                                                e.hbdMd = (uint8_t)hbd;
+                                                e.picPredDepthOnly = false;
+                                                e.fastLambdaMd[0] = 5333;
+                                                e.fastLambdaMd[1] = 5333;
+                                                e.disallow4x4 = d4 == 1;
+                                                e.disallow8x8 = false;
+                                                e.depthRemovalCtrls.enabled = 0;
+                                                e.pd0Ctrls.pd0Level = (uint8_t)pd0Lvl;
+                                                oracleEncDecPd0(e, p, s);
+
+                                                CHECK(c.mdDisallowNsqSearch ==
+                                                      e.mdDisallowNsqSearch);
+                                                CHECK(c.shutFastRate == e.shutFastRate);
+                                                CHECK(c.depthEarlyExitCtrls.splitCostTh ==
+                                                      e.depthEarlyExitCtrls.splitCostTh);
+                                                CHECK(c.depthEarlyExitCtrls.earlyExitTh ==
+                                                      e.depthEarlyExitCtrls.earlyExitTh);
+                                                CHECK(c.intraCtrls.enableIntra ==
+                                                      e.intraCtrls.enableIntra);
+                                                CHECK(c.intraCtrls.intraModeEnd ==
+                                                      e.intraCtrls.intraModeEnd);
+                                                CHECK(c.intraCtrls.angularPredLevel ==
+                                                      e.intraCtrls.angularPredLevel);
+                                                CHECK(c.intraCtrls.skipAngularDelta1Th ==
+                                                      e.intraCtrls.skipAngularDelta1Th);
+                                                CHECK(c.intraSetCtx.skipIntra ==
+                                                      e.intraSetCtx.skipIntra);
+                                                CHECK(c.parentCostBias == e.parentCostBias);
+                                                CHECK(c.pd0UseSrcSamples == e.pd0UseSrcSamples);
+                                                if (pd0Lvl == 6) {
+                                                    // the early return: the tail keeps
+                                                    // its 0xA5 poison bytes
+                                                    CHECK(c.uvCtrls.uvMode == 0xA5);
+                                                    CHECK(c.pfCtrls.pfShape == 0xA5);
+                                                    CHECK(c.subresCtrls.step == 0xA5);
+                                                } else {
+                                                    CHECK(c.uvCtrls.uvMode == e.uvCtrls.uvMode);
+                                                    CHECK(c.uvCtrls.enabled == e.uvCtrls.enabled);
+                                                    CHECK(c.pfCtrls.pfShape == e.pfCtrls.pfShape);
+                                                    CHECK(c.subresCtrls.step == e.subresCtrls.step);
+                                                    CHECK(c.subresCtrls.oddToEvenDeviationTh ==
+                                                          e.subresCtrls.oddToEvenDeviationTh);
+                                                    CHECK(c.rateEstCtrls.coeffRateEstLvl ==
+                                                          e.rateEstCtrls.coeffRateEstLvl);
+                                                    CHECK(c.rateEstCtrls.lpd0QpOffset ==
+                                                          e.rateEstCtrls.lpd0QpOffset);
+                                                    CHECK(c.rateEstCtrls.updateSkipCtxDcSignCtx ==
+                                                          e.rateEstCtrls.updateSkipCtxDcSignCtx);
+                                                    CHECK(c.approxInterRate == e.approxInterRate);
+                                                }
+                                            }
+}
