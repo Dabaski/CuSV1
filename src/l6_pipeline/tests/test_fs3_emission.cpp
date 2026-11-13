@@ -61,16 +61,13 @@ Fs2Line loadGate(const char* tag, int base = 10) {
 TEST_CASE("FS3: per-size emission walk bit-exact vs the FS2 gate lines (4x4/8x8/32x32/64x64)") {
     struct Geo {
         int S;
-        entropy::TxSize ts;
-        entropy::BlockSize bs;
         const char* tag;      // "fs24" etc
-        bool partition;       // the walk reads a partition symbol
     };
     const Geo geos[4] = {
-        {4, entropy::TX_4X4, entropy::BLOCK_4X4, "fs24", false},
-        {8, entropy::TX_8X8, entropy::BLOCK_8X8, "fs28", true},
-        {32, entropy::TX_32X32, entropy::BLOCK_32X32, "fs232", true},
-        {64, entropy::TX_64X64, entropy::BLOCK_64X64, "fs264", true},
+        {4, "fs24"},
+        {8, "fs28"},
+        {32, "fs232"},
+        {64, "fs264"},
     };
 
     for (int g = 0; g < 4; ++g) {

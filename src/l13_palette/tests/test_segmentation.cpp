@@ -5,10 +5,6 @@
 
 namespace seg = l13_palette::segmentation;
 
-TEST_CASE("l13 segmentation scaffold boots") {
-    CHECK(true);
-}
-
 TEST_CASE("kSegFeatureSigned over SEG_LVL_MAX (segmentation_params.c:16)") {
     const std::int32_t expect[seg::segLvlMax] = {1, 1, 1, 1, 1, 0, 0, 0};
     for (int j = 0; j < seg::segLvlMax; ++j) {

@@ -4,10 +4,6 @@
 
 #include "resize.h"
 
-TEST_CASE("l11_resize scaffold boots") {
-    CHECK(true);
-}
-
 TEST_CASE("getDown2Length halves once for steps 1") {
     CHECK(resize::getDown2Length(16, 1) == 8);
 }

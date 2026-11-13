@@ -7,10 +7,6 @@
 
 #include "temporal_filter.h"
 
-TEST_CASE("l9 temporal scaffold boots") {
-    CHECK(true);
-}
-
 // TF2 S1: calculate_squared_errors_sum_highbd (temporal_filtering.c:710-720).
 // Raw int-arithmetic SSE over the window, then ONE shift by shift_factor
 // at the end (:719). bd-10 fixture: shift_factor = (10-8)*2 = 4; diffs

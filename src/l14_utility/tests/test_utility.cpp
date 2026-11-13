@@ -2,10 +2,6 @@
 #include <doctest.h>
 #include <utility.h>
 
-TEST_CASE("l14_utility scaffold boots") {
-    CHECK(true);
-}
-
 TEST_CASE("GEOM_TOT is 11 geoms") {
     CHECK(l14_utility::GEOM_TOT == 11);
 }
@@ -17,23 +13,6 @@ TEST_CASE("kNotUsedValue is 0") {
 TEST_CASE("BlockSize mirror carries BLOCK_INVALID 255") {
     CHECK(l14_utility::BLOCK_INVALID == 255);
     CHECK(l14_utility::BLOCK_128X128 == 15);
-}
-
-TEST_CASE("assertErr with a true condition returns") {
-    l14_utility::assertErr(1, "unreachable");
-    CHECK(true);
-}
-
-TEST_CASE("BlockGeom carries the builder-written fields") {
-    l14_utility::BlockGeom g{};
-    g.sq_size = 64;
-    g.bwidth = 32;
-    g.bheight = 16;
-    g.bsize = l14_utility::BLOCK_32X16;
-    g.bsize_uv = l14_utility::BLOCK_16X8;
-    g.d1_depth_offset = 5;
-    g.ns_depth_offset = 209;
-    CHECK(g.ns_depth_offset == 209);
 }
 
 TEST_CASE("nsQuarterSizeMult carries the H4 row at part index 3") {

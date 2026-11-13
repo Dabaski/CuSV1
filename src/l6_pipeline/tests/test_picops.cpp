@@ -223,10 +223,6 @@ TEST_CASE("l6 picops generatePadding16Bit pads left right then replicates rows")
     CHECK(buf[31] == 8);
 }
 
-TEST_CASE("l6 picops scaffold boots") {
-    CHECK(true);
-}
-
 // CS1: svt_aom_picture_copy_kernel (C_DEFAULT/picture_operators_c.c:30-49).
 // Copies area_width x area_height rows row-by-row honoring strides.
 // Fixture: 3 rows x 4 cols, src stride 6, dst stride 8; padding bytes
