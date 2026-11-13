@@ -428,6 +428,43 @@ std::uint32_t updateLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint
     return (std::uint32_t)rdmult;
 }
 
+// svt_aom_compute_rd_mult (rc_process.c:446-451): verbatim.
+std::uint32_t computeRdMult(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                            bool rtc, bool statsBasedSbLambdaModulation) {
+    // Always use q_index for the derivation of the initial rdmult (i.e. don't use me_q_index)
+    const std::int64_t rdmult = computeRdMultBasedOnQindex(bitDepth, pcs.updateType, qIndex);
+    return updateLambda(pcs, qIndex, meQIndex, bitDepth, rdmult, rtc, statsBasedSbLambdaModulation);
+}
+
+// svt_aom_compute_fast_lambda (rc_process.c:453-464): verbatim; the HBD
+// table branch is the named park - the pinned RTC build is 8-bit only.
+std::uint32_t computeFastLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                                bool rtc, bool statsBasedSbLambdaModulation) {
+    // Always use q_index for the derivation of the initial rdmult (i.e. don't use me_q_index)
+    const std::int64_t rdmult = kLambdaModeDecision8BitSad[qIndex];
+    return updateLambda(pcs, qIndex, meQIndex, bitDepth, rdmult, rtc, statsBasedSbLambdaModulation);
+}
+
+// svt_aom_lambda_assign (rc_process.c:466-496): verbatim; the
+// CONFIG_ENABLE_HIGH_BIT_DEPTH=0 build keeps only the 8-bit branch, so for
+// bit depths 10/12 the assert-removed else leaves the caller's values and
+// only the scale shift applies (the C1/C3 park convention).
+void lambdaAssign(const PcsCarrier& pcs, std::uint32_t& fastLambda, std::uint32_t& fullLambda, int bitDepth,
+                  std::uint8_t qpIndex, bool multiplyLambda, std::uint64_t lambdaScaleFactor, bool rtc,
+                  bool statsBasedSbLambdaModulation) {
+    (void)multiplyLambda;  // only used by the 10/12-bit paths (compiled out in 8-bit RTC)
+    if (bitDepth == kEbEightBit) {
+        fullLambda = computeRdMult(pcs, qpIndex, qpIndex, bitDepth, rtc, statsBasedSbLambdaModulation);
+        fastLambda = kLambdaModeDecision8BitSad[qpIndex];
+    } else {
+        // assert(0) in the reference - removed under NDEBUG.
+    }
+
+    // NM: To be done: tune lambda based on the picture type and layer.
+    fullLambda = (std::uint32_t)((fullLambda * lambdaScaleFactor) >> 7);
+    fastLambda = (std::uint32_t)((fastLambda * lambdaScaleFactor) >> 7);
+}
+
 // frame_is_intra_only (entropy_coding.h:61-64): verbatim.
 bool frameIsIntraOnly(int frameType) {
     return frameType == kKeyFrame || frameType == kIntraOnlyFrame;

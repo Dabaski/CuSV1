@@ -375,6 +375,28 @@ constexpr int kRtcKfLambdaBoost = 100;
 std::uint32_t updateLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
                            std::int64_t rdmult, bool rtc, bool statsBasedSbLambdaModulation);
 
+// svt_aom_compute_rd_mult (rc_process.c:446-451): verbatim; the walls thread
+// as for updateLambda (the reference reads pcs->ppcs->update_type off the
+// carrier).
+std::uint32_t computeRdMult(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                            bool rtc, bool statsBasedSbLambdaModulation);
+
+// svt_aom_compute_fast_lambda (rc_process.c:453-464): verbatim; the
+// CONFIG_ENABLE_HIGH_BIT_DEPTH branch is the named park (the 10/12-bit SAD
+// tables are dead in the pinned RTC 8-bit build), so every depth reads
+// kLambdaModeDecision8BitSad.
+std::uint32_t computeFastLambda(const PcsCarrier& pcs, std::uint8_t qIndex, std::uint8_t meQIndex, int bitDepth,
+                                bool rtc, bool statsBasedSbLambdaModulation);
+
+// svt_aom_lambda_assign (rc_process.c:466-496): verbatim; lambdaScaleFactor
+// threads static_config.lambda_scale_factors[update_type] (the enc_settings
+// default is 128 per entry); multiply_lambda is dead in the 8-bit build
+// ((void)'d in the reference). For bit depths 10/12 the assert-removed else
+// leaves the caller's values in place and only the scale shift applies.
+void lambdaAssign(const PcsCarrier& pcs, std::uint32_t& fastLambda, std::uint32_t& fullLambda, int bitDepth,
+                  std::uint8_t qpIndex, bool multiplyLambda, std::uint64_t lambdaScaleFactor, bool rtc,
+                  bool statsBasedSbLambdaModulation);
+
 // frame_is_intra_only (entropy_coding.h:61-64): the frame_type argument
 // threaded.
 bool frameIsIntraOnly(int frameType);

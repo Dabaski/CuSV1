@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "rc_arith.h"
+#include "rc_tables.h"
 
 // A9R C1: the rd-multiplier family (rc_process.c:343-392).
 //
@@ -298,4 +299,84 @@ TEST_CASE("update_lambda matches the oracle over a carrier-state grid") {
         }
     }
     CHECK(bad == 0);
+}
+
+// ---- A9R C3: compute_rd_mult / compute_fast_lambda / lambda_assign
+// (rc_process.c:446-496) + the 8-bit SAD lambda table ----
+
+namespace {
+
+std::vector<int> sadTable() {
+    return tableNumbers(refText("/third_party/SVT-AV1/Source/Lib/Codec/lambda_rate_tables.h"),
+                        "static const uint32_t av1_lambda_mode_decision8_bit_sad[QINDEX_RANGE /*256*/] = {", 256);
+}
+
+}  // namespace
+
+TEST_CASE("kLambdaModeDecision8BitSad matches lambda_rate_tables.h entry-for-entry") {
+    const std::vector<int> ref = sadTable();
+    int bad = 0;
+    for (int i = 0; i < 256; ++i)
+        if (l15_rc::kLambdaModeDecision8BitSad[i] != (std::uint32_t)ref[i]) ++bad;
+    CHECK(bad == 0);
+    // anchors from the reference print: Sad[0]=86, Sad[100]=2014, Sad[255]=28943.
+    CHECK(l15_rc::kLambdaModeDecision8BitSad[0] == 86);
+    CHECK(l15_rc::kLambdaModeDecision8BitSad[100] == 2014);
+    CHECK(l15_rc::kLambdaModeDecision8BitSad[255] == 28943);
+}
+
+TEST_CASE("compute_rd_mult composes the qindex rdmult and update_lambda") {
+    // KF q=100 (updateType KF_UPDATE): rdmult0 = 29748 (the C1 measured
+    // anchor); update KF row 150: (29748*150)>>7 = 4462200>>7 = 34860.
+    // MEASURED.
+    const l15_rc::PcsCarrier kf = lambdaPcs(0, 0, 4, 100, false, false);
+    CHECK(l15_rc::computeRdMult(kf, 100, 100, 8, false, false) == 34860);
+    // stats + delta_q_present, base 108 so qdiff = 100-108 = -8 -> factor
+    // 90: (34860*90)>>7 = 3137400>>7 = 24510. MEASURED.
+    l15_rc::PcsCarrier kfStats = lambdaPcs(0, 0, 4, 108, true, false);
+    CHECK(l15_rc::computeRdMult(kfStats, 100, 100, 8, false, true) == 24510);
+    // inter LF q=100 (updateType LF_UPDATE selects the inter default):
+    // rdmult0 = 28883; LF row 180: (28883*180)>>7 = 5198940>>7 = 40616.
+    // MEASURED.
+    l15_rc::PcsCarrier interLf = lambdaPcs(1, 4, 4, 100, false, false);
+    interLf.updateType = 1;
+    CHECK(l15_rc::computeRdMult(interLf, 100, 100, 8, false, false) == 40616);
+}
+
+TEST_CASE("compute_fast_lambda starts from the SAD table then applies update_lambda") {
+    // Sad[100] = 2014; KF row 150: (2014*150)>>7 = 302100>>7 = 2360;
+    // LF row 180: (2014*180)>>7 = 362520>>7 = 2832. MEASURED.
+    const l15_rc::PcsCarrier kf = lambdaPcs(0, 0, 4, 100, false, false);
+    CHECK(l15_rc::computeFastLambda(kf, 100, 100, 8, false, false) == 2360);
+    const l15_rc::PcsCarrier interLf = lambdaPcs(1, 4, 4, 100, false, false);
+    CHECK(l15_rc::computeFastLambda(interLf, 100, 100, 8, false, false) == 2832);
+    // The HBD branch is the named park (lambda_rate_tables.h:46 "RTC is
+    // 8-bit only -> 10/12-bit lambda tables are dead"): bd 10 still reads
+    // the 8-bit table, then the 10-bit KF factor row {128}:
+    // (2014*128)>>7 = 2014 (the identity shift). MEASURED.
+    CHECK(l15_rc::computeFastLambda(kf, 100, 100, 10, false, false) == 2014);
+}
+
+TEST_CASE("lambda_assign assigns and applies the scale factor") {
+    const l15_rc::PcsCarrier kf = lambdaPcs(0, 0, 4, 100, false, false);
+    std::uint32_t fast = 0, full = 0;
+    // scale 128 (the enc_settings.c:946 default) is the identity shift.
+    l15_rc::lambdaAssign(kf, fast, full, 8, 100, false, 128, false, false);
+    CHECK(full == 34860);
+    CHECK(fast == 2014);
+    // scale 100: (34860*100)>>7 = 27234; (2014*100)>>7 = 1573. MEASURED.
+    l15_rc::lambdaAssign(kf, fast, full, 8, 100, false, 100, false, false);
+    CHECK(full == 27234);
+    CHECK(fast == 1573);
+    // multiply_lambda is (void)'d in the 8-bit build - both values agree.
+    std::uint32_t fastMul = 0, fullMul = 0;
+    l15_rc::lambdaAssign(kf, fastMul, fullMul, 8, 100, true, 128, false, false);
+    CHECK(fullMul == 34860);
+    CHECK(fastMul == 2014);
+    // CONFIG_ENABLE_HIGH_BIT_DEPTH=0: for bd 10 the assert-removed else
+    // leaves the caller's values in place; only the scale shift applies.
+    std::uint32_t fastPark = 5, fullPark = 7;
+    l15_rc::lambdaAssign(kf, fastPark, fullPark, 10, 100, false, 100, false, false);
+    CHECK(fullPark == 5);
+    CHECK(fastPark == 3);
 }
