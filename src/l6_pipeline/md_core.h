@@ -104,6 +104,7 @@ struct MdCand {
 struct MdCandBf {
     MdCand* cand;
     PicBuf pred;
+    PicBuf residual;   // cand_bf->residual (the hadamard path)
     std::uint64_t* fast_cost;
     std::uint64_t* full_cost;
     std::uint64_t fast_luma_rate;
@@ -171,10 +172,32 @@ struct FlCtx {
     // The candidate-buffer walk state (md_stage_0).
     MdCandBf** cand_bf_ptr_array;                  // ctx->cand_bf_ptr_array
     std::uint64_t* fast_cost_array;                // ctx->fast_cost_array
+    std::int32_t* txCoeffBuf;                      // ctx->tx_coeffs->y_buffer (the hadamard coeffs)
     // The two dispatch tables (product_coding_loop.c:53-:62) - the callees
     // are the threaded prediction/fast-cost walls.
     PredictionFn predTable[2];
     FastCostFn fastCostTable[2];
+    // The obmc_trans_face_off wall set: svt_aom_obmc_motion_mode_allowed
+    // (mode_decision.c:228-:270) + svt_aom_inter_pu_prediction_av1_obmc
+    // thread as callables; svt_aom_motion_mode_allowed (:1159-:1195) is the
+    // LANDED l7 inter_symbols::motionModeAllowed - the carrier carries its
+    // frame-header window so the ported body calls the landed function.
+    using ObmcAllowedFn = bool (*)(const FlCtx& ctx, const MdCand& cand);
+    using MotionModeAllowedFn = int (*)(const FlCtx& ctx, const MdCand& cand);
+    ObmcAllowedFn obmcAllowedFn;
+    MotionModeAllowedFn motionModeAllowedFn;
+    PredictionFn obmcPredFn;
+    // The rate-estimation motion-mode fac bits (md_rate_estimation.h: the
+    // two [BLOCK_SIZES_ALL][...] tables, flat, bsize-row-major).
+    const std::int32_t* motionModeFacBits1;   // [bsize][2]
+    const std::int32_t* motionModeFacBits;    // [bsize][MOTION_MODES]
+    // The svt_aom_motion_mode_allowed frame-header window (md_process.h:
+    // the frm_hdr bits + the blk_ptr/window scalars the l7 helper reads).
+    std::uint8_t is_motion_mode_switchable;
+    std::uint8_t force_integer_mv;
+    std::uint8_t allow_warped_motion;
+    std::uint8_t gm_type_rf0;
+    std::uint32_t overlappable_neighbors;
 };
 
 // av1me.h:50-51 AomVarianceFn: (a, a_stride, b, b_stride, sse) with a =
@@ -194,6 +217,13 @@ void fastLoopCorePd0(MdCandBf* cand_bf, FlCtx* ctx, const PicBuf& input_pic, std
 // product_coding_loop.c:981-:1038 fast_loop_core_light_pd1 (the loc->
 // input_origin_index flattens to the parameter).
 void fastLoopCoreLightPd1(MdCandBf* cand_bf, FlCtx* ctx, const PicBuf& input_pic, std::uint32_t input_origin_index);
+
+// product_coding_loop.c:1040-:1136 obmc_trans_face_off.
+void obmcTransFaceOff(MdCandBf* cand_bf, FlCtx* ctx, const PicBuf& input_pic, std::uint32_t input_origin_index);
+
+// product_coding_loop.c:1209-:1293 fast_loop_core (the BlockLocation*
+// flattens to input_origin_index).
+void fastLoopCore(MdCandBf* cand_bf, FlCtx* ctx, const PicBuf& input_pic, std::uint32_t input_origin_index);
 
 // coding_unit.h:37 MAX_MODE_COST (the A6C constant) re-exported at the
 // mdc surface for the test spans.

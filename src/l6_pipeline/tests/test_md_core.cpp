@@ -11,9 +11,11 @@
 #include <cstring>
 #include <vector>
 
+#include <amvp.h>
 #include <md_core.h>
 
 namespace mdc = pipeline::mdc;
+namespace amvp = motion::amvp;
 
 namespace {
 
@@ -251,4 +253,246 @@ TEST_CASE("l6 mdc fastLoopCoreLightPd1 runs the elimination and early-exit gates
     mdc::fastLoopCoreLightPd1(&bf, &ctx, input, 0);
     CHECK(g_pred_calls[1] == 1);
     CHECK(fast_cost == (static_cast<std::uint64_t>(var) << 4) + 2000);
+}
+
+// OBMC stubs: the threaded walls (svt_aom_obmc_motion_mode_allowed +
+// svt_aom_inter_pu_prediction_av1_obmc). The prediction stub repaints the
+// pred buffer so the OBMC variance differs from the simple-translation one.
+namespace {
+int g_obmc_pred_calls = 0;
+bool g_obmc_allowed = true;
+int g_last_motion_mode = 1;  // OBMC_CAUSAL
+bool obmcAllowedStub(const mdc::FlCtx& ctx, const mdc::MdCand& cand) {
+    (void)ctx;
+    (void)cand;
+    return g_obmc_allowed;
+}
+int motionModeAllowedStub(const mdc::FlCtx& ctx, const mdc::MdCand& cand) {
+    (void)ctx;
+    (void)cand;
+    return g_last_motion_mode;
+}
+void obmcPredStub(mdc::FlCtx& ctx, mdc::MdCandBf& bf) {
+    (void)ctx;
+    // Repaint the 8x8 pred block at the origin with zeros so the OBMC
+    // variance differs from the simple-translation one.
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 8; ++c) bf.pred.buf[r * bf.pred.stride + c] = 0;
+    g_obmc_pred_calls++;
+}
+}  // namespace
+
+// trip 4: obmc_trans_face_off (product_coding_loop.c:1040-:1136). The
+// face-off: save the simple-translation results, derive the OBMC rate
+// (fast_luma_rate + num_obmc - num_translation), predict via the OBMC
+// driver, re-measure, cost = RDCOST(full_lambda, luma+chroma, dist<<4),
+// keep OBMC when cheaper else restore + valid_luma_pred = 0.
+TEST_CASE("l6 mdc obmcTransFaceOff keeps the cheaper motion mode") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.full_lambda_md[0] = 100;
+    ctx.obmcPredFn = obmcPredStub;
+    ctx.obmcAllowedFn = obmcAllowedStub;
+    ctx.motionModeAllowedFn = motionModeAllowedStub;
+    // motion_mode_fac_bits1[8X8] = {10 translation, 25 obmc} (row bsize).
+    std::int32_t fac1[entropy::BLOCK_SIZES_ALL * 2] = {};
+    fac1[entropy::BLOCK_8X8 * 2 + 0] = 10;
+    fac1[entropy::BLOCK_8X8 * 2 + 1] = 25;
+    ctx.motionModeFacBits1 = fac1;
+
+    std::uint8_t src[16 * 16];
+    std::uint8_t predBuf[16 * 16];
+    for (int i = 0; i < 256; ++i) {
+        src[i] = static_cast<std::uint8_t>(i * 7 + 1);
+        predBuf[i] = static_cast<std::uint8_t>(i * 5 + 2);
+    }
+    mdc::PicBuf input{};
+    input.buf = src;
+    input.stride = 16;
+    mdc::PicBuf predP{};
+    predP.buf = predBuf;
+    predP.stride = 16;
+
+    mdc::MdCand cand{};
+    cand.mode = l16_rdo::NEARESTMV;  // single-ref inter
+    cand.ref_frame[0] = amvp::kLastFrame;
+    cand.ref_frame[1] = amvp::kNoneFrame;
+    cand.motion_mode = mdc::kSimpleTranslation;
+    cand.is_interintra_used = 0;
+    std::uint64_t fast_cost = 5000000;
+    std::uint64_t full_cost = 0;
+    mdc::MdCandBf bf{};
+    bf.cand = &cand;
+    bf.pred = predP;
+    bf.fast_cost = &fast_cost;
+    bf.full_cost = &full_cost;
+    bf.fast_luma_rate = 100;
+    bf.fast_chroma_rate = 7;
+    bf.luma_fast_dist = 0;
+    bf.valid_luma_pred = 0;
+
+    VarOracle o;
+    // Scenario 1: the OBMC prediction zeroes the pred block, so the OBMC
+    // distortion is huge while the seeded simple cost is 1 -> OBMC loses
+    // and the simple-translation results restore.
+    fast_cost = 1;
+    g_obmc_pred_calls = 0;
+    mdc::obmcTransFaceOff(&bf, &ctx, input, 0);
+    CHECK(g_obmc_pred_calls == 1);
+    CHECK(cand.motion_mode == mdc::kSimpleTranslation);  // restored
+    CHECK(fast_cost == 1);                               // restored
+    CHECK(bf.fast_luma_rate == 100);
+    CHECK(bf.fast_chroma_rate == 7);
+    CHECK(bf.valid_luma_pred == 0);
+
+    // Scenario 2: OBMC wins. The pred block is src ^ 1 (a known distortion),
+    // the simple cost is seeded far above the zeroed-pred OBMC cost.
+    for (int i = 0; i < 256; ++i) predBuf[i] = static_cast<std::uint8_t>(src[i] ^ 1);
+    fast_cost = 0xFFFFFFFFFFFFFFFFull;
+    bf.fast_luma_rate = 100;
+    bf.valid_luma_pred = 0;
+    mdc::obmcTransFaceOff(&bf, &ctx, input, 0);
+    CHECK(cand.motion_mode == mdc::kObmcCausal);
+    CHECK(bf.valid_luma_pred == 1);
+    CHECK(bf.fast_luma_rate == 115);  // 100 + 25 - 10
+    CHECK(g_obmc_pred_calls == 2);
+    // fast_cost = RDCOST(100, 115 + 7, dObmc<<4); the zeroed OBMC pred vs
+    // src gives dObmc = sum((src-128... the population variance of src)).
+    const std::uint32_t dObmc = o.variance(predBuf, 16, src, 16, 8, 8);  // pred is zeros now
+    const std::uint64_t rate = 115 + 7;
+    const std::uint64_t want = (static_cast<std::uint64_t>((rate * 100 + 256)) >> 9) +
+        (static_cast<std::uint64_t>(dObmc) << 4) * 128;
+    CHECK(fast_cost == want);
+}
+
+// trip 5: fast_loop_core (product_coding_loop.c:1209-:1293). The hadamard
+// vs variance distortion paths, the mds0 pruning gates (per-class and
+// global), the fast cost, valid_luma_pred, the obmc hand-off and the
+// full-cost init.
+TEST_CASE("l6 mdc fastLoopCore routes hadamard and variance and prunes") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.predTable[0] = predIntra;
+    ctx.predTable[1] = predInter;
+    ctx.fastCostTable[0] = fastCostIntra;
+    ctx.fastCostTable[1] = fastCostInter;
+    ctx.full_lambda_md[0] = 100;
+    g_pred_calls[0] = g_pred_calls[1] = 0;
+
+    std::uint8_t src[16 * 16];
+    std::uint8_t predBuf[16 * 16];
+    for (int i = 0; i < 256; ++i) {
+        src[i] = static_cast<std::uint8_t>(i * 7 + 1);
+        predBuf[i] = static_cast<std::uint8_t>(i * 5 + 2);
+    }
+    mdc::PicBuf input{};
+    input.buf = src;
+    input.stride = 16;
+    mdc::PicBuf predP{};
+    predP.buf = predBuf;
+    predP.stride = 16;
+
+    mdc::MdCand cand{};
+    cand.mode = l16_rdo::DC_PRED;
+    std::uint64_t fast_cost = 12345;
+    std::uint64_t full_cost = 999;
+    mdc::MdCandBf bf{};
+    bf.cand = &cand;
+    bf.pred = predP;
+    bf.fast_cost = &fast_cost;
+    bf.full_cost = &full_cost;
+
+    // (a) the variance path (mds0_use_hadamard_blk = 0), pruning off.
+    ctx.mds0_use_hadamard_blk = 0;
+    ctx.pruning_method_th = 0;
+    ctx.mds0_best_cost = 0xFFFFFFFFFFFFFFFFull;
+    ctx.shut_fast_rate = 0;
+    mdc::fastLoopCore(&bf, &ctx, input, 0);
+    VarOracle o;
+    const std::uint32_t var = o.variance(predBuf, 16, src, 16, 8, 8);
+    CHECK(g_pred_calls[0] == 1);
+    CHECK(bf.luma_fast_dist == var);
+    CHECK(fast_cost == (static_cast<std::uint64_t>(var) << 4) + 1000);
+    CHECK(bf.valid_luma_pred == 1);
+    CHECK(full_cost == fast_cost);
+
+    // (b) the hadamard path: the satd from the landed hadamardPath on the
+    // same buffers is the luma_fast_dist.
+    ctx.mds0_use_hadamard_blk = 1;
+    std::vector<std::int16_t> residual(16 * 16);
+    std::vector<std::int32_t> coeff(1024);
+    bf.residual.buf = reinterpret_cast<std::uint8_t*>(residual.data());
+    bf.residual.stride = 16;
+    ctx.txCoeffBuf = coeff.data();
+    mdc::fastLoopCore(&bf, &ctx, input, 0);
+    std::uint32_t satd_ref = 0;
+    pipeline::hadamardPath(src, 16, 0, predBuf, 16, residual.data(), 16, coeff.data(), entropy::BLOCK_8X8, false,
+                           &satd_ref);
+    CHECK(bf.luma_fast_dist == satd_ref);
+    CHECK(fast_cost == (static_cast<std::uint64_t>(satd_ref) << 4) + 1000);
+
+    // (c) the global pruning gate (branch B: pruning_method_th == ~0).
+    ctx.mds0_use_hadamard_blk = 0;
+    ctx.pruning_method_th = 0xFF;
+    ctx.pd_pass = 1;
+    ctx.dist_to_cost_th = 50;
+    ctx.mds0_best_cost = 1000;
+    fast_cost = 12345;
+    mdc::fastLoopCore(&bf, &ctx, input, 0);
+    CHECK(fast_cost == mdc::kMaxModeCost);
+    // The distortion cost is var*2048: (100*(var*2048 - 1000)) must exceed
+    // 1000*50 for the prune; prove the non-prune side by lifting the best
+    // cost above it.
+    ctx.mds0_best_cost = static_cast<std::uint64_t>(var) * 2048;
+    fast_cost = 12345;
+    mdc::fastLoopCore(&bf, &ctx, input, 0);
+    CHECK(fast_cost == (static_cast<std::uint64_t>(var) << 4) + 1000);
+
+    // (d) the per-class gate (branch A): pruning_method_th = 1 and the
+    // min me/pme distortion over area above it.
+    ctx.pruning_method_th = 1;
+    ctx.md_me_dist = 8000;
+    ctx.md_pme_dist = 9000;  // min 8000/64 = 125 > 1
+    ctx.per_class_dist_to_cost_th[0] = 50;
+    ctx.mds0_best_cost_per_class[0] = 1000;
+    ctx.mds0_best_cost = static_cast<std::uint64_t>(var) * 2048;  // no global prune
+    fast_cost = 12345;
+    mdc::fastLoopCore(&bf, &ctx, input, 0);
+    CHECK(fast_cost == mdc::kMaxModeCost);
+    // The class gate passes when the best per-class cost is ~0.
+    ctx.mds0_best_cost_per_class[0] = 0xFFFFFFFFFFFFFFFFull;
+    fast_cost = 12345;
+    mdc::fastLoopCore(&bf, &ctx, input, 0);
+    CHECK(fast_cost == (static_cast<std::uint64_t>(var) << 4) + 1000);
+
+    // (e) the obmc hand-off: obmc_ctrls.enabled && trans_face_off == 1
+    // routes into obmc_trans_face_off (the stub counts).
+    ctx.obmc_enabled = 1;
+    ctx.obmc_trans_face_off = 1;
+    ctx.obmcAllowedFn = obmcAllowedStub;
+    ctx.motionModeAllowedFn = motionModeAllowedStub;
+    ctx.obmcPredFn = obmcPredStub;
+    std::int32_t fac1[entropy::BLOCK_SIZES_ALL * 2] = {};
+    fac1[entropy::BLOCK_8X8 * 2 + 0] = 10;
+    fac1[entropy::BLOCK_8X8 * 2 + 1] = 25;
+    ctx.motionModeFacBits1 = fac1;
+    cand.mode = l16_rdo::NEARESTMV;
+    cand.ref_frame[0] = amvp::kLastFrame;
+    cand.ref_frame[1] = amvp::kNoneFrame;
+    cand.motion_mode = mdc::kSimpleTranslation;
+    cand.is_interintra_used = 0;
+    g_obmc_pred_calls = 0;
+    mdc::fastLoopCore(&bf, &ctx, input, 0);
+    CHECK(g_obmc_pred_calls == 1);
+    // The zeroed OBMC pred loses to the simple cost here -> restore. The
+    // mode slot is INTER (NEARESTMV) so the fast-cost signature is +2000.
+    CHECK(cand.motion_mode == mdc::kSimpleTranslation);
+    CHECK(fast_cost == (static_cast<std::uint64_t>(var) << 4) + 2000);
+    CHECK(full_cost == fast_cost);
 }
