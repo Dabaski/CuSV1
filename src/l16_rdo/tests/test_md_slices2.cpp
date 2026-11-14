@@ -595,3 +595,94 @@ TEST_CASE("l16_rdo skipCompoundOnRefTypes prunes compound on the neighbour walk"
     CHECK(isInterCompoundMode(GLOBALMV_PM) == 0);
     CHECK(isInterCompoundMode(DC_PRED_PM) == 0);
 }
+
+// ---------------------------------------------------------------------------
+// A4M-6: setup_pred_plane / svt_av1_setup_pred_block (mode_decision.c
+// :2051-2080).
+// ---------------------------------------------------------------------------
+using l16_rdo::Buf2D;
+using l16_rdo::Yv12Lite;
+using l16_rdo::setupPredPlane;
+using l16_rdo::setupPredBlock;
+
+
+TEST_CASE("l16_rdo setupPredPlane offsets the buffer and adjusts odd chroma mi") {
+    // mode_decision.c:2051-2068. x = (MI_SIZE * mi_col) >> ssx,
+    // y = (MI_SIZE * mi_row) >> ssy; the odd-mi step-back fires only when
+    // the subsampling is set AND the mi count in that axis is 1.
+    std::uint8_t mem[4096];
+    for (int i = 0; i < 4096; ++i) {
+        mem[i] = (std::uint8_t)(i * 7 + 3);
+    }
+    std::uint8_t* src = mem + 128;
+
+    // Luma row: ss 0/0, 16x16, mi (3, 5), stride 64.
+    // buf = src + (3*4)*64 + 5*4 = src + 768 + 20.
+    Buf2D d;
+    setupPredPlane(&d, l16_rdo::BLOCK_16X16, src, 16, 16, 64, 3, 5, 0, 0);
+    CHECK(d.buf == src + (3 * MI_SIZE_MD) * 64 + 5 * MI_SIZE_MD);
+    CHECK(d.buf0 == src);
+    CHECK(d.width == 16);
+    CHECK(d.height == 16);
+    CHECK(d.stride == 64);
+
+    // Chroma row (ss_y = 1) at an ODD mi_row on a mi_size_high == 1 shape
+    // (4x4 and 16x4 are the two; miSizeHigh == 1). mi_row steps back one
+    // BEFORE the scale: y = (4 * (mi_row - 1)) >> 1.
+    setupPredPlane(&d, l16_rdo::BLOCK_4X4, src, 8, 8, 64, 5, 4, 1, 1);
+    CHECK(d.buf == src + (((4 * (5 - 1)) >> 1) * 64) + ((4 * 4) >> 1));
+    setupPredPlane(&d, l16_rdo::BLOCK_16X4, src, 8, 8, 64, 5, 4, 1, 1);
+    CHECK(d.buf == src + (((4 * (5 - 1)) >> 1) * 64) + ((4 * 4) >> 1));
+
+    // Same odd mi_row on a mi_size_high == 2 shape (8x8): NO step-back.
+    setupPredPlane(&d, l16_rdo::BLOCK_8X8, src, 8, 8, 64, 5, 4, 1, 1);
+    CHECK(d.buf == src + (((4 * 5) >> 1) * 64) + ((4 * 4) >> 1));
+
+    // Chroma col (ss_x = 1) at an ODD mi_col on a mi_size_wide == 1 shape
+    // (4x4 and 4x16): mi_col steps back.
+    setupPredPlane(&d, l16_rdo::BLOCK_4X4, src, 8, 8, 64, 4, 7, 1, 1);
+    CHECK(d.buf == src + (((4 * 4) >> 1) * 64) + ((4 * (7 - 1)) >> 1));
+    setupPredPlane(&d, l16_rdo::BLOCK_4X16, src, 8, 8, 64, 4, 7, 1, 1);
+    CHECK(d.buf == src + (((4 * 4) >> 1) * 64) + ((4 * (7 - 1)) >> 1));
+
+    // Even mi + subsampling: no step-back on either axis.
+    setupPredPlane(&d, l16_rdo::BLOCK_4X4, src, 8, 8, 64, 4, 6, 1, 1);
+    CHECK(d.buf == src + (((4 * 4) >> 1) * 64) + ((4 * 6) >> 1));
+
+    // The step-back is gated on the subsampling flag: odd mi on a
+    // mi_size == 1 shape with ss 0 keeps the raw mi.
+    setupPredPlane(&d, l16_rdo::BLOCK_4X4, src, 8, 8, 64, 5, 7, 0, 0);
+    CHECK(d.buf == src + (4 * 5) * 64 + 4 * 7);
+}
+
+TEST_CASE("l16_rdo setupPredBlock wires the three planes and offsets the luma") {
+    // mode_decision.c:2070-2080. dst[0] = luma (buf/buf0/width/height/
+    // stride via setup_pred_plane ss 0/0); dst[1]/dst[2] get the u/v
+    // buffers and the uv_stride, and are NOT re-offset (the reference
+    // passes the whole array to setup_pred_plane, which writes dst[0]'s
+    // fields only).
+    std::uint8_t memY[1024], memU[256], memV[256];
+    Yv12Lite yv;
+    yv.yBuffer = memY;
+    yv.uBuffer = memU;
+    yv.vBuffer = memV;
+    yv.yStride = 32;
+    yv.uvStride = 16;
+    yv.yCropWidth = 20;
+    yv.yCropHeight = 12;
+
+    Buf2D dst[MAX_PLANES_MD];
+    setupPredBlock(l16_rdo::BLOCK_16X16, dst, &yv, 2, 3);
+
+    CHECK(dst[0].buf == memY + (2 * MI_SIZE_MD) * 32 + 3 * MI_SIZE_MD);
+    CHECK(dst[0].buf0 == memY);
+    CHECK(dst[0].width == 20);
+    CHECK(dst[0].height == 12);
+    CHECK(dst[0].stride == 32);
+    // The chroma slots: buf wired, stride = uv_stride, the rest untouched
+    // by the reference's own shape (setup_pred_plane writes dst[0] only).
+    CHECK(dst[1].buf == memU);
+    CHECK(dst[2].buf == memV);
+    CHECK(dst[1].stride == 16);
+    CHECK(dst[2].stride == 16);
+}

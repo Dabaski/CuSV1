@@ -259,4 +259,41 @@ bool skipCompoundOnRefTypes(bool skipOnRefInfo, const SkipCompXdCarrier& xd, con
     return skipComp;  // :1047
 }
 
+// ---------------------------------------------------------------------------
+// A4M-6: setup_pred_plane / svt_av1_setup_pred_block.
+// ---------------------------------------------------------------------------
+
+// setup_pred_plane (mode_decision.c:2051-2068, verbatim).
+void setupPredPlane(Buf2D* dst, BlockSize bsize, std::uint8_t* src, std::int32_t width, std::int32_t height,
+                    std::int32_t stride, std::int32_t miRow, std::int32_t miCol, std::int32_t subsamplingX,
+                    std::int32_t subsamplingY) {
+    // Offset the buffer pointer
+    if (subsamplingY && (miRow & 0x01) && (miSizeHigh[bsize] == 1)) {
+        miRow -= 1;
+    }
+    if (subsamplingX && (miCol & 0x01) && (miSizeWide[bsize] == 1)) {
+        miCol -= 1;
+    }
+
+    const std::int32_t x = (MI_SIZE_MD * miCol) >> subsamplingX;
+    const std::int32_t y = (MI_SIZE_MD * miRow) >> subsamplingY;
+    dst->buf = src + (y * stride + x);  // scaled_buffer_offset(x, y, stride, scale)
+    dst->buf0 = src;
+    dst->width = width;
+    dst->height = height;
+    dst->stride = stride;
+}
+
+// svt_av1_setup_pred_block (mode_decision.c:2070-2080, verbatim).
+void setupPredBlock(BlockSize bsize, Buf2D dst[MAX_PLANES_MD], const Yv12Lite* src, std::int32_t miRow,
+                    std::int32_t miCol) {
+    dst[0].buf = src->yBuffer;
+    dst[0].stride = src->yStride;
+    dst[1].buf = src->uBuffer;
+    dst[2].buf = src->vBuffer;
+    dst[1].stride = dst[2].stride = src->uvStride;
+
+    setupPredPlane(dst, bsize, dst[0].buf, src->yCropWidth, src->yCropHeight, dst[0].stride, miRow, miCol, 0, 0);
+}
+
 }  // namespace l16_rdo

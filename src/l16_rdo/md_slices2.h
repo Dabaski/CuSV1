@@ -262,4 +262,46 @@ struct SkipCompXdCarrier {
 // read is defined only there).
 bool skipCompoundOnRefTypes(bool skipOnRefInfo, const SkipCompXdCarrier& xd, const MvReferenceFrame rf[2]);
 
+// ---------------------------------------------------------------------------
+// A4M-6: setup_pred_plane / svt_av1_setup_pred_block (mode_decision.c
+// :2051-2080).
+// ---------------------------------------------------------------------------
+
+// Buf2D (definitions.h:270-276, verbatim).
+struct Buf2D {
+    std::uint8_t* buf;
+    std::uint8_t* buf0;
+    std::int32_t width;
+    std::int32_t height;
+    std::int32_t stride;
+};
+
+// MAX_PLANES (definitions.h:246) + MI_SIZE (definitions.h:354 = 1 <<
+// MI_SIZE_LOG2; the landed rate_est.h MI_SIZE_LOG2 = 2 is the shift).
+#define MAX_PLANES_MD 3
+#define MI_SIZE_MD 4
+
+// Yv12BufferConfig, the consumed fields only (aom yv12 buffer config; the
+// SVT port reads y/u/v buffers, the two strides and the crop dims).
+struct Yv12Lite {
+    std::uint8_t* yBuffer;
+    std::uint8_t* uBuffer;
+    std::uint8_t* vBuffer;
+    std::int32_t yStride;
+    std::int32_t uvStride;
+    std::int32_t yCropWidth;
+    std::int32_t yCropHeight;
+};
+
+// setup_pred_plane (mode_decision.c:2051-2068): the INLINE helper exposed
+// for testability (the DF1 cdefSign precedent); the scale is the no-scale
+// call (the scaled_buffer_offset comment :2063).
+void setupPredPlane(Buf2D* dst, BlockSize bsize, std::uint8_t* src, std::int32_t width, std::int32_t height,
+                    std::int32_t stride, std::int32_t miRow, std::int32_t miCol, std::int32_t subsamplingX,
+                    std::int32_t subsamplingY);
+
+// svt_av1_setup_pred_block (mode_decision.c:2070-2080).
+void setupPredBlock(BlockSize bsize, Buf2D dst[MAX_PLANES_MD], const Yv12Lite* src, std::int32_t miRow,
+                    std::int32_t miCol);
+
 }  // namespace l16_rdo
