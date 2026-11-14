@@ -60,6 +60,15 @@ void getFinalFilteredPixels(bool tfChroma, bool isHighbd,
                             int blkYSrcOffset, int blkChSrcOffset,
                             uint16_t blkWidthCh, uint16_t blkHeightCh);
 
+// A11D-T3: 1:1 port of tf_use_64x64_pred (temporal_filtering.c:2491-2507).
+// The consumed MeContext fields are threaded as parameters (the TF1
+// carrier pattern): the four 32x32 SADs, the single p_best_sad_64x64[0],
+// and tf_use_pred_64x64_only_th (uint8_t, me_context.h:472). The uint32
+// accumulation wraps; the numerator is int64 (the cast binds BEFORE the
+// *100 per the reference's parenthesization); the comparison is strict <.
+std::int8_t tfUse64x64Pred(const std::uint32_t* pBestSad32x32, std::uint32_t pBestSad64x64,
+                           std::uint8_t tfUsePred64x64OnlyTh);
+
 // 1:1 port of svt_aom_noise_log1p_fp16 (temporal_filtering.c:568-586).
 int32_t noiseLog1pFp16(int32_t noiseLevelFp16);
 

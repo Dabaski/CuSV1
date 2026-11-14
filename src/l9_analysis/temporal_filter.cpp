@@ -1,5 +1,6 @@
 #include "temporal_filter.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdlib>
 
@@ -957,6 +958,30 @@ void getFinalFilteredPixels(bool tfChroma, bool isHighbd,
                 pos += stride[1 /*PLANE_U*/] - blkWidthCh;
             }
         }
+    }
+}
+
+// A11D-T3: tf_use_64x64_pred (temporal_filtering.c:2491-2507). The
+// reference's MAX(x, 1) is a uint32 ternary; the port's std::max<uint32_t>
+// is identical.
+std::int8_t tfUse64x64Pred(const std::uint32_t* pBestSad32x32, std::uint32_t pBestSad64x64,
+                           std::uint8_t tfUsePred64x64OnlyTh) {
+    std::uint32_t dist32x32 = 0;
+
+    // 32x32
+    for (unsigned i = 0; i < 4; i++) {
+        dist32x32 += pBestSad32x32[i];
+    }
+
+    std::uint32_t floor32 = std::max<std::uint32_t>(dist32x32, 1);
+    std::uint32_t floor64 = std::max<std::uint32_t>(pBestSad64x64, 1);
+    std::int64_t dev64x64To32x32 =
+        (std::int64_t)(((std::int64_t)floor64 - (std::int64_t)floor32) * 100) /
+        (std::int64_t)floor32;
+    if (dev64x64To32x32 < tfUsePred64x64OnlyTh) {
+        return 1;
+    } else {
+        return 0;
     }
 }
 

@@ -1983,3 +1983,62 @@ TEST_CASE("l9 temporal getFinalFilteredPixels luma-only leaves chroma poison") {
         }
     }
 }
+
+namespace {
+
+// A11D-T3 oracle: second independent transcription of
+// tf_use_64x64_pred (temporal_filtering.c:2491-2507). The uint32
+// accumulation wraps, MAX(x,1) floors the division, the numerator is
+// int64 (the cast binds BEFORE the *100 per the reference's
+// parenthesization), and the comparison is strict <.
+std::int32_t tfUse64x64PredOracle(std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t d,
+                                  std::uint32_t sad64, std::uint8_t th) {
+    std::uint32_t dist_32x32 = 0;
+    dist_32x32 += a;
+    dist_32x32 += b;
+    dist_32x32 += c;
+    dist_32x32 += d;
+    std::uint32_t floor32 = std::max<std::uint32_t>(dist_32x32, 1);
+    std::uint32_t floor64 = std::max<std::uint32_t>(sad64, 1);
+    std::int64_t dev = (std::int64_t)(((std::int64_t)floor64 - (std::int64_t)floor32) * 100) /
+        (std::int64_t)floor32;
+    return dev < th ? 1 : 0;
+}
+
+}  // namespace
+
+TEST_CASE("l9 temporal tfUse64x64Pred oracle + threshold bands + wraparound") {
+    using analysis::temporal::tfUse64x64Pred;
+    std::uint32_t zeros[4] = {0, 0, 0, 0};
+    // The th == 0 boundary: dev == 0 == th -> strict < fails -> 0.
+    CHECK_EQ(0, tfUse64x64Pred(zeros, 0, 0));
+    CHECK_EQ(1, tfUse64x64Pred(zeros, 0, 1));
+    // Boundary: dev == th exactly -> 0; dev == th + 1 -> 1.
+    std::uint32_t ten[4] = {2, 3, 2, 3};
+    CHECK_EQ(0, tfUse64x64Pred(ten, 11, 10));
+    CHECK_EQ(1, tfUse64x64Pred(ten, 11, 11));
+    // dev > th -> 0.
+    CHECK_EQ(0, tfUse64x64Pred(ten, 21, 10));
+    // uint32 wraparound: 0xFFFFFFFF*4 mod 2^32 = 0xFFFFFFFC -> negative
+    // int64 dev -> 1.
+    std::uint32_t wraps[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    CHECK_EQ(1, tfUse64x64Pred(wraps, 0, 0));
+    // Oracle band: enumerate the threshold at every value and a spread
+    // of SAD tuples, comparing the port to the independent oracle.
+    std::uint32_t cands[4] = {2, 3, 2, 3};
+    for (std::uint32_t sad64 = 0; sad64 < 64; sad64 += 3) {
+        for (std::uint32_t th = 0; th < 255; ++th) {
+            const std::uint32_t q[4] = {2, 3, 2, 3};
+            CHECK_EQ(tfUse64x64PredOracle(q[0], q[1], q[2], q[3], sad64, (std::uint8_t)th),
+                     tfUse64x64Pred(q, sad64, (std::uint8_t)th));
+        }
+    }
+    // The wraparound band: sad values that sum past 2^32.
+    std::uint32_t big[4] = {0xFFFFFFFFu, 0x00000007u, 0x00000009u, 0x00000001u};
+    for (std::uint32_t sad64 = 0; sad64 < 256; ++sad64) {
+        for (std::uint32_t th = 250; th < 255; ++th) {
+            CHECK_EQ(tfUse64x64PredOracle(big[0], big[1], big[2], big[3], sad64, (std::uint8_t)th),
+                     tfUse64x64Pred(big, sad64, (std::uint8_t)th));
+        }
+    }
+}
