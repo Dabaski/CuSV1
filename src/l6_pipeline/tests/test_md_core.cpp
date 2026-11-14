@@ -2317,3 +2317,158 @@ TEST_CASE("l6 mdc performMdReferencePruning fills the filtering verdicts") {
     mdc::performMdReferencePruning(&ctx, pruning, &fx.me, nullptr, 30);
     CHECK(ctx.refFilteringRes[0][1][1] == 1);
 }
+
+// trip 21: build_single_ref_mvp_array (product_coding_loop.c:3050-:3141).
+// The NEAREST + dedup'd NEAR injection, the rounding + clip, the
+// shut_fast_rate single-{0} path and the best-FP-MVP selection.
+TEST_CASE("l6 mdc buildSingleRefMvpArray injects the nearest and near MVPs") {
+    RrmFixture fx = makeRrm(4, 0);  // the exact match at integer (+4, 0) -> mv (32, 0)
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.blk_org_x = 40;
+    ctx.blk_org_y = 40;
+    ctx.totRefFrameTypes = 1;
+    ctx.refFrameTypeArr[0] = amvp::kLastFrame;
+    ctx.refPicArr[0][0] = &fx.refP;
+
+    // The ref_mv_stack for LAST_FRAME (frame_type 1): NEAREST (-32, 0)
+    // (the exact match: ref(x) = src(x+4) minimizes at dx = -4), NEAR[0]
+    // (24, 0), NEAR[1] (-32, 0) (a NEAREST duplicate -> dedup'd).
+    pipeline::Mv2 stack[3];
+    stack[0] = pipeline::Mv2{-32, 0};
+    stack[1] = pipeline::Mv2{24, 0};
+    stack[2] = pipeline::Mv2{-32, 0};
+    mdc::MdRefMvStack rms{};
+    rms.thisMv[amvp::kLastFrame] = stack;
+
+    std::vector<pipeline::Mv2> mvp(8);
+    ctx.mvpArr[0][0] = mvp.data();
+
+    mdc::buildSingleRefMvpArray(&ctx, fx.input, 100, rms);
+    CHECK(ctx.mvpCnt[0][0] == 2);  // NEAR[1] dedup'd against NEAREST
+    CHECK(mvp[0].x == -32);
+    CHECK(mvp[0].y == 0);
+    CHECK(mvp[1].x == 24);
+    CHECK(mvp[1].y == 0);
+    // The best-FP-MVP: the (-32, 0) MVP sits on the exact match -> var 0.
+    CHECK(ctx.bestFpMvpIdx[0][0] == 0);
+    CHECK(ctx.bestFpMvpDist[0][0] == 0);
+
+    // shut_fast_rate: the single {0} MVP, count 1.
+    ctx.shut_fast_rate = 1;
+    mdc::buildSingleRefMvpArray(&ctx, fx.input, 100, rms);
+    CHECK(ctx.mvpCnt[0][0] == 1);
+    CHECK(mvp[0].as_int == 0);
+}
+
+// trip 22: pme_search (product_coding_loop.c:3150-:3325). The early-exit
+// chain (the mvp-direction check, the pre/post fp dev gates), the qp-
+// scaled search area and the md_pme_dist fold.
+TEST_CASE("l6 mdc pmeSearch runs the early-exit chain and the full-pel search") {
+    RrmFixture fx = makeRrm(0, 0);  // the exact match at (0,0) -> mv 0
+    plantRrmMe(fx, 5, 0, 0, 0);
+
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.blk_org_x = 16;
+    ctx.blk_org_y = 16;
+    ctx.sb_origin_x = 0;
+    ctx.sb_origin_y = 0;
+    ctx.totRefFrameTypes = 1;
+    ctx.refFrameTypeArr[0] = amvp::kLastFrame;
+    ctx.refPicArr[0][0] = &fx.refP;
+    ctx.meBlockOffset = 5;
+    ctx.meCandOffset = 5 * 23;
+    ctx.md_subpel_skip_diag_refinement = 3;
+    ctx.full_lambda_md[0] = 1024;
+    ctx.md_pme_dist = (std::uint32_t)~0;
+    std::vector<pipeline::Mv2> mvp(8);
+    ctx.mvpArr[0][0] = mvp.data();
+    mvp[0] = pipeline::Mv2{0, 0};  // the best MVP: the exact match
+    ctx.mvpCnt[0][0] = 1;
+    ctx.bestFpMvpIdx[0][0] = 0;
+    ctx.bestFpMvpDist[0][0] = 0;
+    ctx.fpMeMv[0][0].x = 0;
+    ctx.fpMeMv[0][0].y = 0;
+    ctx.fpMeDist[0][0] = 0;  // the ME MV is already perfect
+    ctx.subMeMv[0][0].x = 0;
+    ctx.subMeMv[0][0].y = 0;
+    ctx.postSubpelMeMvCost[0][0] = 77;
+
+    for (int l = 0; l < 2; ++l) for (int r = 0; r < 4; ++r) ctx.pmeResDist[l][r] = (std::uint32_t)~0;  // the caller's reset
+    mdc::MdPmeCtrls pme{};
+    pme.dist_type = mdc::DIST_SAD;
+    pme.full_pel_search_width = 8;
+    pme.full_pel_search_height = 8;
+    pme.early_check_mv_th_multiplier = (-2147483647 - 1);  // off
+    pme.pre_fp_pme_to_me_cost_th = 50;
+    pme.pre_fp_pme_to_me_mv_th = 4;
+    pme.post_fp_pme_to_me_cost_th = 50;
+    pme.post_fp_pme_to_me_mv_th = 4;
+    pme.enable_psad = 0;
+    pme.sa_q_weight = 0;
+
+    mdc::MdSubPelCtrls subPme{};
+    subPme.enabled = 0;
+    mdc::MdSubPelCtrls subMe{};
+    subMe.subpel_search_method = mdc::kSubpelTree;
+
+    g_choose_calls = 0;
+    g_tree_calls = 0;
+    l16_rdo::RefPruningCtrls pruning{};
+    l16_rdo::RefFilteringRes filtering = {};
+    for (int g = 0; g < TOT_INTER_GROUP; ++g)
+        for (int l = 0; l < 2; ++l)
+            for (int r = 0; r < 4; ++r) filtering[g][l][r].doRef = 1;  // every ref valid
+
+    // The pre-FP gate: the ME MV == the best MVP and dev = ((1-1)*100)/1
+    // = 0 < 50 -> PME = ME_MV, no search.
+    mdc::pmeSearch(&ctx, fx.input, &fx.me, pme, subPme, 100, 30, 0, 0, 1, pruning, filtering, treeStub, subMe,
+                   chooseZero, 0, 0, 16, 16);
+    CHECK(g_tree_calls == 0);
+    CHECK(ctx.validPmeMv[0][0] == 1);
+    CHECK(ctx.pmeResDist[0][0] == 77);
+    CHECK(ctx.bestPmeMv[0][0].x == 0);
+    CHECK(ctx.md_pme_dist == 77);
+
+    // The full search: make the ME MV far away so the pre gate misses.
+    ctx.fpMeMv[0][0].x = 400;
+    ctx.fpMeMv[0][0].y = 0;
+    ctx.fpMeDist[0][0] = 5000;
+    ctx.md_pme_dist = (std::uint32_t)~0;
+    for (int l = 0; l < 2; ++l) for (int r = 0; r < 4; ++r) ctx.pmeResDist[l][r] = (std::uint32_t)~0;
+    g_tree_calls = 0;
+    g_tree_out.x = 8;
+    g_tree_out.y = 0;
+    g_tree_err = 99;
+    subPme.enabled = 1;
+    mdc::pmeSearch(&ctx, fx.input, &fx.me, pme, subPme, 100, 30, 0, 0, 1, pruning, filtering, treeStub, subMe,
+                   chooseZero, 0, 0, 16, 16);
+    // The post-FP gate: |400 - 8| = 392 > 4 and dev = ((? - 5000+..)*100)/
+    // ... the post mv th misses -> the search result books.
+    CHECK(g_tree_calls == 1);
+    CHECK(ctx.bestPmeMv[0][0].x == 8);
+    CHECK(ctx.validPmeMv[0][0] == 1);
+    CHECK(ctx.pmeResDist[0][0] == 99);
+    CHECK(ctx.md_pme_dist == 99);
+
+    // The pme_ref0_only skip: a LAST2 (list 0 ref 1) pair is skipped
+    // entirely (no search, no verdict) while LAST (ref 0) runs.
+    ctx.totRefFrameTypes = 2;
+    ctx.refFrameTypeArr[1] = amvp::kLast2Frame;  // list 0 ref 1
+    ctx.bestFpMvpDist[0][1] = 10;
+    ctx.fpMeDist[0][1] = 5;
+    ctx.md_pme_dist = (std::uint32_t)~0;
+    for (int l = 0; l < 2; ++l) for (int r = 0; r < 4; ++r) ctx.pmeResDist[l][r] = (std::uint32_t)~0;
+    g_tree_calls = 0;
+    mdc::pmeSearch(&ctx, fx.input, &fx.me, pme, subPme, 100, 30, 0, 1, 1, pruning, filtering, treeStub, subMe,
+                   chooseZero, 0, 0, 16, 16);
+    CHECK(g_tree_calls == 1);  // only the ref-0 pair reached the search
+    CHECK(ctx.validPmeMv[0][1] == 0);  // the skipped pair never set a verdict
+    CHECK(ctx.pmeResDist[0][1] == (std::uint32_t)~0);
+}

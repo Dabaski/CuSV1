@@ -164,9 +164,9 @@ struct FlCtx {
     std::uint32_t geom_offset_x;                   // ctx->geom_offset_x/y (derive_me_offsets)
     std::uint32_t geom_offset_y;
     std::uint32_t sb_ptr_index;                    // ctx->sb_ptr->index
-    // ctx->mvp_array[list][ref] / ctx->mvp_count[list][ref] (the check_
-    // spatial_mv_size inputs, pointer-per-(list,ref) on the carrier).
-    const Mv2* mvpArr[2][4];
+    // ctx->mvp_array[list][ref] / ctx->mvp_count[list][ref] (mutable - the
+    // build_single_ref_mvp_array writer; check_spatial_mv_size reads).
+    Mv2* mvpArr[2][4];
     std::uint8_t mvpCnt[2][4];
     // The ME-MV bookkeeping the read_refine_me_mvs pair reads/writes
     // (mode_decision.h / md_process.h windows).
@@ -204,6 +204,11 @@ struct FlCtx {
     // The ref-pruning state (perform_md_reference_pruning).
     std::uint32_t bestFpMvpDist[2][4];             // ctx->best_fp_mvp_dist
     std::uint8_t refFilteringRes[TOT_INTER_GROUP][2][4];  // ctx->ref_filtering_res .do_ref
+    std::uint8_t bestFpMvpIdx[2][4];               // ctx->best_fp_mvp_idx
+    // The PME state (pme_search).
+    std::uint8_t validPmeMv[2][4];                 // ctx->valid_pme_mv
+    Mv2 bestPmeMv[2][4];                           // ctx->best_pme_mv
+    std::uint32_t pmeResDist[2][4];                // ctx->pme_res[list][ref].dist
     std::uint32_t full_lambda_md[2];               // ctx->full_lambda_md[EB_8_BIT_MD / EB_10_BIT_MD]
     std::uint32_t fast_lambda_md[2];
     // mds0 state (md_process.h:1191-:1200 window).
@@ -502,6 +507,48 @@ bool getSbTplInterStats(const TplPcsWindow& ppcs, std::uint32_t sb_origin_x, std
 // get_sb_tpl_inter_stats input), me_results + the me offsets.
 void performMdReferencePruning(FlCtx* ctx, const l16_rdo::RefPruningCtrls& pruning, const MdMeSbResults* me_results,
                                const TplPcsWindow* tpl_window, std::uint8_t picture_qp);
+
+// The ref_mv_stack window (mode_decision.h CandidateMv this_mv column):
+// one pointer per frame_type (0..8), each pointing at the [0..3] this_mv
+// array the NEAREST/NEAR walk reads.
+struct MdRefMvStack {
+    const Mv2* thisMv[9];  // [frame_type] -> the [0..3] array
+};
+
+// md_process.h:65-:80 InterCandGroup - the PRED_ME_GROUP ordinal only
+// (the isValidUnipredRef input).
+constexpr std::uint8_t kPredMeGroup = 5;
+
+// MdPmeCtrls (md_process.h:354-:382, the consumed fields).
+struct MdPmeCtrls {
+    std::uint8_t enabled;
+    DistortionType dist_type;
+    int early_check_mv_th_multiplier;
+    std::uint8_t full_pel_search_width;
+    std::uint8_t full_pel_search_height;
+    int pre_fp_pme_to_me_cost_th;
+    int pre_fp_pme_to_me_mv_th;
+    int post_fp_pme_to_me_cost_th;
+    int post_fp_pme_to_me_mv_th;
+    std::uint8_t enable_psad;
+    std::uint8_t sa_q_weight;
+};
+
+// product_coding_loop.c:3050-:3141 build_single_ref_mvp_array.
+void buildSingleRefMvpArray(FlCtx* ctx, const PicBuf& input_pic, std::uint8_t base_q_idx,
+                            const MdRefMvStack& ref_mv_stack);
+
+// product_coding_loop.c:3150-:3325 pme_search. The walls thread: the qp
+// scaling inputs (pme_qp_based_th_scaling enable + static_config.qp),
+// mrp_ctrls.pme_ref0_only + pcs->temporal_layer_index, the subpel TREE
+// via SubpelTreeFn, the choose_best_av1_mv_pred wall, the l16
+// isValidUnipredRef carriers and the av1xd/cm mi windows.
+void pmeSearch(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* me_results, const MdPmeCtrls& pme_ctrls,
+               const MdSubPelCtrls& subpel_pme_ctrls, std::uint8_t base_q_idx, std::uint8_t qp,
+               std::uint8_t pme_qp_th_scaling, std::uint8_t pme_ref0_only, std::uint8_t pcs_temporal_layer_index,
+               const l16_rdo::RefPruningCtrls& pruning, const l16_rdo::RefFilteringRes filtering,
+               SubpelTreeFn subpel_tree, const MdSubPelCtrls& subpel_me_ctrls, ChooseBestMvPredFn choose_best_mv_pred,
+               int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols);
 
 // product_coding_loop.c:2021-:2190 md_nsq_motion_search. The pcs walls
 // thread: pa_me_data max_refs/max_l0/max_cand, enable_me_8x8/16x16,

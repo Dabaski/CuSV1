@@ -1871,5 +1871,298 @@ void performMdReferencePruning(FlCtx* ctx, const l16_rdo::RefPruningCtrls& pruni
     }
 }
 
+// product_coding_loop.c:3050-:3141 build_single_ref_mvp_array.
+void buildSingleRefMvpArray(FlCtx* ctx, const PicBuf& input_pic, std::uint8_t base_q_idx,
+                            const MdRefMvStack& ref_mv_stack) {
+    (void)base_q_idx;
+    const bool shut_fast_rate = ctx->shut_fast_rate != 0;
+    for (int ref_it = 0; ref_it < ctx->totRefFrameTypes; ++ref_it) {
+        const std::int32_t ref_pair = ctx->refFrameTypeArr[ref_it];
+
+        int rf[2];
+        motion::amvp::av1SetRefFrame(rf, static_cast<std::int8_t>(ref_pair));
+        // Single ref
+        if (rf[1] == motion::amvp::kNoneFrame) {
+            const std::int32_t frame_type = rf[0];
+            const std::uint8_t list = motion::amvp::getListIdx(static_cast<std::uint8_t>(rf[0]));
+            const std::uint8_t ref = motion::amvp::getRefFrameIdx(static_cast<std::uint8_t>(rf[0]));
+            const PicBuf& ref_pic = *ctx->refPicArr[list][ref];
+            if (shut_fast_rate) {
+                ctx->mvpArr[list][ref][0].as_int = 0;
+                ctx->mvpCnt[list][ref] = 1;
+                continue;
+            }
+            std::int8_t mvp_count = 0;
+
+            // NEAREST
+            const Mv2 as_mv = ref_mv_stack.thisMv[frame_type][0];
+            ctx->mvpArr[list][ref][mvp_count].x = static_cast<std::int16_t>((as_mv.x + 4) & ~0x07);
+            ctx->mvpArr[list][ref][mvp_count].y = static_cast<std::int16_t>((as_mv.y + 4) & ~0x07);
+            clipMvOnPicBoundary(ctx->blk_org_x, ctx->blk_org_y, static_cast<std::int32_t>(ctx->geom.bwidth),
+                                static_cast<std::int32_t>(ctx->geom.bheight),
+                                static_cast<std::int32_t>(ref_pic.max_width),
+                                static_cast<std::int32_t>(ref_pic.max_height), ref_pic.border,
+                                &ctx->mvpArr[list][ref][mvp_count].x, &ctx->mvpArr[list][ref][mvp_count].y);
+            mvp_count++;
+
+            // NEAR
+            const std::uint8_t max_drl_index =
+                l16_rdo::getMaxDrlIndex(static_cast<std::uint8_t>(frame_type), l16_rdo::NEARMV);
+
+            for (int drli = 0; drli < max_drl_index; drli++) {
+                Mv2 nearmv = ref_mv_stack.thisMv[frame_type][1 + drli];
+                // cppcheck doesn't work well when the rhs and lhs have the same union
+                // store temp values before reassigning
+                const std::int16_t x = static_cast<std::int16_t>((nearmv.x + 4) & ~0x07);
+                const std::int16_t y = static_cast<std::int16_t>((nearmv.y + 4) & ~0x07);
+                nearmv.x = x;
+                nearmv.y = y;
+                clipMvOnPicBoundary(ctx->blk_org_x, ctx->blk_org_y, static_cast<std::int32_t>(ctx->geom.bwidth),
+                                    static_cast<std::int32_t>(ctx->geom.bheight),
+                                    static_cast<std::int32_t>(ref_pic.max_width),
+                                    static_cast<std::int32_t>(ref_pic.max_height), ref_pic.border, &nearmv.x,
+                                    &nearmv.y);
+
+                bool inj_near_mv = true;
+                for (int idx = 0; idx < mvp_count; idx++) {
+                    if (nearmv.as_int == ctx->mvpArr[list][ref][idx].as_int) {
+                        inj_near_mv = false;
+                        break;
+                    }
+                }
+                if (inj_near_mv) {
+                    ctx->mvpArr[list][ref][mvp_count].as_int = nearmv.as_int;
+                    mvp_count++;
+                }
+            }
+            ctx->mvpCnt[list][ref] = static_cast<std::uint8_t>(mvp_count);
+
+            // Compute the best distortion and save the best MVP index (results used in subpel, PME, and ref pruning)
+            std::uint32_t best_mvp_cost = static_cast<std::uint32_t>(static_cast<std::int32_t>(~0));
+            const std::uint32_t input_origin_index =
+                static_cast<std::uint32_t>(ctx->blk_org_y) * input_pic.stride + static_cast<std::uint32_t>(ctx->blk_org_x);
+
+            for (std::int8_t mvp_index = 0; mvp_index < ctx->mvpCnt[list][ref]; mvp_index++) {
+                const std::int32_t ref_origin_index =
+                    (ctx->blk_org_x + (ctx->mvpArr[list][ref][mvp_index].x >> 3)) +
+                    (ctx->blk_org_y + (ctx->mvpArr[list][ref][mvp_index].y >> 3)) * static_cast<std::int32_t>(ref_pic.stride);
+                VarianceFn vf = mefnVf(ctx->geom.bsize);
+                std::uint32_t sse;
+                const std::uint8_t* pred_y = ref_pic.buf + ref_origin_index;
+                const std::uint8_t* src_y = input_pic.buf + input_origin_index;
+                const std::uint32_t mvp_cost =
+                    vf(pred_y, static_cast<std::int32_t>(ref_pic.stride), src_y,
+                       static_cast<std::int32_t>(input_pic.stride), &sse);
+
+                if (mvp_cost < best_mvp_cost) {
+                    ctx->bestFpMvpIdx[list][ref] = static_cast<std::uint8_t>(mvp_index);
+                    ctx->bestFpMvpDist[list][ref] = mvp_cost;
+                    best_mvp_cost = mvp_cost;
+                }
+            }
+        }
+    }
+}
+
+// product_coding_loop.c:3150-:3325 pme_search.
+void pmeSearch(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* me_results, const MdPmeCtrls& pme_ctrls,
+               const MdSubPelCtrls& subpel_pme_ctrls, std::uint8_t base_q_idx, std::uint8_t qp,
+               std::uint8_t pme_qp_th_scaling, std::uint8_t pme_ref0_only, std::uint8_t pcs_temporal_layer_index,
+               const l16_rdo::RefPruningCtrls& pruning, const l16_rdo::RefFilteringRes filtering,
+               SubpelTreeFn subpel_tree, const MdSubPelCtrls& subpel_me_ctrls, ChooseBestMvPredFn choose_best_mv_pred,
+               int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols) {
+    const std::uint8_t hbd_md = 0;  // EB_8_BIT_MD
+    // Modulate the PME-full-pel search-area using QP
+    // The PME-full-pel search will be skipped  if width or/and height ends-up equal to 0 (only subpel-search will take place)
+    std::uint8_t full_pel_search_width = pme_ctrls.full_pel_search_width;
+    std::uint8_t full_pel_search_height = pme_ctrls.full_pel_search_height;
+    if (pme_ctrls.sa_q_weight) {
+        std::uint32_t q_weight, q_weight_denom;
+        l16_rdo::mode_config::getQpBasedThScalingFactors(pme_qp_th_scaling != 0, &q_weight, &q_weight_denom, qp);
+        full_pel_search_width = static_cast<std::uint8_t>(3 > (full_pel_search_width * q_weight + (q_weight_denom >> 1)) / q_weight_denom
+            ? 3
+            : (full_pel_search_width * q_weight + (q_weight_denom >> 1)) / q_weight_denom);
+        full_pel_search_height = static_cast<std::uint8_t>(3 > (full_pel_search_height * q_weight + (q_weight_denom >> 1)) / q_weight_denom
+            ? 3
+            : (full_pel_search_height * q_weight + (q_weight_denom >> 1)) / q_weight_denom);
+    }
+
+
+    const std::uint32_t input_origin_index =
+        static_cast<std::uint32_t>(ctx->blk_org_y) * input_pic.stride + static_cast<std::uint32_t>(ctx->blk_org_x);
+
+    ctx->enable_psad = 0;
+    const l16_rdo::MeSbResults me_view = meView(me_results);
+    for (std::uint32_t ref_it = 0; ref_it < ctx->totRefFrameTypes; ++ref_it) {
+        const std::int32_t ref_pair = ctx->refFrameTypeArr[ref_it];
+        int rf[2];
+        motion::amvp::av1SetRefFrame(rf, static_cast<std::int8_t>(ref_pair));
+
+        // Reset search variable(s)
+        std::uint32_t best_mvp_cost = static_cast<std::uint32_t>(static_cast<std::int32_t>(~0));
+        std::uint32_t pme_mv_cost = static_cast<std::uint32_t>(static_cast<std::int32_t>(~0));
+        std::uint32_t me_mv_cost = static_cast<std::uint32_t>(static_cast<std::int32_t>(~0));
+        std::uint32_t post_subpel_pme_mv_cost = static_cast<std::uint32_t>(static_cast<std::int32_t>(~0));
+
+        if (rf[1] == motion::amvp::kNoneFrame) {
+            const std::uint8_t list_idx = motion::amvp::getListIdx(static_cast<std::uint8_t>(rf[0]));
+            const std::uint8_t ref_idx = motion::amvp::getRefFrameIdx(static_cast<std::uint8_t>(rf[0]));
+            ctx->validPmeMv[list_idx][ref_idx] = 0;
+
+            if (pme_ref0_only != 0 && pcs_temporal_layer_index > 0) {
+                if (ref_idx > 0) {
+                    continue;
+                }
+            }
+
+            const PicBuf& ref_pic = *ctx->refPicArr[list_idx][ref_idx];
+            if (!l16_rdo::isValidUnipredRef(pruning, filtering, kPredMeGroup, list_idx, ref_idx)) {
+                continue;
+            }
+            // Get the ME MV
+            const std::uint8_t me_data_present =
+                l16_rdo::isMeDataPresent(ctx->meBlockOffset, ctx->meCandOffset, &me_view, list_idx, ref_idx);
+
+            if (me_data_present) {
+                // Early MVP vs. ME_MV check; do not perform PME search for blocks that have a valid ME_MV unless the ME_MV has a different direction than all MVP(s) and the ME_MV mag is higher than MV_TH (not around(0,0))
+                if (pme_ctrls.early_check_mv_th_multiplier != (-2147483647 - 1) /* MIN_SIGNED_VALUE */) {
+                    std::uint8_t is_me_mv_different_than_mvp = 0;
+                    for (std::int8_t mvp_index = 0; mvp_index < ctx->mvpCnt[list_idx][ref_idx]; mvp_index++) {
+                        const Mv2 mvp = ctx->mvpArr[list_idx][ref_idx][mvp_index];
+
+                        const int mv_th = (((static_cast<int>(input_pic.width) * static_cast<int>(input_pic.height)) >> 17) *
+                                           pme_ctrls.early_check_mv_th_multiplier) /
+                            10;
+
+                        // Check x direction
+                        if ((mvp.x < 0 ? -mvp.x : mvp.x) > mv_th) {
+                            if (ctx->fpMeMv[list_idx][ref_idx].x * mvp.x < 0) {
+                                is_me_mv_different_than_mvp = 1;
+                                break;
+                            }
+                        }
+
+                        // Check y direction
+                        if ((mvp.y < 0 ? -mvp.y : mvp.y) > mv_th) {
+                            if (ctx->fpMeMv[list_idx][ref_idx].y * mvp.y < 0) {
+                                is_me_mv_different_than_mvp = 1;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (is_me_mv_different_than_mvp == 0) {
+                        ctx->validPmeMv[list_idx][ref_idx] = 1;
+                        ctx->pmeResDist[list_idx][ref_idx] =
+                            static_cast<std::uint32_t>(ctx->postSubpelMeMvCost[list_idx][ref_idx]);
+                        ctx->bestPmeMv[list_idx][ref_idx].as_int = ctx->subMeMv[list_idx][ref_idx].as_int;
+                        continue;
+                    }
+                }
+
+                me_mv_cost = ctx->fpMeDist[list_idx][ref_idx];
+            }
+
+            // Step 1: derive the best MVP in term of distortion
+            const Mv2 best_mvp = ctx->mvpArr[list_idx][ref_idx][ctx->bestFpMvpIdx[list_idx][ref_idx]];
+            best_mvp_cost = ctx->bestFpMvpDist[list_idx][ref_idx];
+            if (me_data_present) {
+                const std::int64_t pme_to_me_cost_dev =
+                    (((static_cast<std::int64_t>(best_mvp_cost > 1 ? best_mvp_cost : 1)) -
+                      static_cast<std::int64_t>(me_mv_cost > 1 ? me_mv_cost : 1)) *
+                     100) /
+                    static_cast<std::int64_t>(me_mv_cost > 1 ? me_mv_cost : 1);
+
+                if (((ctx->fpMeMv[list_idx][ref_idx].x - best_mvp.x < 0
+                          ? best_mvp.x - ctx->fpMeMv[list_idx][ref_idx].x
+                          : ctx->fpMeMv[list_idx][ref_idx].x - best_mvp.x) <= pme_ctrls.pre_fp_pme_to_me_mv_th &&
+                     (ctx->fpMeMv[list_idx][ref_idx].y - best_mvp.y < 0
+                          ? best_mvp.y - ctx->fpMeMv[list_idx][ref_idx].y
+                          : ctx->fpMeMv[list_idx][ref_idx].y - best_mvp.y) <= pme_ctrls.pre_fp_pme_to_me_mv_th) ||
+                    pme_to_me_cost_dev >= pme_ctrls.pre_fp_pme_to_me_cost_th) {
+                    ctx->validPmeMv[list_idx][ref_idx] = 1;
+                    ctx->pmeResDist[list_idx][ref_idx] =
+                        static_cast<std::uint32_t>(ctx->postSubpelMeMvCost[list_idx][ref_idx]);
+                    ctx->bestPmeMv[list_idx][ref_idx].as_int = ctx->subMeMv[list_idx][ref_idx].as_int;
+                    continue;
+                }
+            }
+            Mv2 best_search_mv;
+            // Set ref MV
+            Mv2 best_pred_mv[2] = {};
+            std::uint8_t drl_index = 0;
+            (void)drl_index;
+            choose_best_mv_pred(*ctx, ref_pair, best_mvp, best_pred_mv);
+            ctx->ref_mv.as_int = best_pred_mv[0].as_int;
+            ctx->enable_psad = pme_ctrls.enable_psad;
+            mdFullPelSearch(ctx,
+                            input_pic,
+                            ref_pic,
+                            input_origin_index,
+                            pme_ctrls.dist_type,
+                            best_mvp.x,
+                            best_mvp.y,
+                            -static_cast<std::int16_t>(full_pel_search_width >> 1),
+                            static_cast<std::int16_t>(full_pel_search_width >> 1),
+                            -static_cast<std::int16_t>(full_pel_search_height >> 1),
+                            static_cast<std::int16_t>(full_pel_search_height >> 1),
+                            1,
+                            0,
+                            &best_search_mv.x,
+                            &best_search_mv.y,
+                            &pme_mv_cost,
+                            hbd_md,
+                            base_q_idx);
+            if (me_data_present) {
+                const std::int64_t pme_to_me_cost_dev =
+                    (((static_cast<std::int64_t>(pme_mv_cost > 1 ? pme_mv_cost : 1)) -
+                      static_cast<std::int64_t>(me_mv_cost > 1 ? me_mv_cost : 1)) *
+                     100) /
+                    static_cast<std::int64_t>(me_mv_cost > 1 ? me_mv_cost : 1);
+
+                if (((ctx->fpMeMv[list_idx][ref_idx].x - best_search_mv.x < 0
+                          ? best_search_mv.x - ctx->fpMeMv[list_idx][ref_idx].x
+                          : ctx->fpMeMv[list_idx][ref_idx].x - best_search_mv.x) <=
+                     pme_ctrls.post_fp_pme_to_me_mv_th &&
+                     (ctx->fpMeMv[list_idx][ref_idx].y - best_search_mv.y < 0
+                          ? best_search_mv.y - ctx->fpMeMv[list_idx][ref_idx].y
+                          : ctx->fpMeMv[list_idx][ref_idx].y - best_search_mv.y) <=
+                     pme_ctrls.post_fp_pme_to_me_mv_th) ||
+                    pme_to_me_cost_dev >= pme_ctrls.post_fp_pme_to_me_cost_th) {
+                    ctx->validPmeMv[list_idx][ref_idx] = 1;
+                    ctx->pmeResDist[list_idx][ref_idx] =
+                        static_cast<std::uint32_t>(ctx->postSubpelMeMvCost[list_idx][ref_idx]);
+                    ctx->bestPmeMv[list_idx][ref_idx].as_int = ctx->subMeMv[list_idx][ref_idx].as_int;
+                    continue;
+                }
+            }
+            if (subpel_pme_ctrls.enabled) {
+                if (subpel_me_ctrls.subpel_search_method == kSubpelFixedStageSearch) {
+                    const std::uint8_t* src = input_pic.buf + ctx->blk_org_x +
+                        (ctx->blk_org_y) * static_cast<std::int32_t>(input_pic.stride);
+                    post_subpel_pme_mv_cost = mdSubpelSearchFixedStage(ctx, ref_pic, src,
+                                                                       static_cast<int>(input_pic.stride),
+                                                                       &best_search_mv, subpel_pme_ctrls);
+                } else {
+                    post_subpel_pme_mv_cost = static_cast<std::uint32_t>(
+                        mdSubpelSearch(ctx, input_pic, ref_pic, kSpelPme, subpel_pme_ctrls,
+                                       static_cast<std::uint8_t>(rf[0]), &best_search_mv, 0, mi_row, mi_col,
+                                       cm_mi_rows, cm_mi_cols, base_q_idx, subpel_tree));
+                }
+            }
+            ctx->bestPmeMv[list_idx][ref_idx].as_int = best_search_mv.as_int;
+            ctx->validPmeMv[list_idx][ref_idx] = 1;
+            ctx->pmeResDist[list_idx][ref_idx] = post_subpel_pme_mv_cost;
+        }
+    }
+    for (std::uint8_t list_idx = 0; list_idx < MAX_NUM_OF_REF_PIC_LIST; list_idx++) {
+        for (std::uint8_t ref_idx = 0; ref_idx < REF_LIST_MAX_DEPTH; ref_idx++) {
+            if (ctx->pmeResDist[list_idx][ref_idx] < ctx->md_pme_dist) {
+                ctx->md_pme_dist = ctx->pmeResDist[list_idx][ref_idx];
+            }
+        }
+    }
+}
+
 }  // namespace mdc
 }  // namespace pipeline
