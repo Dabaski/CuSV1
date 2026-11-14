@@ -745,6 +745,68 @@ void initSecondPass(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf, Fi
 void twopassZeroStats(FirstpassStatsCarrier* section);
 void accumulateStats(FirstpassStatsCarrier* section, const FirstpassStatsCarrier* frame);
 
+// ---- A9D: initial_rc_process.c (the tpl-group pieces) ----
+
+// TplControls (pcs.h:459-486): the fields the tpl-group pieces consume and
+// write. The enum values are the reference's own ordinals: DC_PRED = 0,
+// PAETH_PRED = 12 (definitions.h:1295-1302, the RE4 errata pin);
+// DEFAULT_SHAPE = 0 / N2_SHAPE = 1 / N4_SHAPE = 2 (definitions.h:2046-2048);
+// EIGHTH_PEL = 0 / QUARTER_PEL = 1 / HALF_PEL = 2 / FULL_PEL = 3
+// (definitions.h:847).
+struct TplControlsCarrier {
+    int enable;                 // uint8
+    int computeRate;            // uint8
+    int enableTplQps;           // uint8
+    int disableIntraPredNref;   // uint8
+    int intraModeEnd;           // PredictionMode
+    int pfShape;                // TxCoeffShape
+    int useSadInSrcSearch;      // uint8
+    int reducedTplGroup;        // int8 (-1 sentinel)
+    double r0AdjustFactor;      // double
+    int dispenserSearchLevel;   // uint8
+    int subsampleTx;            // uint8
+    int synthBlkSize;           // uint8
+    int subpelDepth;            // SUBPEL_FORCE_STOP
+    int subpelDiagRefinement;   // uint8
+};
+
+// TplGroupPicView: the tpl_group[i] member surface the tpl-group pieces
+// consume (the is_pic_skipped twin pd_process.c:998-1003 threads as
+// picSkipped).
+struct TplGroupPicView {
+    std::uint64_t pictureNumber;  // tpl_group[i]->picture_number
+    int temporalLayerIndex;       // tpl_group[i]->temporal_layer_index
+    bool picSkipped;              // svt_aom_is_pic_skipped twin threaded
+};
+
+// is_frame_already_exists (initial_rc_process.c:161-168): verbatim; the
+// walk is over the first endIndex members only.
+bool isFrameAlreadyExists(const TplGroupPicView* tplGroup, int endIndex, std::uint64_t picNum);
+
+// validate_pic_for_tpl (initial_rc_process.c:171-188): verbatim; the head
+// pcs walls thread: tpl_ctrls.reduced_tpl_group (the carrier), the
+// tpl_valid_pic[] byte array and used_tpl_frame_num (both head-pcs state
+// the reference mutates). NOTE the reference indexes tpl_valid_pic by the
+// EXTEND-group index (pic_index), not by the tpl-group index - the caller
+// (store_extended_group) passes the ext-group index i.
+void validatePicForTpl(const TplControlsCarrier& tplCtrls, const TplGroupPicView* tplGroup,
+                       std::uint8_t* tplValidPic, std::uint32_t& usedTplFrameNum, int picIndex);
+
+// set_tpl_params (initial_rc_process.c:319-401): verbatim; the scs->
+// input_resolution wall threads. Writes every TplControlsCarrier field per
+// level 0..5 (the default assert(0) arm is removed under NDEBUG).
+void setTplParams(TplControlsCarrier& tplCtrls, int tplLevel, int inputResolution);
+
+// svt_aom_set_tpl_group (initial_rc_process.c:204-305): verbatim; the
+// pcs == NULL path threads as hasPcs (the early synth_blk_size return);
+// the consumed pcs fields (slice_type, hierarchical_levels) and the scs
+// walls (input_resolution, tpl_lad_mg, static_config.rate_control_mode)
+// thread. The carrier is ZEROED first (the reference's local
+// TplControls = {0}). Returns synth_blk_size.
+int setTplGroup(TplControlsCarrier& tplCtrls, bool hasPcs, int sliceType, int hierarchicalLevels,
+                int inputResolution, int tplGroupLevel, int sourceWidth, int sourceHeight, bool tplLadMg,
+                int rateControlMode);
+
 // MINQ_ADJ_LIMIT (rc_process.h:22) / HIGH_UNDERSHOOT_RATIO (:23).
 constexpr int kMinqAdjLimit = 48;
 constexpr int kHighUndershootRatio = 2;

@@ -3908,4 +3908,220 @@ void twopassPostencodeUpdate(RcControl& rc, const RcConfig& rcCfg, TwoPassCarrie
     }
 }
 
+// ---- A9D: initial_rc_process.c (the tpl-group pieces) ----
+
+// is_frame_already_exists (initial_rc_process.c:161-168): verbatim.
+bool isFrameAlreadyExists(const TplGroupPicView* tplGroup, int endIndex, std::uint64_t picNum) {
+    for (int i = 0; i < endIndex; i++) {
+        if (tplGroup[i].pictureNumber == picNum) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// validate_pic_for_tpl (initial_rc_process.c:171-188): verbatim.
+void validatePicForTpl(const TplControlsCarrier& tplCtrls, const TplGroupPicView* tplGroup,
+                       std::uint8_t* tplValidPic, std::uint32_t& usedTplFrameNum, int picIndex) {
+    // Check whether the i-th pic already exists in the tpl group
+    if (!isFrameAlreadyExists(tplGroup, picIndex, tplGroup[picIndex].pictureNumber) &&
+        // In the middle pass when rc_stat_gen_pass_mode is set, pictures in
+        // the highest temporal layer are skipped, except the first one. The
+        // condition is added to prevent validating these frames for tpl
+        !tplGroup[picIndex].picSkipped) {
+        // Discard low important pictures from tpl group
+        if (tplCtrls.reducedTplGroup >= 0) {
+            if (tplGroup[picIndex].temporalLayerIndex <= tplCtrls.reducedTplGroup) {
+                tplValidPic[picIndex] = 1;
+                usedTplFrameNum++;
+            }
+        } else {
+            tplValidPic[picIndex] = 1;
+            usedTplFrameNum++;
+        }
+    }
+}
+
+// set_tpl_params (initial_rc_process.c:319-401): verbatim.
+void setTplParams(TplControlsCarrier& tplCtrls, int tplLevel, int inputResolution) {
+    switch (tplLevel) {
+    case 0:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 0;
+        tplCtrls.intraModeEnd = 0;  // DC_PRED
+        tplCtrls.pfShape = 0;       // DEFAULT_SHAPE
+        tplCtrls.useSadInSrcSearch = 0;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 3;  // FULL_PEL
+        tplCtrls.subpelDiagRefinement = 0;
+        break;
+    case 1:
+        tplCtrls.computeRate = 1;
+        tplCtrls.enableTplQps = 1;
+        tplCtrls.disableIntraPredNref = 0;
+        tplCtrls.intraModeEnd = 12;  // PAETH_PRED
+        tplCtrls.pfShape = 0;
+        tplCtrls.useSadInSrcSearch = 0;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 1;  // QUARTER_PEL
+        tplCtrls.subpelDiagRefinement = 0;
+        break;
+    case 2:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 1;
+        tplCtrls.intraModeEnd = 12;  // PAETH_PRED
+        tplCtrls.pfShape = inputResolution <= kInputSize480pRange ? 1 : 2;  // N2_SHAPE : N4_SHAPE
+        tplCtrls.useSadInSrcSearch = 1;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 1;
+        tplCtrls.subpelDiagRefinement = 0;
+        break;
+    case 3:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 1;
+        tplCtrls.intraModeEnd = 0;  // DC_PRED
+        tplCtrls.pfShape = inputResolution <= kInputSize480pRange ? 1 : 2;
+        tplCtrls.useSadInSrcSearch = 1;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 1;
+        tplCtrls.subpelDiagRefinement = 4;
+        break;
+    case 4:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 1;
+        tplCtrls.intraModeEnd = 0;  // DC_PRED
+        tplCtrls.pfShape = inputResolution <= kInputSize480pRange ? 1 : 2;
+        tplCtrls.useSadInSrcSearch = 1;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 3;  // FULL_PEL
+        tplCtrls.subpelDiagRefinement = 4;
+        break;
+    case 5:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 1;
+        tplCtrls.intraModeEnd = 0;  // DC_PRED
+        tplCtrls.pfShape = inputResolution <= kInputSize480pRange ? 1 : 2;
+        tplCtrls.useSadInSrcSearch = 1;
+        tplCtrls.dispenserSearchLevel = 1;
+        tplCtrls.subsampleTx = 2;
+        tplCtrls.subpelDepth = 3;
+        tplCtrls.subpelDiagRefinement = 4;
+        break;
+    default:
+        break;
+    }
+}
+
+// svt_aom_set_tpl_group (initial_rc_process.c:204-305): verbatim.
+int setTplGroup(TplControlsCarrier& tplCtrls, bool hasPcs, int sliceType, int hierarchicalLevels,
+                int inputResolution, int tplGroupLevel, int sourceWidth, int sourceHeight, bool tplLadMg,
+                int rateControlMode) {
+    tplCtrls = TplControlsCarrier{};  // the reference's local TplControls = {0}
+
+    switch (tplGroupLevel) {
+    case 0:
+        tplCtrls.enable = 0;
+        break;
+    case 1:
+        tplCtrls.enable = 1;
+        tplCtrls.reducedTplGroup = -1;
+        tplCtrls.synthBlkSize = 16;
+        break;
+    case 2:
+        tplCtrls.enable = 1;
+        tplCtrls.reducedTplGroup = !hasPcs ? -1
+            : sliceType                    ? -1
+                                           : (hierarchicalLevels == 5 ? 4 : 3);
+        tplCtrls.synthBlkSize = 16;
+        break;
+    case 3:
+        tplCtrls.enable = 1;
+        tplCtrls.reducedTplGroup = !hasPcs ? -1 : hierarchicalLevels == 5 ? 4 : 3;
+        tplCtrls.synthBlkSize = 16;
+        break;
+    case 4:
+        tplCtrls.enable = 1;
+        tplCtrls.reducedTplGroup = !hasPcs ? -1
+            : hierarchicalLevels == 5
+            ? sliceType ? 2 : (inputResolution <= kInputSize480pRange ? 3 : 1)
+            : hierarchicalLevels == 4
+            ? sliceType ? 2 : (inputResolution <= kInputSize480pRange ? 2 : 1)
+            : sliceType ? 3
+                        : (inputResolution <= kInputSize480pRange ? 2 : 0);
+        tplCtrls.synthBlkSize = (sourceWidth < sourceHeight ? sourceWidth : sourceHeight) >= 720 ? 32 : 16;
+        break;
+    default:
+        break;
+    }
+
+    if (!hasPcs) {
+        return tplCtrls.synthBlkSize;
+    }
+
+    if (hierarchicalLevels <= tplCtrls.reducedTplGroup) {
+        tplCtrls.reducedTplGroup = -1;
+    }
+
+    // TPL may only look at a subset of available pictures in tpl group,
+    // which may affect the r0 calcuation. As a result, we defined a factor
+    // to adjust r0 (to compensate for TPL not using all available frames).
+    if (tplCtrls.reducedTplGroup >= 0) {
+        switch (hierarchicalLevels - tplCtrls.reducedTplGroup) {
+        case 0:
+        default:
+            tplCtrls.r0AdjustFactor = 0;
+            break;
+        case 1:
+            tplCtrls.r0AdjustFactor = hierarchicalLevels <= 2 ? 0.4
+                : hierarchicalLevels <= 3                     ? 0.8
+                                                              : 1.6;
+            break;
+        case 2:
+            tplCtrls.r0AdjustFactor = hierarchicalLevels <= 2 ? 0.6
+                : hierarchicalLevels <= 3                     ? 1.2
+                                                              : 2.4;
+            break;
+        case 3:
+            tplCtrls.r0AdjustFactor = hierarchicalLevels <= 3 ? 1.4 : 2.8;
+            break;
+        case 4:
+            tplCtrls.r0AdjustFactor = 4.0;
+            break;
+        case 5:
+            tplCtrls.r0AdjustFactor = 6.0;
+            break;
+        }
+
+        // Adjust r0 scaling factor based on GOP structure and lookahead
+        if (!tplLadMg) {
+            tplCtrls.r0AdjustFactor *= 1.25;
+        }
+    } else {
+        // No r0 adjustment when all frames are used
+        tplCtrls.r0AdjustFactor = 0;
+
+        // If no lookahead, apply r0 scaling
+        if (!tplLadMg) {
+            tplCtrls.r0AdjustFactor = sliceType ? 0 : hierarchicalLevels <= 2 ? 0.4
+                                                      : hierarchicalLevels <= 3 ? 0.8
+                                                                                : 1.6;
+        }
+    }
+    if (rateControlMode == kSvtAv1RcModeVbr) {
+        tplCtrls.r0AdjustFactor *= 1.25;
+        tplCtrls.r0AdjustFactor = tplCtrls.r0AdjustFactor < 3 ? tplCtrls.r0AdjustFactor : 3;
+    }
+    return tplCtrls.synthBlkSize;
+}
+
 } // namespace l15_rc

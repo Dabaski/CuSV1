@@ -179,3 +179,246 @@ TEST_CASE("set_1pvbr_param weight paths and the avg floor crossing") {
     l15_rc::set1pVbrParam(d);
     CHECK(d.entry.statStruct.totalNumBits == 2000);
 }
+
+// ---- A9D S11: initial_rc_process.c is_frame_already_exists (:161-168) +
+// validate_pic_for_tpl (:171-188) + set_tpl_params (:319-401) +
+// svt_aom_set_tpl_group (:204-305) ----
+
+TEST_CASE("is_frame_already_exists walks the tpl group for the POC") {
+    l15_rc::TplGroupPicView group[3] = {};
+    group[0].pictureNumber = 10;
+    group[1].pictureNumber = 20;
+    group[2].pictureNumber = 30;
+    CHECK(l15_rc::isFrameAlreadyExists(group, 0, 10) == false);
+    CHECK(l15_rc::isFrameAlreadyExists(group, 2, 30) == false);  // end_index excludes [2]
+    CHECK(l15_rc::isFrameAlreadyExists(group, 2, 20) == true);
+    CHECK(l15_rc::isFrameAlreadyExists(group, 3, 30) == true);
+}
+
+TEST_CASE("validate_pic_for_tpl pins the reduced-group gate and the counters") {
+    {
+        // reduced_tpl_group = -1: EVERY unskipped, non-duplicate pic is
+        // validated; used_tpl_frame_num counts them.
+        l15_rc::TplControlsCarrier ctrls{};
+        ctrls.reducedTplGroup = -1;
+        l15_rc::TplGroupPicView group[3] = {};
+        group[0].pictureNumber = 10;
+        group[1].pictureNumber = 20;
+        group[2].pictureNumber = 30;
+        group[2].picSkipped = true;  // skipped: NOT validated
+        std::uint8_t valid[4] = {0, 0, 0, 9};
+        std::uint32_t used = 0;
+        l15_rc::validatePicForTpl(ctrls, group, valid, used, 0);
+        l15_rc::validatePicForTpl(ctrls, group, valid, used, 1);
+        l15_rc::validatePicForTpl(ctrls, group, valid, used, 2);
+        CHECK(valid[0] == 1);
+        CHECK(valid[1] == 1);
+        CHECK(valid[2] == 0);
+        CHECK(valid[3] == 9);  // untouched
+        CHECK(used == 2);
+    }
+    {
+        // reduced_tpl_group = 1: only members at layer <= 1 validate.
+        l15_rc::TplControlsCarrier ctrls{};
+        ctrls.reducedTplGroup = 1;
+        l15_rc::TplGroupPicView group[2] = {};
+        group[0].pictureNumber = 10;
+        group[0].temporalLayerIndex = 1;
+        group[1].pictureNumber = 20;
+        group[1].temporalLayerIndex = 2;
+        std::uint8_t valid[2] = {0, 0};
+        std::uint32_t used = 0;
+        l15_rc::validatePicForTpl(ctrls, group, valid, used, 0);
+        l15_rc::validatePicForTpl(ctrls, group, valid, used, 1);
+        CHECK(valid[0] == 1);
+        CHECK(valid[1] == 0);
+        CHECK(used == 1);
+    }
+    {
+        // the duplicate-POC gate: a member whose POC already appears earlier
+        // in the group is NOT validated even with reduced = -1.
+        l15_rc::TplControlsCarrier ctrls{};
+        ctrls.reducedTplGroup = -1;
+        l15_rc::TplGroupPicView group[2] = {};
+        group[0].pictureNumber = 10;
+        group[1].pictureNumber = 10;  // duplicate
+        std::uint8_t valid[2] = {0, 0};
+        std::uint32_t used = 0;
+        l15_rc::validatePicForTpl(ctrls, group, valid, used, 0);
+        l15_rc::validatePicForTpl(ctrls, group, valid, used, 1);
+        CHECK(valid[0] == 1);
+        CHECK(valid[1] == 0);
+        CHECK(used == 1);
+    }
+}
+
+TEST_CASE("set_tpl_params enumerates every level and the resolution fork") {
+    const int res[3] = {l15_rc::kInputSize480pRange, l15_rc::kInputSize480pRange + 1, l15_rc::kInputSize4KRange};
+    for (int r = 0; r < 3; ++r) {
+        for (int lvl = 0; lvl <= 5; ++lvl) {
+            l15_rc::TplControlsCarrier c{};
+            c.intraModeEnd = -1;
+            c.pfShape = -1;
+            c.subpelDepth = -1;
+            c.subpelDiagRefinement = -1;
+            c.dispenserSearchLevel = -1;
+            c.subsampleTx = -1;
+            c.useSadInSrcSearch = -1;
+            l15_rc::setTplParams(c, lvl, res[r]);
+            switch (lvl) {
+            case 0:
+                CHECK(c.computeRate == 0);
+                CHECK(c.enableTplQps == 0);
+                CHECK(c.disableIntraPredNref == 0);
+                CHECK(c.intraModeEnd == 0);  // DC_PRED
+                CHECK(c.pfShape == 0);       // DEFAULT_SHAPE
+                CHECK(c.useSadInSrcSearch == 0);
+                CHECK(c.dispenserSearchLevel == 0);
+                CHECK(c.subsampleTx == 0);
+                CHECK(c.subpelDepth == 3);  // FULL_PEL
+                CHECK(c.subpelDiagRefinement == 0);
+                break;
+            case 1:
+                CHECK(c.computeRate == 1);
+                CHECK(c.enableTplQps == 1);
+                CHECK(c.disableIntraPredNref == 0);
+                CHECK(c.intraModeEnd == 12);  // PAETH_PRED
+                CHECK(c.pfShape == 0);
+                CHECK(c.useSadInSrcSearch == 0);
+                CHECK(c.subpelDepth == 1);  // QUARTER_PEL
+                CHECK(c.subpelDiagRefinement == 0);
+                break;
+            case 2:
+                CHECK(c.computeRate == 0);
+                CHECK(c.enableTplQps == 0);
+                CHECK(c.disableIntraPredNref == 1);
+                CHECK(c.intraModeEnd == 12);
+                CHECK(c.pfShape == (res[r] <= l15_rc::kInputSize480pRange ? 1 : 2));  // N2 / N4
+                CHECK(c.useSadInSrcSearch == 1);
+                CHECK(c.subpelDepth == 1);
+                CHECK(c.subpelDiagRefinement == 0);
+                break;
+            case 3:
+                CHECK(c.disableIntraPredNref == 1);
+                CHECK(c.intraModeEnd == 0);  // DC_PRED
+                CHECK(c.subpelDepth == 1);
+                CHECK(c.subpelDiagRefinement == 4);
+                break;
+            case 4:
+                CHECK(c.intraModeEnd == 0);
+                CHECK(c.subpelDepth == 3);
+                CHECK(c.subpelDiagRefinement == 4);
+                CHECK(c.dispenserSearchLevel == 0);
+                CHECK(c.subsampleTx == 0);
+                break;
+            case 5:
+                CHECK(c.intraModeEnd == 0);
+                CHECK(c.subpelDepth == 3);
+                CHECK(c.subpelDiagRefinement == 4);
+                CHECK(c.dispenserSearchLevel == 1);
+                CHECK(c.subsampleTx == 2);
+                break;
+            }
+        }
+    }
+}
+
+TEST_CASE("set_tpl_group matches the oracle over the full configuration grid") {
+    // The oracle: a test-side transcription of initial_rc_process.c
+    // :204-305 (the ternary ladder + the r0 switch), enumerated over the
+    // full grid: level 0..4 x hasPcs x slice x hier 0..5 x res {2,3} x
+    // lad {0,1} x rc mode {0,1,2}.
+    int bad = 0;
+    for (int lvl = 0; lvl <= 4; ++lvl) {
+        for (int hasPcs = 0; hasPcs <= 1; ++hasPcs) {
+            for (int slice = 0; slice <= 1; ++slice) {
+                for (int hier = 0; hier <= 5; ++hier) {
+                    for (int ri = 0; ri < 2; ++ri) {
+                        const int res = ri == 0 ? l15_rc::kInputSize480pRange : l15_rc::kInputSize4KRange;
+                        for (int lad = 0; lad <= 1; ++lad) {
+                            for (int rcm = 0; rcm <= 2; ++rcm) {
+                                l15_rc::TplControlsCarrier got{};
+                                const int gotBlk =
+                                    l15_rc::setTplGroup(got, hasPcs != 0, slice, hier, res, lvl, 1920, 1080,
+                                                        lad != 0, rcm);
+                                // the reference's local TplControls = {0}:
+                                // reduced starts at ZERO (not -1) - only the
+                                // level cases that assign change it (the
+                                // level-0 case leaves 0, so the r0 ladder
+                                // RUNS for TPL-off groups - the quirk).
+                                int wantRed = 0;
+                                int wantBlk = 0;
+                                double wantR0 = 0.0;
+                                int wantEnable = 0;
+                                switch (lvl) {
+                                case 0:
+                                    wantEnable = 0;
+                                    break;
+                                case 1:
+                                    wantEnable = 1;
+                                    wantRed = -1;
+                                    wantBlk = 16;
+                                    break;
+                                case 2:
+                                    wantEnable = 1;
+                                    wantRed = hasPcs ? (slice ? -1 : (hier == 5 ? 4 : 3)) : -1;
+                                    wantBlk = 16;
+                                    break;
+                                case 3:
+                                    wantEnable = 1;
+                                    wantRed = hasPcs ? (hier == 5 ? 4 : 3) : -1;
+                                    wantBlk = 16;
+                                    break;
+                                case 4:
+                                    wantEnable = 1;
+                                    wantRed = hasPcs ? (hier == 5 ? (slice ? 2 : (res <= l15_rc::kInputSize480pRange ? 3 : 1))
+                                                      : hier == 4 ? (slice ? 2 : (res <= l15_rc::kInputSize480pRange ? 2 : 1))
+                                                                  : (slice ? 3 : (res <= l15_rc::kInputSize480pRange ? 2 : 0)))
+                                                    : -1;
+                                    wantBlk = (1920 < 1080 ? 1920 : 1080) >= 720 ? 32 : 16;
+                                    break;
+                                }
+                                if (hasPcs) {
+                                    if (hier <= wantRed) wantRed = -1;
+                                    if (wantRed >= 0) {
+                                        switch (hier - wantRed) {
+                                        case 0:
+                                        default: wantR0 = 0; break;
+                                        case 1: wantR0 = hier <= 2 ? 0.4 : hier <= 3 ? 0.8 : 1.6; break;
+                                        case 2: wantR0 = hier <= 2 ? 0.6 : hier <= 3 ? 1.2 : 2.4; break;
+                                        case 3: wantR0 = hier <= 3 ? 1.4 : 2.8; break;
+                                        case 4: wantR0 = 4.0; break;
+                                        case 5: wantR0 = 6.0; break;
+                                        }
+                                        if (!lad) wantR0 *= 1.25;
+                                    } else {
+                                        wantR0 = 0;
+                                        if (!lad) wantR0 = slice ? 0 : hier <= 2 ? 0.4 : hier <= 3 ? 0.8 : 1.6;
+                                    }
+                                    if (rcm == 1) {  // SVT_AV1_RC_MODE_VBR
+                                        wantR0 *= 1.25;
+                                        wantR0 = wantR0 < 3 ? wantR0 : 3;
+                                    }
+                                }
+                                if (got.enable != wantEnable || got.reducedTplGroup != wantRed ||
+                                    got.synthBlkSize != wantBlk || std::fabs(got.r0AdjustFactor - wantR0) > 1e-9 ||
+                                    gotBlk != wantBlk) {
+                                    ++bad;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CHECK(bad == 0);
+    // a few pinned absolutes out of the grid.
+    {
+        l15_rc::TplControlsCarrier c{};
+        const int blk = l15_rc::setTplGroup(c, false, 0, 3, l15_rc::kInputSize4KRange, 4, 1920, 1080, true, 0);
+        CHECK(blk == 32);  // the NULL-pcs early return with synth 32
+        CHECK(c.r0AdjustFactor == 0.0);  // the NULL path touches no r0
+        CHECK(c.reducedTplGroup == -1);
+    }
+}
