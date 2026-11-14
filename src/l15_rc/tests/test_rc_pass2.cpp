@@ -1137,3 +1137,106 @@ TEST_CASE("allocate_gf_group_bits pins the overlay zero and the no-arf path") {
         CHECK(g[2].baseFrameTarget == 34);
     }
 }
+
+// ---- A9D S6: pass2_strategy.c lap_rc_init (:512-555) +
+// lap_rc_group_error_calc (:562-581) ----
+
+namespace {
+
+// a lap window: 3 stats with coded errors 1/2/3 and total_num_bits 100/200/
+// 300.
+std::vector<l15_rc::FirstpassStatsCarrier> lapWindow() {
+    std::vector<l15_rc::FirstpassStatsCarrier> v;
+    const double ce[3] = {1.0, 2.0, 3.0};
+    const std::uint64_t nb[3] = {100, 200, 300};
+    for (int i = 0; i < 3; ++i) {
+        l15_rc::FirstpassStatsCarrier s{};
+        s.frame = (double)i;
+        s.codedError = ce[i];
+        s.count = 1.0;
+        s.duration = 1.0;
+        s.statStruct.totalNumBits = nb[i];
+        v.push_back(s);
+    }
+    return v;
+}
+
+l15_rc::TwoPassCarrier lapWalk(const std::vector<l15_rc::FirstpassStatsCarrier>& stats) {
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = (int)stats.size();
+    tp.statsInPos = 0;
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 1000;
+    return tp;
+}
+
+}  // namespace
+
+TEST_CASE("lap_rc_init walks the lookahead window with the <= end quirk") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = lapWindow();
+    l15_rc::TwoPassCarrier tp = lapWalk(stats);
+    // the caller's current frame (coded_error 10, total_num_bits 10).
+    l15_rc::FirstpassStatsCarrier arg{};
+    arg.codedError = 10.0;
+    arg.statStruct.totalNumBits = 10;
+
+    l15_rc::lapRcInit(tp, arg, 50, 190, 3000000, 30.0);
+
+    // QUIRK: the `stats_in <= stats_in_end` guard runs the body one final
+    // time before input_stats EOFs -> num_stats = window + 1 = 4, and the
+    // coded-error sum is the arg + all three elements = 16.
+    // DOUBLE_DIVIDE_CHECK: num_stats + 0.000001 -> avg = 16/4.000001.
+    const double avg = 16.0 / (4.0 + 0.000001);
+    CHECK(std::fabs(tp.modifiedErrorMin - (avg * 50.0 / 100.0)) <= 1e-9);
+    CHECK(std::fabs(tp.modifiedErrorMax - (avg * 190.0 / 100.0)) <= 1e-9);
+    // the second walk: calculate_modified_err = total_num_bits, accumulated
+    // arg + all three = 10 + 100 + 200 + 300 = 610.
+    CHECK(std::fabs(tp.modifiedErrorLeft - 610.0) <= 1e-9);
+    // bits_left += (int64)(num_stats * (target / framerate)) = 4 * 100000.
+    CHECK(tp.bitsLeft == 1000 + 400000);
+    // the walk position rewound.
+    CHECK(tp.statsInPos == 0);
+}
+
+TEST_CASE("lap_rc_init pins the empty-window and the rewind") {
+    // pos == count at entry: the body still runs once (the <= guard), the
+    // input_stats EOFs immediately; num_stats 1, coded error = arg only.
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = lapWindow();
+    l15_rc::TwoPassCarrier tp = lapWalk(stats);
+    tp.statsInPos = 3;  // at the end
+    l15_rc::FirstpassStatsCarrier arg{};
+    arg.codedError = 10.0;
+    arg.statStruct.totalNumBits = 10;
+    l15_rc::lapRcInit(tp, arg, 50, 190, 3000000, 30.0);
+    const double avg = 10.0 / (1.0 + 0.000001);
+    CHECK(std::fabs(tp.modifiedErrorMin - (avg * 50.0 / 100.0)) <= 1e-9);
+    CHECK(std::fabs(tp.modifiedErrorLeft - 10.0) <= 1e-9);
+    CHECK(tp.bitsLeft == 1000 + 100000);
+    CHECK(tp.statsInPos == 3);
+}
+
+TEST_CASE("lap_rc_group_error_calc caps at frames_to_key and rewinds") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = lapWindow();
+    {
+        // frames_to_key 2: terms = arg + loaded[0] (the cap).
+        l15_rc::TwoPassCarrier tp = lapWalk(stats);
+        l15_rc::FirstpassStatsCarrier arg{};
+        arg.codedError = 10.0;
+        arg.statStruct.totalNumBits = 10;
+        const double total = l15_rc::lapRcGroupErrorCalc(tp, arg, 2);
+        CHECK(std::fabs(total - 110.0) <= 1e-9);
+        CHECK(tp.statsInPos == 0);
+    }
+    {
+        // frames_to_key beyond the window: the EOF break - arg + all three
+        // = 610 (the same <= quirk as lap_rc_init).
+        l15_rc::TwoPassCarrier tp = lapWalk(stats);
+        l15_rc::FirstpassStatsCarrier arg{};
+        arg.codedError = 10.0;
+        arg.statStruct.totalNumBits = 10;
+        const double total = l15_rc::lapRcGroupErrorCalc(tp, arg, 50);
+        CHECK(std::fabs(total - 610.0) <= 1e-9);
+        CHECK(tp.statsInPos == 0);
+    }
+}

@@ -561,7 +561,24 @@ struct TwoPassCarrier {
     std::int64_t bitsLeft;                 // twopass->bits_left
     std::int64_t kfGroupBits;              // twopass->kf_group_bits
     std::int64_t kfGroupErrorLeft;         // twopass->kf_group_error_left
+    double modifiedErrorMin;               // twopass->modified_error_min
+    double modifiedErrorMax;               // twopass->modified_error_max
+    double modifiedErrorLeft;              // twopass->modified_error_left
 };
+
+// lap_rc_init (pass2_strategy.c:512-555): verbatim; the walls thread (the
+// two_pass_cfg vbrmin/vbrmax sections, the static_config target_bit_rate +
+// the scs new_framerate). The `stats_in <= stats_in_end` guard is preserved
+// (stats_in_end is the exclusive one-past pointer): the body runs one final
+// time before input_stats EOFs, so num_stats = window length + 1 and the
+// arg frame's coded_error joins the sum. MUTATES the carrier's
+// modifiedErrorMin/Max/Left and bitsLeft; the walk position rewinds.
+void lapRcInit(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, std::int64_t vbrminSection,
+               std::int64_t vbrmaxSection, std::int64_t targetBitRate, double newFramerate);
+
+// lap_rc_group_error_calc (pass2_strategy.c:562-581): verbatim; the walk cap
+// is rc->frames_to_key. Returns modified_error_total; the position rewinds.
+double lapRcGroupErrorCalc(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, int framesToKey);
 
 // frame_max_bits (pass2_strategy.c:55-58): verbatim; the
 // enc_ctx->two_pass_cfg.vbrmax_section wall threads. CLIP3(0, max,

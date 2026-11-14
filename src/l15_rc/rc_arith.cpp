@@ -3224,4 +3224,69 @@ void av1GopBitAllocation(const PcsCarrier& pcs, RcControl& rc, GfGroupMemberView
     allocateGfGroupBits(pcs, rc, gfGroup, gfGroupBits, gfArfBits, gfInterval, isKeyFrame, useArf);
 }
 
+// lap_rc_init (pass2_strategy.c:512-555): verbatim; DOUBLE_DIVIDE_CHECK
+// (firstpass.h:23) inlined.
+void lapRcInit(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, std::int64_t vbrminSection,
+               std::int64_t vbrmaxSection, std::int64_t targetBitRate, double newFramerate) {
+    int numStats = 0;
+    double modifiedErrorTotal = 0.0;
+    double codedErrorTotal = 0.0;
+    const int startPosition = twopass.statsInPos;
+    const FirstpassStatsCarrier thisFrameRef = thisFrame;
+
+    // loop over the look ahead and calculate the coded error
+    while (twopass.statsInPos <= twopass.statsInCount) {
+        // Accumulate total number of stats available till end of the look ahead
+        numStats++;
+        // Accumulate error.
+        codedErrorTotal += thisFrame.codedError;
+        // Load the next frame's stats.
+        if (EOF == inputStats(twopass, thisFrame)) {
+            break;
+        }
+    }
+    // Calculate modified_error_min and modified_error_max which is needed in
+    // modified_error_total calculation
+    const double avgError = codedErrorTotal / (numStats < 0 ? numStats - 0.000001 : numStats + 0.000001);
+
+    twopass.modifiedErrorMin = (avgError * (double)vbrminSection) / 100;
+    twopass.modifiedErrorMax = (avgError * (double)vbrmaxSection) / 100;
+    twopass.statsInPos = startPosition;
+    thisFrame = thisFrameRef;
+
+    // loop over the look ahead and calculate the modified_error_total
+    while (twopass.statsInPos <= twopass.statsInCount) {
+        // Accumulate error.
+        modifiedErrorTotal += calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+        // Load the next frame's stats.
+        if (EOF == inputStats(twopass, thisFrame)) {
+            break;
+        }
+    }
+
+    twopass.modifiedErrorLeft = modifiedErrorTotal;
+    twopass.bitsLeft += (std::int64_t)(numStats * ((double)targetBitRate / newFramerate));
+    twopass.statsInPos = startPosition;
+}
+
+// lap_rc_group_error_calc (pass2_strategy.c:562-581): verbatim.
+double lapRcGroupErrorCalc(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, int framesToKey) {
+    int numStats = 0;
+    double modifiedErrorTotal = 0.0;
+    const int startPosition = twopass.statsInPos;
+
+    // loop over the look ahead and calculate the modified_error_total
+    while (twopass.statsInPos <= twopass.statsInCount && numStats < framesToKey) {
+        numStats++;
+        // Accumulate error.
+        modifiedErrorTotal += calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+        // Load the next frame's stats.
+        if (EOF == inputStats(twopass, thisFrame)) {
+            break;
+        }
+    }
+    twopass.statsInPos = startPosition;
+    return modifiedErrorTotal;
+}
+
 } // namespace l15_rc
