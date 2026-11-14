@@ -196,6 +196,11 @@ struct PcsCarrier {
     bool endOfSequenceRegion;        // pcs->end_of_sequence_region
     int framesInSw;                  // pcs->frames_in_sw
 
+    // the A9D is_new_gf_group / process_first_pass_stats walls
+    // (pass2_strategy.c:761-845).
+    int isNewGfGroup;                // pcs->is_new_gf_group
+    bool gfUpdateDue;                // pcs->gf_update_due
+
     // the A9D rc-process walls (rc_process.c:568-605).
     bool disableCdfUpdate;           // frm_hdr.disable_cdf_update
     int overshootSeen;               // ppcs->overshoot_seen
@@ -617,6 +622,42 @@ void kfGroupRateAssignment(PcsCarrier& pcs, RcControl& rc, TwoPassCarrier& twopa
                            FirstpassStatsCarrier thisFrame, RcIntervalParamCarrier& rcParam, bool lapRc,
                            int intraPeriodLength, std::int64_t targetBitRate, double newFramerate,
                            int vbrmaxSection, std::uint8_t passes);
+
+// DEFAULT_GRP_WEIGHT (pass2_strategy.c:744).
+constexpr double kDefaultGrpWeight = 1.0;
+
+// process_first_pass_stats (pass2_strategy.c:761-819): verbatim; the walls
+// thread: the stats_buf_ctx pointers (total_stats / total_left_stats /
+// stats_in_start, all nullable like the reference's own gates), the
+// two_pass_cfg.vbrmin/vbrmax ride getSectionTargetBandwidth +
+// getTwopassWorstQuality through the rc_cfg under/over_shoot_pct, scs->
+// lap_rc + passes, scs->encoder_bit_depth, scs first_pass_downsample +
+// max_input_luma_* (into the one-pass worst-quality call), rc_cfg->
+// best_allowed_q. MUTATES the two left/total stats and the walk position.
+void processFirstPassStats(const PcsCarrier& pcs, RcControl& rc, const RcConfig& rcCfg, TwoPassCarrier& twopass,
+                           FirstpassStatsCarrier& thisFrame, FirstpassStatsCarrier* totalStats,
+                           FirstpassStatsCarrier* totalLeftStats, const FirstpassStatsCarrier* statsInStart,
+                           bool lapRc, std::uint8_t passes, int encoderBitDepth, int underShootPct,
+                           int overShootPct, bool firstPassDownsample, int maxInputLumaWidth,
+                           int maxInputLumaHeight);
+
+// GfGroupPocView: the gf_group[pic_i] member surface is_new_gf_group reads
+// and writes (the NULL check threads as hasPcs; the is_incomp_mg_frame twin
+// threads as incompMgFrame).
+struct GfGroupPocView {
+    bool hasPcs;               // gf_group[pic_i] != NULL
+    std::uint64_t pictureNumber;  // gf_group[pic_i]->picture_number
+    bool gfUpdateDue;          // read AND cleared
+    bool incompMgFrame;        // svt_aom_is_incomp_mg_frame twin
+};
+
+// is_new_gf_group (pass2_strategy.c:823-845): verbatim; the pcs head wall
+// threads (is_new_gf_group OUT, gf_update_due, gf_interval,
+// picture_number); the head's own is_incomp_mg_frame twin is the
+// incompMgFrame argument. The member loop bound is pcs.gfInterval (the
+// reference's own); gfGroup needs >= gfInterval entries. MUTATES the
+// members' gf_update_due.
+void isNewGfGroup(PcsCarrier& pcs, GfGroupPocView* gfGroup, bool incompMgFrame);
 
 // frame_max_bits (pass2_strategy.c:55-58): verbatim; the
 // enc_ctx->two_pass_cfg.vbrmax_section wall threads. CLIP3(0, max,

@@ -3429,4 +3429,94 @@ void kfGroupRateAssignment(PcsCarrier& pcs, RcControl& rc, TwoPassCarrier& twopa
     twopass.modifiedErrorLeft -= kfGroupErr;
 }
 
+// process_first_pass_stats (pass2_strategy.c:761-819): verbatim.
+void processFirstPassStats(const PcsCarrier& pcs, RcControl& rc, const RcConfig& rcCfg, TwoPassCarrier& twopass,
+                           FirstpassStatsCarrier& thisFrame, FirstpassStatsCarrier* totalStats,
+                           FirstpassStatsCarrier* totalLeftStats, const FirstpassStatsCarrier* statsInStart,
+                           bool lapRc, std::uint8_t passes, int encoderBitDepth, int underShootPct,
+                           int overShootPct, bool firstPassDownsample, int maxInputLumaWidth,
+                           int maxInputLumaHeight) {
+    if (pcs.pictureNumber == 0 && totalStats != nullptr && totalLeftStats != nullptr) {
+        if (lapRc) {
+            /*
+             * Accumulate total_stats using available limited number of stats,
+             * and assign it to total_left_stats.
+             */
+            *totalLeftStats = *totalStats;
+        }
+        // Special case code for first frame.
+        const int sectionTargetBandwidth =
+            getSectionTargetBandwidth(rc, lapRc, totalStats->count, (int)pcs.pictureNumber, twopass.bitsLeft);
+        const double sectionLength = totalLeftStats->count;
+        const double sectionError = totalLeftStats->codedError / sectionLength;
+        int tmpQ;
+        if (passes == 2) {
+            const int refQindex = statsInStart->statStruct.worstQindex;
+            const double refQ = convertQindexToQ(refQindex, encoderBitDepth);
+            const std::int64_t refGfGroupBits = (std::int64_t)(totalStats->statStruct.totalNumBits);
+            const std::int64_t targetGfGroupBits = twopass.bitsLeft;
+            {
+                int low = rc.bestQuality;
+                int high = rc.worstQuality;
+
+                while (low < high) {
+                    const int mid = (low + high) >> 1;
+                    const double q = convertQindexToQ(mid, encoderBitDepth);
+                    const int midBits = (int)(refGfGroupBits * refQ / q);
+
+                    if (midBits > targetGfGroupBits) {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+                tmpQ = low;
+            }
+        } else {
+            tmpQ = getTwopassWorstQuality(firstPassDownsample, maxInputLumaWidth, maxInputLumaHeight, sectionError, 0,
+                                          sectionTargetBandwidth, kDefaultGrpWeight, encoderBitDepth, underShootPct,
+                                          overShootPct, rc.bestQuality, rc.worstQuality);
+        }
+
+        rc.activeWorstQuality = tmpQ;
+        rc.avgFrameQindex[kInterFrame] = tmpQ;
+        rc.avgFrameQindex[kKeyFrame] = (tmpQ + rcCfg.bestAllowedQ) / 2;
+    }
+
+    if (EOF == inputStats(twopass, thisFrame)) {
+        return;
+    }
+
+    // Update the total stats remaining structure.
+    if (totalLeftStats != nullptr) {
+        subtractStats(*totalLeftStats, thisFrame);
+    }
+}
+
+// is_new_gf_group (pass2_strategy.c:823-845): verbatim.
+void isNewGfGroup(PcsCarrier& pcs, GfGroupPocView* gfGroup, bool incompMgFrame) {
+    pcs.isNewGfGroup = 0;
+    if (!incompMgFrame) {
+        pcs.isNewGfGroup = pcs.gfUpdateDue ? 1 : 0;
+    } else {
+        for (int picI = 0; picI < pcs.gfInterval; ++picI) {
+            // For P-pictures, since the pictures might get released and
+            // replaced by other pictures, we check the POC difference
+            const std::int64_t pocDelta =
+                (std::int64_t)gfGroup[picI].pictureNumber - (std::int64_t)pcs.pictureNumber;
+            if (gfGroup[picI].hasPcs && (int)(pocDelta < 0 ? -pocDelta : pocDelta) <= pcs.gfInterval &&
+                gfGroup[picI].incompMgFrame && gfGroup[picI].gfUpdateDue) {
+                pcs.isNewGfGroup = 1;
+            }
+        }
+        if (pcs.isNewGfGroup) {
+            for (int picI = 0; picI < pcs.gfInterval; ++picI) {
+                if (gfGroup[picI].hasPcs) {
+                    gfGroup[picI].gfUpdateDue = 0;
+                }
+            }
+        }
+    }
+}
+
 } // namespace l15_rc

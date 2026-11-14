@@ -1429,6 +1429,227 @@ TEST_CASE("kf_group_rate_assingment pins the two-pass kf_bits branch") {
     CHECK(tp.kfGroupBits == 76000 - 8000);
 }
 
+// ---- A9D S8: pass2_strategy.c process_first_pass_stats (:761-819) +
+// is_new_gf_group (:823-845) ----
+
+namespace {
+
+// the process_first_pass_stats fixture: 3 stats in the window, a total and
+// a total_left stats pair.
+l15_rc::FirstpassStatsCarrier pfStat(double frame, double codedError, std::uint64_t tnb) {
+    l15_rc::FirstpassStatsCarrier s{};
+    s.frame = frame;
+    s.codedError = codedError;
+    s.count = 1.0;
+    s.duration = 1.0;
+    s.statStruct.totalNumBits = tnb;
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("process_first_pass_stats first-frame case and the left-stats subtract") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = {pfStat(0.0, 10.0, 100), pfStat(1.0, 20.0, 200),
+                                                              pfStat(2.0, 30.0, 400)};
+    l15_rc::FirstpassStatsCarrier totalStats = pfStat(3.0, 60.0, 700);
+    totalStats.count = 3.0;
+    l15_rc::FirstpassStatsCarrier totalLeftStats = totalStats;
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = 3;
+    tp.statsInPos = 0;
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 300000;
+    l15_rc::RcControl rc{};
+    rc.bestQuality = 0;
+    rc.worstQuality = 255;
+    rc.avgFrameQindex[1] = -1;
+    rc.avgFrameQindex[0] = -1;
+    l15_rc::RcConfig cfg{};
+    cfg.bestAllowedQ = 40;
+    l15_rc::PcsCarrier pcs{};
+    pcs.pictureNumber = 0;
+    l15_rc::FirstpassStatsCarrier thisFrame{};
+
+    l15_rc::processFirstPassStats(pcs, rc, cfg, tp, thisFrame, &totalStats, &totalLeftStats, stats.data(), false, 1,
+                                  8, 50, 40, false, 1920, 1080);
+
+    // one-pass: tmp_q = get_twopass_worst_quality(section_error,
+    // 0, section_target_bandwidth, 1.0). section_length = 3,
+    // section_error = 60/3 = 20; stb = (int)(300000 / 3) = 100000.
+    const int expected = oracleTwopassWq(false, 1920, 1080, 20.0, 0.0, 100000, 1.0, 50, 40, 0, 255,
+                                         qPowTerm(), acTable());
+    CHECK(rc.activeWorstQuality == expected);
+    CHECK(rc.avgFrameQindex[1] == expected);
+    // the integer division: (tmp_q + best_allowed_q) / 2 truncates.
+    CHECK(rc.avgFrameQindex[0] == (expected + 40) / 2);
+    // the walk consumed frame 0.
+    CHECK(tp.statsInPos == 1);
+    CHECK(thisFrame.statStruct.totalNumBits == 100);
+    // subtract_stats on total_left_stats: frame 3 - 0 = 3, coded_error
+    // 60 - 10 = 50, count 3 - 1 = 2, duration 1 - 1 = 0 (pfStat's duration
+    // is 1.0 - the fixture never overrode it).
+    CHECK(std::fabs(totalLeftStats.frame - 3.0) <= 1e-9);
+    CHECK(std::fabs(totalLeftStats.codedError - 50.0) <= 1e-9);
+    CHECK(std::fabs(totalLeftStats.count - 2.0) <= 1e-9);
+    CHECK(std::fabs(totalLeftStats.duration - 0.0) <= 1e-9);
+}
+
+TEST_CASE("process_first_pass_stats the two-pass first-frame search") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = {pfStat(0.0, 10.0, 100), pfStat(1.0, 20.0, 200),
+                                                              pfStat(2.0, 30.0, 400)};
+    l15_rc::FirstpassStatsCarrier totalStats = pfStat(3.0, 60.0, 700);
+    totalStats.count = 3.0;
+    l15_rc::FirstpassStatsCarrier totalLeftStats = totalStats;
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = 3;
+    tp.statsInPos = 0;
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 3920000;
+    l15_rc::RcControl rc{};
+    rc.bestQuality = 0;
+    rc.worstQuality = 255;
+    l15_rc::RcConfig cfg{};
+    cfg.bestAllowedQ = 40;
+    l15_rc::PcsCarrier pcs{};
+    pcs.pictureNumber = 0;
+    l15_rc::FirstpassStatsCarrier thisFrame{};
+
+    l15_rc::processFirstPassStats(pcs, rc, cfg, tp, thisFrame, &totalStats, &totalLeftStats, stats.data(), false, 2,
+                                  8, 50, 40, false, 1920, 1080);
+
+    // passes == 2: ref_qindex = stats_in_start->stat_struct.worst_qindex.
+    // The fixture leaves it 0 -> ref_q = ac[0]/4 = 16.0; ref bits =
+    // total_stats->stat_struct.total_num_bits = 700.
+    // test-side transcription of the reference search (:786-801).
+    const double refQ = 16.0;
+    const std::int64_t refBits = 700;
+    const std::int64_t target = 3920000;
+    int low = 0, high = 255;
+    while (low < high) {
+        const int mid = (low + high) >> 1;
+        const double q = l15_rc::convertQindexToQ(mid, 8);
+        const int midBits = (int)(refBits * refQ / q);
+        if (midBits > target) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    CHECK(rc.activeWorstQuality == low);
+}
+
+TEST_CASE("process_first_pass_stats the picture_number gate and the EOF") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = {pfStat(0.0, 10.0, 100)};
+    l15_rc::FirstpassStatsCarrier totalStats = pfStat(1.0, 10.0, 100);
+    totalStats.count = 1.0;
+    l15_rc::FirstpassStatsCarrier totalLeftStats = totalStats;
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = 1;
+    tp.statsInPos = 1;  // the window is already consumed
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 300000;
+    l15_rc::RcControl rc{};
+    rc.avgFrameQindex[1] = -1;
+    l15_rc::RcConfig cfg{};
+    l15_rc::PcsCarrier pcs{};
+    pcs.pictureNumber = 0;
+    l15_rc::FirstpassStatsCarrier thisFrame{};
+    l15_rc::processFirstPassStats(pcs, rc, cfg, tp, thisFrame, &totalStats, &totalLeftStats, stats.data(), false, 1,
+                                  8, 50, 40, false, 1920, 1080);
+    // the input_stats EOF: the subtract never runs (the values stay).
+    CHECK(std::fabs(totalLeftStats.codedError - 10.0) <= 1e-9);
+    CHECK(tp.statsInPos == 1);
+    {
+        // picture_number != 0: the whole first-frame case is skipped - the
+        // q fields are untouched; the subtract still runs on frame 1.
+        const std::vector<l15_rc::FirstpassStatsCarrier> stats2 = {pfStat(0.0, 10.0, 100),
+                                                                   pfStat(1.0, 20.0, 200)};
+        l15_rc::FirstpassStatsCarrier ts = pfStat(2.0, 30.0, 300);
+        ts.count = 2.0;
+        l15_rc::FirstpassStatsCarrier tls = ts;
+        l15_rc::TwoPassCarrier tp2{};
+        tp2.statsIn = stats2.data();
+        tp2.statsInCount = 2;
+        tp2.statsInPos = 1;  // the caller-advanced convention
+        tp2.hasTotalStats = true;
+        tp2.bitsLeft = 300000;
+        l15_rc::RcControl rc2{};
+        rc2.avgFrameQindex[1] = 77;
+        rc2.avgFrameQindex[0] = 77;
+        l15_rc::RcConfig cfg2{};
+        l15_rc::PcsCarrier pcs2{};
+        pcs2.pictureNumber = 5;
+        l15_rc::FirstpassStatsCarrier tf2{};
+        l15_rc::processFirstPassStats(pcs2, rc2, cfg2, tp2, tf2, &ts, &tls, stats2.data(), false, 1, 8, 50, 40,
+                                      false, 1920, 1080);
+        CHECK(rc2.avgFrameQindex[1] == 77);
+        CHECK(rc2.avgFrameQindex[0] == 77);
+        CHECK(tf2.statStruct.totalNumBits == 200);
+        CHECK(std::fabs(tls.codedError - 10.0) <= 1e-9);
+        CHECK(tp2.statsInPos == 2);
+    }
+}
+
+TEST_CASE("is_new_gf_group the simple and the incomplete-minigop paths") {
+    {
+        // NOT an incomplete-mg frame: is_new_gf_group = gf_update_due.
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.isNewGfGroup = -1;
+        pcs.gfUpdateDue = 1;
+        l15_rc::isNewGfGroup(pcs, nullptr, false);
+        CHECK(pcs.isNewGfGroup == 1);
+        pcs.gfUpdateDue = 0;
+        l15_rc::isNewGfGroup(pcs, nullptr, false);
+        CHECK(pcs.isNewGfGroup == 0);
+    }
+    {
+        // an incomplete-mg frame: the member walk. Member 1 is within the
+        // gf_interval POC distance (the == gf_interval boundary counts),
+        // incomp, and gf_update_due -> 1; the clear pass zeroes every
+        // member's gf_update_due.
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.pictureNumber = 100;
+        pcs.gfUpdateDue = 0;
+        l15_rc::GfGroupPocView group[8] = {};
+        group[0].hasPcs = true;
+        group[0].pictureNumber = 50;   // |50-100| = 50 > 8 -> NOT counted
+        group[0].gfUpdateDue = 1;
+        group[0].incompMgFrame = true;
+        group[1].hasPcs = true;
+        group[1].pictureNumber = 108;  // |108-100| = 8 == gf_interval -> counted
+        group[1].gfUpdateDue = 1;
+        group[1].incompMgFrame = true;
+        group[2].hasPcs = false;       // the NULL member: skipped
+        group[2].gfUpdateDue = 1;
+        l15_rc::isNewGfGroup(pcs, group, true);
+        CHECK(pcs.isNewGfGroup == 1);
+        CHECK(group[0].gfUpdateDue == false);
+        CHECK(group[1].gfUpdateDue == false);
+        // the NULL member is NOT cleared (the reference's own
+        // if (pcs->gf_group[pic_i]) guard).
+        CHECK(group[2].gfUpdateDue == true);
+    }
+    {
+        // an incomplete-mg frame with NO matching member: 0, no clears.
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.pictureNumber = 100;
+        l15_rc::GfGroupPocView group[8] = {};
+        group[0].hasPcs = true;
+        group[0].pictureNumber = 105;
+        group[0].gfUpdateDue = 1;
+        group[0].incompMgFrame = false;  // not incomp -> not counted
+        l15_rc::isNewGfGroup(pcs, group, true);
+        CHECK(pcs.isNewGfGroup == 0);
+        CHECK(group[0].gfUpdateDue == true);
+    }
+}
+
 TEST_CASE("kf_group_rate_assingment pins the lap path and the clip") {
     const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
     {
