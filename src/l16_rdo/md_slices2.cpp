@@ -5,6 +5,8 @@
 #include "md_slices2.h"
 #include "md_slices.h"
 
+#include <cmath>
+
 namespace l16_rdo {
 
 // mv_check_bounds (mode_decision.c:3000-3003, verbatim).
@@ -598,6 +600,122 @@ void chooseBestAv1MvPred(const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MA
                 bestPredMv[1] = refMv[1];
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A4M-9: the TPL/SSIM lambda-tuning surface.
+// ---------------------------------------------------------------------------
+
+// coded_to_superres_mi (resize.h:71-73, verbatim).
+std::int32_t codedToSuperresMi(std::int32_t miCol, std::int32_t denom) {
+    return (miCol * denom + 8 / 2) / 8;  // SCALE_NUMERATOR = 8
+}
+
+// get_superblock_tpl_column_end (mode_decision.c:4115-4129, verbatim over
+// the carrier; miSizeWide is the landed rate_est table).
+std::int32_t getSuperblockTplColumnEnd(const SbLambdaPcs* ppcs, std::int32_t miCol, std::int32_t numMiW) {
+    const std::int32_t mibSizeLog2 = ppcs->sbSize128 ? 5 : 4;  // :4116
+    // Find the start column of this superblock.
+    const std::int32_t sbMiColStart = (miCol >> mibSizeLog2) << mibSizeLog2;  // :4118
+    // Same but in superres upscaled dimension.
+    const std::int32_t sbMiColStartSr = codedToSuperresMi(sbMiColStart, ppcs->superresDenom);  // :4120
+    // Width of this superblock in mi units.
+    const std::int32_t sbMiWidth = miSizeWide[ppcs->sbSize128 ? BLOCK_128X128 : BLOCK_64X64];  // :4122
+    // Same but in superres upscaled dimension.
+    const std::int32_t sbMiWidthSr = codedToSuperresMi(sbMiWidth, ppcs->superresDenom);  // :4124
+    // Superblock end in mi units.
+    const std::int32_t sbMiEnd = sbMiColStartSr + sbMiWidthSr;  // :4126
+    // Superblock end in TPL units.
+    return (sbMiEnd + numMiW - 1) / numMiW;  // :4128
+}
+
+// aom_av1_set_ssim_rdmult (mode_decision.c:4131-4174, verbatim over the
+// carriers; the pow/exp are the libm calls the reference makes).
+void aomAv1SetSsimRdmult(MdLambdaCarrier* ctx, const SbLambdaPcs* pcs, BlockSize bsize, std::int32_t miRow,
+                         std::int32_t miCol) {
+    const std::int32_t bsizeBase = BLOCK_16X16;  // :4135
+    const std::int32_t numMiW = miSizeWide[bsizeBase];
+    const std::int32_t numMiH = miSizeHigh[bsizeBase];
+    const std::int32_t numCols = (pcs->miCols + numMiW - 1) / numMiW;
+    const std::int32_t numRows = (pcs->miRows + numMiH - 1) / numMiH;
+    const std::int32_t numBcols = (miSizeWide[bsize] + numMiW - 1) / numMiW;
+    const std::int32_t numBrows = (miSizeHigh[bsize] + numMiH - 1) / numMiH;
+    std::int32_t row, col;
+    double numOfMi = 0.0;
+    double geomMeanOfScale = 1.0;
+    for (row = miRow / numMiW; row < numRows && row < miRow / numMiW + numBrows; ++row) {  // :4145
+        for (col = miCol / numMiH; col < numCols && col < miCol / numMiH + numBcols; ++col) {  // :4146
+            const std::int32_t index = row * numCols + col;
+            geomMeanOfScale *= pcs->ssimRdmultScalingFactors[index];
+            numOfMi += 1.0;
+        }
+    }
+    geomMeanOfScale = std::pow(geomMeanOfScale, (1.0 / numOfMi));  // :4152
+    if (!pcs->blkLambdaTuning) {
+        ctx->fullLambdaMd[0] = (std::uint32_t)((double)pcs->picFullLambda[0] * geomMeanOfScale + 0.5);
+        ctx->fullLambdaMd[1] = (std::uint32_t)((double)pcs->picFullLambda[1] * geomMeanOfScale + 0.5);
+        ctx->fastLambdaMd[0] = (std::uint32_t)((double)pcs->picFastLambda[0] * geomMeanOfScale + 0.5);
+        ctx->fastLambdaMd[1] = (std::uint32_t)((double)pcs->picFastLambda[1] * geomMeanOfScale + 0.5);
+    } else {
+        ctx->fullLambdaMd[0] = (std::uint32_t)((double)ctx->fullLambdaMd[0] * geomMeanOfScale + 0.5);
+        ctx->fullLambdaMd[1] = (std::uint32_t)((double)ctx->fullLambdaMd[1] * geomMeanOfScale + 0.5);
+        ctx->fastLambdaMd[0] = (std::uint32_t)((double)ctx->fastLambdaMd[0] * geomMeanOfScale + 0.5);
+        ctx->fastLambdaMd[1] = (std::uint32_t)((double)ctx->fastLambdaMd[1] * geomMeanOfScale + 0.5);
+    }
+}
+
+// svt_aom_set_tuned_blk_lambda (mode_decision.c:4176-4236, verbatim over
+// the carriers).
+void setTunedBlkLambda(MdLambdaCarrier* ctx, const SbLambdaPcs* pcs, BlockSize bsize, std::int32_t blkOrgX,
+                       std::int32_t blkOrgY) {
+    const std::int32_t miRow = blkOrgY / 4;  // :4181-4182 (ctx->blk_org_y / 4)
+    const std::int32_t miCol = blkOrgX / 4;
+
+    const std::int32_t miColSr = codedToSuperresMi(miCol, pcs->superresDenom);  // :4184
+    const std::int32_t miColsSr = ((pcs->enhancedUnscaledWidth + 15) / 16) << 2;  // :4185
+    const std::int32_t blockMiWidthSr = codedToSuperresMi(miSizeWide[bsize], pcs->superresDenom);  // :4186
+    const std::int32_t bsizeBase = pcs->synthBlkSize == 32 ? BLOCK_32X32 : BLOCK_16X16;  // :4187
+    const std::int32_t numMiW = miSizeWide[bsizeBase];
+    const std::int32_t numMiH = miSizeHigh[bsizeBase];
+    const std::int32_t numCols = (miColsSr + numMiW - 1) / numMiW;
+    const std::int32_t numRows = (pcs->miRows + numMiH - 1) / numMiH;
+    const std::int32_t numBcols = (blockMiWidthSr + numMiW - 1) / numMiW;
+    const std::int32_t numBrows = (miSizeHigh[bsize] + numMiH - 1) / numMiH;
+
+    // This is required because the end col of superblock may be off by 1 in case
+    // of superres.
+    const std::int32_t sbBcolEnd = getSuperblockTplColumnEnd(pcs, miCol, numMiW);  // :4197
+    std::int32_t row, col;
+    std::int32_t baseBlockCount = 0;
+    double geomMeanOfScale = 0.0;
+    for (row = miRow / numMiW; row < numRows && row < miRow / numMiW + numBrows; ++row) {  // :4201
+        for (col = miColSr / numMiH; col < numCols && col < miColSr / numMiH + numBcols && col < sbBcolEnd;
+             ++col) {  // :4202
+            const std::int32_t index = row * numCols + col;
+            geomMeanOfScale += std::log(pcs->tplSbRdmultScalingFactors[index]);
+            ++baseBlockCount;
+        }
+    }
+    // When superres is on, base_block_count could be zero.
+    // This function's counterpart in AOM, av1_get_hier_tpl_rdmult, will encounter division by zero
+    if (baseBlockCount == 0) {  // :4211-4219
+        // return a large number to indicate invalid state
+        ctx->fullLambdaMd[0] = SUPERRES_INVALID_STATE_MD;
+        ctx->fullLambdaMd[1] = SUPERRES_INVALID_STATE_MD;
+        ctx->fastLambdaMd[0] = SUPERRES_INVALID_STATE_MD;
+        ctx->fastLambdaMd[1] = SUPERRES_INVALID_STATE_MD;
+        return;
+    }
+
+    geomMeanOfScale = std::exp(geomMeanOfScale / baseBlockCount);  // :4221
+
+    ctx->fullLambdaMd[0] = (std::uint32_t)((double)pcs->picFullLambda[0] * geomMeanOfScale + 0.5);
+    ctx->fullLambdaMd[1] = (std::uint32_t)((double)pcs->picFullLambda[1] * geomMeanOfScale + 0.5);
+    ctx->fastLambdaMd[0] = (std::uint32_t)((double)pcs->picFastLambda[0] * geomMeanOfScale + 0.5);
+    ctx->fastLambdaMd[1] = (std::uint32_t)((double)pcs->picFastLambda[1] * geomMeanOfScale + 0.5);
+    if (pcs->tune == TUNE_SSIM || pcs->tune == TUNE_IQ || pcs->tune == TUNE_MS_SSIM) {  // :4232-4235
+        aomAv1SetSsimRdmult(ctx, pcs, bsize, miRow, miCol);
     }
 }
 

@@ -404,4 +404,63 @@ void chooseBestAv1MvPred(const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MA
                          MvReferenceFrame refFrame, PredictionMode mode, Mv mv0, Mv mv1,
                          std::uint8_t* bestDrlIndex, Mv bestPredMv[2]);
 
+// ---------------------------------------------------------------------------
+// A4M-9: the TPL/SSIM lambda-tuning surface.
+// ---------------------------------------------------------------------------
+
+// Tune (definitions.h:1862-1869, verbatim).
+enum Tune {
+    TUNE_VQ = 0,
+    TUNE_PSNR = 1,
+    TUNE_SSIM = 2,
+    TUNE_IQ = 3,
+    TUNE_MS_SSIM = 4,
+    TUNE_VMAF = 5,
+};
+
+// SUPERRES_INVALID_STATE (mode_decision.c:69).
+#define SUPERRES_INVALID_STATE_MD 0x7fffffff
+
+// coded_to_superres_mi (resize.h:71-73). Module-boundary carry (the landed
+// twin is l6 src_ops.cpp:321); SCALE_NUMERATOR = 8.
+std::int32_t codedToSuperresMi(std::int32_t miCol, std::int32_t denom);
+
+// The ppcs/pcs wall set of the two lambda writers (mode_decision.c
+// :4131-4174 + :4176-4236). The pic lambda pairs are the ed_ctx reads
+// (EB_8_BIT_MD = 0 / EB_10_BIT_MD = 1, definitions.h:1857-1858).
+struct SbLambdaPcs {
+    std::int32_t superresDenom;          // ppcs->superres_denom
+    std::int32_t enhancedUnscaledWidth;  // ppcs->enhanced_unscaled_pic->width
+    std::uint8_t synthBlkSize;           // ppcs->tpl_ctrls.synth_blk_size
+    std::int32_t miRows;                 // cm->mi_rows
+    std::int32_t miCols;                 // cm->mi_cols
+    Tune tune;                           // scs->static_config.tune
+    bool blkLambdaTuning;                // ppcs->blk_lambda_tuning
+    bool sbSize128;                      // scs->seq_header.sb_size == BLOCK_128X128
+    const double* tplSbRdmultScalingFactors;   // pa_me_data->tpl_sb_rdmult_scaling_factors
+    const double* ssimRdmultScalingFactors;    // pa_me_data->ssim_rdmult_scaling_factors
+    std::uint32_t picFullLambda[2];      // ctx->ed_ctx->pic_full_lambda
+    std::uint32_t picFastLambda[2];      // ctx->ed_ctx->pic_fast_lambda
+};
+
+// The ctx lambda surface both writers mutate.
+struct MdLambdaCarrier {
+    std::uint32_t fullLambdaMd[2];  // ctx->full_lambda_md[EB_8_BIT_MD / EB_10_BIT_MD]
+    std::uint32_t fastLambdaMd[2];  // ctx->fast_lambda_md
+};
+
+// get_superblock_tpl_column_end (mode_decision.c:4115-4129): the ppcs wall
+// threads as the two reads (sb_size == 128 flag, superres_denom).
+std::int32_t getSuperblockTplColumnEnd(const SbLambdaPcs* ppcs, std::int32_t miCol, std::int32_t numMiW);
+
+// aom_av1_set_ssim_rdmult (mode_decision.c:4131-4174). Deviation, named:
+// the bsize travels as the enum (the reference reads ctx->blk_geom->bsize).
+void aomAv1SetSsimRdmult(MdLambdaCarrier* ctx, const SbLambdaPcs* pcs, BlockSize bsize, std::int32_t miRow,
+                         std::int32_t miCol);
+
+// svt_aom_set_tuned_blk_lambda (mode_decision.c:4176-4236): bsize from the
+// reference's ctx->blk_geom->bsize; blk_org_y/x -> mi_row/mi_col = >> 2.
+void setTunedBlkLambda(MdLambdaCarrier* ctx, const SbLambdaPcs* pcs, BlockSize bsize, std::int32_t blkOrgX,
+                       std::int32_t blkOrgY);
+
 }  // namespace l16_rdo

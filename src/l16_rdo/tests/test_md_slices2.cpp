@@ -1136,3 +1136,192 @@ TEST_CASE("l16_rdo chooseBestAv1MvPred walks the DRL cost loop") {
     CHECK(drl == 0);
     CHECK(pred[0].as_int == stack[1][0].this_mv.as_int);
 }
+
+// ---------------------------------------------------------------------------
+// A4M-9: get_superblock_tpl_column_end (mode_decision.c:4115-4129) +
+// aom_av1_set_ssim_rdmult (:4131-4174) + svt_aom_set_tuned_blk_lambda
+// (:4176-4236) over the coded_to_superres_mi carry (resize.h:71-73).
+// ---------------------------------------------------------------------------
+using l16_rdo::codedToSuperresMi;
+using l16_rdo::getSuperblockTplColumnEnd;
+using l16_rdo::aomAv1SetSsimRdmult;
+using l16_rdo::setTunedBlkLambda;
+using l16_rdo::MdLambdaCarrier;
+using l16_rdo::SbLambdaPcs;
+using l16_rdo::TUNE_VQ;
+using l16_rdo::TUNE_SSIM;
+
+
+
+TEST_CASE("l16_rdo codedToSuperresMi rounds the half-up scaled mi") {
+    // resize.h:71-73: (mi_col * denom + SCALE_NUMERATOR/2) / SCALE_NUMERATOR
+    // with SCALE_NUMERATOR = 8. The landed l6 twin pins the same rows.
+    CHECK(codedToSuperresMi(4, 8) == 4);
+    CHECK(codedToSuperresMi(3, 8) == 3);
+    CHECK(codedToSuperresMi(1, 16) == 2);
+    CHECK(codedToSuperresMi(5, 12) == 8);
+    CHECK(codedToSuperresMi(0, 8) == 0);
+}
+
+TEST_CASE("l16_rdo getSuperblockTplColumnEnd pins the SB column end") {
+    // mode_decision.c:4115-4129. num_mi_w is the TPL base cell width in mi
+    // (8 for the synth-32 base, 4 for synth-16).
+    SbLambdaPcs pcs;
+    pcs.superresDenom = 8;
+    pcs.sbSize128 = false;
+    // 64x64 SB, 4-mi TPL cell: start (12>>4)<<4 = 0, width 16, end
+    // (0 + 16 + 3) / 4 = 4.
+    CHECK(getSuperblockTplColumnEnd(&pcs, 12, 4) == 4);
+    // Second SB (mi_col 20): start 16, end (16 + 16 + 3)/4 = 8.
+    CHECK(getSuperblockTplColumnEnd(&pcs, 20, 4) == 8);
+    // The 128 SB: start (12>>5)<<5 = 0, width 32, end (0+32+3)/4 = 8.
+    pcs.sbSize128 = true;
+    CHECK(getSuperblockTplColumnEnd(&pcs, 12, 4) == 8);
+    pcs.sbSize128 = false;
+    // The 8-mi TPL cell: (0 + 16 + 7)/8 = 2.
+    CHECK(getSuperblockTplColumnEnd(&pcs, 12, 8) == 2);
+    // Superres 2x upscale (denom 16): start 16 -> 32, width 16 -> 32, end
+    // (32 + 32 + 3)/4 = 16.
+    pcs.superresDenom = 16;
+    CHECK(getSuperblockTplColumnEnd(&pcs, 20, 4) == 16);
+}
+
+TEST_CASE("l16_rdo aomAv1SetSsimRdmult folds the geometric mean of the scale cells") {
+    // mode_decision.c:4131-4174. The 16x16 base cells; the mean is the
+    // geometric mean over the covered cells; the !tuning branch scales
+    // from the pic lambdas, the tuning branch from the current ctx values.
+    std::vector<double> ssim(64, 1.0);
+    ssim[0] = 2.0;
+    ssim[1] = 2.0;
+    ssim[2] = 2.0;
+    ssim[3] = 2.0;
+
+    SbLambdaPcs pcs;
+    pcs.miRows = 8;
+    pcs.miCols = 8;
+    pcs.ssimRdmultScalingFactors = ssim.data();
+    pcs.blkLambdaTuning = false;
+    pcs.picFullLambda[0] = 1000;
+    pcs.picFullLambda[1] = 2000;
+    pcs.picFastLambda[0] = 300;
+    pcs.picFastLambda[1] = 400;
+
+    MdLambdaCarrier ctx;
+    ctx.fullLambdaMd[0] = 111;
+    ctx.fullLambdaMd[1] = 222;
+    ctx.fastLambdaMd[0] = 333;
+    ctx.fastLambdaMd[1] = 444;
+
+    // bsize 16x16 at mi (0,0): one 16x16 base cell (index 0), geom = 2.0.
+    // !tuning: full = (uint32)(1000 * 2.0 + 0.5) = 2000; fast = 600.
+    aomAv1SetSsimRdmult(&ctx, &pcs, l16_rdo::BLOCK_16X16, 0, 0);
+    CHECK(ctx.fullLambdaMd[0] == 2000);
+    CHECK(ctx.fullLambdaMd[1] == 4000);
+    CHECK(ctx.fastLambdaMd[0] == 600);
+    CHECK(ctx.fastLambdaMd[1] == 800);
+
+    // The tuning branch: scales the CURRENT ctx values.
+    pcs.blkLambdaTuning = true;
+    ctx.fullLambdaMd[0] = 100;
+    ctx.fullLambdaMd[1] = 100;
+    ctx.fastLambdaMd[0] = 50;
+    ctx.fastLambdaMd[1] = 50;
+    aomAv1SetSsimRdmult(&ctx, &pcs, l16_rdo::BLOCK_16X16, 0, 0);
+    CHECK(ctx.fullLambdaMd[0] == 200);
+    CHECK(ctx.fastLambdaMd[1] == 100);
+
+    // A 32x32 block covers 2x2 = 4 cells; the mean is the geometric mean
+    // (2^4)^(1/4) = 2 - the same fold, exercised at a different bsize.
+    pcs.blkLambdaTuning = false;
+    ctx.fullLambdaMd[0] = 111;
+    aomAv1SetSsimRdmult(&ctx, &pcs, l16_rdo::BLOCK_32X32, 0, 0);
+    CHECK(ctx.fullLambdaMd[0] == 2000);
+
+    // The empty-cover row: mi_row/col far outside the frame -> num_of_mi
+    // = 0 -> pow(g, 1/0) -> the reference divides by zero; the port pins
+    // the g=1.0 init (num_of_mi 0 keeps geom 1.0): the lambdas fall back
+    // to the pic values.
+    aomAv1SetSsimRdmult(&ctx, &pcs, l16_rdo::BLOCK_16X16, 8, 8);
+    CHECK(ctx.fullLambdaMd[0] == 1000);
+}
+
+TEST_CASE("l16_rdo setTunedBlkLambda folds the TPL geometric mean and the superres sentinel") {
+    // mode_decision.c:4176-4236.
+    std::vector<double> tpl(64, 1.0);
+    tpl[0] = 2.0;
+    std::vector<double> ssim(64, 3.0);
+
+    SbLambdaPcs pcs;
+    pcs.superresDenom = 8;
+    pcs.enhancedUnscaledWidth = 32;
+    pcs.synthBlkSize = 32;
+    pcs.miRows = 8;
+    pcs.miCols = 8;
+    pcs.tune = TUNE_VQ;
+    pcs.sbSize128 = false;
+    pcs.tplSbRdmultScalingFactors = tpl.data();
+    pcs.ssimRdmultScalingFactors = ssim.data();
+    pcs.picFullLambda[0] = 1000;
+    pcs.picFullLambda[1] = 2000;
+    pcs.picFastLambda[0] = 300;
+    pcs.picFastLambda[1] = 400;
+
+    MdLambdaCarrier ctx;
+    ctx.fullLambdaMd[0] = 111;
+    ctx.fullLambdaMd[1] = 222;
+    ctx.fastLambdaMd[0] = 333;
+    ctx.fastLambdaMd[1] = 444;
+
+    // bsize 16x16 at blk_org (0,0): one TPL cell (factor 2.0); the four
+    // lambdas scale from the pic values.
+    setTunedBlkLambda(&ctx, &pcs, l16_rdo::BLOCK_16X16, 0, 0);
+    CHECK(ctx.fullLambdaMd[0] == 2000);
+    CHECK(ctx.fullLambdaMd[1] == 4000);
+    CHECK(ctx.fastLambdaMd[0] == 600);
+    CHECK(ctx.fastLambdaMd[1] == 800);
+    // tune == TUNE_VQ: no ssim tail.
+
+    // The superres sentinel row: blk_org (32, 0) makes the col loop empty
+    // (mi_col_sr 8 / 8 >= num_cols 1... the sb_bcol_end clamp) -> count 0
+    // -> all four lambdas = 0x7fffffff.
+    ctx.fullLambdaMd[0] = 111;
+    setTunedBlkLambda(&ctx, &pcs, l16_rdo::BLOCK_16X16, 32, 0);
+    CHECK(ctx.fullLambdaMd[0] == SUPERRES_INVALID_STATE_MD);
+    CHECK(ctx.fullLambdaMd[1] == SUPERRES_INVALID_STATE_MD);
+    CHECK(ctx.fastLambdaMd[0] == SUPERRES_INVALID_STATE_MD);
+    CHECK(ctx.fastLambdaMd[1] == SUPERRES_INVALID_STATE_MD);
+
+    // The TUNE_SSIM tail: the ssim rdmult path rewrites the lambdas after
+    // the TPL fold (ssim factor 3.0 -> 3000 wins over the tpl 2000).
+    pcs.tune = TUNE_SSIM;
+    setTunedBlkLambda(&ctx, &pcs, l16_rdo::BLOCK_16X16, 0, 0);
+    CHECK(ctx.fullLambdaMd[0] == 3000);
+    CHECK(ctx.fastLambdaMd[1] == 1200);
+
+    // The sb_bcol_end clamp row (:4197 + :4202, "the end col of superblock
+    // may be off by 1 in case of superres"): a 64x64 block at blk_org
+    // (80, 0) with a 4-mi TPL cell. The sr block spans TPL cols 5..8 but
+    // the SB's sr end is col 8 (sb_bcol_end), so the loop covers 5..7 -
+    // six 2.0 cells -> geom 2.0. Dropping the clamp would add the col-8
+    // cells (factor 1.0) and fold the mean to 2^(6/8) = 1.6818 -> 1682.
+    std::vector<double> tpl2(64, 1.0);
+    // The TPL grid row stride is numCols = 16 (the 256-wide picture):
+    // rows 0-1 x cols 5-7 = indices 5,6,7 and 21,22,23 - the six 2.0
+    // cells the clamped loop covers.
+    tpl2[5] = 2.0;
+    tpl2[6] = 2.0;
+    tpl2[7] = 2.0;
+    tpl2[21] = 2.0;
+    tpl2[22] = 2.0;
+    tpl2[23] = 2.0;
+    pcs.superresDenom = 8;
+    pcs.enhancedUnscaledWidth = 256;  // 4 SBs wide: numCols = 16 > sb_bcol_end
+    pcs.synthBlkSize = 16;  // the BLOCK_16X16 base: num_mi_w = num_mi_h = 4
+    pcs.miRows = 8;
+    pcs.miCols = 8;
+    pcs.tune = TUNE_VQ;
+    pcs.tplSbRdmultScalingFactors = tpl2.data();
+    ctx.fullLambdaMd[0] = 111;
+    setTunedBlkLambda(&ctx, &pcs, l16_rdo::BLOCK_64X64, 80, 0);
+    CHECK(ctx.fullLambdaMd[0] == 2000);
+}
