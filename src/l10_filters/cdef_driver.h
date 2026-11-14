@@ -152,6 +152,21 @@ using Pack2dPicFn = void (*)(const CdefPic& input, CdefPic& output);
 void setUnscaledInput16bit(const CdefScsWalls& scs, const CdefPic& input, CdefPic& output, CopyBufferInfoFn copyInfo,
     Convert8To16Fn convert8To16, Pack2dPicFn pack2dPic);
 
+// The svt_av1_upscale_normative_rows call-site wall (super_res.c, the
+// resize driver - l11-walled): threaded. (cm is not carried; the rows
+// driver takes the src/dst plane buffers, the height, the subsampling
+// and the bit depth.)
+using UpscaleNormativeRowsFn = void (*)(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst,
+    std::int32_t dstStride, std::int32_t height, std::int32_t subX, int bitDepth, bool is16bit);
+
+// svt_av1_superres_upscale_frame (cdef_process.c:152-:206): copy the
+// recon into a temp through the landed copyReconEnc, then per plane
+// upscale_normative_rows back into the recon. The temp allocation wall
+// is threaded (the caller provides the buffer); cm and the resize
+// driver walls are threaded as the callback.
+void superresUpscaleFrame(const CdefScsWalls& scs, const CdefPic& reconPic, CdefPic& temp, int numPlanes,
+    std::uint8_t* tempAlloc, UpscaleNormativeRowsFn upscaleRows, int encoderBitDepth);
+
 // ---------------------------------------------------------------------------
 // S7: cdef_seg_search (cdef_process.c:292-:666) - the per-segment strength
 // search over the 64x64 filter blocks.

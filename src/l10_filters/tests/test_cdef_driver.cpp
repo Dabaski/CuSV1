@@ -1739,3 +1739,51 @@ TEST_CASE("restKernelIter wn prev-frame unit restore") {
         CHECK(w.unitInfo[p][0].wienerInfo.vfilter[0] == static_cast<std::int16_t>(100 + p));
     }
 }
+
+// ---- S12: svt_av1_superres_upscale_frame -----------------------------------
+TEST_CASE("superresUpscaleFrame copies the recon to temp + upscales back") {
+    CdefScsWalls scs{false, 1, 1, false};
+    CdefPic recon = makeRestPic(0x11, 32, 16, 64);
+    fillRestPic(recon, 0x66, 0x77, 0x88);
+    // the alloc geometry the copyReconEnc pointer arithmetic needs
+    recon.border = 32;
+    recon.lumaSize = 4096;
+    recon.chromaSize = 1024;
+    CdefPic temp;
+    std::vector<std::uint8_t> tempAlloc(8192, 0xAB);
+    // the resize wall: record the per-plane calls, write a marker into the
+    // recon (the "upscaled" result)
+    struct UpsCalls {
+        int n = 0;
+        std::vector<int> planes;
+    };
+    static UpsCalls ups;
+    ups = UpsCalls{};
+    auto upscale = +[](const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+        std::int32_t height, std::int32_t subX, int bitDepth, bool is16bit) {
+        (void)src;
+        (void)srcStride;
+        (void)dstStride;
+        (void)height;
+        (void)bitDepth;
+        (void)is16bit;
+        ++ups.n;
+        ups.planes.push_back(subX);
+        dst[0] = 0xC7; // the marker write
+    };
+    l10_filters::cdef_driver::superresUpscaleFrame(scs, recon, temp, 3, tempAlloc.data(), upscale, 8);
+    // three plane calls with the 4:2:0 subsampling pattern
+    CHECK(ups.n == 3);
+    CHECK(ups.planes[0] == 0);
+    CHECK(ups.planes[1] == 1);
+    CHECK(ups.planes[2] == 1);
+    // the temp got the recon copies
+    CHECK(temp.width == 32);
+    CHECK(temp.height == 16);
+    CHECK(temp.buffer[0][0] == 0x66);
+    CHECK(temp.buffer[1][0] == 0x77);
+    // the recon dst received the upscale marker through the dst pointer
+    CHECK(recon.buffer[0][0] == 0xC7);
+    CHECK(recon.buffer[1][0] == 0xC7);
+    CHECK(recon.buffer[2][0] == 0xC7);
+}

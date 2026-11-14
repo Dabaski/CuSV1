@@ -1103,5 +1103,22 @@ void restKernelIter(RestKernelWalls& w) {
     }
 }
 
+// svt_av1_superres_upscale_frame (cdef_process.c:152-:206). 1:1; the
+// svt_aom_get_recon_pic selector and the svt_av1_upscale_normative_rows
+// resize wall are threaded.
+void superresUpscaleFrame(const CdefScsWalls& scs, const CdefPic& reconPic, CdefPic& temp, int numPlanes,
+    std::uint8_t* tempAlloc, UpscaleNormativeRowsFn upscaleRows, int encoderBitDepth) {
+    // copy the recon into the temp
+    copyReconEnc(scs, reconPic, temp, numPlanes, false, tempAlloc);
+
+    for (int plane = 0; plane < numPlanes; ++plane) {
+        const int subX = plane ? scs.subsamplingX : 0;
+        const int subY = plane ? scs.subsamplingY : 0;
+        upscaleRows(temp.buffer[plane], temp.stride[plane], const_cast<std::uint8_t*>(reconPic.buffer[plane]),
+            reconPic.stride[plane], (temp.height + subY) >> subY, subX, encoderBitDepth, scs.is16bitPipeline);
+    }
+    // free the memory (the EB_FREE_ALIGNED_ARRAY wall is threaded away:
+    // the caller owns the temp)
+}
 } // namespace cdef_driver
 } // namespace l10_filters
