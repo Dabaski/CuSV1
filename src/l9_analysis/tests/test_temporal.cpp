@@ -128,6 +128,69 @@ TEST_CASE("l9 temporal applyFilteringCentral luma-only leaves chroma poison") {
     }
 }
 
+// A11D-T1b: apply_filtering_central_highbd_c (temporal_filtering.c:300-:334).
+// The uint16_t src triple; the same poison-carrier discipline: the port must
+// match a test-side transcription of the reference's highbd body, and the
+// chroma tail (2..7) stays poison when tfChroma is true.
+TEST_CASE("l9 temporal applyFilteringCentralHbd 4:2:0 oracle + poison accum/count") {
+    using analysis::temporal::applyFilteringCentralHbd;
+    const uint16_t luma[2 * 8] = {10, 20, 30, 40, 0, 0, 0, 0,
+                                  50, 60, 70, 80, 0, 0, 0, 0};
+    const uint16_t u[4] = {11, 21, 0, 0};
+    const uint16_t v[4] = {12, 22, 0, 0};
+    const uint16_t* src[3] = {luma, u, v};
+    uint32_t accumPort[3][8];
+    uint32_t accumRef[3][8];
+    uint16_t countPort[3][8];
+    uint16_t countRef[3][8];
+    uint32_t* accumPtrPort[3] = {accumPort[0], accumPort[1], accumPort[2]};
+    uint32_t* accumPtrRef[3]  = {accumRef[0], accumRef[1], accumRef[2]};
+    uint16_t* countPtrPort[3] = {countPort[0], countPort[1], countPort[2]};
+    uint16_t* countPtrRef[3]  = {countRef[0], countRef[1], countRef[2]};
+    for (int p = 0; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            accumPort[p][i] = 0xDEADBEEFu;
+            accumRef[p][i]  = 0xDEADBEEFu;
+            countPort[p][i] = 0xBEEF;
+            countRef[p][i]  = 0xBEEF;
+        }
+    }
+    applyFilteringCentralHbd(true, src, accumPtrPort, countPtrPort, 4, 2, 1, 1, 8);
+
+    // Independent transcription of the reference highbd body.
+    const int modifier   = 1000;
+    for (uint16_t k = 0, i = 0; i < 2; i++) {
+        for (uint16_t j = 0; j < 4; j++) {
+            accumRef[0][k] = modifier * src[0][i * 8 + j];
+            countRef[0][k] = modifier;
+            ++k;
+        }
+    }
+    for (uint16_t k = 0, i = 0; i < (2 >> 1); i++) {
+        for (uint16_t j = 0; j < (4 >> 1); j++) {
+            accumRef[1][k] = modifier * src[1][i * (8 >> 1) + j];
+            countRef[1][k] = modifier;
+            accumRef[2][k] = modifier * src[2][i * (8 >> 1) + j];
+            countRef[2][k] = modifier;
+            ++k;
+        }
+    }
+    for (int p = 0; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            CHECK_EQ(accumPort[p][i], accumRef[p][i]);
+            CHECK_EQ(countPort[p][i], countRef[p][i]);
+        }
+    }
+    // The chroma loops wrote 2 slots each; the untouched chroma tail (2..7)
+    // stays poison in the port's arrays.
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 2; i < 8; ++i) {
+            CHECK_EQ(accumPort[p][i], 0xDEADBEEFu);
+            CHECK_EQ(countPort[p][i], 0xBEEF);
+        }
+    }
+}
+
 // TF2 S1: calculate_squared_errors_sum_highbd (temporal_filtering.c:710-720).
 // Raw int-arithmetic SSE over the window, then ONE shift by shift_factor
 // at the end (:719). bd-10 fixture: shift_factor = (10-8)*2 = 4; diffs

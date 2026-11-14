@@ -821,5 +821,42 @@ void applyFilteringCentral(bool tfChroma, const uint8_t* const* src,
         }
     }
 }
+
+// A11D-T1b: 1:1 port of svt_aom_apply_filtering_central_highbd_c
+// (temporal_filtering.c:300-334). The uint16_t src triple; the
+// structure is identical to the 8-bit twin.
+void applyFilteringCentralHbd(bool tfChroma, const uint16_t* const* src,
+                              uint32_t** accum, uint16_t** count,
+                              uint16_t blkWidth, uint16_t blkHeight,
+                              uint32_t ssX, uint32_t ssY, uint16_t srcStrideY) {
+    uint16_t blkHeightCh = blkHeight >> ssY;
+    uint16_t blkWidthCh  = blkWidth >> ssX;
+    uint16_t srcStrideCh = srcStrideY >> ssX;
+
+    const int modifier = 1000; /*TF_PLANEWISE_FILTER_WEIGHT_SCALE*/
+
+    // Luma
+    for (uint16_t k = 0, i = 0; i < blkHeight; i++) {
+        for (uint16_t j = 0; j < blkWidth; j++) {
+            accum[0 /*PLANE_Y*/][k] = modifier * src[0 /*PLANE_Y*/][i * srcStrideY + j];
+            count[0 /*PLANE_Y*/][k] = modifier;
+            ++k;
+        }
+    }
+
+    // Chroma
+    if (tfChroma) {
+        for (uint16_t k = 0, i = 0; i < blkHeightCh; i++) {
+            for (uint16_t j = 0; j < blkWidthCh; j++) {
+                accum[1 /*PLANE_U*/][k] = modifier * src[1 /*PLANE_U*/][i * srcStrideCh + j];
+                count[1 /*PLANE_U*/][k] = modifier;
+
+                accum[2 /*PLANE_V*/][k] = modifier * src[2 /*PLANE_V*/][i * srcStrideCh + j];
+                count[2 /*PLANE_V*/][k] = modifier;
+                ++k;
+            }
+        }
+    }
+}
 }
 }

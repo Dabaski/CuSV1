@@ -35,6 +35,15 @@ void applyFilteringCentral(bool tfChroma, const uint8_t* const* src,
                            uint16_t blkWidth, uint16_t blkHeight,
                            uint32_t ssX, uint32_t ssY, uint16_t srcStrideY);
 
+// A11D-T1b: 1:1 port of svt_aom_apply_filtering_central_highbd_c
+// (temporal_filtering.c:300-334). The uint16_t src triple is the
+// reference's uint16_t** shape; everything else identical to the
+// 8-bit twin.
+void applyFilteringCentralHbd(bool tfChroma, const uint16_t* const* src,
+                              uint32_t** accum, uint16_t** count,
+                              uint16_t blkWidth, uint16_t blkHeight,
+                              uint32_t ssX, uint32_t ssY, uint16_t srcStrideY);
+
 // 1:1 port of svt_aom_noise_log1p_fp16 (temporal_filtering.c:568-586).
 int32_t noiseLog1pFp16(int32_t noiseLevelFp16);
 
