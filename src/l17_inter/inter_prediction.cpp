@@ -683,6 +683,32 @@ const std::uint8_t obmcMask16[16] = {34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60,
 const std::uint8_t obmcMask32[32] = {33, 35, 36, 38, 40, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55,
                                      56, 57, 58, 59, 60, 60, 61, 62, 64, 64, 64, 64, 64, 64, 64, 64};
 
+// clamp_mv_to_umv_border_sb, enc_inter_prediction.c:55-:75. If the MV
+// points so far into the UMV border that no visible pixels are used, the
+// subpel part is discarded and the MV limited to 16 pixels.
+Mv clampMvToUmvBorderSb(std::int32_t mbToLeftEdge, std::int32_t mbToRightEdge, std::int32_t mbToTopEdge,
+                        std::int32_t mbToBottomEdge, const Mv* srcMv, std::int32_t bw, std::int32_t bh,
+                        std::int32_t ssX, std::int32_t ssY) {
+    constexpr std::int32_t aomInterpExtend = 4; // AOM_INTERP_EXTEND
+    constexpr std::int32_t subpelBitsL = 4;     // SUBPEL_BITS
+    constexpr std::int32_t subpelShiftsL = 16;  // SUBPEL_SHIFTS
+    const std::int32_t spelLeft = (aomInterpExtend + bw) << subpelBitsL;
+    const std::int32_t spelRight = spelLeft - subpelShiftsL;
+    const std::int32_t spelTop = (aomInterpExtend + bh) << subpelBitsL;
+    const std::int32_t spelBottom = spelTop - subpelShiftsL;
+    Mv clampedMv{(std::int16_t)(srcMv->x * (1 << (1 - ssX))), (std::int16_t)(srcMv->y * (1 << (1 - ssY)))};
+    assert(ssX <= 1);
+    assert(ssY <= 1);
+
+    clampMvLocal(&clampedMv,
+                 mbToLeftEdge * (1 << (1 - ssX)) - spelLeft,
+                 mbToRightEdge * (1 << (1 - ssX)) + spelRight,
+                 mbToTopEdge * (1 << (1 - ssY)) - spelTop,
+                 mbToBottomEdge * (1 << (1 - ssY)) + spelBottom);
+
+    return clampedMv;
+}
+
 // svt_av1_get_obmc_mask, inter_prediction.c:2556-:2574.
 const std::uint8_t* getObmcMask(int length) {
     switch (length) {

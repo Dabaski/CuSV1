@@ -481,6 +481,23 @@ int skipU4x4PredInObmc(int bsize, int dir, int subsamplingX, int subsamplingY);
 // definition lives in intra_prediction.c; declared at
 // inter_prediction.c:1198). bsize threads as the 0..21 index.
 int scaleChromaBsize(int bsize, int subsamplingX, int subsamplingY);
+// ---------- A3E E1: the enc-side MV clamp ----------
+
+// clamp_mv (mv.h:70-:73) duplicated locally (the SYM1 wb-trio precedent;
+// l17 cannot link l5 where the port's clampMv lives).
+inline void clampMvLocal(Mv* mv, std::int32_t minCol, std::int32_t maxCol, std::int32_t minRow,
+                         std::int32_t maxRow) {
+    mv->x = (std::int16_t)(mv->x < minCol ? minCol : (mv->x > maxCol ? maxCol : mv->x));
+    mv->y = (std::int16_t)(mv->y < minRow ? minRow : (mv->y > maxRow ? maxRow : mv->y));
+}
+
+// clamp_mv_to_umv_border_sb, enc_inter_prediction.c:55-:75. The xd
+// mb_to_left/right/top/bottom_edge fields thread as the four int
+// parameters (the AMVP1 carrier precedent).
+Mv clampMvToUmvBorderSb(std::int32_t mbToLeftEdge, std::int32_t mbToRightEdge, std::int32_t mbToTopEdge,
+                        std::int32_t mbToBottomEdge, const Mv* srcMv, std::int32_t bw, std::int32_t bh,
+                        std::int32_t ssX, std::int32_t ssY);
+
 // ---------- A3E J4: the dispatch rung ----------
 
 // svt_highbd_inter_predictor, inter_prediction.c:1455-:1523. The

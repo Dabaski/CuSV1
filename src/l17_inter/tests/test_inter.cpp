@@ -1837,6 +1837,53 @@ TEST_CASE("sum_squares_i16 and wedge_sse_from_residuals (ip:2533-2541, :2468-247
     CHECK(inter::wedgeSseFromResiduals(r1b, db, mb, 1) == (32767 * 32767 + 2048) >> 12);
 }
 
+// ------------------------------------------------------------- A3E E1
+// clamp_mv_to_umv_border_sb (enc_inter_prediction.c:55-:75). The xd
+// mb_to_*_edge fields thread as the four int parameters (the AMVP1
+// carrier precedent). The subsampling rule: the chroma MV is HALVED
+// (mv * (1 << (1 - ss))) before the clamp, and the clamp box is widened
+// by the subpel extent ((AOM_INTERP_EXTEND + bw) << SUBPEL_BITS).
+
+TEST_CASE("clamp_mv_to_umv_border_sb clamps the doubled MV into the subpel box (enc:55-75)") {
+    // Luma (ss 0): spel_left = (4 + bw) << 4; box = edges +/- extent.
+    // mb_to_left = -48, mb_to_right = 48, mb_to_top = -48, mb_to_bottom = 48
+    // (an 8x8 block at frame edge semantics), bw = bh = 8.
+    {
+        inter::Mv mv{1000, -2000};
+        const inter::Mv c = inter::clampMvToUmvBorderSb(-48, 48, -48, 48, &mv, 8, 8, 0, 0);
+        // spel_left = (4 + 8) << 4 = 192; left limit = -48*2 - 192 = -288.
+        // spel_right = 192 - 16 = 176; right limit = 48*2 + 176 = 272.
+        // spel_top = 192; top limit = -48*2 - 192 = -288.
+        // spel_bottom = 176; bottom limit = 48*2 + 176 = 272.
+        // The luma MV DOUBLES first (1 << (1 - ss_x) = 2 at ss 0):
+        // 2000 clamps to the right bound, -4000 to the top bound.
+        CHECK(c.x == 272);
+        CHECK(c.y == -288);
+    }
+    {
+        inter::Mv mv{100, 100};
+        const inter::Mv c = inter::clampMvToUmvBorderSb(-48, 48, -48, 48, &mv, 8, 8, 0, 0);
+        CHECK(c.x == 200); // 100 * 2 = 200, inside [-288, 272]: the clamp leaves it
+        CHECK(c.y == 200);
+    }
+    // The LEFT bound specifically: a deeply negative luma MV clamps to
+    // -48*2 - spel_left = -288 (spel_left, not spel_right - the extents
+    // differ by SUBPEL_SHIFTS).
+    {
+        inter::Mv mv{-5000, 0};
+        const inter::Mv c = inter::clampMvToUmvBorderSb(-48, 48, -48, 48, &mv, 8, 8, 0, 0);
+        CHECK(c.x == -288);
+    }
+    // Chroma (ss 1): 1 << (1 - ss) = 1, so the MV is unchanged and the
+    // box edges stay at their unscaled values.
+    {
+        inter::Mv mv{500, -500};
+        const inter::Mv c = inter::clampMvToUmvBorderSb(-48, 48, -48, 48, &mv, 8, 8, 1, 1);
+        CHECK(c.x == 224);  // 48 + (192 - 16)
+        CHECK(c.y == -240); // -48 - 192
+    }
+}
+
 TEST_CASE("find_ref_dv picks the in-tile delay offset (ip:2401-2412)") {
     // Tile starting at mi_row 8, mib_size 16, current mi_row 8 (row 0 of
     // the tile): mi_row - mib_size < start -> the LEFT/-x delay form.
