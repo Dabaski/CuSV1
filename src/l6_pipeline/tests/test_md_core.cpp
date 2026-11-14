@@ -19,6 +19,9 @@
 #include <motion.h>
 #include <picops.h>
 #include <subpel.h>
+#include <transform_hbd.h>
+
+#include <algorithm>
 
 namespace mdc = pipeline::mdc;
 namespace amvp = motion::amvp;
@@ -2471,4 +2474,281 @@ TEST_CASE("l6 mdc pmeSearch runs the early-exit chain and the full-pel search") 
     CHECK(g_tree_calls == 1);  // only the ref-0 pair reached the search
     CHECK(ctx.validPmeMv[0][1] == 0);  // the skipped pair never set a verdict
     CHECK(ctx.pmeResDist[0][1] == (std::uint32_t)~0);
+}
+
+// trip 23: the inverse-recon chain (product_coding_loop.c:695-:953 +
+// full_loop.c:1755-:1789 + inv_transforms.c:3139-:3165). The 8-bit wrapper
+// routes through the landed l3 invTxfmAddStagingHb; the test verifies the
+// recon = pred + invTxfm2dAdd composition against the landed l3 inverse.
+TEST_CASE("l6 mdc invTransformReconWrapper 8bit composes the staging inverse") {
+    const int N = 8;
+    std::vector<std::int32_t> coeff(N * N, 0);
+    // A DCT_DCT-ish sparse pattern: DC 1000, one AC 500.
+    coeff[0] = 1000;
+    coeff[1] = 500;
+    std::vector<std::uint8_t> predBuf(N * N);
+    std::vector<std::uint8_t> reconBuf(N * N);
+    for (int i = 0; i < N * N; ++i) predBuf[i] = static_cast<std::uint8_t>(i * 7 + 1);
+
+    mdc::invTransformReconWrapper(coeff.data(), 0, predBuf.data(), 0, N, reconBuf.data(), 0, N, false,
+                                  entropy::TX_8X8, entropy::DCT_DCT, 2, false);
+
+    // The landed l3 twin: the same dqcoeff through invTxfm2dAdd8x8 + pred.
+    std::vector<std::int32_t> dq(N * N, 0);
+    std::memcpy(dq.data(), coeff.data(), sizeof(std::int32_t) * N * N);
+    std::vector<std::uint16_t> recon16(N * N);
+    transforms::invTxfm2dAddHb(dq.data(), recon16.data(), N, transforms::TxSize::TX_8X8,
+                               transforms::TxType::DCT_DCT, 8);
+    for (int i = 0; i < N * N; ++i) {
+        const int want = std::clamp<int>(predBuf[i] + recon16[i], 0, 255);
+        CHECK(reconBuf[i] == want);
+    }
+}
+
+TEST_CASE("l6 mdc invTransformReconWrapper forces the eob when r != w") {
+    const int N = 8;
+    std::vector<std::int32_t> coeff(N * N, 0);
+    coeff[0] = 1000;  // eob 1 would zero everything else; the forced eob copies all
+    std::vector<std::uint8_t> predBuf(N * N, 0);
+    std::vector<std::uint8_t> reconBuf(N * N, 0);
+    // r != w: the recon writes into a separate buffer.
+    mdc::invTransformReconWrapper(coeff.data(), 0, predBuf.data(), 0, N, reconBuf.data(), 0, N, false,
+                                  entropy::TX_8X8, entropy::DCT_DCT, 1, false);
+    // The staging path with the forced max eob (64) replicates the full
+    // inverse; the same coeff with eob 1 through the landed twin:
+    std::vector<std::int32_t> dq(N * N, 0);
+    std::memcpy(dq.data(), coeff.data(), sizeof(std::int32_t) * N * N);
+    std::vector<std::uint16_t> recon16(N * N, 0);
+    transforms::TxfmParamHb p{};
+    p.txType = transforms::TxType::DCT_DCT;
+    p.txSize = transforms::TxSize::TX_8X8;
+    p.eob = mdc::av1GetMaxEob(entropy::TX_8X8);
+    p.lossless = 0;
+    p.bd = 8;
+    p.isHbd = 1;
+    transforms::invTxfmAddStagingHb(dq.data(), predBuf.data(), N, reconBuf.data(), N, p);
+    std::vector<std::uint16_t> recon16b(N * N);
+    transforms::invTxfm2dAddHb(dq.data(), recon16b.data(), N, transforms::TxSize::TX_8X8,
+                               transforms::TxType::DCT_DCT, 8);
+    for (int i = 0; i < N * N; ++i) {
+        CHECK(reconBuf[i] == std::clamp<int>(recon16b[i], 0, 255));
+    }
+    CHECK(mdc::av1GetMaxEob(entropy::TX_8X8) == 64);
+    CHECK(mdc::av1GetMaxEob(entropy::TX_64X64) == 1024);
+    CHECK(mdc::av1GetMaxEob(entropy::TX_16X64) == 512);
+}
+
+// trip 24: av1_perform_inverse_transform_recon_luma (product_coding_loop.c
+// :695-:752): the txOrg walk, the has_coeff/else-copy branches, and the
+// recon = pred + inverse composition at 16x16 tx_depth 0.
+TEST_CASE("l6 mdc av1PerformInverseTransformReconLuma composes the recon") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_16X16;
+    ctx.geom.bwidth = 16;
+    ctx.geom.bheight = 16;
+    ctx.geom.sq_size = 16;
+    ctx.blk_org_x = 32;
+    ctx.blk_org_y = 32;
+    ctx.sb_origin_x = 0;
+    ctx.sb_origin_y = 0;
+    pipeline::buildTxOrg();
+    std::vector<std::uint8_t> cflTemp(64 * 64, 0);
+    ctx.cfl_temp_luma_recon = cflTemp.data();
+
+    const int STRIDE = 64;
+    std::vector<std::uint8_t> predBuf(STRIDE * 64);
+    std::vector<std::uint8_t> reconBuf(64 * STRIDE);
+    for (int i = 0; i < STRIDE * 64; ++i) predBuf[i] = static_cast<std::uint8_t>(i * 3 + 5);
+
+    mdc::MdCand cand{};
+    cand.mode = l16_rdo::DC_PRED;
+    cand.tx_depth = 0;
+    mdc::MdCandBf bf{};
+    bf.cand = &cand;
+    bf.pred.buf = predBuf.data();
+    bf.pred.stride = STRIDE;
+    bf.recon.buf = reconBuf.data();
+    bf.recon.stride = STRIDE;
+    std::vector<std::int32_t> coeff(16 * 16, 0);
+    bf.rec_coeff.buf = reinterpret_cast<std::uint8_t*>(coeff.data());
+    bf.rec_coeff.stride = STRIDE;
+    bf.y_has_coeff = 1;
+    bf.eob_y[0] = 3;
+    bf.transform_type[0] = static_cast<std::uint8_t>(entropy::DCT_DCT);
+    coeff[0] = 800;
+    coeff[1] = -300;
+
+    mdc::av1PerformInverseTransformReconLuma(&ctx, &bf);
+
+    // The landed l3 twin: the 16x16 inverse of the same dqcoeff + pred.
+    std::vector<std::uint16_t> recon16(16 * 16);
+    transforms::invTxfm2dAddHb(coeff.data(), recon16.data(), 16, transforms::TxSize::TX_16X16,
+                               transforms::TxType::DCT_DCT, 8);
+    // The txOrg origin for (16X16, intra, depth 0) is (0, 0) - the recon
+    // lands in the CFL temp buffer at the block origin (32, 32) in the
+    // 64-strided buffer; the PRED read is at the candidate buffer origin
+    // (the per-candidate buffer models the block at (0,0)).
+    for (int r = 0; r < 16; ++r)
+        for (int c = 0; c < 16; ++c) {
+            const int want = std::clamp<int>(predBuf[r * STRIDE + c] + recon16[r * 16 + c], 0, 255);
+            CHECK(cflTemp[(32 + r) * STRIDE + 32 + c] == want);
+        }
+
+    // The no-coeff branch: the pred copies into the CFL temp.
+    bf.y_has_coeff = 0;
+    for (int i = 0; i < 64 * STRIDE; ++i) cflTemp[i] = 0xEE;
+    mdc::av1PerformInverseTransformReconLuma(&ctx, &bf);
+    for (int r = 0; r < 16; ++r)
+        for (int c = 0; c < 16; ++c) {
+            CHECK(cflTemp[(32 + r) * STRIDE + 32 + c] == predBuf[r * STRIDE + c]);
+        }
+}
+
+// trip 25: av1_perform_inverse_transform_recon (product_coding_loop.c
+// :754-:953): the luma + chroma walk at 32x32 (uv tx 16x16), all three
+// has_coeff branches through the landed l3 twins.
+TEST_CASE("l6 mdc av1PerformInverseTransformRecon composes luma and chroma recon") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_32X32;
+    ctx.geom.bwidth = 32;
+    ctx.geom.bheight = 32;
+    ctx.geom.sq_size = 32;
+    ctx.blk_org_x = 0;
+    ctx.blk_org_y = 0;
+    ctx.has_uv = 1;
+    ctx.uv_mode = 1;  // CHROMA_MODE_1
+    ctx.mds_subres_step = 0;
+    pipeline::buildTxOrg();
+
+    const int STRIDE = 64;
+    const int UVSTRIDE = 32;
+    std::vector<std::uint8_t> predBuf(STRIDE * 64);
+    std::vector<std::uint8_t> predU(UVSTRIDE * 32);
+    std::vector<std::uint8_t> predV(UVSTRIDE * 32);
+    std::vector<std::uint8_t> reconY(STRIDE * 64);
+    std::vector<std::uint8_t> reconU(UVSTRIDE * 32);
+    std::vector<std::uint8_t> reconV(UVSTRIDE * 32);
+    for (int i = 0; i < STRIDE * 64; ++i) predBuf[i] = static_cast<std::uint8_t>(i * 3 + 5);
+    for (int i = 0; i < UVSTRIDE * 32; ++i) {
+        predU[i] = static_cast<std::uint8_t>(i * 5 + 1);
+        predV[i] = static_cast<std::uint8_t>(i * 7 + 2);
+    }
+
+    mdc::MdCand cand{};
+    cand.mode = l16_rdo::DC_PRED;
+    cand.tx_depth = 0;
+    mdc::MdCandBf bf{};
+    bf.cand = &cand;
+    bf.pred.buf = predBuf.data();
+    bf.pred.stride = STRIDE;
+    bf.pred.u_buf = predU.data();
+    bf.pred.v_buf = predV.data();
+    bf.pred.u_stride = UVSTRIDE;
+    bf.pred.v_stride = UVSTRIDE;
+    bf.recon.buf = reconY.data();
+    bf.recon.stride = STRIDE;
+    bf.recon.u_buf = reconU.data();
+    bf.recon.v_buf = reconV.data();
+    bf.recon.u_stride = UVSTRIDE;
+    bf.recon.v_stride = UVSTRIDE;
+    std::vector<std::int32_t> coeffY(32 * 32, 0);
+    std::vector<std::int32_t> coeffU(16 * 16, 0);
+    std::vector<std::int32_t> coeffV(16 * 16, 0);
+    bf.rec_coeff.buf = reinterpret_cast<std::uint8_t*>(coeffY.data());
+    bf.rec_coeff.u_buf = reinterpret_cast<std::uint8_t*>(coeffU.data());
+    bf.rec_coeff.v_buf = reinterpret_cast<std::uint8_t*>(coeffV.data());
+    bf.rec_coeff.stride = STRIDE;
+    bf.rec_coeff.u_stride = UVSTRIDE;
+    bf.rec_coeff.v_stride = UVSTRIDE;
+    bf.eob_y[0] = 5;
+    bf.eob_u[0] = 3;
+    bf.eob_v[0] = 2;
+    bf.transform_type[0] = static_cast<std::uint8_t>(entropy::DCT_DCT);
+    bf.transform_type_uv = static_cast<std::uint8_t>(entropy::DCT_DCT);
+    coeffY[0] = 900;
+    coeffY[3] = -200;
+    coeffU[0] = 400;
+    coeffV[0] = -300;
+
+    ctx.blk_y_has_coeff = 1;
+    ctx.blk_u_has_coeff = 1;
+    ctx.blk_v_has_coeff = 1;
+
+    mdc::MdGeom geom = ctx.geom;
+    mdc::av1PerformInverseTransformRecon(&ctx, &bf, geom);
+
+    // The oracle: the same TxfmParamHb the wrapper builds (the eob forced
+    // to the tx 2d size when r != w, bd 8, isHbd 1), staged through the
+    // landed l3 entry on fresh buffers - the core math is pinned by l3's
+    // own tests; this pins the offsets, strides and param building.
+    auto stageOracle = [](const std::int32_t* coeff, std::uint32_t coeffOff, const std::uint8_t* pred, uint32_t predOff,
+                          uint32_t predStride, uint32_t reconStride, entropy::TxSize txSize, std::uint32_t eob) {
+        std::vector<std::uint8_t> predCopy(predStride * 64, 0);
+        for (int r = 0; r < 32; ++r)
+            std::memcpy(predCopy.data() + predOff + r * predStride, pred + predOff + r * predStride, 32);
+        std::vector<std::uint8_t> reconCopy(reconStride * 64, 0);
+        transforms::TxfmParamHb p{};
+        p.txType = transforms::TxType::DCT_DCT;
+        p.txSize = static_cast<transforms::TxSize>(txSize);
+        p.eob = static_cast<int>(eob);
+        p.lossless = 0;
+        p.bd = 8;
+        p.isHbd = 1;
+        transforms::invTxfmAddStagingHb(coeff + coeffOff, predCopy.data() + predOff, predStride,
+                                        reconCopy.data() + predOff, reconStride, p);
+        return reconCopy;
+    };
+    {
+        const std::vector<std::uint8_t> wantY =
+            stageOracle(coeffY.data(), 0, predBuf.data(), 0, STRIDE, STRIDE, entropy::TX_32X32, 1024);
+        for (int r = 0; r < 32; ++r)
+            for (int c = 0; c < 32; ++c) CHECK(reconY[r * STRIDE + c] == wantY[r * STRIDE + c]);
+        const std::vector<std::uint8_t> wantU = stageOracle(coeffU.data(), 0, predU.data(), 0, UVSTRIDE, UVSTRIDE, entropy::TX_16X16, 256);
+        for (int r = 0; r < 16; ++r)
+            for (int c = 0; c < 16; ++c) CHECK(reconU[r * UVSTRIDE + c] == wantU[r * UVSTRIDE + c]);
+        const std::vector<std::uint8_t> wantV = stageOracle(coeffV.data(), 0, predV.data(), 0, UVSTRIDE, UVSTRIDE, entropy::TX_16X16, 256);
+        for (int r = 0; r < 16; ++r)
+            for (int c = 0; c < 16; ++c) CHECK(reconV[r * UVSTRIDE + c] == wantV[r * UVSTRIDE + c]);
+    }
+
+    // The no-coff paths copy pred into the recon planes.
+    ctx.blk_y_has_coeff = 0;
+    ctx.blk_u_has_coeff = 0;
+    ctx.blk_v_has_coeff = 0;
+    for (int i = 0; i < STRIDE * 64; ++i) reconY[i] = 0xDD;
+    for (int i = 0; i < UVSTRIDE * 32; ++i) {
+        reconU[i] = 0xCC;
+        reconV[i] = 0xBB;
+    }
+    mdc::av1PerformInverseTransformRecon(&ctx, &bf, geom);
+    for (int r = 0; r < 32; ++r)
+        for (int c = 0; c < 32; ++c) CHECK(reconY[r * STRIDE + c] == predBuf[r * STRIDE + c]);
+    for (int r = 0; r < 16; ++r)
+        for (int c = 0; c < 16; ++c) {
+            CHECK(reconU[r * UVSTRIDE + c] == predU[r * UVSTRIDE + c]);
+            CHECK(reconV[r * UVSTRIDE + c] == predV[r * UVSTRIDE + c]);
+        }
+
+    // The split-mask case: luma has coeffs, chroma does not - the luma
+    // inverse runs while both chroma planes copy.
+    ctx.blk_y_has_coeff = 1;
+    ctx.blk_u_has_coeff = 0;
+    ctx.blk_v_has_coeff = 0;
+    for (int i = 0; i < STRIDE * 64; ++i) reconY[i] = 0xDD;
+    for (int i = 0; i < UVSTRIDE * 32; ++i) {
+        reconU[i] = 0xCC;
+        reconV[i] = 0xBB;
+    }
+    mdc::av1PerformInverseTransformRecon(&ctx, &bf, geom);
+    {
+        const std::vector<std::uint8_t> wantY2 =
+            stageOracle(coeffY.data(), 0, predBuf.data(), 0, STRIDE, STRIDE, entropy::TX_32X32, 1024);
+        for (int r = 0; r < 32; ++r)
+            for (int c = 0; c < 32; ++c) CHECK(reconY[r * STRIDE + c] == wantY2[r * STRIDE + c]);
+    }
+    for (int r = 0; r < 16; ++r)
+        for (int c = 0; c < 16; ++c) {
+            CHECK(reconU[r * UVSTRIDE + c] == predU[r * UVSTRIDE + c]);
+            CHECK(reconV[r * UVSTRIDE + c] == predV[r * UVSTRIDE + c]);
+        }
 }

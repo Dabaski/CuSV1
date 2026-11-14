@@ -10,6 +10,7 @@
 #include <packunpack.h>
 #include <picops.h>
 #include <subpel.h>
+#include <transform_hbd.h>
 
 namespace pipeline {
 namespace mdc {
@@ -2162,6 +2163,300 @@ void pmeSearch(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* me_resu
             }
         }
     }
+}
+
+// coefficients.h:44-:46 tx_size_2d (the full TX_SIZES_ALL + 1 table; the
+// landed coding_loop_helpers txSize2d is the 7-entry hadamard slice; the
+// 20th slot is the implicit zero the reference's initializer leaves).
+static const std::int32_t kTxSize2dFull[20] = {16,  64,  256, 1024, 4096, 32,   32,   128, 128, 512,
+                                               512, 2048, 2048, 64,  64,  256,  256,  1024, 1024, 0};
+
+// inv_transforms.h:129-:137 av1_get_max_eob.
+int av1GetMaxEob(entropy::TxSize tx_size) {
+    if (tx_size == entropy::TX_64X64 || tx_size == entropy::TX_64X32 || tx_size == entropy::TX_32X64) {
+        return 1024;
+    }
+    if (tx_size == entropy::TX_16X64 || tx_size == entropy::TX_64X16) {
+        return 512;
+    }
+    return kTxSize2dFull[tx_size];
+}
+
+// svt_aom_inv_transform_recon_wrapper (full_loop.c:1755-:1789).
+void invTransformReconWrapper(const std::int32_t* rec_coeff_buffer, std::uint32_t coeff_offset, std::uint8_t* pred_buffer,
+                              std::uint32_t pred_offset, std::uint32_t pred_stride, std::uint8_t* rec_buffer,
+                              std::uint32_t rec_offset, std::uint32_t rec_stride, bool hbd, entropy::TxSize txsize,
+                              entropy::TxType transform_type, std::uint32_t eob, bool lossless) {
+    if (hbd) {
+        transforms::invTransformReconHb(rec_coeff_buffer + coeff_offset,
+                                        reinterpret_cast<std::uint16_t*>(pred_buffer) + pred_offset, pred_stride,
+                                        reinterpret_cast<std::uint16_t*>(rec_buffer) + rec_offset, rec_stride,
+                                        static_cast<transforms::TxSize>(txsize), 10 /* EB_TEN_BIT */,
+                                        static_cast<transforms::TxType>(transform_type), eob, lossless);
+    } else {
+        // svt_aom_inv_transform_recon8bit (inv_transforms.c:3139-:3165).
+        transforms::TxfmParamHb txfm_param;
+        txfm_param.txType = static_cast<transforms::TxType>(transform_type);
+        txfm_param.txSize = static_cast<transforms::TxSize>(txsize);
+        txfm_param.eob = static_cast<std::int32_t>(eob);
+        txfm_param.lossless = lossless ? 1 : 0;
+        txfm_param.bd = 8;
+        txfm_param.isHbd = 1;
+
+        if (pred_buffer + pred_offset != rec_buffer + rec_offset) {
+            /* When output pointers to read and write are differents,
+             * then kernel copy also all buffer from read to write,
+             * and cannot be limited by End Of Buffer calculations. */
+            txfm_param.eob = av1GetMaxEob(txsize);
+        }
+
+        transforms::invTxfmAddStagingHb(rec_coeff_buffer + coeff_offset, pred_buffer + pred_offset, pred_stride,
+                                        rec_buffer + rec_offset, rec_stride, txfm_param);
+    }
+}
+
+// pic_operators.h:103-:160 the picture-copy inline wrappers. The cb/cr
+// twins read the u/v planes of the passed PicBuf (the reference's
+// src->u_buffer / dst->u_buffer).
+void pictureCopyY(const PicBuf& src, std::uint32_t src_origin_index, const PicBuf& dst, std::uint32_t dst_origin_index,
+                  std::uint32_t width, std::uint32_t height, bool hbd) {
+    if (hbd) {
+        picops::copyWxh16bit(reinterpret_cast<std::uint16_t*>(src.buf) + src_origin_index, src.stride,
+                             reinterpret_cast<std::uint16_t*>(dst.buf) + dst_origin_index, dst.stride, width, height);
+    } else {
+        picops::copyWxh8bit(src.buf + src_origin_index, src.stride, dst.buf + dst_origin_index, dst.stride, width,
+                            height);
+    }
+}
+void pictureCopyCb(const PicBuf& src, std::uint32_t src_origin_index, const PicBuf& dst, std::uint32_t dst_origin_index,
+                   std::uint32_t width, std::uint32_t height, bool hbd) {
+    if (hbd) {
+        picops::copyWxh16bit(reinterpret_cast<std::uint16_t*>(src.u_buf) + src_origin_index, src.u_stride,
+                             reinterpret_cast<std::uint16_t*>(dst.u_buf) + dst_origin_index, dst.u_stride, width,
+                             height);
+    } else {
+        picops::copyWxh8bit(src.u_buf + src_origin_index, src.u_stride, dst.u_buf + dst_origin_index, dst.u_stride,
+                            width, height);
+    }
+}
+void pictureCopyCr(const PicBuf& src, std::uint32_t src_origin_index, const PicBuf& dst, std::uint32_t dst_origin_index,
+                   std::uint32_t width, std::uint32_t height, bool hbd) {
+    if (hbd) {
+        picops::copyWxh16bit(reinterpret_cast<std::uint16_t*>(src.v_buf) + src_origin_index, src.v_stride,
+                             reinterpret_cast<std::uint16_t*>(dst.v_buf) + dst_origin_index, dst.v_stride, width,
+                             height);
+    } else {
+        picops::copyWxh8bit(src.v_buf + src_origin_index, src.v_stride, dst.v_buf + dst_origin_index, dst.v_stride,
+                            width, height);
+    }
+}
+
+// product_coding_loop.c:695-:752 av1_perform_inverse_transform_recon_luma.
+void av1PerformInverseTransformReconLuma(FlCtx* ctx, MdCandBf* cand_bf) {
+    const std::uint8_t tx_depth = cand_bf->cand->tx_depth;
+    const entropy::TxSize tx_size = entropy::txDepthToTxSize[tx_depth][static_cast<int>(ctx->geom.bsize)];
+    const int txb_width = entropy::txSizeWide[tx_size];
+    const int txb_height = entropy::txSizeHigh[tx_size];
+    const std::uint16_t tu_total_count = entropy::txBlocksPerDepth[static_cast<int>(ctx->geom.bsize)][tx_depth];
+    std::uint16_t txb_itr = 0;
+    std::uint32_t txb_1d_offset = 0;
+    const bool is_inter =
+        (isInterMode(cand_bf->cand->mode) || cand_bf->cand->use_intrabc) ? true : false;
+    const bool hbd = ctx->hbd_md != 0;
+    do {
+        const std::uint32_t txb_origin_x = txOrg[static_cast<int>(ctx->geom.bsize)][is_inter ? 1 : 0][tx_depth][txb_itr].x;
+        const std::uint32_t txb_origin_y = txOrg[static_cast<int>(ctx->geom.bsize)][is_inter ? 1 : 0][tx_depth][txb_itr].y;
+        const std::uint32_t txb_origin_index = txb_origin_x + txb_origin_y * cand_bf->pred.stride;
+        // Store recon with block origin offset b/c we may access in other blocks (for 4xN/Nx4 cases where chroma
+        // is not allowed for each block)
+        const std::uint32_t blk_org_x = static_cast<std::uint32_t>(ctx->blk_org_x) - ctx->sb_origin_x;
+        const std::uint32_t blk_org_y = static_cast<std::uint32_t>(ctx->blk_org_y) - ctx->sb_origin_y;
+        const std::uint32_t rec_luma_offset =
+            blk_org_x + txb_origin_x + (blk_org_y + txb_origin_y) * cand_bf->recon.stride;
+        const std::uint16_t y_has_coeff = (cand_bf->y_has_coeff & (1 << txb_itr)) > 0;
+        if (y_has_coeff) {
+            invTransformReconWrapper(cand_bf->rec_coeff.buf ? reinterpret_cast<const std::int32_t*>(cand_bf->rec_coeff.buf)
+                                                            : nullptr,
+                                     txb_1d_offset, cand_bf->pred.buf, txb_origin_index, cand_bf->pred.stride,
+                                     hbd ? reinterpret_cast<std::uint8_t*>(ctx->cfl_temp_luma_recon_16bit)
+                                         : ctx->cfl_temp_luma_recon,
+                                     rec_luma_offset, cand_bf->recon.stride, hbd, tx_size,
+                                     static_cast<entropy::TxType>(cand_bf->transform_type[txb_itr]),
+                                     cand_bf->eob_y[txb_itr], false /* lossless: the pcs segment wall, off */);
+        } else {
+            if (hbd) {
+                picops::copyWxh16bit(reinterpret_cast<std::uint16_t*>(cand_bf->pred.buf) + txb_origin_index,
+                                     cand_bf->pred.stride, ctx->cfl_temp_luma_recon_16bit + rec_luma_offset,
+                                     cand_bf->recon.stride, txb_height, txb_width);
+            } else {
+                picops::copyWxh8bit(cand_bf->pred.buf + txb_origin_index, cand_bf->pred.stride,
+                                    ctx->cfl_temp_luma_recon + rec_luma_offset, cand_bf->recon.stride, txb_height,
+                                    txb_width);
+            }
+        }
+        txb_1d_offset += static_cast<std::uint32_t>(txb_width * txb_height);
+        ++txb_itr;
+    } while (txb_itr < tu_total_count);
+}
+
+// product_coding_loop.c:754-:953 av1_perform_inverse_transform_recon.
+void av1PerformInverseTransformRecon(FlCtx* ctx, MdCandBf* cand_bf, const MdGeom& blk_geom) {
+    const std::uint8_t tx_depth = cand_bf->cand->tx_depth;
+    const std::uint32_t tu_total_count = entropy::txBlocksPerDepth[static_cast<int>(ctx->geom.bsize)][tx_depth];
+    std::uint32_t txb_itr = 0;
+    std::uint32_t txb_1d_offset = 0, txb_1d_offset_uv = 0;
+    const bool is_inter = isInterMode(cand_bf->cand->mode) || cand_bf->cand->use_intrabc;
+    const bool hbd = ctx->hbd_md != 0;
+    do {
+        const std::uint32_t txb_origin_x = txOrg[static_cast<int>(ctx->geom.bsize)][is_inter ? 1 : 0][tx_depth][txb_itr].x;
+        const std::uint32_t txb_origin_y = txOrg[static_cast<int>(ctx->geom.bsize)][is_inter ? 1 : 0][tx_depth][txb_itr].y;
+        entropy::TxSize tx_size = entropy::txDepthToTxSize[tx_depth][static_cast<int>(blk_geom.bsize)];
+        int txb_width = entropy::txSizeWide[tx_size];
+        const int txb_height_full = entropy::txSizeHigh[tx_size];
+        const int txb_height = txb_height_full >> ctx->mds_subres_step;
+        if (ctx->mds_subres_step == 2) {
+            if (tx_size == entropy::TX_64X64) {
+                tx_size = entropy::TX_64X16;
+            } else if (tx_size == entropy::TX_32X32) {
+                tx_size = entropy::TX_32X8;
+            } else if (tx_size == entropy::TX_16X16) {
+                tx_size = entropy::TX_16X4;
+            } else {
+                assert(0);
+            }
+        } else if (ctx->mds_subres_step == 1) {
+            if (tx_size == entropy::TX_64X64) {
+                tx_size = entropy::TX_64X32;
+            } else if (tx_size == entropy::TX_32X32) {
+                tx_size = entropy::TX_32X16;
+            } else if (tx_size == entropy::TX_16X16) {
+                tx_size = entropy::TX_16X8;
+            } else if (tx_size == entropy::TX_8X8) {
+                tx_size = entropy::TX_8X4;
+            } else {
+                assert(0);
+            }
+        }
+        std::uint32_t rec_luma_offset = txb_origin_x + txb_origin_y * cand_bf->recon.stride;
+        std::uint32_t rec_cb_offset = (((txb_origin_x >> 3) << 3) + (((txb_origin_y >> 3) << 3) * cand_bf->recon.u_stride)) >> 1;
+        std::uint32_t rec_cr_offset = (((txb_origin_x >> 3) << 3) + (((txb_origin_y >> 3) << 3) * cand_bf->recon.v_stride)) >> 1;
+        const std::uint32_t txb_origin_index = txb_origin_x + txb_origin_y * cand_bf->pred.stride;
+        PicBuf recon_buffer = cand_bf->recon;
+
+        // If bypassing encdec, update the recon pointer to copy the recon directly
+        // into the buffer used for EncDec; avoids copy after this function call.
+        // cand_bf->recon is only used to update other buffers after this point.
+        if (ctx->bypass_encdec && ctx->pd_pass == 1) {
+            if (ctx->fixed_partition) {
+                recon_buffer = ctx->bypass_recon_pic;
+                const std::uint16_t org_x =
+                    static_cast<std::uint16_t>(ctx->blk_org_x + txOrg[static_cast<int>(blk_geom.bsize)][is_inter ? 1 : 0][tx_depth][txb_itr].x);
+                const std::uint16_t org_y =
+                    static_cast<std::uint16_t>(ctx->blk_org_y + txOrg[static_cast<int>(blk_geom.bsize)][is_inter ? 1 : 0][tx_depth][txb_itr].y);
+                rec_luma_offset = (org_y) * recon_buffer.stride + (org_x);
+
+                const std::uint32_t round_origin_x = ((org_x >> 3) << 3);  // ROUND_UV
+                const std::uint32_t round_origin_y = ((org_y >> 3) << 3);
+                rec_cb_offset = rec_cr_offset = (((round_origin_y) >> 1) * recon_buffer.u_stride) + ((round_origin_x) >> 1);
+            } else {
+                recon_buffer = ctx->recon_tmp;
+                rec_luma_offset = txb_origin_x + (txb_origin_y * recon_buffer.stride);
+                rec_cb_offset = ((((txb_origin_x) >> 3) << 3) + (((txb_origin_y) >> 3) << 3) * recon_buffer.u_stride) >> 1;
+                rec_cr_offset = ((((txb_origin_x) >> 3) << 3) + (((txb_origin_y) >> 3) << 3) * recon_buffer.v_stride) >> 1;
+            }
+        }
+        if (ctx->blk_y_has_coeff & (1 << txb_itr)) {
+            invTransformReconWrapper(reinterpret_cast<const std::int32_t*>(cand_bf->rec_coeff.buf), txb_1d_offset,
+                                     cand_bf->pred.buf, txb_origin_index, cand_bf->pred.stride << ctx->mds_subres_step,
+                                     recon_buffer.buf, rec_luma_offset, recon_buffer.stride << ctx->mds_subres_step, hbd,
+                                     tx_size, static_cast<entropy::TxType>(cand_bf->transform_type[txb_itr]),
+                                     cand_bf->eob_y[txb_itr], false);
+            if (ctx->mds_subres_step == 2) {
+                for (int i = 0; i < (txb_height * 4); i += 4) {
+                    if (hbd) {
+                        std::memcpy(reinterpret_cast<std::uint16_t*>(recon_buffer.buf) + rec_luma_offset +
+                                        (i + 1) * recon_buffer.stride,
+                                    reinterpret_cast<std::uint16_t*>(recon_buffer.buf) + rec_luma_offset +
+                                        i * recon_buffer.stride,
+                                    txb_width * sizeof(std::uint16_t));
+                        std::memcpy(reinterpret_cast<std::uint16_t*>(recon_buffer.buf) + rec_luma_offset +
+                                        (i + 2) * recon_buffer.stride,
+                                    reinterpret_cast<std::uint16_t*>(recon_buffer.buf) + rec_luma_offset +
+                                        i * recon_buffer.stride,
+                                    txb_width * sizeof(std::uint16_t));
+                        std::memcpy(reinterpret_cast<std::uint16_t*>(recon_buffer.buf) + rec_luma_offset +
+                                        (i + 3) * recon_buffer.stride,
+                                    reinterpret_cast<std::uint16_t*>(recon_buffer.buf) + rec_luma_offset +
+                                        i * recon_buffer.stride,
+                                    txb_width * sizeof(std::uint16_t));
+                    } else {
+                        std::memcpy(recon_buffer.buf + rec_luma_offset + (i + 1) * recon_buffer.stride,
+                                    recon_buffer.buf + rec_luma_offset + i * recon_buffer.stride, txb_width);
+                        std::memcpy(recon_buffer.buf + rec_luma_offset + (i + 2) * recon_buffer.stride,
+                                    recon_buffer.buf + rec_luma_offset + i * recon_buffer.stride, txb_width);
+                        std::memcpy(recon_buffer.buf + rec_luma_offset + (i + 3) * recon_buffer.stride,
+                                    recon_buffer.buf + rec_luma_offset + i * recon_buffer.stride, txb_width);
+                    }
+                }
+            } else if (ctx->mds_subres_step) {
+                for (int i = 0; i < (txb_height * 2); i += 2) {
+                    if (hbd) {
+                        std::memcpy(reinterpret_cast<std::uint16_t*>(recon_buffer.buf) + rec_luma_offset +
+                                        (i + 1) * recon_buffer.stride,
+                                    reinterpret_cast<std::uint16_t*>(recon_buffer.buf) + rec_luma_offset +
+                                        i * recon_buffer.stride,
+                                    txb_width * sizeof(std::uint16_t));
+                    } else {
+                        std::memcpy(recon_buffer.buf + rec_luma_offset + (i + 1) * recon_buffer.stride,
+                                    recon_buffer.buf + rec_luma_offset + i * recon_buffer.stride, txb_width);
+                    }
+                }
+            }
+        } else {
+            pictureCopyY(cand_bf->pred, txb_origin_index, recon_buffer, rec_luma_offset, txb_width,
+                         txb_height << ctx->mds_subres_step, hbd);
+        }
+
+        // CHROMA
+        if (ctx->has_uv && (tx_depth == 0 || txb_itr == 0)) {
+            if (ctx->uv_mode <= kChromaMode1) {
+                const entropy::TxSize tx_size_uv = av1GetMaxUvTxsize(blk_geom.bsize, 1, 1);
+                const std::uint32_t chroma_txb_width = entropy::txSizeWide[tx_size_uv];
+                const std::uint32_t chroma_txb_height = entropy::txSizeHigh[tx_size_uv];
+                const std::uint32_t cb_tu_chroma_origin_index =
+                    ((((txb_origin_x) >> 3) << 3) + (((txb_origin_y) >> 3) << 3) * cand_bf->rec_coeff.u_stride) >> 1;
+                const std::uint32_t cr_tu_chroma_origin_index =
+                    ((((txb_origin_x) >> 3) << 3) + (((txb_origin_y) >> 3) << 3) * cand_bf->rec_coeff.v_stride) >> 1;
+                if (ctx->blk_u_has_coeff & (1 << txb_itr)) {
+                    invTransformReconWrapper(reinterpret_cast<const std::int32_t*>(cand_bf->rec_coeff.u_buf),
+                                             txb_1d_offset_uv, cand_bf->pred.u_buf, cb_tu_chroma_origin_index,
+                                             cand_bf->pred.u_stride, recon_buffer.u_buf, rec_cb_offset,
+                                             recon_buffer.u_stride, hbd, tx_size_uv,
+                                             static_cast<entropy::TxType>(cand_bf->transform_type_uv),
+                                             cand_bf->eob_u[txb_itr], false);
+                } else {
+                    pictureCopyCb(cand_bf->pred, cb_tu_chroma_origin_index, recon_buffer, rec_cb_offset,
+                                  chroma_txb_width, chroma_txb_height, hbd);
+                }
+
+                if (ctx->blk_v_has_coeff & (1 << txb_itr)) {
+                    invTransformReconWrapper(reinterpret_cast<const std::int32_t*>(cand_bf->rec_coeff.v_buf),
+                                             txb_1d_offset_uv, cand_bf->pred.v_buf, cr_tu_chroma_origin_index,
+                                             cand_bf->pred.v_stride, recon_buffer.v_buf, rec_cr_offset,
+                                             recon_buffer.v_stride, hbd, tx_size_uv,
+                                             static_cast<entropy::TxType>(cand_bf->transform_type_uv),
+                                             cand_bf->eob_v[txb_itr], false);
+                } else {
+                    pictureCopyCr(cand_bf->pred, cr_tu_chroma_origin_index, recon_buffer, rec_cr_offset,
+                                  chroma_txb_width, chroma_txb_height, hbd);
+                }
+
+                txb_1d_offset_uv += chroma_txb_width * chroma_txb_height;
+            }
+        }
+        txb_1d_offset += static_cast<std::uint32_t>(txb_width * (txb_height << ctx->mds_subres_step));
+        ++txb_itr;
+    } while (txb_itr < tu_total_count);
 }
 
 }  // namespace mdc

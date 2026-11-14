@@ -78,6 +78,12 @@ struct PicBuf {
     std::uint32_t max_width;  // :1875/:2197 the border-clamp bound
     std::uint32_t max_height;
     std::int32_t border;      // the reference border the clamps use
+    // The chroma planes when the carrier models a full picture (0/null
+    // when absent - the inverse-recon chain reads them).
+    std::uint8_t* u_buf;
+    std::uint8_t* v_buf;
+    std::uint32_t u_stride;
+    std::uint32_t v_stride;
 };
 
 // The BlockGeom window (blk_geom) the spans consume.
@@ -113,6 +119,8 @@ struct MdCandBf {
     MdCand* cand;
     PicBuf pred;
     PicBuf residual;   // cand_bf->residual (the hadamard path)
+    PicBuf recon;      // cand_bf->recon (the inverse-recon chain)
+    PicBuf rec_coeff;  // cand_bf->rec_coeff (int32 through the byte-pointer convention)
     std::uint64_t* fast_cost;
     std::uint64_t* full_cost;
     std::uint64_t fast_luma_rate;
@@ -120,6 +128,14 @@ struct MdCandBf {
     std::uint64_t luma_fast_dist;
     std::uint64_t full_dist;
     std::uint8_t valid_luma_pred;
+    std::uint16_t y_has_coeff;   // cand_bf->y_has_coeff (the TU bitmask)
+    std::uint8_t u_has_coeff;
+    std::uint8_t v_has_coeff;
+    std::uint16_t eob_y[16];
+    std::uint16_t eob_u[16];
+    std::uint16_t eob_v[16];
+    std::uint8_t transform_type[16];   // cand->transform_type[txb_itr]
+    std::uint8_t transform_type_uv;    // cand->transform_type_uv
 };
 
 // The prediction / fast-cost callables: the landed-prediction walls
@@ -209,6 +225,16 @@ struct FlCtx {
     std::uint8_t validPmeMv[2][4];                 // ctx->valid_pme_mv
     Mv2 bestPmeMv[2][4];                           // ctx->best_pme_mv
     std::uint32_t pmeResDist[2][4];                // ctx->pme_res[list][ref].dist
+    // The inverse-recon window (av1_perform_inverse_transform_recon*).
+    std::uint8_t* cfl_temp_luma_recon;             // ctx->cfl_temp_luma_recon
+    std::uint16_t* cfl_temp_luma_recon_16bit;      // ctx->cfl_temp_luma_recon16bit
+    std::uint8_t uv_mode;                          // ctx->uv_ctrls.uv_mode (ChromaSearchMode)
+    std::uint8_t fixed_partition;                  // ctx->fixed_partition
+    std::uint8_t blk_y_has_coeff;                  // ctx->blk_ptr->y_has_coeff
+    std::uint8_t blk_u_has_coeff;
+    std::uint8_t blk_v_has_coeff;
+    PicBuf bypass_recon_pic;                       // svt_aom_get_recon_pic (the wall, pre-resolved)
+    PicBuf recon_tmp;                              // ctx->blk_ptr->recon_tmp
     std::uint32_t full_lambda_md[2];               // ctx->full_lambda_md[EB_8_BIT_MD / EB_10_BIT_MD]
     std::uint32_t fast_lambda_md[2];
     // mds0 state (md_process.h:1191-:1200 window).
@@ -549,6 +575,40 @@ void pmeSearch(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* me_resu
                const l16_rdo::RefPruningCtrls& pruning, const l16_rdo::RefFilteringRes filtering,
                SubpelTreeFn subpel_tree, const MdSubPelCtrls& subpel_me_ctrls, ChooseBestMvPredFn choose_best_mv_pred,
                int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols);
+
+// ---------------------------------------------------------------------------
+// The inverse-transform recon chain (full_loop.c:1755-:1789 wrapper +
+// inv_transforms.c:3139-:3165 recon8bit + product_coding_loop.c:695-:953).
+// ---------------------------------------------------------------------------
+
+// inv_transforms.h:129-:137 av1_get_max_eob (txSize2d is the landed l6
+// extern).
+int av1GetMaxEob(entropy::TxSize tx_size);
+
+// svt_aom_inv_transform_recon_wrapper (full_loop.c:1755-:1789): the 8-bit
+// branch builds the TxfmParamHb and routes through the landed
+// invTxfmAddStagingHb (the recon_r != recon_w eob forcing from
+// inv_transforms.c:3154-:3159 folded in); the hbd branch routes through
+// the landed invTransformReconHb at EB_TEN_BIT.
+void invTransformReconWrapper(const std::int32_t* rec_coeff_buffer, std::uint32_t coeff_offset, std::uint8_t* pred_buffer,
+                              std::uint32_t pred_offset, std::uint32_t pred_stride, std::uint8_t* rec_buffer,
+                              std::uint32_t rec_offset, std::uint32_t rec_stride, bool hbd, entropy::TxSize txsize,
+                              entropy::TxType transform_type, std::uint32_t eob, bool lossless);
+
+// pic_operators.h:103-:160 svt_av1_picture_copy_y / _cb / _cr (the
+// copyWxh inline wrappers; the 16-bit casts through the byte buffers).
+void pictureCopyY(const PicBuf& src, std::uint32_t src_origin_index, const PicBuf& dst, std::uint32_t dst_origin_index,
+                  std::uint32_t width, std::uint32_t height, bool hbd);
+void pictureCopyCb(const PicBuf& src, std::uint32_t src_origin_index, const PicBuf& dst, std::uint32_t dst_origin_index,
+                   std::uint32_t width, std::uint32_t height, bool hbd);
+void pictureCopyCr(const PicBuf& src, std::uint32_t src_origin_index, const PicBuf& dst, std::uint32_t dst_origin_index,
+                   std::uint32_t width, std::uint32_t height, bool hbd);
+
+// product_coding_loop.c:695-:752 av1_perform_inverse_transform_recon_luma.
+void av1PerformInverseTransformReconLuma(FlCtx* ctx, MdCandBf* cand_bf);
+
+// product_coding_loop.c:754-:953 av1_perform_inverse_transform_recon.
+void av1PerformInverseTransformRecon(FlCtx* ctx, MdCandBf* cand_bf, const MdGeom& blk_geom);
 
 // product_coding_loop.c:2021-:2190 md_nsq_motion_search. The pcs walls
 // thread: pa_me_data max_refs/max_l0/max_cand, enable_me_8x8/16x16,
