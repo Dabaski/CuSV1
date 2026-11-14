@@ -1,9 +1,230 @@
 #include "packet_helpers.h"
 
+#include "bitstream.h"
+
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 
 namespace bitstream {
+
+// MEM_VALUE_T (definitions.h:556)
+typedef std::int32_t MEM_VALUE_T;
+
+void memPutLe16(void* vmem, MEM_VALUE_T val) {
+    std::uint8_t* mem = (std::uint8_t*)vmem;
+    mem[0] = (std::uint8_t)((val >> 0) & 0xff);
+    mem[1] = (std::uint8_t)((val >> 8) & 0xff);
+}
+
+void memPutLe24(void* vmem, MEM_VALUE_T val) {
+    std::uint8_t* mem = (std::uint8_t*)vmem;
+    mem[0] = (std::uint8_t)((val >> 0) & 0xff);
+    mem[1] = (std::uint8_t)((val >> 8) & 0xff);
+    mem[2] = (std::uint8_t)((val >> 16) & 0xff);
+}
+
+void memPutLe32(void* vmem, MEM_VALUE_T val) {
+    std::uint8_t* mem = (std::uint8_t*)vmem;
+    mem[0] = (std::uint8_t)((val >> 0) & 0xff);
+    mem[1] = (std::uint8_t)((val >> 8) & 0xff);
+    mem[2] = (std::uint8_t)((val >> 16) & 0xff);
+    mem[3] = (std::uint8_t)((val >> 24) & 0xff);
+}
+
+void memPutVarsize(std::uint8_t* const dst, const int sz, const int val) {
+    switch (sz) {
+    case 1:
+        dst[0] = (std::uint8_t)(val & 0xff);
+        break;
+    case 2:
+        memPutLe16(dst, val);
+        break;
+    case 3:
+        memPutLe24(dst, val);
+        break;
+    case 4:
+        memPutLe32(dst, val);
+        break;
+    default:
+        assert(0 && "Invalid size");
+        break;
+    }
+}
+
+std::uint32_t writeObuMetadata(const SvtMetadataT* metadata, std::uint8_t* const dst) {
+    if (!metadata || !metadata->payload) {
+        return 0;
+    }
+    AomWriteBitBuffer wb{dst, 0};
+    std::uint32_t size = 0;
+    wbWriteLiteral(&wb, (std::int32_t)metadata->type, 8);
+    for (std::size_t i = 0; i < metadata->sz; ++i) {
+        wbWriteLiteral(&wb, metadata->payload[i], 8);
+    }
+    wbAddTrailingBits(&wb);
+    size = wbBytesWritten(&wb);
+    return size;
+}
+
+std::uint32_t writeTileGroupHeader(std::uint8_t* const dst, int startTile, int endTile, int tiles_log2,
+                                   int tile_start_and_end_present_flag) {
+    AomWriteBitBuffer wb{dst, 0};
+    std::uint32_t size = 0;
+
+    if (!tiles_log2) {
+        return size;
+    }
+    wbWriteBit(&wb, tile_start_and_end_present_flag);
+
+    if (tile_start_and_end_present_flag) {
+        wbWriteLiteral(&wb, startTile, tiles_log2);
+        wbWriteLiteral(&wb, endTile, tiles_log2);
+    }
+
+    size = wbBytesWritten(&wb);
+    return size;
+}
+
+std::int32_t writeMetadataAv1(Bitstream* bitstream_ptr, SvtMetadataArrayT* metadata, EbAv1MetadataType type) {
+    std::int32_t return_error = EB_ErrorNone;
+    if (!metadata || !metadata->metadata_array) {
+        return EB_ErrorBadParameter;
+    }
+
+    OutputBitstreamUnit* output_bitstream_ptr = bitstream_ptr->output_bitstream_ptr;
+    std::uint8_t* data = output_bitstream_ptr->buffer_av1;
+
+    for (std::size_t i = 0; i < metadata->sz; i++) {
+        SvtMetadataT* current_metadata = metadata->metadata_array[i];
+        if (current_metadata && current_metadata->payload && current_metadata->type == (std::uint32_t)type) {
+            // Phase 1: measure header + payload sizes
+            std::uint32_t obu_header_size = writeObuHeader(OBU_METADATA, 0, data);
+            std::uint32_t obu_payload_size = writeObuMetadata(current_metadata, data + obu_header_size);
+            std::size_t length_field_size = ulebSizeInBytes(obu_payload_size);
+
+            // Phase 2: write at correct offsets (re-write payload after LEB128)
+            // OBU header already at data[0]
+            std::size_t coded_size;
+            std::int32_t ret = ulebEncode(obu_payload_size, sizeof(obu_payload_size), data + obu_header_size,
+                                          &coded_size);
+            assert(ret == 0 && coded_size == length_field_size);
+            if (ret != 0 || coded_size != length_field_size) {
+                return EB_ErrorBadParameter;
+            }
+            writeObuMetadata(current_metadata, data + obu_header_size + length_field_size);
+
+            data += obu_header_size + length_field_size + obu_payload_size;
+        }
+    }
+    output_bitstream_ptr->buffer_av1 = data;
+    return return_error;
+}
+
+std::int32_t encodeSpsAv1(Bitstream* bitstream_ptr, std::uint32_t (*writeSequenceHeaderObuFn)(std::uint8_t* dst)) {
+    std::int32_t return_error = EB_ErrorNone;
+    OutputBitstreamUnit* output_bitstream_ptr = bitstream_ptr->output_bitstream_ptr;
+    std::uint8_t* data = output_bitstream_ptr->buffer_av1;
+    const std::uint8_t enhancement_layers_count = 0;  // cm->enhancement_layers_count
+    (void)enhancement_layers_count;  // threaded into the payload callback's ratified walk
+
+    // Phase 1: measure
+    std::uint32_t obu_header_size = writeObuHeader(OBU_SEQUENCE_HEADER, 0, data);
+    std::uint32_t obu_payload_size = writeSequenceHeaderObuFn(data + obu_header_size);
+    std::size_t length_field_size = ulebSizeInBytes(obu_payload_size);
+
+    // Phase 2: write at correct offsets (re-write payload after LEB128)
+    std::size_t coded_size;
+    std::int32_t ret = ulebEncode(obu_payload_size, sizeof(obu_payload_size), data + obu_header_size, &coded_size);
+    assert(ret == 0 && coded_size == length_field_size);
+    if (ret != 0 || coded_size != length_field_size) {
+        return EB_ErrorBadParameter;
+    }
+    writeSequenceHeaderObuFn(data + obu_header_size + length_field_size);
+
+    data += obu_header_size + length_field_size + obu_payload_size;
+    output_bitstream_ptr->buffer_av1 = data;
+    return return_error;
+}
+
+std::int32_t writeFrameHeaderAv1(Bitstream* bitstream_ptr,
+                                 int show_existing,
+                                 std::uint32_t (*writeFrameHeaderObuFn)(std::uint8_t* dst, int show_existing,
+                                                                        int appendTrailingBits),
+                                 int n_log2_tiles,
+                                 std::uint8_t tile_size_bytes_minus_1,
+                                 const TileEcInfo* tiles,
+                                 int tile_cnt) {
+    std::int32_t return_error = EB_ErrorNone;
+    OutputBitstreamUnit* output_bitstream_ptr = bitstream_ptr->output_bitstream_ptr;
+    std::uint8_t* data = output_bitstream_ptr->buffer_av1;
+
+    ObuType obu_type = show_existing ? OBU_FRAME_HEADER : OBU_FRAME;
+    int tile_start_and_end_present_flag = 0;
+
+    // Phase 1: Measure header sizes by writing to data (will be overwritten in phase 2).
+    std::uint32_t obu_header_size = writeObuHeader(obu_type, 0, data);
+    std::uint32_t frame_hdr_size = writeFrameHeaderObuFn(data + obu_header_size, show_existing, show_existing);
+    std::uint32_t tg_hdr_size =
+        writeTileGroupHeader(data + obu_header_size + frame_hdr_size, 0, 0, n_log2_tiles, tile_start_and_end_present_flag);
+    std::uint32_t hdr_payload_size = frame_hdr_size + tg_hdr_size;
+
+    // Compute tile data size (tile size prefixes + tile data).
+    std::uint32_t tile_data_size = 0;
+    if (!show_existing) {
+        for (int tile_idx = 0; tile_idx < tile_cnt; tile_idx++) {
+            tile_data_size += tiles[tile_idx].pos;
+            if (tile_idx != tile_cnt - 1 && tile_cnt > 1) {
+                tile_data_size += tile_size_bytes_minus_1 + 1;
+            }
+        }
+    }
+
+    // Compute exact OBU payload size and LEB128 field size.
+    std::uint32_t obu_payload_size = hdr_payload_size + tile_data_size;
+    std::size_t length_field_size = ulebSizeInBytes(obu_payload_size);
+
+    // Ensure buffer is large enough for the complete OBU.
+    std::uint32_t total_obu_size = obu_header_size + (std::uint32_t)length_field_size + obu_payload_size;
+    std::uint32_t buf_needed =
+        total_obu_size + (std::uint32_t)(output_bitstream_ptr->buffer_av1 - output_bitstream_ptr->buffer_begin_av1);
+    if (output_bitstream_ptr->size < buf_needed) {
+        reallocOutputBitstreamUnit(output_bitstream_ptr, buf_needed + 1);
+        data = output_bitstream_ptr->buffer_av1;
+    }
+
+    // Phase 2: Write everything at the correct offsets - no memmove needed.
+    // OBU header is already at data[0] from phase 1 (same content, same position).
+
+    // LEB128 size field right after OBU header.
+    std::size_t coded_size;
+    ulebEncode(obu_payload_size, sizeof(obu_payload_size), data + obu_header_size, &coded_size);
+
+    // Re-write frame header + tile group header at the correct offset (after LEB128).
+    std::uint32_t write_offset = obu_header_size + (std::uint32_t)length_field_size;
+    writeFrameHeaderObuFn(data + write_offset, show_existing, show_existing);
+    write_offset += frame_hdr_size;
+    writeTileGroupHeader(data + write_offset, 0, 0, n_log2_tiles, tile_start_and_end_present_flag);
+    write_offset += tg_hdr_size;
+
+    // Copy tile data.
+    if (!show_existing) {
+        for (int tile_idx = 0; tile_idx < tile_cnt; tile_idx++) {
+            std::int32_t tile_size = (std::int32_t)tiles[tile_idx].pos;
+            std::uint8_t tile_size_bytes = 0;
+            if (tile_idx != tile_cnt - 1 && tile_cnt > 1) {
+                tile_size_bytes = tile_size_bytes_minus_1 + 1;
+                memPutVarsize(data + write_offset, tile_size_bytes, tile_size - 1);
+            }
+            memcpy(data + write_offset + tile_size_bytes, tiles[tile_idx].tile_data, tile_size);
+            write_offset += (std::uint32_t)(tile_size + tile_size_bytes);
+        }
+    }
+
+    data += total_obu_size;
+    output_bitstream_ptr->buffer_av1 = data;
+    return return_error;
+}
 
 std::int32_t outputBitstreamUnitCtor(OutputBitstreamUnit* bitstream_ptr, std::uint32_t buffer_size) {
     if (buffer_size) {

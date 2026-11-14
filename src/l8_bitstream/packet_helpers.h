@@ -174,4 +174,112 @@ void sortUndisplayedFrame(EncodeContext* enc_ctx);
 // svt_release_object(ppcs) shell (:385) is parked - the nulling is kept.
 void releaseFrames(EncodeContext* enc_ctx, int frames);
 
+// ---------------------------------------------------------------------------
+// S3: the OBU composition the packetizer applies (entropy_coding.c
+// :3678-3948 + the definitions.h little-endian puts). The scs/pcs walls of
+// encode_sps_av1 / write_frame_header_av1 are threaded as the payload-writer
+// callbacks (the EMC1 carrier precedent); both walks are called TWICE by the
+// reference (phase-1 measure + phase-2 rewrite) so a callback must be
+// idempotent - that is the reference's own structure, pinned by the tests.
+// ---------------------------------------------------------------------------
+
+// EbErrorType slice (API/EbSvtAv1.h:122-131): the values the ported
+// packetization spans return.
+enum EbErrorType {
+    EB_ErrorNone = 0,
+    EB_ErrorBadParameter = (std::int32_t)0x80001005,
+};
+
+// EbAv1MetadataType (API/EbSvtAv1Metadata.h:26-34, verbatim)
+enum EbAv1MetadataType {
+    EB_AV1_METADATA_TYPE_AOM_RESERVED_0 = 0,
+    EB_AV1_METADATA_TYPE_HDR_CLL = 1,
+    EB_AV1_METADATA_TYPE_HDR_MDCV = 2,
+    EB_AV1_METADATA_TYPE_SCALABILITY = 3,
+    EB_AV1_METADATA_TYPE_ITUT_T35 = 4,
+    EB_AV1_METADATA_TYPE_TIMECODE = 5,
+    EB_AV1_METADATA_TYPE_FRAME_SIZE = 6,
+};
+
+// SvtMetadataT (API/EbSvtAv1Metadata.h:37-41, verbatim field layout)
+struct SvtMetadataT {
+    std::uint32_t type = 0;
+    std::uint8_t* payload = nullptr;
+    std::size_t sz = 0;
+};
+
+// SvtMetadataArrayT (API/EbSvtAv1Metadata.h:44-47, verbatim field layout:
+// sz + the metadata_array pointer). The backing array is test/caller-owned
+// - the svt_metadata_alloc/free + EB_REALLOC_ARRAY_NO_CHECK growth shells
+// (metadata_handle.c:64-107) are PARKED; the null-array state stays real
+// (the :3807 gate reads it).
+struct SvtMetadataArrayT {
+    std::size_t sz = 0;
+    SvtMetadataT** metadata_array = nullptr;
+};
+
+// TileEcInfo - the pcs->ec_info[tile_idx]->ec subset consumed by
+// svt_aom_write_frame_header_av1 (entropy_coding.c:3864-3914): the tile's
+// coded byte count (ec_writer.pos) and its data buffer
+// (ec_output_bitstream_ptr->buffer_begin_av1).
+struct TileEcInfo {
+    std::uint32_t pos = 0;
+    const std::uint8_t* tile_data = nullptr;
+};
+
+// mem_put_le16 / le24 / le32 (definitions.h:562-584, verbatim shifts;
+// MEM_VALUE_T = int32_t, definitions.h:556)
+void memPutLe16(void* vmem, std::int32_t val);
+void memPutLe24(void* vmem, std::int32_t val);
+void memPutLe32(void* vmem, std::int32_t val);
+
+// mem_put_varsize (entropy_coding.c:32-50, verbatim switch 1..4; the
+// default assert(0) kept - NDEBUG-dropped convention)
+void memPutVarsize(std::uint8_t* const dst, const int sz, const int val);
+
+// write_obu_metadata (entropy_coding.c:3678-3690): the 8-bit type + the
+// payload bytes + add_trailing_bits; null metadata / null payload -> 0.
+// Deviation named: the file-local wbAddTrailingBits (:3668-3675, static in
+// the reference) is exported from bitstream.h for this call.
+std::uint32_t writeObuMetadata(const SvtMetadataT* metadata, std::uint8_t* const dst);
+
+// write_tile_group_header (entropy_coding.c:3765-3782, verbatim):
+// tiles_log2 == 0 -> 0 bytes written; else the present flag bit and, when
+// set, the start/end literals.
+std::uint32_t writeTileGroupHeader(std::uint8_t* const dst, int startTile, int endTile, int tiles_log2,
+                                   int tile_start_and_end_present_flag);
+
+// svt_aom_write_metadata_av1 (entropy_coding.c:3804-3838): for every
+// matching-type entry compose the metadata OBU at the write pointer
+// (header + uleb + payload) and advance buffer_av1; the null-array gate
+// returns EB_ErrorBadParameter.
+std::int32_t writeMetadataAv1(Bitstream* bitstream_ptr, SvtMetadataArrayT* metadata,
+                              EbAv1MetadataType type);
+
+// svt_aom_encode_sps_av1 (entropy_coding.c:3925-3948) over carriers: the
+// SequenceControlSet wall is threaded as the SPS-payload writer callback
+// (the landed writeSequenceHeaderObu / writeSequenceHeaderObuV3 are the two
+// ratified instantiations); enhancement_layers_count stays const 0 (:3929).
+// PRECONDITION (the reference's own): the payload walk must fit the buffer
+// at the write pointer (the EC ensure-capacity discipline).
+std::int32_t encodeSpsAv1(Bitstream* bitstream_ptr,
+                          std::uint32_t (*writeSequenceHeaderObuFn)(std::uint8_t* dst));
+
+// svt_aom_write_frame_header_av1 (entropy_coding.c:3843-3920) over
+// carriers: the scs/pcs frame-header wall is threaded as the callback
+// (called twice: phase-1 measure :3858 / phase-2 rewrite :3896 - the
+// idempotency is the reference's own structure); the tile size prefixes +
+// data copies and the :3880-3885 capacity gate are verbatim. PRECONDITION:
+// the phase-1 writes must fit the buffer at the write pointer (the
+// reference has the same unguarded order - the ensure comes after the
+// measure; the caller discipline is ecEnsureCapacity before each walk).
+std::int32_t writeFrameHeaderAv1(Bitstream* bitstream_ptr,
+                                 int show_existing,
+                                 std::uint32_t (*writeFrameHeaderObuFn)(std::uint8_t* dst, int show_existing,
+                                                                        int appendTrailingBits),
+                                 int n_log2_tiles,
+                                 std::uint8_t tile_size_bytes_minus_1,
+                                 const TileEcInfo* tiles,
+                                 int tile_cnt);
+
 }  // namespace bitstream

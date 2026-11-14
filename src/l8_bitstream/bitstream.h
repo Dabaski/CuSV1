@@ -56,6 +56,11 @@ void wbWriteInvSignedLiteral(AomWriteBitBuffer* wb, std::int32_t data, std::int3
 // svt_aom_uleb_size_in_bytes (entropy_coding.c:1313-1319)
 std::size_t ulebSizeInBytes(std::uint64_t value);
 
+// add_trailing_bits (entropy_coding.c:3668-3675). Deviation named:
+// file-local static in the reference; exported for the packetizer's
+// write_obu_metadata (:3688) - defined once in bitstream.cpp.
+void wbAddTrailingBits(AomWriteBitBuffer* wb);
+
 // svt_aom_uleb_encode (entropy_coding.c:1321-1341). Returns
 // SVT_AOM_CODEC_OK (0) or -1 on the :1323-1326 guard.
 std::int32_t ulebEncode(std::uint64_t value, std::size_t available, std::uint8_t* coded_value,
