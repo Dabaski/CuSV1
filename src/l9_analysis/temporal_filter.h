@@ -12,8 +12,10 @@
 // the subpel searches (:1431-2102+), apply_filtering_block_plane_wise
 // (:1289-1424), save_YUV_to_file (:87-152),
 // derive_tf_32x32_block_split_flag (:152-205),
-// create_me_context_and_picture_control (:205-262),
-// apply_filtering_central (:262-300) + its highbd twin (:300-335).
+// create_me_context_and_picture_control (:205-262).
+// LANDED (A11D-T1, 2026-11-14): apply_filtering_central (:262-298) and
+// its highbd twin (:300-334) - the consumed MeContext field (tf_chroma)
+// and the picture field (y_stride) are threaded as parameters.
 #pragma once
 
 #include <cstdint>
@@ -21,7 +23,19 @@
 namespace analysis {
 namespace temporal {
 
-  // 1:1 port of svt_aom_noise_log1p_fp16 (temporal_filtering.c:568-586).
+// A11D-T1: 1:1 port of svt_aom_apply_filtering_central_c
+// (temporal_filtering.c:262-298). The consumed MeContext field
+// (tf_chroma) and the picture field (y_stride) are threaded as
+// parameters (the b64Variance carrier pattern); the src/accum/count
+// pointer triples are the reference's EbByte*/uint32_t**/uint16_t**
+// shapes (the reference's src is read-only, the port's const-ness is
+// the named deviation).
+void applyFilteringCentral(bool tfChroma, const uint8_t* const* src,
+                           uint32_t** accum, uint16_t** count,
+                           uint16_t blkWidth, uint16_t blkHeight,
+                           uint32_t ssX, uint32_t ssY, uint16_t srcStrideY);
+
+// 1:1 port of svt_aom_noise_log1p_fp16 (temporal_filtering.c:568-586).
 int32_t noiseLog1pFp16(int32_t noiseLevelFp16);
 
 // AM1: 1:1 port of svt_vmaf_hpass_row_c (temporal_filtering.c:3720-3733).

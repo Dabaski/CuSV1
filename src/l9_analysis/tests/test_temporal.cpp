@@ -7,6 +7,127 @@
 
 #include "temporal_filter.h"
 
+// A11D-T1: apply_filtering_central_c (temporal_filtering.c:262-:298). The
+// test-side transcription oracle below is a SECOND independent transcription
+// of the reference body (the A3M search-oracle precedent): the port's output
+// must match it entry for entry. The accum/count arrays are poison-filled
+// before the call; every written entry is asserted and the untouched tail
+// stays poison (the A11D poison-carrier discipline).
+namespace {
+// Independent transcription of temporal_filtering.c:262-:298.
+// PLANE_Y/U/V = 0/1/2; modifier = TF_PLANEWISE_FILTER_WEIGHT_SCALE = 1000.
+void applyFilteringCentralRef(bool tfChroma, const uint8_t* const* src,
+                              uint32_t** accum, uint16_t** count, uint16_t blkWidth,
+                              uint16_t blkHeight, uint32_t ssX, uint32_t ssY,
+                              uint16_t srcStrideY) {
+    uint16_t blkHeightCh = blkHeight >> ssY;
+    uint16_t blkWidthCh  = blkWidth >> ssX;
+    uint16_t srcStrideCh = srcStrideY >> ssX;
+    const int modifier   = 1000;
+    for (uint16_t k = 0, i = 0; i < blkHeight; i++) {
+        for (uint16_t j = 0; j < blkWidth; j++) {
+            accum[0][k] = modifier * src[0][i * srcStrideY + j];
+            count[0][k] = modifier;
+            ++k;
+        }
+    }
+    if (tfChroma) {
+        for (uint16_t k = 0, i = 0; i < blkHeightCh; i++) {
+            for (uint16_t j = 0; j < blkWidthCh; j++) {
+                accum[1][k] = modifier * src[1][i * srcStrideCh + j];
+                count[1][k] = modifier;
+                accum[2][k] = modifier * src[2][i * srcStrideCh + j];
+                count[2][k] = modifier;
+                ++k;
+            }
+        }
+    }
+}
+}  // namespace
+
+TEST_CASE("l9 temporal applyFilteringCentral 4:2:0 oracle + poison accum/count") {
+    using analysis::temporal::applyFilteringCentral;
+    // 4x2 luma block in stride 8 (4 content + 4 pad), chroma 2x1 in stride 4.
+    const uint8_t luma[2 * 8] = {10, 20, 30, 40, 0, 0, 0, 0,
+                                 50, 60, 70, 80, 0, 0, 0, 0};
+    const uint8_t u[4] = {11, 21, 0, 0};
+    const uint8_t v[4] = {12, 22, 0, 0};
+    const uint8_t* src[3] = {luma, u, v};
+    uint32_t accumPort[3][8];
+    uint32_t accumRef[3][8];
+    uint16_t countPort[3][8];
+    uint16_t countRef[3][8];
+    uint32_t* accumPtrPort[3] = {accumPort[0], accumPort[1], accumPort[2]};
+    uint32_t* accumPtrRef[3]  = {accumRef[0], accumRef[1], accumRef[2]};
+    uint16_t* countPtrPort[3] = {countPort[0], countPort[1], countPort[2]};
+    uint16_t* countPtrRef[3]  = {countRef[0], countRef[1], countRef[2]};
+    for (int p = 0; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            accumPort[p][i] = 0xDEADBEEFu;
+            accumRef[p][i]  = 0xDEADBEEFu;
+            countPort[p][i] = 0xBEEF;
+            countRef[p][i]  = 0xBEEF;
+        }
+    }
+    applyFilteringCentral(true, src, accumPtrPort, countPtrPort, 4, 2, 1, 1, 8);
+    applyFilteringCentralRef(true, src, accumPtrRef, countPtrRef, 4, 2, 1, 1, 8);
+    // Luma 4x2 = 8 slots, all written; the port must match the oracle
+    // entry for entry.
+    for (int i = 0; i < 8; ++i) {
+        CHECK_EQ(accumPort[0][i], accumRef[0][i]);
+        CHECK_EQ(countPort[0][i], countRef[0][i]);
+    }
+    // Chroma 2x1 = 2 slots each; the untouched tail (2..7) must stay poison
+    // in BOTH (proves the port's chroma loop bound equals the reference's).
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 0; i < 2; ++i) {
+            CHECK_EQ(accumPort[p][i], accumRef[p][i]);
+            CHECK_EQ(countPort[p][i], countRef[p][i]);
+        }
+        for (int i = 2; i < 8; ++i) {
+            CHECK_EQ(accumPort[p][i], 0xDEADBEEFu);
+            CHECK_EQ(countPort[p][i], 0xBEEF);
+        }
+    }
+}
+
+// The tfChroma=false branch: the chroma arrays stay poison, the luma
+// output matches the oracle.
+TEST_CASE("l9 temporal applyFilteringCentral luma-only leaves chroma poison") {
+    using analysis::temporal::applyFilteringCentral;
+    const uint8_t luma[2 * 8] = {10, 20, 30, 40, 0, 0, 0, 0,
+                                 50, 60, 70, 80, 0, 0, 0, 0};
+    const uint8_t* src[3] = {luma, luma, luma};
+    uint32_t accumPort[3][8];
+    uint32_t accumRef[3][8];
+    uint16_t countPort[3][8];
+    uint16_t countRef[3][8];
+    uint32_t* accumPtrPort[3] = {accumPort[0], accumPort[1], accumPort[2]};
+    uint32_t* accumPtrRef[3]  = {accumRef[0], accumRef[1], accumRef[2]};
+    uint16_t* countPtrPort[3] = {countPort[0], countPort[1], countPort[2]};
+    uint16_t* countPtrRef[3]  = {countRef[0], countRef[1], countRef[2]};
+    for (int p = 0; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            accumPort[p][i] = 0xDEADBEEFu;
+            accumRef[p][i]  = 0xDEADBEEFu;
+            countPort[p][i] = 0xBEEF;
+            countRef[p][i]  = 0xBEEF;
+        }
+    }
+    applyFilteringCentral(false, src, accumPtrPort, countPtrPort, 4, 2, 1, 1, 8);
+    applyFilteringCentralRef(false, src, accumPtrRef, countPtrRef, 4, 2, 1, 1, 8);
+    for (int i = 0; i < 8; ++i) {
+        CHECK_EQ(accumPort[0][i], accumRef[0][i]);
+        CHECK_EQ(countPort[0][i], countRef[0][i]);
+    }
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            CHECK_EQ(accumPort[p][i], 0xDEADBEEFu);
+            CHECK_EQ(countPort[p][i], 0xBEEF);
+        }
+    }
+}
+
 // TF2 S1: calculate_squared_errors_sum_highbd (temporal_filtering.c:710-720).
 // Raw int-arithmetic SSE over the window, then ONE shift by shift_factor
 // at the end (:719). bd-10 fixture: shift_factor = (10-8)*2 = 4; diffs
