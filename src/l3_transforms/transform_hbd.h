@@ -205,4 +205,8 @@ void quantizeFpHb(const std::int32_t* coeff, const QuantTables& tables, const st
                   int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
                   std::uint16_t* eob);
 
+// av1_get_tx_scale (coefficients.h:48-52) over tx_size_2d (:44-46): the
+// log_scale used by the quantizer entries
+std::int32_t txScale(TxSize txSize);
+
 }  // namespace transforms

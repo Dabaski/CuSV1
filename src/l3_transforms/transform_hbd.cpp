@@ -1133,4 +1133,19 @@ void quantizeFpHb(const std::int32_t* coeff, const QuantTables& tables, const st
     *eob = static_cast<std::uint16_t>(eobVal + 1);
 }
 
+// tx_size_2d (coefficients.h:44-46, verbatim; the +1 sentinel entry is part
+// of the reference table). Duplicated from l16_rdo/rate_est.cpp:148 - l3
+// cannot link l16 (the SYM1 wb-trio precedent).
+static const std::int32_t kTxSize2d[20] = {
+    16, 64, 256, 1024, 4096, 32, 32, 128, 128, 512, 512, 2048, 2048, 64, 64, 256, 256, 1024, 1024,
+    1024,
+};
+
+// av1_get_tx_scale (coefficients.h:48-52)
+std::int32_t txScale(TxSize txSize) {
+    const std::int32_t pels = kTxSize2d[static_cast<int>(txSize)];
+    // Largest possible pels is 4096 (64x64).
+    return (pels > 256 ? 1 : 0) + (pels > 1024 ? 1 : 0);
+}
+
 }  // namespace transforms

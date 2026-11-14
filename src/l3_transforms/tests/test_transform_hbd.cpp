@@ -2174,3 +2174,34 @@ TEST_CASE("quantizeFpHb saturation and the log_scale 2 path") {
     CHECK(bad == 0);
     CHECK(eob64 == eobOr64);
 }
+
+TEST_CASE("txScale matches av1_get_tx_scale over every TxSize") {
+    // av1_get_tx_scale (coefficients.h:48-52): (pels > 256) + (pels > 1024)
+    // over tx_size_2d (:44-46). The derivation oracle computes the same
+    // predicate from the LANDED txSizeWide/txSizeHigh (common_utils.c
+    // tables) - an independent route to the same quantity
+    const transforms::TxSize all[19] = {
+        transforms::TxSize::TX_4X4,   transforms::TxSize::TX_8X8,   transforms::TxSize::TX_16X16,
+        transforms::TxSize::TX_32X32, transforms::TxSize::TX_64X64, transforms::TxSize::TX_4X8,
+        transforms::TxSize::TX_8X4,   transforms::TxSize::TX_8X16,  transforms::TxSize::TX_16X8,
+        transforms::TxSize::TX_16X32, transforms::TxSize::TX_32X16, transforms::TxSize::TX_32X64,
+        transforms::TxSize::TX_64X32, transforms::TxSize::TX_4X16,  transforms::TxSize::TX_16X4,
+        transforms::TxSize::TX_8X32,  transforms::TxSize::TX_32X8,  transforms::TxSize::TX_16X64,
+        transforms::TxSize::TX_64X16};
+    int bad = 0;
+    for (int i = 0; i < 19; ++i) {
+        const std::int32_t pels = transforms::txSizeWide(all[i]) * transforms::txSizeHigh(all[i]);
+        const std::int32_t want = (pels > 256 ? 1 : 0) + (pels > 1024 ? 1 : 0);
+        if (transforms::txScale(all[i]) != want) ++bad;
+    }
+    CHECK(bad == 0);
+    // table-verbatim absolutes (coefficients.h:44-46)
+    CHECK(transforms::txScale(transforms::TxSize::TX_4X4) == 0);
+    CHECK(transforms::txScale(transforms::TxSize::TX_16X16) == 0);
+    CHECK(transforms::txScale(transforms::TxSize::TX_32X32) == 1);
+    CHECK(transforms::txScale(transforms::TxSize::TX_64X64) == 2);
+    CHECK(transforms::txScale(transforms::TxSize::TX_8X32) == 0);   // 256 exactly
+    CHECK(transforms::txScale(transforms::TxSize::TX_32X8) == 0);   // 256 exactly
+    CHECK(transforms::txScale(transforms::TxSize::TX_16X64) == 1);  // 1024 exactly
+    CHECK(transforms::txScale(transforms::TxSize::TX_64X16) == 1);  // 1024 exactly
+}
