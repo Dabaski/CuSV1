@@ -254,5 +254,56 @@ void applyRefMgmtEvents(PdPcsRefMgmt& pcs, PdCtx* ctx);
 // set_key_frame_rps (pd_process.c:1482-:1492).
 void setKeyFrameRps(PdPcsRefMgmt& pcs, PdCtx* ctx);
 
+// ---------------------------------------------------------------------------
+// PD3: the display params + sframe helpers.
+// ---------------------------------------------------------------------------
+
+// SvtAv1SFramePositions (Source/API/EbSvtAv1Enc.h:199-:205, verbatim).
+struct SFramePositions {
+    std::uint32_t sframe_num;
+    const std::uint64_t* sframe_posis;
+    std::uint32_t sframe_qp_num;
+    const std::uint8_t* sframe_qps;
+    const std::int8_t* sframe_qp_offsets;
+};
+
+// The PictureParentControlSet/PredictionStructure window
+// set_frame_display_params (:1134-:1162) consumes.
+struct PdPcsDisplay {
+    std::uint8_t pred_type;             // pcs->pred_struct_ptr->pred_type
+    std::uint8_t is_overlay;
+    std::uint8_t slice_type;
+    std::uint32_t pred_struct_entry_count;  // pcs->pred_struct_ptr->pred_struct_entry_count
+    std::uint8_t show_frame;            // frm_hdr->show_frame
+    std::uint8_t has_show_existing;
+};
+
+// The PictureDecisionContext window (mini_gop_length, pd_process.h:88).
+struct PdDisplayCtx {
+    const std::uint32_t* mini_gop_length;
+};
+
+// set_frame_display_params (pd_process.c:1134-:1162). Returns false on
+// the RA b-frame branch (the caller handles it); the SVT_LOG error path
+// (:1155) is a named silent deviation.
+bool setFrameDisplayParams(PdPcsDisplay& pcs, const PdDisplayCtx& pd_ctx, std::uint32_t mini_gop_index);
+
+// get_dist_to_s (pd_process.c:1496-:1509): the distance to the nearest
+// S-Frame; dist_to_next_s is filled only when picture_num IS an
+// S-Frame (and stays -1 past the last spot).
+std::int32_t getDistToS(const SFramePositions& sframe_posi, std::uint64_t picture_num,
+                        std::int32_t* dist_to_next_s);
+
+// get_sframe_qp (pd_process.c:1511-:1525): the null-qps and null-posis
+// branches are kept (the raw pointers travel on the carrier).
+std::uint8_t getSframeQp(const SFramePositions& sframe_posi, std::uint64_t picture_num);
+
+// get_sframe_qp_offset (pd_process.c:1527-:1541), the int8 twin.
+std::int8_t getSframeQpOffset(const SFramePositions& sframe_posi, std::uint64_t picture_num);
+
+// sframe_position_offset (pd_process.c:1565-:1570): the decode-order
+// offset for SFRAME_DEC_POSI_BASE under RANDOM_ACCESS.
+std::int32_t sframePositionOffset(const PdScsCfg& scs, std::uint8_t sframe_mode);
+
 }  // namespace pd
 }  // namespace pipeline

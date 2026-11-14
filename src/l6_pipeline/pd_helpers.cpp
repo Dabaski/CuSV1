@@ -366,5 +366,93 @@ void setKeyFrameRps(PdPcsRefMgmt& pcs, PdCtx* pd_ctx) {
     pcs.has_show_existing = 0;
 }
 
+// ---------------------------------------------------------------------------
+// PD3: the display params + sframe helpers.
+// ---------------------------------------------------------------------------
+
+// set_frame_display_params (pd_process.c:1134-:1162), verbatim over the
+// carrier.
+bool setFrameDisplayParams(PdPcsDisplay& pcs, const PdDisplayCtx& pd_ctx, std::uint32_t mini_gop_index) {
+    if (pcs.pred_type == kPredLowDelay || pcs.is_overlay) {
+        pcs.show_frame = 1;
+        pcs.has_show_existing = 0;
+    } else {
+        // Decide on Show Mecanism
+        if (pcs.slice_type == kISlice) {
+            // 3 cases for I slice: 1:Key Frame treated above. 2: broken
+            // MiniGop due to sc or intra refresh 3: complete miniGop due
+            // to sc or intra refresh
+            if (pd_ctx.mini_gop_length[mini_gop_index] < pcs.pred_struct_entry_count) {
+                // Scene Change that breaks the mini gop and switch to LDP
+                pcs.show_frame = 1;
+                pcs.has_show_existing = 0;
+            } else {
+                pcs.show_frame = 0;
+                pcs.has_show_existing = 0;
+            }
+        } else {
+            // Handle b frame of Random Access out
+            return false;
+        }
+    }
+    return true;
+}
+
+// get_dist_to_s (pd_process.c:1496-:1509), verbatim.
+std::int32_t getDistToS(const SFramePositions& sframe_posi, std::uint64_t picture_num,
+                        std::int32_t* dist_to_next_s) {
+    *dist_to_next_s = -1;
+    for (std::uint32_t i = 0; i < sframe_posi.sframe_num; i++) {
+        if (sframe_posi.sframe_posis[i] >= picture_num) {
+            if (sframe_posi.sframe_posis[i] == picture_num) {
+                *dist_to_next_s = (i < sframe_posi.sframe_num - 1)
+                    ? static_cast<std::int32_t>(sframe_posi.sframe_posis[i + 1] - picture_num)
+                    : -1;
+            }
+            return static_cast<std::int32_t>(sframe_posi.sframe_posis[i] - picture_num);
+        }
+    }
+    return -1;  // all s-frame spots are expired
+}
+
+// get_sframe_qp (pd_process.c:1511-:1525), verbatim.
+std::uint8_t getSframeQp(const SFramePositions& sframe_posi, std::uint64_t picture_num) {
+    if (sframe_posi.sframe_qps == nullptr) {
+        return 0;
+    }
+    if (sframe_posi.sframe_posis == nullptr) {
+        // always return first QP if not use flexible S-Frame position list
+        return sframe_posi.sframe_qps[0];
+    }
+    for (std::uint32_t i = 0; i < sframe_posi.sframe_num; i++) {
+        if (sframe_posi.sframe_posis[i] == picture_num) {
+            return sframe_posi.sframe_qps[i];
+        }
+    }
+    return 0;  // not find the picture
+}
+
+// get_sframe_qp_offset (pd_process.c:1527-:1541), verbatim.
+std::int8_t getSframeQpOffset(const SFramePositions& sframe_posi, std::uint64_t picture_num) {
+    if (sframe_posi.sframe_qp_offsets == nullptr) {
+        return 0;
+    }
+    if (sframe_posi.sframe_posis == nullptr) {
+        // always return first QP offset if not use flexible S-Frame position list
+        return sframe_posi.sframe_qp_offsets[0];
+    }
+    for (std::uint32_t i = 0; i < sframe_posi.sframe_num; i++) {
+        if (sframe_posi.sframe_posis[i] == picture_num) {
+            return sframe_posi.sframe_qp_offsets[i];
+        }
+    }
+    return 0;  // not find the picture
+}
+
+// sframe_position_offset (pd_process.c:1565-:1570), verbatim.
+std::int32_t sframePositionOffset(const PdScsCfg& scs, std::uint8_t sframe_mode) {
+    return (sframe_mode == kSframeDecPosiBase && scs.pred_structure == kPredRandomAccess) ? 1 : 0;
+}
+
 }  // namespace pd
 }  // namespace pipeline

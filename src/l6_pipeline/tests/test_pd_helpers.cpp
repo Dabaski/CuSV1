@@ -649,3 +649,162 @@ TEST_CASE("l6 pd set_key_frame_rps resets the ref-mgmt state") {
     CHECK(pcs.show_frame);
     CHECK(!pcs.has_show_existing);
 }
+
+// ---------------------------------------------------------------------------
+// PD3: set_frame_display_params (pd_process.c:1134-:1162) + the sframe
+// helpers (:1496-:1571)
+// ---------------------------------------------------------------------------
+
+// The display branch matrix: pred_type x is_overlay x slice_type x
+// broken/complete mini-gop.
+TEST_CASE("l6 pd set_frame_display_params branch matrix") {
+    for (int pred_type = 0; pred_type <= 2; ++pred_type) {
+        for (int overlay = 0; overlay <= 1; ++overlay) {
+            for (int slice = 0; slice <= 2; ++slice) {
+                for (int broken = 0; broken <= 1; ++broken) {
+                    pd::PdPcsDisplay pcs{};
+                    pcs.pred_type = static_cast<std::uint8_t>(pred_type);
+                    pcs.is_overlay = static_cast<std::uint8_t>(overlay);
+                    pcs.slice_type = static_cast<std::uint8_t>(slice);
+                    pcs.show_frame = 7;
+                    pcs.has_show_existing = 7;
+                    // entry_count 8; mini_gop_length 4 (broken) or 8 (complete)
+                    pcs.pred_struct_entry_count = 8;
+                    std::uint32_t mg_length[4] = {broken ? 4u : 8u, 0, 0, 0};
+                    pd::PdDisplayCtx ctx{};
+                    ctx.mini_gop_length = mg_length;
+                    const bool handled =
+                        pd::setFrameDisplayParams(pcs, ctx, 0 /*mini_gop_index*/);
+                    // Oracle: LD or overlay -> show, handled; I-slice ->
+                    // broken -> show/handled, complete -> no-show/handled;
+                    // non-I non-LD non-overlay -> return false untouched.
+                    if (pred_type == pd::kPredLowDelay || overlay) {
+                        CHECK(handled);
+                        CHECK(pcs.show_frame == 1);
+                        CHECK(pcs.has_show_existing == 0);
+                    } else if (slice == pd::kISlice) {
+                        CHECK(handled);
+                        if (broken) {
+                            CHECK(pcs.show_frame == 1);
+                            CHECK(pcs.has_show_existing == 0);
+                        } else {
+                            CHECK(pcs.show_frame == 0);
+                            CHECK(pcs.has_show_existing == 0);
+                        }
+                    } else {
+                        CHECK(!handled);
+                        CHECK(pcs.show_frame == 7);  // untouched
+                        CHECK(pcs.has_show_existing == 7);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// get_dist_to_s over the position-band domain: expired spots, a gap, the
+// exact spot with and without a next spot, and the multi-spot walk.
+TEST_CASE("l6 pd get_dist_to_s position bands") {
+    // all expired
+    {
+        pd::SFramePositions posi{};
+        std::uint64_t spots[2] = {3, 7};
+        posi.sframe_num = 2;
+        posi.sframe_posis = spots;
+        std::int32_t next = 99;
+        CHECK(pd::getDistToS(posi, 10, &next) == -1);
+        CHECK(next == -1);
+    }
+    // gap: current before the first spot
+    {
+        pd::SFramePositions posi{};
+        std::uint64_t spots[2] = {10, 14};
+        posi.sframe_num = 2;
+        posi.sframe_posis = spots;
+        std::int32_t next = 99;
+        CHECK(pd::getDistToS(posi, 8, &next) == 2);
+        CHECK(next == -1);  // not an s-frame itself
+    }
+    // exact match with a next spot
+    {
+        pd::SFramePositions posi{};
+        std::uint64_t spots[2] = {10, 14};
+        posi.sframe_num = 2;
+        posi.sframe_posis = spots;
+        std::int32_t next = 99;
+        CHECK(pd::getDistToS(posi, 10, &next) == 0);
+        CHECK(next == 4);
+    }
+    // exact match on the LAST spot -> dist_to_next stays -1
+    {
+        pd::SFramePositions posi{};
+        std::uint64_t spots[2] = {10, 14};
+        posi.sframe_num = 2;
+        posi.sframe_posis = spots;
+        std::int32_t next = 99;
+        CHECK(pd::getDistToS(posi, 14, &next) == 0);
+        CHECK(next == -1);
+    }
+    // unsorted spots: the walk returns at the FIRST position >=
+    // picture_num - spots[0] = 20 wins over spots[1] = 5.
+    {
+        pd::SFramePositions posi{};
+        std::uint64_t spots[3] = {20, 5, 30};
+        posi.sframe_num = 3;
+        posi.sframe_posis = spots;
+        std::int32_t next = 99;
+        CHECK(pd::getDistToS(posi, 5, &next) == 15);
+        CHECK(next == -1);
+    }
+}
+
+// get_sframe_qp / get_sframe_qp_offset over the null/found/miss domains.
+TEST_CASE("l6 pd sframe qp tables over the null + lookup domains") {
+    pd::SFramePositions posi{};
+    std::uint64_t spots[3] = {2, 5, 9};
+    std::uint8_t qps[3] = {31, 42, 55};
+    std::int8_t offs[3] = {-2, 0, 3};
+    posi.sframe_num = 3;
+    posi.sframe_posis = spots;
+    posi.sframe_qps = qps;
+    posi.sframe_qp_offsets = offs;
+    // null qps -> 0
+    {
+        pd::SFramePositions n{};
+        n.sframe_num = 3;
+        n.sframe_posis = spots;
+        CHECK(pd::getSframeQp(n, 5) == 0);
+        CHECK(pd::getSframeQpOffset(n, 5) == 0);
+    }
+    // null posis -> always the first entry
+    {
+        pd::SFramePositions n{};
+        n.sframe_num = 3;
+        n.sframe_qps = qps;
+        n.sframe_qp_offsets = offs;
+        CHECK(pd::getSframeQp(n, 12345) == 31);
+        CHECK(pd::getSframeQpOffset(n, 12345) == -2);
+    }
+    // found / not found
+    CHECK(pd::getSframeQp(posi, 2) == 31);
+    CHECK(pd::getSframeQp(posi, 5) == 42);
+    CHECK(pd::getSframeQp(posi, 9) == 55);
+    CHECK(pd::getSframeQp(posi, 6) == 0);
+    CHECK(pd::getSframeQpOffset(posi, 2) == -2);
+    CHECK(pd::getSframeQpOffset(posi, 5) == 0);
+    CHECK(pd::getSframeQpOffset(posi, 9) == 3);
+    CHECK(pd::getSframeQpOffset(posi, 6) == 0);
+}
+
+// sframe_position_offset over the full mode x pred-structure domain.
+TEST_CASE("l6 pd sframe_position_offset full domain") {
+    for (int mode = 0; mode <= 4; ++mode) {
+        for (int pred = 0; pred <= 2; ++pred) {
+            pd::PdScsCfg scs{};
+            scs.pred_structure = static_cast<std::uint8_t>(pred);
+            const std::uint8_t mode_val = static_cast<std::uint8_t>(mode);  // EbSFrameMode ordinals 0..4
+            const int want = (mode_val == pd::kSframeDecPosiBase && pred == pd::kPredRandomAccess) ? 1 : 0;
+            CHECK(pd::sframePositionOffset(scs, mode_val) == want);
+        }
+    }
+}
