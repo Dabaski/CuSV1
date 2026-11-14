@@ -71,5 +71,10 @@ TEST_CASE("memalign returns null on the 8 GB overflow") {
 
 TEST_CASE("svtAomFree accepts null") {
     l14_utility::svtAomFree(nullptr);
-    CHECK(true);
+    // The null free must leave the allocator usable: a real allocation and
+    // free still succeed and keep the alignment contract.
+    void* p = l14_utility::svtAomMalloc(64);
+    REQUIRE(p != nullptr);
+    CHECK(reinterpret_cast<std::uintptr_t>(p) % 16 == 0);
+    l14_utility::svtAomFree(p);
 }
