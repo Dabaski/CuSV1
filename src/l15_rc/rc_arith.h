@@ -103,6 +103,10 @@ struct RcControl {
     // (pass2_strategy.c:392-455; rc_process.h:124, :167).
     std::int64_t gfGroupBits;       // rc->gf_group_bits
     std::int64_t vbrBitsOffTarget;  // rc->vbr_bits_off_target
+
+    // the A9D rc_init_frame_stats rate-averaging period
+    // (rc->rate_average_periodin_frames, uint64 in the reference).
+    std::uint64_t rateAveragePeriod;
 };
 
 // RateControlCfg carrier (the enc_ctx->rc_cfg mirrors the bodies consume;
@@ -1015,6 +1019,18 @@ void updateRcCounts(RcControl& rc, const PcsCarrier& ppcs);
 // reset_rc_param (rc_process.c:592-605): verbatim; resets the ppcs recode
 // counters (loop_count, overshoot_seen, undershoot_seen).
 void resetRcParam(PcsCarrier& ppcs);
+
+// rc_init_frame_stats (rc_process.c:607-640): the portable surface is the
+// rate-averaging period walk + the ME-distortion average. Named parks (the
+// l6/l4 walls, unreachable from this layer): the ppcs->r0_gen
+// svt_aom_generate_r0beta call site (:611-613) and the three
+// get_ref_*_percentage walks (:616-618). The scs->passes > 1 &&
+// static_config.max_bit_rate gate threads as twoPassWithMaxBitRate; the
+// total_stats->count ride is totalStatsCount. MAX_RATE_AVG_PERIOD
+// (rc_process.h:48-50) = CODED_FRAMES_STAT_QUEUE_MAX_DEPTH >> 1 = 1000.
+void rcInitFrameStats(RcControl& rc, int sliceType, std::uint16_t b64TotalCount,
+                      const std::uint32_t* me64x64Distortion, bool twoPassWithMaxBitRate,
+                      double totalStatsCount);
 
 // svt_av1_rc_postencode_update_gop_const (rc_vbr_cbr.c:1495-1561): verbatim;
 // the rolling/total bits go to the interval-param carrier; NO low-motion

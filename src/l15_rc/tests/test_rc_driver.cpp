@@ -680,3 +680,42 @@ TEST_CASE("reset_rc_param zeroes the ppcs recode counters") {
     CHECK(pcs.overshootSeen == 0);
     CHECK(pcs.undershootSeen == 0);
 }
+
+TEST_CASE("rc_init_frame_stats pins the rate-average period and the ME-dist walk") {
+    // rc_init_frame_stats (rc_process.c:607-640): the r0/r0beta call and the
+    // three ref-percentage walks are the named parks (l6/l4 walls); the
+    // portable surface is the rate-averaging period + the ME-dist average.
+    static const std::uint32_t d64[4] = {1000, 2000, 3000, 4000};
+    {
+        // two-pass + max_bit_rate: the period is total_stats->count, then
+        // MIN-ed with MAX_RATE_AVG_PERIOD (the 1500 count clamps to 1000).
+        l15_rc::RcControl rc = drvRc();
+        rc.curAvgBaseMeDist = 500;
+        l15_rc::rcInitFrameStats(rc, l15_rc::kBslice, 4, d64, true, 1500.0);
+        CHECK(rc.rateAveragePeriod == 1000);
+        // non-I_SLICE: prev <- cur (500), cur <- avg(1000+2000+3000+4000)/4.
+        CHECK(rc.prevAvgBaseMeDist == 500);
+        CHECK(rc.curAvgBaseMeDist == 2500);
+        // a count below the clamp passes through.
+        l15_rc::rcInitFrameStats(rc, l15_rc::kBslice, 4, d64, true, 800.0);
+        CHECK(rc.rateAveragePeriod == 800);
+    }
+    {
+        // I_SLICE: the ME-dist walk is skipped entirely (a null pointer is
+        // never dereferenced on the I_SLICE path).
+        l15_rc::RcControl rc = drvRc();
+        rc.prevAvgBaseMeDist = 11;
+        rc.curAvgBaseMeDist = 22;
+        l15_rc::rcInitFrameStats(rc, l15_rc::kIslice, 1, nullptr, false, 60.0);
+        CHECK(rc.prevAvgBaseMeDist == 11);
+        CHECK(rc.curAvgBaseMeDist == 22);
+    }
+    {
+        // NOT (two-pass + max_bit_rate): the 60 default.
+        l15_rc::RcControl rc = drvRc();
+        l15_rc::rcInitFrameStats(rc, l15_rc::kBslice, 4, d64, false, 1500.0);
+        CHECK(rc.rateAveragePeriod == 60);
+        l15_rc::rcInitFrameStats(rc, l15_rc::kBslice, 4, d64, true, 30.0);
+        CHECK(rc.rateAveragePeriod == 30);
+    }
+}

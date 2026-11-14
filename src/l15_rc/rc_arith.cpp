@@ -3008,4 +3008,34 @@ void resetRcParam(PcsCarrier& ppcs) {
     ppcs.undershootSeen = 0;
 }
 
+// MAX_RATE_AVG_PERIOD (rc_process.h:48-50):
+// CODED_FRAMES_STAT_QUEUE_MAX_DEPTH (2000) >> 1.
+constexpr std::uint64_t kMaxRateAvgPeriod = 1000;
+
+// rc_init_frame_stats (rc_process.c:607-640): the parked call sites
+// (svt_aom_generate_r0beta, the three get_ref_*_percentage walks) are named
+// in the header; the bodies here are the two portable walks.
+void rcInitFrameStats(RcControl& rc, int sliceType, std::uint16_t b64TotalCount,
+                      const std::uint32_t* me64x64Distortion, bool twoPassWithMaxBitRate,
+                      double totalStatsCount) {
+    // Set rate averaging period
+    if (twoPassWithMaxBitRate) {
+        rc.rateAveragePeriod = (std::uint64_t)totalStatsCount;
+    } else {
+        rc.rateAveragePeriod = 60;
+    }
+    rc.rateAveragePeriod = rc.rateAveragePeriod < kMaxRateAvgPeriod ? rc.rateAveragePeriod : kMaxRateAvgPeriod;
+
+    // Store the avg ME distortion
+    if (sliceType != kIslice) {
+        rc.prevAvgBaseMeDist = rc.curAvgBaseMeDist;
+        std::uint64_t avgMeDist = 0;
+        for (int b64Idx = 0; b64Idx < b64TotalCount; ++b64Idx) {
+            avgMeDist += me64x64Distortion[b64Idx];
+        }
+        avgMeDist /= b64TotalCount;
+        rc.curAvgBaseMeDist = (std::uint32_t)avgMeDist;
+    }
+}
+
 } // namespace l15_rc
