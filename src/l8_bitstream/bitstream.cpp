@@ -141,7 +141,10 @@ std::int32_t encodeTdAv1(std::uint8_t* output_bitstream_ptr) {
 // ---------------------------------------------------------------------------
 // add_trailing_bits (entropy_coding.c:3668-3675): byte-aligned -> 0x80,
 // else a single 1 bit (the trailing zeros are assumed - buffer zeros).
-static void wbAddTrailingBits(AomWriteBitBuffer* wb) {
+// Deviation named: file-local static in the reference; exported here for
+// the packetizer's write_obu_metadata (entropy_coding.c:3688) - declared in
+// bitstream.h, defined once, no duplicate.
+void wbAddTrailingBits(AomWriteBitBuffer* wb) {
     if (wbIsByteAligned(wb)) {
         wbWriteLiteral(wb, 0x80, 8);
     } else {
