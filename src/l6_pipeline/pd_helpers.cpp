@@ -2,6 +2,8 @@
 // pd_helpers.h for the park list and carrier conventions.
 #include <pd_helpers.h>
 
+#include <mode_config.h>
+
 #include <cassert>
 #include <climits>
 #include <cstring>
@@ -583,6 +585,158 @@ void updateRefPocArray(const std::uint8_t* ref_dpb_idx, std::uint64_t* ref_poc_a
     ref_poc_array[4] = dpb_picture_number[ref_dpb_idx[4]];
     ref_poc_array[5] = dpb_picture_number[ref_dpb_idx[5]];
     ref_poc_array[6] = dpb_picture_number[ref_dpb_idx[6]];
+}
+
+// ---------------------------------------------------------------------------
+// PD5: the picture-availability + TF-modulation helpers.
+// ---------------------------------------------------------------------------
+
+// avail_past_pictures (pd_process.c:3601-:3610), verbatim over the
+// flattened buffer column.
+std::int32_t availPastPictures(const std::uint64_t* buf_picture_numbers, std::uint32_t buf_size,
+                               std::uint64_t input_pic) {
+    // buffer has at least curr picture
+    std::int32_t tot_past = 0;
+    for (std::uint32_t pic = 0; pic < buf_size; pic++) {
+        if (buf_picture_numbers[pic] < input_pic) {
+            tot_past++;
+        }
+    }
+    return tot_past;
+}
+
+// search_this_pic (pd_process.c:3616-:3625), verbatim.
+std::int32_t searchThisPic(const std::uint64_t* buf_picture_numbers, std::uint32_t buf_size,
+                           std::uint64_t input_pic) {
+    std::int32_t index = -1;
+    for (std::uint32_t pic = 0; pic < buf_size; pic++) {
+        if (buf_picture_numbers[pic] == input_pic) {
+            index = static_cast<std::int32_t>(pic);
+            break;
+        }
+    }
+    return index;
+}
+
+// svt_aom_is_delayed_intra (pd_process.c:3630-:3644), verbatim.
+bool isDelayedIntra(const PdPcsDelayIntra& pcs) {
+    if ((pcs.idr_flag || pcs.cra_flag) && pcs.pred_structure == kPredRandomAccess) {
+        if (pcs.intra_period_length == 0 || pcs.end_of_sequence_flag) {
+            return false;
+        } else if (pcs.idr_flag ||
+                   (pcs.cra_flag &&
+                    pcs.pre_assignment_buffer_count < pcs.pred_struct_entry_count)) {
+            return true;
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+}
+
+// ref_pics_modulation (pd_process.c:3653-:3755), verbatim over the
+// carrier; the qp-th factors come from the landed l16 port
+// (enc_mode_config.c:26-:54 via l16_rdo::getQpBasedThScalingFactors).
+std::int32_t refPicsModulation(const PdPcsModulate& pcs, std::int32_t noise_levels_log1p_fp16) {
+    std::int32_t offset = 0;
+
+    if (pcs.slice_type == kISlice) {
+        // Adjust number of filtering frames based on noise and
+        // quantization factor (the FLOAT2FP(log1p(x), 16) thresholds).
+        if (noise_levels_log1p_fp16 < 26572) {
+            offset = 6;
+        } else if (noise_levels_log1p_fp16 < 45426) {
+            offset = 4;
+        } else if (noise_levels_log1p_fp16 < 71998) {
+            offset = 2;
+        }
+    } else if (pcs.temporal_layer_index == 0) {
+        const std::int32_t ratio = noise_levels_log1p_fp16
+            ? (pcs.filt_to_unfilt_diff * 100) / noise_levels_log1p_fp16
+            : 0;
+        switch (pcs.modulate_pics) {
+        case 0:
+            offset = 0;
+            break;
+        case 1:
+            if (ratio < 100) {
+                offset = 5;
+            } else {
+                offset = kTfMaxExtension;
+            }
+            break;
+        case 2:
+            if (ratio < 50) {
+                offset = 3;
+            } else if (ratio < 100) {
+                offset = 5;
+            } else {
+                offset = kTfMaxExtension;
+            }
+            break;
+        case 3:
+            if (ratio < 50) {
+                offset = 3;
+            } else if (ratio < 100) {
+                offset = 4;
+            } else {
+                offset = 5;
+            }
+            break;
+        case 4:
+            if (ratio < 50) {
+                offset = 0;
+            } else if (ratio < 100) {
+                offset = 1;
+            } else {
+                offset = 2;
+            }
+            break;
+        default:
+            break;
+        }
+    } else {
+        const std::int32_t ratio = noise_levels_log1p_fp16
+            ? (pcs.filt_to_unfilt_diff * 100) / noise_levels_log1p_fp16
+            : 0;
+        switch (pcs.modulate_pics) {
+        case 0:
+            offset = 0;
+            break;
+        case 1:
+            if (ratio < 25) {
+                offset = 0;
+            } else {
+                offset = 1;
+            }
+            break;
+        case 2:
+            if (ratio < 50) {
+                offset = 0;
+            } else {
+                offset = 1;
+            }
+            break;
+        case 3:
+            if (ratio < 75) {
+                offset = 0;
+            } else {
+                offset = 1;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    // Modulate offset using qp
+    if (pcs.qp_opt) {
+        std::uint32_t q_weight, q_weight_denom;
+        l16_rdo::mode_config::getQpBasedThScalingFactors(pcs.qp_opt != 0, &q_weight, &q_weight_denom, pcs.scs_qp);
+        offset = (offset * static_cast<std::int32_t>(q_weight) + (static_cast<std::int32_t>(q_weight_denom) >> 1)) /
+            static_cast<std::int32_t>(q_weight_denom);
+    }
+    return offset;
 }
 
 }  // namespace pd

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <climits>
+#include <cmath>
 #include <vector>
 
 #include <pd_helpers.h>
@@ -1032,6 +1033,206 @@ TEST_CASE("l6 pd update_ref_poc_array reads the dpb positions") {
         pd::updateRefPocArray(idx, poc, dpb_poc);
         for (int i = 0; i < 7; ++i) {
             CHECK(poc[i] == dpb_poc[idx[i]]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PD5: avail_past_pictures (:3601-:3610) + search_this_pic (:3616-:3625)
+// + svt_aom_is_delayed_intra (:3630-:3644) + ref_pics_modulation
+// (:3653-:3755)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("l6 pd avail_past_pictures + search_this_pic over the buffer bands") {
+    // mixed buffer
+    {
+        std::uint64_t nums[5] = {2, 5, 9, 12, 20};
+        CHECK(pd::availPastPictures(nums, 5, 10) == 3);
+        CHECK(pd::availPastPictures(nums, 5, 2) == 0);   // current-first
+        CHECK(pd::availPastPictures(nums, 5, 21) == 5);  // all past
+        CHECK(pd::searchThisPic(nums, 5, 9) == 2);
+        CHECK(pd::searchThisPic(nums, 5, 10) == -1);
+        CHECK(pd::searchThisPic(nums, 5, 2) == 0);
+    }
+    // duplicate picture numbers: search returns the FIRST match,
+    // avail counts every past entry.
+    {
+        std::uint64_t nums[4] = {7, 3, 7, 3};
+        CHECK(pd::searchThisPic(nums, 4, 7) == 0);
+        CHECK(pd::searchThisPic(nums, 4, 3) == 1);
+        CHECK(pd::availPastPictures(nums, 4, 4) == 2);
+        CHECK(pd::availPastPictures(nums, 4, 8) == 4);
+    }
+    // empty buffer
+    {
+        std::uint64_t nums[1] = {0};
+        CHECK(pd::availPastPictures(nums, 0, 5) == 0);
+        CHECK(pd::searchThisPic(nums, 0, 5) == -1);
+    }
+}
+
+// is_delayed_intra over the full gate matrix.
+TEST_CASE("l6 pd is_delayed_intra over the gate matrix") {
+    for (int idr = 0; idr <= 1; ++idr) {
+        for (int cra = 0; cra <= 1; ++cra) {
+            for (int pred = 0; pred <= 2; ++pred) {
+                for (int period = 0; period <= 1; ++period) {  // 0 vs nonzero
+                    for (int eos = 0; eos <= 1; ++eos) {
+                        for (int pre_small = 0; pre_small <= 1; ++pre_small) {
+                            pd::PdPcsDelayIntra pcs{};
+                            pcs.idr_flag = static_cast<std::uint8_t>(idr);
+                            pcs.cra_flag = static_cast<std::uint8_t>(cra);
+                            pcs.pred_structure = static_cast<std::uint8_t>(pred);
+                            pcs.intra_period_length = static_cast<std::uint8_t>(period * 5);
+                            pcs.end_of_sequence_flag = static_cast<std::uint8_t>(eos);
+                            pcs.pre_assignment_buffer_count = static_cast<std::uint32_t>(pre_small ? 3 : 10);
+                            pcs.pred_struct_entry_count = 5;
+                            // Oracle restated from :3630-:3644.
+                            bool want = false;
+                            if ((idr || cra) && pred == pd::kPredRandomAccess) {
+                                if (period == 0 || eos) {
+                                    want = false;
+                                } else if (idr || (cra && pre_small)) {
+                                    want = true;
+                                }
+                            }
+                            CHECK(pd::isDelayedIntra(pcs) == want);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ref_pics_modulation: the I-slice noise bands over the exact thresholds.
+TEST_CASE("l6 pd ref_pics_modulation I-slice noise bands") {
+    const std::int32_t bands[] = {0, 26571, 26572, 45425, 45426, 71997, 71998, 100000};
+    const int want[] = {6, 6, 4, 4, 2, 2, 0, 0};
+    for (int i = 0; i < 8; ++i) {
+        pd::PdPcsModulate pcs{};
+        pcs.slice_type = pd::kISlice;
+        CHECK(pd::refPicsModulation(pcs, bands[i]) == want[i]);
+    }
+}
+
+// the TL0 ratio switch over every modulate_pics level and every band,
+// plus the noise==0 ratio-0 gate.
+TEST_CASE("l6 pd ref_pics_modulation TL0 ratio switch bands") {
+    for (int mp = 0; mp <= 4; ++mp) {
+        // ratio = (diff * 100) / noise; choose noise 100 and diff across
+        // the band edges 49/50/99/100/101 + 0.
+        const std::int32_t diffs[] = {0, 49, 50, 99, 100, 101};
+        for (std::int32_t diff : diffs) {
+            pd::PdPcsModulate pcs{};
+            pcs.slice_type = pd::kBSlice;
+            pcs.temporal_layer_index = 0;
+            pcs.modulate_pics = static_cast<std::uint32_t>(mp);
+            pcs.filt_to_unfilt_diff = diff;
+            const int ratio = diff;
+            int want = 0;
+            switch (mp) {
+            case 0: want = 0; break;
+            case 1: want = ratio < 100 ? 5 : pd::kTfMaxExtension; break;
+            case 2: want = ratio < 50 ? 3 : (ratio < 100 ? 5 : pd::kTfMaxExtension); break;
+            case 3: want = ratio < 50 ? 3 : (ratio < 100 ? 4 : 5); break;
+            case 4: want = ratio < 50 ? 0 : (ratio < 100 ? 1 : 2); break;
+            default: want = 0; break;
+            }
+            CHECK(pd::refPicsModulation(pcs, 100) == want);
+        }
+    }
+    // noise == 0 -> ratio 0
+    {
+        pd::PdPcsModulate pcs{};
+        pcs.slice_type = pd::kBSlice;
+        pcs.temporal_layer_index = 0;
+        pcs.modulate_pics = 3;
+        pcs.filt_to_unfilt_diff = 1234;
+        CHECK(pd::refPicsModulation(pcs, 0) == 3);  // ratio 0 < 50
+    }
+}
+
+// the non-TL0 switch over its levels + bands.
+TEST_CASE("l6 pd ref_pics_modulation non-TL0 switch bands") {
+    const std::int32_t ratios[] = {0, 24, 25, 49, 50, 74, 75, 100};
+    for (int mp = 0; mp <= 3; ++mp) {
+        for (std::int32_t ratio : ratios) {
+            pd::PdPcsModulate pcs{};
+            pcs.slice_type = pd::kBSlice;
+            pcs.temporal_layer_index = 1;
+            pcs.modulate_pics = static_cast<std::uint32_t>(mp);
+            pcs.filt_to_unfilt_diff = ratio;
+            int want = 0;
+            switch (mp) {
+            case 0: want = 0; break;
+            case 1: want = ratio < 25 ? 0 : 1; break;
+            case 2: want = ratio < 50 ? 0 : 1; break;
+            case 3: want = ratio < 75 ? 0 : 1; break;
+            default: want = 0; break;
+            }
+            CHECK(pd::refPicsModulation(pcs, 100) == want);
+        }
+    }
+    // modulate_pics 5 (unmapped) -> default -> 0
+    {
+        pd::PdPcsModulate pcs{};
+        pcs.slice_type = pd::kBSlice;
+        pcs.temporal_layer_index = 0;
+        pcs.modulate_pics = 5;
+        pcs.filt_to_unfilt_diff = 200;
+        CHECK(pd::refPicsModulation(pcs, 100) == 0);
+    }
+}
+
+// the qp_opt scaling: DIVIDE_AND_ROUND(offset * q_weight, q_weight_denom)
+// with the landed qp-th factors restated.
+namespace {
+
+void qpThFactorsOracle(bool enable, std::uint32_t* w, std::uint32_t* denom, std::uint32_t qp) {
+    if (!enable) {
+        *w = 1;
+        *denom = 1;
+        return;
+    }
+    std::uint32_t qw = qp < 10 ? 10 : qp;
+    std::uint32_t d = 63;
+    if (qp >= 46) {
+        double ex = -((qp < 40.0 ? 40.0 : static_cast<double>(qp)) - 35) / 10;
+        double qi = 1.05 - std::exp(ex);
+        qi *= 10000;
+        qw = static_cast<std::uint32_t>(qi);
+        d = 10000;
+    }
+    *w = qw;
+    *denom = d;
+}
+
+int divideAndRound(int x, int y) {
+    return (x + (y >> 1)) / y;
+}
+
+}  // namespace
+
+TEST_CASE("l6 pd ref_pics_modulation qp_opt scaling") {
+    for (int qp : {10, 45, 46, 63}) {
+        for (int mp = 1; mp <= 4; ++mp) {
+            // TL0 path: pick diff to land offset 5 at qp 10 (ratio 99 -> 5)
+            pd::PdPcsModulate pcs{};
+            pcs.slice_type = pd::kBSlice;
+            pcs.temporal_layer_index = 0;
+            pcs.modulate_pics = static_cast<std::uint32_t>(mp);
+            pcs.filt_to_unfilt_diff = 99;
+            pcs.qp_opt = 1;
+            pcs.scs_qp = static_cast<std::uint32_t>(qp);
+            std::uint32_t w, denom;
+            qpThFactorsOracle(true, &w, &denom, static_cast<std::uint32_t>(qp));
+            const int base_off = mp == 1 ? 5
+                : mp == 2 ? 5
+                : mp == 3 ? 4
+                : 1;
+            const int want = divideAndRound(base_off * static_cast<int>(w), static_cast<int>(denom));
+            CHECK(pd::refPicsModulation(pcs, 100) == want);
         }
     }
 }

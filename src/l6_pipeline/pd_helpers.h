@@ -349,5 +349,54 @@ void setRefListCounts(PdPcsRefCounts& pcs);
 void updateRefPocArray(const std::uint8_t* ref_dpb_idx, std::uint64_t* ref_poc_array,
                        const std::uint64_t* dpb_picture_number);
 
+// ---------------------------------------------------------------------------
+// PD5: the picture-availability + TF-modulation helpers.
+// ---------------------------------------------------------------------------
+
+// avail_past_pictures (pd_process.c:3601-:3610, the CONFIG_ENABLE_
+// TEMPORAL_FILTERING branch): the buf flattened to the picture_number
+// column (the PdCtx deviation).
+std::int32_t availPastPictures(const std::uint64_t* buf_picture_numbers, std::uint32_t buf_size,
+                               std::uint64_t input_pic);
+
+// search_this_pic (pd_process.c:3616-:3625): -1 on miss.
+std::int32_t searchThisPic(const std::uint64_t* buf_picture_numbers, std::uint32_t buf_size,
+                           std::uint64_t input_pic);
+
+// The PictureParentControlSet window svt_aom_is_delayed_intra
+// (:3630-:3644) consumes.
+struct PdPcsDelayIntra {
+    std::uint8_t idr_flag;
+    std::uint8_t cra_flag;
+    std::uint8_t pred_structure;  // pcs->pred_structure
+    std::uint8_t intra_period_length;  // scs->static_config.intra_period_length
+    std::uint8_t end_of_sequence_flag;
+    std::uint32_t pre_assignment_buffer_count;
+    std::uint32_t pred_struct_entry_count;
+};
+
+// svt_aom_is_delayed_intra (pd_process.c:3630-:3644).
+bool isDelayedIntra(const PdPcsDelayIntra& pcs);
+
+// definitions.h:319 TF_MAX_EXTENSION.
+constexpr std::int32_t kTfMaxExtension = 6;
+
+// The PictureParentControlSet window ref_pics_modulation (:3653-:3755)
+// consumes. scs_qp is scs->static_config.qp (the qp-th scaling input).
+struct PdPcsModulate {
+    std::uint8_t slice_type;
+    std::uint32_t temporal_layer_index;
+    std::int32_t filt_to_unfilt_diff;
+    std::uint32_t modulate_pics;  // pcs->tf_ctrls.modulate_pics
+    std::uint8_t qp_opt;          // pcs->tf_ctrls.qp_opt
+    std::uint32_t scs_qp;
+};
+
+// ref_pics_modulation (pd_process.c:3653-:3755): the I-slice noise
+// bands, the TL0 / non-TL0 ratio switches, and the qp_opt scaling via
+// the landed l16 get_qp_based_th_scaling_factors + DIVIDE_AND_ROUND
+// (product_coding_loop.c:47).
+std::int32_t refPicsModulation(const PdPcsModulate& pcs, std::int32_t noise_levels_log1p_fp16);
+
 }  // namespace pd
 }  // namespace pipeline
