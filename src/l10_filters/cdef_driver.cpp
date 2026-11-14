@@ -882,5 +882,105 @@ void finishCdefSearch(CdefFinishCtx& ctx) {
     ctx.cdefDamping = static_cast<std::uint8_t>(3 + ((ctx.baseQIdx) >> 6));
 }
 
+// get_own_recon (rest_process.c:147-:190). 1:1: the no-boundary early
+// return, then the row copies - luma full height, chroma >> ss, widths
+// scaled by is_16bit.
+CdefPic getOwnRecon(const CdefScsWalls& scs, const CdefPic& reconPic, const CdefPic& orgRecFrame,
+    bool useBoundariesInRestSearch, bool is16bit) {
+    // if boundaries are not used, don't need to copy pic to new buffer
+    if (!useBoundariesInRestSearch) {
+        return reconPic;
+    }
+
+    const std::uint32_t ssX = scs.subsamplingX;
+    const std::uint32_t ssY = scs.subsamplingY;
+
+    const int useHighbd = is16bit ? 1 : 0;
+    const std::int32_t orgStrideY = orgRecFrame.stride[0] << useHighbd;
+    const std::int32_t orgStrideCb = orgRecFrame.stride[1] << useHighbd;
+    const std::int32_t orgStrideCr = orgRecFrame.stride[2] << useHighbd;
+
+    const std::int32_t recStrideY = reconPic.stride[0] << useHighbd;
+    const std::int32_t recStrideCb = reconPic.stride[1] << useHighbd;
+    const std::int32_t recStrideCr = reconPic.stride[2] << useHighbd;
+
+    std::uint8_t* orgPtr = orgRecFrame.buffer[0];
+    std::uint8_t* orgPtrCb = orgRecFrame.buffer[1];
+    std::uint8_t* orgPtrCr = orgRecFrame.buffer[2];
+
+    const std::uint8_t* recPtr = reconPic.buffer[0];
+    const std::uint8_t* recPtrCb = reconPic.buffer[1];
+    const std::uint8_t* recPtrCr = reconPic.buffer[2];
+
+    const int recWidth = reconPic.width << useHighbd;
+
+    for (int r = 0; r < reconPic.height; ++r) {
+        memcpy(orgPtr + r * orgStrideY, recPtr + r * recStrideY, recWidth);
+    }
+
+    for (int r = 0; r < (reconPic.height >> ssY); ++r) {
+        memcpy(orgPtrCb + r * orgStrideCb, recPtrCb + r * recStrideCb, recWidth >> ssX);
+        memcpy(orgPtrCr + r * orgStrideCr, recPtrCr + r * recStrideCr, recWidth >> ssX);
+    }
+    return orgRecFrame;
+}
+
+// copy_statistics_to_ref_obj_ect (rest_process.c:192-:251). 1:1.
+void copyStatisticsToRefObjEct(const RestHdr& hdr, const RestCmWalls& cmWalls, const RestPcsWalls& pcs,
+    RestRefStat& obj) {
+    obj.intraCodedArea = (std::uint8_t)pcs.intraCodedArea;
+    obj.skipCodedArea = (std::uint8_t)pcs.skipCodedArea;
+    obj.hpCodedArea = (std::uint8_t)pcs.hpCodedArea;
+    obj.isMfmvUsed = hdr.useRefFrameMvs;
+
+    obj.filterLevel[0] = hdr.filterLevel[0];
+    obj.filterLevel[1] = hdr.filterLevel[1];
+    obj.filterLevelU = hdr.filterLevelU;
+    obj.filterLevelV = hdr.filterLevelV;
+    obj.dlfDistDev = pcs.dlfDistDev;
+    obj.cdefDistDev = pcs.cdefDistDev;
+
+    obj.refCdefStrengthsNum = pcs.nbCdefStrengths;
+    for (std::uint32_t i = 0; i < pcs.nbCdefStrengths; i++) {
+        obj.refCdefStrengths[0][i] = hdr.cdefYStrength[i];
+        obj.refCdefStrengths[1][i] = hdr.cdefUvStrength[i];
+    }
+    for (std::uint32_t sbIndex = 0; sbIndex < pcs.b64TotalCount; ++sbIndex) {
+        obj.sbIntra[sbIndex] = pcs.sbIntra[sbIndex];
+        obj.sbSkip[sbIndex] = pcs.sbSkip[sbIndex];
+        obj.sb64x64Mvp[sbIndex] = pcs.sb64x64Mvp[sbIndex];
+        obj.sbMe64x64Dist[sbIndex] = pcs.me64x64Distortion[sbIndex];
+        obj.sbMe8x8CostVar[sbIndex] = pcs.me8x8CostVariance[sbIndex];
+        obj.sbMinSqSize[sbIndex] = pcs.sbMinSqSize[sbIndex];
+        obj.sbMaxSqSize[sbIndex] = pcs.sbMaxSqSize[sbIndex];
+    }
+    obj.tmpLayerIdx = pcs.temporalLayerIndex;
+    obj.isSceneChange = pcs.sceneChangeFlag;
+
+    if (cmWalls.mfmvEnabled || !pcs.isNotScaled) {
+        obj.frameType = hdr.frameType;
+        obj.orderHint = pcs.curOrderHint;
+        memcpy(obj.refOrderHint, pcs.refOrderHint, sizeof(obj.refOrderHint));
+    }
+    // Copy the prev frame wn filter coeffs
+    if (cmWalls.wnFilterEnabled && cmWalls.wnUsePrevFrameCoeffs) {
+        for (std::int32_t plane = 0; plane < 3; ++plane) {
+            const std::int32_t ntiles = pcs.unitsPerTile[plane];
+            const bool unitInfoValid = pcs.frameRestorationType[plane] != restoration::RESTORE_NONE ||
+                (pcs.sliceType != 0 && pcs.enableRestoration && !hdr.allowIntrabc);
+            for (std::int32_t u = 0; u < ntiles; ++u) {
+                if (!unitInfoValid) {
+                    obj.unitInfo[plane][u].restorationType = restoration::RESTORE_NONE;
+                    continue;
+                }
+                obj.unitInfo[plane][u].restorationType = pcs.unitInfo[plane][u].restorationType;
+                if (pcs.unitInfo[plane][u].restorationType == restoration::RESTORE_WIENER) {
+                    obj.unitInfo[plane][u].wienerInfo = pcs.unitInfo[plane][u].wienerInfo;
+                }
+            }
+        }
+    }
+}
+
 } // namespace cdef_driver
 } // namespace l10_filters

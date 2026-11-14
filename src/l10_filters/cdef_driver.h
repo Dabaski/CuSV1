@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "cdef.h"
+#include "restoration.h"
 
 // A8D (A8 campaign): 1:1 port of the remaining PURE / carrier-able DRIVER
 // spans of third_party/SVT-AV1/Source/Lib/Codec/enc_cdef.c, cdef_process.c
@@ -106,6 +108,9 @@ struct CdefPic {
     int bitDepth;
     int colorFormat;
     std::uint32_t bufferEnableMask;
+    // test-side owned storage (the reference's buffers are external; the
+    // test fixtures need somewhere to own them)
+    std::vector<std::uint8_t> buf0, buf1, buf2;
 };
 
 // PICTURE_BUFFER_DESC_* (pic_buffer_desc.h:23-:28).
@@ -388,6 +393,123 @@ struct CdefFinishCtx {
 // cdef_dist_dev derivation, the per-SB best-gi assignment through the
 // landed propagateCdefStrength, and the filter_map remap.
 void finishCdefSearch(CdefFinishCtx& ctx);
+
+// ---------------------------------------------------------------------------
+// S10: rest_process.c - get_own_recon (:147-:190) +
+// copy_statistics_to_ref_obj_ect (:192-:251).
+// ---------------------------------------------------------------------------
+
+// RestHdr: the threaded FrameHeader surface the rest stage reads:
+// loop_filter_params.filter_level[2]/u/v, use_ref_frame_mvs, allow_intrabc,
+// frame_type, and the cdef_params strengths the ref-stat copy consumes.
+struct RestHdr {
+    std::int32_t filterLevel[2];
+    std::int32_t filterLevelU;
+    std::int32_t filterLevelV;
+    bool useRefFrameMvs;
+    bool allowIntrabc;
+    std::int32_t frameType;
+    std::uint8_t cdefYStrength[kCdefMaxStrengths];
+    std::uint8_t cdefUvStrength[kCdefMaxStrengths];
+};
+
+// RestUnitInfo (the WienerUnitInfo shape, restoration.h:188-:191): the
+// per-unit entry the wn prev-frame machinery forwards. The WienerInfo
+// member inherits the alignas(16) (C4324 padding expected - the landed
+// restoration.h pragma pattern).
+#pragma warning(push)
+#pragma warning(disable : 4324)
+struct RestUnitInfo {
+    restoration::RestorationType restorationType;
+    restoration::WienerInfo wienerInfo;
+};
+
+// RestRefStat: the threaded EbReferenceObject surface
+// (reference_object.h:21-:63), verbatim consumed fields; the sb arrays
+// are the caller-owned rows (sized b64_total_count); unitInfo is the
+// per-plane pointer array (plane -> units).
+struct RestRefStat {
+    std::uint8_t intraCodedArea;
+    std::uint8_t skipCodedArea;
+    std::uint8_t hpCodedArea;
+    std::uint8_t isMfmvUsed;
+    std::int32_t filterLevel[2];
+    std::int32_t filterLevelU;
+    std::int32_t filterLevelV;
+    std::int32_t dlfDistDev;
+    std::int32_t cdefDistDev;
+    std::uint32_t refCdefStrengthsNum;
+    std::uint8_t refCdefStrengths[2][kCdefTotalStrengths];
+    std::uint8_t* sbIntra;
+    std::uint8_t* sbSkip;
+    std::uint8_t* sb64x64Mvp;
+    std::uint32_t* sbMe64x64Dist;
+    std::uint32_t* sbMe8x8CostVar;
+    std::uint8_t* sbMinSqSize;
+    std::uint8_t* sbMaxSqSize;
+    std::uint8_t tmpLayerIdx;
+    bool isSceneChange;
+    std::int32_t frameType;
+    std::uint32_t orderHint;
+    std::uint32_t refOrderHint[7];
+    RestUnitInfo* unitInfo[3];
+};
+
+// RestPcsWalls: the threaded PictureControlSet / PictureParentControlSet
+// surface of copy_statistics_to_ref_obj_ect (the consumed fields).
+struct RestPcsWalls {
+    std::uint32_t intraCodedArea;
+    std::uint64_t skipCodedArea;
+    std::uint64_t hpCodedArea;
+    std::uint8_t temporalLayerIndex;
+    std::uint16_t b64TotalCount;
+    int sliceType; // definitions.h SliceType ordinals, I_SLICE = 0
+    std::int32_t dlfDistDev;
+    std::int32_t cdefDistDev;
+    std::uint32_t nbCdefStrengths; // ppcs->nb_cdef_strengths
+    bool enableRestoration; // ppcs->enable_restoration
+    std::uint8_t* sbIntra;
+    std::uint8_t* sbSkip;
+    std::uint8_t* sb64x64Mvp;
+    std::uint32_t* me64x64Distortion;
+    std::uint32_t* me8x8CostVariance;
+    std::uint8_t* sbMinSqSize;
+    std::uint8_t* sbMaxSqSize;
+    bool sceneChangeFlag;
+    bool isNotScaled;
+    std::uint32_t curOrderHint; // ppcs->cur_order_hint
+    std::uint32_t refOrderHint[7]; // ppcs->ref_order_hint
+    // the rst_info surface: frame_restoration_type + units_per_tile +
+    // unit_info per plane
+    restoration::RestorationType frameRestorationType[3];
+    std::int32_t unitsPerTile[3];
+    RestUnitInfo* unitInfo[3];
+};
+
+// The threaded Av1Common surface of the rest stage: the wn_filter_ctrls
+// gates and the mfmv_enabled flag.
+struct RestCmWalls {
+    bool wnFilterEnabled;
+    bool wnUsePrevFrameCoeffs;
+    bool mfmvEnabled;
+};
+
+// get_own_recon (rest_process.c:147-:190): returns the input recon when
+// boundaries are not used; otherwise copies the recon planes into
+// orgRecFrame (the stride element counts scaled by is_16bit) and returns
+// it. The svt_aom_get_recon_pic selector is threaded (the two pics
+// passed directly).
+CdefPic getOwnRecon(const CdefScsWalls& scs, const CdefPic& reconPic, const CdefPic& orgRecFrame,
+    bool useBoundariesInRestSearch, bool is16bit);
+
+// copy_statistics_to_ref_obj_ect (rest_process.c:192-:251): the ref-stat
+// field copies, the cdef strengths, the per-SB array copies, the
+// scene-change/temporal-layer fields, the mfmv-gated order-hint block
+// and the wn prev-frame unit_info walk (the I_SLICE/intrabc/rest-type
+// validity gates).
+void copyStatisticsToRefObjEct(const RestHdr& hdr, const RestCmWalls& cmWalls, const RestPcsWalls& pcs,
+    RestRefStat& obj);
+#pragma warning(pop)
 
 } // namespace cdef_driver
 } // namespace l10_filters

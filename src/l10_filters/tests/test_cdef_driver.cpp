@@ -1248,3 +1248,251 @@ TEST_CASE("finishCdefSearch skip_cdef_seg + 128-block gather skips") {
     // fb1's mi cell untouched (propagate never ran for it)
     CHECK(f.miGrid[16].cdefStrength == -9);
 }
+
+// ---- S10: rest_process.c get_own_recon + copy_statistics_to_ref_obj_ect
+namespace {
+using l10_filters::cdef_driver::CdefPic;
+using l10_filters::cdef_driver::CdefScsWalls;
+using l10_filters::cdef_driver::RestHdr;
+using l10_filters::cdef_driver::RestCmWalls;
+using l10_filters::cdef_driver::RestPcsWalls;
+using l10_filters::cdef_driver::RestRefStat;
+using l10_filters::cdef_driver::RestUnitInfo;
+
+CdefPic makeRestPic(std::uint8_t fill, std::uint16_t w, std::uint16_t h, std::uint16_t str) {
+    CdefPic p;
+    p.width = w;
+    p.height = h;
+    p.stride[0] = str;
+    p.stride[1] = str / 2 + 8;
+    p.stride[2] = str / 2 + 8;
+    // sized for the 16-bit variant too (the row step doubles there)
+    p.buf0.assign((h + 2) * str * 2 + 32, fill);
+    p.buf1.assign((h + 2) * p.stride[1] * 2 + 32, fill ^ 0x3C);
+    p.buf2.assign((h + 2) * p.stride[2] * 2 + 32, fill ^ 0xC3);
+    p.buffer[0] = p.buf0.data() + str + 4;
+    p.buffer[1] = p.buf1.data() + p.stride[1] + 2;
+    p.buffer[2] = p.buf2.data() + p.stride[2] + 2;
+    return p;
+}
+
+void fillRestPic(CdefPic& p, std::uint8_t y, std::uint8_t cb, std::uint8_t cr) {
+    for (int r = 0; r < p.height; ++r)
+        for (int c = 0; c < p.width; ++c) p.buffer[0][r * p.stride[0] + c] = y;
+    for (int r = 0; r < p.height / 2; ++r)
+        for (int c = 0; c < p.width / 2; ++c) {
+            p.buffer[1][r * p.stride[1] + c] = cb;
+            p.buffer[2][r * p.stride[2] + c] = cr;
+        }
+}
+} // namespace
+
+TEST_CASE("getOwnRecon no-boundary returns the input pic") {
+    CdefPic recon = makeRestPic(0x11, 32, 16, 64);
+    CdefPic org = makeRestPic(0xEE, 32, 16, 64);
+    CdefScsWalls scs{false, 1, 1, false};
+    CdefPic got = l10_filters::cdef_driver::getOwnRecon(scs, recon, org, false, false);
+    CHECK(got.buffer[0] == recon.buffer[0]);
+    // no copies happened: the org poison stays
+    CHECK(org.buffer[0][0] == 0xEE);
+}
+
+TEST_CASE("getOwnRecon boundary mode copies luma + subsampled chroma") {
+    CdefPic recon = makeRestPic(0x11, 32, 16, 64);
+    fillRestPic(recon, 0x44, 0x88, 0xCC);
+    CdefPic org = makeRestPic(0xEE, 32, 16, 64);
+    CdefScsWalls scs{false, 1, 1, false};
+    CdefPic got = l10_filters::cdef_driver::getOwnRecon(scs, recon, org, true, false);
+    CHECK(got.buffer[0] == org.buffer[0]);
+    for (int r = 0; r < 16; ++r)
+        for (int c = 0; c < 32; ++c) CHECK(org.buffer[0][r * 64 + c] == 0x44);
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 16; ++c) {
+            CHECK(org.buffer[1][r * org.stride[1] + c] == 0x88);
+            CHECK(org.buffer[2][r * org.stride[2] + c] == 0xCC);
+        }
+    // beyond the copy widths: prefill (the chroma prefill is fill ^ 0x3C)
+    CHECK(org.buffer[0][32] == 0xEE);
+    CHECK(org.buffer[1][16] == 0xD2);
+}
+
+TEST_CASE("getOwnRecon 16-bit doubles the strides and widths") {
+    CdefPic recon = makeRestPic(0x11, 32, 16, 64);
+    CdefPic org = makeRestPic(0xEE, 32, 16, 64);
+    CdefScsWalls scs{false, 1, 1, true};
+    l10_filters::cdef_driver::getOwnRecon(scs, recon, org, true, true);
+    // rec_width = 32 << 1 = 64 bytes; the luma rows step stride << 1 = 128
+    for (int r = 0; r < 16; ++r)
+        for (int c = 0; c < 64; ++c) CHECK(org.buffer[0][r * 128 + c] == 0x11);
+    CHECK(org.buffer[0][64] == 0xEE);
+}
+
+TEST_CASE("copyStatisticsToRefObjEct field copies + sb loop + wn walk") {
+    RestHdr hdr;
+    hdr.filterLevel[0] = 11;
+    hdr.filterLevel[1] = 22;
+    hdr.filterLevelU = 33;
+    hdr.filterLevelV = 44;
+    hdr.useRefFrameMvs = true;
+    hdr.allowIntrabc = false;
+    hdr.frameType = 3;
+    for (int i = 0; i < l10_filters::cdef_driver::kCdefMaxStrengths; ++i) {
+        hdr.cdefYStrength[i] = static_cast<std::uint8_t>(50 + i);
+        hdr.cdefUvStrength[i] = static_cast<std::uint8_t>(70 + i);
+    }
+    RestCmWalls cmW{true, true, false};
+    std::uint8_t sbIntra[3] = {1, 2, 3};
+    std::uint8_t sbSkip[3] = {4, 5, 6};
+    std::uint8_t sbMvp[3] = {7, 8, 9};
+    std::uint32_t meDist[3] = {10, 20, 30};
+    std::uint32_t meVar[3] = {40, 50, 60};
+    std::uint8_t sbMin[3] = {70, 80, 90};
+    std::uint8_t sbMax[3] = {91, 92, 93};
+    std::uint8_t objIntra[3] = {0xEE, 0xEE, 0xEE};
+    std::uint8_t objSkip[3] = {0xEE, 0xEE, 0xEE};
+    std::uint8_t objMvp[3] = {0xEE, 0xEE, 0xEE};
+    std::uint32_t objMeDist[3] = {0xEEEEEEEE, 0xEEEEEEEE, 0xEEEEEEEE};
+    std::uint32_t objMeVar[3] = {0xEEEEEEEE, 0xEEEEEEEE, 0xEEEEEEEE};
+    std::uint8_t objMin[3] = {0xEE, 0xEE, 0xEE};
+    std::uint8_t objMax[3] = {0xEE, 0xEE, 0xEE};
+    RestPcsWalls pcs{};
+    pcs.intraCodedArea = 257; // truncates to uint8 = 1
+    pcs.skipCodedArea = 512;  // 0
+    pcs.hpCodedArea = 257;    // 1
+    pcs.temporalLayerIndex = 5;
+    pcs.b64TotalCount = 3;
+    pcs.sliceType = 2;
+    pcs.dlfDistDev = -7;
+    pcs.cdefDistDev = 99;
+    pcs.nbCdefStrengths = 2;
+    pcs.enableRestoration = true;
+    pcs.sbIntra = sbIntra;
+    pcs.sbSkip = sbSkip;
+    pcs.sb64x64Mvp = sbMvp;
+    pcs.me64x64Distortion = meDist;
+    pcs.me8x8CostVariance = meVar;
+    pcs.sbMinSqSize = sbMin;
+    pcs.sbMaxSqSize = sbMax;
+    pcs.sceneChangeFlag = true;
+    pcs.isNotScaled = true;
+    pcs.curOrderHint = 1234;
+    for (int i = 0; i < 7; ++i) pcs.refOrderHint[i] = 100 + i;
+    for (int p = 0; p < 3; ++p) {
+        pcs.frameRestorationType[p] = l10_filters::restoration::RESTORE_NONE;
+        pcs.unitsPerTile[p] = 2;
+    }
+    RestUnitInfo pcsUnits[3][2];
+    for (int p = 0; p < 3; ++p)
+        for (int u = 0; u < 2; ++u) {
+            pcsUnits[p][u].restorationType = l10_filters::restoration::RESTORE_WIENER;
+            pcsUnits[p][u].wienerInfo.hfilter[0] = static_cast<std::int16_t>(p * 10 + u);
+        }
+    pcs.unitInfo[0] = pcsUnits[0];
+    pcs.unitInfo[1] = pcsUnits[1];
+    pcs.unitInfo[2] = pcsUnits[2];
+
+    RestUnitInfo objUnits[3][2];
+    for (int p = 0; p < 3; ++p)
+        for (int u = 0; u < 2; ++u) objUnits[p][u].restorationType = l10_filters::restoration::RESTORE_SGRPROJ;
+    RestRefStat obj{};
+    obj.sbIntra = objIntra;
+    obj.sbSkip = objSkip;
+    obj.sb64x64Mvp = objMvp;
+    obj.sbMe64x64Dist = objMeDist;
+    obj.sbMe8x8CostVar = objMeVar;
+    obj.sbMinSqSize = objMin;
+    obj.sbMaxSqSize = objMax;
+    for (int p = 0; p < 3; ++p) obj.unitInfo[p] = objUnits[p];
+
+    l10_filters::cdef_driver::copyStatisticsToRefObjEct(hdr, cmW, pcs, obj);
+    CHECK(obj.intraCodedArea == 1);
+    CHECK(obj.skipCodedArea == 0);
+    CHECK(obj.hpCodedArea == 1);
+    CHECK(obj.isMfmvUsed == 1);
+    CHECK(obj.filterLevel[0] == 11);
+    CHECK(obj.filterLevel[1] == 22);
+    CHECK(obj.filterLevelU == 33);
+    CHECK(obj.filterLevelV == 44);
+    CHECK(obj.dlfDistDev == -7);
+    CHECK(obj.cdefDistDev == 99);
+    CHECK(obj.refCdefStrengthsNum == 2);
+    CHECK(obj.refCdefStrengths[0][0] == 50);
+    CHECK(obj.refCdefStrengths[1][1] == 71);
+    // the strengths beyond nb stay untouched (the obj starts zeroed)
+    CHECK(obj.refCdefStrengths[0][2] == 0);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(obj.sbIntra[i] == sbIntra[i]);
+        CHECK(obj.sbSkip[i] == sbSkip[i]);
+        CHECK(obj.sb64x64Mvp[i] == sbMvp[i]);
+        CHECK(obj.sbMe64x64Dist[i] == meDist[i]);
+        CHECK(obj.sbMe8x8CostVar[i] == meVar[i]);
+        CHECK(obj.sbMinSqSize[i] == sbMin[i]);
+        CHECK(obj.sbMaxSqSize[i] == sbMax[i]);
+    }
+    CHECK(obj.tmpLayerIdx == 5);
+    CHECK(obj.isSceneChange == true);
+    // the mfmv gate: mfmv_enabled false + is_not_scaled true -> NOT copied
+    CHECK(obj.frameType == 0);
+    CHECK(obj.orderHint == 0);
+
+    // the wn walk: all planes valid (rest-type NONE but slice != I and
+    // enable_restoration && !intrabc) -> the wiener infos forwarded
+    for (int p = 0; p < 3; ++p)
+        for (int u = 0; u < 2; ++u) {
+            CHECK(obj.unitInfo[p][u].restorationType == l10_filters::restoration::RESTORE_WIENER);
+            CHECK(obj.unitInfo[p][u].wienerInfo.hfilter[0] == static_cast<std::int16_t>(p * 10 + u));
+        }
+}
+
+TEST_CASE("copyStatisticsToRefObjEct mfmv gate + wn unit invalidation") {
+    RestHdr hdr;
+    hdr.allowIntrabc = true; // the intrabc gate kills the wn validity
+    hdr.frameType = 7;
+    RestCmWalls cmW{true, true, true}; // mfmv enabled
+    std::uint8_t dummy[2] = {0, 0};
+    std::uint32_t dummy32[2] = {0, 0};
+    RestPcsWalls pcs{};
+    pcs.b64TotalCount = 2;
+    pcs.sliceType = 2;
+    pcs.enableRestoration = true;
+    pcs.sbIntra = dummy;
+    pcs.sbSkip = dummy;
+    pcs.sb64x64Mvp = dummy;
+    pcs.me64x64Distortion = dummy32;
+    pcs.me8x8CostVariance = dummy32;
+    pcs.sbMinSqSize = dummy;
+    pcs.sbMaxSqSize = dummy;
+    pcs.isNotScaled = true;
+    pcs.curOrderHint = 777;
+    for (int i = 0; i < 7; ++i) pcs.refOrderHint[i] = 200 + i;
+    for (int p = 0; p < 3; ++p) {
+        pcs.frameRestorationType[p] = l10_filters::restoration::RESTORE_NONE;
+        pcs.unitsPerTile[p] = 1;
+    }
+    RestUnitInfo pcsUnits[3];
+    for (int p = 0; p < 3; ++p) {
+        pcsUnits[p].restorationType = l10_filters::restoration::RESTORE_WIENER;
+        pcsUnits[p].wienerInfo.vfilter[0] = 55;
+    }
+    for (int p = 0; p < 3; ++p) pcs.unitInfo[p] = &pcsUnits[p];
+    RestUnitInfo objUnits[3];
+    for (int p = 0; p < 3; ++p) objUnits[p].restorationType = l10_filters::restoration::RESTORE_SWITCHABLE;
+    RestRefStat obj{};
+    obj.sbIntra = dummy;
+    obj.sbSkip = dummy;
+    obj.sb64x64Mvp = dummy;
+    obj.sbMe64x64Dist = dummy32;
+    obj.sbMe8x8CostVar = dummy32;
+    obj.sbMinSqSize = dummy;
+    obj.sbMaxSqSize = dummy;
+    for (int p = 0; p < 3; ++p) obj.unitInfo[p] = &objUnits[p];
+
+    l10_filters::cdef_driver::copyStatisticsToRefObjEct(hdr, cmW, pcs, obj);
+    // the mfmv gate: enabled -> the order-hint block copied
+    CHECK(obj.frameType == 7);
+    CHECK(obj.orderHint == 777);
+    CHECK(obj.refOrderHint[6] == 206);
+    // the wn walk: intrabc -> the units forced RESTORE_NONE
+    for (int p = 0; p < 3; ++p)
+        CHECK(obj.unitInfo[p][0].restorationType == l10_filters::restoration::RESTORE_NONE);
+}
