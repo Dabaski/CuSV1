@@ -727,7 +727,7 @@ static std::uint32_t obmcSadInstance(int m, int n, const std::uint8_t* ref, int 
 // that swaps them fails; refStride differs from the widths so a stride
 // break fails. 128x128 and 4x16 are in the enumerated set.
 TEST_CASE("every OBMCSADMxN instance equals the obmcSad core at its size") {
-    std::vector<std::uint8_t> ref(static_cast<std::size_t>(128 * 133));
+    std::vector<std::uint8_t> ref(static_cast<std::size_t>(128 * 136));
     std::vector<std::int32_t> wsrc(static_cast<std::size_t>(128 * 128));
     std::vector<std::int32_t> mask(static_cast<std::size_t>(128 * 128));
     fillPseudoRandom(ref.data(), ref.size(), 30);

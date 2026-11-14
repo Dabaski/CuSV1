@@ -1833,9 +1833,9 @@ TEST_CASE("computeDistortion folds the PU pyramid into the per-b64 stats") {
     std::vector<std::uint32_t> variance(2, 0);
     std::vector<std::uint32_t> rcDist(2, 0);
     std::vector<std::uint32_t> d64(2, 0), d32(2, 0), d16(2, 0), d8(2, 0);
-    motion::B64Geom geom{};
-    geom.width = 64;
-    geom.height = 64;
+    motion::B64Geom geom[2]{};
+    geom[0].width = geom[1].width = 64;
+    geom[0].height = geom[1].height = 64;
     motion::PcsCtx pcs{};
     pcs.me8x8CostVariance = variance.data();
     pcs.rcMeDistortion = rcDist.data();
@@ -1843,7 +1843,7 @@ TEST_CASE("computeDistortion folds the PU pyramid into the per-b64 stats") {
     pcs.me32x32Distortion = d32.data();
     pcs.me16x16Distortion = d16.data();
     pcs.me8x8Distortion = d8.data();
-    pcs.b64Geom = &geom;
+    pcs.b64Geom = geom;
 
     motion::MeCtx ctx{};
     for (int i = 0; i < 85; ++i) {
@@ -1879,8 +1879,8 @@ TEST_CASE("computeDistortion folds the PU pyramid into the per-b64 stats") {
 
     // The partial-b64 normalization: a 32x32 b64 (w*h = 1024) scales every
     // fold by 4096/1024 = 4.
-    geom.width = 32;
-    geom.height = 32;
+    geom[0].width = geom[1].width = 32;
+    geom[0].height = geom[1].height = 32;
     motion::computeDistortion(pcs, 0, ctx);
     CHECK(d64[0] == dist64 * 4);
     CHECK(d32[0] == dist32 * 4);
@@ -2214,13 +2214,13 @@ TEST_CASE("check00Center applies the four edge corrections and the cost tie") {
     // exact match) and the zero cost ties-or-wins -> centers zeroed.
     ctx.meEarlyExitTh = 0;
     {
-        std::int16_t xsc = 5, ysc = 6;
+        std::int16_t xsc = 0, ysc = 1;
         const std::uint64_t got = motion::check00Center(pic, ctx, 64, 64, 64, 64, &xsc, &ysc, 0u);
         std::uint32_t hmeSub = 0;
         for (int r = 0; r < 64; r += 2) {
             for (int c = 0; c < 64; ++c) {
                 hmeSub += (std::uint32_t)std::abs((int)b64[r * 128 + c] -
-                                                  (int)ref[(64 + r + 6) * 128 + (64 + c + 5)]);
+                                                  (int)ref[(64 + r + 1) * 128 + (64 + c)]);
             }
         }
         CHECK(got == ((std::uint64_t)hmeSub << 1));
