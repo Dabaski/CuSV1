@@ -1,6 +1,78 @@
 #include <doctest.h>
 #include <mathutil.h>
 
+// random.h - the LCG family. The fixture values are computed
+// independently (state = state * 1103515245 + 12345 mod 2^32, seed 1):
+// 1103527590, 2524885223, 662824084, 3295386429, 4182499122, 2516284547.
+TEST_CASE("lcgNext reproduces the seed-1 sequence") {
+    std::uint32_t s = 1;
+    const std::uint32_t expected[6] = {1103527590u, 2524885223u, 662824084u, 3295386429u, 4182499122u, 2516284547u};
+    for (int i = 0; i < 6; ++i) {
+        CHECK(l14_utility::lcgNext(&s) == expected[i]);
+    }
+}
+
+TEST_CASE("lcgRand16 divides by 65536 and folds mod 32768") {
+    std::uint32_t s = 1;
+    const std::uint32_t expected[6] = {16838u, 5758u, 10113u, 17515u, 31051u, 5627u};
+    for (int i = 0; i < 6; ++i) {
+        CHECK(l14_utility::lcgRand16(&s) == expected[i]);
+    }
+    s = 123456789u;
+    for (int i = 0; i < 1000; ++i) {
+        const std::uint32_t v = l14_utility::lcgRand16(&s);
+        CHECK(v < 32768u);
+    }
+}
+
+TEST_CASE("lcgRandint scales through the top 32 bits") {
+    std::uint32_t s = 1;
+    const std::uint32_t expected[6] = {2u, 5u, 1u, 7u, 9u, 5u};
+    for (int i = 0; i < 6; ++i) {
+        CHECK(l14_utility::lcgRandint(&s, 10) == expected[i]);
+    }
+    s = 42u;
+    for (int i = 0; i < 500; ++i) {
+        CHECK(l14_utility::lcgRandint(&s, 7) < 7u);
+    }
+    CHECK(l14_utility::lcgRandint(&s, 1) == 0);
+}
+
+TEST_CASE("lcgRandrange stays inside [lo, hi)") {
+    std::uint32_t s = 777u;
+    for (int i = 0; i < 500; ++i) {
+        const std::uint32_t v = l14_utility::lcgRandrange(&s, 100, 110);
+        CHECK(v >= 100u);
+        CHECK(v < 110u);
+    }
+}
+
+TEST_CASE("lcgPick yields k distinct values and k=n covers all") {
+    int out[8];
+    std::uint32_t seed = 2024u;
+    l14_utility::lcgPick(8, 5, out, &seed);
+    for (int i = 0; i < 5; ++i) {
+        CHECK(out[i] >= 0);
+        CHECK(out[i] < 8);
+    }
+    for (int i = 0; i < 5; ++i) {
+        for (int j = i + 1; j < 5; ++j) {
+            CHECK(out[i] != out[j]);
+        }
+    }
+    int full[8];
+    l14_utility::lcgPick(8, 8, full, &seed);
+    int seen[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (int i = 0; i < 8; ++i) {
+        CHECK(full[i] >= 0);
+        CHECK(full[i] < 8);
+        seen[full[i]]++;
+    }
+    for (int i = 0; i < 8; ++i) {
+        CHECK(seen[i] == 1);
+    }
+}
+
 // Independent dims transcription for the TxSize enum order (the CU1
 // ebSubTxSizeMap oracle derives every row from these, not from the
 // ported table).

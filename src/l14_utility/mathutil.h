@@ -164,4 +164,26 @@ extern const TxSize ebSubTxSizeMap[TX_SIZES_ALL];
 // blocksize_to_txsize + av1_get_adjusted_tx_size.
 TxSize av1GetTxSize(std::int32_t bsize, int tx_depth, int plane);
 
+// ------------------------------------------------------------------
+// random.h (RA1). The reference keeps these static INLINE in a header;
+// the port carries one copy here.
+// ------------------------------------------------------------------
+
+// lcg_next - random.h:23-:26 verbatim: advance and return the full
+// 32-bit state.
+std::uint32_t lcgNext(std::uint32_t* state);
+
+// lcg_rand16 - random.h:29-:31 verbatim: [0, 32768).
+std::uint32_t lcgRand16(std::uint32_t* state);
+
+// lcg_randint - random.h:38-:41 verbatim: [0, n) via the top 32 bits.
+std::uint32_t lcgRandint(std::uint32_t* state, std::uint32_t n);
+
+// lcg_randrange - random.h:44-:47 verbatim: [lo, hi).
+std::uint32_t lcgRandrange(std::uint32_t* state, std::uint32_t lo, std::uint32_t hi);
+
+// lcg_pick - random.h:56-:76 verbatim: k distinct values from
+// {0..n-1} by resampling.
+void lcgPick(int n, int k, int* out, unsigned int* seed);
+
 }  // namespace l14_utility

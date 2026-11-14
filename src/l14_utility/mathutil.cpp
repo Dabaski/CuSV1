@@ -230,4 +230,49 @@ TxSize av1GetTxSize(std::int32_t bsize, int tx_depth, int plane) {
     return av1GetAdjustedTxSize(uv_tx);
 }
 
+// ------------------------------------------------------------------
+// random.h (RA1).
+// ------------------------------------------------------------------
+std::uint32_t lcgNext(std::uint32_t* state) {
+    *state = static_cast<std::uint32_t>(*state * 1103515245ULL + 12345);
+    return *state;
+}
+
+std::uint32_t lcgRand16(std::uint32_t* state) {
+    return (lcgNext(state) / 65536) % 32768;
+}
+
+std::uint32_t lcgRandint(std::uint32_t* state, std::uint32_t n) {
+    std::uint64_t v = (static_cast<std::uint64_t>(lcgNext(state)) * n) >> 32;
+    return static_cast<std::uint32_t>(v);
+}
+
+std::uint32_t lcgRandrange(std::uint32_t* state, std::uint32_t lo, std::uint32_t hi) {
+    return lo + lcgRandint(state, hi - lo);
+}
+
+void lcgPick(int n, int k, int* out, unsigned int* seed) {
+    for (int i = 0; i < k; i++) {
+        int v;
+
+        // Inner resampling loop (the reference's goto, restructured as a
+        // loop - C++ has a multi-level continue through a flag).
+        while (true) {
+            v = static_cast<int>(lcgRandint(seed, n));
+            bool repeated = false;
+            for (int j = 0; j < i; j++) {
+                if (v == out[j]) {
+                    repeated = true;
+                    break;
+                }
+            }
+            if (!repeated) {
+                break;
+            }
+        }
+
+        out[i] = v;
+    }
+}
+
 }  // namespace l14_utility
