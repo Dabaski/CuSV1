@@ -81,5 +81,71 @@ struct CdefMb {
 void propagateCdefStrength(CdefMb* miGrid, std::int32_t miStride, std::int32_t sbIndex, int bsize,
     std::int8_t strength);
 
+// ---------------------------------------------------------------------------
+// S6: cdef_process.c prep surfaces (the set/copy/recon trio)
+// ---------------------------------------------------------------------------
+
+// CdefPic: the threaded EbPictureBufferDesc surface (pic_buffer_desc.h
+// :40-:97), verbatim fields; the unions are flattened (y_buffer ==
+// buffer[0] etc.). bitDepth/colorFormat thread as ints (named deviation,
+// the LfSearchPic precedent).
+struct CdefPic {
+    std::uint8_t* buffer[3];
+    std::uint16_t stride[3];
+    std::uint8_t strideBitInc[3];
+    std::uint8_t* bufferAlloc;
+    std::size_t bufferAllocSz;
+    std::uint32_t lumaSize;
+    std::uint32_t chromaSize;
+    bool packedFlag;
+    std::uint16_t border;
+    std::uint16_t maxWidth;
+    std::uint16_t maxHeight;
+    std::uint16_t width;
+    std::uint16_t height;
+    int bitDepth;
+    int colorFormat;
+    std::uint32_t bufferEnableMask;
+};
+
+// PICTURE_BUFFER_DESC_* (pic_buffer_desc.h:23-:28).
+constexpr std::uint32_t kPicBufYFlag = 1 << 0;
+constexpr std::uint32_t kPicBufCbFlag = 1 << 1;
+constexpr std::uint32_t kPicBufCrFlag = 1 << 2;
+constexpr std::uint32_t kPicBufLumaMask = kPicBufYFlag;
+constexpr std::uint32_t kPicBufFullMask = kPicBufYFlag | kPicBufCbFlag | kPicBufCrFlag;
+
+// The threaded SequenceControlSet surface of copy_recon_enc /
+// set_unscaled_input_16bit: seq_header.color_config.mono_chrome,
+// subsampling_x/y and is_16bit_pipeline.
+struct CdefScsWalls {
+    bool monoChrome;
+    int subsamplingX;
+    int subsamplingY;
+    bool is16bitPipeline;
+};
+
+// copy_recon_enc (cdef_process.c:46-:150): the 12 header field copies
+// dst <- src, the mono-chrome buffer-enable mask, the per-plane
+// alloc-size accumulation, the plane pointer setup (border arithmetic
+// scaled by the subsampling and bytes-per-pixel) and the row copy loop -
+// copy_width = ((width + sub_x) >> sub_x) * sizeof(*src_buf) <<
+// use_highbd. The EB_CALLOC_ALIGNED_ARRAY allocation wall is threaded as
+// the caller-provided bufferAlloc (named deviation).
+void copyReconEnc(const CdefScsWalls& scs, const CdefPic& src, CdefPic& dst, int numPlanes, bool skipCopy,
+    std::uint8_t* bufferAlloc);
+
+// The three callees of set_unscaled_input_16bit, threaded (the
+// pic-buffer walls; the pack_2d dispatch callees are PU1's landed
+// packunpack in l9, unlinkable from l10).
+using CopyBufferInfoFn = void (*)(const CdefPic& input, CdefPic& output);
+using Convert8To16Fn = void (*)(const CdefPic& input, CdefPic& output, int ssX, int ssY);
+using Pack2dPicFn = void (*)(const CdefPic& input, CdefPic& output);
+
+// set_unscaled_input_16bit (cdef_process.c:31-:44): copy_buffer_info
+// always, then convert_pic_8bit_to_16bit at EB_EIGHT_BIT else pack_2d_pic.
+void setUnscaledInput16bit(const CdefScsWalls& scs, const CdefPic& input, CdefPic& output, CopyBufferInfoFn copyInfo,
+    Convert8To16Fn convert8To16, Pack2dPicFn pack2dPic);
+
 } // namespace cdef_driver
 } // namespace l10_filters

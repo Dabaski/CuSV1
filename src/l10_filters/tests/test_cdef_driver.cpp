@@ -222,3 +222,211 @@ TEST_CASE("propagateCdefStrength bsize classes") {
         CHECK(grid[sbIndex + stride].cdefStrength == -7);
     }
 }
+
+// ---- S6: copy_recon_enc (cdef_process.c:46-:150) + set_unscaled_input_16bit
+// (cdef_process.c:31-:44). The EB_CALLOC_ALIGNED_ARRAY allocation wall is
+// threaded as a caller-provided buffer_alloc; the set_unscaled callees
+// (svt_aom_copy_buffer_info / svt_aom_convert_pic_8bit_to_16bit /
+// svt_aom_pack_2d_pic) are threaded as callbacks (no fakes - the tests
+// drive the dispatch, the kernels stay walled).
+
+namespace {
+using l10_filters::cdef_driver::CdefPic;
+using l10_filters::cdef_driver::CdefScsWalls;
+
+// a poison-initialized src picture, 16x8 content, 4:2:0, border 32
+CdefPic makeSrcPic() {
+    CdefPic s;
+    s.width = 16;
+    s.height = 8;
+    s.maxWidth = 16;
+    s.maxHeight = 8;
+    s.border = 32;
+    s.bitDepth = 8;
+    s.colorFormat = 1;
+    s.lumaSize = 4096;
+    s.chromaSize = 1024;
+    s.packedFlag = true;
+    s.stride[0] = 64;
+    s.stride[1] = 40;
+    s.stride[2] = 40;
+    s.strideBitInc[0] = 11;
+    s.strideBitInc[1] = 7;
+    s.strideBitInc[2] = 5;
+    return s;
+}
+
+CdefPic makeDstPic() {
+    CdefPic d;
+    for (int i = 0; i < 3; ++i) {
+        d.buffer[i] = nullptr;
+        d.stride[i] = 0xEEEE;
+        d.strideBitInc[i] = 0xEE;
+    }
+    d.width = 0xEEEE;
+    d.height = 0xEEEE;
+    d.maxWidth = 0xEEEE;
+    d.maxHeight = 0xEEEE;
+    d.border = 0xEEEE;
+    d.bitDepth = 0xEE;
+    d.colorFormat = 0xEE;
+    d.lumaSize = 0xEEEE;
+    d.chromaSize = 0xEEEE;
+    d.packedFlag = false;
+    d.bufferEnableMask = 0xEEEEEEEE;
+    d.bufferAlloc = nullptr;
+    d.bufferAllocSz = 0xEEEEEEEE;
+    return d;
+}
+
+struct ScsWalls { /* kept for the initializer shape */
+    bool monoChrome = false;
+    int subsamplingX = 1;
+    int subsamplingY = 1;
+    bool is16bitPipeline = false;
+};
+} // namespace
+
+TEST_CASE("copyReconEnc full-mask field copies + plane setup + copy loop") {
+    CdefPic s = makeSrcPic();
+    CdefPic d = makeDstPic();
+    ScsWalls scsInit;
+    CdefScsWalls scs{scsInit.monoChrome, scsInit.subsamplingX, scsInit.subsamplingY, scsInit.is16bitPipeline};
+    // plane buffers: src planes carry recognizable rows, dst planes live in
+    // a caller-provided alloc
+    std::vector<std::uint8_t> srcBuf(8192, 0x55);
+    s.buffer[0] = srcBuf.data() + 100;
+    s.buffer[1] = srcBuf.data() + 200;
+    s.buffer[2] = srcBuf.data() + 300;
+    std::vector<std::uint8_t> alloc(8192, 0xAB);
+    l10_filters::cdef_driver::copyReconEnc(scs, s, d, 3, false, alloc.data());
+
+    // the 12 header field copies
+    CHECK(d.border == 32);
+    CHECK(d.width == 16);
+    CHECK(d.height == 8);
+    CHECK(d.maxWidth == 16);
+    CHECK(d.maxHeight == 8);
+    CHECK(d.bitDepth == 8);
+    CHECK(d.colorFormat == 1);
+    CHECK(d.stride[0] == 64);
+    CHECK(d.stride[1] == 40);
+    CHECK(d.stride[2] == 40);
+    CHECK(d.lumaSize == 4096);
+    CHECK(d.chromaSize == 1024);
+    CHECK(d.packedFlag == true);
+    CHECK(d.strideBitInc[0] == 11);
+    CHECK(d.strideBitInc[1] == 7);
+    CHECK(d.strideBitInc[2] == 5);
+    // mono chrome 0 -> FULL mask (7)
+    CHECK(d.bufferEnableMask == 7);
+    // alloc size = luma + 2 * chroma (bpp 1)
+    CHECK(d.bufferAllocSz == 4096 + 2 * 1024);
+    // plane pointers: y = alloc + (border + y_stride*border); u = alloc +
+    // luma + (border>>1 + u_stride*(border>>1)); v = u + chroma
+    CHECK(d.buffer[0] == alloc.data() + (32 + 64 * 32));
+    CHECK(d.buffer[1] == alloc.data() + 4096 + (16 + 40 * 16));
+    CHECK(d.buffer[2] == alloc.data() + 5120 + (16 + 40 * 16));
+    // the copy loop: luma rows 8 x 16 bytes; chroma rows 4 x 8 bytes
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 16; ++c) CHECK(d.buffer[0][r * 64 + c] == 0x55);
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 8; ++c) {
+            CHECK(d.buffer[1][r * 40 + c] == 0x55);
+            CHECK(d.buffer[2][r * 40 + c] == 0x55);
+        }
+    // beyond the row width: untouched alloc poison
+    CHECK(d.buffer[0][16] == 0xAB);
+    CHECK(d.buffer[1][8] == 0xAB);
+}
+
+TEST_CASE("copyReconEnc mono-chrome mask + null chroma planes") {
+    CdefPic s = makeSrcPic();
+    CdefPic d = makeDstPic();
+    ScsWalls scsInit;
+    CdefScsWalls scs{scsInit.monoChrome, scsInit.subsamplingX, scsInit.subsamplingY, scsInit.is16bitPipeline};
+    scs.monoChrome = true;
+    std::vector<std::uint8_t> srcBuf(8192, 0x55);
+    s.buffer[0] = srcBuf.data() + 100;
+    std::vector<std::uint8_t> alloc(8192, 0xAB);
+    // the real caller passes num_planes = 1 for mono chrome (the copy loop
+    // walks num_planes regardless of the enable mask)
+    l10_filters::cdef_driver::copyReconEnc(scs, s, d, 1, false, alloc.data());
+    CHECK(d.bufferEnableMask == 1);
+    CHECK(d.bufferAllocSz == 4096);
+    CHECK(d.buffer[0] == alloc.data() + (32 + 64 * 32));
+    CHECK(d.buffer[1] == nullptr);
+    CHECK(d.buffer[2] == nullptr);
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 16; ++c) CHECK(d.buffer[0][r * 64 + c] == 0x55);
+}
+
+TEST_CASE("copyReconEnc skip_copy leaves the dst planes poisoned") {
+    CdefPic s = makeSrcPic();
+    CdefPic d = makeDstPic();
+    ScsWalls scsInit;
+    CdefScsWalls scs{scsInit.monoChrome, scsInit.subsamplingX, scsInit.subsamplingY, scsInit.is16bitPipeline};
+    std::vector<std::uint8_t> alloc(8192, 0xAB);
+    l10_filters::cdef_driver::copyReconEnc(scs, s, d, 3, true, alloc.data());
+    CHECK(d.buffer[0] == alloc.data() + (32 + 64 * 32));
+    CHECK(d.bufferAllocSz == 6144);
+    CHECK(d.buffer[0][0] == 0xAB);
+    CHECK(d.buffer[1][0] == 0xAB);
+}
+
+TEST_CASE("copyReconEnc 16-bit pipeline doubles bytes and offsets") {
+    CdefPic s = makeSrcPic();
+    CdefPic d = makeDstPic();
+    ScsWalls scsInit;
+    CdefScsWalls scs{scsInit.monoChrome, scsInit.subsamplingX, scsInit.subsamplingY, scsInit.is16bitPipeline};
+    scs.is16bitPipeline = true;
+    std::vector<std::uint8_t> srcBuf(16384, 0x55);
+    s.buffer[0] = srcBuf.data() + 100;
+    s.buffer[1] = srcBuf.data() + 200;
+    s.buffer[2] = srcBuf.data() + 300;
+    std::vector<std::uint8_t> alloc(16384, 0xAB);
+    l10_filters::cdef_driver::copyReconEnc(scs, s, d, 3, false, alloc.data());
+    // bpp 2: y offset (32 + 64*32) * 2; u = luma*2 + (16 + 40*16)*2
+    CHECK(d.buffer[0] == alloc.data() + (32 + 64 * 32) * 2);
+    CHECK(d.buffer[1] == alloc.data() + 8192 + (16 + 40 * 16) * 2);
+    CHECK(d.buffer[2] == alloc.data() + 10240 + (16 + 40 * 16) * 2);
+    CHECK(d.bufferAllocSz == 8192 + 2 * 2048);
+    // copy width: ((16 + sub) >> sub) * 1 << 1 = 32 bytes per luma row;
+    // the dst row advance is dst_stride << 1 = 128 bytes = 64 uint16
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 16; ++c) {
+            const std::uint16_t got = reinterpret_cast<std::uint16_t*>(d.buffer[0])[r * 64 + c];
+            CHECK(got == 0x5555);
+        }
+}
+
+// set_unscaled_input_16bit (cdef_process.c:31-:44): copy_buffer_info
+// always, then the 8-bit->16bit convert OR the pack_2d path.
+namespace {
+int gCopyInfoCalls, gConvertCalls, gPackCalls;
+void testCopyInfo(const CdefPic&, CdefPic&) { ++gCopyInfoCalls; }
+void testConvert(const CdefPic&, CdefPic&, int, int) { ++gConvertCalls; }
+void testPack(const CdefPic&, CdefPic&) { ++gPackCalls; }
+} // namespace
+
+TEST_CASE("setUnscaledInput16bit dispatches on the input bit depth") {
+    CdefPic in = makeSrcPic();
+    CdefPic out = makeDstPic();
+    ScsWalls scsInit;
+    CdefScsWalls scs{scsInit.monoChrome, scsInit.subsamplingX, scsInit.subsamplingY, scsInit.is16bitPipeline};
+    gCopyInfoCalls = gConvertCalls = gPackCalls = 0;
+
+    in.bitDepth = 8;
+    l10_filters::cdef_driver::setUnscaledInput16bit(
+        scs, in, out, testCopyInfo, testConvert, testPack);
+    CHECK(gCopyInfoCalls == 1);
+    CHECK(gConvertCalls == 1);
+    CHECK(gPackCalls == 0);
+
+    in.bitDepth = 10;
+    l10_filters::cdef_driver::setUnscaledInput16bit(
+        scs, in, out, testCopyInfo, testConvert, testPack);
+    CHECK(gCopyInfoCalls == 2);
+    CHECK(gConvertCalls == 1);
+    CHECK(gPackCalls == 1);
+}

@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 
 #include "cdef_driver.h"
@@ -95,6 +96,111 @@ void propagateCdefStrength(CdefMb* miGrid, std::int32_t miStride, std::int32_t s
         break;
     default:
         break;
+    }
+}
+
+// copy_recon_enc (cdef_process.c:46-:150). 1:1; the EB_CALLOC_ALIGNED_
+// ARRAY allocation wall is threaded as bufferAlloc.
+void copyReconEnc(const CdefScsWalls& scs, const CdefPic& src, CdefPic& dst, int numPlanes, bool skipCopy,
+    std::uint8_t* bufferAlloc) {
+    dst.border = src.border;
+    dst.width = src.width;
+    dst.height = src.height;
+    dst.maxWidth = src.maxWidth;
+    dst.maxHeight = src.maxHeight;
+    dst.bitDepth = src.bitDepth;
+    dst.colorFormat = src.colorFormat;
+
+    dst.stride[0] = src.stride[0];
+    dst.stride[1] = src.stride[1];
+    dst.stride[2] = src.stride[2];
+
+    dst.lumaSize = src.lumaSize;
+    dst.chromaSize = src.chromaSize;
+    dst.packedFlag = src.packedFlag;
+
+    dst.strideBitInc[0] = src.strideBitInc[0];
+    dst.strideBitInc[1] = src.strideBitInc[1];
+    dst.strideBitInc[2] = src.strideBitInc[2];
+
+    dst.bufferEnableMask = scs.monoChrome ? kPicBufLumaMask : kPicBufFullMask;
+
+    const int ssX = scs.subsamplingX;
+    const int ssY = scs.subsamplingY;
+    const std::uint32_t bytesPerPixel = scs.is16bitPipeline ? 2 : 1;
+
+    // Get frame size to alloc
+    std::uint32_t allocSz = 0;
+    std::uint32_t bufferSize[3] = {0};
+    if (dst.bufferEnableMask & kPicBufYFlag) {
+        allocSz += bufferSize[0] = dst.lumaSize * bytesPerPixel;
+    }
+
+    if (dst.bufferEnableMask & kPicBufCbFlag) {
+        allocSz += bufferSize[1] = dst.chromaSize * bytesPerPixel;
+    }
+
+    if (dst.bufferEnableMask & kPicBufCrFlag) {
+        allocSz += bufferSize[2] = dst.chromaSize * bytesPerPixel;
+    }
+
+    dst.bufferAlloc = bufferAlloc;
+    dst.bufferAllocSz = allocSz;
+    std::uint32_t assignedSpace = 0;
+    if (dst.bufferEnableMask & kPicBufYFlag) {
+        dst.buffer[0] = dst.bufferAlloc + (dst.border + (dst.stride[0] * dst.border)) * bytesPerPixel;
+        assignedSpace += bufferSize[0];
+    } else {
+        dst.buffer[0] = nullptr;
+    }
+
+    if (dst.bufferEnableMask & kPicBufCbFlag) {
+        dst.buffer[1] = dst.bufferAlloc + assignedSpace +
+            ((dst.border >> ssX) + (dst.stride[1] * (dst.border >> ssY))) * bytesPerPixel;
+        assignedSpace += bufferSize[1];
+    } else {
+        dst.buffer[1] = nullptr;
+    }
+
+    if (dst.bufferEnableMask & kPicBufCrFlag) {
+        dst.buffer[2] = dst.bufferAlloc + assignedSpace +
+            ((dst.border >> ssX) + (dst.stride[2] * (dst.border >> ssY))) * bytesPerPixel;
+        assignedSpace += bufferSize[2];
+    } else {
+        dst.buffer[2] = nullptr;
+    }
+
+    const int useHighbd = scs.is16bitPipeline ? 1 : 0;
+
+    if (!skipCopy) {
+        for (int plane = 0; plane < numPlanes; ++plane) {
+            const std::uint8_t* srcBuf = src.buffer[plane];
+            std::uint8_t* dstBuf = dst.buffer[plane];
+            const std::int32_t srcStride = src.stride[plane];
+            const std::int32_t dstStride = dst.stride[plane];
+
+            const int subX = plane ? scs.subsamplingX : 0;
+            const int subY = plane ? scs.subsamplingY : 0;
+
+            const std::int32_t height = (src.height + subY) >> subY;
+            for (int row = 0; row < height; ++row) {
+                memcpy(dstBuf, srcBuf, ((src.width + subX) >> subX) * sizeof(*srcBuf) << useHighbd);
+                srcBuf += srcStride << useHighbd;
+                dstBuf += dstStride << useHighbd;
+            }
+        }
+    }
+}
+
+// set_unscaled_input_16bit (cdef_process.c:31-:44). 1:1 dispatch; the
+// three pic-buffer callees are threaded.
+void setUnscaledInput16bit(const CdefScsWalls& scs, const CdefPic& input, CdefPic& output, CopyBufferInfoFn copyInfo,
+    Convert8To16Fn convert8To16, Pack2dPicFn pack2dPic) {
+    copyInfo(input, output);
+    if (input.bitDepth == 8) {
+        convert8To16(input, output, scs.subsamplingX, scs.subsamplingY);
+    } else {
+        pack2dPic(input, output);
     }
 }
 
