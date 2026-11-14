@@ -2298,3 +2298,47 @@ TEST_CASE("l9 temporal convert64x64InfoTo32x32Info hbd") {
         }
     }
 }
+
+TEST_CASE("l9 temporal setHmeSearchParamsMctf") {
+    // A11D-T5: set_hme_search_params_mctf (temporal_filtering.c:2571-2592).
+    // The reference's MeContext fields (hme_l0_sa, hme_l0_sa_default_tf)
+    // are threaded as parameters (the TF1 carrier pattern): the four
+    // hme_l0_sa fields are writable pointers, the four
+    // hme_l0_sa_default_tf fields are read-only values.
+    using analysis::temporal::setHmeSearchParamsMctf;
+
+    // Poison-filled carriers.
+    std::uint16_t saMinW = 0x7A7A, saMinH = 0x7A7A, saMaxW = 0x7A7A, saMaxH = 0x7A7A;
+    const std::uint16_t tfSaMinW = 12, tfSaMinH = 34, tfSaMaxW = 56, tfSaMaxH = 78;
+
+    // Case 0: the four field copies (the reference's :2574-:2577).
+    setHmeSearchParamsMctf(0, &saMinW, &saMinH, &saMaxW, &saMaxH,
+                           tfSaMinW, tfSaMinH, tfSaMaxW, tfSaMaxH);
+    CHECK_EQ(saMinW, 12);
+    CHECK_EQ(saMinH, 34);
+    CHECK_EQ(saMaxW, 56);
+    CHECK_EQ(saMaxH, 78);
+
+    // Case 1: the shifted copies (the reference's :2579-:2582).
+    saMinW = 0x7A7A; saMinH = 0x7A7A; saMaxW = 0x7A7A; saMaxH = 0x7A7A;
+    setHmeSearchParamsMctf(1, &saMinW, &saMinH, &saMaxW, &saMaxH,
+                           tfSaMinW, tfSaMinH, tfSaMaxW, tfSaMaxH);
+    CHECK_EQ(saMinW, 24);
+    CHECK_EQ(saMinH, 68);
+    CHECK_EQ(saMaxW, 224);
+    CHECK_EQ(saMaxH, 312);
+
+    // Wraparound band: the << 1 / << 2 at uint16 (the reference's
+    // uint16_t arithmetic wraps).
+    std::uint16_t w = 0x7A7A, h = 0x7A7A, mw = 0x7A7A, mh = 0x7A7A;
+    std::uint16_t inW = 0x8000, inH = 0x4000, inMw = 0x4000, inMh = 0xC000;
+    setHmeSearchParamsMctf(1, &w, &h, &mw, &mh, inW, inH, inMw, inMh);
+    const std::uint32_t expW = (std::uint32_t)inW << 1;
+    const std::uint32_t expH = (std::uint32_t)inH << 1;
+    const std::uint32_t expMw = (std::uint32_t)inMw << 2;
+    const std::uint32_t expMh = (std::uint32_t)inMh << 2;
+    CHECK_EQ(w, (std::uint16_t)expW);
+    CHECK_EQ(h, (std::uint16_t)expH);
+    CHECK_EQ(mw, (std::uint16_t)expMw);
+    CHECK_EQ(mh, (std::uint16_t)expMh);
+}

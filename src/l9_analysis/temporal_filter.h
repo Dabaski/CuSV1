@@ -70,6 +70,45 @@ std::int8_t tfUse64x64Pred(const std::uint32_t* pBestSad32x32, std::uint32_t pBe
                            std::uint8_t tfUsePred64x64OnlyTh);
 
 // A11D-T4: 1:1 port of convert_64x64_info_to_32x32_info
+// (temporal_filtering.c:2509-2569). The consumed MeContext fields
+// (tf_32x32_mv_x/y[4], tf_32x32_block_split_flag[4],
+// tf_16x16_block_split_flag[4][4], tf_32x32_block_error[4], idx_32x32)
+// are threaded as pointer arrays (the TF1 carrier pattern); the
+// pcs->tf_ctrls.sub_sampling_shift is threaded as the subSamplingShift
+// parameter. The 8-bit branch resolves to the landed analysis:: variance
+// instances; the hbd branch resolves to the HIGHBD_VAR instances
+// (svt_psnr.c:155-172, the A13 file set - NOT the A11 brief's port list -
+// the reference's fn_ptr->vf_hbd_10 dispatch targets).
+void convert64x64InfoTo32x32Info(
+    std::uint8_t subSamplingShift,
+    std::int16_t tf64x64MvX, std::int16_t tf64x64MvY,
+    std::int16_t* tf32x32MvX,          // [4] out
+    std::int16_t* tf32x32MvY,          // [4] out
+    int* tf32x32BlockSplitFlag,        // [4] out = 0
+    int* tf16x16BlockSplitFlag,        // [4][4] out = 0 (memset 16 ints)
+    std::uint64_t* tf32x32BlockError,  // [4] out
+    const uint8_t* const* pred8,       // [PLANE_Y] readable (may be nullptr if highbd)
+    const uint16_t* const* pred16,     // [PLANE_Y] readable (may be nullptr if 8-bit)
+    const uint32_t* stridePred,        // [PLANE_Y]
+    const uint8_t* const* src8,        // [PLANE_Y]
+    const uint16_t* const* src16,      // [PLANE_Y]
+    const uint32_t* strideSrc,         // [PLANE_Y]
+    bool isHighbd);
+
+// A11D-T5: 1:1 port of set_hme_search_params_mctf
+// (temporal_filtering.c:2571-2592). The consumed MeContext fields
+// (hme_l0_sa, hme_l0_sa_default_tf) are threaded as parameters (the
+// TF1 carrier pattern): the four hme_l0_sa fields are writable pointers,
+// the four hme_l0_sa_default_tf fields are read-only values. The
+// reference's switch on hme_search_level (0/1/default) - the reference's
+// case 0 is the four field copies, the reference's case 1 is the four
+// field copies with the << 1 / << 2 shifts (the reference's uint16_t
+// arithmetic wraps), the reference's default is assert(0).
+void setHmeSearchParamsMctf(std::uint8_t hmeSearchLevel,
+                            std::uint16_t* hmeL0SaMinWidth, std::uint16_t* hmeL0SaMinHeight,
+                            std::uint16_t* hmeL0SaMaxWidth, std::uint16_t* hmeL0SaMaxHeight,
+                            std::uint16_t tfSaMinWidth, std::uint16_t tfSaMinHeight,
+                            std::uint16_t tfSaMaxWidth, std::uint16_t tfSaMaxHeight);
 // (temporal_filtering.c:2509-2569). The four 32x32 sub-blocks of the
 // 64x64 luma block; each block-error = fn_ptr->vf(pred, stride << shift,
 // src, stride << shift, &sse) << shift. The consumed MeContext fields

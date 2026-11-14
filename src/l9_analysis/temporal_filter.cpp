@@ -1125,5 +1125,38 @@ void convert64x64InfoTo32x32Info(
     }
 }
 
+// A11D-T5: 1:1 port of set_hme_search_params_mctf
+// (temporal_filtering.c:2571-2592). The consumed MeContext fields
+// (hme_l0_sa, hme_l0_sa_default_tf) are threaded as parameters (the
+// TF1 carrier pattern): the four hme_l0_sa fields are writable pointers,
+// the four hme_l0_sa_default_tf fields are read-only values. The
+// reference's switch on hme_search_level (0/1/default) - the reference's
+// case 0 is the four field copies, the reference's case 1 is the four
+// field copies with the << 1 / << 2 shifts (the reference's uint16_t
+// arithmetic wraps), the reference's default is assert(0).
+void setHmeSearchParamsMctf(std::uint8_t hmeSearchLevel,
+                            std::uint16_t* hmeL0SaMinWidth, std::uint16_t* hmeL0SaMinHeight,
+                            std::uint16_t* hmeL0SaMaxWidth, std::uint16_t* hmeL0SaMaxHeight,
+                            std::uint16_t tfSaMinWidth, std::uint16_t tfSaMinHeight,
+                            std::uint16_t tfSaMaxWidth, std::uint16_t tfSaMaxHeight) {
+    switch (hmeSearchLevel) {
+    case 0:
+        *hmeL0SaMinWidth = tfSaMinWidth;
+        *hmeL0SaMinHeight = tfSaMinHeight;
+        *hmeL0SaMaxWidth = tfSaMaxWidth;
+        *hmeL0SaMaxHeight = tfSaMaxHeight;
+        break;
+    case 1:
+        *hmeL0SaMinWidth = (std::uint16_t)(tfSaMinWidth << 1);
+        *hmeL0SaMinHeight = (std::uint16_t)(tfSaMinHeight << 1);
+        *hmeL0SaMaxWidth = (std::uint16_t)(tfSaMaxWidth << 2);
+        *hmeL0SaMaxHeight = (std::uint16_t)(tfSaMaxHeight << 2);
+        break;
+    default:
+        assert(0);
+        break;
+    }
+}
+
 }  // namespace temporal
 }  // namespace analysis
