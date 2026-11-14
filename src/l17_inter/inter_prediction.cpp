@@ -615,6 +615,210 @@ void convolve2dScale(const std::uint8_t* src, std::int32_t srcStride, std::uint8
     }
 }
 
+// ---------- A3E J1: the jnt (compound) convolve family ----------
+
+// svt_av1_jnt_convolve_2d_c, inter_prediction.c:529-:585. Same arithmetic as
+// convolve2dSr through the vertical pass; the tail composes against the
+// conv_params->dst CONV_BUF plane (use_jnt_comp_avg weighted or plain
+// average) instead of the single-ref offset subtract.
+void jntConvolve2d(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                   std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                   const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                   ConvolveParams* convParams) {
+    ConvBufType* dst = convParams->dst;
+    std::int32_t dstStride = convParams->dstStride;
+    std::int16_t imBlock[(convolve::maxSbSize + kMaxFilterTap - 1) * convolve::maxSbSize];
+    std::int32_t imH = h + filterParamsY->taps - 1;
+    std::int32_t imStride = w;
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+    const std::int32_t bd = 8;
+    const std::int32_t roundBits = 2 * convolve::filterBits - convParams->round0 - convParams->round1;
+
+    // horizontal filter
+    const std::uint8_t* srcHoriz = src - foVert * srcStride;
+    const std::int16_t* xFilter = convolve::getInterpFilterSubpelKernel(*filterParamsX, subpelXQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < imH; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = (1 << (bd + convolve::filterBits - 1));
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                sum += xFilter[k] * srcHoriz[y * srcStride + x - foHoriz + k];
+            }
+            assert(0 <= sum && sum < (1 << (bd + convolve::filterBits + 1)));
+            imBlock[y * imStride + x] = static_cast<std::int16_t>(roundPowerOfTwo(sum, convParams->round0));
+        }
+    }
+
+    // vertical filter
+    std::int16_t* srcVert = imBlock + foVert * imStride;
+    const std::int16_t* yFilter = convolve::getInterpFilterSubpelKernel(*filterParamsY, subpelYQ4 & convolve::subpelMask);
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = 1 << offsetBits;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                sum += yFilter[k] * srcVert[(y - foVert + k) * imStride + x];
+            }
+            assert(0 <= sum && sum < (1 << (offsetBits + 2)));
+            ConvBufType res = static_cast<ConvBufType>(roundPowerOfTwo(sum, convParams->round1));
+            if (convParams->doAverage) {
+                std::int32_t tmp = dst[y * dstStride + x];
+                if (convParams->useJntCompAvg) {
+                    tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                    tmp = tmp >> kDistPrecisionBits;
+                } else {
+                    tmp += res;
+                    tmp = tmp >> 1;
+                }
+                tmp -= (1 << (offsetBits - convParams->round1)) + (1 << (offsetBits - convParams->round1 - 1));
+                dst8[y * dst8Stride + x] = clipPixelHighbd8(roundPowerOfTwo(tmp, roundBits));
+            } else {
+                dst[y * dstStride + x] = res;
+            }
+        }
+    }
+}
+
+// svt_av1_jnt_convolve_y_c, inter_prediction.c:587-:630. Single-axis
+// vertical; res *= (1 << bits) (bits = FILTER_BITS - round_0) BEFORE
+// ROUND_POWER_OF_TWO(res, round_1), then + round_offset (compose and
+// subtract it again) - the order quirk the y/x twins carry and 2d does not.
+void jntConvolveY(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                  std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                  const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                  ConvolveParams* convParams) {
+    ConvBufType* dst = convParams->dst;
+    std::int32_t dstStride = convParams->dstStride;
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    const std::int32_t bits = convolve::filterBits - convParams->round0;
+    const std::int32_t bd = 8;
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    const std::int32_t roundOffset = (1 << (offsetBits - convParams->round1)) +
+        (1 << (offsetBits - convParams->round1 - 1));
+    const std::int32_t roundBits = 2 * convolve::filterBits - convParams->round0 - convParams->round1;
+    (void)filterParamsX;
+    (void)subpelXQ4;
+
+    // vertical filter
+    const std::int16_t* yFilter = convolve::getInterpFilterSubpelKernel(*filterParamsY, subpelYQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t res = 0;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                res += yFilter[k] * src[(y - foVert + k) * srcStride + x];
+            }
+            res *= (1 << bits);
+            res = roundPowerOfTwo(res, convParams->round1) + roundOffset;
+
+            if (convParams->doAverage) {
+                std::int32_t tmp = dst[y * dstStride + x];
+                if (convParams->useJntCompAvg) {
+                    tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                    tmp = tmp >> kDistPrecisionBits;
+                } else {
+                    tmp += res;
+                    tmp = tmp >> 1;
+                }
+                tmp -= roundOffset;
+                dst8[y * dst8Stride + x] = clipPixelHighbd8(roundPowerOfTwo(tmp, roundBits));
+            } else {
+                dst[y * dstStride + x] = static_cast<ConvBufType>(res);
+            }
+        }
+    }
+}
+
+// svt_av1_jnt_convolve_x_c, inter_prediction.c:632-:675. Single-axis
+// horizontal; res = (1 << bits) * ROUND(res, round_0) (bits =
+// FILTER_BITS - round_1) FIRST, then + round_offset - the mirror order of
+// the y twin, pinned by the two oracle order fixtures.
+void jntConvolveX(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                  std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                  const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                  ConvolveParams* convParams) {
+    ConvBufType* dst = convParams->dst;
+    std::int32_t dstStride = convParams->dstStride;
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+    const std::int32_t bits = convolve::filterBits - convParams->round1;
+    const std::int32_t bd = 8;
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    const std::int32_t roundOffset = (1 << (offsetBits - convParams->round1)) +
+        (1 << (offsetBits - convParams->round1 - 1));
+    const std::int32_t roundBits = 2 * convolve::filterBits - convParams->round0 - convParams->round1;
+    (void)filterParamsY;
+    (void)subpelYQ4;
+
+    // horizontal filter
+    const std::int16_t* xFilter = convolve::getInterpFilterSubpelKernel(*filterParamsX, subpelXQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t res = 0;
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                res += xFilter[k] * src[y * srcStride + x - foHoriz + k];
+            }
+            res = (1 << bits) * roundPowerOfTwo(res, convParams->round0);
+            res += roundOffset;
+
+            if (convParams->doAverage) {
+                std::int32_t tmp = dst[y * dstStride + x];
+                if (convParams->useJntCompAvg) {
+                    tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                    tmp = tmp >> kDistPrecisionBits;
+                } else {
+                    tmp += res;
+                    tmp = tmp >> 1;
+                }
+                tmp -= roundOffset;
+                dst8[y * dst8Stride + x] = clipPixelHighbd8(roundPowerOfTwo(tmp, roundBits));
+            } else {
+                dst[y * dstStride + x] = static_cast<ConvBufType>(res);
+            }
+        }
+    }
+}
+
+// svt_av1_jnt_convolve_2d_copy_c, inter_prediction.c:677-:714. The copy
+// twin: res = src << bits with bits = 2*FILTER_BITS - round_1 - round_0,
+// + round_offset (ConvBufType arithmetic, the wrap the compose reads back).
+void jntConvolve2dCopy(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams) {
+    ConvBufType* dst = convParams->dst;
+    std::int32_t dstStride = convParams->dstStride;
+    const std::int32_t bits = convolve::filterBits * 2 - convParams->round1 - convParams->round0;
+    const std::int32_t bd = 8;
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    const std::int32_t roundOffset = (1 << (offsetBits - convParams->round1)) +
+        (1 << (offsetBits - convParams->round1 - 1));
+    (void)filterParamsX;
+    (void)filterParamsY;
+    (void)subpelXQ4;
+    (void)subpelYQ4;
+
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            ConvBufType res = static_cast<ConvBufType>(src[y * srcStride + x] << bits);
+            res += static_cast<ConvBufType>(roundOffset);
+
+            if (convParams->doAverage) {
+                std::int32_t tmp = dst[y * dstStride + x];
+                if (convParams->useJntCompAvg) {
+                    tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                    tmp = tmp >> kDistPrecisionBits;
+                } else {
+                    tmp += res;
+                    tmp = tmp >> 1;
+                }
+                tmp -= roundOffset;
+                dst8[y * dst8Stride + x] = clipPixelHighbd8(roundPowerOfTwo(tmp, bits));
+            } else {
+                dst[y * dstStride + x] = res;
+            }
+        }
+    }
+}
+
 // convolve_2d_for_intrabc, inter_prediction.c:1200-:1241. The NULL filter
 // pointer slots are only read when the matching subpel is nonzero, and the
 // dispatch is: both subpels -> 2d_sr, x only -> x_sr, else y_sr.

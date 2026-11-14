@@ -881,4 +881,388 @@ TEST_CASE("sse8 and sse_highbd: the summed squared differences (enc:600-627)") {
     }
 }
 
+// ------------------------------------------------------------- A3E J1
+// The jnt (compound) convolve family, inter_prediction.c:529-:714. The
+// oracle below is an INDEPENDENT second transcription of the reference
+// arithmetic: a horizontal pass into a plain 2-D array indexed [row][col]
+// (the port runs the reference's flat im_block/stride layout), then the
+// per-pixel vertical pass with the jnt compose. Configs sweep odd sizes,
+// extreme subpels and both compose modes.
+
+namespace jntoracle {
+
+constexpr int kFb = convolve::filterBits; // 7
+
+struct Cfg {
+    int w, h;
+    int subpelX, subpelY;
+    int round0, round1;
+    int fwd, bck;
+    int useJnt;
+    int doAverage;
+};
+
+// LCG fixture so every configuration sees different adversarial data.
+std::uint32_t lcg(std::uint32_t& s) {
+    s = s * 1664525u + 1013904223u;
+    return (s >> 16) & 0xFF;
+}
+
+// Fills a (w+16)x(h+16) plane, src at (8,8); values deterministic.
+void fillPlane(std::vector<std::uint8_t>& plane, int stride, int rows, std::uint32_t seedBase) {
+    std::uint32_t seed = seedBase;
+    plane.resize((size_t)stride * rows);
+    for (size_t i = 0; i < plane.size(); ++i) plane[i] = (std::uint8_t)lcg(seed);
+}
+
+// The horizontal-then-vertical compose for jnt_convolve_2d (ip:529-:585).
+void conv2d(int srcStride, const std::uint8_t* src, const Cfg& c,
+            const convolve::InterpFilterParams* fx, const convolve::InterpFilterParams* fy,
+            const std::vector<std::uint16_t>& dst16Init, int dst16Stride, std::vector<std::uint8_t>& out8,
+            std::vector<std::uint16_t>* out16) {
+    const int tapsX = fx->taps, tapsY = fy->taps;
+    const int foH = tapsX / 2 - 1, foV = tapsY / 2 - 1;
+    const int bd = 8;
+    const int roundBits = 2 * kFb - c.round0 - c.round1;
+    // Horizontal: rows h + tapsY - 1 (the reference runs the vertical
+    // support through the same window), cols w. Row r of the temp holds
+    // src row (r - foV); the vertical pass then reads rows y + k only.
+    const int imH = c.h + tapsY - 1;
+    std::vector<std::int32_t> im((size_t)imH * c.w);
+    const std::int16_t* xf = convolve::getInterpFilterSubpelKernel(*fx, c.subpelX & convolve::subpelMask);
+    for (int y = 0; y < imH; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            std::int32_t sum = 1 << (bd + kFb - 1);
+            for (int k = 0; k < tapsX; ++k) sum += xf[k] * src[(y - foV) * srcStride + (x - foH + k)];
+            im[(size_t)y * c.w + x] = (sum + ((1 << c.round0) >> 1)) >> c.round0;
+        }
+    }
+    const int offsetBits = bd + 2 * kFb - c.round0;
+    const int offC = (1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1));
+    const std::int16_t* yf = convolve::getInterpFilterSubpelKernel(*fy, c.subpelY & convolve::subpelMask);
+    out8.assign((size_t)c.w * c.h, 0);
+    if (out16) out16->assign((size_t)c.w * c.h, 0);
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            std::int32_t sum = 1 << offsetBits;
+            for (int k = 0; k < tapsY; ++k) sum += yf[k] * im[(size_t)(y + k) * c.w + x];
+            const std::int32_t res = (sum + ((1 << c.round1) >> 1)) >> c.round1;
+            if (c.doAverage) {
+                std::int32_t t = dst16Init[(size_t)y * dst16Stride + x];
+                if (c.useJnt) {
+                    t = t * c.fwd + res * c.bck;
+                    t >>= 4; // DIST_PRECISION_BITS, definitions.h:430
+                } else {
+                    t += res;
+                    t >>= 1;
+                }
+                t -= offC;
+                std::int32_t v = (t + ((1 << roundBits) >> 1)) >> roundBits;
+                v = v < 0 ? 0 : (v > 255 ? 255 : v);
+                out8[(size_t)y * c.w + x] = (std::uint8_t)v;
+            } else {
+                (*out16)[(size_t)y * c.w + x] = (std::uint16_t)res;
+            }
+        }
+    }
+}
+
+// The vertical-only compose for jnt_convolve_y (ip:587-:630). The order
+// quirk this pins: res is SCALED by (1 << bits) BEFORE the round_1, where
+// bits = FILTER_BITS - round_0, then round_offset is ADDED back in.
+void convY(int srcStride, const std::uint8_t* src, const Cfg& c, const convolve::InterpFilterParams* fy,
+           const std::vector<std::uint16_t>& dst16Init, int dst16Stride, std::vector<std::uint8_t>& out8,
+           std::vector<std::uint16_t>* out16) {
+    const int tapsY = fy->taps;
+    const int foV = tapsY / 2 - 1;
+    const int bd = 8;
+    const int bits = kFb - c.round0;
+    const int offsetBits = bd + 2 * kFb - c.round0;
+    const int roundOffset = (1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1));
+    const int roundBits = 2 * kFb - c.round0 - c.round1;
+    const std::int16_t* yf = convolve::getInterpFilterSubpelKernel(*fy, c.subpelY & convolve::subpelMask);
+    out8.assign((size_t)c.w * c.h, 0);
+    if (out16) out16->assign((size_t)c.w * c.h, 0);
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            std::int32_t res = 0;
+            for (int k = 0; k < tapsY; ++k) res += yf[k] * src[(y - foV + k) * srcStride + x];
+            res *= (1 << bits);
+            res = ((res + ((1 << c.round1) >> 1)) >> c.round1) + roundOffset;
+            if (c.doAverage) {
+                std::int32_t t = dst16Init[(size_t)y * dst16Stride + x];
+                if (c.useJnt) {
+                    t = t * c.fwd + res * c.bck;
+                    t >>= 4;
+                } else {
+                    t += res;
+                    t >>= 1;
+                }
+                t -= roundOffset;
+                std::int32_t v = (t + ((1 << roundBits) >> 1)) >> roundBits;
+                v = v < 0 ? 0 : (v > 255 ? 255 : v);
+                out8[(size_t)y * c.w + x] = (std::uint8_t)v;
+            } else {
+                (*out16)[(size_t)y * c.w + x] = (std::uint16_t)res;
+            }
+        }
+    }
+}
+
+} // namespace jntoracle
+
+// The horizontal-only compose for jnt_convolve_x (ip:632-:675). The order
+// quirk this pins: res = (1 << bits) * ROUND(res, round_0) with
+// bits = FILTER_BITS - round_1 - the ROUND comes FIRST here, opposite of
+// the y twin, then round_offset is added.
+void convX(int srcStride, const std::uint8_t* src, const jntoracle::Cfg& c, const convolve::InterpFilterParams* fx,
+           const std::vector<std::uint16_t>& dst16Init, int dst16Stride, std::vector<std::uint8_t>& out8,
+           std::vector<std::uint16_t>* out16) {
+    using namespace jntoracle;
+    const int tapsX = fx->taps;
+    const int foH = tapsX / 2 - 1;
+    const int bd = 8;
+    const int bits = kFb - c.round1;
+    const int offsetBits = bd + 2 * kFb - c.round0;
+    const int roundOffset = (1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1));
+    const int roundBits = 2 * kFb - c.round0 - c.round1;
+    const std::int16_t* xf = convolve::getInterpFilterSubpelKernel(*fx, c.subpelX & convolve::subpelMask);
+    out8.assign((size_t)c.w * c.h, 0);
+    if (out16) out16->assign((size_t)c.w * c.h, 0);
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            std::int32_t res = 0;
+            for (int k = 0; k < tapsX; ++k) res += xf[k] * src[y * srcStride + x - foH + k];
+            res = (1 << bits) * ((res + ((1 << c.round0) >> 1)) >> c.round0);
+            res += roundOffset;
+            if (c.doAverage) {
+                std::int32_t t = dst16Init[(size_t)y * dst16Stride + x];
+                if (c.useJnt) {
+                    t = t * c.fwd + res * c.bck;
+                    t >>= 4;
+                } else {
+                    t += res;
+                    t >>= 1;
+                }
+                t -= roundOffset;
+                std::int32_t v = (t + ((1 << roundBits) >> 1)) >> roundBits;
+                v = v < 0 ? 0 : (v > 255 ? 255 : v);
+                out8[(size_t)y * c.w + x] = (std::uint8_t)v;
+            } else {
+                (*out16)[(size_t)y * c.w + x] = (std::uint16_t)res;
+            }
+        }
+    }
+}
+
+void runJntFamily(void (*kern)(const std::uint8_t*, std::int32_t, std::uint8_t*, std::int32_t, std::int32_t,
+                               std::int32_t, const convolve::InterpFilterParams*,
+                               const convolve::InterpFilterParams*, std::int32_t, std::int32_t, inter::ConvolveParams*),
+                  void (*oracle)(int, const std::uint8_t*, const jntoracle::Cfg&, const convolve::InterpFilterParams*,
+                                 const std::vector<std::uint16_t>&, int, std::vector<std::uint8_t>&,
+                                 std::vector<std::uint16_t>*),
+                  const char* label) {
+    using namespace jntoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    const Cfg cfgs[] = {
+        {8, 8, 4, 4, 7, 7, 9, 7, 1, 1},  {8, 8, 4, 4, 7, 7, 9, 7, 1, 0},  {13, 5, 1, 15, 7, 7, 12, 4, 1, 1},
+        {4, 8, 15, 1, 7, 7, 5, 11, 1, 0}, {1, 3, 8, 8, 7, 7, 9, 7, 1, 1}, {5, 4, 2, 13, 4, 7, 13, 3, 1, 1},
+        {8, 8, 11, 6, 4, 7, 7, 9, 0, 1},
+    };
+    for (const Cfg& c : cfgs) {
+        std::vector<std::uint8_t> plane;
+        const int stride = c.w + 16;
+        fillPlane(plane, stride, c.h + 16, 0xBEEFu + (std::uint32_t)c.w * 7 + c.h * 13);
+        const std::uint8_t* src = plane.data() + 8 * stride + 8;
+        std::vector<std::uint16_t> dst16Init((size_t)c.w * c.h);
+        std::uint32_t dstSeed = 0xCAFEu + (std::uint32_t)c.h;
+        for (size_t i = 0; i < dst16Init.size(); ++i) dst16Init[i] = (std::uint16_t)(lcg(dstSeed) * 131u);
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = c.round0;
+        cp.round1 = c.round1;
+        cp.useJntCompAvg = c.useJnt;
+        cp.fwdOffset = c.fwd;
+        cp.bckOffset = c.bck;
+        cp.doAverage = c.doAverage;
+        cp.dst = dst16Init.data();
+        cp.dstStride = c.w;
+        std::vector<std::uint8_t> dst8Buf((size_t)c.w * c.h + 8, 0xAB);
+        kern(src, stride, dst8Buf.data(), c.w, c.w, c.h, reg, reg, c.subpelX, c.subpelY, &cp);
+        std::vector<std::uint8_t> want8;
+        std::vector<std::uint16_t> want16;
+        oracle(stride, src, c, reg, dst16Init, c.w, want8, c.doAverage ? nullptr : &want16);
+        int bad = 0;
+        for (int y = 0; y < c.h; ++y)
+            for (int x = 0; x < c.w; ++x) {
+                const int g = c.doAverage ? dst8Buf[(size_t)y * c.w + x] : dst16Init[(size_t)y * c.w + x];
+                const int v = c.doAverage ? want8[(size_t)y * c.w + x] : want16[(size_t)y * c.w + x];
+                if (g != v) {
+                    ++bad;
+                    if (bad <= 3)
+                        MESSAGE(std::string(label) << " cfg (w,h,sx,sy,r0,r1,jnt,avg)=(" << c.w << "," << c.h << ","
+                                                   << c.subpelX << "," << c.subpelY << "," << c.round0 << ","
+                                                   << c.round1 << "," << c.useJnt << "," << c.doAverage << ") at ("
+                                                   << y << "," << x << "): got " << g << " want " << v);
+                }
+            }
+        CHECK_MESSAGE(bad == 0, label);
+    }
+}
+
+TEST_CASE("jnt_convolve_y pins the scale-before-round order (ip:587-630)") {
+    runJntFamily(&inter::jntConvolveY, &jntoracle::convY, "jnt_y");
+}
+
+TEST_CASE("jnt_convolve_x pins the round-before-scale order (ip:632-675)") {
+    runJntFamily(&inter::jntConvolveX, &convX, "jnt_x");
+}
+
+// The copy compose for jnt_convolve_2d_copy (ip:677-:714): res = src << bits
+// with bits = 2*FILTER_BITS - round_1 - round_0, then + round_offset (as
+// ConvBufType), compose, subtract, clip(round(tmp, bits)).
+void convCopy(int srcStride, const std::uint8_t* src, const jntoracle::Cfg& c,
+              const std::vector<std::uint16_t>& dst16Init, int dst16Stride, std::vector<std::uint8_t>& out8,
+              std::vector<std::uint16_t>* out16) {
+    using namespace jntoracle;
+    const int bd = 8;
+    const int bits = 2 * kFb - c.round1 - c.round0;
+    const int offsetBits = bd + 2 * kFb - c.round0;
+    const int roundOffset = (1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1));
+    out8.assign((size_t)c.w * c.h, 0);
+    if (out16) out16->assign((size_t)c.w * c.h, 0);
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            const int res = (int)(std::uint16_t)(src[y * srcStride + x] << bits) + roundOffset;
+            if (c.doAverage) {
+                std::int32_t t = dst16Init[(size_t)y * dst16Stride + x];
+                if (c.useJnt) {
+                    t = t * c.fwd + res * c.bck;
+                    t >>= 4;
+                } else {
+                    t += res;
+                    t >>= 1;
+                }
+                t -= roundOffset;
+                std::int32_t v = (t + ((1 << bits) >> 1)) >> bits;
+                v = v < 0 ? 0 : (v > 255 ? 255 : v);
+                out8[(size_t)y * c.w + x] = (std::uint8_t)v;
+            } else {
+                (*out16)[(size_t)y * c.w + x] = (std::uint16_t)res;
+            }
+        }
+    }
+}
+
+TEST_CASE("jnt_convolve_2d_copy pins the shift-compose-copy path (ip:677-714)") {
+    using namespace jntoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    const Cfg cfgs[] = {
+        {8, 8, 4, 4, 7, 7, 9, 7, 1, 1},   {8, 8, 4, 4, 7, 7, 9, 7, 1, 0},  {8, 8, 4, 4, 7, 7, 0, 0, 0, 1},
+        {13, 5, 1, 15, 7, 7, 12, 4, 1, 1}, {4, 8, 15, 1, 7, 7, 5, 11, 1, 0}, {5, 4, 2, 13, 4, 7, 13, 3, 1, 1},
+    };
+    for (const Cfg& c : cfgs) {
+        std::vector<std::uint8_t> plane;
+        const int stride = c.w + 16;
+        fillPlane(plane, stride, c.h + 16, 0x5EEDu + (std::uint32_t)c.w * 3 + c.h);
+        const std::uint8_t* src = plane.data() + 8 * stride + 8;
+        std::vector<std::uint16_t> dst16Init((size_t)c.w * c.h);
+        std::uint32_t dstSeed = 0xF00Du + (std::uint32_t)c.h;
+        for (size_t i = 0; i < dst16Init.size(); ++i) dst16Init[i] = (std::uint16_t)(lcg(dstSeed) * 131u);
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = c.round0;
+        cp.round1 = c.round1;
+        cp.useJntCompAvg = c.useJnt;
+        cp.fwdOffset = c.fwd;
+        cp.bckOffset = c.bck;
+        cp.doAverage = c.doAverage;
+        cp.dst = dst16Init.data();
+        cp.dstStride = c.w;
+        std::vector<std::uint8_t> dst8Buf((size_t)c.w * c.h + 8, 0xAB);
+        inter::jntConvolve2dCopy(src, stride, dst8Buf.data(), c.w, c.w, c.h, reg, reg, c.subpelX, c.subpelY, &cp);
+        std::vector<std::uint8_t> want8;
+        std::vector<std::uint16_t> want16;
+        convCopy(stride, src, c, dst16Init, c.w, want8, c.doAverage ? nullptr : &want16);
+        int bad = 0;
+        for (int y = 0; y < c.h; ++y)
+            for (int x = 0; x < c.w; ++x) {
+                const int g = c.doAverage ? dst8Buf[(size_t)y * c.w + x] : dst16Init[(size_t)y * c.w + x];
+                const int v = c.doAverage ? want8[(size_t)y * c.w + x] : want16[(size_t)y * c.w + x];
+                if (g != v) {
+                    ++bad;
+                    if (bad <= 3)
+                        MESSAGE("jnt_copy cfg (w,h,r0,r1,jnt,avg)=(" << c.w << "," << c.h << "," << c.round0 << ","
+                                                                     << c.round1 << "," << c.useJnt << "," << c.doAverage
+                                                                     << ") at (" << y << "," << x << "): got " << g
+                                                                     << " want " << v);
+                }
+            }
+        CHECK_MESSAGE(bad == 0, "jnt_copy mismatch");
+    }
+}
+
+TEST_CASE("jnt_convolve_2d matches the independent compose oracle over the config band (ip:529-585)") {
+    using namespace jntoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    const Cfg cfgs[] = {
+        {8, 8, 4, 4, 7, 7, 9, 7, 1, 1},   {8, 8, 4, 4, 7, 7, 9, 7, 1, 0},
+        {8, 8, 4, 4, 7, 7, 0, 0, 0, 1},   {13, 5, 1, 15, 7, 7, 12, 4, 1, 1},
+        {4, 8, 15, 1, 7, 7, 5, 11, 1, 0}, {1, 3, 8, 8, 7, 7, 9, 7, 1, 1},
+        {5, 4, 2, 13, 4, 7, 13, 3, 1, 1}, {8, 8, 11, 6, 4, 7, 7, 9, 0, 1},
+    };
+    for (const Cfg& c : cfgs) {
+        std::vector<std::uint8_t> plane;
+        const int stride = c.w + 16;
+        fillPlane(plane, stride, c.h + 16, 0xBEEFu + (std::uint32_t)c.w * 7 + c.h);
+        const std::uint8_t* src = plane.data() + 8 * stride + 8;
+        std::vector<std::uint16_t> dst16Init((size_t)c.w * c.h);
+        std::uint32_t dstSeed = 0xCAFEu + (std::uint32_t)c.h;
+        for (size_t i = 0; i < dst16Init.size(); ++i) dst16Init[i] = (std::uint16_t)(lcg(dstSeed) * 131u);
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = c.round0;
+        cp.round1 = c.round1;
+        cp.useJntCompAvg = c.useJnt;
+        cp.fwdOffset = c.fwd;
+        cp.bckOffset = c.bck;
+        cp.doAverage = c.doAverage;
+        cp.dst = dst16Init.data();
+        cp.dstStride = c.w;
+        std::vector<std::uint8_t> got8;
+        std::vector<std::uint16_t> got16;
+        std::vector<std::uint8_t> dst8Buf((size_t)c.w * c.h + 8, 0xAB);
+        inter::jntConvolve2d(src, stride, dst8Buf.data(), c.w, c.w, c.h, reg, reg, c.subpelX, c.subpelY, &cp);
+        if (c.doAverage) {
+            got8.assign(dst8Buf.begin(), dst8Buf.begin() + c.w * c.h);
+        } else {
+            got16.assign(dst16Init.begin(), dst16Init.begin() + c.w * c.h);
+        }
+        std::vector<std::uint8_t> want8;
+        std::vector<std::uint16_t> want16;
+        conv2d(stride, src, c, reg, reg, dst16Init, c.w, want8, c.doAverage ? nullptr : &want16);
+        int bad = 0;
+        for (int y = 0; y < c.h; ++y)
+            for (int x = 0; x < c.w; ++x) {
+                if (c.doAverage) {
+                    if (got8[(size_t)y * c.w + x] != want8[(size_t)y * c.w + x]) ++bad;
+                } else if (got16[(size_t)y * c.w + x] != want16[(size_t)y * c.w + x]) {
+                    ++bad;
+                }
+            }
+        CHECK_MESSAGE(bad == 0, "jnt_2d mismatch cfg");
+        if (bad) {
+            for (int y = 0; y < c.h; ++y)
+                for (int x = 0; x < c.w; ++x) {
+                    const int g = c.doAverage ? got8[(size_t)y * c.w + x] : got16[(size_t)y * c.w + x];
+                    const int v = c.doAverage ? want8[(size_t)y * c.w + x] : want16[(size_t)y * c.w + x];
+                    if (g != v) MESSAGE("cfg (w,h,sp,r0,r1,jnt,avg)=(" << c.w << "," << c.h << "," << c.subpelX << ","
+                                                                       << c.round0 << "," << c.round1 << "," << c.useJnt
+                                                                       << "," << c.doAverage << ") at (" << y << "," << x
+                                                                       << "): got " << g << " want " << v);
+                }
+        }
+    }
+}
+
 

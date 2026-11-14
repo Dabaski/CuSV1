@@ -65,6 +65,7 @@ constexpr int kMaxWedgeTypes = 1 << 4;            // definitions.h:1256
 constexpr int kBlockSizesAll = 22;                // definitions.h:882-:905
 constexpr int kMaxFilterTap = 8;                  // inter_prediction.c:274
 constexpr int kAv1ProbCostShift = 9;              // md_rate_estimation.h:29
+constexpr int kDistPrecisionBits = 4;             // definitions.h:430 (DIST_PRECISION_BITS)
 
 // ---------- enums and small structs ----------
 
@@ -252,6 +253,42 @@ std::int32_t getWedgeBitsLookup(int bsize);
 
 // svt_aom_get_wedge_params_bits, inter_prediction.c:2064-:2066.
 std::int32_t getWedgeParamsBits(int bsize);
+
+// ---------- A3E J1: the jnt (compound) convolve family, 8-bit ----------
+
+// svt_av1_jnt_convolve_2d_c, inter_prediction.c:529-:585. The MC1 park
+// ("the jnt compound convolve family :529-:714") RESOLVES here: the pinned
+// build has CONFIG_ENABLE_INTER_COMPOUND=1 (EbConfigMacros.h:187), so the
+// jnt slots are live dispatch targets, not dead code.
+void jntConvolve2d(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                   std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                   const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                   ConvolveParams* convParams);
+
+// svt_av1_jnt_convolve_y_c, inter_prediction.c:587-:630. The single-axis
+// order quirk is pinned by test: res is scaled by (1 << bits) with
+// bits = FILTER_BITS - round_0 BEFORE the round_1, then round_offset is
+// added back in (the 2d form has no such scale).
+void jntConvolveY(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                  std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                  const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                  ConvolveParams* convParams);
+
+// svt_av1_jnt_convolve_x_c, inter_prediction.c:632-:675. The x twin's order
+// is the INVERSE of the y twin: res = (1 << bits) * ROUND(res, round_0)
+// with bits = FILTER_BITS - round_1, then round_offset is added.
+void jntConvolveX(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                  std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                  const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                  ConvolveParams* convParams);
+
+// svt_av1_jnt_convolve_2d_copy_c, inter_prediction.c:677-:714. The no-subpel
+// compound copy: res = src << bits (bits = 2*FILTER_BITS - round_1 -
+// round_0), + round_offset as ConvBufType, then the same compose tail.
+void jntConvolve2dCopy(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams);
 
 // ---------- T3: sr convolve wrappers + intrabc + the dispatch ----------
 
