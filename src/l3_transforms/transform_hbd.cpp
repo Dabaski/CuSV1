@@ -1044,4 +1044,57 @@ void buildQuantTablesBd(std::int32_t qindex, int bd, QuantTables& tables) {
     }
 }
 
+// svt_aom_highbd_quantize_b_c (full_loop.c:85-136), qm/iqm NULL-folded
+// (wt = iwt = 1 << AOM_QM_BITS = 32, inv_transforms.h:27 - the landed
+// quantizeBN fold). The (dequant * iwt + (1 << (AOM_QM_BITS - 1))) >>
+// AOM_QM_BITS fold is exact (= dequant) at iwt = 32. intptr_t idx_arr ->
+// int32_t (indices < 4096 fit, named deviation). Reference-shape memset
+// zero-fill up front.
+void quantizeBHb(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                 int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                 std::uint16_t* eob) {
+    const std::int32_t zbins[2] = {
+        static_cast<std::int32_t>((tables.zbin[0] + ((1 << logScale) >> 1)) >> logScale),
+        static_cast<std::int32_t>((tables.zbin[1] + ((1 << logScale) >> 1)) >> logScale)};
+    const std::int32_t nzbins[2] = {zbins[0] * -1, zbins[1] * -1};
+    int eobVal = -1;
+    for (int i = 0; i < nCoeffs; ++i) {
+        qcoeff[i] = 0;
+        dqcoeff[i] = 0;
+    }
+    std::int32_t idxArr[4096];
+    int idx = 0;
+    // Pre-scan pass: collect EVERY out-of-bin index (no early break)
+    for (int i = 0; i < nCoeffs; ++i) {
+        const int rc = scan[i];
+        const std::int32_t wt = (1 << 5);
+        const std::int32_t coeffVal = coeff[rc] * wt;
+        if (coeffVal >= (zbins[rc != 0] * (1 << 5)) || coeffVal <= (nzbins[rc != 0] * (1 << 5))) {
+            idxArr[idx++] = i;
+        }
+    }
+    // Quantization pass: only the collected indices
+    for (int i = 0; i < idx; ++i) {
+        const int rc = scan[idxArr[i]];
+        const std::int32_t coeffVal = coeff[rc];
+        const int coeffSign = coeffVal < 0 ? -1 : 0;
+        const std::int32_t absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+        const std::int64_t tmp1 =
+            absCoeff + ((tables.round[rc != 0] + ((1 << logScale) >> 1)) >> logScale);
+        const std::int64_t tmpw = tmp1 * (1 << 5);
+        const std::int64_t tmp2 = ((tmpw * tables.quant[rc != 0]) >> 16) + tmpw;
+        const std::int32_t absQcoeff =
+            static_cast<std::int32_t>((tmp2 * tables.quantShift[rc != 0]) >> (16 - logScale + 5));
+        qcoeff[rc] = (absQcoeff ^ coeffSign) - coeffSign;
+        const std::int32_t dequant = tables.dequant[rc != 0];
+        const std::int32_t absDqcoeff = static_cast<std::int32_t>(
+            (static_cast<std::int64_t>(absQcoeff) * dequant) >> logScale);
+        dqcoeff[rc] = (absDqcoeff ^ coeffSign) - coeffSign;
+        if (absQcoeff) {
+            eobVal = idxArr[i];
+        }
+    }
+    *eob = static_cast<std::uint16_t>(eobVal + 1);
+}
+
 }  // namespace transforms

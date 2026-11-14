@@ -187,4 +187,12 @@ std::int32_t qzbinFactorBd(std::int32_t q, int bd);
 // surface, parked
 void buildQuantTablesBd(std::int32_t qindex, int bd, QuantTables& tables);
 
+// svt_aom_highbd_quantize_b_c (full_loop.c:85-136), qm/iqm NULL-folded
+// (wt = iwt = 1 << AOM_QM_BITS, the landed quantizeBN fold). NO int16 clamp
+// on the round add (that clamp exists only in the lowbd svt_aom_quantize_b_c,
+// :67) and the pre-scan COLLECTS every out-of-bin index (no early break).
+void quantizeBHb(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                 int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                 std::uint16_t* eob);
+
 }  // namespace transforms
