@@ -147,6 +147,128 @@ std::int32_t encodeSpsAv1(Bitstream* bitstream_ptr, std::uint32_t (*writeSequenc
     return return_error;
 }
 
+std::uint32_t countFramesInNextTu(const EncodeContext* enc_ctx, std::uint32_t* data_size) {
+    std::uint32_t i = 0;
+    *data_size = 0;
+    do {
+        const PacketizationReorderEntry* queue_entry_ptr = getReorderQueueEntry(enc_ctx, (int)i);
+        // not a completed td
+        if (!queue_entry_ptr->output_stream) {
+            return 0;
+        }
+
+        const EbBufferHeaderType* output_stream_ptr = queue_entry_ptr->output_stream;
+        *data_size += output_stream_ptr->n_filled_len;
+
+        i++;
+        // we have a td when we got a displable frame
+        if (queue_entry_ptr->show_frame) {
+            break;
+        }
+        if (output_stream_ptr->flags & EB_BUFFERFLAG_EOS) {
+            break;
+        }
+
+    } while (i < enc_ctx->packetization_reorder_queue_size);
+    return i;
+}
+
+void clearEosFlag(EbBufferHeaderType* output_stream_ptr) {
+    output_stream_ptr->flags &= ~EB_BUFFERFLAG_EOS;
+}
+
+void setEosFlag(EbBufferHeaderType* output_stream_ptr) {
+    output_stream_ptr->flags |= EB_BUFFERFLAG_EOS;
+}
+
+std::int32_t copyDataFromBitstream(EncodeContext* enc_ctx, Bitstream* bitstream_ptr,
+                                   EbBufferHeaderType* output_stream_ptr) {
+    std::int32_t return_error = EB_ErrorNone;
+    int size = bitstreamGetBytesCount(bitstream_ptr);
+
+    // CHECK_REPORT_ERROR guard (packetization_process.c:354-356): threaded
+    // as the return - the app-callback error_handler + while(1) halt are
+    // parked.
+    if (!(size + output_stream_ptr->n_filled_len < output_stream_ptr->n_alloc_len)) {
+        (void)enc_ctx;
+        return EB_ENC_EC_ERROR2;
+    }
+
+    void* dest = output_stream_ptr->p_buffer + output_stream_ptr->n_filled_len;
+    bitstreamCopy(bitstream_ptr, dest, size);
+    output_stream_ptr->n_filled_len += size;
+
+    return return_error;
+}
+
+std::size_t metadataSize(SvtMetadataArrayT* metadata, EbAv1MetadataType type) {
+    std::size_t sz = 0;
+    if (!metadata || !metadata->metadata_array || metadata->sz == 0) {
+        return 0;
+    } else {
+        for (std::size_t i = 0; i < metadata->sz; i++) {
+            SvtMetadataT* current_metadata = metadata->metadata_array[i];
+            if (current_metadata && current_metadata->payload && current_metadata->type == (std::uint32_t)type) {
+                sz += current_metadata->sz + 1  // obu type
+                    + 1                         // trailing byte
+                    + 1                         // header size
+                    + 1;                        // length field size
+            }
+        }
+    }
+    return sz;
+}
+
+std::int32_t encodeTu(EncodeContext* enc_ctx, int frames, std::uint32_t total_bytes,
+                      EbBufferHeaderType* output_stream_ptr) {    total_bytes += TD_SIZE;
+    if (total_bytes > output_stream_ptr->n_alloc_len) {
+        // The EB_MALLOC + min(total, alloc) svt_memcpy pre-copy + EB_FREE
+        // shells (:306-319) become vector resize - content preservation is
+        // equivalent; the bytes beyond n_filled_len are overwritten by the
+        // backward walk for every reachable frames >= 1.
+        output_stream_ptr->storage.resize(total_bytes);
+        output_stream_ptr->p_buffer = output_stream_ptr->storage.data();
+        output_stream_ptr->n_alloc_len = total_bytes;
+    }
+    std::uint8_t* dst = output_stream_ptr->p_buffer + total_bytes;
+    // we use last frame's output_stream_ptr to hold entire tu, so we need copy backward.
+    for (int i = frames - 1; i >= 0; i--) {
+        PacketizationReorderEntry* queue_entry_ptr = getReorderQueueEntry(enc_ctx, i);
+        EbBufferHeaderType* src_stream_ptr = queue_entry_ptr->output_stream;
+        std::uint32_t size = src_stream_ptr->n_filled_len;
+        dst -= size;
+        memmove(dst, src_stream_ptr->p_buffer, size);
+        // 1. The last frame is a displayable frame, others are undisplayed.
+        // 2. We do not push alt ref frame since the overlay frame will carry the pts.
+        // 3. Release alt ref stream buffer here for it will not be sent out
+        if (i != frames - 1 && !queue_entry_ptr->is_alt_ref) {
+            pushUndisplayedFrame(enc_ctx, src_stream_ptr);
+        }
+        // the alt-ref EB_FREE + svt_release_object shells (:335-336) are
+        // parked - no observable carrier state change.
+    }
+    if (frames > 1) {
+        sortUndisplayedFrame(enc_ctx);
+    }
+    dst -= TD_SIZE;
+    encodeTdAv1(dst);
+    output_stream_ptr->n_filled_len = total_bytes;
+    output_stream_ptr->flags |= EB_BUFFERFLAG_HAS_TD;
+    return EB_ErrorNone;
+}
+
+void encodeShowExisting(EncodeContext* enc_ctx, PacketizationReorderEntry* queue_entry_ptr,
+                        EbBufferHeaderType* output_stream_ptr) {
+    std::uint8_t* dst = output_stream_ptr->p_buffer;
+
+    encodeTdAv1(dst);
+    output_stream_ptr->n_filled_len = TD_SIZE;
+
+    copyDataFromBitstream(enc_ctx, queue_entry_ptr->bitstream_ptr, output_stream_ptr);
+
+    output_stream_ptr->flags |= (EB_BUFFERFLAG_SHOW_EXT | EB_BUFFERFLAG_HAS_TD);
+}
+
 std::int32_t writeFrameHeaderAv1(Bitstream* bitstream_ptr,
                                  int show_existing,
                                  std::uint32_t (*writeFrameHeaderObuFn)(std::uint8_t* dst, int show_existing,

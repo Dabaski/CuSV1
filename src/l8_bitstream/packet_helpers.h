@@ -123,6 +123,8 @@ struct PacketizationReorderEntry {
     EbBufferHeaderType* output_stream = nullptr;  // wrapper->object_ptr
     void* ppcs_wrapper = nullptr;
     bool show_frame = false;
+    std::uint8_t is_alt_ref = 0;  // encode_tu's release decision (:332-334)
+    Bitstream* bitstream_ptr = nullptr;  // the small show-existing bitstream (:365-375)
 };
 
 // EncodeContext (encode_context.h:123-125 + :95-96): the field subset the
@@ -281,5 +283,76 @@ std::int32_t writeFrameHeaderAv1(Bitstream* bitstream_ptr,
                                  std::uint8_t tile_size_bytes_minus_1,
                                  const TileEcInfo* tiles,
                                  int tile_cnt);
+
+// ---------------------------------------------------------------------------
+// S4: the TU aggregation + the per-TU layout (packetization_process.c
+// :90-115, :303-375, :440-446) + the packetizer's metadata size formula.
+// ---------------------------------------------------------------------------
+
+// EB_BUFFERFLAG_* (API/EbSvtAv1Enc.h:65-67, verbatim values). IS_ALT_REF
+// (:68) is only set by the parked collect_frames_info - not carried. Enum
+// constants, not macros - the reference's #defines poison qualified uses.
+enum : std::uint32_t {
+    EB_BUFFERFLAG_EOS = 0x00000001,
+    EB_BUFFERFLAG_SHOW_EXT = 0x00000002,
+    EB_BUFFERFLAG_HAS_TD = 0x00000004,
+};
+
+// TD_SIZE (packetization_process.c:300)
+#define TD_SIZE 2
+
+// EB_ENC_EC_ERROR2 (API/EbSvtAv1ErrorCodes.h:34) - the copy-data guard's
+// error code, threaded as the return (the CHECK_REPORT_ERROR macro's
+// error_handler call + while(1) halt, API/EbSvtAv1ErrorCodes.h:19-23, are
+// PARKED).
+enum : std::int32_t {
+    EB_ENC_EC_ERROR2 = 0x0701,
+};
+
+// count_frames_in_next_tu (packetization_process.c:90-115, verbatim walk):
+// accumulate the completed entries' n_filled_len until a displayable frame
+// or an EOS-flagged buffer ends the TU; a not-yet-completed slot (null
+// output wrapper) returns 0.
+std::uint32_t countFramesInNextTu(const EncodeContext* enc_ctx, std::uint32_t* data_size);
+
+// copy_data_from_bitstream (packetization_process.c:349-363): the
+// CHECK_REPORT_ERROR guard (:354-356, EB_ENC_EC_ERROR2) threaded as the
+// return - deviation named (the app-callback error_handler + while(1)
+// halt are parked); on pass, append the bitstream bytes at the filled
+// length and advance it.
+std::int32_t copyDataFromBitstream(EncodeContext* enc_ctx, Bitstream* bitstream_ptr,
+                                   EbBufferHeaderType* output_stream_ptr);
+
+// encode_tu (packetization_process.c:303-347) over carriers: total_bytes
+// += TD_SIZE; the grow branch (:306-319) is REAL over the vector-backed
+// p_buffer (deviation named: the EB_MALLOC + min(total,alloc) svt_memcpy
+// pre-copy + EB_FREE shells become vector resize - content preservation is
+// equivalent, the bytes beyond n_filled_len are overwritten by the backward
+// walk for every reachable frames >= 1); the backward copy lays the frames
+// at the buffer tail in queue order; the push/release alt-ref shells
+// (:332-337) are PARKED (the is_alt_ref release and the undisplayed push
+// are wrapper-lifetime walls); TD written at the front (:342-343); flags
+// |= HAS_TD. The sort_undisplayed_frame call (:339-341) is kept (frames >
+// 1). PRECONDITION: frames >= 1 and every entry's output_stream is set.
+std::int32_t encodeTu(EncodeContext* enc_ctx, int frames, std::uint32_t total_bytes,
+                      EbBufferHeaderType* output_stream_ptr);
+
+// encode_show_existing (packetization_process.c:365-375): the TD at the
+// front of the output buffer, then the queue entry's small bitstream
+// appended, flags |= SHOW_EXT | HAS_TD.
+void encodeShowExisting(EncodeContext* enc_ctx, PacketizationReorderEntry* queue_entry_ptr,
+                        EbBufferHeaderType* output_stream_ptr);
+
+// clear/set_eos_flag (packetization_process.c:440-446, verbatim)
+void clearEosFlag(EbBufferHeaderType* output_stream_ptr);
+void setEosFlag(EbBufferHeaderType* output_stream_ptr);
+
+// svt_metadata_size (Globals/metadata_handle.c:128-144, verbatim formula:
+// per matching entry payload + 1 obu type + 1 trailing + 1 header + 1
+// length field - the length-field size 1 assumption is the reference's
+// own). NOTE: metadata_handle.c lives in Source/Lib/Globals - outside the
+// coverage denominator; ported because the packetizer's n_alloc_len
+// aggregation (:804, :809-810) consumes it.
+std::size_t metadataSize(SvtMetadataArrayT* metadata, EbAv1MetadataType type);
 
 }  // namespace bitstream

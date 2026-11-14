@@ -412,6 +412,295 @@ TEST_CASE("PK1 S3: write_frame_header_av1 - two-tile composition, capacity gate,
     CHECK(unit3.buffer_begin_av1[6] == 0x00);  // zero-init vector
 }
 
+TEST_CASE("PK1 S4: eos flag set/clear") {
+    // clear/set_eos_flag (packetization_process.c:440-446): the flag bit
+    // only - the other bits must survive both ops.
+    bitstream::EbBufferHeaderType os{};
+    os.flags = 0;
+    bitstream::setEosFlag(&os);
+    CHECK(os.flags == bitstream::EB_BUFFERFLAG_EOS);
+    os.flags |= bitstream::EB_BUFFERFLAG_HAS_TD;
+    bitstream::clearEosFlag(&os);
+    CHECK(os.flags == bitstream::EB_BUFFERFLAG_HAS_TD);
+    bitstream::setEosFlag(&os);
+    CHECK(os.flags == (bitstream::EB_BUFFERFLAG_EOS | bitstream::EB_BUFFERFLAG_HAS_TD));
+    bitstream::clearEosFlag(&os);
+    bitstream::clearEosFlag(&os);  // idempotent
+    CHECK(os.flags == bitstream::EB_BUFFERFLAG_HAS_TD);
+}
+
+TEST_CASE("PK1 S4: count_frames_in_next_tu aggregates until displayable or EOS") {
+    // count_frames_in_next_tu (packetization_process.c:90-115): walk from
+    // the head, sum n_filled_len, stop after a show_frame entry or an
+    // EOS-flagged buffer; an incomplete slot (null output wrapper) -> 0.
+    // Independent oracle: a hand-walked expectation per configuration;
+    // exhaustive over the wrap (head 0..3, size 4).
+    static bitstream::PacketizationReorderEntry slots[4];
+    static bitstream::EbBufferHeaderType frames[4];
+    memset(frames, 0, sizeof(frames));
+    for (int i = 0; i < 4; ++i) frames[i].n_filled_len = 10 + i;
+    // config A: show_frame at slot 1 -> the TU ends at the first walk step
+    // that reads slot 1: delta = (1 - head) mod 4, frames = delta + 1, and
+    // the byte sum follows the same wrap. Independent oracle: the delta
+    // arithmetic, not a snapshot.
+    for (int head = 0; head < 4; ++head) {
+        bitstream::PacketizationReorderEntry* queue[4] = {&slots[0], &slots[1], &slots[2], &slots[3]};
+        for (int s = 0; s < 4; ++s) {
+            memset(&slots[s], 0, sizeof(slots[s]));
+            slots[s].output_stream = &frames[s];
+            slots[s].show_frame = (s == 1);
+        }
+        bitstream::EncodeContext ctx{};
+        ctx.packetization_reorder_queue = queue;
+        ctx.packetization_reorder_queue_size = 4;
+        ctx.packetization_reorder_queue_head_index = (std::uint32_t)head;
+        const std::uint32_t delta = (std::uint32_t)((1 - head + 4) % 4);
+        std::uint32_t wantBytes = 0;
+        for (std::uint32_t d = 0; d <= delta; ++d) wantBytes += 10 + (head + d) % 4;
+        std::uint32_t bytes = 0xEE;
+        CHECK(bitstream::countFramesInNextTu(&ctx, &bytes) == delta + 1);
+        CHECK(bytes == wantBytes);
+    }
+    // config B: EOS flag ends the TU
+    {
+        bitstream::PacketizationReorderEntry* queue[4] = {&slots[0], &slots[1], &slots[2], &slots[3]};
+        for (int s = 0; s < 4; ++s) {
+            memset(&slots[s], 0, sizeof(slots[s]));
+            slots[s].output_stream = &frames[s];
+        }
+        frames[1].flags = bitstream::EB_BUFFERFLAG_EOS;
+        bitstream::EncodeContext ctx{};
+        ctx.packetization_reorder_queue = queue;
+        ctx.packetization_reorder_queue_size = 4;
+        ctx.packetization_reorder_queue_head_index = 0;
+        std::uint32_t bytes = 0;
+        CHECK(bitstream::countFramesInNextTu(&ctx, &bytes) == 2);
+        CHECK(bytes == 10 + 11);
+        frames[1].flags = 0;
+    }
+    // config C: show_frame on the FIRST entry -> TU of 1
+    {
+        bitstream::PacketizationReorderEntry* queue[4] = {&slots[0], &slots[1], &slots[2], &slots[3]};
+        for (int s = 0; s < 4; ++s) {
+            memset(&slots[s], 0, sizeof(slots[s]));
+            slots[s].output_stream = &frames[s];
+        }
+        slots[0].show_frame = true;
+        bitstream::EncodeContext ctx{};
+        ctx.packetization_reorder_queue = queue;
+        ctx.packetization_reorder_queue_size = 4;
+        ctx.packetization_reorder_queue_head_index = 0;
+        std::uint32_t bytes = 0;
+        CHECK(bitstream::countFramesInNextTu(&ctx, &bytes) == 1);
+        CHECK(bytes == 10);
+    }
+    // config D: incomplete head -> 0
+    {
+        bitstream::PacketizationReorderEntry* queue[4] = {&slots[0], &slots[1], &slots[2], &slots[3]};
+        for (int s = 0; s < 4; ++s) {
+            memset(&slots[s], 0, sizeof(slots[s]));
+            slots[s].output_stream = &frames[s];
+        }
+        slots[0].output_stream = nullptr;
+        bitstream::EncodeContext ctx{};
+        ctx.packetization_reorder_queue = queue;
+        ctx.packetization_reorder_queue_size = 4;
+        ctx.packetization_reorder_queue_head_index = 0;
+        std::uint32_t bytes = 0xEE;
+        CHECK(bitstream::countFramesInNextTu(&ctx, &bytes) == 0);
+        CHECK(bytes == 0);
+    }
+}
+
+TEST_CASE("PK1 S4: copy_data_from_bitstream appends and guards the alloc") {
+    // copy_data_from_bitstream (packetization_process.c:349-363): append
+    // the Bitstream's bytes at n_filled_len, advance it. The
+    // CHECK_REPORT_ERROR guard (:354-356) threaded as the return of
+    // EB_ENC_EC_ERROR2 (0x0701) - the error_handler + while(1) halt shells
+    // parked. Poison tail beyond the filled length.
+    bitstream::OutputBitstreamUnit unit{};
+    REQUIRE(bitstream::outputBitstreamUnitCtor(&unit, 32) == 0);
+    for (int i = 0; i < 6; ++i) *unit.buffer_av1++ = (std::uint8_t)(0x30 + i);
+    bitstream::Bitstream bs{&unit};
+    bitstream::EbBufferHeaderType os{};
+    os.storage.resize(32);
+    os.p_buffer = os.storage.data();
+    os.n_alloc_len = 32;
+    os.n_filled_len = 2;
+    memset(os.p_buffer, 0xC5, 32);
+    os.p_buffer[0] = 0x11;
+    os.p_buffer[1] = 0x22;
+    static bitstream::EncodeContext ctx{};  // unused by the guard path (callback wall parked)
+    CHECK(bitstream::copyDataFromBitstream(&ctx, &bs, &os) == 0);
+    CHECK(os.n_filled_len == 8);
+    CHECK(os.p_buffer[0] == 0x11);
+    CHECK(os.p_buffer[1] == 0x22);
+    for (int i = 0; i < 6; ++i) CHECK(os.p_buffer[2 + i] == (std::uint8_t)(0x30 + i));
+    CHECK(os.p_buffer[8] == 0xC5);
+    // the guard: 6 + 26 == 32 is NOT < 32 -> EB_ENC_EC_ERROR2, no write
+    os.n_filled_len = 26;
+    const std::uint32_t filledBefore = os.n_filled_len;
+    CHECK(bitstream::copyDataFromBitstream(&ctx, &bs, &os) == 0x0701);
+    CHECK(os.n_filled_len == filledBefore);
+    // boundary pass: 6 + 25 == 31 < 32
+    os.n_filled_len = 25;
+    CHECK(bitstream::copyDataFromBitstream(&ctx, &bs, &os) == 0);
+    CHECK(os.n_filled_len == 31);
+    CHECK(os.n_filled_len == os.n_alloc_len - 1);
+}
+
+TEST_CASE("PK1 S4: metadata_size sums matching entries with the +4 formula") {
+    // svt_metadata_size (Globals/metadata_handle.c:128-144): per matching
+    // entry (current && payload && type match) the sum is sz + 1 (obu
+    // type) + 1 (trailing) + 1 (header) + 1 (length field) - the
+    // length-field size 1 assumption is the reference's own.
+    std::uint8_t p3[3] = {1, 2, 3};
+    std::uint8_t p2[2] = {4, 5};
+    std::uint8_t p1[1] = {6};
+    bitstream::SvtMetadataT a{}, b{}, c{};
+    a.type = bitstream::EB_AV1_METADATA_TYPE_HDR_CLL;
+    a.payload = p3;
+    a.sz = 3;
+    b.type = bitstream::EB_AV1_METADATA_TYPE_ITUT_T35;
+    b.payload = p2;
+    b.sz = 2;
+    c.type = bitstream::EB_AV1_METADATA_TYPE_HDR_CLL;
+    c.payload = p1;
+    c.sz = 1;
+    bitstream::SvtMetadataT* backing[3] = {&a, &b, &c};
+    bitstream::SvtMetadataArrayT arr{};
+    arr.metadata_array = backing;
+    arr.sz = 3;
+    CHECK(bitstream::metadataSize(&arr, bitstream::EB_AV1_METADATA_TYPE_HDR_CLL) == (3 + 4) + (1 + 4));
+    CHECK(bitstream::metadataSize(&arr, bitstream::EB_AV1_METADATA_TYPE_ITUT_T35) == 2 + 4);
+    CHECK(bitstream::metadataSize(&arr, bitstream::EB_AV1_METADATA_TYPE_TIMECODE) == 0);
+    CHECK(bitstream::metadataSize(nullptr, bitstream::EB_AV1_METADATA_TYPE_HDR_CLL) == 0);
+    bitstream::SvtMetadataArrayT empty{};
+    CHECK(bitstream::metadataSize(&empty, bitstream::EB_AV1_METADATA_TYPE_HDR_CLL) == 0);
+    // null payload entry skipped
+    c.payload = nullptr;
+    CHECK(bitstream::metadataSize(&arr, bitstream::EB_AV1_METADATA_TYPE_HDR_CLL) == 3 + 4);
+}
+
+TEST_CASE("PK1 S4: encode_tu lays TD + frames at the tail, grows, pushes and sorts") {
+    // encode_tu (packetization_process.c:303-347): total_bytes += TD_SIZE;
+    // grow when over n_alloc_len; the backward walk copies each frame at
+    // the tail (queue order preserved); the last frame is never pushed;
+    // non-last non-alt-ref frames are pushed to the undisplayed queue;
+    // sort_undisplayed when frames > 1; TD at the front; filled = total;
+    // flags |= HAS_TD. The alt-ref EB_FREE + svt_release_object shells
+    // (:335-336) are parked.
+    static bitstream::PacketizationReorderEntry slots[4];
+    static bitstream::EbBufferHeaderType frames[4];
+    memset(frames, 0, sizeof(frames));
+    std::uint8_t f0[5] = {10, 11, 12, 13, 14};
+    std::uint8_t f1[3] = {20, 21, 22};
+    std::uint8_t f2[7] = {30, 31, 32, 33, 34, 35, 36};
+    for (int s = 0; s < 3; ++s) {
+        memset(&slots[s], 0, sizeof(slots[s]));
+        slots[s].output_stream = &frames[s];
+        slots[s].is_alt_ref = 0;
+    }
+    frames[0].storage.assign(f0, f0 + 5);
+    frames[0].p_buffer = frames[0].storage.data();
+    frames[0].n_filled_len = 5;
+    frames[0].pts = 100;
+    frames[1].storage.assign(f1, f1 + 3);
+    frames[1].p_buffer = frames[1].storage.data();
+    frames[1].n_filled_len = 3;
+    frames[1].pts = 50;
+    frames[2].storage.assign(f2, f2 + 7);
+    frames[2].p_buffer = frames[2].storage.data();
+    frames[2].n_filled_len = 7;
+    frames[2].n_alloc_len = 16;  // < 17 -> the grow branch is live
+    bitstream::EncodeContext ctx{};
+    bitstream::PacketizationReorderEntry* queue[4] = {&slots[0], &slots[1], &slots[2], &slots[3]};
+    for (int s = 3; s < 4; ++s) {
+        memset(&slots[s], 0, sizeof(slots[s]));
+        slots[s].output_stream = nullptr;
+    }
+    ctx.packetization_reorder_queue = queue;
+    ctx.packetization_reorder_queue_size = 4;
+    ctx.packetization_reorder_queue_head_index = 0;
+    CHECK(bitstream::encodeTu(&ctx, 3, 5 + 3 + 7, &frames[2]) == 0);
+    // the layout in the LAST frame's buffer: TD + f0 + f1 + f2
+    CHECK(frames[2].n_filled_len == 17);
+    CHECK(frames[2].n_alloc_len == 17);  // grown
+    CHECK((frames[2].flags & bitstream::EB_BUFFERFLAG_HAS_TD) != 0);
+    CHECK(frames[2].p_buffer[0] == 0x12);
+    CHECK(frames[2].p_buffer[1] == 0x00);
+    for (int i = 0; i < 5; ++i) CHECK(frames[2].p_buffer[2 + i] == f0[i]);
+    for (int i = 0; i < 3; ++i) CHECK(frames[2].p_buffer[7 + i] == f1[i]);
+    for (int i = 0; i < 7; ++i) CHECK(frames[2].p_buffer[10 + i] == f2[i]);
+    // the undisplayed queue holds f0 and f1 (the last frame is never
+    // pushed), sorted descending by pts
+    CHECK(ctx.picture_decision_undisplayed_queue_count == 2);
+    CHECK(ctx.picture_decision_undisplayed_queue[0] == &frames[0]);
+    CHECK(ctx.picture_decision_undisplayed_queue[1] == &frames[1]);
+    // the alt-ref entry is NOT pushed - reset the mutated header first
+    // (total_bytes must equal the sum of the entries' filled lengths, the
+    // count_frames contract; the caller starts each TU from a fresh state)
+    frames[2].n_filled_len = 7;
+    frames[2].flags = 0;
+    slots[1].is_alt_ref = 1;
+    bitstream::EncodeContext ctx2{};
+    ctx2.packetization_reorder_queue = queue;
+    ctx2.packetization_reorder_queue_size = 4;
+    ctx2.packetization_reorder_queue_head_index = 0;
+    CHECK(bitstream::encodeTu(&ctx2, 3, 15, &frames[2]) == 0);
+    CHECK(ctx2.picture_decision_undisplayed_queue_count == 1);
+    CHECK(ctx2.picture_decision_undisplayed_queue[0] == &frames[0]);
+    // single frame: the src IS the dst buffer (the reference's own shape)
+    // - reset the header the earlier configs mutated AND refill the buffer
+    // with the frame's own bytes, keeping the carrier invariant
+    // n_alloc_len == storage.size() (the reference's allocation contract)
+    frames[2].storage.assign(f2, f2 + 7);
+    frames[2].p_buffer = frames[2].storage.data();
+    frames[2].n_filled_len = 7;
+    frames[2].n_alloc_len = 7;
+    frames[2].flags = 0;
+    bitstream::EncodeContext ctx3{};
+    ctx3.packetization_reorder_queue = queue;
+    ctx3.packetization_reorder_queue_size = 4;
+    ctx3.packetization_reorder_queue_head_index = 2;  // the head entry IS the dst slot
+    CHECK(bitstream::encodeTu(&ctx3, 1, 7, &frames[2]) == 0);
+    CHECK(frames[2].n_filled_len == 9);
+    CHECK(frames[2].p_buffer[0] == 0x12);
+    CHECK(frames[2].p_buffer[1] == 0x00);
+    for (int i = 0; i < 7; ++i) CHECK(frames[2].p_buffer[2 + i] == f2[i]);
+    CHECK(ctx3.picture_decision_undisplayed_queue_count == 0);
+}
+
+TEST_CASE("PK1 S4: encode_show_existing composes TD + the entry bitstream") {
+    // encode_show_existing (packetization_process.c:365-375): the TD at the
+    // front of the output buffer, filled = TD_SIZE, then
+    // copy_data_from_bitstream appends the queue entry's small bitstream,
+    // flags |= SHOW_EXT | HAS_TD. Poison tail.
+    bitstream::OutputBitstreamUnit entryUnit{};
+    REQUIRE(bitstream::outputBitstreamUnitCtor(&entryUnit, 16) == 0);
+    const std::uint8_t small[4] = {0x41, 0x42, 0x43, 0x44};
+    entryUnit.storage.assign(small, small + 4);
+    entryUnit.buffer_begin_av1 = entryUnit.storage.data();
+    entryUnit.buffer_av1 = entryUnit.buffer_begin_av1 + 4;    bitstream::Bitstream entryBs{&entryUnit};
+    bitstream::PacketizationReorderEntry entry{};
+    entry.bitstream_ptr = &entryBs;
+    bitstream::EbBufferHeaderType os{};
+    os.storage.resize(32);
+    os.p_buffer = os.storage.data();
+    os.n_alloc_len = 32;
+    os.n_filled_len = 0;
+    memset(os.p_buffer, 0xC5, 32);
+    static bitstream::EncodeContext ctx{};
+    bitstream::encodeShowExisting(&ctx, &entry, &os);
+    CHECK(os.n_filled_len == 6);
+    CHECK(os.p_buffer[0] == 0x12);  // the TD
+    CHECK(os.p_buffer[1] == 0x00);
+    for (int i = 0; i < 4; ++i) CHECK(os.p_buffer[2 + i] == small[i]);
+    CHECK(os.p_buffer[6] == 0xC5);
+    CHECK((os.flags & bitstream::EB_BUFFERFLAG_SHOW_EXT) != 0);
+    CHECK((os.flags & bitstream::EB_BUFFERFLAG_HAS_TD) != 0);
+}
+
 TEST_CASE("PK1 S1: reorder queue pos wraps head+delta modulo size") {
     // get_reorder_queue_pos (packetization_process.c:81-83):
     // (head_index + delta) % queue_size.
