@@ -1650,6 +1650,214 @@ TEST_CASE("is_new_gf_group the simple and the incomplete-minigop paths") {
     }
 }
 
+// ---- A9D S9: pass2_strategy.c set_rc_param (:906-949) +
+// read_stat_from_file (:955-969) + init_single_pass_lap (:971-995) +
+// init_second_pass (:997-1058) ----
+
+TEST_CASE("set_rc_param derives the cfg and the frame_info") {
+    l15_rc::FrameInfoCarrier fi{};
+    l15_rc::RcConfig cfg{};
+    int vbrmin = -1, vbrmax = -1, sframeDist = -1, sframeMode = -1;
+    // non-downsample: 1920x1080 -> mb 120x68, 8160 mbs.
+    l15_rc::setRcParam(false, 1920, 1080, 8, 50, 190, 1, 10, 63, false, 25, 35, 10000, 3000, 6000, 2000, 1500,
+                       fi, cfg, vbrmin, vbrmax, sframeDist, sframeMode);
+    CHECK(fi.frameWidth == 1920);
+    CHECK(fi.frameHeight == 1080);
+    CHECK(fi.mbCols == 120);
+    CHECK(fi.mbRows == 68);
+    CHECK(fi.numMbs == 8160);
+    CHECK(fi.bitDepth == 8);
+    CHECK(vbrmin == 50);
+    CHECK(vbrmax == 190);
+    // SVT_AV1_RC_MODE_VBR (1) -> AOM_VBR (0).
+    CHECK(cfg.mode == l15_rc::kRcVbr);
+    // quantizer_to_qindex[10] = 40, [63] = 255 (the index*4 ladder).
+    CHECK(cfg.bestAllowedQ == 40);
+    CHECK(cfg.worstAllowedQ == 255);
+    CHECK(cfg.overShootPct == 25);
+    CHECK(cfg.underShootPct == 35);
+    // the VBR buffer overrides.
+    CHECK(cfg.maximumBufferSizeMs == 240000);
+    CHECK(cfg.startingBufferLevelMs == 60000);
+    CHECK(cfg.optimalBufferLevelMs == 60000);
+    CHECK(cfg.maxIntraBitratePct == 2000);
+    CHECK(cfg.maxInterBitratePct == 1500);
+    CHECK(sframeDist == 0);
+    CHECK(sframeMode == 0);
+    {
+        // gop_constraint_rc zeroes the shoot pcts; CQP (0) -> AOM_Q (2) and
+        // the static buffer ms pass through; downsample doubles the dims.
+        l15_rc::FrameInfoCarrier fi2{};
+        l15_rc::RcConfig cfg2{};
+        int vbrmin2 = -1, vbrmax2 = -1, sd2 = -1, sm2 = -1;
+        l15_rc::setRcParam(true, 640, 360, 10, 50, 190, 0, 0, 63, true, 25, 35, 7777, 8888, 9999, 2000, 1500,
+                           fi2, cfg2, vbrmin2, vbrmax2, sd2, sm2);
+        CHECK(fi2.frameWidth == 1280);
+        CHECK(fi2.frameHeight == 720);
+        CHECK(fi2.mbCols == 80);
+        CHECK(fi2.mbRows == 46);
+        CHECK(cfg2.mode == l15_rc::kRcQ);
+        CHECK(cfg2.overShootPct == 0);
+        CHECK(cfg2.underShootPct == 0);
+        CHECK(cfg2.maximumBufferSizeMs == 7777);
+        CHECK(cfg2.startingBufferLevelMs == 8888);
+        CHECK(cfg2.optimalBufferLevelMs == 9999);
+    }
+    {
+        // CBR (2) -> AOM_CBR (1).
+        l15_rc::RcConfig cfg3{};
+        l15_rc::FrameInfoCarrier fi3{};
+        int v3, v4, sd3, sm3;
+        l15_rc::setRcParam(false, 64, 64, 8, 50, 190, 2, 10, 63, false, 25, 35, 1, 2, 3, 0, 0,
+                           fi3, cfg3, v3, v4, sd3, sm3);
+        CHECK(cfg3.mode == l15_rc::kRcCbr);
+    }
+}
+
+TEST_CASE("read_stat_from_file fills zero-tnb entries per layer") {
+    // window: {100 (layer1), 0 (layer1), 50 (layer0)}.
+    std::vector<l15_rc::FirstpassStatsCarrier> buf(3);
+    for (int i = 0; i < 3; ++i) {
+        buf[i].frame = (double)i;
+        buf[i].count = 1.0;
+        buf[i].duration = 1.0;
+    }
+    buf[0].statStruct.totalNumBits = 100;
+    buf[0].statStruct.temporalLayerIndex = 1;
+    buf[1].statStruct.totalNumBits = 0;
+    buf[1].statStruct.temporalLayerIndex = 1;
+    buf[2].statStruct.totalNumBits = 50;
+    buf[2].statStruct.temporalLayerIndex = 0;
+    l15_rc::FirstpassStatsCarrier totalStats{};
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = buf.data();
+    tp.statsInCount = 3;
+    tp.hasTotalStats = true;
+    l15_rc::readStatFromFile(tp, buf.data(), &totalStats);
+    // frame1 filled from previous_num_bits[layer1] = 100.
+    CHECK(buf[1].statStruct.totalNumBits == 100);
+    // total = 100 + 100 + 50 = 250 -> total_stats.
+    CHECK(totalStats.statStruct.totalNumBits == 250);
+}
+
+TEST_CASE("init_single_pass_lap resets the twopass and rc counters") {
+    // the set_rc_param composition runs through the same walls (verified by
+    // the cfg writes); the counters reset.
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsInCount = 3;  // the stats_in_end-present gate
+    tp.bitsLeft = 999;
+    tp.modifiedErrorMin = 9.0;
+    tp.modifiedErrorMax = 9.0;
+    tp.modifiedErrorLeft = 9.0;
+    tp.kfZeroMotionPct = 0;
+    l15_rc::RcControl rc{};
+    rc.vbrBitsOffTarget = 123;
+    rc.vbrBitsOffTargetFast = 456;
+    rc.rateErrorEstimate = 789;
+    l15_rc::FrameInfoCarrier fi{};
+    l15_rc::RcConfig cfg{};
+    int v1, v2, sd, sm;
+    l15_rc::initSinglePassLap(tp, rc, false, 1920, 1080, 8, 50, 190, 1, 10, 63, false, 25, 35, 1, 2, 3, 0, 0,
+                              fi, cfg, v1, v2, sd, sm);
+    CHECK(tp.bitsLeft == 0);
+    CHECK(tp.modifiedErrorMin == 0.0);
+    CHECK(tp.modifiedErrorMax == 0.0);
+    CHECK(tp.modifiedErrorLeft == 0.0);
+    CHECK(tp.kfZeroMotionPct == 100);
+    CHECK(rc.vbrBitsOffTarget == 0);
+    CHECK(rc.vbrBitsOffTargetFast == 0);
+    CHECK(rc.rateErrorEstimate == 0);
+    // the set_rc_param composition ran (the cfg derivation is observable).
+    CHECK(cfg.mode == l15_rc::kRcVbr);
+    CHECK(fi.numMbs == 8160);
+    {
+        // the empty-stats gate: NOTHING moves.
+        l15_rc::TwoPassCarrier tp2{};
+        tp2.statsInCount = 0;
+        tp2.bitsLeft = 999;
+        tp2.kfZeroMotionPct = 5;
+        l15_rc::RcControl rc2{};
+        rc2.vbrBitsOffTarget = 123;
+        l15_rc::FrameInfoCarrier fi2{};
+        l15_rc::RcConfig cfg2{};
+        int w1, w2, wd, wm;
+        l15_rc::initSinglePassLap(tp2, rc2, false, 1920, 1080, 8, 50, 190, 1, 10, 63, false, 25, 35, 1, 2, 3, 0, 0,
+                                  fi2, cfg2, w1, w2, wd, wm);
+        CHECK(tp2.bitsLeft == 999);
+        CHECK(tp2.kfZeroMotionPct == 5);
+        CHECK(rc2.vbrBitsOffTarget == 123);
+        // set_rc_param did NOT run.
+        CHECK(fi2.numMbs == 0);
+    }
+}
+
+TEST_CASE("init_second_pass accumulates, derives the framerate and walks the error") {
+    std::vector<l15_rc::FirstpassStatsCarrier> buf(3);
+    for (int i = 0; i < 3; ++i) {
+        buf[i].frame = (double)i + 1.0;
+        buf[i].codedError = 10.0 * (i + 1);
+        buf[i].count = 1.0;
+        buf[i].duration = 1.0;
+        buf[i].statStruct.totalNumBits = 100 * (i + 1);
+        buf[i].statStruct.temporalLayerIndex = 0;
+    }
+    l15_rc::FirstpassStatsCarrier statsInEnd{};  // the accumulator cell
+    statsInEnd.frame = 99.0;                     // poison: zero_stats must clear
+    statsInEnd.duration = 99.0;
+    l15_rc::FirstpassStatsCarrier totalStats{};
+    totalStats.frame = 88.0;
+    l15_rc::FirstpassStatsCarrier totalLeftStats{};
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = buf.data();
+    tp.statsInCount = 3;
+    tp.statsInPos = 0;
+    tp.hasTotalStats = true;
+    tp.bitsLeft = -1;
+    tp.kfZeroMotionPct = 0;
+    l15_rc::RcControl rc{};
+    rc.vbrBitsOffTarget = 123;
+    rc.vbrBitsOffTargetFast = 456;
+    rc.rateErrorEstimate = 789;
+    rc.avgFrameBandwidth = -1;
+    l15_rc::FrameInfoCarrier fi{};
+    l15_rc::RcConfig cfg{};
+    double scsFr = 0.0;
+    int v1, v2, sd, sm;
+    l15_rc::initSecondPass(tp, buf.data(), &statsInEnd, &totalStats, &totalLeftStats, rc, scsFr, 3000000, 100,
+                           false, 1920, 1080, 8, 50, 190, 1, 10, 63, false, 25, 35, 1, 2, 3, 0, 0,
+                           fi, cfg, v1, v2, sd, sm);
+    // the accumulator cell: zero_stats then accumulate the three frames:
+    // frame 1+2+3 = 6, coded_error 10+20+30 = 60, count 3, duration
+    // 1 + 1+1+1 = 4 (zero_stats starts duration at 1.0).
+    CHECK(std::fabs(statsInEnd.frame - 6.0) <= 1e-9);
+    CHECK(std::fabs(statsInEnd.codedError - 60.0) <= 1e-9);
+    CHECK(std::fabs(statsInEnd.count - 3.0) <= 1e-9);
+    CHECK(std::fabs(statsInEnd.duration - 4.0) <= 1e-9);
+    // the accumulate's total_num_bits = 100+200+300 = 600.
+    CHECK(statsInEnd.statStruct.totalNumBits == 600);
+    // total_stats <- stats_in_end; total_left_stats <- total_stats.
+    CHECK(std::fabs(totalStats.frame - 6.0) <= 1e-9);
+    CHECK(std::fabs(totalLeftStats.frame - 6.0) <= 1e-9);
+    // frame_rate = 10000000.0 * 3 / 4 = 7,500,000.
+    CHECK(std::fabs(scsFr - 7500000.0) <= 1e-9);
+    CHECK(rc.avgFrameBandwidth == (int)(3000000 / 7500000.0));
+    // bits_left = (int64)(4.0 * 3000000 / 10000000.0) = (int64)1.2 = 1.
+    CHECK(tp.bitsLeft == 1);
+    // read_stat_from_file: no zero-tnb entries; the sum 600 -> total_stats.
+    CHECK(totalStats.statStruct.totalNumBits == 600);
+    // avg_error = 60 / (3 + 0.000001); the vbrmin/vbrmax 50/190 splits.
+    const double avg = 60.0 / (3.0 + 0.000001);
+    CHECK(std::fabs(tp.modifiedErrorMin - (avg * 50.0 / 100.0)) <= 1e-9);
+    CHECK(std::fabs(tp.modifiedErrorMax - (avg * 190.0 / 100.0)) <= 1e-9);
+    // the modified-error walk: calculate_modified_err = tnb per frame.
+    CHECK(std::fabs(tp.modifiedErrorLeft - 600.0) <= 1e-9);
+    // the counter resets and the zeromotion pin.
+    CHECK(rc.vbrBitsOffTarget == 0);
+    CHECK(rc.vbrBitsOffTargetFast == 0);
+    CHECK(rc.rateErrorEstimate == 0);
+    CHECK(tp.kfZeroMotionPct == 100);
+}
+
 TEST_CASE("kf_group_rate_assingment pins the lap path and the clip") {
     const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
     {

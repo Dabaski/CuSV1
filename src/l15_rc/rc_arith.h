@@ -104,6 +104,10 @@ struct RcControl {
     std::int64_t gfGroupBits;       // rc->gf_group_bits
     std::int64_t vbrBitsOffTarget;  // rc->vbr_bits_off_target
 
+    // the A9D pass-init walls (pass2_strategy.c:971-1058).
+    std::int64_t vbrBitsOffTargetFast;  // rc->vbr_bits_off_target_fast
+    int rateErrorEstimate;              // rc->rate_error_estimate
+
     // the A9D rc_init_frame_stats rate-averaging period
     // (rc->rate_average_periodin_frames, uint64 in the reference).
     std::uint64_t rateAveragePeriod;
@@ -658,6 +662,75 @@ struct GfGroupPocView {
 // reference's own); gfGroup needs >= gfInterval entries. MUTATES the
 // members' gf_update_due.
 void isNewGfGroup(PcsCarrier& pcs, GfGroupPocView* gfGroup, bool incompMgFrame);
+
+// FrameInfo (enc_ctx->frame_info): the set_rc_param writes.
+struct FrameInfoCarrier {
+    int frameWidth;   // frame_info->frame_width
+    int frameHeight;  // frame_info->frame_height
+    int mbCols;       // frame_info->mb_cols
+    int mbRows;       // frame_info->mb_rows
+    int numMbs;       // frame_info->num_mbs
+    int bitDepth;     // frame_info->bit_depth
+};
+
+// SvtAv1RcMode (EbSvtAv1Enc.h:175-179): CQP_OR_CRF = 0, VBR = 1, CBR = 2.
+constexpr int kSvtAv1RcModeCqp = 0;
+constexpr int kSvtAv1RcModeVbr = 1;
+constexpr int kSvtAv1RcModeCbr = 2;
+
+// svt_aom_set_rc_param (pass2_strategy.c:906-949): verbatim; the scs
+// static_config walls thread as scalars; the two_pass_cfg vbr sections and
+// the sf_cfg.sframe_dist/sframe_mode writes are out-params (the reference
+// writes enc_ctx fields).
+void setRcParam(bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight, int encoderBitDepth,
+                int vbrMinSectionPct, int vbrMaxSectionPct, int rateControlMode, int minQpAllowed,
+                int maxQpAllowed, bool gopConstraintRc, int staticOverShootPct, int staticUnderShootPct,
+                int staticMaximumBufferMs, int staticStartingBufferMs, int staticOptimalBufferMs,
+                int staticMaxIntraBitratePct, int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo,
+                RcConfig& rcCfg, int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode);
+
+// svt_av1_init_single_pass_lap (pass2_strategy.c:971-995): verbatim
+// including the svt_aom_set_rc_param composition (the landed setRcParam,
+// same walls) and the !stats_in_end gate (the empty buffer returns before
+// ANY write).
+void initSinglePassLap(TwoPassCarrier& twopass, RcControl& rc, bool firstPassDownsample, int maxInputLumaWidth,
+                       int maxInputLumaHeight, int encoderBitDepth, int vbrMinSectionPct, int vbrMaxSectionPct,
+                       int rateControlMode, int minQpAllowed, int maxQpAllowed, bool gopConstraintRc,
+                       int staticOverShootPct, int staticUnderShootPct, int staticMaximumBufferMs,
+                       int staticStartingBufferMs, int staticOptimalBufferMs, int staticMaxIntraBitratePct,
+                       int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo, RcConfig& rcCfg,
+                       int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode);
+
+// read_stat_from_file (pass2_strategy.c:955-969): verbatim - the NAME says
+// file, the body walks the in-memory stats buffer. NAMED DEVIATION: the
+// reference casts away const on twopass->stats_in to fill zero-tnb entries
+// in place; the port takes the mutable buffer directly. The per-layer
+// previous_num_bits[MAX_TEMPORAL_LAYERS] walk and the total_stats->
+// stat_struct.total_num_bits write are 1:1.
+void readStatFromFile(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf,
+                      FirstpassStatsCarrier* totalStats);
+
+// svt_av1_init_second_pass (pass2_strategy.c:997-1058): verbatim including
+// the svt_aom_set_rc_param composition and the svt_av1_new_framerate call
+// (both landed). The stats_in_end cell doubles as the accumulate target
+// (the reference zeroes it and accumulates the whole window into it);
+// the caller owns that cell.
+void initSecondPass(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf, FirstpassStatsCarrier* statsInEnd,
+                    FirstpassStatsCarrier* totalStats, FirstpassStatsCarrier* totalLeftStats, RcControl& rc,
+                    double& scsNewFramerate, std::int64_t targetBitRate, int numMbs, bool firstPassDownsample,
+                    int maxInputLumaWidth, int maxInputLumaHeight, int encoderBitDepth, int vbrMinSectionPct,
+                    int vbrMaxSectionPct, int rateControlMode, int minQpAllowed, int maxQpAllowed,
+                    bool gopConstraintRc, int staticOverShootPct, int staticUnderShootPct,
+                    int staticMaximumBufferMs, int staticStartingBufferMs, int staticOptimalBufferMs,
+                    int staticMaxIntraBitratePct, int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo,
+                    RcConfig& rcCfg, int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode);
+
+// svt_av1_twopass_zero_stats (firstpass.c:133-139) and
+// svt_av1_accumulate_stats (firstpass.c:141-146): DUPLICATED from the l9
+// AN20 twins (this layer cannot link l9 - the SYM1 wb-trio precedent);
+// duration starts at 1.0 and the stat_struct is NOT accumulated.
+void twopassZeroStats(FirstpassStatsCarrier* section);
+void accumulateStats(FirstpassStatsCarrier* section, const FirstpassStatsCarrier* frame);
 
 // frame_max_bits (pass2_strategy.c:55-58): verbatim; the
 // enc_ctx->two_pass_cfg.vbrmax_section wall threads. CLIP3(0, max,

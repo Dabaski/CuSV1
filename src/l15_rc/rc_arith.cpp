@@ -3519,4 +3519,186 @@ void isNewGfGroup(PcsCarrier& pcs, GfGroupPocView* gfGroup, bool incompMgFrame) 
     }
 }
 
+// ---- A9D: pass2_strategy.c (the rc-param derivation and the pass inits) ----
+
+// svt_av1_twopass_zero_stats (firstpass.c:133-139): the duplicated l9 twin.
+void twopassZeroStats(FirstpassStatsCarrier* section) {
+    section->frame = 0.0;
+    section->codedError = 0.0;
+    section->count = 0.0;
+    section->duration = 1.0;
+    section->statStruct = StatStructCarrier{};
+}
+
+// svt_av1_accumulate_stats (firstpass.c:141-146): the duplicated l9 twin.
+void accumulateStats(FirstpassStatsCarrier* section, const FirstpassStatsCarrier* frame) {
+    section->frame += frame->frame;
+    section->codedError += frame->codedError;
+    section->count += frame->count;
+    section->duration += frame->duration;
+}
+
+// svt_aom_set_rc_param (pass2_strategy.c:906-949): verbatim.
+void setRcParam(bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight, int encoderBitDepth,
+                int vbrMinSectionPct, int vbrMaxSectionPct, int rateControlMode, int minQpAllowed,
+                int maxQpAllowed, bool gopConstraintRc, int staticOverShootPct, int staticUnderShootPct,
+                int staticMaximumBufferMs, int staticStartingBufferMs, int staticOptimalBufferMs,
+                int staticMaxIntraBitratePct, int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo,
+                RcConfig& rcCfg, int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode) {
+    if (firstPassDownsample) {
+        frameInfo.frameWidth = maxInputLumaWidth << 1;
+        frameInfo.frameHeight = maxInputLumaHeight << 1;
+        frameInfo.mbCols = ((maxInputLumaWidth + 16 - 1) / 16) << 1;
+        frameInfo.mbRows = ((maxInputLumaHeight + 16 - 1) / 16) << 1;
+    } else {
+        frameInfo.frameWidth = maxInputLumaWidth;
+        frameInfo.frameHeight = maxInputLumaHeight;
+        frameInfo.mbCols = (maxInputLumaWidth + 16 - 1) / 16;
+        frameInfo.mbRows = (maxInputLumaHeight + 16 - 1) / 16;
+    }
+    frameInfo.numMbs = frameInfo.mbCols * frameInfo.mbRows;
+    frameInfo.bitDepth = encoderBitDepth;
+    // input config from options
+    vbrminSection = vbrMinSectionPct;
+    vbrmaxSection = vbrMaxSectionPct;
+    rcCfg.mode = rateControlMode == kSvtAv1RcModeVbr ? kRcVbr
+        : (rateControlMode == kSvtAv1RcModeCbr ? kRcCbr : kRcQ);
+    rcCfg.bestAllowedQ = kQuantizerToQindex[minQpAllowed];
+    rcCfg.worstAllowedQ = kQuantizerToQindex[maxQpAllowed];
+
+    if (gopConstraintRc) {
+        rcCfg.overShootPct = 0;
+        rcCfg.underShootPct = 0;
+    } else {
+        rcCfg.overShootPct = staticOverShootPct;
+        rcCfg.underShootPct = staticUnderShootPct;
+    }
+    const bool isVbr = rcCfg.mode == kRcVbr;
+    rcCfg.maximumBufferSizeMs = isVbr ? 240000 : staticMaximumBufferMs;
+    rcCfg.startingBufferLevelMs = isVbr ? 60000 : staticStartingBufferMs;
+    rcCfg.optimalBufferLevelMs = isVbr ? 60000 : staticOptimalBufferMs;
+
+    rcCfg.maxIntraBitratePct = staticMaxIntraBitratePct;
+    rcCfg.maxInterBitratePct = staticMaxInterBitratePct;
+
+    sframeDist = 0;  // sf_cfg.sframe_dist (the static_config echo)
+    sframeMode = 0;  // sf_cfg.sframe_mode
+}
+
+// svt_av1_init_single_pass_lap (pass2_strategy.c:971-995): verbatim.
+void initSinglePassLap(TwoPassCarrier& twopass, RcControl& rc, bool firstPassDownsample, int maxInputLumaWidth,
+                       int maxInputLumaHeight, int encoderBitDepth, int vbrMinSectionPct, int vbrMaxSectionPct,
+                       int rateControlMode, int minQpAllowed, int maxQpAllowed, bool gopConstraintRc,
+                       int staticOverShootPct, int staticUnderShootPct, int staticMaximumBufferMs,
+                       int staticStartingBufferMs, int staticOptimalBufferMs, int staticMaxIntraBitratePct,
+                       int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo, RcConfig& rcCfg,
+                       int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode) {
+    if (twopass.statsInCount == 0) {
+        return;
+    }
+
+    setRcParam(firstPassDownsample, maxInputLumaWidth, maxInputLumaHeight, encoderBitDepth, vbrMinSectionPct,
+               vbrMaxSectionPct, rateControlMode, minQpAllowed, maxQpAllowed, gopConstraintRc,
+               staticOverShootPct, staticUnderShootPct, staticMaximumBufferMs, staticStartingBufferMs,
+               staticOptimalBufferMs, staticMaxIntraBitratePct, staticMaxInterBitratePct, frameInfo, rcCfg,
+               vbrminSection, vbrmaxSection, sframeDist, sframeMode);
+
+    // This variable monitors how far behind the second ref update is lagging.
+
+    twopass.bitsLeft = 0;
+    twopass.modifiedErrorMin = 0.0;
+    twopass.modifiedErrorMax = 0.0;
+    twopass.modifiedErrorLeft = 0.0;
+
+    // Reset the vbr bits off target counters
+    rc.vbrBitsOffTarget = 0;
+    rc.vbrBitsOffTargetFast = 0;
+
+    rc.rateErrorEstimate = 0;
+
+    // Static sequence monitor variables.
+    twopass.kfZeroMotionPct = 100;
+}
+
+// read_stat_from_file (pass2_strategy.c:955-969): verbatim (the body walks
+// the in-memory buffer; see the header note on the const cast).
+void readStatFromFile(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf,
+                      FirstpassStatsCarrier* totalStats) {
+    std::uint64_t totalNumBits = 0;
+    std::uint64_t previousNumBits[kMaxTemporalLayers] = {0};
+    for (int i = 0; i < twopass.statsInCount; ++i) {
+        if (statsBuf[i].statStruct.totalNumBits == 0) {
+            statsBuf[i].statStruct.totalNumBits =
+                previousNumBits[statsBuf[i].statStruct.temporalLayerIndex];
+        }
+        previousNumBits[statsBuf[i].statStruct.temporalLayerIndex] = statsBuf[i].statStruct.totalNumBits;
+        totalNumBits += statsBuf[i].statStruct.totalNumBits;
+    }
+    totalStats->statStruct.totalNumBits = totalNumBits;
+}
+
+// svt_av1_init_second_pass (pass2_strategy.c:997-1058): verbatim.
+void initSecondPass(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf, FirstpassStatsCarrier* statsInEnd,
+                    FirstpassStatsCarrier* totalStats, FirstpassStatsCarrier* totalLeftStats, RcControl& rc,
+                    double& scsNewFramerate, std::int64_t targetBitRate, int numMbs, bool firstPassDownsample,
+                    int maxInputLumaWidth, int maxInputLumaHeight, int encoderBitDepth, int vbrMinSectionPct,
+                    int vbrMaxSectionPct, int rateControlMode, int minQpAllowed, int maxQpAllowed,
+                    bool gopConstraintRc, int staticOverShootPct, int staticUnderShootPct,
+                    int staticMaximumBufferMs, int staticStartingBufferMs, int staticOptimalBufferMs,
+                    int staticMaxIntraBitratePct, int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo,
+                    RcConfig& rcCfg, int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode) {
+    if (statsInEnd == nullptr) {
+        return;
+    }
+    {
+        twopassZeroStats(statsInEnd);
+        std::uint64_t totalNumBits = 0;
+
+        for (int i = 0; i < twopass.statsInCount; ++i) {
+            accumulateStats(statsInEnd, &statsBuf[i]);
+            totalNumBits += statsBuf[i].statStruct.totalNumBits;
+        }
+        statsInEnd->statStruct.totalNumBits = totalNumBits;
+    }
+    setRcParam(firstPassDownsample, maxInputLumaWidth, maxInputLumaHeight, encoderBitDepth, vbrMinSectionPct,
+               vbrMaxSectionPct, rateControlMode, minQpAllowed, maxQpAllowed, gopConstraintRc,
+               staticOverShootPct, staticUnderShootPct, staticMaximumBufferMs, staticStartingBufferMs,
+               staticOptimalBufferMs, staticMaxIntraBitratePct, staticMaxInterBitratePct, frameInfo, rcCfg,
+               vbrminSection, vbrmaxSection, sframeDist, sframeMode);
+    *totalStats = *statsInEnd;
+    *totalLeftStats = *totalStats;
+
+    const double frameRate = 10000000.0 * totalStats->count / totalStats->duration;
+    // Each frame can have a different duration, as the frame rate in the
+    // source isn't guaranteed to be constant. The frame rate prior to the
+    // first frame encoded in the second pass is a guess. However, the sum
+    // duration is not. It is calculated based on the actual durations of all
+    // frames from the first pass.
+    av1NewFramerate(rc, scsNewFramerate, frameRate, targetBitRate, vbrmaxSection, numMbs);
+    twopass.bitsLeft = (std::int64_t)(totalStats->duration * (std::int64_t)targetBitRate / 10000000.0);
+    readStatFromFile(twopass, statsBuf, totalStats);
+
+    // Scan the first pass file and calculate a modified total error based
+    // upon the bias/power function used to allocate bits.
+    {
+        const double avgError = totalStats->codedError / (totalStats->count < 0 ? totalStats->count - 0.000001
+                                                                               : totalStats->count + 0.000001);
+        double modifiedErrorTotal = 0.0;
+        twopass.modifiedErrorMin = (avgError * (double)vbrminSection) / 100;
+        twopass.modifiedErrorMax = (avgError * (double)vbrmaxSection) / 100;
+        for (int i = 0; i < twopass.statsInCount; ++i) {
+            modifiedErrorTotal += calculateModifiedErr(twopass.hasTotalStats, statsBuf[i].statStruct.totalNumBits);
+        }
+        twopass.modifiedErrorLeft = modifiedErrorTotal;
+    }
+
+    // Reset the vbr bits off target counters
+    rc.vbrBitsOffTarget = 0;
+    rc.vbrBitsOffTargetFast = 0;
+    rc.rateErrorEstimate = 0;
+
+    // Static sequence monitor variables.
+    twopass.kfZeroMotionPct = 100;
+}
+
 } // namespace l15_rc
