@@ -1,4 +1,4 @@
-#include <doctest.h>
+﻿#include <doctest.h>
 #include <cstdint>
 #include <vector>
 
@@ -147,4 +147,117 @@ TEST_CASE("extendFrame/copyTile highbd dispatch widens to lowbd at bd 8") {
     for (std::int32_t r = 0; r < h; ++r)
         for (std::int32_t c = 0; c < w; ++c)
             CHECK(dh0[r * 10 + c] == dl0[r * 10 + c]);
+}
+
+namespace {
+
+// Fill the extended selfguided window (rows -3..h+2, cols -3..w+2 around
+// the content pointer) with one constant value, uint8 and widened uint16.
+void fillConstWindow(std::uint8_t* l, std::uint16_t* hp, std::int32_t w, std::int32_t h, std::int32_t s,
+    std::uint16_t v) {
+    for (std::int32_t r = -3; r < h + 3; ++r)
+        for (std::int32_t c = -3; c < w + 3; ++c) {
+            l[r * s + c] = static_cast<std::uint8_t>(v & 0xFF);
+            hp[r * s + c] = v;
+        }
+}
+
+} // namespace
+
+// svt_av1_selfguided_restoration_c (restoration.c:893-:899): the highbd
+// staging branch reads dgd16 = CONVERT_TO_SHORTPTR(dgd8). The unpatched
+// tree SKIPS the staging under NDEBUG (the assert compiles out) and the
+// boxsums read the PREVIOUS lowbd call's stack residue - the test poisons
+// that residue with a DIFFERENT constant content first (V=7 -> flt1 112,
+// derived below) so the defect shows as 112 != 704.
+//
+// Constant-plane transcript at bd 8 (eps 0: r = {2,1}; the SLOW filter
+// radius_idx 1 -> r = 1, s[1] = 140):
+//   boxsum r=1 interior 3x3: a' = RPOT(9V^2, 0) = 9V^2, b' = RPOT(9V, 0) = 9V
+//   p = a'*9 - b'^2 = 81V^2 - 81V^2 = 0 for ANY constant plane
+//   -> z = RPOT(0*s, 20) = 0 -> A = xByXplus1[0] = 1
+//   B = RPOT((256-1)*b'*oneByX[8]=455, 12)
+//   flt1 = RPOT(32*(V+B), 9) (slow 3x3 kernel: a = 32*1, b = 32*B, nb = 5)
+//   V=7:  b' = 63,  B = 1782,  flt1 = 112
+//   V=44: b' = 396, B = 11216, flt1 = 704
+TEST_CASE("selfguidedRestoration hbd staging reads its own window (residue poison)") {
+    const std::int32_t w = 8, h = 6, s = 20;
+    std::vector<std::uint8_t> low((h + 6) * s + 6, 0x5A);
+    std::vector<std::uint16_t> high((h + 6) * s + 6, 0x5A5A);
+    std::uint8_t* l = low.data() + 3 * s + 3;
+    std::uint16_t* hp = high.data() + 3 * s + 3;
+    std::vector<std::int32_t> flt0(w * h, 0x7ABCDEF0);
+    std::vector<std::int32_t> flt1(w * h, 0x7ABCDEF0);
+
+    // 1) lowbd V=7: stages the residue (all 7) and computes flt1 = 112.
+    fillConstWindow(l, hp, w, h, s, 7);
+    l10_filters::restoration::selfguidedRestoration(l, w, h, s, flt0.data(), flt1.data(), w, 0, 8, 0);
+    CHECK(flt1[0] == 112);
+
+    // 2) hbd V=44: MUST stage its own window (all 44) -> flt1 = 704. The
+    // unpatched tree reads the step-1 residue -> 112 -> RED.
+    fillConstWindow(l, hp, w, h, s, 44);
+    l10_filters::restoration::selfguidedRestoration(reinterpret_cast<const std::uint8_t*>(hp), w, h, s, flt0.data(),
+        flt1.data(), w, 0, 8, 1);
+    CHECK(flt1[0] == 704);
+
+    // 3) the widening oracle: the same content through the lowbd path now
+    //    gives the same outputs (the hbd staging read is value-exact).
+    l10_filters::restoration::selfguidedRestoration(l, w, h, s, flt0.data(), flt1.data(), w, 0, 8, 0);
+    for (std::int32_t k = 0; k < w * h; ++k) {
+        CHECK(flt1[k] == 704);
+    }
+}
+
+// svt_apply_selfguided_restoration_c highbd (:941 read, :955-:956 write).
+// eps 11 (r = {0,1}, s[1] = 1618), xqd = {0,0} -> xq = {0, 128}.
+// Constant-plane transcript at bd 10 (the SLOW filter, radius_idx 1 ->
+// r = 1, interior 3x3 boxsums; the estimation pass shifts a'/b' by bd but
+// the B NEW product uses the RAW boxsum AND is uint32 arithmetic - the
+// reference's own wrap at 2^32 is pinned here):
+//   A_raw = 9V^2, B_raw = 9V; a' = RPOT(A_raw, 2(bd-8)), b' = RPOT(B_raw, bd-8)
+//   p = a'*9 - b'^2 = 0 for a constant plane (both shifts divide exactly)
+//   -> z = 0 -> A = xByXplus1[0] = 1
+//   P = (255 * B_raw * 455) mod 2^32   (uint32 product, reference wrap)
+//   B = RPOT(P, 12)
+//   flt1 = RPOT(32*(V + B), 9)   (slow 3x3 kernel: a = 32*1, b = 32*B, nb = 5)
+//   v2 = u<<7 + 128*(flt1-u) = 128*flt1 exactly (xq1 = 2^7, u = V<<4)
+//   out = clip(RPOT(128*flt1, 11), bd)
+//   V=44:    P = 11486475,        B = 2804?  no: 255*396*455 = 45945900,
+//            B = RPOT(45945900,12) = 11216, flt1 = 704,   out = 44
+//   V=300:   P = 313267500,       B = 76481, flt1 = 4803,  out = 300
+//   V=5000:  P = 5221125000 mod 2^32 = 926157704, B = 226120,
+//            flt1 = 14445, out = 903   <- the wrap pin
+//   V=10000: P = 10442250000 mod 2^32 = 1852315408, B = 452226,
+//            flt1 = 28891, out = clip(1802, 10) = 1023 <- the clip pin
+// A truncating staging read (300&0xFF = 44) reproduces 44, not 300; the
+// V=44 plane truncated to 232 produces 1023, not 44; V=10000 truncated to
+// 16 produces 16, not 1023.
+TEST_CASE("applySelfguidedRestoration hbd read/write bd 10 transcript + poison") {
+    const std::int32_t w = 4, h = 3, s = 16;
+    std::vector<std::uint8_t> low((h + 6) * s + 6, 0x5A);
+    std::vector<std::uint16_t> high((h + 6) * s + 6, 0x5A5A);
+    std::uint8_t* l = low.data() + 3 * s + 3;
+    std::uint16_t* hp = high.data() + 3 * s + 3;
+    std::vector<std::int32_t> flt0(w * h, 0);
+    std::vector<std::int32_t> flt1(w * h, 0);
+    std::vector<std::int32_t> tmpbuf(2 * l10_filters::restoration::restorationUnitpelsMax, 0x7ABCDEF0);
+    const std::int32_t xqd[2] = {0, 0};
+
+    // residue poison: lowbd constant V=7
+    fillConstWindow(l, hp, w, h, s, 7);
+    l10_filters::restoration::selfguidedRestoration(l, w, h, s, flt0.data(), flt1.data(), w, 0, 8, 0);
+
+    const std::uint16_t vs[4] = {44, 300, 5000, 10000};
+    const std::int32_t expected[4] = {44, 300, 903, 1023};
+    for (int pass = 0; pass < 4; ++pass) {
+        fillConstWindow(l, hp, w, h, s, vs[pass]);
+        std::vector<std::uint16_t> dst((h - 1) * s + w + 8, 0xBEEF);
+        std::uint16_t* dp = dst.data() + 2;
+        l10_filters::restoration::applySelfguidedRestoration(reinterpret_cast<const std::uint8_t*>(hp), w, h, s, 11,
+            xqd, reinterpret_cast<std::uint8_t*>(dp), s, tmpbuf.data(), 10, 1);
+        for (std::int32_t r = 0; r < h; ++r)
+            for (std::int32_t c = 0; c < w; ++c)
+                CHECK(dp[r * s + c] == expected[pass]);
+    }
 }

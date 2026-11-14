@@ -505,8 +505,8 @@ void selfguidedRestorationInternal(std::int32_t* dgd, std::int32_t width, std::i
 
 // svt_av1_selfguided_restoration_c (restoration.c:886-:922). 1:1: the
 // dgd32 staging copy (rows/cols -3..+3 beyond the content window), then
-// the r[0]/r[1] skip pair. The highbd staging branch is named-parked
-// (CONVERT_TO_SHORTPTR; unreachable in our 8-bit emission).
+// the r[0]/r[1] skip pair. The highbd staging branch reads the uint16
+// plane aliased through the uint8 param (LR2 park resolves).
 void selfguidedRestoration(const std::uint8_t* dgd8, std::int32_t width, std::int32_t height,
     std::int32_t dgd_stride, std::int32_t* flt0, std::int32_t* flt1, std::int32_t flt_stride,
     std::int32_t sgr_params_idx, std::int32_t bit_depth, std::int32_t highbd) {
@@ -515,7 +515,12 @@ void selfguidedRestoration(const std::uint8_t* dgd8, std::int32_t width, std::in
     std::int32_t*      dgd32        = dgd32_ + dgd32_stride * sgrprojBorderVert + sgrprojBorderHorz;
 
     if (highbd) {
-        assert(0 && "highbd restoration path parked (LR2)");
+        const std::uint16_t* dgd16 = reinterpret_cast<const std::uint16_t*>(dgd8);
+        for (std::int32_t i = -sgrprojBorderVert; i < height + sgrprojBorderVert; ++i) {
+            for (std::int32_t j = -sgrprojBorderHorz; j < width + sgrprojBorderHorz; ++j) {
+                dgd32[i * dgd32_stride + j] = dgd16[i * dgd_stride + j];
+            }
+        }
     } else {
         for (std::int32_t i = -sgrprojBorderVert; i < height + sgrprojBorderVert; ++i) {
             for (std::int32_t j = -sgrprojBorderHorz; j < width + sgrprojBorderHorz; ++j) {
@@ -544,8 +549,8 @@ void selfguidedRestoration(const std::uint8_t* dgd8, std::int32_t width, std::in
 // filters into tmpbuf (flt1 = flt0 + RESTORATION_UNITPELS_MAX), the
 // decodeXq composition, then the per-pixel u/v accumulation, the
 // ROUND_POWER_OF_TWO at SGRPROJ_PRJ_BITS + SGRPROJ_RST_BITS and the
-// clip_pixel_highbd write. The highbd reads/writes are named-parked
-// (CONVERT_TO_SHORTPTR; unreachable in our 8-bit emission).
+// clip_pixel_highbd write. The highbd reads/writes go through the uint16
+// alias (the LR2 park resolves).
 void applySelfguidedRestoration(const std::uint8_t* dat8, std::int32_t width, std::int32_t height,
     std::int32_t stride, std::int32_t eps, const std::int32_t* xqd, std::uint8_t* dst8,
     std::int32_t dst_stride, std::int32_t* tmpbuf, std::int32_t bit_depth, std::int32_t highbd) {
@@ -557,15 +562,17 @@ void applySelfguidedRestoration(const std::uint8_t* dat8, std::int32_t width, st
     const SgrParamsType* const params = &sgrParams[eps];
     std::int32_t xq[2];
     decodeXq(xqd, xq, params);
+    // The uint16 planes alias through the uint8 params with the port-wide
+    // REAL-ADDRESS convention (A8R highbdPixelProjError precedent: cast
+    // once, then index in elements - the reference's CONVERT_TO_SHORTPTR
+    // half-address form becomes this).
+    const std::uint16_t* dat16 = highbd ? reinterpret_cast<const std::uint16_t*>(dat8) : nullptr;
+    std::uint16_t* dst16 = highbd ? reinterpret_cast<std::uint16_t*>(dst8) : nullptr;
     for (std::int32_t i = 0; i < height; ++i) {
         for (std::int32_t j = 0; j < width; ++j) {
-            const std::int32_t  k      = i * width + j;
-            std::uint8_t*       dst8ij = dst8 + i * dst_stride + j;
-            const std::uint8_t* dat8ij = dat8 + i * stride + j;
+            const std::int32_t k = i * width + j;
 
-            // const uint16_t pre_u = highbd ? *CONVERT_TO_SHORTPTR(dat8ij)
-            // : *dat8ij; highbd parked (named).
-            const std::uint16_t pre_u = *dat8ij;
+            const std::uint16_t pre_u = highbd ? dat16[i * stride + j] : dat8[i * stride + j];
             const std::int32_t  u     = (std::int32_t)pre_u << sgrprojRstBits;
             std::int32_t        v     = u << sgrprojPrjBits;
             // r == 0 => that filter was skipped in selfguidedRestoration
@@ -580,9 +587,9 @@ void applySelfguidedRestoration(const std::uint8_t* dat8, std::int32_t width, st
 
             const std::uint16_t out = clipPixelHighbd(w, bit_depth);
             if (highbd) {
-                assert(0 && "highbd restoration path parked (LR2)");
+                dst16[i * dst_stride + j] = out;
             } else {
-                *dst8ij = (std::uint8_t)out;
+                dst8[i * dst_stride + j] = (std::uint8_t)out;
             }
         }
     }
