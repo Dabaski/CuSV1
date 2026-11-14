@@ -540,4 +540,40 @@ void injectNewCandidatesLightPd1(InterInjectedCandidate* candArray, std::uint32_
                                   bool allowBipred, bool isIntraBordered, bool useNeighbouringEnabled,
                                   bool corruptedMvCheck, InjectedMvCarrier& injected);
 
+// get_ref_frame_idx (inter_prediction.h:511-515) over ref_type_to_ref_idx
+// (:511, 8 rows {0,0,1,2,3,0,1,2}). Module-boundary carry.
+std::uint8_t getRefFrameIdx(MvReferenceFrame refType);
+
+// The nested-injector wall counters (the inj_non_simple_modes / inj_comp_
+// modes calls the pme injector makes thread as counts - the walls are
+// named, their call sites pinned).
+struct InjectorWallCalls {
+    std::uint32_t nonSimpleModeCalls;  // the :2802 inj_non_simple_modes wall
+    std::uint32_t compModeCalls;       // the :2847 inj_comp_modes wall
+};
+
+// inject_pme_candidates (mode_decision.c:2761-2859). Walls threaded: the
+// ref_frame_type_arr + count, ctx->valid_pme_mv / ctx->best_pme_mv as the
+// two [2][7] arrays, the A4M-8 choose-best bundle, the wm_sample_info num
+// column, corrupted_mv_check, inter_comp_ctrls.do_pme, the landed
+// InjectedMvCarrier, and the InjectorWallCalls counters. The
+// determine_compound_mode(MD_COMP_AVG) call (:2841) runs through the landed
+// A4M-3 twin on a temp carrier merged into the candidate.
+void injectPmeCandidates(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                          std::uint32_t maxCanCount, const MvReferenceFrame* refFrameTypeArr,
+                          std::uint32_t totRefFrameTypes, const std::uint8_t validPmeMv[2][REFS_PER_FRAME_MV],
+                          const Mv bestPmeMv[2][REFS_PER_FRAME_MV], bool allowBipred,
+                          const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                          const std::uint8_t* refMvCount, const ChooseBestMvCtx& chooseBest,
+                          const std::uint8_t* wmSampleInfoNum, bool corruptedMvCheck, bool doPme,
+                          InjectedMvCarrier& injected, InjectorWallCalls& wallCalls);
+
+// inject_sframe_backup_candidate (mode_decision.c:3507-3539): the zero-MV
+// BWD candidate; NO injected-list bookkeeping (the reference writes none).
+void injectSframeBackupCandidate(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                                  std::uint32_t maxCanCount,
+                                  const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                                  const std::uint8_t* refMvCount, const ChooseBestMvCtx& chooseBest,
+                                  const std::uint8_t* wmSampleInfoNum, bool corruptedMvCheck);
+
 }  // namespace l16_rdo

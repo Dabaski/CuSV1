@@ -1834,3 +1834,229 @@ TEST_CASE("l16_rdo injectNewCandidatesLightPd1 emits the ME-driven sequence") {
         CHECK(!foundCorrupt);
     }
 }
+
+// ---------------------------------------------------------------------------
+// A4M-12: inject_pme_candidates (mode_decision.c:2761-2859) +
+// inject_sframe_backup_candidate (:3507-3539).
+// ---------------------------------------------------------------------------
+using l16_rdo::InjectorWallCalls;
+using l16_rdo::injectPmeCandidates;
+using l16_rdo::injectSframeBackupCandidate;
+using l16_rdo::getRefFrameIdx;
+using l16_rdo::REFS_PER_FRAME_MV;
+
+
+TEST_CASE("l16_rdo injectPmeCandidates emits the PME-driven rows and counts the walls") {
+    // mode_decision.c:2761-2859. The ctx->valid_pme_mv / best_pme_mv walls
+    // thread as the two [2][7] arrays; the inj_non_simple_modes /
+    // inj_comp_modes nested walls count through InjectorWallCalls.
+    CandidateMv stack[29][MAX_REF_MV_STACK_SIZE_MD];
+    for (int r = 0; r < 29; ++r) {
+        for (int s = 0; s < MAX_REF_MV_STACK_SIZE_MD; ++s) {
+            stack[r][s].this_mv.as_int = 0;
+            stack[r][s].comp_mv.as_int = 0;
+            stack[r][s].weight = 1000;
+        }
+    }
+    std::uint8_t count[29];
+    for (int r = 0; r < 29; ++r) {
+        count[r] = 3;
+    }
+    std::uint8_t wmNum[29];
+    for (int r = 0; r < 29; ++r) {
+        wmNum[r] = 6;
+    }
+    const std::int32_t dummyCost[4] = {0, 0, 0, 0};
+    const std::int32_t* dummyStack[2] = {dummyCost, dummyCost};
+    const std::int32_t drlFac[DRL_MODE_CONTEXTS_MD][2] = {{10, 20}, {10, 20}, {10, 20}};
+    ChooseBestMvCtx choose;
+    choose.shutFastRate = false;
+    choose.approxInterRate = 1;
+    choose.nmvVecCost = dummyCost;
+    choose.nmvCostStack = dummyStack;
+    choose.drlModeFacBits = drlFac;
+
+    Mv bestPme[2][REFS_PER_FRAME_MV];
+    for (int l = 0; l < 2; ++l) {
+        for (int r2 = 0; r2 < REFS_PER_FRAME_MV; ++r2) {
+            bestPme[l][r2].as_int = 0;
+        }
+    }
+    bestPme[0][0].as_int = (std::uint32_t)(70 | (80 << 16));
+    bestPme[1][2].as_int = (std::uint32_t)(90 | (100 << 16));  // ALTREF = list 1, ref idx 2
+    std::uint8_t validPme[2][REFS_PER_FRAME_MV] = {};
+    validPme[0][0] = 1;
+    validPme[1][2] = 1;
+
+    const l16_rdo::MvReferenceFrame refArr[2] = {1, 16};
+    InterInjectedCandidate cands[8];
+    for (int i = 0; i < 8; ++i) {
+        cands[i] = InterInjectedCandidate{};
+        cands[i].mode = -7;
+    }
+    std::uint32_t tot = 0;
+    InjectedMvCarrier inj;
+    inj.injectedMvCount = 0;
+    inj.corruptedMvCheck = 0;
+    inj.redundCtrl.scoreTh = 0;
+    inj.redundCtrl.magTh = 0;
+    InjectorWallCalls walls;
+    walls.nonSimpleModeCalls = 0;
+    walls.compModeCalls = 0;
+
+    injectPmeCandidates(cands, &tot, 8, refArr, 2, validPme, bestPme, true, stack, count, choose, wmNum,
+                        false, true, inj, walls);
+    CHECK(tot == 2);
+    CHECK(inj.injectedMvCount == 2);
+    CHECK(inj.injectedRefTypes[0] == 1);
+    CHECK(inj.injectedRefTypes[1] == 16);
+    CHECK(walls.nonSimpleModeCalls == 1);  // the unipred row's II/OBMC/WM wall
+    CHECK(walls.compModeCalls == 1);       // the do_pme row's inj_comp_modes wall
+
+    CHECK(cands[0].mode == NEWMV_PM);
+    CHECK(cands[0].motionMode == SIMPLE_TRANSLATION);
+    CHECK(cands[0].skipModeAllowed == false);
+    CHECK(cands[0].drlIndex == 0);
+    CHECK((std::uint32_t)cands[0].mv[0] == (std::uint32_t)(70 | (80 << 16)));
+    CHECK(cands[0].refFrame[0] == 1);
+    CHECK(cands[0].refFrame[1] == NONE_FRAME_MV);
+    CHECK(cands[0].predMv[0] == 0);
+    CHECK(cands[0].numProjRef == 6);
+    CHECK(cands[0].useIntrabc == 0);
+    CHECK(cands[0].isInterintraUsed == 0);
+
+    CHECK(cands[1].mode == NEW_NEWMV_PM);
+    CHECK((std::uint32_t)cands[1].mv[0] == (std::uint32_t)(70 | (80 << 16)));
+    CHECK((std::uint32_t)cands[1].mv[1] == (std::uint32_t)(90 | (100 << 16)));
+    CHECK(cands[1].refFrame[0] == 1);
+    CHECK(cands[1].refFrame[1] == ALTREF_FRAME_MV);
+    CHECK(cands[1].predMv[0] == 0);
+    CHECK(cands[1].predMv[1] == 0);
+    CHECK(cands[1].compGroupIdx == 0);
+    CHECK(cands[1].compoundIdx == 1);
+    CHECK(cands[1].compoundType == COMPOUND_AVERAGE);
+
+    // The validity gate: no valid PME MV -> nothing injects.
+    {
+        std::uint8_t zeroValid[2][REFS_PER_FRAME_MV] = {};
+        InterInjectedCandidate c2[8];
+        for (int i = 0; i < 8; ++i) {
+            c2[i] = InterInjectedCandidate{};
+            c2[i].mode = -7;
+        }
+        std::uint32_t t2 = 0;
+        InjectedMvCarrier i2;
+        i2.injectedMvCount = 0;
+        i2.corruptedMvCheck = 0;
+        i2.redundCtrl.scoreTh = 0;
+        i2.redundCtrl.magTh = 0;
+        InjectorWallCalls w2;
+        w2.nonSimpleModeCalls = 0;
+        w2.compModeCalls = 0;
+        injectPmeCandidates(c2, &t2, 8, refArr, 2, zeroValid, bestPme, true, stack, count, choose, wmNum,
+                            false, true, i2, w2);
+        CHECK(t2 == 0);
+        CHECK(w2.nonSimpleModeCalls == 0);
+        CHECK(w2.compModeCalls == 0);
+    }
+    // do_pme = 0: the candidate still injects but the inj_comp_modes wall
+    // is not called.
+    {
+        InterInjectedCandidate c2[8];
+        for (int i = 0; i < 8; ++i) {
+            c2[i] = InterInjectedCandidate{};
+            c2[i].mode = -7;
+        }
+        std::uint32_t t2 = 0;
+        InjectedMvCarrier i2;
+        i2.injectedMvCount = 0;
+        i2.corruptedMvCheck = 0;
+        i2.redundCtrl.scoreTh = 0;
+        i2.redundCtrl.magTh = 0;
+        InjectorWallCalls w2;
+        w2.nonSimpleModeCalls = 0;
+        w2.compModeCalls = 0;
+        injectPmeCandidates(c2, &t2, 8, refArr, 2, validPme, bestPme, true, stack, count, choose, wmNum,
+                            false, false, i2, w2);
+        CHECK(t2 == 2);
+        CHECK(w2.compModeCalls == 0);
+        CHECK(w2.nonSimpleModeCalls == 1);
+    }
+}
+
+TEST_CASE("l16_rdo injectSframeBackupCandidate pins the BWD zero-MV row and the in-if count write") {
+    // mode_decision.c:3507-3539. The zero-MV BWD candidate; the
+    // (*candidate_total_cnt) write is INSIDE the validity if (:3537).
+    CandidateMv stack[29][MAX_REF_MV_STACK_SIZE_MD];
+    for (int r = 0; r < 29; ++r) {
+        for (int s = 0; s < MAX_REF_MV_STACK_SIZE_MD; ++s) {
+            stack[r][s].this_mv.as_int = 0;
+            stack[r][s].comp_mv.as_int = 0;
+            stack[r][s].weight = 1000;
+        }
+    }
+    std::uint8_t count[29];
+    for (int r = 0; r < 29; ++r) {
+        count[r] = 3;
+    }
+    std::uint8_t wmNum[29];
+    for (int r = 0; r < 29; ++r) {
+        wmNum[r] = 3;
+    }
+    const std::int32_t dummyCost[4] = {0, 0, 0, 0};
+    const std::int32_t* dummyStack[2] = {dummyCost, dummyCost};
+    const std::int32_t drlFac[DRL_MODE_CONTEXTS_MD][2] = {{10, 20}, {10, 20}, {10, 20}};
+    ChooseBestMvCtx choose;
+    choose.shutFastRate = false;
+    choose.approxInterRate = 1;
+    choose.nmvVecCost = dummyCost;
+    choose.nmvCostStack = dummyStack;
+    choose.drlModeFacBits = drlFac;
+
+    InterInjectedCandidate cands[4];
+    for (int i = 0; i < 4; ++i) {
+        cands[i] = InterInjectedCandidate{};
+        cands[i].mode = -7;
+        cands[i].drlIndex = 9;
+    }
+    std::uint32_t tot = 0;
+    injectSframeBackupCandidate(cands, &tot, 4, stack, count, choose, wmNum, false);
+    CHECK(tot == 1);
+    CHECK(cands[0].mode == NEWMV_PM);
+    CHECK(cands[0].motionMode == SIMPLE_TRANSLATION);
+    CHECK(cands[0].skipModeAllowed == false);
+    CHECK(cands[0].drlIndex == 0);
+    CHECK(cands[0].mv[0] == 0);
+    CHECK(cands[0].refFrame[0] == BWDREF_FRAME_MV);  // svt_get_ref_frame_type(REF_LIST_1, 0)
+    CHECK(cands[0].refFrame[1] == NONE_FRAME_MV);
+    CHECK(cands[0].predMv[0] == 0);
+    CHECK(cands[0].transformType == 0);      // DCT_DCT
+    CHECK(cands[0].transformTypeUv == 0);    // DCT_DCT
+    CHECK(cands[0].numProjRef == 3);
+    CHECK(cands[0].useIntrabc == 0);
+    CHECK(cands[0].isInterintraUsed == 0);
+
+    // The corrupted gate with a far pred: stack[5] all (17000, 0) makes
+    // best_pred_mv[0] = (17000, 0) -> is_valid_mv_diff fails -> NO count
+    // write (tot stays 0) and NO injected bookkeeping (this injector never
+    // writes the injected list), but the :3512 drl pre-write is visible.
+    for (int s = 0; s < MAX_REF_MV_STACK_SIZE_MD; ++s) {
+        stack[5][s].this_mv.as_int = (std::uint32_t)(17000 | (0 << 16));
+    }
+    InterInjectedCandidate c2[4];
+    for (int i = 0; i < 4; ++i) {
+        c2[i] = InterInjectedCandidate{};
+        c2[i].mode = -7;
+        c2[i].drlIndex = 9;
+    }
+    std::uint32_t t2 = 0;
+    injectSframeBackupCandidate(c2, &t2, 4, stack, count, choose, wmNum, true);
+    CHECK(t2 == 0);
+    CHECK(c2[0].drlIndex == 0);  // the :3512 pre-write ran
+    CHECK(c2[0].mode == -7);     // nothing else was written
+    // corrupted_mv_check = 0: the same far pred injects (the ! gate arm).
+    std::uint32_t t3 = 0;
+    injectSframeBackupCandidate(c2, &t3, 4, stack, count, choose, wmNum, false);
+    CHECK(t3 == 1);
+    CHECK(c2[0].mode == NEWMV_PM);
+}
