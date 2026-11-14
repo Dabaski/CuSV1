@@ -819,6 +819,212 @@ void jntConvolve2dCopy(const std::uint8_t* src, std::int32_t srcStride, std::uin
     }
 }
 
+// svt_av1_highbd_convolve_x_sr_c, inter_prediction.c:734-:759. The clip is
+// bd-parameterized (clipPixelHighbd), the 8-bit twin's is hardwired 8.
+void highbdConvolveXsr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams, std::int32_t bd) {
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+    const std::int32_t bits = convolve::filterBits - convParams->round0;
+    (void)filterParamsY;
+    (void)subpelYQ4;
+
+    assert(bits >= 0);
+    assert((convolve::filterBits - convParams->round1) >= 0 ||
+           ((convParams->round0 + convParams->round1) == 2 * convolve::filterBits));
+
+    // horizontal filter
+    const std::int16_t* xFilter = convolve::getInterpFilterSubpelKernel(*filterParamsX, subpelXQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t res = 0;
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                res += xFilter[k] * src[y * srcStride + x - foHoriz + k];
+            }
+            res = roundPowerOfTwo(res, convParams->round0);
+            dst[y * dstStride + x] = static_cast<std::uint16_t>(clipPixelHighbd(roundPowerOfTwo(res, bits), bd));
+        }
+    }
+}
+
+// svt_av1_highbd_convolve_y_sr_c, inter_prediction.c:761-:785.
+void highbdConvolveYsr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams, std::int32_t bd) {
+    assert(filterParamsY);
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    (void)filterParamsX;
+    (void)subpelXQ4;
+    (void)convParams;
+
+    assert(convParams->round0 <= convolve::filterBits);
+    assert(((convParams->round0 + convParams->round1) <= (convolve::filterBits + 1)) ||
+           ((convParams->round0 + convParams->round1) == (2 * convolve::filterBits)));
+    // vertical filter
+    const std::int16_t* yFilter = convolve::getInterpFilterSubpelKernel(*filterParamsY, subpelYQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t res = 0;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                res += yFilter[k] * src[(y - foVert + k) * srcStride + x];
+            }
+            dst[y * dstStride + x] =
+                static_cast<std::uint16_t>(clipPixelHighbd(roundPowerOfTwo(res, convolve::filterBits), bd));
+        }
+    }
+}
+
+// svt_av1_highbd_convolve_2d_sr_c, inter_prediction.c:787-:829. The uint16
+// intermediate store and the int32 res are pinned by the J2 oracle.
+void highbdConvolve2dSr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                        std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                        const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                        ConvolveParams* convParams, std::int32_t bd) {
+    std::int16_t imBlock[(convolve::maxSbSize + kMaxFilterTap - 1) * convolve::maxSbSize];
+    std::int32_t imH = h + filterParamsY->taps - 1;
+    std::int32_t imStride = w;
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+    const std::int32_t bits = convolve::filterBits * 2 - convParams->round0 - convParams->round1;
+    assert(bits >= 0);
+
+    // horizontal filter
+    const std::uint16_t* srcHoriz = src - foVert * srcStride;
+    const std::int16_t* xFilter = convolve::getInterpFilterSubpelKernel(*filterParamsX, subpelXQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < imH; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = (1 << (bd + convolve::filterBits - 1));
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                sum += xFilter[k] * srcHoriz[y * srcStride + x - foHoriz + k];
+            }
+            assert(0 <= sum && sum < (1 << (bd + convolve::filterBits + 1)));
+            imBlock[y * imStride + x] = static_cast<std::int16_t>(static_cast<ConvBufType>(roundPowerOfTwo(sum, convParams->round0)));
+        }
+    }
+
+    // vertical filter
+    std::int16_t* srcVert = imBlock + foVert * imStride;
+    const std::int16_t* yFilter = convolve::getInterpFilterSubpelKernel(*filterParamsY, subpelYQ4 & convolve::subpelMask);
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = 1 << offsetBits;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                sum += yFilter[k] * srcVert[(y - foVert + k) * imStride + x];
+            }
+            assert(0 <= sum && sum < (1 << (offsetBits + 2)));
+            std::int32_t res = roundPowerOfTwo(sum, convParams->round1) -
+                ((1 << (offsetBits - convParams->round1)) + (1 << (offsetBits - convParams->round1 - 1)));
+            dst[y * dstStride + x] =
+                static_cast<std::uint16_t>(clipPixelHighbd(roundPowerOfTwo(res, bits), bd));
+        }
+    }
+}
+
+// svt_av1_highbd_convolve_2d_copy_sr_c, inter_prediction.c:716-:732.
+void highbdConvolve2dCopySr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                            std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                            const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                            std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                            std::int32_t bd) {
+    (void)filterParamsX;
+    (void)filterParamsY;
+    (void)subpelXQ4;
+    (void)subpelYQ4;
+    (void)convParams;
+    (void)bd;
+
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            dst[y * dstStride + x] = src[y * srcStride + x];
+        }
+    }
+}
+
+// svt_av1_highbd_convolve_2d_scale_c, inter_prediction.c:831-:906. The
+// SCALE_SUBPEL_BITS=10 stepping (x_step_qn/y_step_qn); the compound
+// branches carry dst16 in conv_params (use_dist_wtd_comp_avg or plain
+// average), all clipped at bd (clipPixelHighbd).
+void highbdConvolve2dScale(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                           std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                           const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                           std::int32_t subpelXQn, std::int32_t xStepQn, std::int32_t subpelYQn, std::int32_t yStepQn,
+                           ConvolveParams* convParams, std::int32_t bd) {
+    std::int16_t imBlock[(2 * convolve::maxSbSize + kMaxFilterTap) * convolve::maxSbSize];
+    const std::int32_t imH = (((h - 1) * yStepQn + subpelYQn) >> kScaleSubpelBits) + filterParamsY->taps;
+    std::int32_t imStride = w;
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+    ConvBufType* dst16 = convParams->dst;
+    const std::int32_t dst16Stride = convParams->dstStride;
+    const std::int32_t bits = convolve::filterBits * 2 - convParams->round0 - convParams->round1;
+    assert(bits >= 0);
+    // horizontal filter
+    const std::uint16_t* srcHoriz = src - foVert * srcStride;
+    for (std::int32_t y = 0; y < imH; ++y) {
+        std::int32_t xQn = subpelXQn;
+        for (std::int32_t x = 0; x < w; ++x, xQn += xStepQn) {
+            const std::uint16_t* srcX = &srcHoriz[xQn >> kScaleSubpelBits];
+            const std::int32_t xFilterIdx = (xQn & kScaleSubpelMask) >> kScaleExtraBits;
+            assert(xFilterIdx < convolve::subpelShifts);
+            const std::int16_t* xFilter = convolve::getInterpFilterSubpelKernel(*filterParamsX, xFilterIdx);
+            std::int32_t sum = (1 << (bd + convolve::filterBits - 1));
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                sum += xFilter[k] * srcX[k - foHoriz];
+            }
+            assert(0 <= sum && sum < (1 << (bd + convolve::filterBits + 1)));
+            imBlock[y * imStride + x] = static_cast<std::int16_t>(roundPowerOfTwo(sum, convParams->round0));
+        }
+        srcHoriz += srcStride;
+    }
+
+    // vertical filter
+    std::int16_t* srcVert = imBlock + foVert * imStride;
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    for (std::int32_t x = 0; x < w; ++x) {
+        std::int32_t yQn = subpelYQn;
+        for (std::int32_t y = 0; y < h; ++y, yQn += yStepQn) {
+            const std::int16_t* srcY = &srcVert[(yQn >> kScaleSubpelBits) * imStride];
+            const std::int32_t yFilterIdx = (yQn & kScaleSubpelMask) >> kScaleExtraBits;
+            assert(yFilterIdx < convolve::subpelShifts);
+            const std::int16_t* yFilter = convolve::getInterpFilterSubpelKernel(*filterParamsY, yFilterIdx);
+            std::int32_t sum = 1 << offsetBits;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                sum += yFilter[k] * srcY[(k - foVert) * imStride];
+            }
+            assert(0 <= sum && sum < (1 << (offsetBits + 2)));
+            ConvBufType res = static_cast<ConvBufType>(roundPowerOfTwo(sum, convParams->round1));
+            if (convParams->isCompound) {
+                if (convParams->doAverage) {
+                    std::int32_t tmp = dst16[y * dst16Stride + x];
+                    if (convParams->useDistWtdCompAvg) {
+                        tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                        tmp = tmp >> kDiffFactorLog2;
+                    } else {
+                        tmp += res;
+                        tmp = tmp >> 1;
+                    }
+                    // Subtract round offset and convolve round
+                    tmp = tmp -
+                        ((1 << (offsetBits - convParams->round1)) + (1 << (offsetBits - convParams->round1 - 1)));
+                    dst[y * dstStride + x] =
+                        static_cast<std::uint16_t>(clipPixelHighbd(roundPowerOfTwo(tmp, bits), bd));
+                } else {
+                    dst16[y * dst16Stride + x] = res;
+                }
+            } else {
+                // Subtract round offset and convolve round
+                std::int32_t tmp = res -
+                    ((1 << (offsetBits - convParams->round1)) + (1 << (offsetBits - convParams->round1 - 1)));
+                dst[y * dstStride + x] = static_cast<std::uint16_t>(clipPixelHighbd(roundPowerOfTwo(tmp, bits), bd));
+            }
+        }
+        ++srcVert;
+    }
+}
+
 // convolve_2d_for_intrabc, inter_prediction.c:1200-:1241. The NULL filter
 // pointer slots are only read when the matching subpel is nonzero, and the
 // dispatch is: both subpels -> 2d_sr, x only -> x_sr, else y_sr.
@@ -835,6 +1041,23 @@ void convolve2dForIntrabc(const std::uint8_t* src, std::int32_t srcStride, std::
         convolveXSR(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 8, 0, convParams);
     } else {
         convolveYSr(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 0, 8, convParams);
+    }
+}
+
+// highbd_convolve_2d_for_intrabc, inter_prediction.c:1243-:1257.
+void highbdConvolve2dForIntrabc(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                                std::int32_t dstStride, std::int32_t w, std::int32_t h, std::int32_t subpelXQ4,
+                                std::int32_t subpelYQ4, ConvolveParams* convParams, std::int32_t bd) {
+    const InterpFilterParams* filterParamsX =
+        subpelXQ4 ? &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)] : nullptr;
+    const InterpFilterParams* filterParamsY =
+        subpelYQ4 ? &convolve::interpFilterParamsList[static_cast<int>(convolve::InterpFilter::BILINEAR)] : nullptr;
+    if (subpelXQ4 != 0 && subpelYQ4 != 0) {
+        highbdConvolve2dSr(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 8, 8, convParams, bd);
+    } else if (subpelXQ4 != 0) {
+        highbdConvolveXsr(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 8, 0, convParams, bd);
+    } else {
+        highbdConvolveYsr(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 0, 8, convParams, bd);
     }
 }
 

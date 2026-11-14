@@ -1154,6 +1154,465 @@ void convCopy(int srcStride, const std::uint8_t* src, const jntoracle::Cfg& c,
     }
 }
 
+// ------------------------------------------------------------- A3E J2
+// The highbd sr convolve family (ip:716-:906) + highbd intrabc
+// (:1243-:1257). Primary oracle: the DERIVATION relationship - at bd=8
+// with uint16 planes carrying 8-bit values, every highbd kernel must
+// equal its landed 8-bit twin on the same data (the HB1 precedent).
+// Secondary: an independent scalar transcription at bd=10 with the
+// bd-shifted bias and the clip at (1 << bd) - 1.
+
+namespace hbdoracle {
+
+// LCG uint16 plane fill (values 0..(1<<bd)-1 by default).
+std::uint32_t lcg16(std::uint32_t& s) {
+    s = s * 1664525u + 1013904223u;
+    return (s >> 16) & 0xFFFF;
+}
+
+void fillPlane16(std::vector<std::uint16_t>& plane, int stride, int rows, int bd, std::uint32_t seedBase) {
+    std::uint32_t seed = seedBase;
+    const std::uint32_t vmax = (1u << bd) - 1;
+    plane.resize((size_t)stride * rows);
+    for (size_t i = 0; i < plane.size(); ++i) plane[i] = (std::uint16_t)(lcg16(seed) & vmax);
+}
+
+// The 8-bit twin's view of the same data (the derivation fixture's
+// reference side): copy the uint16 plane down to uint8 (all values < 256
+// at bd=8) and call the landed kernel.
+std::vector<std::uint8_t> downPlane(const std::vector<std::uint16_t>& p16, int stride, int rows) {
+    std::vector<std::uint8_t> p8((size_t)stride * rows);
+    for (size_t i = 0; i < p8.size(); ++i) p8[i] = (std::uint8_t)p16[i];
+    return p8;
+}
+
+} // namespace hbdoracle
+
+TEST_CASE("highbd_convolve_2d_copy_sr at bd=8 equals the 8-bit twin (ip:716-732 vs :434-449)") {
+    using namespace hbdoracle;
+    const struct {
+        int w, h;
+    } dims[] = {{8, 8}, {13, 5}, {4, 8}, {1, 3}, {16, 16}};
+    for (const auto& d : dims) {
+        std::vector<std::uint16_t> plane16;
+        const int stride = d.w + 16;
+        fillPlane16(plane16, stride, d.h + 16, 8, 0xA11CEu + (std::uint32_t)d.w * 5);
+        const std::uint16_t* src = plane16.data() + 8 * stride + 8;
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = convolve::filterBits;
+        cp.round1 = convolve::filterBits;
+        std::vector<std::uint16_t> dst16((size_t)d.w * d.h, 0x1234);
+        inter::highbdConvolve2dCopySr(src, stride, dst16.data(), d.w, d.w, d.h, nullptr, nullptr, 0, 0, &cp, 8);
+        std::vector<std::uint8_t> plane8 = downPlane(plane16, stride, d.h + 16);
+        std::vector<std::uint8_t> dst8((size_t)d.w * d.h, 0x56);
+        inter::convolve2dCopySr(plane8.data() + 8 * stride + 8, stride, dst8.data(), d.w, d.w, d.h, nullptr, nullptr,
+                                0, 0, &cp);
+        int bad = 0;
+        for (int y = 0; y < d.h; ++y)
+            for (int x = 0; x < d.w; ++x)
+                if (dst16[(size_t)y * d.w + x] != dst8[(size_t)y * d.w + x]) ++bad;
+        CHECK_MESSAGE(bad == 0, "copy derivation mismatch");
+        if (bad) {
+            for (int y = 0; y < d.h; ++y)
+                for (int x = 0; x < d.w; ++x) {
+                    if (dst16[(size_t)y * d.w + x] != dst8[(size_t)y * d.w + x])
+                        MESSAGE("copy deriv " << d.w << "x" << d.h << " at (" << y << "," << x << "): hbd "
+                                              << dst16[(size_t)y * d.w + x] << " lb " << (int)dst8[(size_t)y * d.w + x]);
+                }
+        }
+    }
+}
+
+// The independent scalar x-oracle for the highbd sr kernels: horizontal
+// pass only, res = round(sum, r0), then round(res, FB - r0), clip at bd.
+// At bd=8 with 8-bit-valued input this must also equal the 8-bit twin.
+void convXHbd(int stride, const std::uint16_t* src, const jntoracle::Cfg& c,
+              const convolve::InterpFilterParams* fx, std::vector<std::uint16_t>& out, int bd) {
+    using namespace jntoracle;
+    const int taps = fx->taps;
+    const int foH = taps / 2 - 1;
+    const int bits = kFb - c.round0;
+    const std::int16_t* xf = convolve::getInterpFilterSubpelKernel(*fx, c.subpelX & convolve::subpelMask);
+    out.assign((size_t)c.w * c.h, 0);
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            std::int32_t res = 0;
+            for (int k = 0; k < taps; ++k) res += xf[k] * src[y * stride + x - foH + k];
+            res = (res + ((1 << c.round0) >> 1)) >> c.round0;
+            std::int32_t v = (res + ((1 << bits) >> 1)) >> bits;
+            v = v < 0 ? 0 : (v > ((1 << bd) - 1) ? ((1 << bd) - 1) : v);
+            out[(size_t)y * c.w + x] = (std::uint16_t)v;
+        }
+    }
+}
+
+TEST_CASE("highbd_convolve_x_sr: derivation at bd=8, scalar oracle at bd=10 (ip:734-759)") {
+    using namespace hbdoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    const jntoracle::Cfg cfgs[] = {{8, 8, 4, 0, 7, 7, 0, 0, 0, 0},
+                                   {13, 5, 1, 0, 7, 7, 0, 0, 0, 0},
+                                   {4, 8, 15, 0, 7, 7, 0, 0, 0, 0},
+                                   {5, 4, 2, 0, 4, 7, 0, 0, 0, 0}};
+    for (const auto& c : cfgs) {
+        for (int bd : {8, 10}) {
+            std::vector<std::uint16_t> plane16;
+            const int stride = c.w + 16;
+            fillPlane16(plane16, stride, c.h + 16, bd, 0xB0B5Eu + (std::uint32_t)c.w * 11 + bd);
+            const std::uint16_t* src = plane16.data() + 8 * stride + 8;
+            inter::ConvolveParams cp{};
+            std::memset(&cp, 0, sizeof(cp));
+            cp.round0 = c.round0;
+            cp.round1 = c.round1;
+            std::vector<std::uint16_t> got((size_t)c.w * c.h, 0x999);
+            inter::highbdConvolveXsr(src, stride, got.data(), c.w, c.w, c.h, reg, nullptr, c.subpelX, 0, &cp, bd);
+            std::vector<std::uint16_t> want;
+            convXHbd(stride, src, c, reg, want, bd);
+            if (bd == 8) {
+                std::vector<std::uint8_t> plane8 = downPlane(plane16, stride, c.h + 16);
+                std::vector<std::uint8_t> got8((size_t)c.w * c.h, 0x77);
+                inter::convolveXSR(plane8.data() + 8 * stride + 8, stride, got8.data(), c.w, c.w, c.h, reg, nullptr,
+                                   c.subpelX, 0, &cp);
+                int bad8 = 0;
+                for (int y = 0; y < c.h; ++y)
+                    for (int x = 0; x < c.w; ++x)
+                        if (got[(size_t)y * c.w + x] != got8[(size_t)y * c.w + x]) ++bad8;
+                CHECK_MESSAGE(bad8 == 0, "x_sr derivation mismatch");
+            }
+            int bad = 0;
+            for (int y = 0; y < c.h; ++y)
+                for (int x = 0; x < c.w; ++x)
+                    if (got[(size_t)y * c.w + x] != want[(size_t)y * c.w + x]) ++bad;
+            CHECK_MESSAGE(bad == 0, "x_sr scalar mismatch");
+            if (bad) {
+                for (int y = 0; y < c.h; ++y)
+                    for (int x = 0; x < c.w; ++x) {
+                        if (got[(size_t)y * c.w + x] != want[(size_t)y * c.w + x])
+                            MESSAGE("x_sr bd " << bd << " " << c.w << "x" << c.h << " sp " << c.subpelX << " at ("
+                                               << y << "," << x << "): got " << got[(size_t)y * c.w + x] << " want "
+                                               << want[(size_t)y * c.w + x]);
+                    }
+            }
+        }
+    }
+}
+
+TEST_CASE("highbd_convolve_y_sr: derivation at bd=8, scalar oracle at bd=10 (ip:761-785)") {
+    using namespace hbdoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    const jntoracle::Cfg cfgs[] = {{8, 8, 0, 4, 7, 7, 0, 0, 0, 0},
+                                   {13, 5, 0, 1, 7, 7, 0, 0, 0, 0},
+                                   {4, 8, 0, 15, 7, 7, 0, 0, 0, 0},
+                                   {5, 4, 0, 13, 4, 7, 0, 0, 0, 0}};
+    for (const auto& c : cfgs) {
+        for (int bd : {8, 10}) {
+            std::vector<std::uint16_t> plane16;
+            const int stride = c.w + 16;
+            fillPlane16(plane16, stride, c.h + 16, bd, 0x0B0Bu + (std::uint32_t)c.h * 11 + bd);
+            const std::uint16_t* src = plane16.data() + 8 * stride + 8;
+            inter::ConvolveParams cp{};
+            std::memset(&cp, 0, sizeof(cp));
+            cp.round0 = c.round0;
+            cp.round1 = c.round1;
+            std::vector<std::uint16_t> got((size_t)c.w * c.h, 0x999);
+            inter::highbdConvolveYsr(src, stride, got.data(), c.w, c.w, c.h, nullptr, reg, 0, c.subpelY, &cp, bd);
+            // Independent scalar oracle: vertical pass, res rounded by
+            // FILTER_BITS directly (the y path has no round_1 involvement).
+            std::vector<std::uint16_t> want;
+            {
+                const int taps = reg->taps;
+                const int foV = taps / 2 - 1;
+                const std::int16_t* yf = convolve::getInterpFilterSubpelKernel(*reg, c.subpelY & convolve::subpelMask);
+                want.assign((size_t)c.w * c.h, 0);
+                for (int y = 0; y < c.h; ++y) {
+                    for (int x = 0; x < c.w; ++x) {
+                        std::int32_t res = 0;
+                        for (int k = 0; k < taps; ++k) res += yf[k] * src[(y - foV + k) * stride + x];
+                        std::int32_t v = (res + ((1 << convolve::filterBits) >> 1)) >> convolve::filterBits;
+                        v = v < 0 ? 0 : (v > ((1 << bd) - 1) ? ((1 << bd) - 1) : v);
+                        want[(size_t)y * c.w + x] = (std::uint16_t)v;
+                    }
+                }
+            }
+            if (bd == 8) {
+                std::vector<std::uint8_t> plane8 = downPlane(plane16, stride, c.h + 16);
+                std::vector<std::uint8_t> got8((size_t)c.w * c.h, 0x77);
+                inter::convolveYSr(plane8.data() + 8 * stride + 8, stride, got8.data(), c.w, c.w, c.h, nullptr, reg, 0,
+                                   c.subpelY, &cp);
+                int bad8 = 0;
+                for (int y = 0; y < c.h; ++y)
+                    for (int x = 0; x < c.w; ++x)
+                        if (got[(size_t)y * c.w + x] != got8[(size_t)y * c.w + x]) ++bad8;
+                CHECK_MESSAGE(bad8 == 0, "y_sr derivation mismatch");
+            }
+            int bad = 0;
+            for (int y = 0; y < c.h; ++y)
+                for (int x = 0; x < c.w; ++x)
+                    if (got[(size_t)y * c.w + x] != want[(size_t)y * c.w + x]) ++bad;
+            CHECK_MESSAGE(bad == 0, "y_sr scalar mismatch");
+        }
+    }
+}
+
+// The two-pass scalar oracle for highbd_convolve_2d_sr (ip:787-:829). The
+// pinned quirks: the horizontal intermediate is stored through ConvBufType
+// (uint16 truncation of the round_0 result), and the vertical res is an
+// int32 (NOT the int16 cast the 8-bit twin applies) before the clip at bd.
+void conv2dHbd(int stride, const std::uint16_t* src, const jntoracle::Cfg& c, const convolve::InterpFilterParams* fx,
+               const convolve::InterpFilterParams* fy, std::vector<std::uint16_t>& out, int bd) {
+    using namespace jntoracle;
+    const int tapsX = fx->taps, tapsY = fy->taps;
+    const int foH = tapsX / 2 - 1, foV = tapsY / 2 - 1;
+    const int imH = c.h + tapsY - 1;
+    std::vector<std::uint16_t> im((size_t)imH * c.w);
+    const std::int16_t* xf = convolve::getInterpFilterSubpelKernel(*fx, c.subpelX & convolve::subpelMask);
+    for (int y = 0; y < imH; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            std::int32_t sum = 1 << (bd + kFb - 1);
+            for (int k = 0; k < tapsX; ++k) sum += xf[k] * src[(y - foV) * stride + (x - foH + k)];
+            im[(size_t)y * c.w + x] = (std::uint16_t)((sum + ((1 << c.round0) >> 1)) >> c.round0);
+        }
+    }
+    const int offsetBits = bd + 2 * kFb - c.round0;
+    const int offC = (1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1));
+    const int bits = 2 * kFb - c.round0 - c.round1;
+    const std::int16_t* yf = convolve::getInterpFilterSubpelKernel(*fy, c.subpelY & convolve::subpelMask);
+    out.assign((size_t)c.w * c.h, 0);
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            std::int32_t sum = 1 << offsetBits;
+            for (int k = 0; k < tapsY; ++k) sum += yf[k] * im[(size_t)(y + k) * c.w + x];
+            std::int32_t res = ((sum + ((1 << c.round1) >> 1)) >> c.round1) - offC;
+            std::int32_t v = (res + ((1 << bits) >> 1)) >> bits;
+            v = v < 0 ? 0 : (v > ((1 << bd) - 1) ? ((1 << bd) - 1) : v);
+            out[(size_t)y * c.w + x] = (std::uint16_t)v;
+        }
+    }
+}
+
+TEST_CASE("highbd_convolve_2d_sr: derivation at bd=8, scalar oracle at bd=10/12 (ip:787-829)") {
+    using namespace hbdoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    const jntoracle::Cfg cfgs[] = {{8, 8, 4, 4, 7, 7, 0, 0, 0, 0},
+                                   {13, 5, 1, 15, 7, 7, 0, 0, 0, 0},
+                                   {4, 8, 15, 1, 7, 7, 0, 0, 0, 0},
+                                   {5, 4, 2, 13, 7, 7, 0, 0, 0, 0},
+                                   {16, 16, 8, 8, 7, 7, 0, 0, 0, 0}};
+    for (const auto& c : cfgs) {
+        for (int bd : {8, 10, 12}) {
+            std::vector<std::uint16_t> plane16;
+            const int stride = c.w + 16;
+            fillPlane16(plane16, stride, c.h + 16, bd, 0x2D51u + (std::uint32_t)c.w * 7 + bd * 3);
+            const std::uint16_t* src = plane16.data() + 8 * stride + 8;
+            inter::ConvolveParams cp{};
+            std::memset(&cp, 0, sizeof(cp));
+            cp.round0 = c.round0;
+            cp.round1 = c.round1;
+            std::vector<std::uint16_t> got((size_t)c.w * c.h, 0x999);
+            inter::highbdConvolve2dSr(src, stride, got.data(), c.w, c.w, c.h, reg, reg, c.subpelX, c.subpelY, &cp, bd);
+            std::vector<std::uint16_t> want;
+            conv2dHbd(stride, src, c, reg, reg, want, bd);
+            if (bd == 8) {
+                std::vector<std::uint8_t> plane8 = downPlane(plane16, stride, c.h + 16);
+                std::vector<std::uint8_t> got8((size_t)c.w * c.h, 0x77);
+                inter::convolve2dSr(plane8.data() + 8 * stride + 8, stride, got8.data(), c.w, c.w, c.h, reg, reg,
+                                    c.subpelX, c.subpelY, &cp);
+                int bad8 = 0;
+                for (int y = 0; y < c.h; ++y)
+                    for (int x = 0; x < c.w; ++x)
+                        if (got[(size_t)y * c.w + x] != got8[(size_t)y * c.w + x]) ++bad8;
+                CHECK_MESSAGE(bad8 == 0, "2d_sr derivation mismatch");
+            }
+            int bad = 0;
+            for (int y = 0; y < c.h; ++y)
+                for (int x = 0; x < c.w; ++x)
+                    if (got[(size_t)y * c.w + x] != want[(size_t)y * c.w + x]) ++bad;
+            CHECK_MESSAGE(bad == 0, "2d_sr scalar mismatch");
+            if (bad) {
+                for (int y = 0; y < c.h; ++y)
+                    for (int x = 0; x < c.w; ++x) {
+                        if (got[(size_t)y * c.w + x] != want[(size_t)y * c.w + x])
+                            MESSAGE("2d_sr bd " << bd << " " << c.w << "x" << c.h << " at (" << y << "," << x
+                                                << "): got " << got[(size_t)y * c.w + x] << " want "
+                                                << want[(size_t)y * c.w + x]);
+                    }
+            }
+        }
+    }
+}
+
+// The independent scalar oracle for highbd_convolve_2d_scale (ip:831-:906):
+// two-pass with the SCALE_SUBPEL_BITS=10 stepping, the dst16 compound
+// branches, and the bd clip.
+struct ScaleCfg {
+    int w, h;
+    int subpelXQn, xStepQn, subpelYQn, yStepQn;
+    int round0, round1;
+    int fwd, bck, useJnt;
+    int isCompound, doAverage;
+};
+
+void convScaleHbd(int stride, const std::uint16_t* src, const ScaleCfg& c,
+                  const convolve::InterpFilterParams* fx, const convolve::InterpFilterParams* fy,
+                  const std::vector<std::uint16_t>& dst16Init, std::vector<std::uint16_t>& out, int bd) {
+    using namespace jntoracle;
+    const int tapsX = fx->taps, tapsY = fy->taps;
+    const int foH = tapsX / 2 - 1, foV = tapsY / 2 - 1;
+    const int kSsb = 10; // SCALE_SUBPEL_BITS
+    const int kSsm = (1 << kSsb) - 1;
+    const int imH = (((c.h - 1) * c.yStepQn + c.subpelYQn) >> kSsb) + tapsY;
+    std::vector<std::uint16_t> im((size_t)imH * c.w);
+    for (int y = 0; y < imH; ++y) {
+        int xQn = c.subpelXQn;
+        for (int x = 0; x < c.w; ++x, xQn += c.xStepQn) {
+            const std::uint16_t* srcX = src + (y - foV) * stride + (xQn >> kSsb);
+            const int xIdx = (xQn & kSsm) >> (kSsb - convolve::subpelBits);
+            const std::int16_t* xf = convolve::getInterpFilterSubpelKernel(*fx, xIdx);
+            std::int32_t sum = 1 << (bd + kFb - 1);
+            for (int k = 0; k < tapsX; ++k) sum += xf[k] * srcX[k - foH];
+            im[(size_t)y * c.w + x] = (std::uint16_t)((sum + ((1 << c.round0) >> 1)) >> c.round0);
+        }
+    }
+    const int offsetBits = bd + 2 * kFb - c.round0;
+    const int offC = (1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1));
+    const int bits = 2 * kFb - c.round0 - c.round1;
+    out.assign((size_t)c.w * c.h, 0);
+    for (int x = 0; x < c.w; ++x) {
+        int yQn = c.subpelYQn;
+        for (int y = 0; y < c.h; ++y, yQn += c.yStepQn) {
+            const std::uint16_t* srcY = im.data() + ((yQn >> kSsb) + foV) * c.w + x;
+            const int yIdx = (yQn & kSsm) >> (kSsb - convolve::subpelBits);
+            const std::int16_t* yf = convolve::getInterpFilterSubpelKernel(*fy, yIdx);
+            std::int32_t sum = 1 << offsetBits;
+            for (int k = 0; k < tapsY; ++k) sum += yf[k] * srcY[(k - foV) * c.w];
+            const std::int32_t res = (sum + ((1 << c.round1) >> 1)) >> c.round1;
+            auto clipBd = [&](std::int32_t v) {
+                return v < 0 ? 0 : (v > ((1 << bd) - 1) ? ((1 << bd) - 1) : v);
+            };
+            if (c.isCompound) {
+                if (c.doAverage) {
+                    std::int32_t t = dst16Init[(size_t)y * c.w + x];
+                    if (c.useJnt) {
+                        t = t * c.fwd + res * c.bck;
+                        t >>= 4;
+                    } else {
+                        t += res;
+                        t >>= 1;
+                    }
+                    t -= offC;
+                    out[(size_t)y * c.w + x] = (std::uint16_t)clipBd((t + ((1 << bits) >> 1)) >> bits);
+                } else {
+                    // dst16 write is observed through out when !doAverage
+                    out[(size_t)y * c.w + x] = (std::uint16_t)res;
+                }
+            } else {
+                std::int32_t t = res - offC;
+                out[(size_t)y * c.w + x] = (std::uint16_t)clipBd((t + ((1 << bits) >> 1)) >> bits);
+            }
+        }
+    }
+}
+
+TEST_CASE("highbd_convolve_2d_scale: scalar oracle over the qn band + compound branches (ip:831-906)") {
+    using namespace hbdoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    // qn values: identity (16384), 2x downscale (32768), 0.5x (8192), and
+    // a non-power-of-two 1.25x (20480), with in-range subpels.
+    const ScaleCfg cfgs[] = {
+        {8, 8, 512, 16384, 512, 16384, 7, 7, 9, 7, 1, 1, 0},
+        {8, 8, 512, 16384, 512, 16384, 7, 7, 9, 7, 1, 1, 1},
+        {8, 8, 512, 16384, 512, 16384, 7, 7, 0, 0, 0, 1, 1},
+        {13, 5, 256, 32768, 256, 32768, 7, 7, 12, 4, 1, 1, 0},
+        {5, 4, 1024, 8192, 1024, 8192, 7, 7, 5, 11, 1, 0, 1},
+        {4, 4, 100, 20480, 700, 20480, 7, 7, 13, 3, 1, 1, 1},
+    };
+    for (const auto& c : cfgs) {
+        for (int bd : {8, 10}) {
+            std::vector<std::uint16_t> plane16;
+            const int stride = c.w * ((c.xStepQn + 1023) / 1024) + 16;
+            fillPlane16(plane16, stride, c.h * ((c.yStepQn + 1023) / 1024) + 16, bd, 0x5CA1Eu + (std::uint32_t)c.w);
+            const std::uint16_t* src = plane16.data() + 8 * stride + 8;
+            inter::ConvolveParams cp{};
+            std::memset(&cp, 0, sizeof(cp));
+            cp.round0 = c.round0;
+            cp.round1 = c.round1;
+            cp.isCompound = c.isCompound;
+            cp.doAverage = c.doAverage;
+            // The 2d_scale family reads use_dist_wtd_comp_avg (ip:504/:883),
+            // NOT use_jnt_comp_avg - the flag choice is part of what this
+            // test pins.
+            cp.useDistWtdCompAvg = c.useJnt;
+            cp.fwdOffset = c.fwd;
+            cp.bckOffset = c.bck;
+            std::vector<std::uint16_t> dst16Init((size_t)c.w * c.h);
+            std::uint32_t seed = 0xD15Eu + (std::uint32_t)c.h;
+            for (size_t i = 0; i < dst16Init.size(); ++i) dst16Init[i] = (std::uint16_t)(lcg16(seed) & 0xFFFF);
+            cp.dst = dst16Init.data();
+            cp.dstStride = c.w;
+            std::vector<std::uint16_t> got((size_t)c.w * c.h, 0x999);
+            if (c.isCompound && !c.doAverage) {
+                inter::highbdConvolve2dScale(src, stride, nullptr, c.w, c.w, c.h, reg, reg, c.subpelXQn, c.xStepQn,
+                                             c.subpelYQn, c.yStepQn, &cp, bd);
+                std::memcpy(got.data(), dst16Init.data(), (size_t)c.w * c.h * sizeof(std::uint16_t));
+            } else {
+                inter::highbdConvolve2dScale(src, stride, got.data(), c.w, c.w, c.h, reg, reg, c.subpelXQn, c.xStepQn,
+                                             c.subpelYQn, c.yStepQn, &cp, bd);
+            }
+            std::vector<std::uint16_t> want;
+            convScaleHbd(stride, src, c, reg, reg, dst16Init, want, bd);
+            int bad = 0;
+            for (int y = 0; y < c.h; ++y)
+                for (int x = 0; x < c.w; ++x)
+                    if (got[(size_t)y * c.w + x] != want[(size_t)y * c.w + x]) ++bad;
+            CHECK_MESSAGE(bad == 0, "2d_scale scalar mismatch");
+            if (bad) {
+                for (int y = 0; y < c.h; ++y)
+                    for (int x = 0; x < c.w; ++x) {
+                        if (got[(size_t)y * c.w + x] != want[(size_t)y * c.w + x])
+                            MESSAGE("2d_scale bd " << bd << " " << c.w << "x" << c.h << " avg " << c.doAverage
+                                                   << " at (" << y << "," << x << "): got " << got[(size_t)y * c.w + x]
+                                                   << " want " << want[(size_t)y * c.w + x]);
+                    }
+            }
+        }
+    }
+}
+
+TEST_CASE("highbd_convolve_2d_for_intrabc dispatches like the 8-bit twin at bd=8 (ip:1243-1257)") {
+    using namespace hbdoracle;
+    // The reference's own guard (ip:1411/:1436) only reaches this path when
+    // at least one subpel is nonzero; the (0,0) case is out of contract
+    // (filter_params_y would be NULL there).
+    const struct {
+        int subpelX, subpelY;
+    } cases[] = {{8, 8}, {8, 0}, {0, 8}, {4, 12}};
+    for (const auto& cs : cases) {
+        std::vector<std::uint16_t> plane16;
+        const int stride = 8 + 16;
+        fillPlane16(plane16, stride, 8 + 16, 8, 0x1ABCu + (std::uint32_t)cs.subpelX);
+        const std::uint16_t* src = plane16.data() + 8 * stride + 8;
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = convolve::filterBits;
+        cp.round1 = convolve::filterBits;
+        std::vector<std::uint16_t> got((size_t)8 * 8, 0x999);
+        inter::highbdConvolve2dForIntrabc(src, stride, got.data(), 8, 8, 8, cs.subpelX, cs.subpelY, &cp, 8);
+        // The 8-bit twin under the same dispatch.
+        std::vector<std::uint8_t> plane8 = downPlane(plane16, stride, 8 + 16);
+        std::vector<std::uint8_t> got8((size_t)8 * 8, 0x77);
+        inter::convolve2dForIntrabc(plane8.data() + 8 * stride + 8, stride, got8.data(), 8, 8, 8, cs.subpelX,
+                                    cs.subpelY, &cp);
+        int bad = 0;
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x)
+                if (got[(size_t)y * 8 + x] != got8[(size_t)y * 8 + x]) ++bad;
+        CHECK_MESSAGE(bad == 0, "intrabc derivation mismatch");
+        if (bad) {
+            MESSAGE("intrabc subpel (" << cs.subpelX << "," << cs.subpelY << ") diffs " << bad);
+        }
+    }
+}
+
 TEST_CASE("jnt_convolve_2d_copy pins the shift-compose-copy path (ip:677-714)") {
     using namespace jntoracle;
     const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];

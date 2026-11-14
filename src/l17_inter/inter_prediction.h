@@ -282,6 +282,63 @@ void jntConvolveX(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t*
                   const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
                   ConvolveParams* convParams);
 
+// ---------- A3E J2: the highbd sr convolve family ----------
+
+// svt_av1_highbd_convolve_2d_copy_sr_c, inter_prediction.c:716-:732. The
+// MC1 park ("the highbd convolve family :716-:1098") RESOLVES here: the
+// pinned build has CONFIG_ENABLE_HIGH_BIT_DEPTH=1 (EbConfigMacros.h:175),
+// so the hbd slots are live dispatch targets. The src/dst planes are
+// uint16 (the reference's CONVERT_TO_SHORTPTR form); bd threads the clip.
+void highbdConvolve2dCopySr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                            std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                            const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                            std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                            std::int32_t bd);
+
+// svt_av1_highbd_convolve_x_sr_c, inter_prediction.c:734-:759. The clip is
+// bd-parameterized (clip_pixel_highbd), the 8-bit twin's is hardwired 8.
+void highbdConvolveXsr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams, std::int32_t bd);
+
+
+// svt_av1_highbd_convolve_y_sr_c, inter_prediction.c:761-:785. Same shape as
+// the x twin, vertical pass, res rounded by FILTER_BITS directly.
+void highbdConvolveYsr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams, std::int32_t bd);
+
+// svt_av1_highbd_convolve_2d_sr_c, inter_prediction.c:787-:829. Two quirks
+// vs the 8-bit twin, both pinned by test: the horizontal intermediate is
+// stored through ConvBufType (uint16 truncation of the round_0 result) and
+// the vertical res is a plain int32 (no int16 cast) before the bd clip.
+void highbdConvolve2dSr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                        std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                        const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                        ConvolveParams* convParams, std::int32_t bd);
+
+// svt_av1_highbd_convolve_2d_scale_c, inter_prediction.c:831-:906. The
+// SCALE_SUBPEL_BITS=10 stepping; the compound branches carry dst16 in
+// conv_params (use_dist_wtd_comp_avg or plain average), all clipped at bd.
+void highbdConvolve2dScale(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                           std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                           const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                           std::int32_t subpelXQn, std::int32_t xStepQn, std::int32_t subpelYQn, std::int32_t yStepQn,
+                           ConvolveParams* convParams, std::int32_t bd);
+
+// highbd_convolve_2d_for_intrabc, inter_prediction.c:1243-:1257. The same
+// three-arm dispatch as the 8-bit twin, BILINEAR filters at fixed subpel
+// 8, bd threaded to the kernels.
+void highbdConvolve2dForIntrabc(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                                std::int32_t dstStride, std::int32_t w, std::int32_t h, std::int32_t subpelXQ4,
+                                std::int32_t subpelYQ4, ConvolveParams* convParams, std::int32_t bd);
+void highbdConvolveYsr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams, std::int32_t bd);
+
 // svt_av1_jnt_convolve_2d_copy_c, inter_prediction.c:677-:714. The no-subpel
 // compound copy: res = src << bits (bits = 2*FILTER_BITS - round_1 -
 // round_0), + round_offset as ConvBufType, then the same compose tail.
