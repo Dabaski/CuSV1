@@ -101,6 +101,7 @@ struct HdrSeqHeader {
     // seq_header (av1_structs.h:121-:267) - the fields the writer family
     // consumes; grown per slice.
     int enable_superres;   // av1_structs.h:251 (uint8)
+    int sb_size_log2;      // av1_structs.h:199 (uint8)
     int frame_width_bits;  // av1_structs.h:156 (uint8)
     int frame_height_bits; // av1_structs.h:160 (uint8)
 };
@@ -248,10 +249,38 @@ struct HdrFrameHeader {
     HdrCdefParams cdef_params;
 };
 
-// HdrAv1Common (av1_common.h:58-:89) - grown by later slices; C2 consumes
-// only frm_size.
+// HdrAv1Common (av1_common.h:58-:89) - the fields the tile + frame-size
+// spans consume; C2 consumes only frm_size.
+
+// TilesInfo (av1_structs.h:287-:337, verbatim layout).
+struct HdrTilesInfo {
+    std::uint16_t max_tile_width_sb;   // :289
+    std::uint16_t max_tile_height_sb;  // :292
+    std::uint8_t min_log2_tile_cols;   // :295
+    std::uint8_t max_log2_tile_cols;   // :298
+    std::uint8_t max_log2_tile_rows;   // :301
+    std::uint8_t min_log2_tile_rows;   // :304
+    std::uint8_t min_log2_tiles;       // :307
+    std::uint8_t uniform_tile_spacing_flag;  // :311
+    std::uint8_t tile_cols;            // :314
+    std::uint8_t tile_rows;            // :317
+    std::uint8_t tile_cols_log2;       // :320
+    std::uint8_t tile_rows_log2;       // :323
+    std::uint16_t tile_col_start_mi[HD_MAX_TILE_ROWS + 1];  // :327
+    std::uint16_t tile_row_start_mi[HD_MAX_TILE_COLS + 1];  // :330
+    std::uint16_t context_update_tile_id;                   // :333
+    std::uint8_t tile_size_bytes;                           // :336
+};
+
 struct HdrAv1Common {
     HdrFrameSize frm_size;
+    std::int32_t mi_rows;              // av1_common.h:59
+    std::int32_t mi_cols;              // av1_common.h:60
+    std::int32_t log2_tile_cols;       // av1_common.h:77 (only valid uniform)
+    std::int32_t log2_tile_rows;       // av1_common.h:78 (only valid uniform)
+    std::int32_t tile_width;           // av1_common.h:79 (in MI units)
+    std::int32_t tile_height;          // av1_common.h:79 (in MI units)
+    HdrTilesInfo tiles_info;           // av1_common.h:87
 };
 
 // HdrPcs - the PictureParentControlSet surface (pcs.h): the fields the C2
@@ -271,6 +300,17 @@ struct HdrPcs {
     // child_pcs->rst_info[3] (rest_process.c; the writer reads
     // child_pcs->rst_info[p]).
     HdrRestorationInfo rst_info[3];
+    // C3: the tile machinery. pcs.h:775-:777 / :1214-:1217 (uint8).
+    std::uint8_t log2_sb_size;
+    std::uint8_t log2_tile_cols;
+    std::uint8_t log2_tile_rows;
+    // pcs.h:192 (uint8) - the OUT of write_tile_info (:2584, :2602-:2612).
+    std::uint8_t tile_size_bytes_minus_1;
+    // pcs.h child_pcs->ec_info[tile_idx]->ec->ec_writer.pos facts
+    // (entropy_coding.c:2600): the per-tile arithmetic-coder writer
+    // positions; the last tile is not read (tile_cnt - 1 walk bound).
+    const std::uint32_t* ec_writer_pos;
+    std::uint32_t ec_writer_pos_count;
 };
 
 // encode_restoration_mode (:2189-:2251)
@@ -288,4 +328,19 @@ void writeRenderSize(AomWriteBitBuffer* wb, HdrPcs* pcs);
 void writeSuperresScale(AomWriteBitBuffer* wb, HdrPcs* pcs);
 // write_frame_size (:2652-:2669)
 void writeFrameSize(HdrPcs* pcs, std::int32_t frame_size_override, AomWriteBitBuffer* wb);
+
+// svt_av1_get_tile_limits (:2450-:2467)
+void getTileLimits(HdrPcs* pcs);
+// svt_av1_calculate_tile_cols (:2469-:2509)
+void calculateTileCols(HdrPcs* pcs);
+// svt_av1_calculate_tile_rows (:2511-:2535)
+void calculateTileRows(HdrPcs* pcs);
+// svt_aom_set_tile_info (:2537-:2579)
+void setTileInfo(HdrPcs* pcs);
+// write_tile_info_max_tile (:2403-:2448). MUTATES tiles_info.
+// min_log2_tile_rows (:2418) - 1:1 with the reference.
+void writeTileInfoMaxTile(const HdrPcs* pcs, AomWriteBitBuffer* wb);
+// write_tile_info (:2581-:2614). Non-const: the reference mutates
+// child_pcs->tile_size_bytes_minus_1 (:2584, :2603-:2612).
+void writeTileInfo(HdrPcs* pcs, AomWriteBitBuffer* wb);
 }  // namespace entropy

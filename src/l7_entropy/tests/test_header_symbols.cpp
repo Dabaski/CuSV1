@@ -550,12 +550,12 @@ void oracleLoopfilter(int allow_intrabc, int fl0, int fl1, int flu, int flv, int
     bitVals[n++] = mrde;
     *nBits = n;
 }
-entropy::HdrPcs c2Pcs() {
+entropy::HdrPcs c2Pcs(entropy::HdrSeqHeader* sh, entropy::HdrAv1Common* cm) {
+    *sh = entropy::HdrSeqHeader{};
+    *cm = entropy::HdrAv1Common{};
     entropy::HdrPcs pcs{};
-    entropy::HdrSeqHeader sh{};
-    entropy::HdrAv1Common cm{};
-    pcs.scs = &sh;
-    pcs.av1_cm = &cm;
+    pcs.scs = sh;
+    pcs.av1_cm = cm;
     return pcs;
 }
 }  // namespace
@@ -567,7 +567,9 @@ TEST_CASE("encodeLoopfilter branch matrix vs oracle") {
             for (int i1 = 0; i1 < 4; ++i1) {
                 for (int mrde = 0; mrde < 2; ++mrde) {
                     WbHarness h;
-                    entropy::HdrPcs pcs = c2Pcs();
+                    entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
                     pcs.frm_hdr.allow_intrabc = intrabc;
                     pcs.frm_hdr.loop_filter_params.filter_level[0] = levels[i0];
                     pcs.frm_hdr.loop_filter_params.filter_level[1] = levels[i1];
@@ -594,7 +596,9 @@ TEST_CASE("encodeLoopfilter branch matrix vs oracle") {
     // is nonzero (16 vs 28 bits).
     {
         WbHarness h0, h1;
-        entropy::HdrPcs p0 = c2Pcs(), p1 = c2Pcs();
+        entropy::HdrSeqHeader sh0{}, sh1{};
+        entropy::HdrAv1Common cm0{}, cm1{};
+        entropy::HdrPcs p0 = c2Pcs(&sh0, &cm0), p1 = c2Pcs(&sh1, &cm1);
         p0.frm_hdr.loop_filter_params.filter_level[0] = 0;
         p0.frm_hdr.loop_filter_params.filter_level[1] = 0;
         p1.frm_hdr.loop_filter_params.filter_level[0] = 0;
@@ -615,7 +619,9 @@ TEST_CASE("encodeCdef damping/bits/strength grid vs oracle") {
             for (int cdefBits = 0; cdefBits <= 3; ++cdefBits) {
                 for (int nb = 0; nb <= 3; ++nb) {
                     WbHarness h;
-                    entropy::HdrPcs pcs = c2Pcs();
+                    entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
                     pcs.frm_hdr.allow_intrabc = intrabc;
                     pcs.frm_hdr.cdef_params.cdef_damping = damping;
                     pcs.frm_hdr.cdef_params.cdef_bits = cdefBits;
@@ -701,7 +707,9 @@ TEST_CASE("encodeQuantization full Y-delta span + diff gates vs oracle") {
     // The Y delta over the full signed span with U/V identical.
     for (int dy = -64; dy <= 63; ++dy) {
         WbHarness h;
-        entropy::HdrPcs pcs = c2Pcs();
+        entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
         pcs.frm_hdr.quantization_params.base_q_idx = 137;
         pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_Y] = dy;
         pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_U] = 3;
@@ -724,7 +732,9 @@ TEST_CASE("encodeQuantization full Y-delta span + diff gates vs oracle") {
             // case 2: ac differs (diff bit)
             // case 3: both differ (diff bit)
             WbHarness h;
-            entropy::HdrPcs pcs = c2Pcs();
+            entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
             pcs.frm_hdr.quantization_params.base_q_idx = 200;
             pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_Y] = -5;
             pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_U] = caseIdx == 1 ? 2 : 3;
@@ -792,7 +802,9 @@ TEST_CASE("encodeRestorationMode type grid + unit bits vs oracle") {
                 const int ty[3] = {types[t0], types[t1], types[t2]};
                 const int units[3] = {128, 128, 128};
                 WbHarness h;
-                entropy::HdrPcs pcs = c2Pcs();
+                entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
                 pcs.frm_hdr.allow_intrabc = 0;
                 for (int p = 0; p < 3; ++p) {
                     pcs.rst_info[p].frame_restoration_type = ty[p];
@@ -816,7 +828,9 @@ TEST_CASE("encodeRestorationMode type grid + unit bits vs oracle") {
             const int ty[3] = {1, 1, 1};      // all WIENER: chroma bit live
             const int units[3] = {unit, unit, unit};
             WbHarness h;
-            entropy::HdrPcs pcs = c2Pcs();
+            entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
             for (int p = 0; p < 3; ++p) {
                 pcs.rst_info[p].frame_restoration_type = ty[p];
                 pcs.rst_info[p].restoration_unit_size = units[p];
@@ -835,7 +849,9 @@ TEST_CASE("encodeRestorationMode type grid + unit bits vs oracle") {
     // chroma unit writes 1.
     {
         WbHarness h;
-        entropy::HdrPcs pcs = c2Pcs();
+        entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
         pcs.rst_info[0].frame_restoration_type = 1;  // WIENER
         pcs.rst_info[0].restoration_unit_size = 128;
         pcs.rst_info[1].frame_restoration_type = 1;
@@ -854,7 +870,9 @@ TEST_CASE("encodeRestorationMode type grid + unit bits vs oracle") {
     // intrabc short-circuit.
     {
         WbHarness h;
-        entropy::HdrPcs pcs = c2Pcs();
+        entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
         pcs.frm_hdr.allow_intrabc = 1;
         entropy::encodeRestorationMode(&pcs, &h.wb);
         CHECK_EQ(h.bits(), 0u);
@@ -869,7 +887,9 @@ TEST_CASE("writeRenderSize + writeSuperresScale exact bit counts") {
     // Render size: the resize gate.
     {
         WbHarness h;
-        entropy::HdrPcs pcs = c2Pcs();
+        entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
         pcs.frame_resize_enabled = 0;
         entropy::writeRenderSize(&h.wb, &pcs);
         CHECK_EQ(h.bits(), 1u);
@@ -877,7 +897,9 @@ TEST_CASE("writeRenderSize + writeSuperresScale exact bit counts") {
     }
     {
         WbHarness h;
-        entropy::HdrPcs pcs = c2Pcs();
+        entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
         pcs.frame_resize_enabled = 1;
         pcs.render_width = 1024;
         pcs.render_height = 577;
@@ -892,7 +914,9 @@ TEST_CASE("writeRenderSize + writeSuperresScale exact bit counts") {
     // Superres: enable gate + the denominator domain [8, 15].
     {
         WbHarness h;
-        entropy::HdrPcs pcs = c2Pcs();
+        entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
         pcs.scs->enable_superres = 0;
         pcs.av1_cm->frm_size.superres_denominator = 8;
         entropy::writeSuperresScale(&h.wb, &pcs);
@@ -900,7 +924,9 @@ TEST_CASE("writeRenderSize + writeSuperresScale exact bit counts") {
     }
     for (int denom = 8; denom <= 15; ++denom) {
         WbHarness h;
-        entropy::HdrPcs pcs = c2Pcs();
+        entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
         pcs.scs->enable_superres = 1;
         pcs.av1_cm->frm_size.superres_denominator = denom;
         entropy::writeSuperresScale(&h.wb, &pcs);
@@ -921,7 +947,9 @@ TEST_CASE("writeFrameSize composition: override + superres + render") {
         for (int denom = 8; denom <= 10; ++denom) {
             for (int resize = 0; resize < 2; ++resize) {
                 WbHarness h;
-                entropy::HdrPcs pcs = c2Pcs();
+                entropy::HdrSeqHeader sh_c2{};
+            entropy::HdrAv1Common cm_c2{};
+            entropy::HdrPcs pcs = c2Pcs(&sh_c2, &cm_c2);
                 pcs.scs->enable_superres = 1;
                 pcs.scs->frame_width_bits = 8;
                 pcs.scs->frame_height_bits = 8;
@@ -938,5 +966,236 @@ TEST_CASE("writeFrameSize composition: override + superres + render") {
                 CHECK_EQ(h.bits(), want);
             }
         }
+    }
+}
+// ---------------------------------------------------------------------------
+// C3: the tile machinery. Oracle transcriptions of
+// entropy_coding.c:2403-:2614 (test side).
+// ---------------------------------------------------------------------------
+namespace {
+int oracleAlignPow2(int value, int n) {
+    return (value + ((1 << n) - 1)) & ~((1 << n) - 1);
+}
+int oracleTileLog2(int blk_size, int target) {
+    int k;
+    for (k = 0; (blk_size << k) < target; k++) {}
+    return k;
+}
+// Oracle of svt_av1_get_tile_limits :2450-:2467.
+void oracleTileLimits(int mi_cols_in, int mi_rows_in, int log2_sb, int* out) {
+    const int mi_cols = oracleAlignPow2(mi_cols_in, log2_sb);
+    const int mi_rows = oracleAlignPow2(mi_rows_in, log2_sb);
+    const int sb_cols = mi_cols >> log2_sb;
+    const int sb_rows = mi_rows >> log2_sb;
+    const int sb_size_log2 = log2_sb + 2;
+    out[0] = 4096 >> sb_size_log2;                       // max_tile_width_sb
+    const int max_tile_area_sb = (4096 * 2304) >> (2 * sb_size_log2);
+    out[1] = oracleTileLog2(out[0], sb_cols);            // min_log2_tile_cols
+    out[2] = oracleTileLog2(1, sb_cols < 64 ? sb_cols : 64);  // max_log2_tile_cols
+    out[3] = oracleTileLog2(1, sb_rows < 64 ? sb_rows : 64);  // max_log2_tile_rows
+    out[4] = 0;                                          // min_log2_tile_rows
+    int min_log2_tiles = oracleTileLog2(max_tile_area_sb, sb_cols * sb_rows);
+    out[5] = min_log2_tiles > out[1] ? min_log2_tiles : out[1];  // min_log2_tiles
+}
+entropy::HdrPcs c3Pcs(int mi_cols, int mi_rows, int log2_sb) {
+    entropy::HdrPcs pcs{};
+    static entropy::HdrSeqHeader sh;  // one-at-a-time callers; reset each call
+    sh = entropy::HdrSeqHeader{};
+    pcs.scs = &sh;
+    static entropy::HdrAv1Common cm;  // zero-init grids
+    cm = entropy::HdrAv1Common{};
+    cm.mi_cols = mi_cols;
+    cm.mi_rows = mi_rows;
+    pcs.av1_cm = &cm;
+    pcs.log2_sb_size = (std::uint8_t)log2_sb;
+    return pcs;
+}
+}  // namespace
+
+TEST_CASE("getTileLimits grid vs oracle") {
+    const int dims[4][2] = {{64, 64}, {257, 145}, {960, 544}, {3841, 2177}};
+    for (int d = 0; d < 4; ++d) {
+        for (int log2_sb = 4; log2_sb <= 5; ++log2_sb) {
+            entropy::HdrPcs pcs = c3Pcs(dims[d][0], dims[d][1], log2_sb);
+            entropy::getTileLimits(&pcs);
+            int out[6];
+            oracleTileLimits(dims[d][0], dims[d][1], log2_sb, out);
+            CHECK_EQ(pcs.av1_cm->tiles_info.max_tile_width_sb, out[0]);
+            CHECK_EQ(pcs.av1_cm->tiles_info.min_log2_tile_cols, out[1]);
+            CHECK_EQ(pcs.av1_cm->tiles_info.max_log2_tile_cols, out[2]);
+            CHECK_EQ(pcs.av1_cm->tiles_info.max_log2_tile_rows, out[3]);
+            CHECK_EQ(pcs.av1_cm->tiles_info.min_log2_tile_rows, out[4]);
+            CHECK_EQ(pcs.av1_cm->tiles_info.min_log2_tiles, out[5]);
+        }
+    }
+    // The 1080p SB grid: one 64x64 SB over the full frame is legal.
+    {
+        entropy::HdrPcs pcs = c3Pcs(270, 160, 4);  // 1080x640 luma -> SB grid
+        entropy::getTileLimits(&pcs);
+        CHECK_EQ(pcs.av1_cm->tiles_info.min_log2_tile_cols, 0);
+        CHECK_EQ(pcs.av1_cm->tiles_info.max_log2_tile_cols,
+                 oracleTileLog2(1, 17));
+    }
+}
+
+TEST_CASE("setTileInfo + calculateTileCols/Rows derived grid vs oracle") {
+    // (mi_cols, mi_rows, log2_sb, requested log2 cols, requested log2 rows).
+    const int cases[5][5] = {
+        {256, 256, 4, 0, 0},
+        {256, 256, 4, 2, 2},
+        {3840, 2176, 4, 1, 0},
+        {1024, 1024, 5, 0, 1},
+        {3840, 2176, 4, 4, 0},
+    };
+    for (int c = 0; c < 5; ++c) {
+        entropy::HdrPcs pcs = c3Pcs(cases[c][0], cases[c][1], cases[c][2]);
+        pcs.log2_tile_cols = (std::uint8_t)cases[c][3];
+        pcs.log2_tile_rows = (std::uint8_t)cases[c][4];
+        entropy::setTileInfo(&pcs);
+        const entropy::HdrTilesInfo* ti = &pcs.av1_cm->tiles_info;
+        // Uniform spacing is forced (:2556).
+        CHECK_EQ(ti->uniform_tile_spacing_flag, 1);
+        // log2_tile_cols clamped into [min, max] (:2557-:2558).
+        int out[6];
+        oracleTileLimits(cases[c][0], cases[c][1], cases[c][2], out);
+        const int minC = out[1], maxC = out[2], maxR = out[3];
+        int wantCols = cases[c][3] < minC ? minC : cases[c][3];
+        if (wantCols > maxC) wantCols = maxC;
+        CHECK_EQ(pcs.av1_cm->log2_tile_cols, wantCols);
+        // calculate_tile_cols: size_sb round-up walk + the start_mi array.
+        const int mi_cols = oracleAlignPow2(cases[c][0], cases[c][2]);
+        const int mi_rows = oracleAlignPow2(cases[c][1], cases[c][2]);
+        const int sb_cols = mi_cols >> cases[c][2];
+        const int sb_rows = mi_rows >> cases[c][2];
+        const int size_sb = oracleAlignPow2(sb_cols, wantCols) >> wantCols;
+        REQUIRE(size_sb > 0);
+        int nCols = 0;
+        for (int start_sb = 0; start_sb < sb_cols; nCols++) start_sb += size_sb;
+        CHECK_EQ(ti->tile_cols, nCols);
+        for (int i = 0; i < nCols; ++i) {
+            CHECK_EQ(ti->tile_col_start_mi[i], i * size_sb * (1 << cases[c][2]));
+        }
+        CHECK_EQ(ti->tile_col_start_mi[nCols], sb_cols << cases[c][2]);
+        // min_log2_tile_rows recomputed (:2489), max_tile_height_sb (:2490).
+        const int minR = (out[5] - wantCols) > 0 ? (out[5] - wantCols) : 0;
+        CHECK_EQ(ti->min_log2_tile_rows, minR);
+        CHECK_EQ(ti->max_tile_height_sb, sb_rows >> minR);
+        CHECK_EQ(pcs.av1_cm->tile_width,
+                 (size_sb << cases[c][2]) < mi_cols ? (size_sb << cases[c][2]) : mi_cols);
+        // calculate_tile_rows for the uniform branch.
+        int wantRows = cases[c][4] < minR ? minR : cases[c][4];
+        if (wantRows > maxR) wantRows = maxR;
+        CHECK_EQ(pcs.av1_cm->log2_tile_rows, wantRows);
+        const int size_sb_r = oracleAlignPow2(sb_rows, wantRows) >> wantRows;
+        int nRows = 0;
+        for (int start_sb = 0; start_sb < sb_rows; nRows++) start_sb += size_sb_r;
+        CHECK_EQ(ti->tile_rows, nRows);
+        for (int i = 0; i < nRows; ++i) {
+            CHECK_EQ(ti->tile_row_start_mi[i], i * size_sb_r * (1 << cases[c][2]));
+        }
+        CHECK_EQ(ti->tile_row_start_mi[nRows], sb_rows << cases[c][2]);
+        CHECK_EQ(pcs.av1_cm->tile_height,
+                 (size_sb_r << cases[c][2]) < mi_rows ? (size_sb_r << cases[c][2]) : mi_rows);
+    }
+}
+
+
+TEST_CASE("writeTileInfoMaxTile exact bit pattern vs oracle") {
+    // Real derived state: dims -> setTileInfo -> writeTileInfoMaxTile. The
+    // oracle walks the reference loop :2405-:2448 over the values
+    // getTileLimits computed (the writer does not re-derive them).
+    const int cases[4][5] = {
+        // mi_cols, mi_rows, log2_sb, req_cols, req_rows
+        {256, 256, 4, 0, 0},
+        {256, 256, 4, 2, 1},
+        {3840, 2176, 4, 1, 0},
+        {1024, 1024, 5, 0, 1},
+    };
+    for (int c = 0; c < 4; ++c) {
+        entropy::HdrPcs pcs = c3Pcs(cases[c][0], cases[c][1], cases[c][2]);
+        pcs.log2_tile_cols = (std::uint8_t)cases[c][3];
+        pcs.log2_tile_rows = (std::uint8_t)cases[c][4];
+        entropy::setTileInfo(&pcs);
+        int out[6];
+        oracleTileLimits(cases[c][0], cases[c][1], cases[c][2], out);
+        const int gotCols = pcs.av1_cm->log2_tile_cols;
+        const int gotRows = pcs.av1_cm->log2_tile_rows;
+        int vals[32], n = 0;
+        vals[n++] = 1;  // uniform_tile_spacing_flag = 1
+        for (int i = 0; i < gotCols - out[1]; ++i) vals[n++] = 1;
+        if (gotCols < out[2]) vals[n++] = 0;
+        // The rows walk consumes min_log2_tile_rows RECOMPUTED at :2418.
+        const int minR2 = (out[5] - gotCols) > 0 ? (out[5] - gotCols) : 0;
+        for (int i = 0; i < gotRows - minR2; ++i) vals[n++] = 1;
+        if (gotRows < out[3]) vals[n++] = 0;
+        WbHarness h;
+        entropy::writeTileInfoMaxTile(&pcs, &h.wb);
+        CHECK_EQ(h.bits(), (std::uint32_t)n);
+        for (int b = 0; b < n; ++b) {
+            REQUIRE(h.bitAt((std::uint32_t)b) == vals[b]);
+        }
+        // The reference MUTATES tiles_info.min_log2_tile_rows at :2418.
+        CHECK_EQ(pcs.av1_cm->tiles_info.min_log2_tile_rows, minR2);
+    }
+}
+
+TEST_CASE("writeTileInfo tile-count literal + size-bytes walk vs oracle") {
+    // Real derived state with 2x2 tiles: 1024x1024 mi at sb 64 = 64x64 SBs,
+    // requested 1x1 tile logs -> 2 tile cols x 2 tile rows = tile_cnt 4.
+    {
+        WbHarness h;
+        entropy::HdrPcs pcs = c3Pcs(1024, 1024, 4);
+        pcs.log2_tile_cols = 1;
+        pcs.log2_tile_rows = 1;
+        const std::uint32_t pos[4] = {10, 300, 5, 70000};  // last tile = biggest
+        pcs.ec_writer_pos = pos;
+        pcs.ec_writer_pos_count = 4;
+        // The encoder flow derives the tile state first (svt_aom_set_tile_info
+        // is the only writer of tiles_info.tile_rows/tile_cols); write_tile_info
+        // then re-runs get_tile_limits (:2585) and writes.
+        entropy::setTileInfo(&pcs);
+        entropy::writeTileInfo(&pcs, &h.wb);
+        // setTileInfo-derived state: log2_tile_cols = clamp(1, min 0, max 6)
+        // = 1; min_log2_tiles = 1; min_log2_tile_rows = 0; log2_tile_rows =
+        // clamp(1, 0, 6) = 1; tile_cols = tile_rows = 2.
+        CHECK_EQ(pcs.av1_cm->log2_tile_cols, 1);
+        CHECK_EQ(pcs.av1_cm->log2_tile_rows, 1);
+        CHECK_EQ(pcs.av1_cm->tiles_info.tile_cols, 2);
+        CHECK_EQ(pcs.av1_cm->tiles_info.tile_rows, 2);
+        // tile_cnt 4 > 1: the count literal is 3 in log2_cols + log2_rows =
+        // 2 bits; the size walk reads [0, tile_cnt - 1) = {10, 300, 5} ->
+        // max 300 (>> 8 != 0, >> 16 == 0) -> size bytes minus 1 = 1.
+        CHECK_EQ(pcs.tile_size_bytes_minus_1, 1);
+        // uniform(1) + ones(1) + term(0) + ones(1) + term(0) + count(2) +
+        // size-bytes(2) = 9 bits.
+        CHECK_EQ(h.bits(), 9u);
+        CHECK_EQ(h.bitAt(0), 1);
+        CHECK_EQ(h.bitAt(1), 1);
+        CHECK_EQ(h.bitAt(2), 0);
+        CHECK_EQ(h.bitAt(3), 1);
+        CHECK_EQ(h.bitAt(4), 0);
+        CHECK_EQ(h.bitAt(5), 1);  // count literal 3 = 11
+        CHECK_EQ(h.bitAt(6), 1);
+        CHECK_EQ(h.bitAt(7), 0);  // size bytes 1 = 01
+        CHECK_EQ(h.bitAt(8), 1);
+    }
+    // The single-tile branch: NO tile-count literal, NO size-bytes. A 1-SB
+    // frame derives max_log2_tile_cols = 0, so the writer emits ONLY the
+    // uniform bit.
+    {
+        WbHarness h;
+        entropy::HdrPcs pcs = c3Pcs(16, 16, 4);
+        pcs.log2_tile_cols = 0;
+        pcs.log2_tile_rows = 0;
+        const std::uint32_t pos[1] = {42};
+        pcs.ec_writer_pos = pos;
+        pcs.ec_writer_pos_count = 1;
+        entropy::setTileInfo(&pcs);
+        entropy::writeTileInfo(&pcs, &h.wb);
+        CHECK_EQ(pcs.av1_cm->tiles_info.tile_cols, 1);
+        CHECK_EQ(pcs.av1_cm->tiles_info.tile_rows, 1);
+        CHECK_EQ(pcs.tile_size_bytes_minus_1, 0);
+        CHECK_EQ(h.bits(), 1u);
+        CHECK_EQ(h.bitAt(0), 1);
     }
 }

@@ -424,4 +424,193 @@ void writeFrameSize(HdrPcs* pcs, std::int32_t frame_size_override, AomWriteBitBu
     writeSuperresScale(wb, pcs);
     writeRenderSize(wb, pcs);
 }
+
+// ---------------------------------------------------------------------------
+// C3: the tile machinery (:2403-:2614).
+// ---------------------------------------------------------------------------
+// tile_log2 (block_structures.h:131-:135)
+static std::int32_t hdTileLog2(std::int32_t blk_size, std::int32_t target) {
+    std::int32_t k;
+    for (k = 0; (blk_size << k) < target; k++) {}
+    return k;
+}
+
+#define HD_ALIGN_POWER_OF_TWO(value, n) \
+    (((value) + ((1 << (n)) - 1)) & ~((1 << (n)) - 1))  // definitions.h:996
+
+// svt_av1_get_tile_limits (entropy_coding.c:2450-:2467)
+void getTileLimits(HdrPcs* pcs) {
+    HdrAv1Common* cm = pcs->av1_cm;
+    const std::int32_t mi_cols = HD_ALIGN_POWER_OF_TWO(cm->mi_cols, pcs->log2_sb_size);
+    const std::int32_t mi_rows = HD_ALIGN_POWER_OF_TWO(cm->mi_rows, pcs->log2_sb_size);
+    const std::int32_t sb_cols = mi_cols >> pcs->log2_sb_size;
+    const std::int32_t sb_rows = mi_rows >> pcs->log2_sb_size;
+    const std::int32_t sb_size_log2 = pcs->log2_sb_size + HD_MI_SIZE_LOG2;
+    cm->tiles_info.max_tile_width_sb = (std::uint16_t)(HD_MAX_TILE_WIDTH >> sb_size_log2);
+    const std::int32_t max_tile_area_sb = HD_MAX_TILE_AREA >> (2 * sb_size_log2);
+    cm->tiles_info.min_log2_tile_cols = (std::uint8_t)hdTileLog2(cm->tiles_info.max_tile_width_sb, sb_cols);
+    cm->tiles_info.max_log2_tile_cols =
+        (std::uint8_t)hdTileLog2(1, AOMMIN(sb_cols, HD_MAX_TILE_COLS));
+    cm->tiles_info.max_log2_tile_rows =
+        (std::uint8_t)hdTileLog2(1, AOMMIN(sb_rows, HD_MAX_TILE_ROWS));
+    cm->tiles_info.min_log2_tile_rows = 0;  // CHKN Tiles
+    cm->tiles_info.min_log2_tiles = (std::uint8_t)hdTileLog2(max_tile_area_sb, sb_cols * sb_rows);
+    cm->tiles_info.min_log2_tiles =
+        (std::uint8_t)AOMMAX(cm->tiles_info.min_log2_tiles, cm->tiles_info.min_log2_tile_cols);
+}
+
+// svt_av1_calculate_tile_cols (entropy_coding.c:2469-:2509)
+void calculateTileCols(HdrPcs* pcs) {
+    HdrAv1Common* const cm = pcs->av1_cm;
+    const int mi_cols = HD_ALIGN_POWER_OF_TWO(cm->mi_cols, pcs->log2_sb_size);
+    const int mi_rows = HD_ALIGN_POWER_OF_TWO(cm->mi_rows, pcs->log2_sb_size);
+    const int sb_cols = mi_cols >> pcs->log2_sb_size;
+    const int sb_rows = mi_rows >> pcs->log2_sb_size;
+    const int sb_size_log2 = pcs->log2_sb_size;
+    if (cm->tiles_info.uniform_tile_spacing_flag) {
+        int size_sb = HD_ALIGN_POWER_OF_TWO(sb_cols, cm->log2_tile_cols);
+        size_sb >>= cm->log2_tile_cols;
+        assert(size_sb > 0);
+        int i = 0;
+        for (int start_sb = 0; start_sb < sb_cols; i++) {
+            cm->tiles_info.tile_col_start_mi[i] = (std::uint16_t)(start_sb << sb_size_log2);
+            start_sb += size_sb;
+        }
+        cm->tiles_info.tile_cols = (std::uint8_t)i;
+        cm->tiles_info.tile_col_start_mi[i] = (std::uint16_t)(sb_cols << sb_size_log2);
+        cm->tiles_info.min_log2_tile_rows =
+            (std::uint8_t)AOMMAX(cm->tiles_info.min_log2_tiles - cm->log2_tile_cols, 0);
+        cm->tiles_info.max_tile_height_sb = (std::uint16_t)(sb_rows >> cm->tiles_info.min_log2_tile_rows);
+        cm->tile_width = size_sb << pcs->log2_sb_size;
+        cm->tile_width = AOMMIN(cm->tile_width, cm->mi_cols);
+    } else {
+        int max_tile_area_sb = (sb_rows * sb_cols);
+        int widest_tile_sb = 1;
+        cm->log2_tile_cols = hdTileLog2(1, cm->tiles_info.tile_cols);
+        for (int i = 0; i < cm->tiles_info.tile_cols; i++) {
+            int size_sb = (cm->tiles_info.tile_col_start_mi[i + 1] - cm->tiles_info.tile_col_start_mi[i]) >>
+                sb_size_log2;
+            widest_tile_sb = AOMMAX(widest_tile_sb, size_sb);
+        }
+        if (cm->tiles_info.min_log2_tiles) {
+            max_tile_area_sb >>= (cm->tiles_info.min_log2_tiles + 1);
+        }
+        cm->tiles_info.max_tile_height_sb =
+            (std::uint16_t)AOMMAX(max_tile_area_sb / widest_tile_sb, 1);
+    }
+}
+
+// svt_av1_calculate_tile_rows (entropy_coding.c:2511-:2535)
+void calculateTileRows(HdrPcs* pcs) {
+    HdrAv1Common* const cm = pcs->av1_cm;
+    int mi_rows = HD_ALIGN_POWER_OF_TWO(cm->mi_rows, pcs->log2_sb_size);
+    int sb_rows = mi_rows >> pcs->log2_sb_size;
+    int sb_size_log2 = pcs->log2_sb_size;
+    if (cm->tiles_info.uniform_tile_spacing_flag) {
+        int size_sb = HD_ALIGN_POWER_OF_TWO(sb_rows, cm->log2_tile_rows);
+        size_sb >>= cm->log2_tile_rows;
+        assert(size_sb > 0);
+        int i = 0;
+        for (int start_sb = 0; start_sb < sb_rows; i++) {
+            cm->tiles_info.tile_row_start_mi[i] = (std::uint16_t)(start_sb << sb_size_log2);
+            start_sb += size_sb;
+        }
+        cm->tiles_info.tile_rows = (std::uint8_t)i;
+        cm->tiles_info.tile_row_start_mi[i] = (std::uint16_t)(sb_rows << sb_size_log2);
+        cm->tile_height = size_sb << pcs->log2_sb_size;
+        cm->tile_height = AOMMIN(cm->tile_height, cm->mi_rows);
+    } else {
+        cm->log2_tile_rows = hdTileLog2(1, cm->tiles_info.tile_rows);
+    }
+}
+
+// svt_aom_set_tile_info (entropy_coding.c:2537-:2579)
+void setTileInfo(HdrPcs* pcs) {
+    HdrAv1Common* cm = pcs->av1_cm;
+    getTileLimits(pcs);
+    // configure tile columns
+    cm->tiles_info.uniform_tile_spacing_flag = 1;
+    cm->log2_tile_cols = AOMMAX((std::int32_t)pcs->log2_tile_cols, cm->tiles_info.min_log2_tile_cols);
+    cm->log2_tile_cols = AOMMIN(cm->log2_tile_cols, cm->tiles_info.max_log2_tile_cols);
+    calculateTileCols(pcs);
+    // configure tile rows
+    if (cm->tiles_info.uniform_tile_spacing_flag) {
+        cm->log2_tile_rows = AOMMAX((std::int32_t)pcs->log2_tile_rows, cm->tiles_info.min_log2_tile_rows);
+        cm->log2_tile_rows = AOMMIN(cm->log2_tile_rows, cm->tiles_info.max_log2_tile_rows);
+    } else {
+        int i = 0;
+        const int mi_rows = HD_ALIGN_POWER_OF_TWO(cm->mi_rows, pcs->log2_sb_size);
+        const int sb_rows = mi_rows >> pcs->log2_sb_size;
+        const int sb_size_log2 = pcs->scs->sb_size_log2;
+        for (int start_sb = 0; start_sb < sb_rows && i < HD_MAX_TILE_ROWS; i++) {
+            cm->tiles_info.tile_row_start_mi[i] = (std::uint16_t)(start_sb << sb_size_log2);
+            start_sb += cm->tiles_info.max_tile_height_sb;
+        }
+        cm->tiles_info.tile_rows = (std::uint8_t)i;
+        cm->tiles_info.tile_row_start_mi[i] = (std::uint16_t)(sb_rows << sb_size_log2);
+    }
+    calculateTileRows(pcs);
+}
+
+// write_tile_info_max_tile (entropy_coding.c:2403-:2448). MUTATES
+// tiles_info.min_log2_tile_rows at :2418 - 1:1 with the reference.
+void writeTileInfoMaxTile(const HdrPcs* pcs, AomWriteBitBuffer* wb) {
+    HdrAv1Common* cm = pcs->av1_cm;
+    wbWriteBit(wb, cm->tiles_info.uniform_tile_spacing_flag);
+    if (cm->tiles_info.uniform_tile_spacing_flag) {
+        // Uniform spaced tiles with power-of-two number of rows and columns
+        // tile columns
+        std::int32_t ones = cm->log2_tile_cols - cm->tiles_info.min_log2_tile_cols;
+        while (ones--) {
+            wbWriteBit(wb, 1);
+        }
+        if (cm->log2_tile_cols < cm->tiles_info.max_log2_tile_cols) {
+            wbWriteBit(wb, 0);
+        }
+        // rows
+        cm->tiles_info.min_log2_tile_rows =
+            (std::uint8_t)AOMMAX(cm->tiles_info.min_log2_tiles - cm->log2_tile_cols, 0);
+        ones = cm->log2_tile_rows - cm->tiles_info.min_log2_tile_rows;
+        while (ones--) {
+            wbWriteBit(wb, 1);
+        }
+        if (cm->log2_tile_rows < cm->tiles_info.max_log2_tile_rows) {
+            wbWriteBit(wb, 0);
+        }
+    } else {
+        // NON uniform_tile_spacing_flag not supported yet (SVT_ERROR shell;
+        // the explicit-tiles code is commented out upstream).
+        assert(0);
+    }
+}
+
+// write_tile_info (entropy_coding.c:2581-:2614). Non-const: the reference
+// mutates child_pcs->tile_size_bytes_minus_1 (:2584, :2603-:2612).
+void writeTileInfo(HdrPcs* pcs, AomWriteBitBuffer* wb) {
+    HdrAv1Common* const cm = pcs->av1_cm;
+    const std::uint16_t tile_cnt = (std::uint16_t)(cm->tiles_info.tile_rows * cm->tiles_info.tile_cols);
+    pcs->tile_size_bytes_minus_1 = 0;
+    getTileLimits(pcs);
+    writeTileInfoMaxTile(pcs, wb);
+    if ((std::uint32_t)cm->tiles_info.tile_rows * cm->tiles_info.tile_cols > 1) {
+        // tile id used for cdf update; force each frame to update their data
+        wbWriteLiteral(wb, (std::int32_t)(cm->tiles_info.tile_rows * cm->tiles_info.tile_cols - 1),
+                       cm->log2_tile_cols + cm->log2_tile_rows);
+        // Number of bytes in tile size - 1
+        std::uint32_t max_tile_size = 0;
+        for (int tile_idx = 0; tile_idx < (int)tile_cnt - 1; tile_idx++) {
+            max_tile_size = AOMMAX(max_tile_size, pcs->ec_writer_pos[tile_idx]);
+        }
+        if (max_tile_size >> 24 != 0) {
+            pcs->tile_size_bytes_minus_1 = 3;
+        } else if (max_tile_size >> 16 != 0) {
+            pcs->tile_size_bytes_minus_1 = 2;
+        } else if (max_tile_size >> 8 != 0) {
+            pcs->tile_size_bytes_minus_1 = 1;
+        } else {
+            pcs->tile_size_bytes_minus_1 = 0;
+        }
+        wbWriteLiteral(wb, pcs->tile_size_bytes_minus_1, 2);  // Jing: Change 3 to smaller size
+    }
+}
 }  // namespace entropy
