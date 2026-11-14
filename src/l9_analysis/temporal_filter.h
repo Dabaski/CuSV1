@@ -12,8 +12,10 @@
 // the subpel searches (:1431-2102+), apply_filtering_block_plane_wise
 // (:1289-1424), save_YUV_to_file (:87-152),
 // derive_tf_32x32_block_split_flag (:152-205),
-// create_me_context_and_picture_control (:205-262),
-// apply_filtering_central (:262-300) + its highbd twin (:300-335).
+// create_me_context_and_picture_control (:205-262).
+// LANDED (A11D-T1, 2026-11-14): apply_filtering_central (:262-298) and
+// its highbd twin (:300-334) - the consumed MeContext field (tf_chroma)
+// and the picture field (y_stride) are threaded as parameters.
 #pragma once
 
 #include <cstdint>
@@ -21,7 +23,142 @@
 namespace analysis {
 namespace temporal {
 
-  // 1:1 port of svt_aom_noise_log1p_fp16 (temporal_filtering.c:568-586).
+// A11D-T1: 1:1 port of svt_aom_apply_filtering_central_c
+// (temporal_filtering.c:262-298). The consumed MeContext field
+// (tf_chroma) and the picture field (y_stride) are threaded as
+// parameters (the b64Variance carrier pattern); the src/accum/count
+// pointer triples are the reference's EbByte*/uint32_t**/uint16_t**
+// shapes (the reference's src is read-only, the port's const-ness is
+// the named deviation).
+void applyFilteringCentral(bool tfChroma, const uint8_t* const* src,
+                           uint32_t** accum, uint16_t** count,
+                           uint16_t blkWidth, uint16_t blkHeight,
+                           uint32_t ssX, uint32_t ssY, uint16_t srcStrideY);
+
+// A11D-T1b: 1:1 port of svt_aom_apply_filtering_central_highbd_c
+// (temporal_filtering.c:300-334). The uint16_t src triple is the
+// reference's uint16_t** shape; everything else identical to the
+// 8-bit twin.
+void applyFilteringCentralHbd(bool tfChroma, const uint16_t* const* src,
+                              uint32_t** accum, uint16_t** count,
+                              uint16_t blkWidth, uint16_t blkHeight,
+                              uint32_t ssX, uint32_t ssY, uint16_t srcStrideY);
+
+// A11D-T2: 1:1 port of svt_aom_get_final_filtered_pixels_c
+// (temporal_filtering.c:2426-2489). The consumed MeContext field
+// (tf_chroma) is threaded as the tfChroma parameter; the luma block is
+// TF_BW x TF_BH = 64x64 (temporal_filtering.h:23-:24) and the chroma
+// block is caller-supplied. The 8-bit and highbd destination triples are
+// the reference's EbByte* and uint16_t** shapes; the unused one is
+// nullptr per call. The chroma row advance is stride[PLANE_U] - blkWidthCh
+// (the reference's :2468), and the chroma k index is shared across U/V.
+// The division is the reference's OD_DIVU macro (bitstream_unit.h:48-54).
+void getFinalFilteredPixels(bool tfChroma, bool isHighbd,
+                            uint8_t* const* src8, uint16_t* const* src16,
+                            uint32_t** accum, uint16_t** count,
+                            const uint32_t* stride,
+                            int blkYSrcOffset, int blkChSrcOffset,
+                            uint16_t blkWidthCh, uint16_t blkHeightCh);
+
+// A11D-T3: 1:1 port of tf_use_64x64_pred (temporal_filtering.c:2491-2507).
+// The consumed MeContext fields are threaded as parameters (the TF1
+// carrier pattern): the four 32x32 SADs, the single p_best_sad_64x64[0],
+// and tf_use_pred_64x64_only_th (uint8_t, me_context.h:472). The uint32
+// accumulation wraps; the numerator is int64 (the cast binds BEFORE the
+// *100 per the reference's parenthesization); the comparison is strict <.
+std::int8_t tfUse64x64Pred(const std::uint32_t* pBestSad32x32, std::uint32_t pBestSad64x64,
+                           std::uint8_t tfUsePred64x64OnlyTh);
+
+// A11D-T4: 1:1 port of convert_64x64_info_to_32x32_info
+// (temporal_filtering.c:2509-2569). The consumed MeContext fields
+// (tf_32x32_mv_x/y[4], tf_32x32_block_split_flag[4],
+// tf_16x16_block_split_flag[4][4], tf_32x32_block_error[4], idx_32x32)
+// are threaded as pointer arrays (the TF1 carrier pattern); the
+// pcs->tf_ctrls.sub_sampling_shift is threaded as the subSamplingShift
+// parameter. The 8-bit branch resolves to the landed analysis:: variance
+// instances; the hbd branch resolves to the HIGHBD_VAR instances
+// (svt_psnr.c:155-172, the A13 file set - NOT the A11 brief's port list -
+// the reference's fn_ptr->vf_hbd_10 dispatch targets).
+void convert64x64InfoTo32x32Info(
+    std::uint8_t subSamplingShift,
+    std::int16_t tf64x64MvX, std::int16_t tf64x64MvY,
+    std::int16_t* tf32x32MvX,          // [4] out
+    std::int16_t* tf32x32MvY,          // [4] out
+    int* tf32x32BlockSplitFlag,        // [4] out = 0
+    int* tf16x16BlockSplitFlag,        // [4][4] out = 0 (memset 16 ints)
+    std::uint64_t* tf32x32BlockError,  // [4] out
+    const uint8_t* const* pred8,       // [PLANE_Y] readable (may be nullptr if highbd)
+    const uint16_t* const* pred16,     // [PLANE_Y] readable (may be nullptr if 8-bit)
+    const uint32_t* stridePred,        // [PLANE_Y]
+    const uint8_t* const* src8,        // [PLANE_Y]
+    const uint16_t* const* src16,      // [PLANE_Y]
+    const uint32_t* strideSrc,         // [PLANE_Y]
+    bool isHighbd);
+
+// A11D-T5: 1:1 port of set_hme_search_params_mctf
+// (temporal_filtering.c:2571-2592). The consumed MeContext fields
+// (hme_l0_sa, hme_l0_sa_default_tf) are threaded as parameters (the
+// TF1 carrier pattern): the four hme_l0_sa fields are writable pointers,
+// the four hme_l0_sa_default_tf fields are read-only values. The
+// reference's switch on hme_search_level (0/1/default) - the reference's
+// case 0 is the four field copies, the reference's case 1 is the four
+// field copies with the << 1 / << 2 shifts (the reference's uint16_t
+// arithmetic wraps), the reference's default is assert(0).
+void setHmeSearchParamsMctf(std::uint8_t hmeSearchLevel,
+                            std::uint16_t* hmeL0SaMinWidth, std::uint16_t* hmeL0SaMinHeight,
+                            std::uint16_t* hmeL0SaMaxWidth, std::uint16_t* hmeL0SaMaxHeight,
+                            std::uint16_t tfSaMinWidth, std::uint16_t tfSaMinHeight,
+                            std::uint16_t tfSaMaxWidth, std::uint16_t tfSaMaxHeight);
+// (temporal_filtering.c:2509-2569). The four 32x32 sub-blocks of the
+// 64x64 luma block; each block-error = fn_ptr->vf(pred, stride << shift,
+// src, stride << shift, &sse) << shift. The consumed MeContext fields
+// (tf_32x32_mv_x/y[4], tf_32x32_block_split_flag[4],
+// tf_16x16_block_split_flag[4][4], tf_32x32_block_error[4], idx_32x32)
+// are threaded as pointer arrays (the TF1 carrier pattern); the
+// pcs->tf_ctrls.sub_sampling_shift is threaded as the subSamplingShift
+// parameter. The 8-bit branch resolves to the landed analysis:: variance
+// instances; the hbd branch resolves to the HIGHBD_VAR instances
+// (svt_psnr.c:155-:172, the svt_psnr.c HIGHBD_VAR instances are the
+// A13 file set - NOT the A11 brief's port list - the reference's
+// svt_psnr.c HIGHBD_VAR instances are the dependency the reference's
+// convert_64x64_info_to_32x32_info hbd branch calls).
+void convert64x64InfoTo32x32Info(
+    std::uint8_t subSamplingShift,
+    std::int16_t tf64x64MvX, std::int16_t tf64x64MvY,
+    std::int16_t* tf32x32MvX,          // [4] out
+    std::int16_t* tf32x32MvY,          // [4] out
+    int* tf32x32BlockSplitFlag,        // [4] out = 0
+    int* tf16x16BlockSplitFlag,        // [4][4] out = 0 (memset 16 ints)
+    std::uint64_t* tf32x32BlockError,  // [4] out
+    const uint8_t* const* pred8,       // [PLANE_Y] readable (may be nullptr if highbd)
+    const uint16_t* const* pred16,     // [PLANE_Y] readable (may be nullptr if 8-bit)
+    const uint32_t* stridePred,        // [PLANE_Y]
+    const uint8_t* const* src8,        // [PLANE_Y]
+    const uint16_t* const* src16,      // [PLANE_Y]
+    const uint32_t* strideSrc,         // [PLANE_Y]
+    bool isHighbd);
+
+// A11D-T4: the reference's svt_psnr.c HIGHBD_VAR instances (svt_psnr.c:125-:172)
+// are the reference's fn_ptr->vf_hbd_10 dispatch targets - the A13 file set,
+// NOT the A11 brief's port list - the reference's svt_psnr.c HIGHBD_VAR
+// instances are the dependency the reference's convert_64x64_info_to_32x32_info
+// hbd branch calls. The reference's highbd_variance64 (:125-:143) is the uint64
+// sse / int64 sum accumulation core; the reference's highbd_10_variance
+// (:146-:153) is the ROUND_POWER_OF_TWO dispatch (definitions.h:457) shift
+// *sse = (sse_long + 8) >> 4 and *sum = (sum_long + 2) >> 2; the reference's
+// HIGHBD_VAR(W, H) macro (:155-:163) is the instance body: var = sse -
+// sum*sum/(W*H), the clamp at 0. The CONVERT_TO_SHORTPTR staging is not
+// present in this port (the port takes uint16 directly, the CS1/LR1
+// precedent). Only the two instances the 32x32/32x16 branch consumes are
+// ported (the T4 slice's dependency).
+std::uint32_t highbd10Var32x32(const std::uint16_t* a, int aStride,
+                               const std::uint16_t* b, int bStride,
+                               std::uint32_t* sse);
+std::uint32_t highbd10Var32x16(const std::uint16_t* a, int aStride,
+                               const std::uint16_t* b, int bStride,
+                               std::uint32_t* sse);
+
+// 1:1 port of svt_aom_noise_log1p_fp16 (temporal_filtering.c:568-586).
 int32_t noiseLog1pFp16(int32_t noiseLevelFp16);
 
 // AM1: 1:1 port of svt_vmaf_hpass_row_c (temporal_filtering.c:3720-3733).

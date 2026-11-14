@@ -1,6 +1,17 @@
 #include "temporal_filter.h"
 
+#include "analysis.h"
+
+#include <algorithm>
+#include <cassert>
 #include <cstdlib>
+
+namespace analysis {
+// OD_DIVU (bitstream_unit.h:48-54) reads the magic-multiplier table that
+// AN14 landed in noise_util.cpp; the extern declaration matches the
+// definition there (and analysis.h:1049).
+extern std::uint32_t odDivuSmallConsts[1024][2];
+}  // namespace analysis
 
 namespace analysis {
 namespace temporal {
@@ -99,6 +110,17 @@ int32_t getMsb(uint32_t n) {
         ++position;
     }
     return position;
+}
+
+// OD_DIVU (bitstream_unit.h:48-54): the multiply-unroll division for
+// d < OD_DIVU_DMAX (1024), plain division otherwise. svt_log2f = get_msb
+// (definitions.h:591-592).
+uint32_t odDivu(uint32_t x, uint32_t d) {
+    if (d < 1024) {
+        return (uint32_t)((odDivuSmallConsts[d - 1][0] * (uint64_t)x + odDivuSmallConsts[d - 1][1]) >> 32) >>
+               getMsb(d);
+    }
+    return x / d;
 }
 
 }  // namespace
@@ -781,5 +803,360 @@ int32_t vmafEstimateNoiseFp16(const uint8_t* src, uint16_t width, uint16_t heigh
 
     return (int32_t)((sum * 82137 /*SQRT_PI_BY_2_FP16*/) / (6 * num));
 }
+
+// A11D-T1: 1:1 port of svt_aom_apply_filtering_central_c
+// (temporal_filtering.c:262-298). The consumed MeContext field
+// (tf_chroma) and the picture field (y_stride) are threaded as
+// parameters (the b64Variance carrier pattern); the src/accum/count
+// pointer triples are the reference's EbByte*/uint32_t**/uint16_t**
+// shapes. modifier = TF_PLANEWISE_FILTER_WEIGHT_SCALE (1000).
+void applyFilteringCentral(bool tfChroma, const uint8_t* const* src,
+                           uint32_t** accum, uint16_t** count,
+                           uint16_t blkWidth, uint16_t blkHeight,
+                           uint32_t ssX, uint32_t ssY, uint16_t srcStrideY) {
+    uint16_t blkHeightCh = blkHeight >> ssY;
+    uint16_t blkWidthCh  = blkWidth >> ssX;
+    uint16_t srcStrideCh = srcStrideY >> ssX;
+
+    const int modifier = 1000; /*TF_PLANEWISE_FILTER_WEIGHT_SCALE*/
+
+    // Luma
+    for (uint16_t k = 0, i = 0; i < blkHeight; i++) {
+        for (uint16_t j = 0; j < blkWidth; j++) {
+            accum[0 /*PLANE_Y*/][k] = modifier * src[0 /*PLANE_Y*/][i * srcStrideY + j];
+            count[0 /*PLANE_Y*/][k] = modifier;
+            ++k;
+        }
+    }
+
+    // Chroma
+    if (tfChroma) {
+        for (uint16_t k = 0, i = 0; i < blkHeightCh; i++) {
+            for (uint16_t j = 0; j < blkWidthCh; j++) {
+                accum[1 /*PLANE_U*/][k] = modifier * src[1 /*PLANE_U*/][i * srcStrideCh + j];
+                count[1 /*PLANE_U*/][k] = modifier;
+
+                accum[2 /*PLANE_V*/][k] = modifier * src[2 /*PLANE_V*/][i * srcStrideCh + j];
+                count[2 /*PLANE_V*/][k] = modifier;
+                ++k;
+            }
+        }
+    }
 }
+
+// A11D-T1b: 1:1 port of svt_aom_apply_filtering_central_highbd_c
+// (temporal_filtering.c:300-334). The uint16_t src triple; the
+// structure is identical to the 8-bit twin.
+void applyFilteringCentralHbd(bool tfChroma, const uint16_t* const* src,
+                              uint32_t** accum, uint16_t** count,
+                              uint16_t blkWidth, uint16_t blkHeight,
+                              uint32_t ssX, uint32_t ssY, uint16_t srcStrideY) {
+    uint16_t blkHeightCh = blkHeight >> ssY;
+    uint16_t blkWidthCh  = blkWidth >> ssX;
+    uint16_t srcStrideCh = srcStrideY >> ssX;
+
+    const int modifier = 1000; /*TF_PLANEWISE_FILTER_WEIGHT_SCALE*/
+
+    // Luma
+    for (uint16_t k = 0, i = 0; i < blkHeight; i++) {
+        for (uint16_t j = 0; j < blkWidth; j++) {
+            accum[0 /*PLANE_Y*/][k] = modifier * src[0 /*PLANE_Y*/][i * srcStrideY + j];
+            count[0 /*PLANE_Y*/][k] = modifier;
+            ++k;
+        }
+    }
+
+    // Chroma
+    if (tfChroma) {
+        for (uint16_t k = 0, i = 0; i < blkHeightCh; i++) {
+            for (uint16_t j = 0; j < blkWidthCh; j++) {
+                accum[1 /*PLANE_U*/][k] = modifier * src[1 /*PLANE_U*/][i * srcStrideCh + j];
+                count[1 /*PLANE_U*/][k] = modifier;
+
+                accum[2 /*PLANE_V*/][k] = modifier * src[2 /*PLANE_V*/][i * srcStrideCh + j];
+                count[2 /*PLANE_V*/][k] = modifier;
+                ++k;
+            }
+        }
+    }
 }
+
+// A11D-T2: 1:1 port of svt_aom_get_final_filtered_pixels_c
+// (temporal_filtering.c:2426-2489). The consumed MeContext field
+// (tf_chroma) is threaded as the tfChroma parameter (the b64Variance
+// carrier pattern); TF_BW/TF_BH = 64 (temporal_filtering.h:23-:24). The
+// 8-bit and highbd destination triples are the reference's EbByte*/and
+// uint16_t** shapes; the unused one is nullptr per call. The chroma row
+// advance is stride[PLANE_U] (the reference's :2468), and the chroma
+// k index is shared across U/V. The division is the OD_DIVU macro
+// (bitstream_unit.h:48-54) over the AN14 table.
+void getFinalFilteredPixels(bool tfChroma, bool isHighbd,
+                            uint8_t* const* src8, uint16_t* const* src16,
+                            uint32_t** accum, uint16_t** count,
+                            const uint32_t* stride,
+                            int blkYSrcOffset, int blkChSrcOffset,
+                            uint16_t blkWidthCh, uint16_t blkHeightCh) {
+    if (!isHighbd) {
+        // Process luma
+        int pos = blkYSrcOffset;
+        for (int i = 0, k = 0; i < 64 /*TF_BH*/; i++) {
+            for (int j = 0; j < 64 /*TF_BW*/; j++, k++) {
+                assert(odDivu(accum[0 /*PLANE_Y*/][k] + (count[0 /*PLANE_Y*/][k] >> 1),
+                              count[0 /*PLANE_Y*/][k]) < 256);
+                src8[0 /*PLANE_Y*/][pos] =
+                    (uint8_t)odDivu(accum[0 /*PLANE_Y*/][k] + (count[0 /*PLANE_Y*/][k] >> 1),
+                                    count[0 /*PLANE_Y*/][k]);
+                pos++;
+            }
+            pos += stride[0 /*PLANE_Y*/] - 64 /*TF_BW*/;
+        }
+        // Process chroma
+        if (tfChroma) {
+            pos = blkChSrcOffset;
+            for (int i = 0, k = 0; i < blkHeightCh; i++) {
+                for (int j = 0; j < blkWidthCh; j++, k++) {
+                    assert(odDivu(accum[1 /*PLANE_U*/][k] + (count[1 /*PLANE_U*/][k] >> 1),
+                                  count[1 /*PLANE_U*/][k]) < 256);
+                    src8[1 /*PLANE_U*/][pos] =
+                        (uint8_t)odDivu(accum[1 /*PLANE_U*/][k] + (count[1 /*PLANE_U*/][k] >> 1),
+                                        count[1 /*PLANE_U*/][k]);
+                    // The reference's second assert reads PLANE_U (the
+                    // :2468 quirk) before the V write.
+                    assert(odDivu(accum[1 /*PLANE_U*/][k] + (count[1 /*PLANE_U*/][k] >> 1),
+                                  count[1 /*PLANE_U*/][k]) < 256);
+                    src8[2 /*PLANE_V*/][pos] =
+                        (uint8_t)odDivu(accum[2 /*PLANE_V*/][k] + (count[2 /*PLANE_V*/][k] >> 1),
+                                        count[2 /*PLANE_V*/][k]);
+                    pos++;
+                }
+                pos += stride[1 /*PLANE_U*/] - blkWidthCh;
+            }
+        }
+    } else {
+        // Process luma
+        int pos = blkYSrcOffset;
+        for (int i = 0, k = 0; i < 64 /*TF_BH*/; i++) {
+            for (int j = 0; j < 64 /*TF_BW*/; j++, k++) {
+                src16[0 /*PLANE_Y*/][pos] =
+                    (uint16_t)odDivu(accum[0 /*PLANE_Y*/][k] + (count[0 /*PLANE_Y*/][k] >> 1),
+                                     count[0 /*PLANE_Y*/][k]);
+                pos++;
+            }
+            pos += stride[0 /*PLANE_Y*/] - 64 /*TF_BW*/;
+        }
+        // Process chroma
+        if (tfChroma) {
+            pos = blkChSrcOffset;
+            for (int i = 0, k = 0; i < blkHeightCh; i++) {
+                for (int j = 0; j < blkWidthCh; j++, k++) {
+                    src16[1 /*PLANE_U*/][pos] =
+                        (uint16_t)odDivu(accum[1 /*PLANE_U*/][k] + (count[1 /*PLANE_U*/][k] >> 1),
+                                         count[1 /*PLANE_U*/][k]);
+                    src16[2 /*PLANE_V*/][pos] =
+                        (uint16_t)odDivu(accum[2 /*PLANE_V*/][k] + (count[2 /*PLANE_V*/][k] >> 1),
+                                         count[2 /*PLANE_V*/][k]);
+                    pos++;
+                }
+                pos += stride[1 /*PLANE_U*/] - blkWidthCh;
+            }
+        }
+    }
+}
+
+// A11D-T3: tf_use_64x64_pred (temporal_filtering.c:2491-2507). The
+// reference's MAX(x, 1) is a uint32 ternary; the port's std::max<uint32_t>
+// is identical.
+std::int8_t tfUse64x64Pred(const std::uint32_t* pBestSad32x32, std::uint32_t pBestSad64x64,
+                           std::uint8_t tfUsePred64x64OnlyTh) {
+    std::uint32_t dist32x32 = 0;
+
+    // 32x32
+    for (unsigned i = 0; i < 4; i++) {
+        dist32x32 += pBestSad32x32[i];
+    }
+
+    std::uint32_t floor32 = std::max<std::uint32_t>(dist32x32, 1);
+    std::uint32_t floor64 = std::max<std::uint32_t>(pBestSad64x64, 1);
+    std::int64_t dev64x64To32x32 =
+        (std::int64_t)(((std::int64_t)floor64 - (std::int64_t)floor32) * 100) /
+        (std::int64_t)floor32;
+    if (dev64x64To32x32 < tfUsePred64x64OnlyTh) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+// A11D-T4: the reference's svt_psnr.c HIGHBD_VAR instances are the fn_ptr->vf_hbd_10
+// dispatch targets - the A13 file set, NOT the A11 brief's port list - the
+// reference's svt_psnr.c HIGHBD_VAR instances are the dependency the reference's
+// convert_64x64_info_to_32x32_info hbd branch calls. The reference's
+// highbd_variance64 (svt_psnr.c:125-:143) is the uint64 sse / int64 sum
+// accumulation core; the reference's highbd_10_variance (:146-:153) is the
+// ROUND_POWER_OF_TWO dispatch (definitions.h:457) shift *sse = (sse_long + 8) >> 4
+// and *sum = (sum_long + 2) >> 2; the reference's HIGHBD_VAR(W, H) macro
+// (:155-:163) is the instance body: var = sse - sum*sum/(W*H), the clamp at 0.
+// The CONVERT_TO_SHORTPTR staging is not present in this port (the port takes
+// uint16 directly, the CS1/LR1 precedent).
+namespace {
+void highbd10VarCore(const std::uint16_t* a, int aStride, const std::uint16_t* b, int bStride,
+                     int w, int h, std::uint64_t* sseLong, std::int64_t* sumLong) {
+    std::int64_t tsum = 0;
+    std::uint64_t tsse = 0;
+    for (int i = 0; i < h; ++i) {
+        std::int32_t lsum = 0;
+        for (int j = 0; j < w; ++j) {
+            const int diff = a[j] - b[j];
+            lsum += diff;
+            tsse += (std::uint32_t)(diff * diff);
+        }
+        tsum += lsum;
+        a += aStride;
+        b += bStride;
+    }
+    *sseLong = tsse;
+    *sumLong = tsum;
+}
+}  // namespace
+
+std::uint32_t highbd10Var32x32(const std::uint16_t* a, int aStride, const std::uint16_t* b, int bStride,
+                               std::uint32_t* sse) {
+    std::uint64_t sseLong = 0;
+    std::int64_t sumLong = 0;
+    highbd10VarCore(a, aStride, b, bStride, 32, 32, &sseLong, &sumLong);
+    *sse = (std::uint32_t)((sseLong + 8) >> 4);
+    const std::int32_t sum = (std::int32_t)((sumLong + 2) >> 2);
+    const std::int64_t var = (std::int64_t)(*sse) - ((std::int64_t)sum * sum) / (32 * 32);
+    return (var >= 0) ? (std::uint32_t)var : 0;
+}
+
+std::uint32_t highbd10Var32x16(const std::uint16_t* a, int aStride, const std::uint16_t* b, int bStride,
+                               std::uint32_t* sse) {
+    std::uint64_t sseLong = 0;
+    std::int64_t sumLong = 0;
+    highbd10VarCore(a, aStride, b, bStride, 32, 16, &sseLong, &sumLong);
+    *sse = (std::uint32_t)((sseLong + 8) >> 4);
+    const std::int32_t sum = (std::int32_t)((sumLong + 2) >> 2);
+    const std::int64_t var = (std::int64_t)(*sse) - ((std::int64_t)sum * sum) / (32 * 16);
+    return (var >= 0) ? (std::uint32_t)var : 0;
+}
+
+// A11D-T4: 1:1 port of convert_64x64_info_to_32x32_info
+// (temporal_filtering.c:2509-2569). The four 32x32 sub-blocks of the
+// 64x64 luma block; each block-error = fn_ptr->vf(pred, stride << shift,
+// src, stride << shift, &sse) << shift. The consumed MeContext fields
+// (tf_32x32_mv_x/y[4], tf_32x32_block_split_flag[4],
+// tf_16x16_block_split_flag[4][4], tf_32x32_block_error[4], idx_32x32)
+// are threaded as pointer arrays (the TF1 carrier pattern); the
+// pcs->tf_ctrls.sub_sampling_shift is threaded as the subSamplingShift
+// parameter. The 8-bit branch resolves to the landed analysis:: variance
+// instances; the hbd branch resolves to the HIGHBD_VAR instances.
+void convert64x64InfoTo32x32Info(
+    std::uint8_t subSamplingShift,
+    std::int16_t tf64x64MvX, std::int16_t tf64x64MvY,
+    std::int16_t* tf32x32MvX,          // [4] out
+    std::int16_t* tf32x32MvY,          // [4] out
+    int* tf32x32BlockSplitFlag,        // [4] out = 0
+    int* tf16x16BlockSplitFlag,        // [4][4] out = 0 (memset 16 ints)
+    std::uint64_t* tf32x32BlockError,  // [4] out
+    const uint8_t* const* pred8,       // [PLANE_Y] readable (may be nullptr if highbd)
+    const uint16_t* const* pred16,     // [PLANE_Y] readable (may be nullptr if 8-bit)
+    const uint32_t* stridePred,        // [PLANE_Y]
+    const uint8_t* const* src8,        // [PLANE_Y]
+    const uint16_t* const* src16,      // [PLANE_Y]
+    const uint32_t* strideSrc,         // [PLANE_Y]
+    bool isHighbd) {
+    // The reference's four mv copies (the reference's :2513-:2522).
+    for (int i = 0; i < 4; ++i) {
+        tf32x32MvX[i] = tf64x64MvX;
+        tf32x32MvY[i] = tf64x64MvY;
+    }
+    // The reference's :2524-:2527.
+    for (int i = 0; i < 4; ++i) {
+        tf32x32BlockSplitFlag[i] = 0;
+    }
+    // The reference's memset(ctx->tf_16x16_block_split_flag, 0,
+    // sizeof(ctx->tf_16x16_block_split_flag[0][0]) * 4 * 4) - 16 ints.
+    for (int i = 0; i < 16; ++i) {
+        tf16x16BlockSplitFlag[i] = 0;
+    }
+    // The reference's "Update the 32x32 block-error" loop (:2530-:2568).
+    constexpr std::uint32_t kPlaneY = 0;
+    constexpr std::uint32_t kBlockSize = 32;
+    for (int blockRow = 0; blockRow < 2; ++blockRow) {
+        for (int blockCol = 0; blockCol < 2; ++blockCol) {
+            std::uint64_t distortion;
+            const std::uint32_t idx32x32 = blockCol + (blockRow << 1);
+            if (!isHighbd) {
+                const std::uint8_t* predYPtr =
+                    pred8[kPlaneY] + kBlockSize * blockRow * stridePred[kPlaneY] + kBlockSize * blockCol;
+                const std::uint8_t* srcYPtr =
+                    src8[kPlaneY] + kBlockSize * blockRow * strideSrc[kPlaneY] + kBlockSize * blockCol;
+                std::uint32_t sse = 0;
+                if (subSamplingShift) {
+                    distortion = (std::uint64_t)analysis::variance32x16(
+                                     predYPtr, (int)(stridePred[kPlaneY] << subSamplingShift),
+                                     srcYPtr, (int)(strideSrc[kPlaneY] << subSamplingShift), &sse)
+                                 << subSamplingShift;
+                } else {
+                    distortion = (std::uint64_t)analysis::variance32x32(
+                                     predYPtr, (int)stridePred[kPlaneY], srcYPtr, (int)strideSrc[kPlaneY], &sse)
+                                 << subSamplingShift;
+                }
+            } else {
+                const std::uint16_t* predYPtr =
+                    pred16[kPlaneY] + kBlockSize * blockRow * stridePred[kPlaneY] + kBlockSize * blockCol;
+                const std::uint16_t* srcYPtr =
+                    src16[kPlaneY] + kBlockSize * blockRow * strideSrc[kPlaneY] + kBlockSize * blockCol;
+                std::uint32_t sse = 0;
+                if (subSamplingShift) {
+                    distortion = (std::uint64_t)highbd10Var32x16(
+                                     predYPtr, (int)(stridePred[kPlaneY] << subSamplingShift),
+                                     srcYPtr, (int)(strideSrc[kPlaneY] << subSamplingShift), &sse)
+                                 << subSamplingShift;
+                } else {
+                    distortion = (std::uint64_t)highbd10Var32x32(
+                                     predYPtr, (int)stridePred[kPlaneY], srcYPtr, (int)strideSrc[kPlaneY], &sse)
+                                 << subSamplingShift;
+                }
+            }
+            tf32x32BlockError[idx32x32] = distortion;
+        }
+    }
+}
+
+// A11D-T5: 1:1 port of set_hme_search_params_mctf
+// (temporal_filtering.c:2571-2592). The consumed MeContext fields
+// (hme_l0_sa, hme_l0_sa_default_tf) are threaded as parameters (the
+// TF1 carrier pattern): the four hme_l0_sa fields are writable pointers,
+// the four hme_l0_sa_default_tf fields are read-only values. The
+// reference's switch on hme_search_level (0/1/default) - the reference's
+// case 0 is the four field copies, the reference's case 1 is the four
+// field copies with the << 1 / << 2 shifts (the reference's uint16_t
+// arithmetic wraps), the reference's default is assert(0).
+void setHmeSearchParamsMctf(std::uint8_t hmeSearchLevel,
+                            std::uint16_t* hmeL0SaMinWidth, std::uint16_t* hmeL0SaMinHeight,
+                            std::uint16_t* hmeL0SaMaxWidth, std::uint16_t* hmeL0SaMaxHeight,
+                            std::uint16_t tfSaMinWidth, std::uint16_t tfSaMinHeight,
+                            std::uint16_t tfSaMaxWidth, std::uint16_t tfSaMaxHeight) {
+    switch (hmeSearchLevel) {
+    case 0:
+        *hmeL0SaMinWidth = tfSaMinWidth;
+        *hmeL0SaMinHeight = tfSaMinHeight;
+        *hmeL0SaMaxWidth = tfSaMaxWidth;
+        *hmeL0SaMaxHeight = tfSaMaxHeight;
+        break;
+    case 1:
+        *hmeL0SaMinWidth = (std::uint16_t)(tfSaMinWidth << 1);
+        *hmeL0SaMinHeight = (std::uint16_t)(tfSaMinHeight << 1);
+        *hmeL0SaMaxWidth = (std::uint16_t)(tfSaMaxWidth << 2);
+        *hmeL0SaMaxHeight = (std::uint16_t)(tfSaMaxHeight << 2);
+        break;
+    default:
+        assert(0);
+        break;
+    }
+}
+
+}  // namespace temporal
+}  // namespace analysis

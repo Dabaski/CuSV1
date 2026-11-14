@@ -7,6 +7,190 @@
 
 #include "temporal_filter.h"
 
+// A11D-T1: apply_filtering_central_c (temporal_filtering.c:262-:298). The
+// test-side transcription oracle below is a SECOND independent transcription
+// of the reference body (the A3M search-oracle precedent): the port's output
+// must match it entry for entry. The accum/count arrays are poison-filled
+// before the call; every written entry is asserted and the untouched tail
+// stays poison (the A11D poison-carrier discipline).
+namespace {
+// Independent transcription of temporal_filtering.c:262-:298.
+// PLANE_Y/U/V = 0/1/2; modifier = TF_PLANEWISE_FILTER_WEIGHT_SCALE = 1000.
+void applyFilteringCentralRef(bool tfChroma, const uint8_t* const* src,
+                              uint32_t** accum, uint16_t** count, uint16_t blkWidth,
+                              uint16_t blkHeight, uint32_t ssX, uint32_t ssY,
+                              uint16_t srcStrideY) {
+    uint16_t blkHeightCh = blkHeight >> ssY;
+    uint16_t blkWidthCh  = blkWidth >> ssX;
+    uint16_t srcStrideCh = srcStrideY >> ssX;
+    const int modifier   = 1000;
+    for (uint16_t k = 0, i = 0; i < blkHeight; i++) {
+        for (uint16_t j = 0; j < blkWidth; j++) {
+            accum[0][k] = modifier * src[0][i * srcStrideY + j];
+            count[0][k] = modifier;
+            ++k;
+        }
+    }
+    if (tfChroma) {
+        for (uint16_t k = 0, i = 0; i < blkHeightCh; i++) {
+            for (uint16_t j = 0; j < blkWidthCh; j++) {
+                accum[1][k] = modifier * src[1][i * srcStrideCh + j];
+                count[1][k] = modifier;
+                accum[2][k] = modifier * src[2][i * srcStrideCh + j];
+                count[2][k] = modifier;
+                ++k;
+            }
+        }
+    }
+}
+}  // namespace
+
+TEST_CASE("l9 temporal applyFilteringCentral 4:2:0 oracle + poison accum/count") {
+    using analysis::temporal::applyFilteringCentral;
+    // 4x2 luma block in stride 8 (4 content + 4 pad), chroma 2x1 in stride 4.
+    const uint8_t luma[2 * 8] = {10, 20, 30, 40, 0, 0, 0, 0,
+                                 50, 60, 70, 80, 0, 0, 0, 0};
+    const uint8_t u[4] = {11, 21, 0, 0};
+    const uint8_t v[4] = {12, 22, 0, 0};
+    const uint8_t* src[3] = {luma, u, v};
+    uint32_t accumPort[3][8];
+    uint32_t accumRef[3][8];
+    uint16_t countPort[3][8];
+    uint16_t countRef[3][8];
+    uint32_t* accumPtrPort[3] = {accumPort[0], accumPort[1], accumPort[2]};
+    uint32_t* accumPtrRef[3]  = {accumRef[0], accumRef[1], accumRef[2]};
+    uint16_t* countPtrPort[3] = {countPort[0], countPort[1], countPort[2]};
+    uint16_t* countPtrRef[3]  = {countRef[0], countRef[1], countRef[2]};
+    for (int p = 0; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            accumPort[p][i] = 0xDEADBEEFu;
+            accumRef[p][i]  = 0xDEADBEEFu;
+            countPort[p][i] = 0xBEEF;
+            countRef[p][i]  = 0xBEEF;
+        }
+    }
+    applyFilteringCentral(true, src, accumPtrPort, countPtrPort, 4, 2, 1, 1, 8);
+    applyFilteringCentralRef(true, src, accumPtrRef, countPtrRef, 4, 2, 1, 1, 8);
+    // Luma 4x2 = 8 slots, all written; the port must match the oracle
+    // entry for entry.
+    for (int i = 0; i < 8; ++i) {
+        CHECK_EQ(accumPort[0][i], accumRef[0][i]);
+        CHECK_EQ(countPort[0][i], countRef[0][i]);
+    }
+    // Chroma 2x1 = 2 slots each; the untouched tail (2..7) must stay poison
+    // in BOTH (proves the port's chroma loop bound equals the reference's).
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 0; i < 2; ++i) {
+            CHECK_EQ(accumPort[p][i], accumRef[p][i]);
+            CHECK_EQ(countPort[p][i], countRef[p][i]);
+        }
+        for (int i = 2; i < 8; ++i) {
+            CHECK_EQ(accumPort[p][i], 0xDEADBEEFu);
+            CHECK_EQ(countPort[p][i], 0xBEEF);
+        }
+    }
+}
+
+// The tfChroma=false branch: the chroma arrays stay poison, the luma
+// output matches the oracle.
+TEST_CASE("l9 temporal applyFilteringCentral luma-only leaves chroma poison") {
+    using analysis::temporal::applyFilteringCentral;
+    const uint8_t luma[2 * 8] = {10, 20, 30, 40, 0, 0, 0, 0,
+                                 50, 60, 70, 80, 0, 0, 0, 0};
+    const uint8_t* src[3] = {luma, luma, luma};
+    uint32_t accumPort[3][8];
+    uint32_t accumRef[3][8];
+    uint16_t countPort[3][8];
+    uint16_t countRef[3][8];
+    uint32_t* accumPtrPort[3] = {accumPort[0], accumPort[1], accumPort[2]};
+    uint32_t* accumPtrRef[3]  = {accumRef[0], accumRef[1], accumRef[2]};
+    uint16_t* countPtrPort[3] = {countPort[0], countPort[1], countPort[2]};
+    uint16_t* countPtrRef[3]  = {countRef[0], countRef[1], countRef[2]};
+    for (int p = 0; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            accumPort[p][i] = 0xDEADBEEFu;
+            accumRef[p][i]  = 0xDEADBEEFu;
+            countPort[p][i] = 0xBEEF;
+            countRef[p][i]  = 0xBEEF;
+        }
+    }
+    applyFilteringCentral(false, src, accumPtrPort, countPtrPort, 4, 2, 1, 1, 8);
+    applyFilteringCentralRef(false, src, accumPtrRef, countPtrRef, 4, 2, 1, 1, 8);
+    for (int i = 0; i < 8; ++i) {
+        CHECK_EQ(accumPort[0][i], accumRef[0][i]);
+        CHECK_EQ(countPort[0][i], countRef[0][i]);
+    }
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            CHECK_EQ(accumPort[p][i], 0xDEADBEEFu);
+            CHECK_EQ(countPort[p][i], 0xBEEF);
+        }
+    }
+}
+
+// A11D-T1b: apply_filtering_central_highbd_c (temporal_filtering.c:300-:334).
+// The uint16_t src triple; the same poison-carrier discipline: the port must
+// match a test-side transcription of the reference's highbd body, and the
+// chroma tail (2..7) stays poison when tfChroma is true.
+TEST_CASE("l9 temporal applyFilteringCentralHbd 4:2:0 oracle + poison accum/count") {
+    using analysis::temporal::applyFilteringCentralHbd;
+    const uint16_t luma[2 * 8] = {10, 20, 30, 40, 0, 0, 0, 0,
+                                  50, 60, 70, 80, 0, 0, 0, 0};
+    const uint16_t u[4] = {11, 21, 0, 0};
+    const uint16_t v[4] = {12, 22, 0, 0};
+    const uint16_t* src[3] = {luma, u, v};
+    uint32_t accumPort[3][8];
+    uint32_t accumRef[3][8];
+    uint16_t countPort[3][8];
+    uint16_t countRef[3][8];
+    uint32_t* accumPtrPort[3] = {accumPort[0], accumPort[1], accumPort[2]};
+    uint32_t* accumPtrRef[3]  = {accumRef[0], accumRef[1], accumRef[2]};
+    uint16_t* countPtrPort[3] = {countPort[0], countPort[1], countPort[2]};
+    uint16_t* countPtrRef[3]  = {countRef[0], countRef[1], countRef[2]};
+    for (int p = 0; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            accumPort[p][i] = 0xDEADBEEFu;
+            accumRef[p][i]  = 0xDEADBEEFu;
+            countPort[p][i] = 0xBEEF;
+            countRef[p][i]  = 0xBEEF;
+        }
+    }
+    applyFilteringCentralHbd(true, src, accumPtrPort, countPtrPort, 4, 2, 1, 1, 8);
+
+    // Independent transcription of the reference highbd body.
+    const int modifier   = 1000;
+    for (uint16_t k = 0, i = 0; i < 2; i++) {
+        for (uint16_t j = 0; j < 4; j++) {
+            accumRef[0][k] = modifier * src[0][i * 8 + j];
+            countRef[0][k] = modifier;
+            ++k;
+        }
+    }
+    for (uint16_t k = 0, i = 0; i < (2 >> 1); i++) {
+        for (uint16_t j = 0; j < (4 >> 1); j++) {
+            accumRef[1][k] = modifier * src[1][i * (8 >> 1) + j];
+            countRef[1][k] = modifier;
+            accumRef[2][k] = modifier * src[2][i * (8 >> 1) + j];
+            countRef[2][k] = modifier;
+            ++k;
+        }
+    }
+    for (int p = 0; p < 3; ++p) {
+        for (int i = 0; i < 8; ++i) {
+            CHECK_EQ(accumPort[p][i], accumRef[p][i]);
+            CHECK_EQ(countPort[p][i], countRef[p][i]);
+        }
+    }
+    // The chroma loops wrote 2 slots each; the untouched chroma tail (2..7)
+    // stays poison in the port's arrays.
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 2; i < 8; ++i) {
+            CHECK_EQ(accumPort[p][i], 0xDEADBEEFu);
+            CHECK_EQ(countPort[p][i], 0xBEEF);
+        }
+    }
+}
+
 // TF2 S1: calculate_squared_errors_sum_highbd (temporal_filtering.c:710-720).
 // Raw int-arithmetic SSE over the window, then ONE shift by shift_factor
 // at the end (:719). bd-10 fixture: shift_factor = (10-8)*2 = 4; diffs
@@ -1617,4 +1801,544 @@ TEST_CASE("l9 temporal non-zz hbd medium wrapper derivation equals the 8-bit twi
     // calibration: the chroma blend makes chroma weights differ from
     // luma (the S14 finding, now through the hbd wrapper).
     CHECK_NE(uH.count[0], fH.count[0]);
+}
+
+// A11D-T2: get_final_filtered_pixels_c (temporal_filtering.c:2426-:2489).
+// The test-side transcription oracle below is a SECOND independent
+// transcription of the reference body (the A3M search-oracle precedent):
+// the port's output must match it entry for entry. The OD_DIVU table's
+// functional contract is x/d (the AN14 sentinel test over every d in
+// 1..1024), so the oracle uses plain division - the reference's
+// round-to-nearest form (accum + (count >> 1)) / count. The destination
+// buffers are poison-filled before the call; every written entry is
+// asserted and the untouched tail stays poison (the A11D poison-carrier
+// discipline).
+namespace {
+// Independent transcription of temporal_filtering.c:2426-:2489. PLANE_Y/U/V
+// = 0/1/2; TF_BW/TF_BH = 64 (temporal_filtering.h:23-:24); the chroma row
+// advance is stride[PLANE_U] - blk_width_ch (the reference uses the U
+// plane's stride, not the V plane's). The OD_DIVU table's contract is x/d
+// (the AN14 sentinel test), so the oracle uses plain division.
+void getFinalFilteredPixelsRef(bool tfChroma, bool isHighbd,
+                               uint8_t* const* src8, uint16_t* const* src16,
+                               uint32_t** accum, uint16_t** count,
+                               const uint32_t* stride,
+                               int blkYSrcOffset, int blkChSrcOffset,
+                               uint16_t blkWidthCh, uint16_t blkHeightCh) {
+    if (!isHighbd) {
+        // Process luma
+        int pos = blkYSrcOffset;
+        for (int i = 0, k = 0; i < 64; i++) {
+            for (int j = 0; j < 64; j++, k++) {
+                src8[0][pos] = (uint8_t)((accum[0][k] + (count[0][k] >> 1)) / count[0][k]);
+                pos++;
+            }
+            pos += stride[0] - 64;
+        }
+        // Process chroma
+        if (tfChroma) {
+            pos = blkChSrcOffset;
+            for (int i = 0, k = 0; i < blkHeightCh; i++) {
+                for (int j = 0; j < blkWidthCh; j++, k++) {
+                    src8[1][pos] = (uint8_t)((accum[1][k] + (count[1][k] >> 1)) / count[1][k]);
+                    src8[2][pos] = (uint8_t)((accum[2][k] + (count[2][k] >> 1)) / count[2][k]);
+                    pos++;
+                }
+                pos += stride[1] - blkWidthCh;
+            }
+        }
+    } else {
+        // Process luma
+        int pos = blkYSrcOffset;
+        for (int i = 0, k = 0; i < 64; i++) {
+            for (int j = 0; j < 64; j++, k++) {
+                src16[0][pos] = (uint16_t)((accum[0][k] + (count[0][k] >> 1)) / count[0][k]);
+                pos++;
+            }
+            pos += stride[0] - 64;
+        }
+        // Process chroma
+        if (tfChroma) {
+            pos = blkChSrcOffset;
+            for (int i = 0, k = 0; i < blkHeightCh; i++) {
+                for (int j = 0; j < blkWidthCh; j++, k++) {
+                    src16[1][pos] = (uint16_t)((accum[1][k] + (count[1][k] >> 1)) / count[1][k]);
+                    src16[2][pos] = (uint16_t)((accum[2][k] + (count[2][k] >> 1)) / count[2][k]);
+                    pos++;
+                }
+                pos += stride[1] - blkWidthCh;
+            }
+        }
+    }
+}
+}  // namespace
+
+TEST_CASE("l9 temporal getFinalFilteredPixels 4:2:0 oracle + poison carriers + stride") {
+    using analysis::temporal::getFinalFilteredPixels;
+    // 64x64 luma block in stride 70 (64 content + 6 pad), chroma 32x32 in
+    // stride 36 (32 content + 4 pad). The strides differ per plane; the
+    // port's chroma row advance must use stride[PLANE_U] (the reference's
+    // :2468), not stride[PLANE_Y].
+    constexpr uint32_t kStrideY = 70;
+    constexpr uint32_t kStrideCh = 36;
+    const uint32_t stride[3] = {kStrideY, kStrideCh, kStrideCh};
+    std::vector<uint8_t> dst8(64 * 70 + 2 * 32 * 36, 0xAB);
+    uint8_t* dst8Ptr[3] = {dst8.data(), dst8.data() + 64 * 70, dst8.data() + 64 * 70 + 32 * 36};
+
+    std::vector<uint32_t> accum(3 * 64 * 64);
+    std::vector<uint16_t> count(3 * 64 * 64);
+    // Deterministic accum/count: the oracle's division is exact, so the
+    // expected values differ per plane (the U and V planes' values differ
+    // via the p * 11 term - a V-write mutation reading U's accum is
+    // caught by the expected-value mismatch).
+    for (int p = 0; p < 3; ++p) {
+        for (int k = 0; k < 64 * 64; ++k) {
+            const uint16_t c = (uint16_t)(1000 + (k % 7));
+            const uint32_t r = (uint32_t)((k * 37 + p * 11) % 256);
+            const uint32_t err = (uint32_t)(k % c);
+            count[p * 64 * 64 + k] = c;
+            accum[p * 64 * 64 + k] = c * r + err;
+        }
+    }
+    uint32_t* accumPtr[3] = {accum.data(), accum.data() + 64 * 64, accum.data() + 2 * 64 * 64};
+    uint16_t* countPtr[3] = {count.data(), count.data() + 64 * 64, count.data() + 2 * 64 * 64};
+
+    getFinalFilteredPixels(true, false, dst8Ptr, nullptr, accumPtr, countPtr, stride, 0, 0, 32, 32);
+
+    // Luma: 64 rows x 64 columns at pos = i*70 + j; the untouched tail
+    // (j in [64,70) per row) stays poison.
+    for (int i = 0; i < 64; ++i) {
+        for (int j = 0; j < 64; ++j) {
+            const int k = i * 64 + j;
+            const uint32_t c = (uint32_t)(1000 + (k % 7));
+            const uint32_t r = (uint32_t)((k * 37) % 256);
+            const uint32_t err = (uint32_t)(k % c);
+            const uint8_t expected = (uint8_t)((c * r + err + (c >> 1)) / c);
+            CHECK_EQ(dst8Ptr[0][i * kStrideY + j], expected);
+        }
+        for (int j = 64; j < 70; ++j) {
+            CHECK_EQ(dst8Ptr[0][i * kStrideY + j], 0xAB);
+        }
+    }
+    // Chroma: 32 rows x 32 columns at pos = i*36 + j; the untouched tail
+    // (j in [32,36) per row) stays poison. The U and V planes share the
+    // same k index (the reference's chroma loop advances k once per
+    // pixel, both planes) and the U/V values differ via the p * 11 term.
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 0; i < 32; ++i) {
+            for (int j = 0; j < 32; ++j) {
+                const int k = i * 32 + j;
+                const uint32_t c = (uint32_t)(1000 + (k % 7));
+                const uint32_t r = (uint32_t)((k * 37 + p * 11) % 256);
+                const uint32_t err = (uint32_t)(k % c);
+                const uint8_t expected = (uint8_t)((c * r + err + (c >> 1)) / c);
+                CHECK_EQ(dst8Ptr[p][i * kStrideCh + j], expected);
+            }
+            for (int j = 32; j < 36; ++j) {
+                CHECK_EQ(dst8Ptr[p][i * kStrideCh + j], 0xAB);
+            }
+        }
+    }
+}
+
+TEST_CASE("l9 temporal getFinalFilteredPixels luma-only leaves chroma poison") {
+    using analysis::temporal::getFinalFilteredPixels;
+    constexpr uint32_t kStrideY = 70;
+    constexpr uint32_t kStrideCh = 36;
+    const uint32_t stride[3] = {kStrideY, kStrideCh, kStrideCh};
+    std::vector<uint8_t> dst8(64 * 70 + 2 * 32 * 36, 0xAB);
+    uint8_t* dst8Ptr[3] = {dst8.data(), dst8.data() + 64 * 70, dst8.data() + 64 * 70 + 32 * 36};
+
+    std::vector<uint32_t> accum(3 * 64 * 64);
+    std::vector<uint16_t> count(3 * 64 * 64);
+    for (int p = 0; p < 3; ++p) {
+        for (int k = 0; k < 64 * 64; ++k) {
+            const uint16_t c = (uint16_t)(1000 + (k % 7));
+            const uint32_t r = (uint32_t)((k * 37) % 256);
+            const uint32_t err = (uint32_t)(k % c);
+            count[p * 64 * 64 + k] = c;
+            accum[p * 64 * 64 + k] = c * r + err;
+        }
+    }
+    uint32_t* accumPtr[3] = {accum.data(), accum.data() + 64 * 64, accum.data() + 2 * 64 * 64};
+    uint16_t* countPtr[3] = {count.data(), count.data() + 64 * 64, count.data() + 2 * 64 * 64};
+
+    getFinalFilteredPixels(false, false, dst8Ptr, nullptr, accumPtr, countPtr, stride, 0, 0, 32, 32);
+
+    // Luma written; the chroma planes stay poison (the reference's
+    // chroma branch is gated on tf_chroma).
+    for (int i = 0; i < 64; ++i) {
+        for (int j = 0; j < 64; ++j) {
+            const int k = i * 64 + j;
+            const uint32_t c = (uint32_t)(1000 + (k % 7));
+            const uint32_t r = (uint32_t)((k * 37) % 256);
+            const uint32_t err = (uint32_t)(k % c);
+            const uint8_t expected = (uint8_t)((c * r + err + (c >> 1)) / c);
+            CHECK_EQ(dst8Ptr[0][i * kStrideY + j], expected);
+        }
+    }
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 0; i < 32 * 36; ++i) {
+            CHECK_EQ(dst8Ptr[p][i], 0xAB);
+        }
+    }
+}
+
+namespace {
+
+// A11D-T3 oracle: second independent transcription of
+// tf_use_64x64_pred (temporal_filtering.c:2491-2507). The uint32
+// accumulation wraps, MAX(x,1) floors the division, the numerator is
+// int64 (the cast binds BEFORE the *100 per the reference's
+// parenthesization), and the comparison is strict <.
+std::int32_t tfUse64x64PredOracle(std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t d,
+                                  std::uint32_t sad64, std::uint8_t th) {
+    std::uint32_t dist_32x32 = 0;
+    dist_32x32 += a;
+    dist_32x32 += b;
+    dist_32x32 += c;
+    dist_32x32 += d;
+    std::uint32_t floor32 = std::max<std::uint32_t>(dist_32x32, 1);
+    std::uint32_t floor64 = std::max<std::uint32_t>(sad64, 1);
+    std::int64_t dev = (std::int64_t)(((std::int64_t)floor64 - (std::int64_t)floor32) * 100) /
+        (std::int64_t)floor32;
+    return dev < th ? 1 : 0;
+}
+
+}  // namespace
+
+TEST_CASE("l9 temporal tfUse64x64Pred oracle + threshold bands + wraparound") {
+    using analysis::temporal::tfUse64x64Pred;
+    std::uint32_t zeros[4] = {0, 0, 0, 0};
+    // The th == 0 boundary: dev == 0 == th -> strict < fails -> 0.
+    CHECK_EQ(0, tfUse64x64Pred(zeros, 0, 0));
+    CHECK_EQ(1, tfUse64x64Pred(zeros, 0, 1));
+    // Boundary: dev == th exactly -> 0; dev == th + 1 -> 1.
+    std::uint32_t ten[4] = {2, 3, 2, 3};
+    CHECK_EQ(0, tfUse64x64Pred(ten, 11, 10));
+    CHECK_EQ(1, tfUse64x64Pred(ten, 11, 11));
+    // dev > th -> 0.
+    CHECK_EQ(0, tfUse64x64Pred(ten, 21, 10));
+    // uint32 wraparound: 0xFFFFFFFF*4 mod 2^32 = 0xFFFFFFFC -> negative
+    // int64 dev -> 1.
+    std::uint32_t wraps[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    CHECK_EQ(1, tfUse64x64Pred(wraps, 0, 0));
+    // Oracle band: enumerate the threshold at every value and a spread
+    // of SAD tuples, comparing the port to the independent oracle.
+    std::uint32_t cands[4] = {2, 3, 2, 3};
+    for (std::uint32_t sad64 = 0; sad64 < 64; sad64 += 3) {
+        for (std::uint32_t th = 0; th < 255; ++th) {
+            const std::uint32_t q[4] = {2, 3, 2, 3};
+            CHECK_EQ(tfUse64x64PredOracle(q[0], q[1], q[2], q[3], sad64, (std::uint8_t)th),
+                     tfUse64x64Pred(q, sad64, (std::uint8_t)th));
+        }
+    }
+    // The wraparound band: sad values that sum past 2^32.
+    std::uint32_t big[4] = {0xFFFFFFFFu, 0x00000007u, 0x00000009u, 0x00000001u};
+    for (std::uint32_t sad64 = 0; sad64 < 256; ++sad64) {
+        for (std::uint32_t th = 250; th < 255; ++th) {
+            CHECK_EQ(tfUse64x64PredOracle(big[0], big[1], big[2], big[3], sad64, (std::uint8_t)th),
+                     tfUse64x64Pred(big, sad64, (std::uint8_t)th));
+        }
+    }
+}
+
+// A11D-T4: the reference's fn_ptr->vf_hbd_10 for 32x32/32x16 resolves to
+// svt_aom_highbd_10_variance32x32_c (svt_psnr.c:155-:163 the HIGHBD_VAR
+// instances). The reference's `highbd_10_variance` (:146-:153) and
+// `highbd_variance64` (:125-:143) are file-local there; the reference's
+// `svt_psnr.c` is in the A13 file set - NOT the A11 brief's port list -
+// the reference's `svt_psnr.c` HIGHBD_VAR instances are the dependency
+// the reference's `convert_64x64_info_to_32x32_info` hbd branch calls.
+namespace {
+std::uint32_t highbd10Var32x32Oracle(const std::uint16_t* src, int aStride,
+                                     const std::uint16_t* refB, int bStride,
+                                     std::uint32_t* sseOut) {
+    // The reference's HIGHBD_VAR(32, 32) instance arithmetic: ROUND_POWER_OF_TWO
+    // dispatch shifts (:146-:153) and the reference's HIGHBD_VAR macro
+    // (:155-:163) - the reference's `svt_psnr.c` (:125-:163).
+    std::uint64_t sse_long = 0;
+    std::int64_t sum_long = 0;
+    for (std::int32_t i = 0; i < 32; ++i) {
+        std::int32_t lsum = 0;
+        for (std::int32_t j = 0; j < 32; ++j) {
+            const std::int32_t diff = src[i * aStride + j] - refB[i * bStride + j];
+            lsum += diff;
+            sse_long += (std::uint32_t)(diff * diff);
+        }
+        sum_long += lsum;
+    }
+    *sseOut = (std::uint32_t)((sse_long + 8) >> 4);
+    const std::int32_t sum = (std::int32_t)((sum_long + 2) >> 2);
+    const std::int64_t var = (std::int64_t)(*sseOut) - ((std::int64_t)sum * sum) / 1024;
+    return (var >= 0) ? (std::uint32_t)var : 0;
+}
+}  // namespace
+
+TEST_CASE("l9 temporal convert64x64InfoTo32x32Info 8-bit") {
+    // A11D-T4: convert_64x64_info_to_32x32_info (temporal_filtering.c:2509-2569).
+    // The four 32x32 sub-blocks of the 64x64 luma block; each block-error =
+    // fn_ptr->vf(pred, stride << shift, src, stride << shift, &sse) << shift.
+    // shift = 0 -> variance32x32 (the landed instance); shift != 0 ->
+    // variance32x16 (the 32x16 shape the reference's BLOCK_32X16 instance
+    // reads). The 8-bit branch resolves to the landed analysis:: variance
+    // instances.
+    using analysis::temporal::convert64x64InfoTo32x32Info;
+    constexpr std::uint32_t kStride = 64;
+    std::vector<std::uint8_t> pred(kStride * kStride);
+    std::vector<std::uint8_t> src(kStride * kStride);
+    for (std::uint32_t i = 0; i < pred.size(); ++i) {
+        pred[i] = (std::uint8_t)(i * 3 + 7);
+        src[i] = (std::uint8_t)(i * 3 + 7 + 5);
+    }
+    const uint8_t* pred8[3] = {pred.data(), nullptr, nullptr};
+    const uint8_t* src8[3] = {src.data(), nullptr, nullptr};
+    const uint32_t stridePred[3] = {kStride, kStride, kStride};
+    const uint32_t strideSrc[3] = {kStride, kStride, kStride};
+
+    // Poison-filled carriers: every written field asserted, the untouched
+    // poison asserted.
+    std::int16_t mv32x32X[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    std::int16_t mv32x32Y[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    int splitFlag32x32[4] = {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A};
+    int splitFlag16x16[4][4] = {{0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A}};
+    std::uint64_t blockError[4] = {0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF};
+
+    convert64x64InfoTo32x32Info(0, 0x1234, 0x5678, mv32x32X, mv32x32Y,
+                                splitFlag32x32, &splitFlag16x16[0][0],
+                                blockError, pred8, nullptr, stridePred,
+                                src8, nullptr, strideSrc, false);
+
+    CHECK_EQ(mv32x32X[0], 0x1234);
+    CHECK_EQ(mv32x32X[1], 0x1234);
+    CHECK_EQ(mv32x32X[2], 0x1234);
+    CHECK_EQ(mv32x32X[3], 0x1234);
+    CHECK_EQ(mv32x32Y[0], 0x5678);
+    CHECK_EQ(mv32x32Y[1], 0x5678);
+    CHECK_EQ(mv32x32Y[2], 0x5678);
+    CHECK_EQ(mv32x32Y[3], 0x5678);
+    for (int i = 0; i < 4; ++i) {
+        CHECK_EQ(splitFlag32x32[i], 0);
+    }
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            CHECK_EQ(splitFlag16x16[i][j], 0);
+        }
+    }
+    // The four 32x32 block errors: each sub-block's variance32x32 shifted
+    // by shift = 0 (the reference's :2541-:2554).
+    for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            std::uint32_t expect = 0;
+            std::uint32_t sum = 0;
+            for (std::uint32_t i = 0; i < 32; ++i) {
+                for (std::uint32_t j = 0; j < 32; ++j) {
+                    const int diff = (int)src[(row * 32 + i) * kStride + col * 32 + j] -
+                                     (int)pred[(row * 32 + i) * kStride + col * 32 + j];
+                    sum += diff;
+                    expect += diff * diff;
+                }
+            }
+            const std::uint32_t var = expect - sum * sum / (32 * 32);
+            CHECK_EQ(blockError[row * 2 + col], (std::uint64_t)var);
+        }
+    }
+}
+
+TEST_CASE("l9 temporal convert64x64InfoTo32x32Info shift1") {
+    // A11D-T4: the reference's sub_sampling_shift != 0 branch - the
+    // BLOCK_32X16 instance (the reference's :2541-:2542) with the strides
+    // doubled (the reference's :2543-:2545) and the distortion shifted
+    // (the reference's :2546-:2547).
+    using analysis::temporal::convert64x64InfoTo32x32Info;
+    constexpr std::uint32_t kStride = 64;
+    std::vector<std::uint8_t> pred(kStride * kStride);
+    std::vector<std::uint8_t> src(kStride * kStride);
+    for (std::uint32_t i = 0; i < pred.size(); ++i) {
+        pred[i] = (std::uint8_t)(i * 3 + 7);
+        src[i] = (std::uint8_t)(i * 3 + 7 + 5);
+    }
+    const uint8_t* pred8[3] = {pred.data(), nullptr, nullptr};
+    const uint8_t* src8[3] = {src.data(), nullptr, nullptr};
+    const uint32_t stridePred[3] = {kStride, kStride, kStride};
+    const uint32_t strideSrc[3] = {kStride, kStride, kStride};
+
+    std::int16_t mv32x32X[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    std::int16_t mv32x32Y[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    int splitFlag32x32[4] = {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A};
+    int splitFlag16x16[4][4] = {{0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A}};
+    std::uint64_t blockError[4] = {0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF};
+
+    convert64x64InfoTo32x32Info(1, 0x1234, 0x5678, mv32x32X, mv32x32Y,
+                                splitFlag32x32, &splitFlag16x16[0][0],
+                                blockError, pred8, nullptr, stridePred,
+                                src8, nullptr, strideSrc, false);
+
+    for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            // The reference's 32x16 shape at the sub-block origin with the
+            // strides doubled: 32 wide x 16 rows (the even rows).
+            std::uint32_t expect = 0;
+            std::uint32_t sum = 0;
+            for (std::uint32_t i = 0; i < 16; ++i) {
+                for (std::uint32_t j = 0; j < 32; ++j) {
+                    const int diff = (int)src[(row * 32 + 2 * i) * kStride + col * 32 + j] -
+                                     (int)pred[(row * 32 + 2 * i) * kStride + col * 32 + j];
+                    sum += diff;
+                    expect += diff * diff;
+                }
+            }
+            const std::uint32_t var = expect - sum * sum / (32 * 16);
+            CHECK_EQ(blockError[row * 2 + col], (std::uint64_t)(var << 1));
+        }
+    }
+}
+
+TEST_CASE("l9 temporal highbd10Var instances") {
+    // A11D-T4: the reference's HIGHBD_VAR instances (svt_psnr.c:155-:172,
+    // the HIGHBD_VAR(32, 32) and HIGHBD_VAR(32, 16) instances the
+    // reference's convert_64x64_info_to_32x32_info hbd branch calls).
+    // The reference's `highbd_10_variance` (:146-:153) shifts the
+    // uint64 sse / int64 sum accumulation core by the ROUND_POWER_OF_TWO
+    // dispatch shifts: *sse = ROUND_POWER_OF_TWO(sse_long, 4) and
+    // *sum = ROUND_POWER_OF_TWO(sum_long, 2) (definitions.h:457).
+    using analysis::temporal::highbd10Var32x32;
+    using analysis::temporal::highbd10Var32x16;
+
+    // The 32x32 case: the oracle cross-check over the poison-carrier.
+    constexpr int kStride = 40;
+    std::vector<std::uint16_t> a(kStride * 40);
+    std::vector<std::uint16_t> b(kStride * 40);
+    for (std::uint32_t i = 0; i < a.size(); ++i) {
+        a[i] = (std::uint16_t)(i * 3 + 7);
+        b[i] = (std::uint16_t)(i * 3 + 7 + 5);
+    }
+    std::uint32_t sseOut = 0;
+    std::uint32_t sseExpect = 0;
+    std::uint32_t expect = highbd10Var32x32Oracle(a.data(), kStride, b.data(), kStride, &sseExpect);
+    std::uint32_t got = highbd10Var32x32(a.data(), kStride, b.data(), kStride, &sseOut);
+    CHECK_EQ(got, expect);
+    CHECK_EQ(sseOut, sseExpect);
+
+    // The 32x16 case: the reference's HIGHBD_VAR(32, 16) instance -
+    // the same core, the same ROUND_POWER_OF_TWO dispatch shifts, the
+    // 32x16 shape's variance (the reference's HIGHBD_VAR(32, 16) at
+    // svt_psnr.c:172).
+    std::uint64_t sseLong = 0;
+    std::int64_t sumLong = 0;
+    for (std::int32_t i = 0; i < 16; ++i) {
+        std::int32_t lsum = 0;
+        for (std::int32_t j = 0; j < 32; ++j) {
+            const std::int32_t diff = a[i * kStride + j] - b[i * kStride + j];
+            lsum += diff;
+            sseLong += (std::uint32_t)(diff * diff);
+        }
+        sumLong += lsum;
+    }
+    const std::uint32_t sse16 = (std::uint32_t)((sseLong + 8) >> 4);
+    const std::int32_t sum16 = (std::int32_t)((sumLong + 2) >> 2);
+    const std::int64_t var16 = (std::int64_t)sse16 - ((std::int64_t)sum16 * sum16) / 512;
+    const std::uint32_t expect16 = (var16 >= 0) ? (std::uint32_t)var16 : 0;
+    got = highbd10Var32x16(a.data(), kStride, b.data(), kStride, &sseOut);
+    CHECK_EQ(got, expect16);
+    CHECK_EQ(sseOut, sse16);
+}
+
+TEST_CASE("l9 temporal convert64x64InfoTo32x32Info hbd") {
+    // A11D-T4: the reference's hbd branch (the reference's :2549-:2567).
+    // The reference's vf_hbd_10 = the HIGHBD_VAR instances (svt_psnr.c:155-:172).
+    using analysis::temporal::convert64x64InfoTo32x32Info;
+    constexpr std::uint32_t kStride = 64;
+    std::vector<std::uint16_t> pred(kStride * kStride);
+    std::vector<std::uint16_t> src(kStride * kStride);
+    for (std::uint32_t i = 0; i < pred.size(); ++i) {
+        pred[i] = (std::uint16_t)(i * 3 + 7);
+        src[i] = (std::uint16_t)(i * 3 + 7 + 5);
+    }
+    const uint16_t* pred16[3] = {pred.data(), nullptr, nullptr};
+    const uint16_t* src16[3] = {src.data(), nullptr, nullptr};
+    const uint32_t stridePred[3] = {kStride, kStride, kStride};
+    const uint32_t strideSrc[3] = {kStride, kStride, kStride};
+
+    std::int16_t mv32x32X[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    std::int16_t mv32x32Y[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    int splitFlag32x32[4] = {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A};
+    int splitFlag16x16[4][4] = {{0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A}};
+    std::uint64_t blockError[4] = {0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF};
+
+    convert64x64InfoTo32x32Info(0, 0x1234, 0x5678, mv32x32X, mv32x32Y,
+                                splitFlag32x32, &splitFlag16x16[0][0],
+                                blockError, nullptr, pred16, stridePred,
+                                nullptr, src16, strideSrc, true);
+
+    // The four 32x32 block errors: each sub-block's HIGHBD_VAR(32, 32)
+    // shifted by shift = 0 (the reference's :2549-:2567).
+    for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            std::uint64_t sseLong = 0;
+            std::int64_t sumLong = 0;
+            for (std::uint32_t i = 0; i < 32; ++i) {
+                for (std::uint32_t j = 0; j < 32; ++j) {
+                    const int diff = (int)src[(row * 32 + i) * kStride + col * 32 + j] -
+                                     (int)pred[(row * 32 + i) * kStride + col * 32 + j];
+                    sumLong += diff;
+                    sseLong += (std::uint32_t)(diff * diff);
+                }
+            }
+            const std::uint32_t sse = (std::uint32_t)((sseLong + 8) >> 4);
+            const std::int32_t sum = (std::int32_t)((sumLong + 2) >> 2);
+            const std::int64_t var = (std::int64_t)sse - ((std::int64_t)sum * sum) / 1024;
+            const std::uint32_t varU = (var >= 0) ? (std::uint32_t)var : 0;
+            CHECK_EQ(blockError[row * 2 + col], (std::uint64_t)varU);
+        }
+    }
+}
+
+TEST_CASE("l9 temporal setHmeSearchParamsMctf") {
+    // A11D-T5: set_hme_search_params_mctf (temporal_filtering.c:2571-2592).
+    // The reference's MeContext fields (hme_l0_sa, hme_l0_sa_default_tf)
+    // are threaded as parameters (the TF1 carrier pattern): the four
+    // hme_l0_sa fields are writable pointers, the four
+    // hme_l0_sa_default_tf fields are read-only values.
+    using analysis::temporal::setHmeSearchParamsMctf;
+
+    // Poison-filled carriers.
+    std::uint16_t saMinW = 0x7A7A, saMinH = 0x7A7A, saMaxW = 0x7A7A, saMaxH = 0x7A7A;
+    const std::uint16_t tfSaMinW = 12, tfSaMinH = 34, tfSaMaxW = 56, tfSaMaxH = 78;
+
+    // Case 0: the four field copies (the reference's :2574-:2577).
+    setHmeSearchParamsMctf(0, &saMinW, &saMinH, &saMaxW, &saMaxH,
+                           tfSaMinW, tfSaMinH, tfSaMaxW, tfSaMaxH);
+    CHECK_EQ(saMinW, 12);
+    CHECK_EQ(saMinH, 34);
+    CHECK_EQ(saMaxW, 56);
+    CHECK_EQ(saMaxH, 78);
+
+    // Case 1: the shifted copies (the reference's :2579-:2582).
+    saMinW = 0x7A7A; saMinH = 0x7A7A; saMaxW = 0x7A7A; saMaxH = 0x7A7A;
+    setHmeSearchParamsMctf(1, &saMinW, &saMinH, &saMaxW, &saMaxH,
+                           tfSaMinW, tfSaMinH, tfSaMaxW, tfSaMaxH);
+    CHECK_EQ(saMinW, 24);
+    CHECK_EQ(saMinH, 68);
+    CHECK_EQ(saMaxW, 224);
+    CHECK_EQ(saMaxH, 312);
+
+    // Wraparound band: the << 1 / << 2 at uint16 (the reference's
+    // uint16_t arithmetic wraps).
+    std::uint16_t w = 0x7A7A, h = 0x7A7A, mw = 0x7A7A, mh = 0x7A7A;
+    std::uint16_t inW = 0x8000, inH = 0x4000, inMw = 0x4000, inMh = 0xC000;
+    setHmeSearchParamsMctf(1, &w, &h, &mw, &mh, inW, inH, inMw, inMh);
+    const std::uint32_t expW = (std::uint32_t)inW << 1;
+    const std::uint32_t expH = (std::uint32_t)inH << 1;
+    const std::uint32_t expMw = (std::uint32_t)inMw << 2;
+    const std::uint32_t expMh = (std::uint32_t)inMh << 2;
+    CHECK_EQ(w, (std::uint16_t)expW);
+    CHECK_EQ(h, (std::uint16_t)expH);
+    CHECK_EQ(mw, (std::uint16_t)expMw);
+    CHECK_EQ(mh, (std::uint16_t)expMh);
 }
