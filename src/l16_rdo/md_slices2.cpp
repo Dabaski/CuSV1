@@ -1255,4 +1255,115 @@ void injectSframeBackupCandidate(InterInjectedCandidate* candArray, std::uint32_
     }
 }
 
+// ---------------------------------------------------------------------------
+// A4M-13: the pd0 injection pair.
+// ---------------------------------------------------------------------------
+
+// inject_new_candidates_pd0 (mode_decision.c:2331-2408, verbatim over the
+// carriers; BI_PRED = 2, REF_LIST_0 = 0, REF_LIST_1 = 1).
+void injectNewCandidatesPd0(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                             std::uint32_t maxCanCount, const MeSbResultsPd0* meResults,
+                             std::uint32_t meBlockOffset, std::uint32_t meCandOffset, std::uint8_t maxRefs,
+                             std::uint8_t maxL0, Pd0Level pd0Level, bool allowBipred) {
+    std::uint32_t candTotalCnt = *candTotCnt;  // :2336
+    const std::uint8_t totalMeCnt = meResults->totalMeCandidateIndex[meBlockOffset];  // :2338
+    const MeCandidate* meBlockResults = &meResults->meCandidateArray[meCandOffset];  // :2339
+
+    for (std::uint8_t meCandidateIndex = 0; meCandidateIndex < totalMeCnt; ++meCandidateIndex) {  // :2344
+        const MeCandidate* meBlockResultsPtr = &meBlockResults[meCandidateIndex];
+        const std::uint8_t interDirection = meBlockResultsPtr->direction;
+        const std::uint8_t list0RefIndex = meBlockResultsPtr->refIdxL0;
+        const std::uint8_t list1RefIndex = meBlockResultsPtr->refIdxL1;
+
+        if (pd0Level == PD0_LVL_6_MD && interDirection == 2 /* BI_PRED */) {  // :2350-2352
+            continue;
+        }
+
+        // NEWMV
+        if (interDirection < 2 /* BI_PRED */) {  // :2357
+            const std::uint8_t listIdx = interDirection;
+            const std::uint8_t refIdx = interDirection ? list1RefIndex : list0RefIndex;
+            const std::int16_t toInjectMvX = (std::int16_t)(meResults->meMvArray[meBlockOffset * maxRefs +
+                                                                                      (interDirection ? maxL0 : 0) +
+                                                                                      refIdx]
+                                                                .x *
+                                               8);  // :2360-2361
+            const std::int16_t toInjectMvY = (std::int16_t)(meResults->meMvArray[meBlockOffset * maxRefs +
+                                                                                      (interDirection ? maxL0 : 0) +
+                                                                                      refIdx]
+                                                                .y *
+                                               8);  // :2362-2363
+            const std::uint8_t toInjectRefType = (std::uint8_t)getRefFrameType(listIdx, refIdx);  // :2364
+
+            InterInjectedCandidate* cand = &candArray[candTotalCnt];  // :2366
+            cand->mode = NEWMV;              // :2367
+            cand->mv[0] = (std::int32_t)((std::uint16_t)toInjectMvX |
+                                         ((std::uint32_t)(std::uint16_t)toInjectMvY << 16));  // :2368
+            cand->refFrame[0] = toInjectRefType;  // :2369
+            cand->refFrame[1] = NONE_FRAME_MV;    // :2370
+            incMdCandCntA4m(candTotalCnt, maxCanCount);  // :2371
+            if (candTotalCnt > 2) {  // :2372-2374
+                break;
+            }
+        } else if (allowBipred) {  // :2375
+            // NEW_NEWMV
+            const std::uint32_t ref0Offset = meBlockOffset * maxRefs +
+                (meBlockResultsPtr->ref0List > 0 ? maxL0 : 0) + list0RefIndex;  // :2380-2381
+            const std::uint32_t ref1Offset = meBlockOffset * maxRefs +
+                (meBlockResultsPtr->ref1List > 0 ? maxL0 : 0) + list1RefIndex;  // :2382-2383
+            const std::int16_t toInjectMvXL0 = (std::int16_t)(meResults->meMvArray[ref0Offset].x * 8);  // :2384
+            const std::int16_t toInjectMvYL0 = (std::int16_t)(meResults->meMvArray[ref0Offset].y * 8);  // :2385
+            const std::int16_t toInjectMvXL1 = (std::int16_t)(meResults->meMvArray[ref1Offset].x * 8);  // :2386
+            const std::int16_t toInjectMvYL1 = (std::int16_t)(meResults->meMvArray[ref1Offset].y * 8);  // :2387
+
+            const MvReferenceFrame rf[2] = {(MvReferenceFrame)getRefFrameType(meBlockResultsPtr->ref0List,
+                                                                              list0RefIndex),
+                                            (MvReferenceFrame)getRefFrameType(meBlockResultsPtr->ref1List,
+                                                                              list1RefIndex)};  // :2389-2390
+
+            // Inject AVG candidate only
+            InterInjectedCandidate* cand = &candArray[candTotalCnt];  // :2393
+            cand->mv[0] = (std::int32_t)((std::uint16_t)toInjectMvXL0 |
+                                         ((std::uint32_t)(std::uint16_t)toInjectMvYL0 << 16));  // :2394
+            cand->mv[1] = (std::int32_t)((std::uint16_t)toInjectMvXL1 |
+                                         ((std::uint32_t)(std::uint16_t)toInjectMvYL1 << 16));  // :2395
+            cand->mode = NEW_NEWMV;      // :2396
+            cand->refFrame[0] = rf[0];   // :2397
+            cand->refFrame[1] = rf[1];   // :2398
+            // determine_compound_mode(pcs, ctx, cand, MD_COMP_AVG) :2399 - the landed
+            // A4M-3 twin merged into the candidate.
+            CompoundModeCarrier cmc;
+            cmc.maskType = -1;
+            cmc.searchDiffWedgeCalled = false;
+            determineCompoundMode(&cmc, MD_COMP_AVG);
+            cand->compGroupIdx = cmc.compGroupIdx;
+            cand->compoundIdx = cmc.compoundIdx;
+            cand->compoundType = cmc.interinterCompType;
+            incMdCandCntA4m(candTotalCnt, maxCanCount);  // :2400
+            if (candTotalCnt > 2) {  // :2401-2403
+                break;
+            }
+        }
+    }
+    // update the total number of candidates injected
+    (*candTotCnt) = candTotalCnt;  // :2407
+}
+
+// inject_inter_candidates_pd0 (mode_decision.c:2861-2871, verbatim; the
+// CONFIG_ENABLE_INTER_COMPOUND conjunct is live = 1).
+void injectInterCandidatesPd0(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                               std::uint32_t maxCanCount, const MeSbResultsPd0* meResults,
+                               std::uint32_t meBlockOffset, std::uint32_t meCandOffset, std::uint8_t maxRefs,
+                               std::uint8_t maxL0, Pd0Level pd0Level, ReferenceMode referenceMode,
+                               BlockSize bsize) {
+    // Bipred prediction is only allowed when both dimensions are > 4 and the frame-header reference mode allows it.
+    // See AV1 spec 5.11.25
+    // RTC low-delay is single-reference (no compound / 2nd ref): CONFIG_ENABLE_INTER_COMPOUND folds this to false.
+    const bool allowBipred = referenceMode != SINGLE_REFERENCE &&  // :2867-2868
+        blockSizeWide[bsize] != 4 && blockSizeHigh[bsize] != 4;
+
+    injectNewCandidatesPd0(candArray, candTotCnt, maxCanCount, meResults, meBlockOffset, meCandOffset, maxRefs,
+                           maxL0, pd0Level, allowBipred);  // :2870
+}
+
 }  // namespace l16_rdo

@@ -2060,3 +2060,204 @@ TEST_CASE("l16_rdo injectSframeBackupCandidate pins the BWD zero-MV row and the 
     CHECK(t3 == 1);
     CHECK(c2[0].mode == NEWMV_PM);
 }
+
+// ---------------------------------------------------------------------------
+// A4M-13: inject_new_candidates_pd0 (mode_decision.c:2331-2408) +
+// inject_inter_candidates_pd0 (:2861-2871).
+// ---------------------------------------------------------------------------
+using l16_rdo::MeSbResultsPd0;
+using l16_rdo::injectNewCandidatesPd0;
+using l16_rdo::injectInterCandidatesPd0;
+using l16_rdo::PD0_LVL_6_MD;
+
+TEST_CASE("l16_rdo injectNewCandidatesPd0 emits the raw ME rows with the >2 break") {
+    // mode_decision.c:2331-2408. The me_mv_array halves are <<3 (the
+    // full-pel-to-subpel lift); the pd0_level == 6 gate skips BI rows;
+    // both branches break at cand_total_cnt > 2. No injected bookkeeping
+    // and no choose-best: the raw ME MVs go straight into the candidates.
+    std::uint8_t meIdx[4] = {4, 0, 0, 0};
+    MeCandidate meCands[4];
+    // Row 0: list-0 ref 0. Row 1: list-1 ref 1. Row 2: BI (lists 0/1).
+    // Row 3: list-0 ref 1 (never reached if the break fires).
+    meCands[0].direction = 0;
+    meCands[0].refIdxL0 = 0;
+    meCands[0].refIdxL1 = 0;
+    meCands[0].ref0List = 0;
+    meCands[0].ref1List = 0;
+    meCands[1].direction = 1;
+    meCands[1].refIdxL0 = 0;
+    meCands[1].refIdxL1 = 1;
+    meCands[1].ref0List = 0;
+    meCands[1].ref1List = 0;
+    meCands[2].direction = 2;
+    meCands[2].refIdxL0 = 0;
+    meCands[2].refIdxL1 = 1;
+    meCands[2].ref0List = 0;
+    meCands[2].ref1List = 1;
+    meCands[3].direction = 0;
+    meCands[3].refIdxL0 = 1;
+    meCands[3].refIdxL1 = 0;
+    meCands[3].ref0List = 0;
+    meCands[3].ref1List = 0;
+    // me_mv_array: the [me_block_offset * max_refs + (list1 ? max_l0 : 0) +
+    // ref_idx] layout with max_refs = 3, max_l0 = 2. Row entries for block
+    // 0: list0 slots 0..1 and list1 slots 2..3.
+    std::vector<Mv> meMv(16);
+    meMv[0].as_int = (std::uint32_t)(11 | (22 << 16));    // list0 ref0
+    meMv[1].as_int = (std::uint32_t)(33 | (44 << 16));    // list0 ref1
+    meMv[2].as_int = (std::uint32_t)(55 | (66 << 16));    // list1 ref0
+    meMv[3].as_int = (std::uint32_t)(77 | (88 << 16));    // list1 ref1
+    MeSbResultsPd0 meRes;
+    meRes.totalMeCandidateIndex = meIdx;
+    meRes.meCandidateArray = meCands;
+    meRes.meMvArray = meMv.data();
+
+    InterInjectedCandidate cands[8];
+    for (int i = 0; i < 8; ++i) {
+        cands[i] = InterInjectedCandidate{};
+        cands[i].mode = -7;
+    }
+    std::uint32_t tot = 0;
+    // pd0_level != 6 (0), allow_bipred true: rows 0 (list0), 1 (list1),
+    // 2 (BI) run; the row-3 NEWMV breaks at cnt > 2.
+    injectNewCandidatesPd0(cands, &tot, 64, &meRes, 0, 0, 3, 2, l16_rdo::PD0_LVL_0_MD, true);
+    CHECK(tot == 3);
+    // Row 0: mv = (11 * 8, 22 * 8) = (88, 176).
+    CHECK(cands[0].mode == NEWMV_PM);
+    CHECK((std::uint32_t)cands[0].mv[0] == (std::uint32_t)(88 | (176 << 16)));
+    CHECK(cands[0].refFrame[0] == 1);
+    CHECK(cands[0].refFrame[1] == NONE_FRAME_MV);
+    // Row 1: list 1 ref 1 -> ref type ALTREF2 (6); mv = (77*8, 88*8).
+    CHECK(cands[1].mode == NEWMV_PM);
+    CHECK((std::uint32_t)cands[1].mv[0] == (std::uint32_t)(616 | (704 << 16)));
+    CHECK(cands[1].refFrame[0] == 6);
+    // Row 2: the BI pair (ref0 list 0 -> slot 0; ref1 list 1 -> slot 3).
+    CHECK(cands[2].mode == NEW_NEWMV_PM);
+    CHECK((std::uint32_t)cands[2].mv[0] == (std::uint32_t)(88 | (176 << 16)));
+    CHECK((std::uint32_t)cands[2].mv[1] == (std::uint32_t)(616 | (704 << 16)));
+    CHECK(cands[2].refFrame[0] == 1);
+    CHECK(cands[2].refFrame[1] == 6);
+    CHECK(cands[2].compGroupIdx == 0);      // determine_compound_mode(AVG)
+    CHECK(cands[2].compoundIdx == 1);
+    CHECK(cands[2].compoundType == COMPOUND_AVERAGE);
+    // No injected bookkeeping in this injector.
+    CHECK(cands[3].mode == -7);  // the row-3 candidate never ran (break)
+
+    // pd0_level == 6: the BI row is skipped -> the three unipred rows run
+    // (rows 0, 1 and 3; row 3 is list-0 ref 1 = LAST2).
+    {
+        InterInjectedCandidate c2[8];
+        for (int i = 0; i < 8; ++i) {
+            c2[i] = InterInjectedCandidate{};
+            c2[i].mode = -7;
+        }
+        std::uint32_t t2 = 0;
+        injectNewCandidatesPd0(c2, &t2, 64, &meRes, 0, 0, 3, 2, PD0_LVL_6_MD, true);
+        CHECK(t2 == 3);
+        CHECK(c2[0].mode == NEWMV_PM);
+        CHECK(c2[1].mode == NEWMV_PM);
+        CHECK(c2[2].mode == NEWMV_PM);
+        CHECK(c2[2].refFrame[0] == 2);  // LAST2 = svt_get_ref_frame_type(0, 1)
+        CHECK((std::uint32_t)c2[2].mv[0] == (std::uint32_t)(264 | (352 << 16)));
+    }
+    // allow_bipred = 0: the BI row is skipped -> the same three unipred rows.
+    {
+        InterInjectedCandidate c2[8];
+        for (int i = 0; i < 8; ++i) {
+            c2[i] = InterInjectedCandidate{};
+            c2[i].mode = -7;
+        }
+        std::uint32_t t2 = 0;
+        injectNewCandidatesPd0(c2, &t2, 64, &meRes, 0, 0, 3, 2, l16_rdo::PD0_LVL_0_MD, false);
+        CHECK(t2 == 3);
+        CHECK(c2[2].mode == NEWMV_PM);
+        CHECK(c2[3].mode == -7);
+    }
+    // The > 2 break inside the unipred branch: with the BI row FIRST
+    // (candidates reordered so row 0 is BI), the unipred rows continue
+    // after it... and with allow_bipred + a 4-row unipred-only list, the
+    // 4th row breaks.
+    {
+        std::uint8_t meIdx4[4] = {4, 0, 0, 0};
+        MeCandidate meC4[4];
+        for (int i = 0; i < 4; ++i) {
+            meC4[i] = meCands[0];
+            meC4[i].refIdxL0 = (std::uint8_t)(i & 1);
+        }
+        MeSbResultsPd0 meRes4;
+        meRes4.totalMeCandidateIndex = meIdx4;
+        meRes4.meCandidateArray = meC4;
+        meRes4.meMvArray = meMv.data();
+        InterInjectedCandidate c2[8];
+        for (int i = 0; i < 8; ++i) {
+            c2[i] = InterInjectedCandidate{};
+            c2[i].mode = -7;
+        }
+        std::uint32_t t2 = 0;
+        injectNewCandidatesPd0(c2, &t2, 64, &meRes4, 0, 0, 3, 2, l16_rdo::PD0_LVL_0_MD, false);
+        // Four list-0 rows (refs 0,1,0,1): after the third INC (cnt 3 > 2)
+        // the break fires - the 4th row never runs.
+        CHECK(t2 == 3);
+        CHECK(c2[2].mv[0] != 0);
+        CHECK(c2[3].mode == -7);
+        CHECK(c2[3].mv[0] == 0);
+    }
+}
+
+TEST_CASE("l16_rdo injectInterCandidatesPd0 derives allow_bipred and delegates") {
+    // mode_decision.c:2861-2871: allow_bipred = CONFIG_ENABLE_INTER_COMPOUND
+    // (live = 1) && reference_mode != SINGLE_REFERENCE && bwidth != 4 &&
+    // bheight != 4; then the single inject_new_candidates_pd0 call.
+    std::uint8_t meIdx[4] = {1, 0, 0, 0};
+    MeCandidate meCands[1];
+    meCands[0].direction = 0;
+    meCands[0].refIdxL0 = 0;
+    meCands[0].refIdxL1 = 0;
+    meCands[0].ref0List = 0;
+    meCands[0].ref1List = 0;
+    std::vector<Mv> meMv(16);
+    meMv[0].as_int = (std::uint32_t)(11 | (22 << 16));
+    MeSbResultsPd0 meRes;
+    meRes.totalMeCandidateIndex = meIdx;
+    meRes.meCandidateArray = meCands;
+    meRes.meMvArray = meMv.data();
+
+    InterInjectedCandidate cands[8];
+    for (int i = 0; i < 8; ++i) {
+        cands[i] = InterInjectedCandidate{};
+        cands[i].mode = -7;
+    }
+    std::uint32_t tot = 0;
+    // COMPOUND_REFERENCE + 16x16: bipred allowed.
+    injectInterCandidatesPd0(cands, &tot, 64, &meRes, 0, 0, 3, 2, l16_rdo::PD0_LVL_0_MD, l16_rdo::COMPOUND_REFERENCE,
+                             l16_rdo::BLOCK_16X16);
+    CHECK(tot == 1);
+    CHECK(cands[0].mode == NEWMV_PM);
+    // SINGLE_REFERENCE: the ME row is still a NEWMV (unipred rows run);
+    // the BI rows would be gated - verified via a BI row:
+    std::uint8_t meIdx2[4] = {1, 0, 0, 0};
+    MeCandidate meC2[1];
+    meC2[0] = meCands[0];
+    meC2[0].direction = 2;
+    meC2[0].ref0List = 0;
+    meC2[0].ref1List = 1;
+    meC2[0].refIdxL0 = 0;
+    meC2[0].refIdxL1 = 1;
+    MeSbResultsPd0 meRes2;
+    meRes2.totalMeCandidateIndex = meIdx2;
+    meRes2.meCandidateArray = meC2;
+    meRes2.meMvArray = meMv.data();
+    InterInjectedCandidate c2[8];
+    for (int i = 0; i < 8; ++i) {
+        c2[i] = InterInjectedCandidate{};
+        c2[i].mode = -7;
+    }
+    std::uint32_t t2 = 0;
+    injectInterCandidatesPd0(c2, &t2, 64, &meRes2, 0, 0, 3, 2, l16_rdo::PD0_LVL_0_MD, l16_rdo::SINGLE_REFERENCE,
+                             l16_rdo::BLOCK_16X16);
+    CHECK(t2 == 0);  // the BI row gated by allow_bipred
+    // 4-wide block: allow_bipred false again.
+    std::uint32_t t3 = 0;
+    injectInterCandidatesPd0(c2, &t3, 64, &meRes2, 0, 0, 3, 2, l16_rdo::PD0_LVL_0_MD, l16_rdo::COMPOUND_REFERENCE, l16_rdo::BLOCK_4X16);
+    CHECK(t3 == 0);
+}

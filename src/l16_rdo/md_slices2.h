@@ -576,4 +576,55 @@ void injectSframeBackupCandidate(InterInjectedCandidate* candArray, std::uint32_
                                   const std::uint8_t* refMvCount, const ChooseBestMvCtx& chooseBest,
                                   const std::uint8_t* wmSampleInfoNum, bool corruptedMvCheck);
 
+// ---------------------------------------------------------------------------
+// A4M-13: the pd0 injection pair.
+// ---------------------------------------------------------------------------
+
+// Pd0Level (definitions.h:741-750, verbatim).
+enum Pd0Level {
+    PD0_LVL_0_MD = 0,
+    PD0_LVL_1_MD,
+    PD0_LVL_2_MD,
+    PD0_LVL_3_MD,
+    PD0_LVL_4_MD,
+    PD0_LVL_5_MD,
+    PD0_LVL_6_MD,  // Lightest PD0 path, doesn't perform TX
+    PD0_LEVELS_MD,
+};
+
+// ReferenceMode (definitions.h:1268-1273 verbatim order, the inter injector's
+// frm_hdr->reference_mode).
+enum ReferenceMode {
+    SINGLE_REFERENCE = 0,
+    COMPOUND_REFERENCE = 1,
+    REFERENCE_MODE_SELECT = 2,
+    REFERENCE_MODES_MD = 3,
+};
+
+// The MeSbResults surface the pd0 injector reads: the landed MD1 carrier
+// carries the candidate side; this one adds the me_mv_array wall
+// (md_process.h MeSbResults.me_mv_array).
+struct MeSbResultsPd0 {
+    const std::uint8_t* totalMeCandidateIndex;
+    const MeCandidate* meCandidateArray;
+    const Mv* meMvArray;
+};
+
+// inject_new_candidates_pd0 (mode_decision.c:2331-2408): the raw ME rows
+// (no choose-best, no injected bookkeeping), the <<3 sub-pel lift, the
+// pd0_level == 6 BI gate and the cand_total_cnt > 2 break.
+void injectNewCandidatesPd0(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                             std::uint32_t maxCanCount, const MeSbResultsPd0* meResults,
+                             std::uint32_t meBlockOffset, std::uint32_t meCandOffset, std::uint8_t maxRefs,
+                             std::uint8_t maxL0, Pd0Level pd0Level, bool allowBipred);
+
+// inject_inter_candidates_pd0 (mode_decision.c:2861-2871): the allow_bipred
+// derivation (CONFIG_ENABLE_INTER_COMPOUND is live = 1) + the single
+// inject_new_candidates_pd0 call.
+void injectInterCandidatesPd0(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                               std::uint32_t maxCanCount, const MeSbResultsPd0* meResults,
+                               std::uint32_t meBlockOffset, std::uint32_t meCandOffset, std::uint8_t maxRefs,
+                               std::uint8_t maxL0, Pd0Level pd0Level, ReferenceMode referenceMode,
+                               BlockSize bsize);
+
 }  // namespace l16_rdo
