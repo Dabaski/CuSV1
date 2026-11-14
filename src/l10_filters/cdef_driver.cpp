@@ -204,5 +204,232 @@ void setUnscaledInput16bit(const CdefScsWalls& scs, const CdefPic& input, CdefPi
     }
 }
 
+// cdef_seg_search (cdef_process.c:292-:666). 1:1; the walls are the
+// CdefSegCtx fields, svt_sb_compute_cdef_list the callback. The landed
+// cdefFilterFbLbd / cdefFilterFb / cdefCopyRect8 / cdefCopySb8To16 /
+// computeCdefDist carry the kernel calls. CDEF geometry constants:
+// CDEF_VBORDER 3, CDEF_HBORDER 8, CDEF_HALO 2, CDEF_BSTRIDE 144
+// (kCdefBstride), MI_SIZE_LOG2 2, MI_SIZE_64X64 16, MI_SIZE_128X128 32,
+// MAX_SB_SIZE_LOG2 7.
+void cdefSegSearch(CdefSegCtx& ctx, std::uint32_t segmentIndex) {
+    constexpr std::int32_t kMiSize64x64 = 16;
+    constexpr std::int32_t kMiSize128x128 = 32;
+    constexpr std::int32_t kMiSizeLog2 = 2;
+    constexpr std::int32_t kCdefVBorder = 3;
+    constexpr std::int32_t kCdefHBorder = 8;
+    constexpr std::int32_t kCdefHalo = 2;
+    constexpr std::int32_t kMaxSbSizeLog2 = 7;
+    constexpr std::uint64_t kDefaultMseUv = 1040400;
+
+    const std::uint32_t b64PicWidth = (ctx.alignedWidth + 64 - 1) / 64;
+    const std::uint32_t b64PicHeight = (ctx.alignedHeight + 64 - 1) / 64;
+    const std::uint32_t xSegIdx = segmentIndex % ctx.cdefSegmentsColumnCount;
+    const std::uint32_t ySegIdx = segmentIndex / ctx.cdefSegmentsColumnCount;
+    const std::uint32_t xB64StartIdx = (xSegIdx * b64PicWidth) / ctx.cdefSegmentsColumnCount;
+    const std::uint32_t xB64EndIdx = ((xSegIdx + 1) * b64PicWidth) / ctx.cdefSegmentsColumnCount;
+    const std::uint32_t yB64StartIdx = (ySegIdx * b64PicHeight) / ctx.cdefSegmentsRowCount;
+    const std::uint32_t yB64EndIdx = ((ySegIdx + 1) * b64PicHeight) / ctx.cdefSegmentsRowCount;
+
+    const std::int32_t miRows = ctx.miRows;
+    const std::int32_t miCols = ctx.miCols;
+    const CdefSearchControls* cdefCtrls = &ctx.ctrls;
+    const int firstPassFsNum = cdefCtrls->firstPassFsNum;
+    const int defaultSecondPassFsNum = cdefCtrls->defaultSecondPassFsNum;
+    const std::int32_t coeffShift = ctx.encoderBitDepth - 8 > 0 ? ctx.encoderBitDepth - 8 : 0;
+    const std::int32_t nvfb = (miRows + kMiSize64x64 - 1) / kMiSize64x64;
+    const std::int32_t nhfb = (miCols + kMiSize64x64 - 1) / kMiSize64x64;
+    const std::int32_t damping = 3 + (ctx.baseQIdx >> 6);
+    const std::int32_t numPlanes = 3;
+    const bool sb64 = ctx.sb64;
+    CdefList dlistLocal[kMiSize128x128 * kMiSize128x128];
+    CdefList* dlist;
+
+    const bool is16bit = ctx.is16bit;
+
+    std::int32_t toffPrev = kCdefVBorder;
+    std::int32_t loffPrev = kCdefHBorder;
+    std::int32_t ysizePrev = (1 << kMaxSbSizeLog2) + 2 * kCdefVBorder;
+    std::int32_t xsizePrev = (1 << kMaxSbSizeLog2) + 2 * kCdefHBorder;
+
+    std::uint16_t* inbuf = ctx.scratch.inbuf; // 16-bit sentinel buffer
+    std::uint16_t* in = inbuf + kCdefVBorder * kCdefBstride + kCdefHBorder;
+    // 8-bit padded buffer for the native interior path
+    std::uint8_t* inbuf8 = ctx.scratch.inbuf8;
+    std::uint8_t* in8 = inbuf8 + kCdefVBorder * kCdefBstride + kCdefHBorder;
+    std::uint16_t* tmpDst = ctx.scratch.tmpDst;
+
+    (void)kMiSizeLog2;
+
+    // Loop over all filter blocks (64x64)
+    for (std::uint32_t fbr = yB64StartIdx; fbr < yB64EndIdx; ++fbr) {
+        for (std::uint32_t fbc = xB64StartIdx; fbc < xB64EndIdx; ++fbc) {
+            std::int32_t dirinit = 0;
+            const std::uint32_t lc = kMiSize64x64 * fbc;
+            const std::uint32_t lr = kMiSize64x64 * fbr;
+            int nhb = miCols - lc < kMiSize64x64 ? miCols - lc : kMiSize64x64;
+            int nvb = miRows - lr < kMiSize64x64 ? miRows - lr : kMiSize64x64;
+            int hbStep = 1; // these should be all time with 64x64 SBs
+            int vbStep = 1;
+            int bs = 12; // BLOCK_64X64
+            const int bsize = ctx.miGrid[lr * ctx.miStride + lc].bsize;
+            if (((fbc & 1) && (bsize == 15 || bsize == 14)) || ((fbr & 1) && (bsize == 15 || bsize == 13))) {
+                continue;
+            }
+            if (bsize == 15 || bsize == 14 || bsize == 13) {
+                bs = bsize;
+            }
+
+            if (bs == 15 || bs == 14) {
+                nhb = miCols - lc < kMiSize128x128 ? miCols - lc : kMiSize128x128;
+                hbStep = 2;
+            }
+            if (bs == 15 || bs == 13) {
+                nvb = miRows - lr < kMiSize128x128 ? miRows - lr : kMiSize128x128;
+                vbStep = 2;
+            }
+            const std::uint32_t fbIdx = fbr * nhfb + fbc;
+            // For SB=64, compute the dlist straight into the per-fb cache
+            dlist = sb64 ? ctx.cdefFbList[fbIdx].dlist : dlistLocal;
+            const std::int32_t cdefCount =
+                ctx.computeCdefList(ctx.miGrid, ctx.miStride, (std::int32_t)lr, (std::int32_t)lc, dlist, bs);
+            if (sb64) {
+                ctx.cdefFbList[fbIdx].cdefCount = cdefCount;
+            }
+            if (cdefCount == 0) {
+                ctx.skipCdefSeg[fbIdx] = 1;
+                continue;
+            }
+            ctx.skipCdefSeg[fbIdx] = 0;
+
+            const std::int32_t toff = kCdefVBorder * (fbr != 0);
+            const std::int32_t loff = kCdefHBorder * (fbc != 0);
+            const std::int32_t boff = kCdefVBorder * ((std::int32_t)fbr + vbStep < nvfb);
+            const std::int32_t roff = kCdefHBorder * ((std::int32_t)fbc + hbStep < nhfb);
+
+            std::uint8_t (*dir)[kCdefNblocks][kCdefNblocks] = &ctx.cdefDirData[fbIdx].dir;
+            std::int32_t (*var)[kCdefNblocks][kCdefNblocks] = &ctx.cdefDirData[fbIdx].var;
+            for (int pli = 0; pli < numPlanes; pli++) {
+                const std::int32_t miWideL2 = kMiSizeLog2 - (pli == 0 ? 0 : 1);
+                const std::int32_t miHighL2 = kMiSizeLog2 - (pli == 0 ? 0 : 1);
+                const std::int32_t ysize = (nvb << miHighL2) + boff + toff;
+                const std::int32_t xsize = (nhb << miWideL2) + roff + loff;
+
+                // 8-bit content (RTC): filter via the boundary-aware hybrid;
+                // otherwise the 16-bit sentinel gather
+                const bool native8bit = !is16bit;
+                if (!native8bit) {
+                    bool needToReset =
+                        toffPrev > toff || loffPrev > loff || ysize < ysizePrev || xsize < xsizePrev;
+                    if (needToReset) {
+                        std::uint16_t* p = &in[(-toffPrev * kCdefBstride - loffPrev)];
+                        // the reference's (uint8_t)CDEF_VERY_LARGE truncation:
+                        // 0x7F7F -> 0x7F, so each uint16 cell becomes 0x7F7F
+                        for (int r = 0; r < ysizePrev; r++) {
+                            memset(p, kCdefVeryLarge & 0xFF, sizeof(p[0]) * xsizePrev);
+                            p += kCdefBstride;
+                        }
+                    }
+                    toffPrev = toff;
+                    loffPrev = loff;
+                    ysizePrev = ysize;
+                    xsizePrev = xsize;
+
+                    cdefCopySb8To16(&in[(-toff * kCdefBstride - loff)], kCdefBstride, ctx.src[pli],
+                        (lr << miHighL2) - toff, (lc << miWideL2) - loff, ctx.strideSrc[pli], ysize, xsize, is16bit);
+                }
+                if (native8bit) {
+                    // The bounded 8-bit kernel reads only +/-CDEF_HALO
+                    const std::int32_t toff8 = kCdefHalo * (fbr != 0);
+                    const std::int32_t loff8 = kCdefHalo * (fbc != 0);
+                    const std::int32_t boff8 = kCdefHalo * ((std::int32_t)fbr + vbStep < nvfb);
+                    const std::int32_t roff8 = kCdefHalo * ((std::int32_t)fbc + hbStep < nhfb);
+                    const std::int32_t ysize8 = (nvb << miHighL2) + boff8 + toff8;
+                    const std::int32_t xsize8 = (nhb << miWideL2) + roff8 + loff8;
+                    cdefCopyRect8(&in8[(-toff8 * kCdefBstride - loff8)], kCdefBstride, ctx.src[pli],
+                        (lr << miHighL2) - toff8, (lc << miWideL2) - loff8, ctx.strideSrc[pli], ysize8, xsize8);
+                }
+
+                std::uint8_t subsamplingFactor = cdefCtrls->subsamplingFactor;
+                // Cap the subsampling for certain block sizes
+                // (plane_bsize per the reference's hardcoded 4:2:0:
+                // luma BLOCK_8X8 = 3, chroma BLOCK_4X4 = 0,
+                // definitions.h:883-:905 ordinals)
+                const int planeBsize = (pli == 0) ? 3 : 0;
+                switch (planeBsize) {
+                case 3: subsamplingFactor = subsamplingFactor < 4 ? subsamplingFactor : 4; break;
+                case 2: // BLOCK_8X4
+                case 1: // BLOCK_4X8
+                    subsamplingFactor = subsamplingFactor < 2 ? subsamplingFactor : 2;
+                    break;
+                case 0: subsamplingFactor = subsamplingFactor < 1 ? subsamplingFactor : 1; break;
+                default: break;
+                }
+
+                // first cdef stage
+                for (int gi = 0; gi < firstPassFsNum; gi++) {
+                    // Check if chroma filter is set to be tested
+                    if (pli && (cdefCtrls->defaultFirstPassFsUv[gi] == -1)) {
+                        ctx.mseSeg[1][fbIdx][gi] = kDefaultMseUv * 64;
+                        continue;
+                    }
+
+                    if (native8bit) {
+                        cdefFilterFbLbd(reinterpret_cast<std::uint8_t*>(tmpDst), 0, in8, toff == 0, loff == 0,
+                            boff == 0, roff == 0, nvb << miHighL2, nhb << miWideL2, pli == 0 ? 0 : 1,
+                            pli == 0 ? 0 : 1, *dir, &dirinit, *var, pli, dlist, cdefCount,
+                            cdefCtrls->defaultFirstPassFs[gi], damping, coeffShift, subsamplingFactor);
+                    } else {
+                        cdefFilterFb(is16bit ? nullptr : reinterpret_cast<std::uint8_t*>(tmpDst),
+                            is16bit ? tmpDst : nullptr, 0, in, pli == 0 ? 0 : 1, pli == 0 ? 0 : 1, *dir, &dirinit,
+                            *var, pli, dlist, cdefCount, cdefCtrls->defaultFirstPassFs[gi], damping, coeffShift,
+                            subsamplingFactor);
+                    }
+                    const std::uint64_t currMse = computeCdefDist(ctx.ref[pli],
+                        (lr << miHighL2) * ctx.strideRef[pli] + (lc << miWideL2), ctx.strideRef[pli],
+                        reinterpret_cast<const std::uint8_t*>(tmpDst), dlist, cdefCount,
+                        static_cast<CdefBlockSize>(planeBsize), coeffShift, subsamplingFactor, is16bit);
+
+                    if (pli < 2) {
+                        ctx.mseSeg[pli][fbIdx][gi] = currMse * subsamplingFactor;
+                    } else {
+                        ctx.mseSeg[1][fbIdx][gi] += (currMse * subsamplingFactor);
+                    }
+                }
+
+                // second cdef stage
+                for (int gi = firstPassFsNum; gi < firstPassFsNum + defaultSecondPassFsNum; gi++) {
+                    if (pli && (cdefCtrls->defaultSecondPassFsUv[gi - firstPassFsNum] == -1)) {
+                        ctx.mseSeg[1][fbIdx][gi] = kDefaultMseUv * 64;
+                        continue;
+                    }
+
+                    if (native8bit) {
+                        cdefFilterFbLbd(reinterpret_cast<std::uint8_t*>(tmpDst), 0, in8, toff == 0, loff == 0,
+                            boff == 0, roff == 0, nvb << miHighL2, nhb << miWideL2, pli == 0 ? 0 : 1,
+                            pli == 0 ? 0 : 1, *dir, &dirinit, *var, pli, dlist, cdefCount,
+                            cdefCtrls->defaultSecondPassFs[gi - firstPassFsNum], damping, coeffShift,
+                            subsamplingFactor);
+                    } else {
+                        cdefFilterFb(is16bit ? nullptr : reinterpret_cast<std::uint8_t*>(tmpDst),
+                            is16bit ? tmpDst : nullptr, 0, in, pli == 0 ? 0 : 1, pli == 0 ? 0 : 1, *dir, &dirinit,
+                            *var, pli, dlist, cdefCount, cdefCtrls->defaultSecondPassFs[gi - firstPassFsNum],
+                            damping, coeffShift, subsamplingFactor);
+                    }
+                    const std::uint64_t currMse = computeCdefDist(ctx.ref[pli],
+                        (lr << miHighL2) * ctx.strideRef[pli] + (lc << miWideL2), ctx.strideRef[pli],
+                        reinterpret_cast<const std::uint8_t*>(tmpDst), dlist, cdefCount,
+                        static_cast<CdefBlockSize>(planeBsize), coeffShift, subsamplingFactor, is16bit);
+
+                    if (pli < 2) {
+                        ctx.mseSeg[pli][fbIdx][gi] = currMse * subsamplingFactor;
+                    } else {
+                        ctx.mseSeg[1][fbIdx][gi] += (currMse * subsamplingFactor);
+                    }
+                }
+            }
+        }
+    }
+}
+
 } // namespace cdef_driver
 } // namespace l10_filters

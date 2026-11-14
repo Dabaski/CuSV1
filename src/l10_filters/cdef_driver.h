@@ -147,5 +147,110 @@ using Pack2dPicFn = void (*)(const CdefPic& input, CdefPic& output);
 void setUnscaledInput16bit(const CdefScsWalls& scs, const CdefPic& input, CdefPic& output, CopyBufferInfoFn copyInfo,
     Convert8To16Fn convert8To16, Pack2dPicFn pack2dPic);
 
+// ---------------------------------------------------------------------------
+// S7: cdef_seg_search (cdef_process.c:292-:666) - the per-segment strength
+// search over the 64x64 filter blocks.
+// ---------------------------------------------------------------------------
+
+// CdefFbEntry (pcs.h:157-:160): the per-fb dlist/count cache the SB=64
+// apply reuses. dlist holds the max 8x8 sub-blocks of a 64x64 fb.
+struct CdefFbEntry {
+    std::int32_t cdefCount;
+    CdefList dlist[64];
+};
+
+// CdefDirData (pcs.h:150-:153): the per-fb dir/var scratch.
+struct CdefDirData {
+    std::uint8_t dir[kCdefNblocks][kCdefNblocks];
+    std::int32_t var[kCdefNblocks][kCdefNblocks];
+};
+
+// The threaded CdefSearchControls surface (pcs.h:554-:591): the fields
+// cdef_seg_search consumes. default_first_pass_fs/uv and
+// default_second_pass_fs/uv are the full TOTAL_STRENGTHS arrays (64).
+struct CdefSearchControls {
+    int firstPassFsNum;
+    int defaultSecondPassFsNum;
+    std::uint8_t defaultFirstPassFs[kCdefTotalStrengths];
+    std::uint8_t defaultSecondPassFs[kCdefTotalStrengths];
+    std::int8_t defaultFirstPassFsUv[kCdefTotalStrengths];
+    std::int8_t defaultSecondPassFsUv[kCdefTotalStrengths];
+    std::uint8_t subsamplingFactor;
+};
+
+// The threaded CdefContext scratch (cdef_process.c:211-:222): the hoisted
+// buffers. tmpDst is uint16 to accommodate hbd content (8 bit treats it
+// as a uint8 buffer and uses half).
+struct CdefSegScratch {
+    std::uint16_t* tmpDst; // 1 << (MAX_SB_SIZE_LOG2 * 2)
+    std::uint16_t* inbuf; // CDEF_INBUF_SIZE (16-bit sentinel path)
+    std::uint8_t* inbuf8; // CDEF_INBUF_SIZE (native interior path)
+};
+
+// CDEF_INBUF_SIZE (cdef.h:41): CDEF_BSTRIDE * ((1 << MAX_SB_SIZE_LOG2) +
+// 2 * CDEF_VBORDER) = 144 * 134.
+constexpr int kCdefInbufSize = kCdefBstride * ((1 << 7) + 2 * 3);
+
+// The mse_seg carrier (pcs.h:205): two arrays of pointers to
+// TOTAL_STRENGTHS-wide rows, indexed [plane][fb][strength].
+using CdefMseSeg = std::uint64_t (*[2])[kCdefTotalStrengths];
+
+// The svt_sb_compute_cdef_list call-site wall (enc_cdef.c:153-:184, the
+// mi-grid walk): threaded as a callback. (pcsMiGrid, miStride, miRow,
+// miCol, dlist, bs) -> count. bs threads as the BlockSize ordinal.
+using ComputeCdefListFn = std::int32_t (*)(CdefMb* miGrid, std::int32_t miStride, std::int32_t miRow,
+    std::int32_t miCol, CdefList* dlist, int bs);
+
+// CdefSegCtx: the threaded PictureControlSet / SequenceControlSet /
+// PictureParentControlSet surface of cdef_seg_search, one named field per
+// consumed reference field (the DeblockContext pattern).
+struct CdefSegCtx {
+    // pcs->mi_grid_base / pcs->mi_stride / cm->mi_rows / cm->mi_cols
+    CdefMb* miGrid;
+    std::int32_t miStride;
+    std::int32_t miRows;
+    std::int32_t miCols;
+    // ppcs->aligned_width / aligned_height (the b64 segment geometry)
+    std::int32_t alignedWidth;
+    std::int32_t alignedHeight;
+    // pcs->cdef_segments_column_count / row_count
+    int cdefSegmentsColumnCount;
+    int cdefSegmentsRowCount;
+    // ppcs->cdef_search_ctrls
+    CdefSearchControls ctrls;
+    // scs->seq_header.sb_size == BLOCK_64X64, scs->static_config.
+    // encoder_bit_depth, SVT_EFFECTIVE_IS_16BIT_PIPELINE
+    bool sb64;
+    int encoderBitDepth;
+    bool is16bit;
+    // frm_hdr->quantization_params.base_q_idx (the damping)
+    std::int32_t baseQIdx;
+    // pcs->cdef_input_recon / cdef_input_source (the plane pointers) and
+    // the recon/input strides
+    const std::uint8_t* src[3];
+    const std::uint8_t* ref[3];
+    std::int32_t strideSrc[3];
+    std::int32_t strideRef[3];
+    // pcs->mse_seg / skip_cdef_seg / cdef_dir_data / cdef_fb_list
+    CdefMseSeg mseSeg;
+    std::uint8_t* skipCdefSeg;
+    CdefDirData* cdefDirData;
+    CdefFbEntry* cdefFbList;
+    // the CdefContext hoisted scratch
+    CdefSegScratch scratch;
+    // the svt_sb_compute_cdef_list call-site wall
+    ComputeCdefListFn computeCdefList;
+};
+
+// cdef_seg_search (cdef_process.c:292-:666): for each 64x64 filter block
+// in the segment and each plane, search the allowable strength pairs:
+// the 16-bit sentinel gather (the incremental VERY_LARGE reset logic) or
+// the native 8-bit halo gather, the per-plane_bsize subsampling cap, the
+// first/second pass strength loops over the landed fb filters, and the
+// mse_seg accumulation (V folds into the U row - the pli < 2 vs else
+// quirk). The chroma -1 mask gate pins default_mse_uv * 64 and skips the
+// filter call.
+void cdefSegSearch(CdefSegCtx& ctx, std::uint32_t segmentIndex);
+
 } // namespace cdef_driver
 } // namespace l10_filters

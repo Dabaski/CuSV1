@@ -430,3 +430,338 @@ TEST_CASE("setUnscaledInput16bit dispatches on the input bit depth") {
     CHECK(gConvertCalls == 1);
     CHECK(gPackCalls == 1);
 }
+
+// ---- S7: cdef_seg_search (cdef_process.c:292-:666) ------------------------
+// The fixtures pin the OBSERVABLE structure with deterministic constant
+// planes: on a constant recon any CDEF filter returns the recon exactly
+// (the constrain of equal diffs is 0 -> y = x), so every gi's tmp_dst is
+// the gathered recon and the mse values are hand-derivable:
+//   luma  (BLOCK_8X8, 64 blocks x 64 px x (104-100)^2 = 65536, x ss)
+//   chroma (BLOCK_4X4, 64 blocks x 16 px x 16 = 16384 each)
+//   the V plane FOLDS into the U row (pli < 2 vs else) -> 32768
+// The gathered plane identity is pinned through the scratch buffers (the
+// final inbuf body is the V plane's gather; in8 has no sentinel reset).
+
+namespace {
+using l10_filters::cdef_driver::CdefSegCtx;
+using l10_filters::cdef_driver::CdefSearchControls;
+using l10_filters::cdef_driver::CdefMb;
+using l10_filters::cdef_driver::CdefFbEntry;
+using l10_filters::cdef_driver::CdefDirData;
+using l10_filters::cdef_driver::kCdefInbufSize;
+
+// the test-side svt_sb_compute_cdef_list for an all-non-skip grid: 8x8
+// units stepping 2 mi, count = (maxr/2)*(maxc/2)
+std::int32_t testComputeCdefList(l10_filters::cdef_driver::CdefMb*, std::int32_t, std::int32_t miRow,
+    std::int32_t miCol, l10_filters::CdefList* dlist, int bs) {
+    (void)miRow;
+    (void)miCol;
+    const int kMiSize = bs == 15 || bs == 13 ? 32 : 16;
+    const std::int32_t maxc = kMiSize, maxr = kMiSize;
+    std::int32_t count = 0;
+    for (std::int32_t r = 0; r < maxr; r += 2)
+        for (std::int32_t c = 0; c < maxc; c += 2) {
+            dlist[count].by = static_cast<std::uint8_t>(r >> 1);
+            dlist[count].bx = static_cast<std::uint8_t>(c >> 1);
+            ++count;
+        }
+    return count;
+}
+
+struct SegFixture {
+    static constexpr std::int32_t kMiStride = 40;
+    CdefMb miGrid[kMiStride * kMiStride];
+    CdefFbEntry fbList[16];
+    CdefDirData dirData[16];
+    std::uint8_t skip[16];
+    std::vector<std::uint16_t> tmpDst;
+    std::vector<std::uint16_t> inbuf;
+    std::vector<std::uint8_t> inbuf8;
+    std::uint64_t msePlane0[16][l10_filters::kCdefTotalStrengths];
+    std::uint64_t msePlane1[16][l10_filters::kCdefTotalStrengths];
+    CdefSegCtx ctx;
+
+    // miRows/miCols in mi units; srcConst/refConst per plane (or a column
+    // ramp when rampCol)
+    SegFixture(std::int32_t miRows, std::int32_t miCols, std::uint16_t srcY, std::uint16_t srcU,
+        std::uint16_t refY, std::uint16_t refU, bool rampCol = false, std::int32_t fbPx = 128) {
+        for (auto& mb : miGrid) {
+            mb.bsize = 12; // BLOCK_64X64
+            mb.cdefStrength = 0;
+        }
+        for (int i = 0; i < 16; ++i) skip[i] = 0xEE;
+        tmpDst.assign(1 << 14, 0x7ABC);
+        inbuf.assign(kCdefInbufSize, 0x1234);
+        inbuf8.assign(kCdefInbufSize, 0xAA);
+
+        const std::int32_t lumaPx = 2 * fbPx, chromaPx = fbPx;
+        // the plane buffers are 8-BIT (the native path reads bytes); the
+        // 16-bit variant widens them (set16bitMode)
+        srcBufY.assign((lumaPx + 8) * (lumaPx + 16), (std::uint8_t) srcY);
+        srcBufU.assign((chromaPx + 8) * (chromaPx + 16), (std::uint8_t) srcU);
+        srcBufV.assign((chromaPx + 8) * (chromaPx + 16), (std::uint8_t)(srcU + 11));
+        refBufY.assign((lumaPx + 8) * (lumaPx + 16), (std::uint8_t) refY);
+        refBufU.assign((chromaPx + 8) * (chromaPx + 16), (std::uint8_t) refU);
+        refBufV.assign((chromaPx + 8) * (chromaPx + 16), (std::uint8_t)(refU + 11));
+        if (rampCol) {
+            for (std::int32_t r = 0; r < lumaPx + 8; ++r)
+                for (std::int32_t c = 0; c < lumaPx + 16; ++c)
+                    srcBufY[r * (lumaPx + 16) + c] = static_cast<std::uint8_t>(c + 1);
+        }
+        ctx.miGrid = miGrid;
+        ctx.miStride = kMiStride;
+        ctx.miRows = miRows;
+        ctx.miCols = miCols;
+        ctx.alignedWidth = miCols * 4;
+        ctx.alignedHeight = miRows * 4;
+        ctx.cdefSegmentsColumnCount = 1;
+        ctx.cdefSegmentsRowCount = 1;
+        ctx.sb64 = true;
+        ctx.encoderBitDepth = 8;
+        ctx.is16bit = false;
+        ctx.baseQIdx = 0;
+        ctx.src[0] = srcBufY.data();
+        ctx.src[1] = srcBufU.data();
+        ctx.src[2] = srcBufV.data();
+        ctx.ref[0] = refBufY.data();
+        ctx.ref[1] = refBufU.data();
+        ctx.ref[2] = refBufV.data();
+        ctx.strideSrc[0] = lumaPx + 16;
+        ctx.strideSrc[1] = ctx.strideSrc[2] = chromaPx + 16;
+        ctx.strideRef[0] = lumaPx + 16;
+        ctx.strideRef[1] = ctx.strideRef[2] = chromaPx + 16;
+        ctx.mseSeg[0] = msePlane0;
+        ctx.mseSeg[1] = msePlane1;
+        ctx.skipCdefSeg = skip;
+        ctx.cdefDirData = dirData;
+        ctx.cdefFbList = fbList;
+        ctx.scratch.tmpDst = tmpDst.data();
+        ctx.scratch.inbuf = inbuf.data();
+        ctx.scratch.inbuf8 = inbuf8.data();
+        ctx.computeCdefList = testComputeCdefList;
+        for (int i = 0; i < 16; ++i) fbList[i].cdefCount = -1;
+        for (int i = 0; i < 16; ++i)
+            for (int j = 0; j < l10_filters::kCdefTotalStrengths; ++j) {
+                msePlane0[i][j] = 0xAAAAAAAAAAAAAAAAull;
+                msePlane1[i][j] = 0xAAAAAAAAAAAAAAAAull;
+            }
+    }
+
+    std::vector<std::uint8_t> srcBufY, srcBufU, srcBufV, refBufY, refBufU, refBufV;
+    std::vector<std::uint16_t> src16Y, src16U, src16V, ref16Y, ref16U, ref16V;
+
+    CdefSearchControls& ctrls() { return ctx.ctrls; }
+
+    // widen the plane buffers and re-point the carrier (for is16bit runs)
+    void set16bitMode() {
+        auto widen = [](const std::vector<std::uint8_t>& u8, std::vector<std::uint16_t>& u16) {
+            u16.resize(u8.size());
+            for (std::size_t i = 0; i < u8.size(); ++i) u16[i] = u8[i];
+        };
+        widen(srcBufY, src16Y);
+        widen(srcBufU, src16U);
+        widen(srcBufV, src16V);
+        widen(refBufY, ref16Y);
+        widen(refBufU, ref16U);
+        widen(refBufV, ref16V);
+        ctx.src[0] = reinterpret_cast<const std::uint8_t*>(src16Y.data());
+        ctx.src[1] = reinterpret_cast<const std::uint8_t*>(src16U.data());
+        ctx.src[2] = reinterpret_cast<const std::uint8_t*>(src16V.data());
+        ctx.ref[0] = reinterpret_cast<const std::uint8_t*>(ref16Y.data());
+        ctx.ref[1] = reinterpret_cast<const std::uint8_t*>(ref16U.data());
+        ctx.ref[2] = reinterpret_cast<const std::uint8_t*>(ref16V.data());
+        ctx.is16bit = true;
+    }
+};
+} // namespace
+
+TEST_CASE("cdefSegSearch constant frame mse structure + fb cache + dir/var") {
+    SegFixture f(32, 32, 100, 66, 104, 70); // 128x128 px, 2x2 fbs
+    auto& c = f.ctrls();
+    c.firstPassFsNum = 1;
+    c.defaultSecondPassFsNum = 1;
+    for (int i = 0; i < 64; ++i) {
+        c.defaultFirstPassFs[i] = 5;
+        c.defaultSecondPassFs[i] = 7;
+        c.defaultFirstPassFsUv[i] = 0;
+        c.defaultSecondPassFsUv[i] = 0;
+    }
+    c.subsamplingFactor = 1;
+    l10_filters::cdef_driver::cdefSegSearch(f.ctx, 0);
+
+    for (std::uint32_t fb = 0; fb < 4; ++fb) {
+        // luma: 64 blocks x 64 px x 16 = 65536, x ss 1
+        CHECK(f.msePlane0[fb][0] == 65536);
+        // chroma U then V folded: 16384 + 16384 = 32768
+        CHECK(f.msePlane1[fb][0] == 32768);
+        // second pass gi 1: same
+        CHECK(f.msePlane0[fb][1] == 65536);
+        CHECK(f.msePlane1[fb][1] == 32768);
+        // skip flag cleared
+        CHECK(f.skip[fb] == 0);
+        // the SB=64 dlist cache filled: 64 entries, corners {0,0} and {7,7}
+        CHECK(f.fbList[fb].cdefCount == 64);
+        CHECK(f.fbList[fb].dlist[0].by == 0);
+        CHECK(f.fbList[fb].dlist[0].bx == 0);
+        CHECK(f.fbList[fb].dlist[63].by == 7);
+        CHECK(f.fbList[fb].dlist[63].bx == 7);
+        // dir/var: constant planes -> dir 0, var 0
+        CHECK(f.dirData[fb].dir[0][0] == 0);
+        CHECK(f.dirData[fb].var[0][0] == 0);
+        CHECK(f.dirData[fb].var[7][7] == 0);
+    }
+    // the fb count equals the mi-grid call count: 4 calls (one per fb)
+}
+
+TEST_CASE("cdefSegSearch chroma -1 mask gate pins default_mse_uv * 64") {
+    SegFixture f(32, 32, 100, 66, 104, 70);
+    auto& c = f.ctrls();
+    c.firstPassFsNum = 1;
+    c.defaultSecondPassFsNum = 1;
+    for (int i = 0; i < 64; ++i) {
+        c.defaultFirstPassFs[i] = 5;
+        c.defaultSecondPassFs[i] = 7;
+        c.defaultFirstPassFsUv[i] = -1;
+        c.defaultSecondPassFsUv[i] = -1;
+    }
+    c.subsamplingFactor = 1;
+    l10_filters::cdef_driver::cdefSegSearch(f.ctx, 0);
+
+    for (std::uint32_t fb = 0; fb < 4; ++fb) {
+        // both chroma gis pinned to default_mse_uv * 64 = 1040400 * 64
+        CHECK(f.msePlane1[fb][0] == 1040400ull * 64);
+        CHECK(f.msePlane1[fb][1] == 1040400ull * 64);
+        // luma still searched
+        CHECK(f.msePlane0[fb][0] == 65536);
+        CHECK(f.msePlane0[fb][1] == 65536);
+    }
+}
+
+TEST_CASE("cdefSegSearch 16-bit path matches the native 8-bit path") {
+    // identical constant fixture, is16bit on: the widened planes carry the
+    // same content and the sentinel gather + cdefFilterFb path must land
+    // the same mse values
+    SegFixture f(32, 32, 100, 66, 104, 70);
+    f.set16bitMode();
+    auto& c = f.ctrls();
+    c.firstPassFsNum = 1;
+    c.defaultSecondPassFsNum = 1;
+    for (int i = 0; i < 64; ++i) {
+        c.defaultFirstPassFs[i] = 5;
+        c.defaultSecondPassFs[i] = 7;
+        c.defaultFirstPassFsUv[i] = 0;
+        c.defaultSecondPassFsUv[i] = 0;
+    }
+    c.subsamplingFactor = 1;
+    l10_filters::cdef_driver::cdefSegSearch(f.ctx, 0);
+    for (std::uint32_t fb = 0; fb < 4; ++fb) {
+        CHECK(f.msePlane0[fb][0] == 65536);
+        CHECK(f.msePlane1[fb][0] == 32768);
+        CHECK(f.msePlane0[fb][1] == 65536);
+        CHECK(f.msePlane1[fb][1] == 32768);
+    }
+}
+
+TEST_CASE("cdefSegSearch 128 block: skip geometry + big-fb list") {
+    SegFixture f(32, 32, 100, 66, 104, 70);
+    // one 128x128 block: every mi cell bsize 15
+    for (auto& mb : f.miGrid) mb.bsize = 15;
+    f.ctx.sb64 = false; // SB=128: no dlist cache write
+    auto& c = f.ctrls();
+    c.firstPassFsNum = 1;
+    c.defaultSecondPassFsNum = 1;
+    for (int i = 0; i < 64; ++i) {
+        c.defaultFirstPassFs[i] = 5;
+        c.defaultSecondPassFs[i] = 7;
+        c.defaultFirstPassFsUv[i] = 0;
+        c.defaultSecondPassFsUv[i] = 0;
+    }
+    c.subsamplingFactor = 1;
+    l10_filters::cdef_driver::cdefSegSearch(f.ctx, 0);
+
+    // fb (0,0) processed: the b64 count = (32/2)*(32/2) = 256 through the
+    // test callback; the other three fbs are skipped by the bsize condition
+    // BEFORE the flag write, so their flags stay at the fixture poison
+    CHECK(f.skip[0] == 0);
+    CHECK(f.skip[1] == 0xEE);
+    CHECK(f.skip[2] == 0xEE);
+    CHECK(f.skip[3] == 0xEE);
+    // the fb cache NOT written (sb64 false)
+    CHECK(f.fbList[0].cdefCount == -1);
+    // luma mse: 256 blocks x 64 px x 16 = 262144 (the 128 fb covers 256
+    // 8x8 luma units)
+    CHECK(f.msePlane0[0][0] == 262144);
+    // chroma: 256 4x4 units x 16 px x 16 = 65536 each, V folds -> 131072
+    CHECK(f.msePlane1[0][0] == 131072);
+}
+
+TEST_CASE("cdefSegSearch inbuf sentinel reset + V-plane residency") {
+    // single 64x64 fb, 16-bit path: the incremental reset zeroes the whole
+    // buffer to 0x7F7F, then the gathers write the body; the LAST gather
+    // is the V plane (pli 2), so the resident body is the V plane content
+    SegFixture f(16, 16, 55, 66, 59, 70);
+    f.set16bitMode();
+    auto& c = f.ctrls();
+    c.firstPassFsNum = 1;
+    c.defaultSecondPassFsNum = 1;
+    for (int i = 0; i < 64; ++i) {
+        c.defaultFirstPassFs[i] = 5;
+        c.defaultSecondPassFs[i] = 7;
+        c.defaultFirstPassFsUv[i] = 0;
+        c.defaultSecondPassFsUv[i] = 0;
+    }
+    c.subsamplingFactor = 1;
+    l10_filters::cdef_driver::cdefSegSearch(f.ctx, 0);
+
+    const std::uint16_t sentinel = 0x7F7F;
+    // Geometry for the SINGLE-fb frame (nhfb = nvfb = 1 -> roff = boff = 0,
+    // toff = loff = 0): each gather body is (nvb<<miHighL2) x (nhb<<miWideL2)
+    // = 32 x 32 chroma / 64 x 64 luma, landing at buffer rows 3.., cols 8..
+    // from the in origin (inbuf + 3*144 + 8). Sequence:
+    //   pli 0 luma: full reset (134x134 from inbuf[0]) then a 64-wide gather
+    //   pli 1 U:    ysize 40 < ysizePrev 72 -> reset AGAIN (72 rows x 64
+    //               cols from the in origin - which wipes the whole luma
+    //               body), then a 32-wide gather
+    //   pli 2 V:    no reset, 32-wide over U
+    // Final state at row 3: cols 8..39 = V (77); cols 40+ sentinel.
+    CHECK(f.inbuf[0] == sentinel);
+    CHECK(f.inbuf[2 * 144 + 100] == sentinel);
+    for (int j = 0; j < 32; ++j) {
+        CHECK(f.inbuf[3 * 144 + 8 + j] == 77); // srcV = srcU + 11 = 66 + 11
+    }
+    for (int j = 32; j < 64; ++j) {
+        CHECK(f.inbuf[3 * 144 + 8 + j] == sentinel);
+    }
+    CHECK(f.inbuf[3 * 144 + 8 + 64] == sentinel);
+    CHECK(f.inbuf[(3 + 41) * 144 + 20] == sentinel);
+}
+
+TEST_CASE("cdefSegSearch native 8-bit in8 gather has NO sentinel reset") {
+    SegFixture f(16, 16, 55, 66, 59, 70);
+    f.ctx.is16bit = false; // native path
+    auto& c = f.ctrls();
+    c.firstPassFsNum = 1;
+    c.defaultSecondPassFsNum = 1;
+    for (int i = 0; i < 64; ++i) {
+        c.defaultFirstPassFs[i] = 5;
+        c.defaultSecondPassFs[i] = 7;
+        c.defaultFirstPassFsUv[i] = 0;
+        c.defaultSecondPassFsUv[i] = 0;
+    }
+    c.subsamplingFactor = 1;
+    l10_filters::cdef_driver::cdefSegSearch(f.ctx, 0);
+
+    // in8 is pre-filled 0xAA and the native gather never resets it. With
+    // roff = boff = 0 (single fb), the luma gather is 64 wide (rows 3..74,
+    // cols 8..71), U and V 32 wide (rows 3..42, cols 8..39); the FINAL
+    // body is the V plane content and the luma leftovers survive around
+    // it (55); only cells outside BOTH gathers keep the 0xAA pre-fill.
+    CHECK(f.inbuf8[3 * 144 + 8] == 77);
+    CHECK(f.inbuf8[3 * 144 + 8 + 31] == 77);
+    // one col past the 32-wide chroma body: the luma leftover (55)
+    CHECK(f.inbuf8[3 * 144 + 8 + 32] == 55);
+    CHECK(f.inbuf8[3 * 144 + 8 + 63] == 55);
+    // outside the luma gather too: the pre-fill survives
+    CHECK(f.inbuf8[0] == 0xAA);
+    CHECK(f.inbuf8[(3 + 72) * 144 + 20] == 0xAA);
+}
