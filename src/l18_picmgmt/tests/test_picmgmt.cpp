@@ -1,7 +1,12 @@
-﻿#include <doctest.h>
+#include <doctest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "picmgmt.h"
 
@@ -159,10 +164,11 @@ TEST_CASE("b64GeomInit lays out the b64 grid over ragged edges") {
     // (d) the old pointer is freed and replaced: re-init into the same slot.
     geoms = nullptr;
     CHECK(l18_picmgmt::b64GeomInit(&scs, 64, 64, &geoms) == 0);
-    l18_picmgmt::B64Geom* first = geoms;
     // 130 wide -> ceil(130/64) = 3 cells; the LAST cell is the ragged one.
+    // NOTE: no pointer-inequality check against `first` here - the freed
+    // block may legitimately be re-allocated at the same address; the
+    // free-and-replace contract is pinned through the new content instead.
     CHECK(l18_picmgmt::b64GeomInit(&scs, 130, 64, &geoms) == 0);
-    CHECK(geoms != first);
     CHECK(geoms[1].width == 64);
     CHECK(geoms[2].orgX == 128);
     CHECK(geoms[2].width == 2); // 130 - 128
@@ -201,11 +207,13 @@ TEST_CASE("sbGeomInit and the sb-geom alloc/copy/free trio") {
     l18_picmgmt::freeSbGeoms(nullptr); // the reference guards the null (pcs.c:1520-:1524)
 
     // re-init into the same slot: the old array is freed first (pcs.c:1535).
+    // Same-address reuse is legal, so the contract is pinned by the
+    // (re-)initialized content of the fresh cells, not by pointer identity.
     geoms = nullptr;
     CHECK(l18_picmgmt::sbGeomInit(&scs, 128, 128, &geoms) == 0);
-    l18_picmgmt::SbGeom* first = geoms;
+    geoms[0].orgX = 0xDEAD;
     CHECK(l18_picmgmt::sbGeomInit(&scs, 128, 128, &geoms) == 0);
-    CHECK(geoms != first);
+    CHECK(geoms[0].orgX == 0); // re-initialized by the second init
     l18_picmgmt::freeSbGeoms(geoms);
 }
 
@@ -1380,4 +1388,182 @@ TEST_CASE("tplReferenceParamUpdate fills the TPL_PAD luma-only init data") {
     CHECK(tpl.yStride == 164);
     CHECK(tpl.uStride == 82);
     CHECK(tpl.lumaSize == 164u * 124u);
+}
+
+// ---------------------------------------------------------------------------
+// C7: svt_threads.c spans:
+//   svt_format_thread_name :174-:176,
+//   the semaphore quartet :312-:400, the mutex quartet :405-:470,
+//   svt_aom_atomic_set_u32 :475-:479 (AtomicVarU32, definitions.h:1920-:1925),
+//   the cond-var trio :490-:553, svt_run_once :555-:561.
+// The parked walls: svt_create_thread/destroy_thread (:181-:307, the OS
+// thread + trampoline internals), check_set_prio/can_use_prio (POSIX-only).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("formatThreadName writes prefix+index into a fixed buffer") {
+    char buf[16];
+    l18_picmgmt::formatThreadName(buf, sizeof(buf), "svt_aom_picture_decision", 0u);
+    // snprintf bounds the write at 15 chars + NUL in the 16-byte buffer:
+    // the 25-char name truncates (this is the TASK_COMM_LEN semantics the
+    // reference relies on).
+    CHECK(std::strcmp(buf, "svt_aom_picture") == 0);
+    l18_picmgmt::formatThreadName(buf, sizeof(buf), "enc", 42u);
+    CHECK(std::strcmp(buf, "enc42") == 0);
+    // Truncation: snprintf bounds the write at size; the 16-byte buffer
+    // with a long prefix truncates (TASK_COMM_LEN semantics).
+    l18_picmgmt::formatThreadName(buf, sizeof(buf), "0123456789ABCDEF", 7u);
+    CHECK(std::strncmp(buf, "0123456789ABCDEF", sizeof(buf) - 1) == 0);
+    CHECK(buf[sizeof(buf) - 1] == '\0');
+    // Zero-size buffer writes nothing.
+    char tiny[1] = {0x7F};
+    l18_picmgmt::formatThreadName(tiny, 0, "abc", 1u);
+    CHECK(tiny[0] == 0x7F);
+    // The full index domain end-to-end: every formatted index round-trips.
+    for (std::uint32_t i = 0; i < 1000u; ++i) {
+        char slot[16];
+        l18_picmgmt::formatThreadName(slot, sizeof(slot), "w", i);
+        CHECK(std::strcmp(slot, (std::string("w") + std::to_string(i)).c_str()) == 0);
+    }
+}
+
+TEST_CASE("semaphore quartet posts blocks and destroys") {
+    l18_picmgmt::EbHandle sem = l18_picmgmt::createSemaphore(0, 2);
+    REQUIRE(sem != nullptr);
+    // Post-then-block: the count is available, block returns success.
+    CHECK(l18_picmgmt::postSemaphore(sem) == l18_picmgmt::EB_ErrorNone);
+    CHECK(l18_picmgmt::blockOnSemaphore(sem) == l18_picmgmt::EB_ErrorNone);
+    // Cross-thread: the block must actually WAIT until another thread
+    // posts (50 ms delay proves the block happened before the post).
+    std::atomic<bool> posted{false};
+    std::thread t([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        posted.store(true);
+        CHECK(l18_picmgmt::postSemaphore(sem) == l18_picmgmt::EB_ErrorNone);
+    });
+    CHECK(l18_picmgmt::blockOnSemaphore(sem) == l18_picmgmt::EB_ErrorNone);
+    CHECK(posted.load() == true); // the post happened before the block returned
+    t.join();
+    CHECK(l18_picmgmt::destroySemaphore(sem) == l18_picmgmt::EB_ErrorNone);
+}
+
+TEST_CASE("mutex quartet acquires releases and serializes") {
+    l18_picmgmt::EbHandle mtx = l18_picmgmt::createMutex();
+    REQUIRE(mtx != nullptr);
+    CHECK(l18_picmgmt::blockOnMutex(mtx) == l18_picmgmt::EB_ErrorNone);
+    CHECK(l18_picmgmt::releaseMutex(mtx) == l18_picmgmt::EB_ErrorNone);
+    // Cross-thread handoff: the thread's acquire only succeeds after the
+    // main thread releases.
+    std::atomic<bool> got{false};
+    CHECK(l18_picmgmt::blockOnMutex(mtx) == l18_picmgmt::EB_ErrorNone);
+    std::thread t([&] {
+        CHECK(l18_picmgmt::blockOnMutex(mtx) == l18_picmgmt::EB_ErrorNone);
+        got.store(true);
+        CHECK(l18_picmgmt::releaseMutex(mtx) == l18_picmgmt::EB_ErrorNone);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(got.load() == false); // still blocked while we hold it
+    CHECK(l18_picmgmt::releaseMutex(mtx) == l18_picmgmt::EB_ErrorNone);
+    t.join();
+    CHECK(got.load() == true);
+    // The destroy quirk again (svt_threads.c:459-:463).
+    CHECK(l18_picmgmt::destroyMutex(mtx) == l18_picmgmt::EB_ErrorDestroyMutexFailed);
+}
+
+TEST_CASE("atomicSetU32 single-thread determinism and cross-thread coherence") {
+    l18_picmgmt::EbHandle mtx = l18_picmgmt::createMutex();
+    REQUIRE(mtx != nullptr);
+    l18_picmgmt::AtomicVarU32 var = {};
+    var.obj = 0xEEEE1111u;
+    var.mutex = mtx;
+    l18_picmgmt::atomicSetU32(&var, 5u);
+    CHECK(var.obj == 5u);
+    l18_picmgmt::atomicSetU32(&var, 0u);
+    CHECK(var.obj == 0u);
+    // Cross-thread: two threads hammer different values; every read
+    // observes a whole written value (the mutex makes the pair atomic).
+    std::atomic<int> coherent{0};
+    std::thread a([&] {
+        for (int i = 0; i < 2000; ++i) {
+            l18_picmgmt::atomicSetU32(&var, 1u);
+            if (var.obj == 1u || var.obj == 2u) {
+                ++coherent;
+            }
+        }
+    });
+    std::thread b([&] {
+        for (int i = 0; i < 2000; ++i) {
+            l18_picmgmt::atomicSetU32(&var, 2u);
+            if (var.obj == 1u || var.obj == 2u) {
+                ++coherent;
+            }
+        }
+    });
+    a.join();
+    b.join();
+    CHECK(coherent.load() == 4000);
+    // The pinned reference quirk: destroy_mutex's Windows branch has the
+    // INVERTED polarity - CloseHandle succeeded (nonzero) yields
+    // EB_ErrorDestroyMutexFailed, not EB_ErrorNone
+    // (svt_threads.c:459-:463; contrast destroySemaphore :389-:390 which
+    // negates). Ported 1:1, pinned here.
+    CHECK(l18_picmgmt::destroyMutex(mtx) == l18_picmgmt::EB_ErrorDestroyMutexFailed);
+}
+
+TEST_CASE("condVar trio sets waits and wakes") {
+    l18_picmgmt::CondVar cv;
+    CHECK(l18_picmgmt::createCondVar(&cv) == l18_picmgmt::EB_ErrorNone);
+    CHECK(cv.val == 0); // the ctor zeroes val (:492)
+    CHECK(l18_picmgmt::setCondVar(&cv, 7) == l18_picmgmt::EB_ErrorNone);
+    CHECK(cv.val == 7);
+    // The wait returns as soon as val != input: val is 7, so waiting for
+    // "not 0" and "not 42" both return immediately.
+    CHECK(l18_picmgmt::waitCondVar(&cv, 0) == l18_picmgmt::EB_ErrorNone);
+    CHECK(l18_picmgmt::waitCondVar(&cv, 42) == l18_picmgmt::EB_ErrorNone);
+    // The BLOCKING path: main waits with input 7 (val IS 7) while a thread
+    // sets 42 after a delay; the wait cannot return before the set.
+    std::atomic<bool> setDone{false};
+    std::thread t([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        setDone.store(true);
+        CHECK(l18_picmgmt::setCondVar(&cv, 42) == l18_picmgmt::EB_ErrorNone);
+    });
+    CHECK(l18_picmgmt::waitCondVar(&cv, 7) == l18_picmgmt::EB_ErrorNone);
+    CHECK(setDone.load() == true);
+    CHECK(cv.val == 42);
+    t.join();
+}
+
+#ifdef _WIN32
+static int onceCounter = 0;
+static BOOL CALLBACK l18OnceCallback(PINIT_ONCE, PVOID, PVOID*) {
+    ++onceCounter;
+    return TRUE;
+}
+#else
+static int onceCounter = 0;
+static void l18OnceCallback() {
+    ++onceCounter;
+}
+#endif
+
+TEST_CASE("runOnce runs exactly once across repeated and concurrent calls") {
+    l18_picmgmt::OnceType once;
+    onceCounter = 0;
+#ifdef _WIN32
+    once = {}; // INIT_ONCE zero state = not initialized
+#else
+    once = PTHREAD_ONCE_INIT;
+#endif
+    l18_picmgmt::runOnce(&once, l18OnceCallback);
+    l18_picmgmt::runOnce(&once, l18OnceCallback);
+    CHECK(onceCounter == 1); // exactly-once, single-threaded
+    // Concurrent: N threads race on the same control; the counter stays 1.
+    std::vector<std::thread> ts;
+    for (int i = 0; i < 8; ++i) {
+        ts.emplace_back([&] { l18_picmgmt::runOnce(&once, l18OnceCallback); });
+    }
+    for (auto& th : ts) {
+        th.join();
+    }
+    CHECK(onceCounter == 1);
 }

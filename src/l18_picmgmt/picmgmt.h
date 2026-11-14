@@ -11,6 +11,23 @@
 #include <cstddef>
 #include <cstdint>
 
+// The CondVar/OnceType carriers embed the OS types, exactly as
+// svt_threads.h:17-:19 does. The NOMINMAX/LEAN_AND_MEAN guards are a build
+// hygiene named deviation (the reference includes raw <windows.h>).
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+// The reference header pulls pthread in for the non-Windows CondVar /
+// OnceType fields (svt_threads.h:57-:66).
+#include <pthread.h>
+#endif
+
 namespace l18_picmgmt {
 
 // ---------------------------------------------------------------------------
@@ -413,5 +430,66 @@ EbErrorType paReferenceParamUpdate(PaRefObject* paRefObj, const Scs* scs);
 // svt_tpl_reference_param_update (:348-:372): the TPL_PAD 32 luma-only
 // init data.
 EbErrorType tplReferenceParamUpdate(TplRefObject* tplRefObj, const Scs* scs);
+
+// ---------------------------------------------------------------------------
+// svt_threads.c spans.
+// ---------------------------------------------------------------------------
+
+// EbHandle (definitions.h:1918).
+using EbHandle = void*;
+
+// AtomicVarU32 (definitions.h:1920-:1925), verbatim fields; the mutex is an
+// EbHandle in the reference.
+struct AtomicVarU32 {
+    std::uint32_t obj;
+    EbHandle mutex;
+};
+
+// CondVar (svt_threads.h:111-:120), verbatim fields.
+struct CondVar {
+    std::int32_t val;
+#ifdef _WIN32
+    CRITICAL_SECTION cs;
+    CONDITION_VARIABLE cv;
+#else
+    pthread_mutex_t m_mutex;
+    pthread_cond_t m_cond;
+#endif
+};
+
+// OnceType / OnceFn (svt_threads.h:128-:144).
+#ifdef _WIN32
+using OnceType = INIT_ONCE;
+using OnceFn = PINIT_ONCE_FN;
+#else
+using OnceType = pthread_once_t;
+using OnceFn = void (*)(void);
+#endif
+
+// svt_format_thread_name (svt_threads.c:174-:176): snprintf into a fixed
+// buffer (typical size 16 = TASK_COMM_LEN semantics).
+void formatThreadName(char* buf, std::size_t size, const char* prefix, std::uint32_t index);
+
+// The semaphore quartet (svt_threads.c:312-:400) and the mutex quartet
+// (:405-:470): the platform wrappers, verbatim error-code mapping.
+EbHandle createSemaphore(std::uint32_t initialCount, std::uint32_t maxCount);
+EbErrorType postSemaphore(EbHandle semaphoreHandle);
+EbErrorType blockOnSemaphore(EbHandle semaphoreHandle);
+EbErrorType destroySemaphore(EbHandle semaphoreHandle);
+EbHandle createMutex();
+EbErrorType releaseMutex(EbHandle mutexHandle);
+EbErrorType blockOnMutex(EbHandle mutexHandle);
+EbErrorType destroyMutex(EbHandle mutexHandle);
+
+// svt_aom_atomic_set_u32 (svt_threads.c:475-:479): block-set-release.
+void atomicSetU32(AtomicVarU32* var, std::uint32_t in);
+
+// The cond-var trio (svt_threads.c:490-:553).
+EbErrorType createCondVar(CondVar* condVar);
+EbErrorType setCondVar(CondVar* condVar, std::int32_t newVal);
+EbErrorType waitCondVar(CondVar* condVar, std::int32_t input);
+
+// svt_run_once (svt_threads.c:555-:561).
+void runOnce(OnceType* onceControl, OnceFn initRoutine);
 
 } // namespace l18_picmgmt
