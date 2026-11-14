@@ -509,4 +509,35 @@ void injectMvpCandidatesIiLightPd1(InterInjectedCandidate* candArray, std::uint3
                                     std::int32_t skipRefIdx1, bool losslessSegment,
                                     InjectedMvCarrier& injected);
 
+// av1_ref_frame_type (inter_prediction.h:447-459) over get_uni_comp_ref_idx
+// (:428-441) and the comp_ref0/ref1 LUTs (:396-420). Module-boundary carry
+// (the landed twin is l5 amvp.cpp:129-170; l16 cannot link l5).
+std::int8_t av1RefFrameType(const std::int32_t* rf);
+
+// The choose-best bundle: the ModeDecisionContext/md_rate_est_ctx fields
+// svt_aom_choose_best_av1_mv_pred reads, bundled for the injector callers.
+struct ChooseBestMvCtx {
+    bool shutFastRate;                 // ctx->shut_fast_rate
+    std::uint8_t approxInterRate;      // ctx->approx_inter_rate
+    const std::int32_t* nmvVecCost;    // md_rate_est_ctx->nmv_vec_cost
+    const std::int32_t* const* nmvCostStack;  // md_rate_est_ctx->nmvcoststack
+    const std::int32_t (*drlModeFacBits)[2];  // md_rate_est_ctx->drl_mode_fac_bits[3][2]
+};
+
+// inject_new_candidates_light_pd1 (mode_decision.c:2410-2515). Walls
+// threaded: me_results + the two offsets, ctx->sb_me_mv as two row
+// pointers, the A4M-8 choose-best bundle, the wm_sample_info num column,
+// reduce_unipred_candidates, allow_bipred, the is_intra_bordered x
+// use_neighbouring_mode_ctrls.enabled conjunction, corrupted_mv_check, and
+// the landed InjectedMvCarrier.
+void injectNewCandidatesLightPd1(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                                  std::uint32_t maxCanCount, const MeSbResults* meResults,
+                                  std::uint32_t meBlockOffset, std::uint32_t meCandOffset,
+                                  const Mv* const sbMeMv[2],
+                                  const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                                  const std::uint8_t* refMvCount, const ChooseBestMvCtx& chooseBest,
+                                  const std::uint8_t* wmSampleInfoNum, std::uint8_t reduceUnipredCandidates,
+                                  bool allowBipred, bool isIntraBordered, bool useNeighbouringEnabled,
+                                  bool corruptedMvCheck, InjectedMvCarrier& injected);
+
 }  // namespace l16_rdo

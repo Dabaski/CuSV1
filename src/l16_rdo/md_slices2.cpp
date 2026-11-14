@@ -891,4 +891,181 @@ void injectMvpCandidatesIiLightPd1(InterInjectedCandidate* candArray, std::uint3
     *candTotCnt = candIdx;  // :1508
 }
 
+// ---------------------------------------------------------------------------
+// A4M-11: inject_new_candidates_light_pd1 over the av1_ref_frame_type carry.
+// ---------------------------------------------------------------------------
+
+// comp_ref0 / comp_ref1 (inter_prediction.h:396-407 / :409-420, verbatim).
+static std::int32_t compRef0A4m(std::int32_t refIdx) {
+    static const std::int32_t lut[TOTAL_UNIDIR_COMP_REFS_MV] = {LAST_FRAME_MV, LAST_FRAME_MV, LAST_FRAME_MV,
+                                                                BWDREF_FRAME_MV, LAST2_FRAME_MV, LAST2_FRAME_MV,
+                                                                LAST3_FRAME_MV, BWDREF_FRAME_MV, ALTREF2_FRAME_MV};
+    return lut[refIdx];
+}
+
+static std::int32_t compRef1A4m(std::int32_t refIdx) {
+    static const std::int32_t lut[TOTAL_UNIDIR_COMP_REFS_MV] = {LAST2_FRAME_MV, LAST3_FRAME_MV, GOLDEN_FRAME_MV,
+                                                                ALTREF_FRAME_MV, LAST3_FRAME_MV,
+                                                                GOLDEN_FRAME_MV, GOLDEN_FRAME_MV,
+                                                                ALTREF2_FRAME_MV, ALTREF_FRAME_MV};
+    return lut[refIdx];
+}
+
+// get_uni_comp_ref_idx (inter_prediction.h:428-441, verbatim).
+static std::int8_t getUniCompRefIdxA4m(const std::int32_t* rf) {
+    if (rf[1] <= INTRA_FRAME_MV) {
+        return -1;
+    }
+    if ((rf[0] < BWDREF_FRAME_MV) && (rf[1] >= BWDREF_FRAME_MV)) {
+        return -1;
+    }
+    for (std::int8_t refIdx = 0; refIdx < TOTAL_UNIDIR_COMP_REFS_MV; ++refIdx) {
+        if (rf[0] == compRef0A4m(refIdx) && rf[1] == compRef1A4m(refIdx)) {
+            return refIdx;
+        }
+    }
+    return -1;
+}
+
+// av1_ref_frame_type (inter_prediction.h:447-459, verbatim; FWD_RF_OFFSET =
+// ref - LAST_FRAME, BWD_RF_OFFSET = ref - BWDREF_FRAME, definitions.h
+// :1393-1394).
+std::int8_t av1RefFrameType(const std::int32_t* rf) {
+    if (rf[1] > INTRA_FRAME_MV) {
+        const std::int8_t uniCompRefIdx = getUniCompRefIdxA4m(rf);
+        if (uniCompRefIdx >= 0) {
+            return (std::int8_t)(TOTAL_REFS_PER_FRAME_MV + FWD_REFS_MV * BWD_REFS_MV + uniCompRefIdx);
+        } else {
+            return (std::int8_t)(TOTAL_REFS_PER_FRAME_MV + (rf[0] - LAST_FRAME_MV) +
+                                 (rf[1] - BWDREF_FRAME_MV) * FWD_REFS_MV);
+        }
+    }
+    return (std::int8_t)rf[0];
+}
+
+// inject_new_candidates_light_pd1 (mode_decision.c:2410-2515, verbatim over
+// the carriers; BI_PRED = 2, REF_LIST_0 = 0).
+void injectNewCandidatesLightPd1(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                                  std::uint32_t maxCanCount, const MeSbResults* meResults,
+                                  std::uint32_t meBlockOffset, std::uint32_t meCandOffset,
+                                  const Mv* const sbMeMv[2],
+                                  const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                                  const std::uint8_t* refMvCount, const ChooseBestMvCtx& chooseBest,
+                                  const std::uint8_t* wmSampleInfoNum, std::uint8_t reduceUnipredCandidates,
+                                  bool allowBipred, bool isIntraBordered, bool useNeighbouringEnabled,
+                                  bool corruptedMvCheck, InjectedMvCarrier& injected) {
+    Mv bestPredMv[2];
+    bestPredMv[0].as_int = 0;  // :2415 {{{0}}
+    bestPredMv[1].as_int = 0;
+    std::uint32_t candTotalCnt = *candTotCnt;  // :2416
+    const std::uint8_t totalMeCnt = meResults->totalMeCandidateIndex[meBlockOffset];  // :2418
+    const MeCandidate* meBlockResults = &meResults->meCandidateArray[meCandOffset];  // :2419
+
+    for (std::uint8_t meCandidateIndex = 0; meCandidateIndex < totalMeCnt; ++meCandidateIndex) {  // :2421
+        const MeCandidate* meBlockResultsPtr = &meBlockResults[meCandidateIndex];
+        const std::uint8_t interDirection = meBlockResultsPtr->direction;
+        const std::uint8_t list0RefIndex = meBlockResultsPtr->refIdxL0;
+        const std::uint8_t list1RefIndex = meBlockResultsPtr->refIdxL1;
+
+        if (reduceUnipredCandidates >= 2) {  // :2427-2435
+            if ((totalMeCnt > 1) && (interDirection != 2)) {
+                continue;
+            }
+        } else if (reduceUnipredCandidates) {
+            if ((totalMeCnt > 3) && (interDirection != 2)) {
+                continue;
+            }
+        }
+
+        // NEWMV
+        if (interDirection < 2 /* BI_PRED */) {  // :2440
+            const std::uint8_t listIdx = interDirection;
+            const std::uint8_t refIdx = interDirection ? list1RefIndex : list0RefIndex;
+            const Mv toInjMv = sbMeMv[listIdx][refIdx];  // :2443
+            const std::uint8_t toInjectRefType = (std::uint8_t)getRefFrameType(listIdx, refIdx);  // :2444
+            if (injected.injectedMvCount == 0 ||
+                mvIsAlreadyInjected(injected, (std::int32_t)toInjMv.as_int, (std::int32_t)toInjMv.as_int,
+                                    toInjectRefType) == false) {  // :2445-2446
+                std::uint8_t drlIndex = 0;
+                chooseBestAv1MvPred(refMvStack, refMvCount, chooseBest.shutFastRate, chooseBest.approxInterRate,
+                                    chooseBest.nmvVecCost, chooseBest.nmvCostStack, chooseBest.drlModeFacBits,
+                                    (MvReferenceFrame)toInjectRefType, NEWMV, toInjMv, Mv{0, 0}, &drlIndex,
+                                    bestPredMv);  // :2448-2449
+                if (!corruptedMvCheck || isValidMvDiff((std::int32_t)bestPredMv[0].as_int,
+                                                       (std::int32_t)bestPredMv[1].as_int,
+                                                       (std::int32_t)toInjMv.as_int,
+                                                       (std::int32_t)toInjMv.as_int, 0)) {  // :2450
+                    InterInjectedCandidate* cand = &candArray[candTotalCnt];
+                    cand->useIntrabc = 0;        // :2452
+                    cand->isInterintraUsed = 0;  // :2453
+                    cand->skipModeAllowed = false;  // :2454
+                    cand->mode = NEWMV;          // :2455
+                    cand->motionMode = SIMPLE_TRANSLATION;  // :2456
+                    cand->drlIndex = drlIndex;   // :2457
+                    cand->mv[0] = (std::int32_t)toInjMv.as_int;  // :2458
+                    cand->refFrame[0] = toInjectRefType;  // :2459
+                    cand->refFrame[1] = NONE_FRAME_MV;  // :2460
+                    cand->predMv[0] = (std::int32_t)bestPredMv[0].as_int;  // :2461
+                    cand->numProjRef = wmSampleInfoNum[toInjectRefType];  // :2462
+                    incMdCandCntA4m(candTotalCnt, maxCanCount);  // :2463
+                    // Add the injected MV to the list of injected MVs
+                    injected.injectedMvs[injected.injectedMvCount][0] = (std::int32_t)toInjMv.as_int;  // :2465
+                    injected.injectedRefTypes[injected.injectedMvCount] = toInjectRefType;  // :2466
+                    ++injected.injectedMvCount;  // :2467
+                }
+            }
+        } else if (allowBipred && interDirection == 2 &&
+                   !(isIntraBordered && useNeighbouringEnabled)) {  // :2470-2471
+            // NEW_NEWMV
+            const Mv toInjMv0 = sbMeMv[meBlockResultsPtr->ref0List][list0RefIndex];  // :2475
+            const Mv toInjMv1 = sbMeMv[meBlockResultsPtr->ref1List][list1RefIndex];  // :2476
+            const MvReferenceFrame rf[2] = {(MvReferenceFrame)getRefFrameType(meBlockResultsPtr->ref0List,
+                                                                              list0RefIndex),
+                                            (MvReferenceFrame)getRefFrameType(meBlockResultsPtr->ref1List,
+                                                                              list1RefIndex)};  // :2477-2478
+            const std::int32_t rfInt[2] = {rf[0], rf[1]};
+            const std::uint8_t toInjectRefType = (std::uint8_t)av1RefFrameType(rfInt);  // :2479
+            if ((injected.injectedMvCount == 0 ||
+                 mvIsAlreadyInjected(injected, (std::int32_t)toInjMv0.as_int, (std::int32_t)toInjMv1.as_int,
+                                     toInjectRefType) == false)) {  // :2480-2481
+                std::uint8_t drlIndex = 0;
+                chooseBestAv1MvPred(refMvStack, refMvCount, chooseBest.shutFastRate, chooseBest.approxInterRate,
+                                    chooseBest.nmvVecCost, chooseBest.nmvCostStack, chooseBest.drlModeFacBits,
+                                    (MvReferenceFrame)toInjectRefType, NEW_NEWMV, toInjMv0, toInjMv1, &drlIndex,
+                                    bestPredMv);  // :2483-2484
+                if (!corruptedMvCheck || isValidMvDiff((std::int32_t)bestPredMv[0].as_int,
+                                                       (std::int32_t)bestPredMv[1].as_int,
+                                                       (std::int32_t)toInjMv0.as_int,
+                                                       (std::int32_t)toInjMv1.as_int, 1)) {  // :2485
+                    InterInjectedCandidate* cand = &candArray[candTotalCnt];
+                    cand->useIntrabc = 0;        // :2487
+                    cand->isInterintraUsed = 0;  // :2488
+                    cand->skipModeAllowed = false;  // :2489
+                    cand->drlIndex = drlIndex;   // :2490
+                    cand->mv[0] = (std::int32_t)toInjMv0.as_int;  // :2491
+                    cand->mv[1] = (std::int32_t)toInjMv1.as_int;  // :2492
+                    cand->mode = NEW_NEWMV;      // :2493
+                    cand->motionMode = SIMPLE_TRANSLATION;  // :2494
+                    cand->refFrame[0] = rf[0];   // :2495
+                    cand->refFrame[1] = rf[1];   // :2496
+                    cand->predMv[0] = (std::int32_t)bestPredMv[0].as_int;  // :2497
+                    cand->predMv[1] = (std::int32_t)bestPredMv[1].as_int;  // :2498
+                    cand->compGroupIdx = 0;      // :2499
+                    cand->compoundIdx = 1;       // :2500
+                    cand->compoundType = COMPOUND_AVERAGE;  // :2501
+                    incMdCandCntA4m(candTotalCnt, maxCanCount);  // :2502
+
+                    // Add the injected MV to the list of injected MVs
+                    injected.injectedMvs[injected.injectedMvCount][0] = (std::int32_t)toInjMv0.as_int;  // :2505
+                    injected.injectedMvs[injected.injectedMvCount][1] = (std::int32_t)toInjMv1.as_int;  // :2506
+                    injected.injectedRefTypes[injected.injectedMvCount] = toInjectRefType;  // :2507
+                    ++injected.injectedMvCount;  // :2508
+                }
+            }
+        }
+    }
+    // update the total number of candidates injected
+    *candTotCnt = candTotalCnt;  // :2514
+}
+
 }  // namespace l16_rdo

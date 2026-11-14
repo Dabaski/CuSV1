@@ -1590,3 +1590,247 @@ TEST_CASE("l16_rdo injectMvpCandidatesIiLightPd1 pins the gates") {
         CHECK(cands[1].drlIndex == 1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// A4M-11: inject_new_candidates_light_pd1 (mode_decision.c:2410-2515) over
+// the av1_ref_frame_type carry (inter_prediction.h:396-459).
+// ---------------------------------------------------------------------------
+using l16_rdo::ChooseBestMvCtx;
+using l16_rdo::av1RefFrameType;
+using l16_rdo::injectNewCandidatesLightPd1;
+
+TEST_CASE("l16_rdo av1RefFrameType pins the uni/bidir type fold") {
+    // inter_prediction.h:396-459. Uni-dir rows first (get_uni_comp_ref_idx
+    // :428-441), then the FWD x BWD grid (:447-459).
+    const std::int32_t lastAlt[2] = {1, 7};
+    CHECK(av1RefFrameType(lastAlt) == 16);   // (LAST - LAST) + (ALT - BWD)*4 = 8 + row 8
+    const std::int32_t lastAlt2[2] = {1, 6};
+    CHECK(av1RefFrameType(lastAlt2) == 12);  // row 4
+    const std::int32_t last2Last3[2] = {2, 3};
+    CHECK(av1RefFrameType(last2Last3) == 24);  // uni idx 4 -> 8 + 12 + 4 (map row 16)
+    const std::int32_t bwdAlt[2] = {5, 7};
+    CHECK(av1RefFrameType(bwdAlt) == 23);      // uni idx 3 -> 23 (map row 15)
+    const std::int32_t alt2Alt[2] = {6, 7};
+    CHECK(av1RefFrameType(alt2Alt) == 28);     // uni idx 8 -> 28 (map row 20)
+    // Single-ref rows pass through.
+    const std::int32_t last[2] = {1, NONE_FRAME_MV};
+    CHECK(av1RefFrameType(last) == 1);
+    const std::int32_t intra[2] = {0, NONE_FRAME_MV};
+    CHECK(av1RefFrameType(intra) == 0);
+    // The rf[1] <= INTRA arm: even a compound-looking first slot with a
+    // non-positive second slot is single.
+    const std::int32_t lastIntra[2] = {1, 0};
+    CHECK(av1RefFrameType(lastIntra) == 1);
+}
+
+TEST_CASE("l16_rdo injectNewCandidatesLightPd1 emits the ME-driven sequence") {
+    // mode_decision.c:2410-2515. Three ME candidates: a list-0 NEWMV, a
+    // list-1 NEWMV, and a BI NEWMV/NEWMV pair. Hand-derived outputs from
+    // the light-cost choose-best (all ref mvs zero): drl 0 wins with the
+    // drl_mode_fac_bits[0][1] tail; pred_mv = stack[0] = (0,0).
+    std::uint8_t meIdx[4] = {3, 0, 0, 0};
+    MeCandidate meCands[3];
+    meCands[0].direction = 0;
+    meCands[0].refIdxL0 = 0;
+    meCands[0].refIdxL1 = 0;
+    meCands[0].ref0List = 0;
+    meCands[0].ref1List = 0;
+    meCands[1].direction = 1;
+    meCands[1].refIdxL0 = 0;
+    meCands[1].refIdxL1 = 1;
+    meCands[1].ref0List = 0;
+    meCands[1].ref1List = 0;
+    meCands[2].direction = 2;
+    meCands[2].refIdxL0 = 0;
+    meCands[2].refIdxL1 = 1;
+    meCands[2].ref0List = 0;
+    meCands[2].ref1List = 1;
+    MeSbResults meRes;
+    meRes.totalMeCandidateIndex = meIdx;
+    meRes.meCandidateArray = meCands;
+
+    std::vector<Mv> sbList0(8);
+    std::vector<Mv> sbList1(8);
+    sbList0[0].as_int = (std::uint32_t)(100 | (200 << 16));
+    sbList0[1].as_int = (std::uint32_t)(2 | (3 << 16));
+    sbList1[0].as_int = (std::uint32_t)(300 | (400 << 16));
+    sbList1[1].as_int = (std::uint32_t)(4 | (5 << 16));
+    const Mv* sbRows[2] = {sbList0.data(), sbList1.data()};
+
+    CandidateMv stack[29][MAX_REF_MV_STACK_SIZE_MD];
+    for (int r = 0; r < 29; ++r) {
+        for (int s = 0; s < MAX_REF_MV_STACK_SIZE_MD; ++s) {
+            stack[r][s].this_mv.as_int = 0;
+            stack[r][s].comp_mv.as_int = 0;
+            stack[r][s].weight = 1000;
+        }
+    }
+    std::uint8_t count[29];
+    for (int r = 0; r < 29; ++r) {
+        count[r] = 3;
+    }
+    std::uint8_t wmNum[29];
+    for (int r = 0; r < 29; ++r) {
+        wmNum[r] = 4;
+    }
+    const std::int32_t dummyCost[4] = {0, 0, 0, 0};
+    const std::int32_t* dummyStack[2] = {dummyCost, dummyCost};
+    const std::int32_t drlFac[DRL_MODE_CONTEXTS_MD][2] = {{10, 20}, {10, 20}, {10, 20}};
+    ChooseBestMvCtx choose;
+    choose.shutFastRate = false;
+    choose.approxInterRate = 1;
+    choose.nmvVecCost = dummyCost;
+    choose.nmvCostStack = dummyStack;
+    choose.drlModeFacBits = drlFac;
+
+    InterInjectedCandidate cands[8];
+    for (int i = 0; i < 8; ++i) {
+        cands[i] = InterInjectedCandidate{};
+        cands[i].mode = -7;
+    }
+    std::uint32_t tot = 0;
+    InjectedMvCarrier inj;
+    inj.injectedMvCount = 0;
+    inj.corruptedMvCheck = 0;
+    inj.redundCtrl.scoreTh = 0;
+    inj.redundCtrl.magTh = 0;
+
+    injectNewCandidatesLightPd1(cands, &tot, 8, &meRes, 0, 0, sbRows, stack, count, choose, wmNum,
+                                0, true, false, false, false, inj);
+    CHECK(tot == 3);
+    CHECK(inj.injectedMvCount == 3);
+    CHECK(inj.injectedRefTypes[0] == 1);
+    CHECK(inj.injectedRefTypes[1] == 6);   // ALTREF2 via svt_get_ref_frame_type(1, 1)
+    CHECK(inj.injectedRefTypes[2] == 12);  // LAST|ALTREF2 via av1_ref_frame_type
+
+    CHECK(cands[0].mode == NEWMV_PM);
+    CHECK(cands[0].motionMode == SIMPLE_TRANSLATION);
+    CHECK(cands[0].skipModeAllowed == false);
+    CHECK(cands[0].drlIndex == 0);
+    CHECK((std::uint32_t)cands[0].mv[0] == (std::uint32_t)(100 | (200 << 16)));
+    CHECK(cands[0].refFrame[0] == 1);
+    CHECK(cands[0].refFrame[1] == NONE_FRAME_MV);
+    CHECK(cands[0].predMv[0] == 0);
+    CHECK(cands[0].numProjRef == 4);
+    CHECK(cands[0].useIntrabc == 0);
+    CHECK(cands[0].isInterintraUsed == 0);
+    CHECK(cands[0].compGroupIdx == 0);
+
+    CHECK(cands[1].mode == NEWMV_PM);
+    CHECK((std::uint32_t)cands[1].mv[0] == (std::uint32_t)(4 | (5 << 16)));
+    CHECK(cands[1].refFrame[0] == 6);
+
+    CHECK(cands[2].mode == NEW_NEWMV_PM);
+    CHECK(cands[2].drlIndex == 0);
+    CHECK((std::uint32_t)cands[2].mv[0] == (std::uint32_t)(100 | (200 << 16)));
+    CHECK((std::uint32_t)cands[2].mv[1] == (std::uint32_t)(4 | (5 << 16)));
+    CHECK(cands[2].refFrame[0] == 1);
+    CHECK(cands[2].refFrame[1] == 6);
+    CHECK(cands[2].predMv[0] == 0);
+    CHECK(cands[2].predMv[1] == 0);
+    CHECK(cands[2].compGroupIdx == 0);
+    CHECK(cands[2].compoundIdx == 1);
+    CHECK(cands[2].compoundType == COMPOUND_AVERAGE);
+
+    // reduce_unipred_candidates = 2 with total_me_cnt 3 > 1: only the BI
+    // row runs.
+    {
+        InterInjectedCandidate c2[8];
+        for (int i = 0; i < 8; ++i) {
+            c2[i] = InterInjectedCandidate{};
+            c2[i].mode = -7;
+        }
+        std::uint32_t t2 = 0;
+        InjectedMvCarrier i2;
+        i2.injectedMvCount = 0;
+        i2.corruptedMvCheck = 0;
+        i2.redundCtrl.scoreTh = 0;
+        i2.redundCtrl.magTh = 0;
+        injectNewCandidatesLightPd1(c2, &t2, 8, &meRes, 0, 0, sbRows, stack, count, choose, wmNum,
+                                    2, true, false, false, false, i2);
+        CHECK(t2 == 1);
+        CHECK(c2[0].mode == NEW_NEWMV_PM);
+        // Level 1 with total_me_cnt 3: the > 3 test is false -> all rows run.
+        std::uint32_t t3 = 0;
+        InjectedMvCarrier i3;
+        i3.injectedMvCount = 0;
+        i3.corruptedMvCheck = 0;
+        i3.redundCtrl.scoreTh = 0;
+        i3.redundCtrl.magTh = 0;
+        injectNewCandidatesLightPd1(c2, &t3, 8, &meRes, 0, 0, sbRows, stack, count, choose, wmNum,
+                                    1, true, false, false, false, i3);
+        CHECK(t3 == 3);
+    }
+
+    // The intra-bordered + neighbouring gate: the BI row is skipped.
+    {
+        InterInjectedCandidate c2[8];
+        for (int i = 0; i < 8; ++i) {
+            c2[i] = InterInjectedCandidate{};
+            c2[i].mode = -7;
+        }
+        std::uint32_t t2 = 0;
+        InjectedMvCarrier i2;
+        i2.injectedMvCount = 0;
+        i2.corruptedMvCheck = 0;
+        i2.redundCtrl.scoreTh = 0;
+        i2.redundCtrl.magTh = 0;
+        injectNewCandidatesLightPd1(c2, &t2, 8, &meRes, 0, 0, sbRows, stack, count, choose, wmNum,
+                                    0, true, true, true, false, i2);
+        CHECK(t2 == 2);
+        // ...and the BI row returns when either flag drops.
+        std::uint32_t t3 = 0;
+        InjectedMvCarrier i3;
+        i3.injectedMvCount = 0;
+        i3.corruptedMvCheck = 0;
+        i3.redundCtrl.scoreTh = 0;
+        i3.redundCtrl.magTh = 0;
+        injectNewCandidatesLightPd1(c2, &t3, 8, &meRes, 0, 0, sbRows, stack, count, choose, wmNum,
+                                    0, true, true, false, false, i3);
+        CHECK(t3 == 3);
+    }
+
+    // The corrupted-MV row: a 17000-x ME MV fails check_mv_validity ->
+    // mv_is_already_injected returns true -> the list-0 NEWMV is skipped.
+    {
+        std::vector<Mv> s0(8);
+        std::vector<Mv> s1(8);
+        s0[0].as_int = (std::uint32_t)(17000 | (0 << 16));
+        s0[1].as_int = (std::uint32_t)(2 | (3 << 16));
+        s1[0].as_int = (std::uint32_t)(300 | (400 << 16));
+        s1[1].as_int = (std::uint32_t)(4 | (5 << 16));
+        const Mv* rows[2] = {s0.data(), s1.data()};
+        InterInjectedCandidate c2[8];
+        for (int i = 0; i < 8; ++i) {
+            c2[i] = InterInjectedCandidate{};
+            c2[i].mode = -7;
+        }
+        std::uint32_t t2 = 0;
+        InjectedMvCarrier i2;
+        i2.injectedMvCount = 0;
+        i2.corruptedMvCheck = 1;
+        i2.redundCtrl.scoreTh = 0;
+        i2.redundCtrl.magTh = 0;
+        // The :2445 `count == 0 ||` arm short-circuits the corrupted check
+        // for the first injection (the reference's own shape) - pre-inject
+        // one benign entry so the corrupted path is reached.
+        i2.injectedMvs[0][0] = 0;
+        i2.injectedMvs[0][1] = 0;
+        i2.injectedRefTypes[0] = 0x7F;
+        i2.injectedMvCount = 1;
+        injectNewCandidatesLightPd1(c2, &t2, 8, &meRes, 0, 0, rows, stack, count, choose, wmNum,
+                                    0, true, false, false, false, i2);
+        // BOTH corrupted rows skip (the BI row reads the same (17000, 0)
+        // via ref0_list 0 / list0_ref_index 0): only the list-1 row lands.
+        CHECK(t2 == 1);
+        CHECK(c2[0].mode == NEWMV_PM);
+        CHECK((std::uint32_t)c2[0].mv[0] == (std::uint32_t)(4 | (5 << 16)));
+        bool foundCorrupt = false;
+        for (int i = 0; i < i2.injectedMvCount; ++i) {
+            if ((std::uint32_t)i2.injectedMvs[i][0] == 17000) {
+                foundCorrupt = true;
+            }
+        }
+        CHECK(!foundCorrupt);
+    }
+}
