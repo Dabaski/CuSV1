@@ -154,3 +154,96 @@ TEST_CASE("l16_rdo validRefFrameType matches the ref-frame-type array walk") {
     CHECK(validRefFrameType(rfBwd, arr, 3) == false);
     CHECK(validRefFrameType(rfBwd, arr, 4) == true);
 }
+
+// ---------------------------------------------------------------------------
+// A4M-3: get_tot_comp_types_bsize (mode_decision.c:124-126) +
+// determine_compound_mode (:515-552) over to_av1_compound_lut (:513).
+// ---------------------------------------------------------------------------
+using l16_rdo::MdCompType;
+using l16_rdo::MD_COMP_AVG;
+using l16_rdo::MD_COMP_DIST;
+using l16_rdo::MD_COMP_DIFF0;
+using l16_rdo::MD_COMP_WEDGE;
+using l16_rdo::MD_COMP_TYPES;
+using l16_rdo::CompoundType;
+using l16_rdo::COMPOUND_AVERAGE;
+using l16_rdo::COMPOUND_DISTWTD;
+using l16_rdo::COMPOUND_WEDGE;
+using l16_rdo::COMPOUND_DIFFWTD;
+using l16_rdo::getTotCompTypesBsize;
+using l16_rdo::determineCompoundMode;
+using l16_rdo::CompoundModeCarrier;
+
+TEST_CASE("l16_rdo getTotCompTypesBsize caps at WEDGE where wedge bits are 0") {
+    // mode_decision.c:124-126: (wedge_params_bits(bsize) == 0) ?
+    // MIN(tot, MD_COMP_WEDGE) : tot. The wedge bits column
+    // (inter_prediction.c:2001-2024 via the landed l17 twin) is 4 for
+    // 8x8..32x32 and 8x32/32x8, 0 elsewhere - enumerate all 22 bsizes.
+    const int totIn[2] = {MD_COMP_TYPES, MD_COMP_DIST};
+    for (int b = 0; b < l16_rdo::BLOCK_SIZES_ALL; ++b) {
+        const l16_rdo::BlockSize bs = (l16_rdo::BlockSize)b;
+        const int bits = (bs >= l16_rdo::BLOCK_8X8 && bs <= l16_rdo::BLOCK_32X32) ||
+                                 bs == l16_rdo::BLOCK_8X32 || bs == l16_rdo::BLOCK_32X8
+                             ? 4
+                             : 0;
+        const int wantFull = bits == 0 ? l16_rdo::aomMin(MD_COMP_TYPES, MD_COMP_WEDGE) : MD_COMP_TYPES;
+        const int wantDist = bits == 0 ? l16_rdo::aomMin(MD_COMP_DIST, MD_COMP_WEDGE) : MD_COMP_DIST;
+        CHECK(getTotCompTypesBsize(totIn[0], bs) == wantFull);
+        CHECK(getTotCompTypesBsize(totIn[1], bs) == wantDist);
+    }
+    // The 8x8 wedge shape keeps tot uncapped.
+    CHECK(getTotCompTypesBsize(MD_COMP_TYPES, l16_rdo::BLOCK_8X8) == MD_COMP_TYPES);
+    CHECK(getTotCompTypesBsize(MD_COMP_TYPES, l16_rdo::BLOCK_32X8) == MD_COMP_TYPES);
+    // The 64x64 shape caps MD_COMP_TYPES (4) at MD_COMP_WEDGE (3).
+    CHECK(getTotCompTypesBsize(MD_COMP_TYPES, l16_rdo::BLOCK_64X64) == MD_COMP_WEDGE);
+    CHECK(getTotCompTypesBsize(MD_COMP_TYPES, l16_rdo::BLOCK_4X4) == MD_COMP_WEDGE);
+    // MD_COMP_DIST stays MD_COMP_DIST everywhere (MIN(1, 3) = 1).
+    CHECK(getTotCompTypesBsize(MD_COMP_DIST, l16_rdo::BLOCK_64X64) == MD_COMP_DIST);
+}
+
+TEST_CASE("l16_rdo determineCompoundMode writes the exact block_mi fields per type") {
+    // mode_decision.c:515-552 with the candidate wall threaded as the
+    // written-field carrier; the svt_aom_search_compound_diff_wedge wall
+    // (:3718, enc_inter_prediction.c) threads as the called flag (its
+    // candidate mutation stays parked with it - named in md_slices2.h).
+    // to_av1_compound_lut (:513): AVG->AVERAGE, DIST->DISTWTD,
+    // DIFF0->DIFFWTD, WEDGE->WEDGE - NOT the identity on MD_COMP (DIFF0
+    // and WEDGE swap positions between the two enum orders).
+    const int wantType[MD_COMP_TYPES] = {COMPOUND_AVERAGE, COMPOUND_DISTWTD, COMPOUND_DIFFWTD, COMPOUND_WEDGE};
+    for (int t = 0; t < MD_COMP_TYPES; ++t) {
+        CompoundModeCarrier c;
+        c.interinterCompType = (CompoundType)0xBEEF;
+        c.compGroupIdx = -2;
+        c.compoundIdx = -2;
+        c.maskType = -2;
+        c.searchDiffWedgeCalled = false;
+        determineCompoundMode(&c, (MdCompType)t);
+        CHECK((int)c.interinterCompType == wantType[t]);
+        const bool identityOrDiffers = wantType[t] == t || (int)c.interinterCompType != t;
+        CHECK(identityOrDiffers);
+        CHECK(c.searchDiffWedgeCalled == (t == MD_COMP_DIFF0 || t == MD_COMP_WEDGE));
+        if (t == MD_COMP_AVG) {
+            CHECK(c.compGroupIdx == 0);
+            CHECK(c.compoundIdx == 1);
+            CHECK(c.maskType == -2);  // untouched
+        } else if (t == MD_COMP_DIST) {
+            CHECK(c.compGroupIdx == 0);
+            CHECK(c.compoundIdx == 0);
+            CHECK(c.maskType == -2);  // untouched
+        } else {
+            CHECK(c.compGroupIdx == 1);
+            CHECK(c.compoundIdx == 1);
+            if (t == MD_COMP_DIFF0) {
+                CHECK(c.maskType == 55);  // the :535 literal
+            } else {
+                CHECK(c.maskType == -2);  // WEDGE does not write mask_type
+            }
+        }
+    }
+    // The lut spell-out, pinned per slot (the reference array is
+    // {COMPOUND_AVERAGE, COMPOUND_DISTWTD, COMPOUND_DIFFWTD, COMPOUND_WEDGE}).
+    CHECK(COMPOUND_AVERAGE == 0);
+    CHECK(COMPOUND_DISTWTD == 1);
+    CHECK(COMPOUND_WEDGE == 2);
+    CHECK(COMPOUND_DIFFWTD == 3);
+}

@@ -66,4 +66,78 @@ bool validRefFrameType(const MvReferenceFrame rf[2], const MvReferenceFrame* ref
     }
     return false;
 }
+
+// ---------------------------------------------------------------------------
+// A4M-3: the compound-mode surface.
+// ---------------------------------------------------------------------------
+
+// The wedge_params_lookup bits column (inter_prediction.c:2001-2024,
+// transcribed via the landed l17 twin inter_prediction.cpp:354-377); rows in
+// the rate_est.h BlockSize order. Wedge is signalable at 8x8..32x32 and the
+// 8x32/32x8 rects only.
+const std::int32_t wedgeParamsBits[BLOCK_SIZES_ALL] = {
+    0,  // BLOCK_4X4
+    0,  // BLOCK_4X8
+    0,  // BLOCK_8X4
+    4,  // BLOCK_8X8
+    4,  // BLOCK_8X16
+    4,  // BLOCK_16X8
+    4,  // BLOCK_16X16
+    4,  // BLOCK_16X32
+    4,  // BLOCK_32X16
+    4,  // BLOCK_32X32
+    0,  // BLOCK_32X64
+    0,  // BLOCK_64X32
+    0,  // BLOCK_64X64
+    0,  // BLOCK_64X128
+    0,  // BLOCK_128X64
+    0,  // BLOCK_128X128
+    0,  // BLOCK_4X16
+    0,  // BLOCK_16X4
+    4,  // BLOCK_8X32
+    4,  // BLOCK_32X8
+    0,  // BLOCK_16X64
+    0,  // BLOCK_64X16
+};
+
+// get_tot_comp_types_bsize (mode_decision.c:124-126, verbatim).
+std::int32_t getTotCompTypesBsize(std::int32_t totCompTypes, BlockSize bsize) {
+    return (wedgeParamsBits[bsize] == 0) ? aomMin(totCompTypes, MD_COMP_WEDGE) : totCompTypes;
+}
+
+// to_av1_compound_lut (mode_decision.c:513, verbatim).
+static const CompoundType toAv1CompoundLut[MD_COMP_TYPES] = {COMPOUND_AVERAGE, COMPOUND_DISTWTD,
+                                                             COMPOUND_DIFFWTD, COMPOUND_WEDGE};
+
+// determine_compound_mode (mode_decision.c:515-552, verbatim over the
+// carrier; the search wall threads as the flag).
+void determineCompoundMode(CompoundModeCarrier* blockMi, MdCompType curType) {
+    blockMi->interinterCompType = toAv1CompoundLut[curType];  // :522
+    switch (curType) {
+    case MD_COMP_AVG:
+        blockMi->compGroupIdx = 0;  // :525
+        blockMi->compoundIdx = 1;   // :526
+        break;
+    case MD_COMP_DIST:
+        blockMi->compGroupIdx = 0;  // :529
+        blockMi->compoundIdx = 0;   // :530
+        break;
+    case MD_COMP_DIFF0:
+        blockMi->compGroupIdx = 1;            // :533
+        blockMi->compoundIdx = 1;             // :534
+        blockMi->maskType = 55;                 // :535 (block_mi.interinter_comp.mask_type)
+        blockMi->searchDiffWedgeCalled = true;  // :537 the wall (CONFIG live)
+        break;
+    case MD_COMP_WEDGE:
+        blockMi->compGroupIdx = 1;              // :541
+        blockMi->compoundIdx = 1;               // :542
+        blockMi->searchDiffWedgeCalled = true;  // :544 the wall (CONFIG live)
+        break;
+    default:
+        // SVT_ERROR("not used comp type\n") + assert(0) (:548-549) -
+        // NDEBUG-dropped convention.
+        break;
+    }
+}
+
 }  // namespace l16_rdo

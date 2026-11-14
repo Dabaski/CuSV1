@@ -104,4 +104,59 @@ void av1SetRefFrame(MvReferenceFrame* rf, std::int8_t refFrameType);
 bool validRefFrameType(const MvReferenceFrame rf[2], const MvReferenceFrame* refFrameTypeArr,
                        std::uint8_t totRefFrameTypes);
 
+// ---------------------------------------------------------------------------
+// A4M-3: the compound-mode surface.
+// ---------------------------------------------------------------------------
+
+// MD_COMP_TYPE (definitions.h:1264-1270, verbatim order).
+enum MdCompType {
+    MD_COMP_AVG,
+    MD_COMP_DIST,
+    MD_COMP_DIFF0,
+    MD_COMP_WEDGE,
+    MD_COMP_TYPES,
+};
+
+// COMPOUND_TYPE (definitions.h:1238-1245, verbatim order).
+enum CompoundType {
+    COMPOUND_AVERAGE,
+    COMPOUND_DISTWTD,
+    COMPOUND_WEDGE,
+    COMPOUND_DIFFWTD,
+    COMPOUND_TYPES,
+    MASKED_COMPOUND_TYPES = 2,
+};
+
+// MIN (the aom macro as a function; the l16 surface cannot spell the macro
+// without clashing with the landed rate_est.h defines).
+inline int aomMin(int a, int b) { return a < b ? a : b; }
+
+// svt_aom_get_wedge_params_bits (inter_prediction.c:2064-2066) as the bits
+// column of wedge_params_lookup (:2001-2024). Module-boundary carry (the
+// landed twin is l17 inter_prediction.cpp:390 over its full lookup); the
+// rows follow the rate_est.h BlockSize order.
+extern const std::int32_t wedgeParamsBits[BLOCK_SIZES_ALL];
+
+// get_tot_comp_types_bsize (mode_decision.c:124-126): the
+// CONFIG_ENABLE_INTER_COMPOUND guard is LIVE (= 1, EbConfigMacros.h
+// non-RTC block - the inter_symbols.h:18-22 finding), so the body is kept.
+std::int32_t getTotCompTypesBsize(std::int32_t totCompTypes, l16_rdo::BlockSize bsize);
+
+// The written BlockModeInfo fields of determine_compound_mode
+// (mode_decision.c:515-552). The svt_aom_search_compound_diff_wedge wall
+// (enc_inter_prediction.c:3718) threads as the called flag - its candidate
+// mutation stays parked with the wall (named).
+struct CompoundModeCarrier {
+    CompoundType interinterCompType;  // block_mi.interinter_comp.type :522
+    std::int32_t compGroupIdx;        // block_mi.comp_group_idx :525/:529/:533/:541
+    std::int32_t compoundIdx;         // block_mi.compound_idx :526/:530/:534/:542
+    std::int32_t maskType;            // block_mi.interinter_comp.mask_type :535
+    bool searchDiffWedgeCalled;       // the :537/:544 wall call
+};
+
+// determine_compound_mode (mode_decision.c:515-552) over to_av1_compound_lut
+// (:513). Deviation, named: the pcs/ctx/cand walls thread as the carrier +
+// flag; the SVT_ERROR/assert(0) default arm is NDEBUG-dropped convention.
+void determineCompoundMode(CompoundModeCarrier* blockMi, MdCompType curType);
+
 }  // namespace l16_rdo
