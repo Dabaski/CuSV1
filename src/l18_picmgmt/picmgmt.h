@@ -207,16 +207,63 @@ struct PicBufferDescInitData {
 // deep-copies.
 // ---------------------------------------------------------------------------
 
+// The SvtAv1EncConfiguration carrier: the fields the reference-object
+// param updates read off scs->static_config.
+struct ScsStaticConfig {
+    std::uint32_t encoderBitDepth;       // SvtAv1EncConfiguration.encoder_bit_depth
+    EbColorFormat encoderColorFormat;    // .encoder_color_format
+    std::int32_t superresMode;           // .superres_mode (SUPERRES_NONE = 0)
+    std::int32_t resizeMode;             // .resize_mode (RESIZE_NONE = 0)
+};
+
+// SUPERRES_NONE / RESIZE_NONE (EbSvtAv1Enc.h:106/:124, the enum's first
+// values).
+constexpr std::int32_t superresNone = 0;
+constexpr std::int32_t resizeNone = 0;
+// TPL_PAD (encode_context.h:35).
+constexpr std::uint16_t tplPad = 32;
+
 struct Scs {
     std::uint8_t b64Size;             // sequence_control_set.h:131
     std::uint16_t sbSize;             // :135
     std::uint16_t b64TotalCount;      // :134
+    std::uint16_t sbTotalCount;       // :138
     std::uint16_t pictureWidthInSb;   // :136
     std::uint16_t pictureHeightInSb;  // :137
+    std::uint16_t maxInputLumaWidth;  // :113
+    std::uint16_t maxInputLumaHeight; // :114
+    std::uint16_t border;             // :125
+    std::uint32_t encoderBitDepth;    // :127
+    std::int32_t restUnitsPerTile;    // :143
+    std::uint32_t superBlockSize;     // :253
+    std::uint8_t mfmvEnabled;         // :102
+    bool is16bitPipeline;             // :248
+    ScsStaticConfig staticConfig;
     SbGeom* sbGeom;                   // :68
     B64Geom* b64Geom;                 // :70
     FrameScaleEvts frameScaleEvts;    // static_config.frame_scale_evts (EbSvtAv1Enc.h:192-197)
     SframePosi sframePosi;            // static_config.sframe_posi (EbSvtAv1Enc.h:199-205)
+};
+
+// EbReferenceObject (reference_object.h), minimal carry: the fields
+// svt_reference_param_update / svt_reference_object_reset consume.
+struct RefObject {
+    PicBufferDesc* referencePicture;
+    std::uint32_t miRows;
+    std::uint32_t miCols;
+};
+
+// EbPaReferenceObject, minimal carry: the three picture pointers the PA
+// param update drives.
+struct PaRefObject {
+    PicBufferDesc* inputPaddedPic;
+    PicBufferDesc* quarterDownsampledPicturePtr;
+    PicBufferDesc* sixteenthDownsampledPicturePtr;
+};
+
+// EbTplReferenceObject, minimal carry.
+struct TplRefObject {
+    PicBufferDesc* refPicturePtr;
 };
 
 // DIVIDE_AND_CEIL (utility.h): ((x) + ((y) - 1)) / (y).
@@ -334,5 +381,37 @@ void linkEbToAomBufferDesc8bit(PicBufferDesc* picBuffDsc, Yv12BufferConfig* aomB
 // (definitions.h) and flags = YV12_FLAG_HIGHBITDEPTH (:629).
 void linkEbToAomBufferDesc(PicBufferDesc* picBuffDsc, Yv12BufferConfig* aomBuffDsc, std::uint16_t padRight,
                            std::uint16_t padBottom, bool is16bit);
+
+// ---------------------------------------------------------------------------
+// reference_object.c spans.
+// ---------------------------------------------------------------------------
+
+// initialize_samples_neighboring_reference_picture_8bit
+// (reference_object.c:21-:44): zero the one-pixel ring (top row, bottom
+// row, left column, right column) around the samples. File-local static in
+// the reference; exported for direct testability (named deviation).
+void initializeSamplesNeighboringReferencePicture8bit(std::uint8_t* reconSamplesBufferPtr, std::uint16_t stride,
+                                                      std::uint16_t reconWidth, std::uint16_t reconHeight);
+
+// initialize_samples_neighboring_reference_picture (:46-:55): the y/u/v
+// wrapper with the >>1 chroma dims. File-local static; exported (named
+// deviation).
+void initializeSamplesNeighboringReferencePicture(PicBufferDesc* refPic);
+
+// svt_reference_param_update (:83-:125): the SCS-derived init data (the
+// super_block_size + 32 padding, the superres/resize bump), the 10-bit
+// split fork, the ring zeroing on the 8-bit path and the mi grid.
+EbErrorType referenceParamUpdate(RefObject* refObject, const Scs* scs);
+
+// svt_reference_object_reset (:204-:209).
+EbErrorType referenceObjectReset(RefObject* refObject, const Scs* scs);
+
+// svt_pa_reference_param_update (:239-:288): the three PA init datas
+// (luma-only quarter/sixteenth, mask 0 for the padded input).
+EbErrorType paReferenceParamUpdate(PaRefObject* paRefObj, const Scs* scs);
+
+// svt_tpl_reference_param_update (:348-:372): the TPL_PAD 32 luma-only
+// init data.
+EbErrorType tplReferenceParamUpdate(TplRefObject* tplRefObj, const Scs* scs);
 
 } // namespace l18_picmgmt

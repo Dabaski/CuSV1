@@ -698,4 +698,180 @@ void linkEbToAomBufferDesc(PicBufferDesc* picBuffDsc, Yv12BufferConfig* aomBuffD
     }
 }
 
+// ---------------------------------------------------------------------------
+// reference_object.c spans.
+// ---------------------------------------------------------------------------
+
+// initialize_samples_neighboring_reference_picture_8bit
+// (reference_object.c:21-:44): verbatim walk.
+void initializeSamplesNeighboringReferencePicture8bit(std::uint8_t* reconSamplesBufferPtr, std::uint16_t stride,
+                                                      std::uint16_t reconWidth, std::uint16_t reconHeight) {
+    std::uint8_t* reconSamplesPtr;
+    std::uint16_t sampleCount;
+
+    // 1. zero out the top row
+    reconSamplesPtr = reconSamplesBufferPtr - stride - 1;
+    std::memset(reconSamplesPtr, 0, sizeof(std::uint8_t) * (1 + reconWidth + 1));
+
+    // 2. zero out the bottom row
+    reconSamplesPtr = reconSamplesBufferPtr + (reconHeight)*stride - 1;
+    std::memset(reconSamplesPtr, 0, sizeof(std::uint8_t) * (1 + reconWidth + 1));
+
+    // 3. zero out the left column
+    reconSamplesPtr = reconSamplesBufferPtr - 1;
+    for (sampleCount = 0; sampleCount < reconHeight; sampleCount++) {
+        reconSamplesPtr[sampleCount * stride] = 0;
+    }
+    // 4. zero out the right column
+    reconSamplesPtr = reconSamplesBufferPtr + reconWidth;
+    for (sampleCount = 0; sampleCount < reconHeight; sampleCount++) {
+        reconSamplesPtr[sampleCount * stride] = 0;
+    }
+}
+
+// initialize_samples_neighboring_reference_picture (reference_object.c
+// :46-:55).
+void initializeSamplesNeighboringReferencePicture(PicBufferDesc* refPic) {
+    initializeSamplesNeighboringReferencePicture8bit(
+        refPic->yBuffer, refPic->yStride, refPic->width, refPic->height);
+
+    initializeSamplesNeighboringReferencePicture8bit(
+        refPic->uBuffer, refPic->uStride, refPic->width >> 1, refPic->height >> 1);
+
+    initializeSamplesNeighboringReferencePicture8bit(
+        refPic->vBuffer, refPic->vStride, refPic->width >> 1, refPic->height >> 1);
+}
+
+// svt_reference_param_update (reference_object.c:83-:125).
+EbErrorType referenceParamUpdate(RefObject* refObject, const Scs* scs) {
+    PicBufferDescInitData pictureBufferDescInitData;
+
+    const bool is16bit = scs->staticConfig.encoderBitDepth > EB_EIGHT_BIT;
+    // Initialize the various Picture types
+    pictureBufferDescInitData.maxWidth = scs->maxInputLumaWidth;
+    pictureBufferDescInitData.maxHeight = scs->maxInputLumaHeight;
+    pictureBufferDescInitData.bitDepth = static_cast<EbBitDepth>(scs->encoderBitDepth);
+    pictureBufferDescInitData.colorFormat = scs->staticConfig.encoderColorFormat;
+    pictureBufferDescInitData.bufferEnableMask = PICTURE_BUFFER_DESC_FULL_MASK;
+    pictureBufferDescInitData.restUnitsPerTile = scs->restUnitsPerTile;
+    pictureBufferDescInitData.sbTotalCount = scs->b64TotalCount;
+    std::uint16_t padding = static_cast<std::uint16_t>(scs->superBlockSize + 32);
+    if (scs->staticConfig.superresMode > superresNone || scs->staticConfig.resizeMode > resizeNone) {
+        padding = static_cast<std::uint16_t>(padding + scs->superBlockSize);
+    }
+
+    pictureBufferDescInitData.border = padding;
+    pictureBufferDescInitData.mfmv = scs->mfmvEnabled;
+    pictureBufferDescInitData.is16bitPipeline = scs->is16bitPipeline;
+
+    pictureBufferDescInitData.splitMode = false;
+    if (is16bit) {
+        pictureBufferDescInitData.bitDepth = EB_TEN_BIT;
+    }
+
+    PicBufferDescInitData pictureBufferDescInitData16bit = pictureBufferDescInitData;
+    //TODO:12bit
+    if (pictureBufferDescInitData.bitDepth == EB_TEN_BIT) {
+        pictureBufferDescInitData16bit.splitMode = true;
+        pictureBufferDescUpdate(refObject->referencePicture, &pictureBufferDescInitData16bit);
+    } else {
+        // Hsan: set split_mode to 0 to as 8BIT input
+        pictureBufferDescInitData.splitMode = false;
+        pictureBufferDescUpdate(refObject->referencePicture, &pictureBufferDescInitData);
+
+        initializeSamplesNeighboringReferencePicture(refObject->referencePicture);
+    }
+
+    refObject->miRows = refObject->referencePicture->height >> miSizeLog2;
+    refObject->miCols = refObject->referencePicture->width >> miSizeLog2;
+    return EB_ErrorNone;
+}
+
+// svt_reference_object_reset (reference_object.c:204-:209).
+EbErrorType referenceObjectReset(RefObject* refObject, const Scs* scs) {
+    refObject->miRows = scs->maxInputLumaHeight >> miSizeLog2;
+    refObject->miCols = scs->maxInputLumaWidth >> miSizeLog2;
+
+    return EB_ErrorNone;
+}
+
+// svt_pa_reference_param_update (reference_object.c:239-:288).
+EbErrorType paReferenceParamUpdate(PaRefObject* paRefObj, const Scs* scs) {
+    PicBufferDescInitData refPicBufDescInitData;
+    PicBufferDescInitData quartPicBufDescInitData;
+    PicBufferDescInitData sixteenthPicBufDescInitData;
+    // PA Reference Picture Buffers
+    // Currently, only Luma samples are needed in the PA
+    refPicBufDescInitData.maxWidth = scs->maxInputLumaWidth;
+    refPicBufDescInitData.maxHeight = scs->maxInputLumaHeight;
+    refPicBufDescInitData.bitDepth = EB_EIGHT_BIT;
+    refPicBufDescInitData.colorFormat = EB_YUV420; //use 420 for picture analysis
+    //No full-resolution pixel data is allocated for PA REF,
+    // it points directly to the Luma input samples of the app data
+    refPicBufDescInitData.bufferEnableMask = 0;
+
+    refPicBufDescInitData.border = scs->border;
+    refPicBufDescInitData.splitMode = false;
+    refPicBufDescInitData.restUnitsPerTile = scs->restUnitsPerTile;
+    refPicBufDescInitData.mfmv = 0;
+    refPicBufDescInitData.is16bitPipeline = false;
+
+    quartPicBufDescInitData.maxWidth = static_cast<std::uint16_t>(scs->maxInputLumaWidth >> 1);
+    quartPicBufDescInitData.maxHeight = static_cast<std::uint16_t>(scs->maxInputLumaHeight >> 1);
+    quartPicBufDescInitData.bitDepth = EB_EIGHT_BIT;
+    quartPicBufDescInitData.colorFormat = EB_YUV420;
+    quartPicBufDescInitData.bufferEnableMask = PICTURE_BUFFER_DESC_LUMA_MASK;
+    quartPicBufDescInitData.border = static_cast<std::uint16_t>(scs->b64Size >> 1);
+    quartPicBufDescInitData.splitMode = false;
+    quartPicBufDescInitData.restUnitsPerTile = scs->restUnitsPerTile;
+    quartPicBufDescInitData.mfmv = 0;
+    quartPicBufDescInitData.is16bitPipeline = false;
+
+    sixteenthPicBufDescInitData.maxWidth = static_cast<std::uint16_t>(scs->maxInputLumaWidth >> 2);
+    sixteenthPicBufDescInitData.maxHeight = static_cast<std::uint16_t>(scs->maxInputLumaHeight >> 2);
+    sixteenthPicBufDescInitData.bitDepth = EB_EIGHT_BIT;
+    sixteenthPicBufDescInitData.colorFormat = EB_YUV420;
+    sixteenthPicBufDescInitData.bufferEnableMask = PICTURE_BUFFER_DESC_LUMA_MASK;
+    sixteenthPicBufDescInitData.border = static_cast<std::uint16_t>(scs->b64Size >> 2);
+    sixteenthPicBufDescInitData.splitMode = false;
+    sixteenthPicBufDescInitData.restUnitsPerTile = scs->restUnitsPerTile;
+    sixteenthPicBufDescInitData.mfmv = 0;
+    sixteenthPicBufDescInitData.is16bitPipeline = false;
+
+    // Reference picture constructor
+    pictureBufferDescUpdate(paRefObj->inputPaddedPic, &refPicBufDescInitData);
+    // Downsampled reference picture constructor
+    pictureBufferDescUpdate(paRefObj->quarterDownsampledPicturePtr, &quartPicBufDescInitData);
+    pictureBufferDescUpdate(paRefObj->sixteenthDownsampledPicturePtr,
+                            &sixteenthPicBufDescInitData);
+    return EB_ErrorNone;
+}
+
+// svt_tpl_reference_param_update (reference_object.c:348-:372).
+EbErrorType tplReferenceParamUpdate(TplRefObject* tplRefObj, const Scs* scs) {
+    PicBufferDescInitData refPicBufDescInitData;
+    // PA Reference Picture Buffers
+    // Currently, only Luma samples are needed in the PA
+    refPicBufDescInitData.maxWidth = scs->maxInputLumaWidth;
+    refPicBufDescInitData.maxHeight = scs->maxInputLumaHeight;
+    refPicBufDescInitData.bitDepth = EB_EIGHT_BIT;
+    refPicBufDescInitData.colorFormat = EB_YUV420; //use 420 for picture analysis
+
+    // Allocate one ref pic to be used in TPL
+    refPicBufDescInitData.bufferEnableMask = PICTURE_BUFFER_DESC_Y_FLAG;
+
+    refPicBufDescInitData.border = tplPad;
+    refPicBufDescInitData.splitMode = false;
+    refPicBufDescInitData.mfmv = 0;
+    refPicBufDescInitData.is16bitPipeline = false;
+
+    refPicBufDescInitData.restUnitsPerTile = 0;
+    refPicBufDescInitData.sbTotalCount = scs->sbTotalCount;
+
+    // Reference picture constructor
+    pictureBufferDescUpdate(tplRefObj->refPicturePtr, &refPicBufDescInitData);
+
+    return EB_ErrorNone;
+}
+
 } // namespace l18_picmgmt

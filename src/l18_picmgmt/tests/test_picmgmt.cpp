@@ -1105,3 +1105,279 @@ TEST_CASE("linkEbToAomBufferDesc 8-bit and the 16-bit CONVERT branch") {
     CHECK(aom.uvWidth == 7);
     CHECK(aom.yCropWidth == 13);
 }
+
+// ---------------------------------------------------------------------------
+// C6: reference_object.c spans:
+//   initialize_samples_neighboring_reference_picture_8bit :21-:44 (the
+//     one-pixel ring zeroing around the reconstructed samples),
+//   initialize_samples_neighboring_reference_picture :46-:55 (the y/u/v
+//     wrapper with the >>1 chroma dims),
+//   svt_reference_param_update :83-:125 (the SCS-derived init data, the
+//     padding derivation, the 10-bit split fork, mi_rows/mi_cols),
+//   svt_reference_object_reset :204-:209,
+//   svt_pa_reference_param_update :239-:288 (the three PA init datas),
+//   svt_tpl_reference_param_update :348-:372 (the TPL_PAD 32 luma-only
+//     init data).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("initializeSamples8bit zeroes the one-pixel ring only") {
+    const std::uint16_t stride = 40;
+    const std::uint16_t w = 9;
+    const std::uint16_t h = 5;
+    // The ring spans rows 0..6 around the samples at row 1: SEVEN rows,
+    // not six - the bottom ring row sits BELOW the samples block (the
+    // reference ctor's border supplies it).
+    std::uint8_t buf[7 * 40];
+    std::memset(buf, 0xFF, sizeof(buf));
+    std::uint8_t* samples = buf + 1 * stride + 1; // one ring row/col in
+    l18_picmgmt::initializeSamplesNeighboringReferencePicture8bit(samples, stride, w, h);
+    // Top row: samples - stride - 1 == buf + 0, 1 + w + 1 bytes.
+    for (int i = 0; i < 1 + w + 1; ++i) {
+        CHECK(buf[i] == 0);
+    }
+    // Bottom row: samples + h*stride - 1 == buf + 41 + 200 - 1 = buf + 240.
+    for (int i = 0; i < 1 + w + 1; ++i) {
+        CHECK(buf[(1 * stride + 1) + h * stride - 1 + i] == 0);
+    }
+    // Left column: samples - 1 + k*stride == buf[(k+1)*stride].
+    for (int k = 0; k < h; ++k) {
+        CHECK(buf[(k + 1) * stride] == 0);
+    }
+    // Right column: samples + w + k*stride == buf[50 + k*stride].
+    for (int k = 0; k < h; ++k) {
+        CHECK(buf[(k + 1) * stride + w + 1] == 0);
+    }
+    // Interior untouched.
+    for (int k = 0; k < h; ++k) {
+        for (int i = 0; i < w; ++i) {
+            CHECK(buf[(k + 1) * stride + 1 + i] == 0xFF);
+        }
+    }
+}
+
+TEST_CASE("initializeSamplesNeighboringReferencePicture rings all three planes") {
+    l18_picmgmt::PicBufferDesc ref = {};
+    ref.width = 64;
+    ref.height = 64;
+    ref.yStride = 96;
+    ref.uStride = 48;
+    ref.vStride = 48;
+    const std::size_t ySize = 96u * 96u;
+    const std::size_t cSize = 48u * 48u;
+    std::uint8_t* y = static_cast<std::uint8_t*>(std::malloc(ySize));
+    std::uint8_t* u = static_cast<std::uint8_t*>(std::malloc(cSize));
+    std::uint8_t* v = static_cast<std::uint8_t*>(std::malloc(cSize));
+    std::memset(y, 0xFF, ySize);
+    std::memset(u, 0xFF, cSize);
+    std::memset(v, 0xFF, cSize);
+    ref.yBuffer = y + ref.yStride + 1;
+    ref.uBuffer = u + ref.uStride + 1;
+    ref.vBuffer = v + ref.vStride + 1;
+    l18_picmgmt::initializeSamplesNeighboringReferencePicture(&ref);
+    // Luma ring (samples at y + 97): top row y[0..65], bottom row
+    // y[97 + 64*96 - 1 .. +65] = y[6240..6305], left col y[96 + k*96],
+    // right col y[161 + k*96].
+    for (int i = 0; i < 66; ++i) {
+        CHECK(y[i] == 0);
+        CHECK(y[97 + 64 * 96 - 1 + i] == 0);
+    }
+    for (int k = 0; k < 64; ++k) {
+        CHECK(y[96 + k * 96] == 0);
+        CHECK(y[96 + 65 + k * 96] == 0);
+    }
+    CHECK(y[97 + 31 * 96 + 31] == 0xFF); // interior stays
+    // Chroma: 32x32 rings (samples at u + 49): top u[0..33], bottom
+    // u[49 + 32*48 - 1 .. +33] = u[1584..1617], left u[48 + k*48], right
+    // u[81 + k*48].
+    for (int i = 0; i < 34; ++i) {
+        CHECK(u[i] == 0);
+        CHECK(v[49 + 32 * 48 - 1 + i] == 0);
+    }
+    for (int k = 0; k < 32; ++k) {
+        CHECK(u[48 + k * 48] == 0);
+        CHECK(v[49 + 32 + k * 48] == 0);
+    }
+    CHECK(u[49 + 15 * 48 + 15] == 0xFF);
+    std::free(y);
+    std::free(u);
+    std::free(v);
+}
+
+TEST_CASE("referenceParamUpdate derives the init data and rings 8-bit refs") {
+    l18_picmgmt::PicBufferDesc refPic = {};
+    refPic.width = 1;
+    refPic.height = 1;
+    refPic.packedFlag = true;    // update() does not write packed_flag - poison stays
+    refPic.yStrideBitInc = 0xEE; // split stays OFF at 8-bit: poison survives
+    refPic.bitDepth = static_cast<l18_picmgmt::EbBitDepth>(0xEE);
+    refPic.colorFormat = l18_picmgmt::EB_YUV444;
+    refPic.bufferEnableMask = 0x1234u;    l18_picmgmt::RefObject refObj = {};
+    refObj.referencePicture = &refPic;
+    l18_picmgmt::Scs scs = {};
+    scs.maxInputLumaWidth = 128;
+    scs.maxInputLumaHeight = 96;
+    scs.encoderBitDepth = 8;
+    scs.staticConfig.encoderColorFormat = l18_picmgmt::EB_YUV420;
+    scs.staticConfig.superresMode = 0; // SUPERRES_NONE
+    scs.staticConfig.resizeMode = 0;   // RESIZE_NONE
+    scs.superBlockSize = 128;
+    scs.restUnitsPerTile = 7;
+    scs.b64TotalCount = 21;
+    scs.mfmvEnabled = 1;
+    scs.is16bitPipeline = false;
+    // Real buffers for the ring zeroing: the largest layout this test
+    // drives is border 288 (superres bump) -> y_stride 704, luma
+    // 704x608, chroma 352x304. The samples pointers sit one ring
+    // row/col in, exactly like the reference's own ctor output.
+    std::uint8_t* y = static_cast<std::uint8_t*>(std::malloc(704u * 608u));
+    std::uint8_t* u = static_cast<std::uint8_t*>(std::malloc(352u * 304u));
+    std::uint8_t* v = static_cast<std::uint8_t*>(std::malloc(352u * 304u));
+    std::memset(y, 0xFF, 704u * 608u);
+    std::memset(u, 0xFF, 352u * 304u);
+    std::memset(v, 0xFF, 352u * 304u);
+    refPic.yBuffer = y + 704 + 1;
+    refPic.uBuffer = u + 352 + 1;
+    refPic.vBuffer = v + 352 + 1;
+    CHECK(l18_picmgmt::referenceParamUpdate(&refObj, &scs) == 0);
+    // The update wrote the layout into the reference picture. bit_depth /
+    // color_format / buffer_enable_mask are NOT in picture_buffer_desc_
+    // update's walk (:192-:219) - the real encoder's ctor set them at
+    // creation; the poison here must survive.
+    CHECK(refPic.width == 128);
+    CHECK(refPic.height == 96);
+    CHECK(refPic.bitDepth == static_cast<l18_picmgmt::EbBitDepth>(0xEE));
+    CHECK(refPic.colorFormat == l18_picmgmt::EB_YUV444);
+    CHECK(refPic.bufferEnableMask == 0x1234u);
+    // padding = super_block_size + 32, no superres/resize bump.
+    CHECK(refPic.border == 160);
+    CHECK(refPic.yStride == 128 + 2 * 160);
+    CHECK(refPic.lumaSize == 448u * 416u);
+    CHECK(refPic.packedFlag == true);    // poison survived: update() never writes it
+    CHECK(refPic.yStrideBitInc == 0xEE); // split_mode false in the derived init data
+    // mi grid.
+    CHECK(refObj.miRows == 96u >> 2);
+    CHECK(refObj.miCols == 128u >> 2);
+
+    // superres bump: padding += super_block_size -> 128+32+128 = 288.
+    scs.staticConfig.superresMode = 1;
+    CHECK(l18_picmgmt::referenceParamUpdate(&refObj, &scs) == 0);
+    CHECK(refPic.border == 288);
+    scs.staticConfig.superresMode = 0;
+    scs.staticConfig.resizeMode = 2;
+    CHECK(l18_picmgmt::referenceParamUpdate(&refObj, &scs) == 0);
+    CHECK(refPic.border == 288); // the same bump through resize_mode
+    scs.staticConfig.resizeMode = 0;
+
+    // 10-bit: is_16bit flips bit_depth to EB_TEN_BIT and split on (the
+    // 16bit init-data copy); NO ring zeroing happens on the 10-bit path
+    // (:111-:113), so the y_buffer contents are not touched here.
+    scs.encoderBitDepth = 10;
+    scs.staticConfig.encoderBitDepth = 10;
+    CHECK(l18_picmgmt::referenceParamUpdate(&refObj, &scs) == 0);
+    // The 10-bit init data's bit_depth never reaches the descriptor
+    // (update() does not write it) - the poison survives here too. The
+    // 10-bitness is observable through the split strides only.
+    CHECK(refPic.bitDepth == static_cast<l18_picmgmt::EbBitDepth>(0xEE));
+    CHECK(refPic.yStrideBitInc == refPic.yStride);
+    CHECK(refPic.uStrideBitInc == refPic.uStride);
+    CHECK(refObj.miRows == 24u);
+    CHECK(refObj.miCols == 32u);
+    // The 8-bit ring zeroing ran on the FIRST (border-160) pass with
+    // samples at y + 705 and y_stride 448: top ring row = y + 705 - 448
+    // - 1 = y + 256, 130 cells; interior pixels survived at 0xFF.
+    for (int i = 0; i < 130; ++i) {
+        CHECK(y[705 - 448 - 1 + i] == 0);
+    }
+    CHECK(y[705 + 16 * 448 + 16] == 0xFF);
+    CHECK(u[353 + 16 * 224 + 8] == 0xFF);
+    std::free(y);
+    std::free(u);
+    std::free(v);
+}
+
+TEST_CASE("referenceObjectReset derives the mi grid from the SCS max dims") {
+    l18_picmgmt::RefObject refObj = {};
+    refObj.miRows = 0xEE;
+    refObj.miCols = 0xEE;
+    l18_picmgmt::Scs scs = {};
+    scs.maxInputLumaWidth = 130;
+    scs.maxInputLumaHeight = 66;
+    CHECK(l18_picmgmt::referenceObjectReset(&refObj, &scs) == 0);
+    CHECK(refObj.miRows == 66u >> 2);
+    CHECK(refObj.miCols == 130u >> 2);
+}
+
+TEST_CASE("paReferenceParamUpdate fills the three PA init datas") {
+    l18_picmgmt::PicBufferDesc inPic = {};
+    l18_picmgmt::PicBufferDesc quart = {};
+    l18_picmgmt::PicBufferDesc sixteenth = {};
+    // The depth/format/mask fields are NOT in picture_buffer_desc_update's
+    // walk - poison them and pin the survival (the real ctor set them).
+    inPic.bitDepth = static_cast<l18_picmgmt::EbBitDepth>(0xEE);
+    inPic.colorFormat = l18_picmgmt::EB_YUV444;
+    inPic.bufferEnableMask = 0x1234u;
+    inPic.packedFlag = true;
+    quart.bitDepth = static_cast<l18_picmgmt::EbBitDepth>(0xEE);
+    quart.bufferEnableMask = 0x4321u;
+    l18_picmgmt::PaRefObject pa = {};
+    pa.inputPaddedPic = &inPic;
+    pa.quarterDownsampledPicturePtr = &quart;
+    pa.sixteenthDownsampledPicturePtr = &sixteenth;
+    l18_picmgmt::Scs scs = {};
+    scs.maxInputLumaWidth = 128;
+    scs.maxInputLumaHeight = 96;
+    scs.border = 80;
+    scs.b64Size = 64;
+    scs.restUnitsPerTile = 4;
+    CHECK(l18_picmgmt::paReferenceParamUpdate(&pa, &scs) == 0);
+    // ref: the SCS dims and border land; depth/format/mask survive.
+    CHECK(inPic.width == 128);
+    CHECK(inPic.height == 96);
+    CHECK(inPic.bitDepth == 0xEE);
+    CHECK(inPic.colorFormat == l18_picmgmt::EB_YUV444);
+    CHECK(inPic.bufferEnableMask == 0x1234u);
+    CHECK(inPic.border == 80);
+    CHECK(inPic.packedFlag == true);
+    CHECK(inPic.yStride == 128 + 2 * 80);
+    CHECK(inPic.uStride == (128 + 2 * 80 + 1) >> 1);
+    // quarter: dims >>1, border = b64_size >> 1.
+    CHECK(quart.width == 64);
+    CHECK(quart.height == 48);
+    CHECK(quart.bitDepth == 0xEE);
+    CHECK(quart.bufferEnableMask == 0x4321u);
+    CHECK(quart.border == 32);
+    // sixteenth: dims >>2, border = b64_size >> 2.
+    CHECK(sixteenth.width == 32);
+    CHECK(sixteenth.height == 24);
+    CHECK(sixteenth.border == 16);
+    CHECK(sixteenth.yStride == 32 + 2 * 16);
+    CHECK(sixteenth.lumaSize == 64u * 56u);
+}
+
+TEST_CASE("tplReferenceParamUpdate fills the TPL_PAD luma-only init data") {
+    l18_picmgmt::PicBufferDesc tpl = {};
+    tpl.bitDepth = static_cast<l18_picmgmt::EbBitDepth>(0xEE);
+    tpl.colorFormat = l18_picmgmt::EB_YUV444;
+    tpl.bufferEnableMask = 0x4321u;
+    tpl.packedFlag = true;
+    l18_picmgmt::TplRefObject tplRef = {};
+    tplRef.refPicturePtr = &tpl;
+    l18_picmgmt::Scs scs = {};
+    scs.maxInputLumaWidth = 100;
+    scs.maxInputLumaHeight = 60;
+    scs.sbTotalCount = 9;
+    CHECK(l18_picmgmt::tplReferenceParamUpdate(&tplRef, &scs) == 0);
+    CHECK(tpl.width == 100);
+    CHECK(tpl.height == 60);
+    // Depth/format/mask are not in update()'s walk - poison survives.
+    CHECK(tpl.bitDepth == 0xEE);
+    CHECK(tpl.colorFormat == l18_picmgmt::EB_YUV444);
+    CHECK(tpl.bufferEnableMask == 0x4321u);
+    CHECK(tpl.border == 32); // TPL_PAD (encode_context.h:35)
+    CHECK(tpl.packedFlag == true);
+    // y_stride = 100 + 64 = 164, chroma stride = (164+1)>>1 = 82,
+    // luma_size = 164 * (60 + 64) = 164 * 124.
+    CHECK(tpl.yStride == 164);
+    CHECK(tpl.uStride == 82);
+    CHECK(tpl.lumaSize == 164u * 124u);
+}
