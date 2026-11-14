@@ -1813,6 +1813,124 @@ TEST_CASE("highbd_jnt_convolve_2d: derivation at bd=8, scalar oracle at bd=10 (i
 // (d) the VERTICAL/ OBLIQUE63 window content vs independent closed-form
 //     reconstructions of the primary planes.
 
+// ------------------------------------------------------------- A3E S2
+// The inter_prediction.c tail utilities (:2401-:2592) + scale_chroma_bsize
+// (intra_prediction.c:2492-:2544).
+
+TEST_CASE("sum_squares_i16 and wedge_sse_from_residuals (ip:2533-2541, :2468-2477)") {
+    const std::int16_t v[5] = {-3, 4, -5, 2, 0};
+    CHECK(inter::sumSquaresI16(v, 5) == 9 + 16 + 25 + 4 + 0);
+    // The reference's do/while(--n) contract requires N >= 1 (the real
+    // callers pass N = bw * bh >= 64); n = 0 would not terminate.
+    const std::int16_t r1[3] = {10, -20, 30};
+    const std::int16_t d[3] = {5, -5, 2};
+    const std::uint8_t m[3] = {64, 32, 16};
+    // t = 64*10 + 64*5 = 960; 64*-20 + 32*-5 = -1440; 64*30 + 16*2 = 1952.
+    // csse = 960^2 + 1440^2 + 1952^2 = 921600 + 2073600 + 3810304 = 6805504.
+    // ROUND_POWER_OF_TWO(csse, 12) = (6805504 + 2048) >> 12 = 1662.
+    CHECK(inter::wedgeSseFromResiduals(r1, d, m, 3) == 1662);
+    // Clamping: a term beyond int16 saturates (the reference's clamp note).
+    const std::int16_t r1b[1] = {300};
+    const std::int16_t db[1] = {300};
+    const std::uint8_t mb[1] = {64};
+    // t = 64*300 + 64*300 = 38400 -> INT16_MAX = 32767.
+    CHECK(inter::wedgeSseFromResiduals(r1b, db, mb, 1) == (32767 * 32767 + 2048) >> 12);
+}
+
+TEST_CASE("find_ref_dv picks the in-tile delay offset (ip:2401-2412)") {
+    // Tile starting at mi_row 8, mib_size 16, current mi_row 8 (row 0 of
+    // the tile): mi_row - mib_size < start -> the LEFT/-x delay form.
+    inter::Mv dv{0, 0};
+    inter::findRefDv(&dv, 8, 16, 8);
+    CHECK(dv.x == (-4 * 16 - 256) * 8);
+    CHECK(dv.y == 0);
+    // Current mi_row 24 (deep in the tile): the ABOVE form.
+    inter::Mv dv2{9, 9};
+    inter::findRefDv(&dv2, 8, 16, 24);
+    CHECK(dv2.x == 0);
+    CHECK(dv2.y == (-4 * 16) * 8);
+}
+
+TEST_CASE("skip_u4x4_pred_in_obmc pins the one-sided 4xN rule (ip:2414-2436)") {
+    // DISABLE_CHROMA_U8X8_OBMC = 0 (inter_prediction.h:41): dir==0 only.
+    // plane bsizes 4X4 (0), 8X4 (2), 4X8 (1): luma (ss 0) -> dir==0;
+    // chroma (ss 1) maps 8X8->4X4 etc.
+    CHECK(inter::skipU4x4PredInObmc(0, 0, 0, 0) == 1);  // luma 4x4, above
+    CHECK(inter::skipU4x4PredInObmc(0, 1, 0, 0) == 0);  // luma 4x4, left
+    CHECK(inter::skipU4x4PredInObmc(1, 1, 0, 0) == 0);  // luma 4x8, left
+    CHECK(inter::skipU4x4PredInObmc(2, 0, 0, 0) == 1);  // luma 8x4, above
+    // 4:2:0: 8x8 -> chroma 4x4.
+    CHECK(inter::skipU4x4PredInObmc(0, 0, 1, 1) == 1);
+    CHECK(inter::skipU4x4PredInObmc(3, 0, 1, 1) == 1);  // 8x8 -> chroma 4x4, above
+    CHECK(inter::skipU4x4PredInObmc(3, 1, 1, 1) == 0);  // 8x8 -> chroma 4x4, left
+    CHECK(inter::skipU4x4PredInObmc(6, 0, 1, 1) == 0);  // 16x16 -> chroma 8x8: default 0
+}
+
+TEST_CASE("scale_chroma_bsize maps the subsampled plane sizes (intra_prediction.c:2492-2544)") {
+    // 4x4 luma at 4:2:0 -> 8x8 chroma (the AV1 min-8 rule).
+    CHECK(inter::scaleChromaBsize(0, 1, 1) == 3);  // BLOCK_8X8
+    CHECK(inter::scaleChromaBsize(0, 1, 0) == 2);  // BLOCK_8X4
+    CHECK(inter::scaleChromaBsize(0, 0, 1) == 1);  // BLOCK_4X8
+    CHECK(inter::scaleChromaBsize(0, 0, 0) == 0);  // unchanged
+    // 4x8: ssx folds both branches to 8x8.
+    CHECK(inter::scaleChromaBsize(1, 1, 1) == 3);
+    CHECK(inter::scaleChromaBsize(1, 1, 0) == 3);
+    CHECK(inter::scaleChromaBsize(1, 0, 1) == 1);  // stays 4x8
+    // 8x4: ssx keeps 8x4; ssy folds to 8x8.
+    CHECK(inter::scaleChromaBsize(2, 1, 1) == 3);
+    CHECK(inter::scaleChromaBsize(2, 1, 0) == 2);
+    CHECK(inter::scaleChromaBsize(2, 0, 1) == 3);
+    // 4x16 -> 8x16 (4) at ssx; stays at ssy.
+    CHECK(inter::scaleChromaBsize(16, 1, 1) == 4);
+    CHECK(inter::scaleChromaBsize(16, 1, 0) == 4);
+    CHECK(inter::scaleChromaBsize(16, 0, 1) == 16);
+    // 16x4 -> 16x8 (5) at 4:2:0, stays 16x4 (17) at ssx-only.
+    CHECK(inter::scaleChromaBsize(17, 1, 1) == 5);
+    CHECK(inter::scaleChromaBsize(17, 1, 0) == 17);
+    CHECK(inter::scaleChromaBsize(17, 0, 1) == 5);
+    // Sizes >= 8x8 are untouched.
+    CHECK(inter::scaleChromaBsize(3, 1, 1) == 3);
+    CHECK(inter::scaleChromaBsize(6, 1, 1) == 6);
+}
+
+TEST_CASE("mode_context_analyzer folds the compound context (ip:2576-2592)") {
+    // rf[1] <= INTRA_FRAME (0): the context passes through.
+    const std::int32_t rfIntra[2] = {1, 0};
+    CHECK(inter::modeContextAnalyzer(5, rfIntra) == 5);
+    const std::int32_t rfNone[2] = {1, -1};
+    CHECK(inter::modeContextAnalyzer(7, rfNone) == 7);
+    // Compound: comp_ctx = map[refmv_ctx >> 1][min(newmv_ctx, 4)].
+    // mode_context bitfield: newmv_ctx = ctx & 7, refmv_ctx = (ctx >> 4) & 15.
+    const std::int32_t rf2[2] = {1, 2};
+    CHECK(inter::modeContextAnalyzer(0, rf2) == 0);          // newmv 0, refmv 0 -> map[0][0] = 0
+    CHECK(inter::modeContextAnalyzer(3, rf2) == 1);          // newmv 3, refmv 0 -> map[0][3] = 1
+    CHECK(inter::modeContextAnalyzer((2 << 4) | 4, rf2) == 4); // refmv 2 -> map[1][4] = 4
+    CHECK(inter::modeContextAnalyzer((3 << 4) | 2, rf2) == 3); // refmv 3 -> map[1][2] = 3
+    CHECK(inter::modeContextAnalyzer((5 << 4) | 7, rf2) == 7); // refmv 5 -> map[2][4] = 7 (newmv clamped 4)
+}
+
+TEST_CASE("get_obmc_mask returns the six length tables (ip:2543-2574)") {
+    const std::uint8_t m1[1] = {64};
+    const std::uint8_t m2[2] = {45, 64};
+    const std::uint8_t m4[4] = {39, 50, 59, 64};
+    const std::uint8_t m8[8] = {36, 42, 48, 53, 57, 61, 64, 64};
+    const std::uint8_t m16[16] = {34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60, 61, 64, 64, 64, 64};
+    const std::uint8_t m32[32] = {33, 35, 36, 38, 40, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55,
+                                  56, 57, 58, 59, 60, 60, 61, 62, 64, 64, 64, 64, 64, 64, 64, 64};
+    CHECK(std::memcmp(inter::getObmcMask(1), m1, 1) == 0);
+    CHECK(std::memcmp(inter::getObmcMask(2), m2, 2) == 0);
+    CHECK(std::memcmp(inter::getObmcMask(4), m4, 4) == 0);
+    CHECK(std::memcmp(inter::getObmcMask(8), m8, 8) == 0);
+    CHECK(std::memcmp(inter::getObmcMask(16), m16, 16) == 0);
+    CHECK(std::memcmp(inter::getObmcMask(32), m32, 32) == 0);
+    // Each table is monotone nondecreasing and ends at 64.
+    for (int len : {1, 2, 4, 8, 16, 32}) {
+        const std::uint8_t* m = inter::getObmcMask(len);
+        for (int i = 1; i < len; ++i) CHECK(m[i] >= m[i - 1]);
+        CHECK(m[len - 1] == 64);
+    }
+}
+
 TEST_CASE("wedge mask synthesis: signflip consistency, complement, window content (ip:2077-2223)") {
     // init must run before the masks are readable.
     inter::initWedgeMasks();

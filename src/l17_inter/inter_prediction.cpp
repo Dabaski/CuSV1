@@ -648,6 +648,180 @@ void convolve2dScale(const std::uint8_t* src, std::int32_t srcStride, std::uint8
     }
 }
 
+// ---------- A3E S2: the tail utilities ----------
+
+// svt_aom_sum_squares_i16_c, inter_prediction.c:2533-:2541.
+std::uint64_t sumSquaresI16(const std::int16_t* src, std::uint32_t n) {
+    std::uint64_t ss = 0;
+    do {
+        const std::int16_t v = *src++;
+        ss += (std::uint64_t)v * v;
+    } while (--n);
+
+    return ss;
+}
+
+// svt_av1_wedge_sse_from_residuals_c, inter_prediction.c:2468-:2477.
+// MAX_MASK_VALUE = 1 << WEDGE_WEIGHT_BITS (ip:2438).
+std::uint64_t wedgeSseFromResiduals(const std::int16_t* r1, const std::int16_t* d, const std::uint8_t* m, int n) {
+    std::uint64_t csse = 0;
+
+    for (int i = 0; i < n; i++) {
+        std::int32_t t = (1 << kWedgeWeightBits) * r1[i] + m[i] * d[i];
+        t = clampInt(t, INT16_MIN, INT16_MAX);
+        csse += (std::uint64_t)(t * t);
+    }
+    return roundPowerOfTwo64((std::int64_t)csse, 2 * kWedgeWeightBits);
+}
+
+// obmc_mask_N[overlap_position], inter_prediction.c:2543-:2554.
+const std::uint8_t obmcMask1[1] = {64};
+const std::uint8_t obmcMask2[2] = {45, 64};
+const std::uint8_t obmcMask4[4] = {39, 50, 59, 64};
+const std::uint8_t obmcMask8[8] = {36, 42, 48, 53, 57, 61, 64, 64};
+const std::uint8_t obmcMask16[16] = {34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60, 61, 64, 64, 64, 64};
+const std::uint8_t obmcMask32[32] = {33, 35, 36, 38, 40, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55,
+                                     56, 57, 58, 59, 60, 60, 61, 62, 64, 64, 64, 64, 64, 64, 64, 64};
+
+// svt_av1_get_obmc_mask, inter_prediction.c:2556-:2574.
+const std::uint8_t* getObmcMask(int length) {
+    switch (length) {
+    case 1: return obmcMask1;
+    case 2: return obmcMask2;
+    case 4: return obmcMask4;
+    case 8: return obmcMask8;
+    case 16: return obmcMask16;
+    case 32: return obmcMask32;
+    default:
+        assert(0);
+        return nullptr;
+    }
+}
+
+// svt_aom_mode_context_analyzer, inter_prediction.c:2576-:2592. The
+// NEWMV/REFMV ctx bitfield splits (definitions.h:1324-:1331):
+// GLOBALMV_OFFSET 3, NEWMV_CTX_MASK 7, REFMV_OFFSET 4, REFMV_CTX_MASK 15,
+// COMP_NEWMV_CTXS 5; the compound map is verbatim.
+std::int16_t modeContextAnalyzer(std::int16_t modeContext, const std::int32_t* rf) {
+    static const unsigned compoundModeCtxMap[3][5] = {
+        {0, 1, 1, 1, 1},
+        {1, 2, 3, 4, 4},
+        {4, 4, 5, 6, 7},
+    };
+
+    if (rf[1] <= 0 /* INTRA_FRAME */) {
+        return modeContext;
+    }
+
+    const unsigned newmvCtx = (unsigned)modeContext & 7;
+    const unsigned refmvCtx = ((unsigned)modeContext >> 4) & 15;
+    assert((refmvCtx >> 1) < 3);
+    const unsigned compCtx = compoundModeCtxMap[refmvCtx >> 1][newmvCtx < 5 ? newmvCtx : 4];
+    return (std::int16_t)compCtx;
+}
+
+// svt_aom_find_ref_dv, inter_prediction.c:2401-:2412. MI_SIZE = 4
+// (definitions.h:354), INTRABC_DELAY_PIXELS = 256 (inter_prediction.h:35).
+void findRefDv(Mv* refDv, int miRowStart, int mibSize, int miRow) {
+    if (miRow - mibSize < miRowStart) {
+        refDv->y = 0;
+        refDv->x = (std::int16_t)(-4 * mibSize - 256);
+    } else {
+        refDv->y = (std::int16_t)(-4 * mibSize);
+        refDv->x = 0;
+    }
+    refDv->y = (std::int16_t)(refDv->y * 8);
+    refDv->x = (std::int16_t)(refDv->x * 8);
+}
+
+// get_plane_block_size, common_utils.h:135-:140, via the local
+// svt_aom_ss_size_lookup transcription (common_utils.c:236-:258). The
+// BLOCK_INVALID value is 255 (definitions.h:907).
+const std::uint8_t ssSizeLookup[22][2][2] = {
+    {{0, 0}, {0, 0}},       {{1, 0}, {255, 0}},     {{2, 255}, {0, 0}},     {{3, 2}, {1, 0}},
+    {{4, 3}, {255, 1}},     {{5, 255}, {3, 2}},     {{6, 5}, {4, 3}},       {{7, 6}, {255, 4}},
+    {{8, 255}, {6, 5}},     {{9, 8}, {7, 6}},       {{10, 9}, {255, 7}},    {{11, 255}, {9, 8}},
+    {{12, 11}, {10, 9}},    {{13, 12}, {255, 10}},  {{14, 255}, {12, 11}},  {{15, 14}, {13, 12}},
+    {{16, 1}, {255, 1}},    {{17, 255}, {2, 2}},    {{18, 4}, {255, 16}},   {{19, 255}, {5, 17}},
+    {{20, 7}, {255, 18}},   {{21, 255}, {8, 19}},
+};
+
+inline int getPlaneBlockSize(int bsize, int ssx, int ssy) {
+    return ssSizeLookup[bsize][ssx][ssy];
+}
+
+// svt_av1_skip_u4x4_pred_in_obmc, inter_prediction.c:2414-:2436.
+int skipU4x4PredInObmc(int bsize, int dir, int subsamplingX, int subsamplingY) {
+    const int bsizePlane = getPlaneBlockSize(bsize, subsamplingX, subsamplingY);
+    switch (bsizePlane) {
+    // DISABLE_CHROMA_U8X8_OBMC = 0 (inter_prediction.h:41): the one-sided
+    // branch (dir == 0 skips).
+    case 0: // BLOCK_4X4
+    case 2: // BLOCK_8X4
+    case 1: // BLOCK_4X8
+        return dir == 0;
+    default:
+        return 0;
+    }
+}
+
+// svt_aom_scale_chroma_bsize, intra_prediction.c:2492-:2544. The enum
+// values thread as the 0..21 indices (BLOCK_8X8 = 3, BLOCK_8X4 = 2,
+// BLOCK_4X8 = 1, BLOCK_8X16 = 4, BLOCK_16X8 = 5).
+int scaleChromaBsize(int bsize, int subsamplingX, int subsamplingY) {
+    int bs = bsize;
+    switch (bsize) {
+    case 0: // BLOCK_4X4
+        if (subsamplingX == 1 && subsamplingY == 1) {
+            bs = 3;
+        } else if (subsamplingX == 1) {
+            bs = 2;
+        } else if (subsamplingY == 1) {
+            bs = 1;
+        }
+        break;
+    case 1: // BLOCK_4X8
+        if (subsamplingX == 1 && subsamplingY == 1) {
+            bs = 3;
+        } else if (subsamplingX == 1) {
+            bs = 3;
+        } else if (subsamplingY == 1) {
+            bs = 1;
+        }
+        break;
+    case 2: // BLOCK_8X4
+        if (subsamplingX == 1 && subsamplingY == 1) {
+            bs = 3;
+        } else if (subsamplingX == 1) {
+            bs = 2;
+        } else if (subsamplingY == 1) {
+            bs = 3;
+        }
+        break;
+    case 16: // BLOCK_4X16
+        if (subsamplingX == 1 && subsamplingY == 1) {
+            bs = 4;
+        } else if (subsamplingX == 1) {
+            bs = 4;
+        } else if (subsamplingY == 1) {
+            bs = 16;
+        }
+        break;
+    case 17: // BLOCK_16X4
+        if (subsamplingX == 1 && subsamplingY == 1) {
+            bs = 5;
+        } else if (subsamplingX == 1) {
+            bs = 17;
+        } else if (subsamplingY == 1) {
+            bs = 5;
+        }
+        break;
+    default:
+        break;
+    }
+    return bs;
+}
+
 // ---------- A3E W1: the wedge mask synthesis (functions) ----------
 
 // shift_copy, inter_prediction.c:2053-:2062.

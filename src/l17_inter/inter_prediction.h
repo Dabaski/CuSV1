@@ -410,6 +410,23 @@ void highbdJntConvolve2d(const std::uint16_t* src, std::int32_t srcStride, std::
 extern const std::uint8_t kBlockSizeWide[22];
 extern const std::uint8_t kBlockSizeHigh[22];
 
+// ---------- A3E S2: the tail utilities ----------
+
+// svt_aom_sum_squares_i16_c, inter_prediction.c:2533-:2541. The
+// do/while(--n) contract requires N >= 1 (callers pass bw * bh >= 64).
+std::uint64_t sumSquaresI16(const std::int16_t* src, std::uint32_t n);
+
+// svt_av1_wedge_sse_from_residuals_c, inter_prediction.c:2468-:2477. The
+// partial term clamps to int16 (the reference's SIMD-parity note).
+std::uint64_t wedgeSseFromResiduals(const std::int16_t* r1, const std::int16_t* d, const std::uint8_t* m, int n);
+
+// obmc_mask_N tables + svt_av1_get_obmc_mask, inter_prediction.c:2543-:2574.
+const std::uint8_t* getObmcMask(int length);
+
+// svt_aom_mode_context_analyzer, inter_prediction.c:2576-:2592. rf threads
+// as the two MvReferenceFrame ints (INTRA_FRAME = 0, definitions.h:1359).
+std::int16_t modeContextAnalyzer(std::int16_t modeContext, const std::int32_t* rf);
+
 // shift_copy, inter_prediction.c:2053-:2062 (file-local static in the
 // reference; exported for testability, the DF1 cdefSign precedent).
 void shiftCopy(const std::uint8_t* src, std::uint8_t* dst, int shift, int width);
@@ -442,6 +459,28 @@ const std::uint8_t* getContiguousSoftMask(int wedgeIndex, int wedgeSign, int bsi
 // precedent); no production caller.
 const std::uint8_t* wedgeMaskOblData();
 
+// Mv, mv.h:46-:58 (the union; the ported spans consume only x/y, so the
+// as_int alias is parked - named deviation).
+struct Mv {
+    std::int16_t x;
+    std::int16_t y;
+};
+
+// svt_aom_find_ref_dv, inter_prediction.c:2401-:2412. The TileInfo
+// (mi_row_start), mib_size, mi_row and mi_col thread as parameters (the
+// tile struct is the AMVP1 carrier precedent); mi_col is voided as in the
+// reference.
+void findRefDv(Mv* refDv, int miRowStart, int mibSize, int miRow);
+
+// svt_av1_skip_u4x4_pred_in_obmc, inter_prediction.c:2414-:2436.
+// DISABLE_CHROMA_U8X8_OBMC = 0 (inter_prediction.h:41): the one-sided
+// branch; bsize threads as the 0..21 index.
+int skipU4x4PredInObmc(int bsize, int dir, int subsamplingX, int subsamplingY);
+
+// svt_aom_scale_chroma_bsize, intra_prediction.c:2492-:2544 (the
+// definition lives in intra_prediction.c; declared at
+// inter_prediction.c:1198). bsize threads as the 0..21 index.
+int scaleChromaBsize(int bsize, int subsamplingX, int subsamplingY);
 // ---------- A3E J4: the dispatch rung ----------
 
 // svt_highbd_inter_predictor, inter_prediction.c:1455-:1523. The
