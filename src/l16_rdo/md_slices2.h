@@ -15,6 +15,7 @@
 
 #include "rate_est.h"
 #include "mode_config.h"
+#include "md_slices.h"  // the MD1 carriers (InjectedMvCarrier, MeSbResults)
 
 namespace l16_rdo {
 
@@ -462,5 +463,50 @@ void aomAv1SetSsimRdmult(MdLambdaCarrier* ctx, const SbLambdaPcs* pcs, BlockSize
 // reference's ctx->blk_geom->bsize; blk_org_y/x -> mi_row/mi_col = >> 2.
 void setTunedBlkLambda(MdLambdaCarrier* ctx, const SbLambdaPcs* pcs, BlockSize bsize, std::int32_t blkOrgX,
                        std::int32_t blkOrgY);
+
+// ---------------------------------------------------------------------------
+// A4M-10: the inter candidate-INJECTION surface (the inter search's
+// definition). The candidate carry: exactly the fields the injectors write,
+// each cited to its write site (the AN17 struct-carry precedent); Mv
+// travels as its packed as_int form (the RE3 precedent).
+// ---------------------------------------------------------------------------
+struct InterInjectedCandidate {
+    std::int32_t mode;        // block_mi.mode
+    std::int32_t motionMode;  // block_mi.motion_mode
+    bool skipModeAllowed;     // cand->skip_mode_allowed
+    std::uint8_t drlIndex;    // cand->drl_index
+    std::int32_t refFrame[2]; // block_mi.ref_frame[0/1]
+    std::int32_t mv[2];       // block_mi.mv[0/1].as_int
+    std::int32_t predMv[2];   // cand->pred_mv[0/1].as_int
+    std::int32_t numProjRef;  // block_mi.num_proj_ref (the wm_sample_info wall)
+    std::int32_t useIntrabc;  // block_mi.use_intrabc
+    std::int32_t isInterintraUsed;  // block_mi.is_interintra_used
+    std::int32_t compGroupIdx;      // block_mi.comp_group_idx
+    std::int32_t compoundIdx;       // block_mi.compound_idx
+    std::int32_t compoundType;      // block_mi.interinter_comp.type (CompoundType)
+    std::int32_t transformType;     // cand->transform_type[0]
+    std::int32_t transformTypeUv;   // cand->transform_type_uv
+};
+
+// inject_mvp_candidates_ii_light_pd1 (mode_decision.c:1366-1509). The walls
+// thread per the campaign pattern: ref_mv_stack / ref_mv_count /
+// ref_frame_type_arr / tot_ref_frame_types / max_can_count / the wm_sample_
+// info num column / the near_count_ctrls trio / the frm_hdr skip-mode
+// params (skip_mode_flag + the two ref_frame_idx slots) / the lossless-
+// segment fold (the pinned CONFIG=0 -> the test passes false) / the
+// lpd1_mvp_best_me_list flag + the me_results wall / the injected-mv
+// carrier (the landed MD1 InjectedMvCarrier).
+void injectMvpCandidatesIiLightPd1(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                                    std::uint32_t maxCanCount,
+                                    const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                                    const std::uint8_t* refMvCount, const MvReferenceFrame* refFrameTypeArr,
+                                    std::uint32_t totRefFrameTypes, bool allowBipred,
+                                    const std::uint8_t* wmSampleInfoNum, std::uint8_t lpd1MvpBestMeList,
+                                    const MeSbResults* meResults, std::uint32_t meBlockOffset,
+                                    std::uint32_t meCandOffset, bool nearCountCtrlEnabled,
+                                    std::uint8_t nearCount, std::uint8_t nearNearCount,
+                                    std::uint8_t skipModeFlag, std::int32_t skipRefIdx0,
+                                    std::int32_t skipRefIdx1, bool losslessSegment,
+                                    InjectedMvCarrier& injected);
 
 }  // namespace l16_rdo

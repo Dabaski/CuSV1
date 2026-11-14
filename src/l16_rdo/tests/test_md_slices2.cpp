@@ -1325,3 +1325,268 @@ TEST_CASE("l16_rdo setTunedBlkLambda folds the TPL geometric mean and the superr
     setTunedBlkLambda(&ctx, &pcs, l16_rdo::BLOCK_64X64, 80, 0);
     CHECK(ctx.fullLambdaMd[0] == 2000);
 }
+
+// ---------------------------------------------------------------------------
+// A4M-10: inject_mvp_candidates_ii_light_pd1 (mode_decision.c:1366-1509).
+// ---------------------------------------------------------------------------
+using l16_rdo::InterInjectedCandidate;
+using l16_rdo::injectMvpCandidatesIiLightPd1;
+using l16_rdo::InjectedMvCarrier;
+using l16_rdo::MeSbResults;
+using l16_rdo::MeCandidate;
+
+TEST_CASE("l16_rdo injectMvpCandidatesIiLightPd1 emits the exact candidate sequence") {
+    // mode_decision.c:1366-1509. Hand-derived sequence from the reference:
+    // per ref-pair row, the NEAREST (no dedup, the :1394 comment) then the
+    // capped NEAR walk; the compound rows mirror with NEAREST_NEAREST +
+    // NEAR_NEAR. The injected list bookkeeping runs on every injection;
+    // the INC_MD_CAND_CNT bound gates only the candidate array.
+    CandidateMv stack[29][MAX_REF_MV_STACK_SIZE_MD];
+    for (int r = 0; r < 29; ++r) {
+        for (int s = 0; s < MAX_REF_MV_STACK_SIZE_MD; ++s) {
+            stack[r][s].this_mv.as_int = 0;
+            stack[r][s].comp_mv.as_int = 0;
+            stack[r][s].weight = 1000;
+        }
+    }
+    stack[1][0].this_mv.as_int = (std::uint32_t)(10 | (20 << 16));
+    stack[1][1].this_mv.as_int = (std::uint32_t)(30 | (40 << 16));
+    stack[1][2].this_mv.as_int = (std::uint32_t)(50 | (60 << 16));
+    stack[16][0].this_mv.as_int = (std::uint32_t)(2 | (3 << 16));
+    stack[16][0].comp_mv.as_int = (std::uint32_t)(4 | (5 << 16));
+    stack[16][1].this_mv.as_int = (std::uint32_t)(6 | (7 << 16));
+    stack[16][1].comp_mv.as_int = (std::uint32_t)(8 | (9 << 16));
+    stack[16][2].this_mv.as_int = (std::uint32_t)(10 | (11 << 16));
+    stack[16][2].comp_mv.as_int = (std::uint32_t)(12 | (13 << 16));
+    std::uint8_t count[29];
+    for (int r = 0; r < 29; ++r) {
+        count[r] = 3;
+    }
+    const l16_rdo::MvReferenceFrame refArr[2] = {1, 16};
+    std::uint8_t wmNum[29];
+    for (int r = 0; r < 29; ++r) {
+        wmNum[r] = 9;
+    }
+    wmNum[1] = 7;
+
+    InterInjectedCandidate cands[64];
+    for (int i = 0; i < 64; ++i) {
+        cands[i] = InterInjectedCandidate{};
+        cands[i].mode = -7;  // poison
+    }
+    std::uint32_t tot = 0;
+    InjectedMvCarrier inj;
+    inj.injectedMvCount = 0;
+    inj.corruptedMvCheck = 0;
+    inj.redundCtrl.scoreTh = 0;
+    inj.redundCtrl.magTh = 0;
+    // near_count_ctrls enabled with both caps = 2; skip-mode params:
+    // flag 1, rf idx {1, 7}; lossless false.
+    injectMvpCandidatesIiLightPd1(cands, &tot, 64, stack, count, refArr, 2, true, wmNum,
+                                  0, nullptr, 0, 0, 1, 2, 2, 1, 1, 7, false, inj);
+    CHECK(tot == 6);
+    CHECK(inj.injectedMvCount == 6);
+
+    // The exact emitted rows (the fields each :1397-:1408 / :1424-:1435 /
+    // :1450-:1465 / :1483-:1498 write).
+    CHECK(cands[0].mode == NEARESTMV_PM);
+    CHECK(cands[0].motionMode == SIMPLE_TRANSLATION);
+    CHECK(cands[0].skipModeAllowed == false);
+    CHECK(cands[0].drlIndex == 0);
+    CHECK(cands[0].refFrame[0] == 1);
+    CHECK(cands[0].refFrame[1] == NONE_FRAME_MV);
+    CHECK((std::uint32_t)cands[0].mv[0] == (std::uint32_t)(10 | (20 << 16)));
+    CHECK(cands[0].numProjRef == 7);
+    CHECK(cands[0].useIntrabc == 0);
+    CHECK(cands[0].isInterintraUsed == 0);
+    CHECK(cands[0].compGroupIdx == 0);   // untouched by the unipred row (init 0)
+    CHECK(cands[0].compoundIdx == 0);
+    CHECK(cands[0].compoundType == 0);
+
+    CHECK(cands[1].mode == NEARMV_PM);
+    CHECK(cands[1].drlIndex == 0);
+    CHECK((std::uint32_t)cands[1].mv[0] == (std::uint32_t)(30 | (40 << 16)));
+    CHECK(cands[1].numProjRef == 7);
+    CHECK(cands[2].mode == NEARMV_PM);
+    CHECK(cands[2].drlIndex == 1);
+    CHECK((std::uint32_t)cands[2].mv[0] == (std::uint32_t)(50 | (60 << 16)));
+
+    CHECK(cands[3].mode == NEAREST_NEARESTMV_PM);
+    CHECK(cands[3].motionMode == SIMPLE_TRANSLATION);
+    CHECK(cands[3].skipModeAllowed == true);  // rf == the skip-mode idx pair
+    CHECK(cands[3].drlIndex == 0);
+    CHECK(cands[3].refFrame[0] == 1);
+    CHECK(cands[3].refFrame[1] == ALTREF_FRAME_MV);
+    CHECK((std::uint32_t)cands[3].mv[0] == (std::uint32_t)(2 | (3 << 16)));
+    CHECK((std::uint32_t)cands[3].mv[1] == (std::uint32_t)(4 | (5 << 16)));
+    CHECK(cands[3].compGroupIdx == 0);
+    CHECK(cands[3].compoundIdx == 1);
+    CHECK(cands[3].compoundType == COMPOUND_AVERAGE);
+
+    CHECK(cands[4].mode == NEAR_NEARMV_PM);
+    CHECK(cands[4].drlIndex == 0);
+    CHECK((std::uint32_t)cands[4].mv[0] == (std::uint32_t)(6 | (7 << 16)));
+    CHECK((std::uint32_t)cands[4].mv[1] == (std::uint32_t)(8 | (9 << 16)));
+    CHECK(cands[4].compGroupIdx == 0);
+    CHECK(cands[4].compoundIdx == 1);
+    CHECK(cands[5].mode == NEAR_NEARMV_PM);
+    CHECK(cands[5].drlIndex == 1);
+    CHECK((std::uint32_t)cands[5].mv[0] == (std::uint32_t)(10 | (11 << 16)));
+    CHECK((std::uint32_t)cands[5].mv[1] == (std::uint32_t)(12 | (13 << 16)));
+
+    // The injected bookkeeping: NEAREST (1), two NEARs, compound NEAREST +
+    // two NEAR_NEARs - all six recorded with their ref types.
+    CHECK(inj.injectedRefTypes[0] == 1);
+    CHECK((std::uint32_t)inj.injectedMvs[0][0] == (std::uint32_t)(10 | (20 << 16)));
+    CHECK(inj.injectedRefTypes[3] == 16);
+    CHECK((std::uint32_t)inj.injectedMvs[3][1] == (std::uint32_t)(4 | (5 << 16)));
+
+    // The dedup re-run: the NEAREST rows are injected UNCONDITIONALLY (the
+    // :1394/:1444 comments), the NEAR rows dedup against the injected list
+    // -> exactly two more candidates.
+    for (int i = 0; i < 64; ++i) {
+        cands[i] = InterInjectedCandidate{};
+        cands[i].mode = -7;
+    }
+    std::uint32_t tot2 = 0;
+    injectMvpCandidatesIiLightPd1(cands, &tot2, 64, stack, count, refArr, 2, true, wmNum,
+                                  0, nullptr, 0, 0, 1, 2, 2, 1, 1, 7, false, inj);
+    CHECK(tot2 == 2);
+    CHECK(cands[0].mode == NEARESTMV_PM);
+    CHECK(cands[1].mode == NEAREST_NEARESTMV_PM);
+    CHECK(inj.injectedMvCount == 8);
+}
+
+TEST_CASE("l16_rdo injectMvpCandidatesIiLightPd1 pins the gates") {
+    CandidateMv stack[29][MAX_REF_MV_STACK_SIZE_MD];
+    for (int r = 0; r < 29; ++r) {
+        for (int s = 0; s < MAX_REF_MV_STACK_SIZE_MD; ++s) {
+            stack[r][s].this_mv.as_int = (std::uint32_t)(5 | (6 << 16));
+            stack[r][s].comp_mv.as_int = (std::uint32_t)(7 | (8 << 16));
+            stack[r][s].weight = 1000;
+        }
+    }
+    std::uint8_t count[29];
+    for (int r = 0; r < 29; ++r) {
+        count[r] = 3;
+    }
+    std::uint8_t wmNum[29];
+    for (int r = 0; r < 29; ++r) {
+        wmNum[r] = 1;
+    }
+    // Distinct NEAR slots: a live stack's NEAR MVs differ from the NEAREST
+    // (all-equal slots would dedup the NEAR rows against the NEAREST
+    // injection - the exact behavior the dedup re-run below pins).
+    stack[1][1].this_mv.as_int = (std::uint32_t)(15 | (16 << 16));
+    stack[1][2].this_mv.as_int = (std::uint32_t)(25 | (26 << 16));
+    // allow_bipred = 0: the compound row is skipped entirely.
+    {
+        const l16_rdo::MvReferenceFrame refArr[2] = {1, 16};
+        InterInjectedCandidate cands[8];
+        for (int i = 0; i < 8; ++i) {
+            cands[i] = InterInjectedCandidate{};
+            cands[i].mode = -7;
+        }
+        std::uint32_t tot = 0;
+        InjectedMvCarrier inj;
+        inj.injectedMvCount = 0;
+        inj.corruptedMvCheck = 0;
+        inj.redundCtrl.scoreTh = 0;
+        inj.redundCtrl.magTh = 0;
+        injectMvpCandidatesIiLightPd1(cands, &tot, 8, stack, count, refArr, 2, false, wmNum,
+                                      0, nullptr, 0, 0, 0, 0, 0, 0, 0, 0, false, inj);
+        CHECK(tot == 1);  // only the unipred NEAREST (near ctrl disabled -> cap 0)
+        CHECK(cands[0].mode == NEARESTMV_PM);
+        // near_count_ctrls disabled: cap_max_drl_index stays 0 -> no NEARs.
+    }
+
+    // The near-count cap: enabled with near_count = 1 caps the NEAR walk
+    // at one drl slot even though max_drl = 2.
+    {
+        const l16_rdo::MvReferenceFrame refArr[1] = {1};
+        InterInjectedCandidate cands[8];
+        for (int i = 0; i < 8; ++i) {
+            cands[i] = InterInjectedCandidate{};
+            cands[i].mode = -7;
+        }
+        std::uint32_t tot = 0;
+        InjectedMvCarrier inj;
+        inj.injectedMvCount = 0;
+        inj.corruptedMvCheck = 0;
+        inj.redundCtrl.scoreTh = 0;
+        inj.redundCtrl.magTh = 0;
+        injectMvpCandidatesIiLightPd1(cands, &tot, 8, stack, count, refArr, 1, false, wmNum,
+                                      0, nullptr, 0, 0, 1, 1, 0, 0, 0, 0, false, inj);
+        CHECK(tot == 2);  // NEAREST + one NEAR
+        CHECK(cands[1].mode == NEARMV_PM);
+        CHECK(cands[1].drlIndex == 0);
+    }
+
+    // The lpd1_mvp_best_me_list gate (:1383-1392): with the flag on, a
+    // list-0 ref row is SKIPPED when me[0].direction is list 1 and the me
+    // count is nonzero.
+    {
+        std::uint8_t meIdx[4] = {1, 0, 0, 0};
+        MeCandidate meCands[2];
+        meCands[0].direction = 1;
+        meCands[0].refIdxL0 = 0;
+        meCands[0].refIdxL1 = 0;
+        meCands[0].ref0List = 0;
+        meCands[0].ref1List = 0;
+        meCands[1] = meCands[0];
+        MeSbResults meRes;
+        meRes.totalMeCandidateIndex = meIdx;
+        meRes.meCandidateArray = meCands;
+        const l16_rdo::MvReferenceFrame refArr[2] = {1, 5};
+        InterInjectedCandidate cands[8];
+        for (int i = 0; i < 8; ++i) {
+            cands[i] = InterInjectedCandidate{};
+            cands[i].mode = -7;
+        }
+        std::uint32_t tot = 0;
+        InjectedMvCarrier inj;
+        inj.injectedMvCount = 0;
+        inj.corruptedMvCheck = 0;
+        inj.redundCtrl.scoreTh = 0;
+        inj.redundCtrl.magTh = 0;
+        injectMvpCandidatesIiLightPd1(cands, &tot, 8, stack, count, refArr, 2, false, wmNum,
+                                      1, &meRes, 0, 0, 0, 0, 0, 0, 0, 0, false, inj);
+        // The list-0 row (LAST) is skipped; the list-1 row (BWDREF,
+        // direction 1) passes -> exactly one NEAREST.
+        CHECK(tot == 1);
+        CHECK(cands[0].refFrame[0] == BWDREF_FRAME_MV);
+        // The zero-me-count row: total_me_cnt == 0 lifts the gate; LAST
+        // now injects too.
+        meIdx[0] = 0;
+        tot = 0;
+        injectMvpCandidatesIiLightPd1(cands, &tot, 8, stack, count, refArr, 2, false, wmNum,
+                                      1, &meRes, 0, 0, 0, 0, 0, 0, 0, 0, false, inj);
+        CHECK(tot == 2);
+    }
+
+    // The INC_MD_CAND_CNT bound: with max_can_count = 2 the candidate
+    // array stops growing (the SVT_ERROR arm leaves cnt) but the injected
+    // bookkeeping keeps counting.
+    {
+        const l16_rdo::MvReferenceFrame refArr[1] = {1};
+        InterInjectedCandidate cands[8];
+        for (int i = 0; i < 8; ++i) {
+            cands[i] = InterInjectedCandidate{};
+            cands[i].mode = -7;
+        }
+        std::uint32_t tot = 0;
+        InjectedMvCarrier inj;
+        inj.injectedMvCount = 0;
+        inj.corruptedMvCheck = 0;
+        inj.redundCtrl.scoreTh = 0;
+        inj.redundCtrl.magTh = 0;
+        injectMvpCandidatesIiLightPd1(cands, &tot, 2, stack, count, refArr, 1, false, wmNum,
+                                      0, nullptr, 0, 0, 1, 4, 0, 0, 0, 0, false, inj);
+        CHECK(tot == 1);
+        CHECK(inj.injectedMvCount == 3);  // NEAREST + two NEARs recorded
+        // The last WRITE landed at slot 1 (overwritten by each later
+        // candidate): the final write is the NEAR drl 1 row.
+        CHECK(cands[1].mode == NEARMV_PM);
+        CHECK(cands[1].drlIndex == 1);
+    }
+}

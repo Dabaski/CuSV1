@@ -719,4 +719,176 @@ void setTunedBlkLambda(MdLambdaCarrier* ctx, const SbLambdaPcs* pcs, BlockSize b
     }
 }
 
+// ---------------------------------------------------------------------------
+// A4M-10: the inter candidate-INJECTION surface.
+// ---------------------------------------------------------------------------
+
+// INC_MD_CAND_CNT (mode_decision.c:61-68) - increments cnt only when
+// cnt + 1 < max_can_count; else SVT_ERROR (the count is not incremented;
+// the port's deviation: no console print). The file-local rate_est.cpp
+// twin is not exported (the l7-l13 duplication precedent).
+static inline void incMdCandCntA4m(std::uint32_t& cnt, std::uint32_t maxCanCount) {
+    if (cnt + 1 < maxCanCount) {
+        cnt++;
+    }
+}
+
+// inject_mvp_candidates_ii_light_pd1 (mode_decision.c:1366-1509, verbatim
+// over the carriers).
+void injectMvpCandidatesIiLightPd1(InterInjectedCandidate* candArray, std::uint32_t* candTotCnt,
+                                    std::uint32_t maxCanCount,
+                                    const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                                    const std::uint8_t* refMvCount, const MvReferenceFrame* refFrameTypeArr,
+                                    std::uint32_t totRefFrameTypes, bool allowBipred,
+                                    const std::uint8_t* wmSampleInfoNum, std::uint8_t lpd1MvpBestMeList,
+                                    const MeSbResults* meResults, std::uint32_t meBlockOffset,
+                                    std::uint32_t meCandOffset, bool nearCountCtrlEnabled,
+                                    std::uint8_t nearCount, std::uint8_t nearNearCount,
+                                    std::uint8_t skipModeFlag, std::int32_t skipRefIdx0,
+                                    std::int32_t skipRefIdx1, bool losslessSegment,
+                                    InjectedMvCarrier& injected) {
+    std::uint32_t candIdx = *candTotCnt;  // :1369
+    InterInjectedCandidate* candArray_ = candArray;
+
+    // all of ref pairs: (1)single-ref List0  (2)single-ref List1  (3)compound Bi-Dir List0-List1
+    for (std::uint32_t refIt = 0; refIt < totRefFrameTypes; ++refIt) {  // :1374
+        const MvReferenceFrame refPair = refFrameTypeArr[refIt];
+        MvReferenceFrame rf[2];
+        av1SetRefFrame(rf, (std::int8_t)refPair);
+
+        // single ref/list
+        if (rf[1] == NONE_FRAME_MV) {  // :1380
+            const MvReferenceFrame frameType = rf[0];
+            const std::uint8_t listIdx = getListIdx(rf[0]);
+            if (lpd1MvpBestMeList) {  // :1383-1392
+                const std::uint8_t totalMeCnt = meResults->totalMeCandidateIndex[meBlockOffset];
+                const MeCandidate* meBlockResults = &meResults->meCandidateArray[meCandOffset];
+                const MeCandidate* meBlockResultsPtr = &meBlockResults[0];
+                const std::uint8_t interDirection = meBlockResultsPtr->direction;
+                if (totalMeCnt && listIdx != interDirection) {
+                    continue;
+                }
+            }
+            // NEAREST
+            // Don't check if MV is already injected b/c NEAREST is the first INTER MV injected
+            Mv toInjMv;
+            toInjMv.as_int = refMvStack[frameType][0].this_mv.as_int;  // :1395
+
+            InterInjectedCandidate* cand = &candArray_[candIdx];  // :1397
+            cand->mode = NEARESTMV;                    // :1398
+            cand->motionMode = SIMPLE_TRANSLATION;     // :1399
+            cand->skipModeAllowed = false;             // :1400
+            cand->drlIndex = 0;                        // :1401
+            cand->refFrame[0] = rf[0];                 // :1402
+            cand->refFrame[1] = rf[1];                 // :1403
+            cand->mv[0] = (std::int32_t)toInjMv.as_int;  // :1404
+            cand->numProjRef = wmSampleInfoNum[frameType];  // :1405
+            cand->useIntrabc = 0;                      // :1406
+            cand->isInterintraUsed = 0;                // :1407
+            incMdCandCntA4m(candIdx, maxCanCount);     // :1408
+
+            injected.injectedMvs[injected.injectedMvCount][0] = (std::int32_t)toInjMv.as_int;  // :1410
+            injected.injectedRefTypes[injected.injectedMvCount] = frameType;  // :1411
+            ++injected.injectedMvCount;  // :1412
+            // NEAR
+            const std::uint8_t maxDrlIndex = getMaxDrlIndex(refMvCount[frameType], NEARMV);  // :1414
+            std::uint8_t capMaxDrlIndex = 0;
+            if (nearCountCtrlEnabled) {  // :1416-1418
+                capMaxDrlIndex = (std::uint8_t)aomMin(nearCount, maxDrlIndex);
+            }
+            for (std::uint8_t drli = 0; drli < capMaxDrlIndex; drli++) {  // :1419
+                toInjMv.as_int = refMvStack[frameType][1 + drli].this_mv.as_int;  // :1420
+
+                if ((injected.injectedMvCount == 0 ||
+                     mvIsAlreadyInjected(injected, (std::int32_t)toInjMv.as_int, (std::int32_t)toInjMv.as_int,
+                                         (std::uint8_t)frameType) == false)) {  // :1422-1423
+                    cand = &candArray_[candIdx];  // :1424
+                    cand->mode = NEARMV;          // :1425
+                    cand->motionMode = SIMPLE_TRANSLATION;  // :1426
+                    cand->skipModeAllowed = false;  // :1427
+                    cand->drlIndex = drli;        // :1428
+                    cand->useIntrabc = 0;         // :1429
+                    cand->isInterintraUsed = 0;   // :1430
+                    cand->refFrame[0] = rf[0];    // :1431
+                    cand->refFrame[1] = rf[1];    // :1432
+                    cand->mv[0] = (std::int32_t)toInjMv.as_int;  // :1433
+                    cand->numProjRef = wmSampleInfoNum[frameType];  // :1434
+                    incMdCandCntA4m(candIdx, maxCanCount);  // :1435
+
+                    injected.injectedMvs[injected.injectedMvCount][0] = (std::int32_t)toInjMv.as_int;  // :1437
+                    injected.injectedRefTypes[injected.injectedMvCount] = frameType;  // :1438
+                    ++injected.injectedMvCount;  // :1439
+                }
+            }
+        } else if (allowBipred) {  // :1442
+            // NEAREST_NEAREST
+            // Don't check if MV is already injected b/c NEAREST_NEAREST is the first bipred INTER candidate injected
+            Mv toInjMv0;
+            toInjMv0.as_int = refMvStack[refPair][0].this_mv.as_int;  // :1445
+            Mv toInjMv1;
+            toInjMv1.as_int = refMvStack[refPair][0].comp_mv.as_int;  // :1446
+            const bool isSkipMode = !losslessSegment && skipModeFlag &&  // :1447-1449
+                (rf[0] == (MvReferenceFrame)skipRefIdx0) && (rf[1] == (MvReferenceFrame)skipRefIdx1);
+            InterInjectedCandidate* cand = &candArray_[candIdx];  // :1450
+            cand->mode = NEAREST_NEARESTMV;    // :1451
+            cand->motionMode = SIMPLE_TRANSLATION;  // :1452
+            cand->skipModeAllowed = isSkipMode;  // :1453
+            cand->mv[0] = (std::int32_t)toInjMv0.as_int;  // :1454
+            cand->mv[1] = (std::int32_t)toInjMv1.as_int;  // :1455
+            cand->drlIndex = 0;                // :1456
+            cand->useIntrabc = 0;              // :1457
+            cand->isInterintraUsed = 0;        // :1458
+            cand->refFrame[0] = rf[0];         // :1459
+            cand->refFrame[1] = rf[1];         // :1460
+            cand->compGroupIdx = 0;            // :1461
+            cand->compoundIdx = 1;             // :1462
+            cand->compoundType = COMPOUND_AVERAGE;  // :1463
+
+            incMdCandCntA4m(candIdx, maxCanCount);  // :1465
+
+            injected.injectedMvs[injected.injectedMvCount][0] = (std::int32_t)toInjMv0.as_int;  // :1467
+            injected.injectedMvs[injected.injectedMvCount][1] = (std::int32_t)toInjMv1.as_int;  // :1468
+            injected.injectedRefTypes[injected.injectedMvCount] = refPair;  // :1469
+            ++injected.injectedMvCount;  // :1470
+
+            // NEAR_NEAR
+            const std::uint8_t maxDrlIndex = getMaxDrlIndex(refMvCount[refPair], NEAR_NEARMV);  // :1473
+            std::uint8_t capMaxDrlIndex = 0;
+            if (nearCountCtrlEnabled) {  // :1475-1477
+                capMaxDrlIndex = (std::uint8_t)aomMin(nearNearCount, maxDrlIndex);
+            }
+            for (std::uint8_t drli = 0; drli < capMaxDrlIndex; drli++) {  // :1478
+                toInjMv0.as_int = refMvStack[refPair][1 + drli].this_mv.as_int;  // :1479
+                toInjMv1.as_int = refMvStack[refPair][1 + drli].comp_mv.as_int;  // :1480
+                if ((injected.injectedMvCount == 0 ||
+                     mvIsAlreadyInjected(injected, (std::int32_t)toInjMv0.as_int, (std::int32_t)toInjMv1.as_int,
+                                         (std::uint8_t)refPair) == false)) {  // :1481-1482
+                    cand = &candArray_[candIdx];  // :1483
+                    cand->mode = NEAR_NEARMV;     // :1484
+                    cand->motionMode = SIMPLE_TRANSLATION;  // :1485
+                    cand->skipModeAllowed = false;  // :1486
+                    cand->useIntrabc = 0;         // :1487
+                    cand->isInterintraUsed = 0;   // :1488
+                    cand->mv[0] = (std::int32_t)toInjMv0.as_int;  // :1489
+                    cand->mv[1] = (std::int32_t)toInjMv1.as_int;  // :1490
+                    cand->drlIndex = drli;        // :1491
+                    cand->refFrame[0] = rf[0];    // :1492
+                    cand->refFrame[1] = rf[1];    // :1493
+                    cand->compGroupIdx = 0;       // :1494
+                    cand->compoundIdx = 1;        // :1495
+                    cand->compoundType = COMPOUND_AVERAGE;  // :1496
+
+                    incMdCandCntA4m(candIdx, maxCanCount);  // :1498
+                    injected.injectedMvs[injected.injectedMvCount][0] = (std::int32_t)toInjMv0.as_int;  // :1499
+                    injected.injectedMvs[injected.injectedMvCount][1] = (std::int32_t)toInjMv1.as_int;  // :1500
+                    injected.injectedRefTypes[injected.injectedMvCount] = refPair;  // :1501
+                    ++injected.injectedMvCount;  // :1502
+                }
+            }
+        }
+    }
+    // update tot Candidate count
+    *candTotCnt = candIdx;  // :1508
+}
+
 }  // namespace l16_rdo
