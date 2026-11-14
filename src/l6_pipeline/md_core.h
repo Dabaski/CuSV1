@@ -340,6 +340,69 @@ struct MdSqCtrls {
     std::uint8_t enable_psad;
 };
 
+// MdSubPelSearchCtrls (md_process.h:384-:418, the consumed fields).
+struct MdSubPelCtrls {
+    std::uint8_t enabled;
+    SubpelSearchType subpel_search_type;
+    SubpelForceStop max_precision;
+    SubpelSearchMethods subpel_search_method;
+    int subpel_iters_per_step;
+    int pred_variance_th;
+    std::uint8_t abs_th_mult;
+    int round_dev_th;
+    std::uint8_t skip_diag_refinement;
+    std::uint8_t min_blk_sz;
+    std::uint8_t mvp_th;
+    int hp_mv_th;
+    std::int32_t bias_fp;
+};
+
+// product_coding_loop.c:2582-:2681 md_subpel_search_fixed_stage (the ref
+// PicBuf + the src block travel as parameters).
+std::uint32_t mdSubpelSearchFixedStage(FlCtx* ctx, const PicBuf& ref_pic, const std::uint8_t* src,
+                                       const int src_stride, Mv2* me_mv, const MdSubPelCtrls& sub_ctrls);
+
+// The mcomp subpel-tree wall (svt_av1_find_best_sub_pixel_tree_pruned,
+// mcomp.c - PARKED in A3M) threads as the callable; MdSubpelParams
+// (mcomp.h:70-100 SUBPEL_MOTION_SEARCH_PARAMS) carries the consumed
+// window. buf2d is the reference's struct svt_buf_2d.
+struct MdBuf2d {
+    const std::uint8_t* buf;
+    int width;
+    int height;
+    int stride;
+};
+struct MdSubpelParams {
+    SubpelStage search_stage;        // :96
+    std::uint8_t list_idx;           // :80
+    std::uint8_t ref_idx;            // :81
+    std::uint8_t allow_hp;           // :82 frm_hdr.allow_high_precision_mv
+    SubpelForceStop forced_stop;     // :90
+    int iters_per_step;              // :92
+    int col_min, col_max, row_min, row_max;  // :100 the subpel range outs
+    pipeline::SvtMvCostParam mv_cost_params;  // :75
+    SubpelSearchType subpel_search_type;      // :93 var_params
+    int var_w;                                // :94 block_size_wide
+    int var_h;                                // :95 block_size_high
+    MdBuf2d ref_buf;                          // ms_buffers->ref
+    MdBuf2d src_buf;                          // ms_buffers->src
+    int pred_variance_th;                     // :97
+    int abs_th_mult;                          // :98
+    int round_dev_th;                         // :99
+    std::uint8_t skip_diag_refinement;        // :100-ish
+    std::int32_t bias_fp;                     // var_params.bias_fp
+};
+
+// product_coding_loop.c:2462-:2578 md_subpel_search. The walls thread:
+// the subpel tree as subpelSearchFn (the A3M park), xd->mi_row/mi_col as
+// parameters, cm->mi_rows/mi_cols as cm_mi_rows/cm_mi_cols, the ref PicBuf
+// pre-resolved (the scaled-ref park), frm_hdr base_q_idx as a parameter.
+using MdSubpelSearchFn = int (*)(FlCtx& ctx, const MdSubpelParams& params, Mv2 subpel_start_mv, Mv2* best_mv);
+int mdSubpelSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, SubpelStage search_stage,
+                   const MdSubPelCtrls& md_subpel_ctrls, std::uint8_t rf, Mv2* me_mv, std::uint8_t allow_hp,
+                   int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols, std::uint8_t base_q_idx,
+                   MdSubpelSearchFn subpel_search_fn);
+
 // product_coding_loop.c:2021-:2190 md_nsq_motion_search. The pcs walls
 // thread: pa_me_data max_refs/max_l0/max_cand, enable_me_8x8/16x16,
 // max_number_of_pus_per_sb (= SQUARE_PU_COUNT, resource_coordination_

@@ -9,6 +9,7 @@
 #include <motion_search.h>
 #include <packunpack.h>
 #include <picops.h>
+#include <subpel.h>
 
 namespace pipeline {
 namespace mdc {
@@ -1262,6 +1263,233 @@ void mdSqMotionSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic
             *me_mv_y = best_search_mvy;
         }
     }
+}
+
+// pic_analysis_process.c:936-:942 svt_aom_eb_av1_var_offs (MAX_SB_SIZE
+// entries of 128).
+static const std::uint8_t kVarOffs[128] = {
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128};
+
+// The svf slot (av1me.h:61-62): the subpel variance at the block dims - the
+// landed analysis::subpel SUBPIX_VAR instances.
+using SubpelVarFn = std::uint32_t (*)(const std::uint8_t* a, int aStride, int xoffset, int yoffset,
+                                      const std::uint8_t* b, int bStride, std::uint32_t* sse);
+static const SubpelVarFn kMefnSvfTable[entropy::BLOCK_SIZES_ALL] = {
+    analysis::subpel::subPixelVariance4x4,    // BLOCK_4X4
+    analysis::subpel::subPixelVariance4x8,    // BLOCK_4X8
+    analysis::subpel::subPixelVariance8x4,    // BLOCK_8X4
+    analysis::subpel::subPixelVariance8x8,    // BLOCK_8X8
+    analysis::subpel::subPixelVariance8x16,   // BLOCK_8X16
+    analysis::subpel::subPixelVariance16x8,   // BLOCK_16X8
+    analysis::subpel::subPixelVariance16x16,  // BLOCK_16X16
+    analysis::subpel::subPixelVariance16x32,  // BLOCK_16X32
+    analysis::subpel::subPixelVariance32x16,  // BLOCK_32X16
+    analysis::subpel::subPixelVariance32x32,  // BLOCK_32X32
+    analysis::subpel::subPixelVariance32x64,  // BLOCK_32X64
+    analysis::subpel::subPixelVariance64x32,  // BLOCK_64X32
+    analysis::subpel::subPixelVariance64x64,  // BLOCK_64X64
+    analysis::subpel::subPixelVariance64x128, // BLOCK_64X128
+    analysis::subpel::subPixelVariance128x64, // BLOCK_128X64
+    analysis::subpel::subPixelVariance128x128,// BLOCK_128X128
+    analysis::subpel::subPixelVariance4x16,   // BLOCK_4X16
+    analysis::subpel::subPixelVariance16x4,   // BLOCK_16X4
+    analysis::subpel::subPixelVariance8x32,   // BLOCK_8X32
+    analysis::subpel::subPixelVariance32x8,   // BLOCK_32X8
+    analysis::subpel::subPixelVariance16x64,  // BLOCK_16X64
+    analysis::subpel::subPixelVariance64x16,  // BLOCK_64X16
+};
+
+// product_coding_loop.c:2582-:2681 md_subpel_search_fixed_stage.
+std::uint32_t mdSubpelSearchFixedStage(FlCtx* ctx, const PicBuf& ref_pic, const std::uint8_t* src,
+                                       const int src_stride, Mv2* me_mv, const MdSubPelCtrls& sub_ctrls) {
+    const std::uint8_t* ref_buf = ref_pic.buf;
+    const int blk_org_x = ctx->blk_org_x;
+    const int blk_org_y = ctx->blk_org_y;
+    const int blk_w = static_cast<int>(ctx->geom.bwidth);
+    const int blk_h = static_cast<int>(ctx->geom.bheight);
+    const int ref_stride = static_cast<int>(ref_pic.stride);
+    const entropy::BlockSize bsize = ctx->geom.bsize;
+    VarianceFn vf = mefnVf(bsize);
+    SubpelVarFn svf = kMefnSvfTable[bsize];
+    const int mv_x_fp = me_mv->x;
+    const int mv_y_fp = me_mv->y;
+    const std::uint32_t bias_fp = static_cast<std::uint32_t>(sub_ctrls.bias_fp);
+
+    static const std::int8_t hpel_dx[4] = {4, -4, 0, 0};
+    static const std::int8_t hpel_dy[4] = {0, 0, 4, -4};
+    std::uint32_t best_var = 0xFFFFFFFFu;
+    int best_dx = 0, best_dy = 0;
+
+    const std::uint32_t th_normalizer = static_cast<std::uint32_t>(blk_w * blk_h) * sub_ctrls.abs_th_mult;
+    // integer-pel baseline
+    {
+        const int fp_x = blk_org_x + (mv_x_fp >> 3);
+        const int fp_y = blk_org_y + (mv_y_fp >> 3);
+        std::uint32_t sse;
+        best_var = vf(ref_buf + fp_x + fp_y * ref_stride, ref_stride, src, src_stride, &sse);
+
+        if (best_var < th_normalizer) {
+            return best_var;
+        }
+
+        // Exit subpel search if the variance of the full-pel predicted samples is low (i.e. where likely interpolation will not modify the integer samples)
+        if (sub_ctrls.pred_variance_th) {
+            const unsigned int var =
+                vf(ref_buf + fp_x + fp_y * ref_stride, ref_stride, kVarOffs, 0, &sse);
+            const int block_var = static_cast<int>(roundPowerOfTwo64(var, entropy::ebNumPelsLog2Lookup[bsize]));
+
+            if (block_var < sub_ctrls.pred_variance_th) {
+                return best_var;
+            }
+        }
+    }
+    // half-pel neighbors
+    for (int i = 0; i < 4; ++i) {
+        const int subx = (mv_x_fp + hpel_dx[i]) & 7;
+        const int suby = (mv_y_fp + hpel_dy[i]) & 7;
+        const int fp_x = blk_org_x + ((mv_x_fp + hpel_dx[i]) >> 3);
+        const int fp_y = blk_org_y + ((mv_y_fp + hpel_dy[i]) >> 3);
+        std::uint32_t sse;
+        const std::uint32_t var = svf(ref_buf + fp_x + fp_y * ref_stride, ref_stride, subx, suby, src, src_stride,
+                                      &sse);
+        const std::uint32_t biased_var = (bias_fp && best_dx == 0 && best_dy == 0)
+            ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(var) * bias_fp) / 100)
+            : var;
+        if (biased_var < best_var) {
+            best_var = var;
+            best_dx = hpel_dx[i];
+            best_dy = hpel_dy[i];
+            if (best_var < th_normalizer) {
+                me_mv->x = static_cast<std::int16_t>(mv_x_fp + best_dx);
+                me_mv->y = static_cast<std::int16_t>(mv_y_fp + best_dy);
+                return best_var;
+            }
+        }
+    }
+
+    // quarter-pel neighbors
+    if (sub_ctrls.max_precision <= kQuarterPel) {
+        static const std::int8_t qpel_dx[4] = {2, -2, 0, 0};
+        static const std::int8_t qpel_dy[4] = {0, 0, 2, -2};
+
+        for (int i = 0; i < 4; ++i) {
+            const int tot_dx = best_dx + qpel_dx[i];
+            const int tot_dy = best_dy + qpel_dy[i];
+            const int subx = (mv_x_fp + tot_dx) & 7;
+            const int suby = (mv_y_fp + tot_dy) & 7;
+            const int fp_x = blk_org_x + ((mv_x_fp + tot_dx) >> 3);
+            const int fp_y = blk_org_y + ((mv_y_fp + tot_dy) >> 3);
+            std::uint32_t sse;
+            const std::uint32_t var = svf(ref_buf + fp_x + fp_y * ref_stride, ref_stride, subx, suby, src,
+                                          src_stride, &sse);
+            const std::uint32_t biased_var = (bias_fp && best_dx == 0 && best_dy == 0)
+                ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(var) * bias_fp) / 100)
+                : var;
+            if (biased_var < best_var) {
+                best_var = var;
+                best_dx = tot_dx;
+                best_dy = tot_dy;
+                if (best_var < th_normalizer) {
+                    me_mv->x = static_cast<std::int16_t>(mv_x_fp + best_dx);
+                    me_mv->y = static_cast<std::int16_t>(mv_y_fp + best_dy);
+                    return best_var;
+                }
+            }
+        }
+    }
+    me_mv->x = static_cast<std::int16_t>(mv_x_fp + best_dx);
+    me_mv->y = static_cast<std::int16_t>(mv_y_fp + best_dy);
+    return best_var;
+}
+
+// product_coding_loop.c:2462-:2578 md_subpel_search.
+int mdSubpelSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, SubpelStage search_stage,
+                   const MdSubPelCtrls& md_subpel_ctrls, std::uint8_t rf, Mv2* me_mv, std::uint8_t allow_hp,
+                   int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols, std::uint8_t base_q_idx,
+                   MdSubpelSearchFn subpel_search_fn) {
+    const std::int16_t me_mv_x = me_mv->x;
+    const std::int16_t me_mv_y = me_mv->y;
+    const std::uint8_t list_idx = motion::amvp::getListIdx(rf);
+    const std::uint8_t ref_idx = motion::amvp::getRefFrameIdx(rf);
+
+    // High level params
+    MdSubpelParams ms_params_struct;
+    std::memset(&ms_params_struct, 0, sizeof(ms_params_struct));
+    MdSubpelParams* ms_params = &ms_params_struct;
+    ms_params->search_stage = search_stage;
+    ms_params->list_idx = list_idx;
+    ms_params->ref_idx = ref_idx;
+    ms_params->allow_hp = allow_hp;
+    ms_params->forced_stop = md_subpel_ctrls.max_precision;
+    // Maximum number of steps in logarithmic subpel search before giving up.
+    ms_params->iters_per_step = md_subpel_ctrls.subpel_iters_per_step;
+    // Derive mv_limits (TODO Hsan_Subpel should be derived under ctx @ eack block)
+    // Set up limit values for MV components.
+    // Mv beyond the range do not produce new/different prediction block.
+    motion::MvLimits mv_limits;
+    const int mi_width = l16_rdo::miSizeWide[static_cast<int>(ctx->geom.bsize)];
+    const int mi_height = l16_rdo::miSizeHigh[static_cast<int>(ctx->geom.bsize)];
+    mv_limits.row_min = -(((mi_row + mi_height) * 4 /* MI_SIZE */) + 4 /* AOM_INTERP_EXTEND */);
+    mv_limits.col_min = -(((mi_col + mi_width) * 4 /* MI_SIZE */) + 4 /* AOM_INTERP_EXTEND */);
+    mv_limits.row_max = (cm_mi_rows - mi_row) * 4 /* MI_SIZE */ + 4 /* AOM_INTERP_EXTEND */;
+    mv_limits.col_max = (cm_mi_cols - mi_col) * 4 /* MI_SIZE */ + 4 /* AOM_INTERP_EXTEND */;
+    motion::setMvSearchRange(&mv_limits, &ctx->ref_mv);
+    motion::setSubpelMvSearchRange(&mv_limits, &ms_params->col_min, &ms_params->col_max, &ms_params->row_min,
+                                   &ms_params->row_max, &ctx->ref_mv);
+    // Mvcost params
+    pipeline::InitMvCostParamsCtx init_ctx;
+    init_ctx.sq_size = ctx->geom.sq_size;
+    init_ctx.skip_diag_refinement = ctx->md_subpel_skip_diag_refinement;
+    init_ctx.nmv_vec_cost = ctx->nmv_vec_cost;
+    init_ctx.nmvcoststack0 = ctx->nmvcoststack0;
+    init_ctx.nmvcoststack1 = ctx->nmvcoststack1;
+    pipeline::svtInitMvCostParams(init_ctx, &ms_params->mv_cost_params, &ctx->ref_mv, base_q_idx,
+                                  ctx->full_lambda_md[0], 0);  // 10BIT not supported
+    // Subpel variance params
+    ms_params->subpel_search_type = md_subpel_ctrls.subpel_search_type;
+    ms_params->var_w = static_cast<int>(entropy::blockSizeWide[static_cast<int>(ctx->geom.bsize)]);
+    ms_params->var_h = static_cast<int>(entropy::blockSizeHigh[static_cast<int>(ctx->geom.bsize)]);
+
+    // Ref buffer
+    const std::int32_t ref_origin_index = ctx->blk_org_x + (ctx->blk_org_y) * static_cast<std::int32_t>(ref_pic.stride);
+    ms_params->ref_buf.buf = ref_pic.buf + ref_origin_index;
+    ms_params->ref_buf.width = static_cast<int>(ref_pic.width);
+    ms_params->ref_buf.height = static_cast<int>(ref_pic.height);
+    ms_params->ref_buf.stride = static_cast<int>(ref_pic.stride);
+    // Src buffer
+    const std::uint32_t input_origin_index =
+        static_cast<std::uint32_t>(ctx->blk_org_y) * input_pic.stride + static_cast<std::uint32_t>(ctx->blk_org_x);
+    ms_params->src_buf.buf = input_pic.buf + input_origin_index;
+    ms_params->src_buf.width = static_cast<int>(input_pic.width);
+    ms_params->src_buf.height = static_cast<int>(input_pic.height);
+    ms_params->src_buf.stride = static_cast<int>(input_pic.stride);
+    Mv2 best_mv;
+    // TODO: should use get_fullmv_from_mv instead of shifting
+    best_mv.x = static_cast<std::int16_t>(me_mv_x >> 3);
+    best_mv.y = static_cast<std::int16_t>(me_mv_y >> 3);
+    Mv2 subpel_start_mv;
+    subpel_start_mv.x = static_cast<std::int16_t>(best_mv.x * 8);  // GET_MV_SUBPEL
+    subpel_start_mv.y = static_cast<std::int16_t>(best_mv.y * 8);
+
+    // Assign which subpel search method to use: RTC (M9+) never selects
+    // SUBPEL_TREE, so only the pruned search is reachable (the reference's
+    // own CONFIG=0 comment) - the tree itself is the A3M park, threaded as
+    // subpel_search_fn (the reference's int* not_used out drops with it).
+    ms_params->pred_variance_th = md_subpel_ctrls.pred_variance_th;
+    ms_params->abs_th_mult = md_subpel_ctrls.abs_th_mult;
+    ms_params->round_dev_th = md_subpel_ctrls.round_dev_th;
+    ms_params->skip_diag_refinement = md_subpel_ctrls.skip_diag_refinement;
+    ms_params->bias_fp = md_subpel_ctrls.bias_fp;
+    const int besterr = subpel_search_fn(*ctx, *ms_params, subpel_start_mv, &best_mv);
+    me_mv->x = best_mv.x;
+    me_mv->y = best_mv.y;
+
+    return besterr;
 }
 
 }  // namespace mdc

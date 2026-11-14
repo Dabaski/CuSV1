@@ -18,6 +18,7 @@
 #include <md_core.h>
 #include <motion.h>
 #include <picops.h>
+#include <subpel.h>
 
 namespace mdc = pipeline::mdc;
 namespace amvp = motion::amvp;
@@ -1648,4 +1649,261 @@ TEST_CASE("l6 mdc mdSqMotionSearch low distortion keeps the pa-me mv and the tem
                           motion::amvp::kInvalidMv, 3000, 0, 100);
     CHECK(me_x == 0);
     CHECK(ctx.sprs_lev0_start_x == 77);
+}
+
+// trip 15: md_subpel_search_fixed_stage (product_coding_loop.c:2582-:2681).
+// The walk is transcribed in the test over the LANDED kernels (the mefn vf
+// + analysis::subpel svf): the integer baseline, the pred-variance gate
+// (the var_offs constant-128 call), the four half-pel neighbours with the
+// bias_fp rule, the quarter-pel round gated on max_precision, and the
+// th_normalizer early exits.
+TEST_CASE("l6 mdc mdSubpelSearchFixedStage walks hpel then qpel with the bias rule") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.blk_org_x = 40;
+    ctx.blk_org_y = 40;
+
+    // ref plane: a curved ramp; the src block equals the kernel's own
+    // horizontal half-pel interpolation of the ramp ((a0 + a1 + 2) >> 2,
+    // the {64,64} bilinear row), so the hpel (4, 0) neighbour reproduces
+    // the src exactly (variance 0) while the integer baseline diff varies.
+    std::vector<std::uint8_t> refPlane(144 * 144);
+    std::vector<std::uint8_t> srcPlane(64 * 64);
+    for (int r = 0; r < 144; ++r)
+        for (int c = 0; c < 144; ++c) refPlane[r * 144 + c] = static_cast<std::uint8_t>(((c * c) >> 6) + r * 3);
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 8; ++c) {
+            const int a0 = refPlane[(40 + r) * 144 + (40 + c)];
+            const int a1 = refPlane[(40 + r) * 144 + (41 + c)];
+            srcPlane[r * 64 + c] = static_cast<std::uint8_t>((a0 + a1 + 2) >> 2);
+        }
+    mdc::PicBuf ref{};
+    ref.buf = refPlane.data();  // the PLANE ORIGIN (blk_org indexes absolutely)
+    ref.stride = 144;
+
+    mdc::MdSubPelCtrls sub{};
+    sub.abs_th_mult = 0;           // th_normalizer 0 -> no early exit
+    sub.pred_variance_th = 0;      // the offs gate off
+    sub.max_precision = mdc::kEighthPel;
+    sub.bias_fp = 30;              // penalize the (0,0)-delta hpel/qpel
+
+    pipeline::Mv2 me_mv{};
+    me_mv.x = 0;  // mv_x_fp = 0: the integer baseline is the block itself
+    me_mv.y = 0;
+    const std::uint32_t got = mdc::mdSubpelSearchFixedStage(&ctx, ref, srcPlane.data(), 64, &me_mv, sub);
+
+    // Independent transcription of the walk over the landed kernels.
+    VarOracle o;
+    auto svf = [](const std::uint8_t* a, int aStride, int xo, int yo, const std::uint8_t* b, int bStride,
+                  std::uint32_t* sse) {
+        return analysis::subpel::subPixelVariance8x8(a, aStride, xo, yo, b, bStride, sse);
+    };
+    (void)svf;
+    const std::uint8_t* refO = refPlane.data() + 40 * 144 + 40;
+    std::uint32_t want_var = o.variance(refO, 144, srcPlane.data(), 64, 8, 8);
+    REQUIRE(want_var > 0);  // the baseline diff is not constant
+    int want_dx = 0, want_dy = 0;
+    static const int hpel_dx[4] = {4, -4, 0, 0};
+    static const int hpel_dy[4] = {0, 0, 4, -4};
+    for (int i = 0; i < 4; ++i) {
+        const int subx = (0 + hpel_dx[i]) & 7;
+        const int suby = (0 + hpel_dy[i]) & 7;
+        const std::uint8_t* rp = refO + (hpel_dx[i] >> 3) + (hpel_dy[i] >> 3) * 144;
+        std::uint32_t sse2;
+        const std::uint32_t var = svf(rp, 144, subx, suby, srcPlane.data(), 64, &sse2);
+        const std::uint32_t biased = (want_dx == 0 && want_dy == 0)
+            ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(var) * 30) / 100)
+            : var;
+        if (biased < want_var) {
+            want_var = var;
+            want_dx = hpel_dx[i];
+            want_dy = hpel_dy[i];
+        }
+    }
+    // max_precision = EIGHTH_PEL -> the qpel round runs.
+    static const int qpel_dx[4] = {2, -2, 0, 0};
+    static const int qpel_dy[4] = {0, 0, 2, -2};
+    for (int i = 0; i < 4; ++i) {
+        const int tot_dx = want_dx + qpel_dx[i];
+        const int tot_dy = want_dy + qpel_dy[i];
+        const int subx = (0 + tot_dx) & 7;
+        const int suby = (0 + tot_dy) & 7;
+        const std::uint8_t* rp = refO + (tot_dx >> 3) + (tot_dy >> 3) * 144;
+        std::uint32_t sse2;
+        const std::uint32_t var = svf(rp, 144, subx, suby, srcPlane.data(), 64, &sse2);
+        const std::uint32_t biased = (want_dx == 0 && want_dy == 0)
+            ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(var) * 30) / 100)
+            : var;
+        if (biased < want_var) {
+            want_var = var;
+            want_dx = tot_dx;
+            want_dy = tot_dy;
+        }
+    }
+    CHECK(got == want_var);
+    CHECK(me_mv.x == 0 + want_dx);
+    CHECK(me_mv.y == 0 + want_dy);
+    // The bias rule: the first hpel candidate is evaluated at 30% (the
+    // winner moved off (0,0) delta), so the result is a real subpel mv.
+    CHECK((want_dx != 0 || want_dy != 0));
+}
+
+TEST_CASE("l6 mdc mdSubpelSearchFixedStage early exits on the two thresholds") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.blk_org_x = 40;
+    ctx.blk_org_y = 40;
+
+    std::vector<std::uint8_t> refPlane(144 * 144);
+    std::vector<std::uint8_t> srcPlane(64 * 64, 0);
+    for (int r = 0; r < 144; ++r)
+        for (int c = 0; c < 144; ++c) refPlane[r * 144 + c] = static_cast<std::uint8_t>(c * 2 + r);
+    // src = the ref block shifted by a constant +2 -> the population
+    // variance of the constant-diff block is 0 -> the first early exit
+    // (best_var < th_normalizer) fires with abs_th_mult = 1.
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 8; ++c)
+            srcPlane[r * 64 + c] = static_cast<std::uint8_t>(refPlane[(40 + r) * 144 + (42 + c)]);
+
+    mdc::PicBuf ref{};
+    ref.buf = refPlane.data();  // the PLANE ORIGIN
+    ref.stride = 144;
+
+    mdc::MdSubPelCtrls sub{};
+    sub.abs_th_mult = 1;  // th = 64; best_var = 0 < 64 -> exit at the baseline
+    sub.pred_variance_th = 0;
+    sub.max_precision = mdc::kEighthPel;
+    sub.bias_fp = 0;
+    pipeline::Mv2 me_mv{};
+    me_mv.x = 16;  // 2 px
+    me_mv.y = 0;
+    const std::uint32_t got = mdc::mdSubpelSearchFixedStage(&ctx, ref, srcPlane.data(), 64, &me_mv, sub);
+    CHECK(got == 0);
+    CHECK(me_mv.x == 16);  // unchanged: the baseline returned
+    CHECK(me_mv.y == 0);
+
+    // The pred-variance gate: abs_th_mult = 0 (no first exit), the ref
+    // block variance vs 128 is the ramp variance; th above it exits.
+    mdc::MdSubPelCtrls sub2{};
+    sub2.abs_th_mult = 0;
+    sub2.pred_variance_th = 100000;
+    sub2.max_precision = mdc::kEighthPel;
+    sub2.bias_fp = 0;
+    // Make the baseline variance nonzero: src = ref ^ 1 (a +/1-1 diff has
+    // nonzero population variance).
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 8; ++c)
+            srcPlane[r * 64 + c] = static_cast<std::uint8_t>(refPlane[(40 + r) * 144 + (40 + c)] ^ 1);
+    me_mv.x = 0;
+    me_mv.y = 0;
+    VarOracle o2;
+    const std::uint8_t* refO2 = refPlane.data() + 40 * 144 + 40;
+    const std::uint32_t want2 = o2.variance(refO2, 144, srcPlane.data(), 64, 8, 8);
+    const std::uint32_t got2 = mdc::mdSubpelSearchFixedStage(&ctx, ref, srcPlane.data(), 64, &me_mv, sub2);
+    CHECK(got2 == want2);
+    CHECK(me_mv.x == 0);
+}
+
+// trip 16: md_subpel_search (product_coding_loop.c:2462-:2578). The setup
+// is the ported body: the mv_limits derivation, the two search-range
+// calls (the landed l5 helpers), the mv-cost params, the ref/src buf2d
+// windows and the subpel start mv. The subpel TREE is the A3M park - the
+// stub records what it received and returns a canned winner.
+TEST_CASE("l6 mdc mdSubpelSearch derives the limits and hands the tree the right windows") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_16X16;
+    ctx.geom.bwidth = 16;
+    ctx.geom.bheight = 16;
+    ctx.geom.sq_size = 16;
+    ctx.blk_org_x = 48;
+    ctx.blk_org_y = 32;
+    ctx.ref_mv.x = 24;
+    ctx.ref_mv.y = -40;
+    ctx.md_subpel_skip_diag_refinement = 2;
+    ctx.full_lambda_md[0] = 4096;
+
+    std::vector<std::uint8_t> srcPlane(128 * 128, 7);
+    std::vector<std::uint8_t> refPlane(256 * 256, 9);
+    mdc::PicBuf input{};
+    input.buf = srcPlane.data();
+    input.stride = 128;
+    input.width = 128;
+    input.height = 128;
+    mdc::PicBuf refP{};
+    refP.buf = refPlane.data();
+    refP.stride = 256;
+    refP.width = 192;
+    refP.height = 192;
+
+    mdc::MdSubPelCtrls ctrls{};
+    ctrls.max_precision = mdc::kQuarterPel;
+    ctrls.subpel_iters_per_step = 3;
+    ctrls.subpel_search_type = mdc::kUse4Taps;
+    ctrls.pred_variance_th = 11;
+    ctrls.abs_th_mult = 5;
+    ctrls.round_dev_th = 7;
+    ctrls.skip_diag_refinement = 2;
+    ctrls.bias_fp = 44;
+
+    static mdc::MdSubpelParams seen;
+    static pipeline::Mv2 seen_start;
+    auto treeStub = [](mdc::FlCtx& c, const mdc::MdSubpelParams& p, pipeline::Mv2 start, pipeline::Mv2* best) {
+        (void)c;
+        seen = p;
+        seen_start = start;
+        best->x = 33;
+        best->y = -17;
+        return 4321;
+    };
+
+    pipeline::Mv2 me_mv{};
+    me_mv.x = 33 * 8;  // best_mv.x = 33, the start re-expands to 264
+    me_mv.y = -17 * 8;
+    const int besterr = mdc::mdSubpelSearch(&ctx, input, refP, mdc::kSpelMe, ctrls, amvp::kLastFrame, &me_mv, 1, 2, 3,
+                                            36, 36, 100, treeStub);
+    CHECK(besterr == 4321);
+    CHECK(me_mv.x == 33);
+    CHECK(me_mv.y == -17);
+    CHECK(seen_start.x == 264);
+    CHECK(seen_start.y == -136);
+    CHECK(seen.list_idx == 0);
+    CHECK(seen.ref_idx == 0);
+    CHECK(seen.allow_hp == 1);
+    CHECK(seen.forced_stop == mdc::kQuarterPel);
+    CHECK(seen.iters_per_step == 3);
+    CHECK(seen.subpel_search_type == mdc::kUse4Taps);
+    CHECK(seen.var_w == 16);
+    CHECK(seen.var_h == 16);
+    CHECK(seen.pred_variance_th == 11);
+    CHECK(seen.abs_th_mult == 5);
+    CHECK(seen.round_dev_th == 7);
+    CHECK(seen.skip_diag_refinement == 2);
+    CHECK(seen.bias_fp == 44);
+    CHECK(seen.mv_cost_params.error_per_bit == 64);  // 4096 >> 6
+    CHECK(seen.mv_cost_params.mv_cost_type == pipeline::MV_COST_ENTROPY);
+    CHECK(seen.src_buf.buf == srcPlane.data() + 32 * 128 + 48);
+    CHECK(seen.src_buf.stride == 128);
+    CHECK(seen.ref_buf.buf == refPlane.data() + 32 * 256 + 48);
+    CHECK(seen.ref_buf.stride == 256);
+    CHECK(seen.ref_buf.width == 192);
+    // The mv_limits derivation + the two search-range calls against the
+    // independent transcription: the raw limits are row [-28, 140] / col
+    // [-32, 136] (col_max = (36-3)*4+4); set_mv_search_range's ref_mv
+    // window does not intersect-tighten them; set_subpel_mv_search_range
+    // scales by 8 around ref_mv and clamps to the MV_LOW/MV_UPP band.
+    CHECK(seen.row_min == -224);
+    CHECK(seen.col_min == -256);
+    CHECK(seen.row_max == 1120);
+    CHECK(seen.col_max == 1088);
+    // The list/ref split for a BWDREF (list 1, ref 0).
+    me_mv.x = 0;
+    me_mv.y = 0;
+    mdc::mdSubpelSearch(&ctx, input, refP, mdc::kSpelMe, ctrls, amvp::kBwdrefFrame, &me_mv, 1, 2, 3, 36, 36, 100,
+                        treeStub);
+    CHECK(seen.list_idx == 1);
+    CHECK(seen.ref_idx == 0);
 }
