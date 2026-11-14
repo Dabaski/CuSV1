@@ -111,6 +111,24 @@ void addNoiseToBlock(const AomFilmGrain* params, std::uint8_t* luma,
                      std::int32_t bitDepth, std::int32_t chromaSubsampY,
                      std::int32_t chromaSubsampX);
 
+// add_noise_to_block_hbd (grainSynthesis.c:607-:709): the uint16 twin - the
+// GR1 hbd park resolves. bd-scaled cb/cr offsets ((offset << (bd-8)) -
+// (1 << bd)), bd-scaled clamps, scale_lut at bit_depth. REFERENCE QUIRK
+// kept 1:1: apply_cb/apply_cr gate on num_cb_points/num_cr_points ALONE
+// here (:624-:626) - unlike the 8-bit twin (:522-:523) chroma_scaling_
+// from_luma alone does NOT enable the chroma pass, so the two twins
+// diverge for CSFL without points (pinned by test).
+void addNoiseToBlockHbd(const AomFilmGrain* params, std::uint16_t* luma,
+                        std::uint16_t* cb, std::uint16_t* cr,
+                        std::int32_t lumaStride, std::int32_t chromaStride,
+                        const std::int32_t* lumaGrain,
+                        const std::int32_t* cbGrain, const std::int32_t* crGrain,
+                        std::int32_t lumaGrainStride,
+                        std::int32_t chromaGrainStride,
+                        std::int32_t halfLumaHeight, std::int32_t halfLumaWidth,
+                        std::int32_t bitDepth, std::int32_t chromaSubsampY,
+                        std::int32_t chromaSubsampX);
+
 // ver_boundary_overlap (grainSynthesis.c:816-:838): blend a 1- or 2-wide
 // vertical boundary, clamping to the grain range; widths above 2 write
 // nothing (the reference returns silently). File-local in the reference;

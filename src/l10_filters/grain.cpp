@@ -1,4 +1,4 @@
-#include "grain.h"
+﻿#include "grain.h"
 
 #include <array>
 #include <cassert>
@@ -712,6 +712,117 @@ void addNoiseToBlock(const AomFilmGrain* params, std::uint8_t* luma,
                 luma[i * lumaStride + j] = (std::uint8_t)clampVal(
                     luma[i * lumaStride + j] +
                         ((scaleLut(scalingLutY, luma[i * lumaStride + j], 8) *
+                              lumaGrain[i * lumaGrainStride + j] +
+                          roundingOffset) >> params->scaling_shift),
+                    minLuma, maxLuma);
+            }
+        }
+    }
+}
+
+// add_noise_to_block_hbd (grainSynthesis.c:607-:709). 1:1: the uint16
+// planes are the reference's own signature; the bd-scaled offsets/clamps
+// and the scale_lut bit_depth are the only differences from the 8-bit
+// twin. The apply gate here is num_cb_points/num_cr_points ONLY
+// (:624-:626) - the 8-bit twin's CSFL clause (:522-:523) is NOT carried,
+// so the twins diverge for CSFL without points (reference behavior,
+// pinned by test).
+void addNoiseToBlockHbd(const AomFilmGrain* params, std::uint16_t* luma,
+                        std::uint16_t* cb, std::uint16_t* cr,
+                        std::int32_t lumaStride, std::int32_t chromaStride,
+                        const std::int32_t* lumaGrain,
+                        const std::int32_t* cbGrain, const std::int32_t* crGrain,
+                        std::int32_t lumaGrainStride,
+                        std::int32_t chromaGrainStride,
+                        std::int32_t halfLumaHeight, std::int32_t halfLumaWidth,
+                        std::int32_t bitDepth, std::int32_t chromaSubsampY,
+                        std::int32_t chromaSubsampX) {
+    std::int32_t cbMult = params->cb_mult - 128;
+    std::int32_t cbLumaMult = params->cb_luma_mult - 128;
+    // offset value depends on the bit depth
+    std::int32_t cbOffset =
+        (params->cb_offset << (bitDepth - 8)) - (1 << bitDepth);
+
+    std::int32_t crMult = params->cr_mult - 128;
+    std::int32_t crLumaMult = params->cr_luma_mult - 128;
+    std::int32_t crOffset =
+        (params->cr_offset << (bitDepth - 8)) - (1 << bitDepth);
+
+    std::int32_t roundingOffset = (1 << (params->scaling_shift - 1));
+
+    std::int32_t applyY = params->num_y_points > 0 ? 1 : 0;
+    std::int32_t applyCb = params->num_cb_points > 0 ? 1 : 0;
+    std::int32_t applyCr = params->num_cr_points > 0 ? 1 : 0;
+
+    if (params->chroma_scaling_from_luma) {
+        cbMult = 0;
+        cbLumaMult = 64;
+        cbOffset = 0;
+
+        crMult = 0;
+        crLumaMult = 64;
+        crOffset = 0;
+    }
+
+    std::int32_t minLuma, maxLuma, minChroma, maxChroma;
+
+    if (params->clip_to_restricted_range) {
+        minLuma = minLumaLegalRange << (bitDepth - 8);
+        maxLuma = maxLumaLegalRange << (bitDepth - 8);
+
+        minChroma = minChromaLegalRange << (bitDepth - 8);
+        maxChroma = maxChromaLegalRange << (bitDepth - 8);
+    } else {
+        minLuma = minChroma = 0;
+        maxLuma = maxChroma = (256 << (bitDepth - 8)) - 1;
+    }
+
+    for (std::int32_t i = 0; i < (halfLumaHeight << (1 - chromaSubsampY)); i++) {
+        for (std::int32_t j = 0; j < (halfLumaWidth << (1 - chromaSubsampX)); j++) {
+            std::int32_t averageLuma = 0;
+            if (chromaSubsampX) {
+                averageLuma = (luma[(i << chromaSubsampY) * lumaStride + (j << chromaSubsampX)] +
+                               luma[(i << chromaSubsampY) * lumaStride +
+                                    (j << chromaSubsampX) + 1] + 1) >> 1;
+            } else {
+                averageLuma = luma[(i << chromaSubsampY) * lumaStride + j];
+            }
+            if (applyCb) {
+                cb[i * chromaStride + j] = (std::uint16_t)clampVal(
+                    cb[i * chromaStride + j] +
+                        ((scaleLut(scalingLutCb,
+                                   clampVal(((averageLuma * cbLumaMult +
+                                              cbMult * cb[i * chromaStride + j]) >> 6) +
+                                          cbOffset,
+                                   0, (256 << (bitDepth - 8)) - 1),
+                                   bitDepth) *
+                          cbGrain[i * chromaGrainStride + j] +
+                      roundingOffset) >> params->scaling_shift),
+                    minChroma, maxChroma);
+            }
+
+            if (applyCr) {
+                cr[i * chromaStride + j] = (std::uint16_t)clampVal(
+                    cr[i * chromaStride + j] +
+                        ((scaleLut(scalingLutCr,
+                                   clampVal(((averageLuma * crLumaMult +
+                                              crMult * cr[i * chromaStride + j]) >> 6) +
+                                          crOffset,
+                                   0, (256 << (bitDepth - 8)) - 1),
+                                   bitDepth) *
+                          crGrain[i * chromaGrainStride + j] +
+                      roundingOffset) >> params->scaling_shift),
+                    minChroma, maxChroma);
+            }
+        }
+    }
+
+    if (applyY) {
+        for (std::int32_t i = 0; i < (halfLumaHeight << 1); i++) {
+            for (std::int32_t j = 0; j < (halfLumaWidth << 1); j++) {
+                luma[i * lumaStride + j] = (std::uint16_t)clampVal(
+                    luma[i * lumaStride + j] +
+                        ((scaleLut(scalingLutY, luma[i * lumaStride + j], bitDepth) *
                               lumaGrain[i * lumaGrainStride + j] +
                           roundingOffset) >> params->scaling_shift),
                     minLuma, maxLuma);
