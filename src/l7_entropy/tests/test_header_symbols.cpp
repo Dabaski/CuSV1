@@ -526,3 +526,417 @@ TEST_CASE("writeBitdepth branch matrix") {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// C2: encode_loopfilter :2284-:2342 - the flag/level branch matrix with a
+// byte-exact independent oracle.
+// ---------------------------------------------------------------------------
+namespace {
+// Oracle transcription of entropy_coding.c:2284-:2342 (test side).
+void oracleLoopfilter(int allow_intrabc, int fl0, int fl1, int flu, int flv, int sharp,
+                      int mrde, int* bitVals, int* nBits) {
+    int n = 0;
+    if (allow_intrabc) {
+        *nBits = 0;
+        return;
+    }
+    for (int b = 5; b >= 0; --b) bitVals[n++] = (fl0 >> b) & 1;
+    for (int b = 5; b >= 0; --b) bitVals[n++] = (fl1 >> b) & 1;
+    if (fl0 || fl1) {
+        for (int b = 5; b >= 0; --b) bitVals[n++] = (flu >> b) & 1;
+        for (int b = 5; b >= 0; --b) bitVals[n++] = (flv >> b) & 1;
+    }
+    for (int b = 2; b >= 0; --b) bitVals[n++] = (sharp >> b) & 1;
+    bitVals[n++] = mrde;
+    *nBits = n;
+}
+entropy::HdrPcs c2Pcs() {
+    entropy::HdrPcs pcs{};
+    entropy::HdrSeqHeader sh{};
+    entropy::HdrAv1Common cm{};
+    pcs.scs = &sh;
+    pcs.av1_cm = &cm;
+    return pcs;
+}
+}  // namespace
+
+TEST_CASE("encodeLoopfilter branch matrix vs oracle") {
+    const int levels[4] = {0, 1, 31, 63};
+    for (int intrabc = 0; intrabc < 2; ++intrabc) {
+        for (int i0 = 0; i0 < 4; ++i0) {
+            for (int i1 = 0; i1 < 4; ++i1) {
+                for (int mrde = 0; mrde < 2; ++mrde) {
+                    WbHarness h;
+                    entropy::HdrPcs pcs = c2Pcs();
+                    pcs.frm_hdr.allow_intrabc = intrabc;
+                    pcs.frm_hdr.loop_filter_params.filter_level[0] = levels[i0];
+                    pcs.frm_hdr.loop_filter_params.filter_level[1] = levels[i1];
+                    pcs.frm_hdr.loop_filter_params.filter_level_u = 17;
+                    pcs.frm_hdr.loop_filter_params.filter_level_v = 29;
+                    pcs.frm_hdr.loop_filter_params.sharpness_level = 5;
+                    pcs.frm_hdr.loop_filter_params.mode_ref_delta_enabled = mrde;
+                    entropy::encodeLoopfilter(&pcs, &h.wb);
+                    int vals[64], nBits = 0;
+                    oracleLoopfilter(intrabc, levels[i0], levels[i1], 17, 29, 5, mrde, vals, &nBits);
+                    if (intrabc) {
+                        CHECK_EQ(h.bits(), 0u);
+                        continue;
+                    }
+                    CHECK_EQ(h.bits(), (std::uint32_t)nBits);
+                    for (int b = 0; b < nBits; ++b) {
+                        REQUIRE(h.bitAt((std::uint32_t)b) == vals[b]);
+                    }
+                }
+            }
+        }
+    }
+    // The chroma-levels gate: u/v literals appear EXACTLY when a luma level
+    // is nonzero (16 vs 28 bits).
+    {
+        WbHarness h0, h1;
+        entropy::HdrPcs p0 = c2Pcs(), p1 = c2Pcs();
+        p0.frm_hdr.loop_filter_params.filter_level[0] = 0;
+        p0.frm_hdr.loop_filter_params.filter_level[1] = 0;
+        p1.frm_hdr.loop_filter_params.filter_level[0] = 0;
+        p1.frm_hdr.loop_filter_params.filter_level[1] = 1;
+        entropy::encodeLoopfilter(&p0, &h0.wb);
+        entropy::encodeLoopfilter(&p1, &h1.wb);
+        CHECK_EQ(h0.bits(), 16u);
+        CHECK_EQ(h1.bits(), 28u);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C2: encode_cdef :2344-:2363.
+// ---------------------------------------------------------------------------
+TEST_CASE("encodeCdef damping/bits/strength grid vs oracle") {
+    for (int intrabc = 0; intrabc < 2; ++intrabc) {
+        for (int damping = 3; damping <= 6; ++damping) {
+            for (int cdefBits = 0; cdefBits <= 3; ++cdefBits) {
+                for (int nb = 0; nb <= 3; ++nb) {
+                    WbHarness h;
+                    entropy::HdrPcs pcs = c2Pcs();
+                    pcs.frm_hdr.allow_intrabc = intrabc;
+                    pcs.frm_hdr.cdef_params.cdef_damping = damping;
+                    pcs.frm_hdr.cdef_params.cdef_bits = cdefBits;
+                    pcs.nb_cdef_strengths = nb;
+                    for (int i = 0; i < nb; ++i) {
+                        pcs.frm_hdr.cdef_params.cdef_y_strength[i] = 21 + i;
+                        pcs.frm_hdr.cdef_params.cdef_uv_strength[i] = 40 + i;
+                    }
+                    entropy::encodeCdef(&pcs, &h.wb);
+                    if (intrabc) {
+                        CHECK_EQ(h.bits(), 0u);
+                        continue;
+                    }
+                    CHECK_EQ(h.bits(), (std::uint32_t)(4 + 12 * nb));
+                    // damping - 3 as a 2-bit literal, then cdef_bits.
+                    for (int b = 0; b < 2; ++b)
+                        REQUIRE(h.bitAt((std::uint32_t)b) == (((damping - 3) >> (1 - b)) & 1));
+                    for (int b = 0; b < 2; ++b)
+                        REQUIRE(h.bitAt((std::uint32_t)(2 + b)) == (((cdefBits) >> (1 - b)) & 1));
+                    for (int i = 0; i < nb; ++i) {
+                        for (int b = 0; b < 6; ++b)
+                            REQUIRE(h.bitAt((std::uint32_t)(4 + 12 * i + b)) ==
+                                    (((21 + i) >> (5 - b)) & 1));
+                        for (int b = 0; b < 6; ++b)
+                            REQUIRE(h.bitAt((std::uint32_t)(4 + 12 * i + 6 + b)) ==
+                                    (((40 + i) >> (5 - b)) & 1));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C2: encode_quantization :2374-:2401.
+// ---------------------------------------------------------------------------
+namespace {
+// Oracle transcription of entropy_coding.c:2365-:2401 (write_delta_q +
+// encode_quantization).
+void oracleDeltaQ(int delta_q, int* bitVals, int* nBits) {
+    int n = 0;
+    if (delta_q != 0) {
+        bitVals[n++] = 1;
+        // inv_signed_literal(delta_q, 6) = literal(delta_q, 7)
+        for (int b = 6; b >= 0; --b) bitVals[n++] = (delta_q >> b) & 1;
+    } else {
+        bitVals[n++] = 0;
+    }
+    *nBits = n;
+}
+void oracleQuantization(int base_q, int dy, int du, int dv, int au, int av, int qm,
+                        int qmy, int qmu, int qmv, int* bitVals, int* nBits) {
+    int n = 0;
+    for (int b = 7; b >= 0; --b) bitVals[n++] = (base_q >> b) & 1;
+    int m;
+    oracleDeltaQ(dy, bitVals + n, &m);
+    n += m;
+    const int diff = (du != dv) || (au != av);
+    if (diff) bitVals[n++] = diff;
+    oracleDeltaQ(du, bitVals + n, &m);
+    n += m;
+    oracleDeltaQ(au, bitVals + n, &m);
+    n += m;
+    if (diff) {
+        oracleDeltaQ(dv, bitVals + n, &m);
+        n += m;
+        oracleDeltaQ(av, bitVals + n, &m);
+        n += m;
+    }
+    bitVals[n++] = qm;
+    if (qm) {
+        for (int b = 3; b >= 0; --b) bitVals[n++] = (qmy >> b) & 1;
+        for (int b = 3; b >= 0; --b) bitVals[n++] = (qmu >> b) & 1;
+        if (diff) {
+            for (int b = 3; b >= 0; --b) bitVals[n++] = (qmv >> b) & 1;
+        }
+    }
+    *nBits = n;
+}
+}  // namespace
+
+TEST_CASE("encodeQuantization full Y-delta span + diff gates vs oracle") {
+    // The Y delta over the full signed span with U/V identical.
+    for (int dy = -64; dy <= 63; ++dy) {
+        WbHarness h;
+        entropy::HdrPcs pcs = c2Pcs();
+        pcs.frm_hdr.quantization_params.base_q_idx = 137;
+        pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_Y] = dy;
+        pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_U] = 3;
+        pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_V] = 3;
+        pcs.frm_hdr.quantization_params.delta_q_ac[entropy::HD_PLANE_U] = 4;
+        pcs.frm_hdr.quantization_params.delta_q_ac[entropy::HD_PLANE_V] = 4;
+        entropy::encodeQuantization(&pcs, &h.wb);
+        int vals[128], nBits = 0;
+        oracleQuantization(137, dy, 3, 3, 4, 4, 0, 0, 0, 0, vals, &nBits);
+        CHECK_EQ(h.bits(), (std::uint32_t)nBits);
+        for (int b = 0; b < nBits; ++b) {
+            REQUIRE(h.bitAt((std::uint32_t)b) == vals[b]);
+        }
+    }
+    // The diff_uv_delta gates x qmatrix.
+    for (int qm = 0; qm < 2; ++qm) {
+        for (int caseIdx = 0; caseIdx < 4; ++caseIdx) {
+            // case 0: dc equal, ac equal (no diff bit)
+            // case 1: dc differs (diff bit)
+            // case 2: ac differs (diff bit)
+            // case 3: both differ (diff bit)
+            WbHarness h;
+            entropy::HdrPcs pcs = c2Pcs();
+            pcs.frm_hdr.quantization_params.base_q_idx = 200;
+            pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_Y] = -5;
+            pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_U] = caseIdx == 1 ? 2 : 3;
+            pcs.frm_hdr.quantization_params.delta_q_dc[entropy::HD_PLANE_V] = 3;
+            pcs.frm_hdr.quantization_params.delta_q_ac[entropy::HD_PLANE_U] = caseIdx == 2 ? 7 : 4;
+            pcs.frm_hdr.quantization_params.delta_q_ac[entropy::HD_PLANE_V] = 4;
+            pcs.frm_hdr.quantization_params.delta_q_ac[entropy::HD_PLANE_Y] = 0;
+            pcs.frm_hdr.quantization_params.using_qmatrix = qm;
+            pcs.frm_hdr.quantization_params.qm[entropy::HD_PLANE_Y] = qm ? 9 : 0;
+            pcs.frm_hdr.quantization_params.qm[entropy::HD_PLANE_U] = qm ? 10 : 0;
+            pcs.frm_hdr.quantization_params.qm[entropy::HD_PLANE_V] = qm ? (caseIdx ? 11 : 10) : 0;
+            entropy::encodeQuantization(&pcs, &h.wb);
+            const int diff = (caseIdx != 0);
+            int vals[128], nBits = 0;
+            oracleQuantization(200, -5, caseIdx == 1 ? 2 : 3, 3, caseIdx == 2 ? 7 : 4, 4, qm,
+                               qm ? 9 : 0, qm ? 10 : 0, qm ? (caseIdx ? 11 : 10) : 0, vals, &nBits);
+            CHECK_EQ(h.bits(), (std::uint32_t)nBits);
+            for (int b = 0; b < nBits; ++b) {
+                REQUIRE(h.bitAt((std::uint32_t)b) == vals[b]);
+            }
+            (void)diff;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C2: encode_restoration_mode :2189-:2251.
+// ---------------------------------------------------------------------------
+namespace {
+// Oracle transcription of entropy_coding.c:2189-:2251.
+void oracleRestoration(int intrabc, const int types[3], int sb128, const int units[3],
+                       int* bitVals, int* nBits) {
+    int n = 0;
+    if (intrabc) {
+        *nBits = 0;
+        return;
+    }
+    const int pair[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    int allNone = 1, chromaNone = 1;
+    for (int p = 0; p < 3; ++p) {
+        if (types[p] != 0) {
+            allNone = 0;
+            chromaNone &= (p == 0);
+        }
+        bitVals[n++] = pair[types[p]][0];
+        bitVals[n++] = pair[types[p]][1];
+    }
+    if (!allNone) {
+        if (!sb128) bitVals[n++] = units[0] > 64;
+        if (units[0] > 64) bitVals[n++] = units[0] > 128;
+    }
+    if (!chromaNone) {
+        bitVals[n++] = units[1] != units[0];
+    }
+    *nBits = n;
+}
+}  // namespace
+
+TEST_CASE("encodeRestorationMode type grid + unit bits vs oracle") {
+    const int types[4] = {0, 1, 2, 3};  // NONE, WIENER, SGRPROJ, SWITCHABLE
+    // The full 4^3 type grid with fixed units.
+    for (int t0 = 0; t0 < 4; ++t0) {
+        for (int t1 = 0; t1 < 4; ++t1) {
+            for (int t2 = 0; t2 < 4; ++t2) {
+                const int ty[3] = {types[t0], types[t1], types[t2]};
+                const int units[3] = {128, 128, 128};
+                WbHarness h;
+                entropy::HdrPcs pcs = c2Pcs();
+                pcs.frm_hdr.allow_intrabc = 0;
+                for (int p = 0; p < 3; ++p) {
+                    pcs.rst_info[p].frame_restoration_type = ty[p];
+                    pcs.rst_info[p].restoration_unit_size = units[p];
+                }
+                pcs.sb_size_is_128 = 0;
+                entropy::encodeRestorationMode(&pcs, &h.wb);
+                int vals[64], nBits = 0;
+                oracleRestoration(0, ty, 0, units, vals, &nBits);
+                CHECK_EQ(h.bits(), (std::uint32_t)nBits);
+                for (int b = 0; b < nBits; ++b) {
+                    REQUIRE(h.bitAt((std::uint32_t)b) == vals[b]);
+                }
+            }
+        }
+    }
+    // The unit-size bits over the sb_size x unit grid.
+    for (int sb128 = 0; sb128 < 2; ++sb128) {
+        for (int u0 = 0; u0 < 3; ++u0) {
+            const int unit = 64 * (1 << u0);  // 64, 128, 256
+            const int ty[3] = {1, 1, 1};      // all WIENER: chroma bit live
+            const int units[3] = {unit, unit, unit};
+            WbHarness h;
+            entropy::HdrPcs pcs = c2Pcs();
+            for (int p = 0; p < 3; ++p) {
+                pcs.rst_info[p].frame_restoration_type = ty[p];
+                pcs.rst_info[p].restoration_unit_size = units[p];
+            }
+            pcs.sb_size_is_128 = sb128;
+            entropy::encodeRestorationMode(&pcs, &h.wb);
+            int vals[64], nBits = 0;
+            oracleRestoration(0, ty, sb128, units, vals, &nBits);
+            CHECK_EQ(h.bits(), (std::uint32_t)nBits);
+            for (int b = 0; b < nBits; ++b) {
+                REQUIRE(h.bitAt((std::uint32_t)b) == vals[b]);
+            }
+        }
+    }
+    // The chroma-unit difference bit: chroma type non-NONE with a smaller
+    // chroma unit writes 1.
+    {
+        WbHarness h;
+        entropy::HdrPcs pcs = c2Pcs();
+        pcs.rst_info[0].frame_restoration_type = 1;  // WIENER
+        pcs.rst_info[0].restoration_unit_size = 128;
+        pcs.rst_info[1].frame_restoration_type = 1;
+        pcs.rst_info[1].restoration_unit_size = 64;
+        pcs.rst_info[2].frame_restoration_type = 1;
+        pcs.rst_info[2].restoration_unit_size = 64;
+        pcs.sb_size_is_128 = 1;
+        entropy::encodeRestorationMode(&pcs, &h.wb);
+        const int ty128[3] = {1, 1, 1};
+        const int u12864[3] = {128, 64, 64};
+        int vals[64], nBits = 0;
+        oracleRestoration(0, ty128, 1, u12864, vals, &nBits);
+        CHECK_EQ(h.bits(), (std::uint32_t)nBits);
+        CHECK_EQ(h.bitAt((std::uint32_t)(nBits - 1)), 1);
+    }
+    // intrabc short-circuit.
+    {
+        WbHarness h;
+        entropy::HdrPcs pcs = c2Pcs();
+        pcs.frm_hdr.allow_intrabc = 1;
+        entropy::encodeRestorationMode(&pcs, &h.wb);
+        CHECK_EQ(h.bits(), 0u);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C2: write_render_size :2616-:2629 + write_superres_scale :2631-:2650 +
+// write_frame_size :2652-:2669.
+// ---------------------------------------------------------------------------
+TEST_CASE("writeRenderSize + writeSuperresScale exact bit counts") {
+    // Render size: the resize gate.
+    {
+        WbHarness h;
+        entropy::HdrPcs pcs = c2Pcs();
+        pcs.frame_resize_enabled = 0;
+        entropy::writeRenderSize(&h.wb, &pcs);
+        CHECK_EQ(h.bits(), 1u);
+        CHECK_EQ(h.bitAt(0), 0);
+    }
+    {
+        WbHarness h;
+        entropy::HdrPcs pcs = c2Pcs();
+        pcs.frame_resize_enabled = 1;
+        pcs.render_width = 1024;
+        pcs.render_height = 577;
+        entropy::writeRenderSize(&h.wb, &pcs);
+        CHECK_EQ(h.bits(), 33u);
+        CHECK_EQ(h.bitAt(0), 1);
+        for (int b = 0; b < 16; ++b)
+            REQUIRE(h.bitAt((std::uint32_t)(1 + b)) == (((1023) >> (15 - b)) & 1));
+        for (int b = 0; b < 16; ++b)
+            REQUIRE(h.bitAt((std::uint32_t)(17 + b)) == (((576) >> (15 - b)) & 1));
+    }
+    // Superres: enable gate + the denominator domain [8, 15].
+    {
+        WbHarness h;
+        entropy::HdrPcs pcs = c2Pcs();
+        pcs.scs->enable_superres = 0;
+        pcs.av1_cm->frm_size.superres_denominator = 8;
+        entropy::writeSuperresScale(&h.wb, &pcs);
+        CHECK_EQ(h.bits(), 0u);
+    }
+    for (int denom = 8; denom <= 15; ++denom) {
+        WbHarness h;
+        entropy::HdrPcs pcs = c2Pcs();
+        pcs.scs->enable_superres = 1;
+        pcs.av1_cm->frm_size.superres_denominator = denom;
+        entropy::writeSuperresScale(&h.wb, &pcs);
+        if (denom == 8) {
+            CHECK_EQ(h.bits(), 1u);
+            CHECK_EQ(h.bitAt(0), 0);
+        } else {
+            CHECK_EQ(h.bits(), 4u);
+            CHECK_EQ(h.bitAt(0), 1);
+            for (int b = 0; b < 3; ++b)
+                REQUIRE(h.bitAt((std::uint32_t)(1 + b)) == ((((denom - 9)) >> (2 - b)) & 1));
+        }
+    }
+}
+
+TEST_CASE("writeFrameSize composition: override + superres + render") {
+    for (int override_ = 0; override_ < 2; ++override_) {
+        for (int denom = 8; denom <= 10; ++denom) {
+            for (int resize = 0; resize < 2; ++resize) {
+                WbHarness h;
+                entropy::HdrPcs pcs = c2Pcs();
+                pcs.scs->enable_superres = 1;
+                pcs.scs->frame_width_bits = 8;
+                pcs.scs->frame_height_bits = 8;
+                pcs.av1_cm->frm_size.superres_upscaled_width = 256;
+                pcs.av1_cm->frm_size.superres_upscaled_height = 144;
+                pcs.av1_cm->frm_size.superres_denominator = denom;
+                pcs.frame_resize_enabled = resize;
+                pcs.render_width = 256;
+                pcs.render_height = 144;
+                entropy::writeFrameSize(&pcs, override_, &h.wb);
+                std::uint32_t want = override_ ? 16u : 0u;
+                want += (denom == 8) ? 1u : 4u;
+                want += resize ? 33u : 1u;
+                CHECK_EQ(h.bits(), want);
+            }
+        }
+    }
+}

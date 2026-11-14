@@ -98,7 +98,11 @@ struct HdrSeqHeader {
     int chroma_u_ac_qindex_offset;
     int chroma_v_dc_qindex_offset;
     int chroma_v_ac_qindex_offset;
-    // seq_header (av1_structs.h) - added by later slices.
+    // seq_header (av1_structs.h:121-:267) - the fields the writer family
+    // consumes; grown per slice.
+    int enable_superres;   // av1_structs.h:251 (uint8)
+    int frame_width_bits;  // av1_structs.h:156 (uint8)
+    int frame_height_bits; // av1_structs.h:160 (uint8)
 };
 
 // ---------------------------------------------------------------------------
@@ -155,4 +159,133 @@ void writeProfile(std::int32_t profile, AomWriteBitBuffer* wb);
 // the pinned HBD=1 build.
 void writeBitdepth(const HdrSeqHeader* sh, AomWriteBitBuffer* wb);
 
+
+// ---------------------------------------------------------------------------
+// Frame-header carriers (C2). Sub-struct mirrors, field-for-field.
+// ---------------------------------------------------------------------------
+// Plane (definitions.h:683).
+enum HdPlane { HD_PLANE_Y = 0, HD_PLANE_U = 1, HD_PLANE_V = 2, HD_MAX_PLANES = 3 };
+// RestorationType (definitions.h:1421-:1428).
+enum HdRestorationType {
+    HD_RESTORE_NONE = 0, HD_RESTORE_WIENER = 1, HD_RESTORE_SGRPROJ = 2,
+    HD_RESTORE_SWITCHABLE = 3,
+};
+// BlockSize sb_size tail (definitions.h:883-:905): only the 128 flag is
+// consumed (entropy_coding.c:2231).
+#define HD_SB_128X128 1
+
+// RestorationInfo consumed surface (restoration.h:224-:241).
+struct HdrRestorationInfo {
+    int frame_restoration_type;  // HdRestorationType
+    int restoration_unit_size;
+};
+
+// QuantizationParams (av1_structs.h:339-:353) - the writer-consumed fields
+// (qindex[MAX_SEGMENTS] is not consumed by any span in this surface).
+struct HdrQuantizationParams {
+    int base_q_idx;     // uint8 in the reference
+    int delta_q_dc[3];  // int8 in the reference, [HD_MAX_PLANES]
+    int delta_q_ac[3];  // int8 in the reference, [HD_MAX_PLANES]
+    int using_qmatrix;
+    int qm[3];          // uint8 in the reference, [HD_MAX_PLANES]
+};
+
+// DeltaQParams (av1_structs.h:355-:362).
+struct HdrDeltaQParams {
+    int delta_q_present;
+    int delta_q_res;
+};
+
+// DeltaLfParams (av1_structs.h:364-:376).
+struct HdrDeltaLfParams {
+    int delta_lf_present;
+    int delta_lf_res;
+    int delta_lf_multi;
+};
+
+// CdefParams (av1_structs.h:378-:388); CDEF_MAX_STRENGTHS 16
+// (definitions.h:1440).
+#define HD_CDEF_MAX_STRENGTHS 16
+struct HdrCdefParams {
+    int cdef_damping;
+    int cdef_bits;
+    int cdef_y_strength[HD_CDEF_MAX_STRENGTHS];
+    int cdef_uv_strength[HD_CDEF_MAX_STRENGTHS];
+};
+
+// LoopFilter (definitions.h:1655-:1672) - the writer-consumed fields (the
+// ref_deltas/mode_deltas pairs live only in the reference's commented-out
+// mode_ref_delta_update block, entropy_coding.c:2307-:2340).
+struct HdrLoopFilter {
+    int filter_level[2];
+    int filter_level_u;
+    int filter_level_v;
+    int sharpness_level;
+    int mode_ref_delta_enabled;
+};
+
+// FrameSize (av1_structs.h:269-:285).
+struct HdrFrameSize {
+    int frame_width;
+    int frame_height;
+    int render_width;
+    int render_height;
+    int superres_denominator;
+    int superres_upscaled_width;
+    int superres_upscaled_height;
+};
+
+// FrameHeader (av1_structs.h:427-:601) - the fields the C2 spans consume;
+// grown by later slices.
+struct HdrFrameHeader {
+    int allow_intrabc;
+    int coded_lossless;
+    int all_lossless;
+    HdrQuantizationParams quantization_params;
+    HdrDeltaQParams delta_q_params;
+    HdrDeltaLfParams delta_lf_params;
+    HdrLoopFilter loop_filter_params;
+    HdrCdefParams cdef_params;
+};
+
+// HdrAv1Common (av1_common.h:58-:89) - grown by later slices; C2 consumes
+// only frm_size.
+struct HdrAv1Common {
+    HdrFrameSize frm_size;
+};
+
+// HdrPcs - the PictureParentControlSet surface (pcs.h): the fields the C2
+// spans consume.
+struct HdrPcs {
+    HdrFrameHeader frm_hdr;
+    HdrSeqHeader* scs;
+    HdrAv1Common* av1_cm;
+    // pcs.h:1045 (bool) + :1042-:1043 (uint16).
+    int frame_resize_enabled;
+    int render_width;
+    int render_height;
+    // pcs.h:931 (int32).
+    int nb_cdef_strengths;
+    // seq_header.sb_size == BLOCK_128X128 (entropy_coding.c:2231).
+    int sb_size_is_128;
+    // child_pcs->rst_info[3] (rest_process.c; the writer reads
+    // child_pcs->rst_info[p]).
+    HdrRestorationInfo rst_info[3];
+};
+
+// encode_restoration_mode (:2189-:2251)
+void encodeRestorationMode(HdrPcs* pcs, AomWriteBitBuffer* wb);
+// encode_loopfilter (:2284-:2342)
+void encodeLoopfilter(HdrPcs* pcs, AomWriteBitBuffer* wb);
+// encode_cdef (:2344-:2363)
+void encodeCdef(const HdrPcs* pcs, AomWriteBitBuffer* wb);
+// encode_quantization (:2374-:2401)
+void encodeQuantization(const HdrPcs* pcs, AomWriteBitBuffer* wb);
+
+// write_render_size (:2616-:2629)
+void writeRenderSize(AomWriteBitBuffer* wb, HdrPcs* pcs);
+// write_superres_scale (:2631-:2650)
+void writeSuperresScale(AomWriteBitBuffer* wb, HdrPcs* pcs);
+// write_frame_size (:2652-:2669)
+void writeFrameSize(HdrPcs* pcs, std::int32_t frame_size_override, AomWriteBitBuffer* wb);
 }  // namespace entropy
