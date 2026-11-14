@@ -1907,3 +1907,227 @@ TEST_CASE("l6 mdc mdSubpelSearch derives the limits and hands the tree the right
     CHECK(seen.list_idx == 1);
     CHECK(seen.ref_idx == 0);
 }
+
+// Shared read_refine fixtures: a bordered ref plane whose block at
+// (blk_org + shift) matches the src block exactly, and stub callables.
+namespace {
+struct RrmFixture {
+    std::vector<std::uint8_t> srcPlane;
+    std::vector<std::uint8_t> refPlane;
+    mdc::PicBuf input{};
+    mdc::PicBuf refP{};
+    std::vector<std::uint8_t> totalCnt;
+    std::vector<l16_rdo::MeCandidate> cands;
+    std::vector<pipeline::Mv2> mvArr;
+    mdc::MdMeSbResults me{};
+};
+RrmFixture makeRrm(int shift_x, int shift_y) {
+    RrmFixture fx;
+    fx.srcPlane.assign(128 * 128, 0);
+    fx.refPlane.assign(192 * 192, 0);
+    for (int r = 0; r < 128; ++r)
+        for (int c = 0; c < 128; ++c)
+            fx.srcPlane[r * 128 + c] = static_cast<std::uint8_t>(((r * 128 + c) * 2654435761u) >> 24);
+    for (int r = 0; r < 192; ++r)
+        for (int c = 0; c < 192; ++c) {
+            const int sy = ((r - 32 + shift_y) % 128 + 128) % 128;
+            const int sx = ((c - 32 + shift_x) % 128 + 128) % 128;
+            fx.refPlane[r * 192 + c] = fx.srcPlane[sy * 128 + sx];
+        }
+    fx.input.buf = fx.srcPlane.data();
+    fx.input.stride = 128;
+    fx.refP.buf = fx.refPlane.data() + 32 * 192 + 32;  // the bordered picture origin
+    fx.refP.stride = 192;
+    fx.refP.max_width = 128;
+    fx.refP.max_height = 128;
+    fx.refP.border = 32;
+    fx.totalCnt.assign(85, 0);
+    fx.cands.assign(85 * 23, {});
+    fx.mvArr.assign(85 * 8, pipeline::Mv2{0, 0});
+    fx.me.total_me_candidate_index = fx.totalCnt.data();
+    fx.me.me_mv_array = fx.mvArr.data();
+    fx.me.me_candidate_array = fx.cands.data();
+    return fx;
+}
+void plantRrmMe(RrmFixture& fx, std::uint32_t block_offset, int ref, int mv_x, int mv_y) {
+    fx.totalCnt[block_offset] = 1;
+    l16_rdo::MeCandidate& c = fx.cands[block_offset * 23];
+    c.direction = 0;
+    c.ref0List = 0;
+    c.refIdxL0 = static_cast<std::uint8_t>(ref);
+    fx.mvArr[block_offset * 8 + ref] = pipeline::Mv2{static_cast<std::int16_t>(mv_x), static_cast<std::int16_t>(mv_y)};
+}
+int g_choose_calls = 0;
+pipeline::Mv2 g_choose_out = {};
+void chooseZero(mdc::FlCtx& ctx, std::int32_t ref_pair, pipeline::Mv2 me_mv, pipeline::Mv2* best_pred_mv) {
+    (void)ctx;
+    (void)ref_pair;
+    (void)me_mv;
+    g_choose_calls++;
+    best_pred_mv[0] = g_choose_out;
+}
+int g_tree_calls = 0;
+pipeline::Mv2 g_tree_out = {};
+int g_tree_err = 0;
+int treeStub(mdc::FlCtx& ctx, const mdc::MdSubpelParams& p, pipeline::Mv2 start, pipeline::Mv2* best) {
+    (void)ctx;
+    (void)p;
+    (void)start;
+    g_tree_calls++;
+    *best = g_tree_out;
+    return g_tree_err;
+}
+}  // namespace
+
+// trip 17: read_refine_me_mvs_light_pd1 (product_coding_loop.c:2685-:2760).
+TEST_CASE("l6 mdc readRefineMeMvsLightPd1 runs subpel and books the mv slots") {
+    RrmFixture fx = makeRrm(3, -2);  // the exact match at integer (+3, -2) -> mv (24, -16)
+    plantRrmMe(fx, 5, 0, 3, -2);
+
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.blk_org_x = 16;
+    ctx.blk_org_y = 16;
+    ctx.totRefFrameTypes = 1;
+    ctx.refFrameTypeArr[0] = amvp::kLastFrame;  // single ref: rf[1] = NONE
+    ctx.refPicArr[0][0] = &fx.refP;
+    ctx.mdSubpelSearchMethod = mdc::kSubpelTree;  // the tree path
+    ctx.mdSubpelMinBlkSz = 4;
+    g_choose_calls = 0;
+    g_tree_calls = 0;
+    g_tree_out.x = 24;
+    g_tree_out.y = -16;
+    g_tree_err = 123;
+
+    mdc::MdSubPelCtrls sub{};
+    sub.enabled = 1;
+    mdc::readRefineMeMvsLightPd1(&ctx, fx.input, &fx.me, 5, 5 * 23, 4, 8, 100, chooseZero, treeStub, sub, 0, 0, 16,
+                                 16);
+    CHECK(g_tree_calls == 1);
+    CHECK(g_choose_calls == 1);
+    CHECK(ctx.postSubpelMeMvCost[0][0] == 123);
+    CHECK(ctx.md_me_dist == 123);
+    CHECK(ctx.sbMeMv[0][0].x == 24);
+    CHECK(ctx.sbMeMv[0][0].y == -16);
+    CHECK(ctx.ref_mv.x == 0);
+    CHECK(ctx.ref_mv.y == 0);  // no_mv_stack via shut_fast_rate = 0 + the stub writes (0,0)
+    // shut_fast_rate skips the choose call and zeroes the ref mv.
+    ctx.shut_fast_rate = 1;
+    g_choose_calls = 0;
+    g_tree_calls = 0;
+    mdc::readRefineMeMvsLightPd1(&ctx, fx.input, &fx.me, 5, 5 * 23, 4, 8, 100, chooseZero, treeStub, sub, 0, 0, 16,
+                                 16);
+    CHECK(g_choose_calls == 0);
+    CHECK(g_tree_calls == 1);
+    CHECK(ctx.ref_mv.as_int == 0);
+
+    // The skip_subpel gate: sq_size <= min_blk_sz -> no subpel, the raw
+    // ME mv is booked (clipped).
+    ctx.shut_fast_rate = 0;
+    ctx.geom.sq_size = 4;
+    ctx.mdSubpelMinBlkSz = 8;
+    g_tree_calls = 0;
+    mdc::readRefineMeMvsLightPd1(&ctx, fx.input, &fx.me, 5, 5 * 23, 4, 8, 100, chooseZero, treeStub, sub, 0, 0, 16,
+                                 16);
+    CHECK(g_tree_calls == 0);
+    CHECK(ctx.md_me_dist == (std::uint32_t)~0);
+    CHECK(ctx.sbMeMv[0][0].x == 24);
+    CHECK(ctx.sbMeMv[0][0].y == -16);
+}
+
+// trip 18: read_refine_me_mvs (product_coding_loop.c:2764-:2887). The
+// three me_mv derivation branches, the nsq/sq dispatch on b_w_ne_h, the
+// subpel/fp-me-dist fork, and the PART_N sq write-back.
+TEST_CASE("l6 mdc readRefineMeMvs derives the me_mv per branch and dispatches nsq/sq") {
+    RrmFixture fx = makeRrm(0, 0);  // the exact match at (0,0) -> mv 0
+    plantRrmMe(fx, 5, 0, 0, 0);
+
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_16X8;  // b_w_ne_h, not the 64x128 pair
+    ctx.geom.bwidth = 16;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 16;
+    ctx.blk_org_x = 0;
+    ctx.blk_org_y = 0;
+    ctx.sb_origin_x = 0;
+    ctx.sb_origin_y = 0;
+    ctx.geom_offset_x = 0;
+    ctx.geom_offset_y = 0;
+    ctx.totRefFrameTypes = 1;
+    ctx.refFrameTypeArr[0] = amvp::kLastFrame;
+    ctx.refPicArr[0][0] = &fx.refP;
+    ctx.meBlockOffset = 5;
+    ctx.meCandOffset = 5 * 23;
+    ctx.mdSubpelSearchMethod = mdc::kSubpelTree;
+    ctx.md_subpel_skip_diag_refinement = 3;  // MV_COST_OPT: table-free mv err
+    ctx.enableMe8x8 = 1;
+    ctx.enableMe16x16 = 1;
+    g_choose_calls = 0;
+    g_tree_calls = 0;
+    g_tree_out.x = 0;
+    g_tree_out.y = 0;
+    g_tree_err = 55;
+
+    mdc::MdSubPelCtrls sub{};
+    sub.enabled = 0;  // the fp_me_dist fallback path
+    mdc::MdNsqCtrls nsq{};
+    nsq.enabled = 1;
+    nsq.dist_type = mdc::DIST_SAD;
+    nsq.full_pel_search_width = 0;
+    nsq.full_pel_search_height = 0;
+    nsq.enable_psad = 0;
+    mdc::MdSqCtrls sq{};
+    sq.enabled = 1;
+
+    // Branch (a): blk_avail_sqi && b_w_ne_h -> the sq carrier MV rounded;
+    // the NSQ search then finds the exact match at (0,0) (SAD 0 + err 0)
+    // and the ladder keeps it.
+    ctx.sqSbMeMv[0][0].x = 11;  // (11 + 4) & ~7 = 8
+    ctx.sqSbMeMv[0][0].y = -5;  // (-5 + 4) & ~7 = -8
+    ctx.updatedEnablePme = 1;
+    ctx.fpMeDist[0][0] = 999;
+    mdc::readRefineMeMvs(&ctx, fx.input, &fx.me, 4, 8, 23, 100, chooseZero, treeStub, sub, nsq, sq, 0, 0, 16, 16,
+                         true, false);
+    CHECK(g_choose_calls == 1);
+    CHECK(g_tree_calls == 0);  // subpel disabled
+    CHECK(ctx.fpMeMv[0][0].x == 0);
+    CHECK(ctx.fpMeMv[0][0].y == 0);
+    // The fp_me_dist fallback ran (subpel off + updated_enable_pme): the
+    // variance at the exact match is 0 + the mv err 0.
+    CHECK(ctx.fpMeDist[0][0] == 0);
+    CHECK(ctx.sbMeMv[0][0].x == 0);
+    CHECK(ctx.sbMeMv[0][0].y == 0);
+    CHECK(ctx.subMeMv[0][0].x == 0);
+    // shape == PART_N -> the sq write-back.
+    ctx.shape = 0;  // PART_N
+    CHECK(ctx.sqSbMeMv[0][0].x == 0);
+    CHECK(ctx.sqSbMeMv[0][0].y == 0);
+
+    // Branch (c): sqi unavailable -> the me_mv_array read (0,0 here).
+    ctx.shape = 3;  // not PART_N
+    ctx.sqSbMeMv[0][0].x = 77;
+    ctx.sqSbMeMv[0][0].y = 77;
+    ctx.fpMeDist[0][0] = 999;
+    mdc::readRefineMeMvs(&ctx, fx.input, &fx.me, 4, 8, 23, 100, chooseZero, treeStub, sub, nsq, sq, 0, 0, 16, 16,
+                         false, false);
+    CHECK(ctx.fpMeMv[0][0].x == 0);
+    CHECK(ctx.fpMeMv[0][0].y == 0);
+    CHECK(ctx.sqSbMeMv[0][0].x == 77);  // not PART_N -> untouched
+
+    // Branch (b): BLOCK_4X4 with a tested parent -> the sq MV rounded;
+    // the 4x4 block takes neither NSQ (b_w_ne_h false) nor SQ.
+    ctx.geom.bsize = entropy::BLOCK_4X4;
+    ctx.geom.bwidth = 4;
+    ctx.geom.bheight = 4;
+    ctx.geom.sq_size = 4;
+    ctx.sqSbMeMv[0][0].x = 11;
+    ctx.sqSbMeMv[0][0].y = -5;
+    ctx.fpMeDist[0][0] = 999;
+    mdc::readRefineMeMvs(&ctx, fx.input, &fx.me, 4, 8, 23, 100, chooseZero, treeStub, sub, nsq, sq, 0, 0, 16, 16,
+                         false, true);
+    CHECK(ctx.fpMeMv[0][0].x == 8);
+    CHECK(ctx.fpMeMv[0][0].y == -8);
+}

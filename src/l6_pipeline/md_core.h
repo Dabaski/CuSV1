@@ -168,6 +168,39 @@ struct FlCtx {
     // spatial_mv_size inputs, pointer-per-(list,ref) on the carrier).
     const Mv2* mvpArr[2][4];
     std::uint8_t mvpCnt[2][4];
+    // The ME-MV bookkeeping the read_refine_me_mvs pair reads/writes
+    // (mode_decision.h / md_process.h windows).
+    Mv2 sbMeMv[2][4];                              // ctx->sb_me_mv
+    Mv2 subMeMv[2][4];                             // ctx->sub_me_mv
+    Mv2 fpMeMv[2][4];                              // ctx->fp_me_mv
+    Mv2 sqSbMeMv[2][4];                            // ctx->sq_sb_me_mv
+    std::int32_t postSubpelMeMvCost[2][4];         // ctx->post_subpel_me_mv_cost
+    std::uint32_t fpMeDist[2][4];                  // ctx->fp_me_dist
+    std::int32_t refFrameTypeArr[8];               // ctx->ref_frame_type_arr
+    std::uint8_t totRefFrameTypes;                 // ctx->tot_ref_frame_types
+    std::uint8_t isIntraBordered;                  // ctx->is_intra_bordered
+    std::uint8_t useNeighboringModeEnabled;        // cand_reduction_ctrls.use_neighbouring_mode_ctrls.enabled
+    std::uint8_t updatedEnablePme;                 // ctx->updated_enable_pme
+    std::uint8_t shape;                            // ctx->shape (Part)
+    std::uint32_t meSbAddr;                        // ctx->me_sb_addr (derive_me_offsets)
+    std::uint32_t meBlockOffset;                   // ctx->me_block_offset
+    std::uint32_t meCandOffset;                    // ctx->me_cand_offset
+    std::uint32_t mdSubpelMinBlkSz;                // md_subpel_me_ctrls.min_blk_sz
+    std::uint8_t mdSubpelEnabled;                  // md_subpel_me_ctrls.enabled
+    std::uint8_t mdSubpelSearchMethod;             // md_subpel_me_ctrls.subpel_search_method
+    // The per-(list,ref) resolved ref PicBufs (the get_ref_pic_buffer +
+    // scaled-refs wall, pre-resolved by the caller - the S4/S5 park).
+    const PicBuf* refPicArr[2][4];
+    std::uint8_t refPruningEnabled;                // ref_pruning_ctrls.enabled
+    // The md_sq_motion_search pcs walls threaded as scalars.
+    std::int64_t sqPictureNumber;                  // pcs->picture_number
+    std::int64_t sqRefPicPoc;                      // ppcs->ref_pic_poc_array[list][ref]
+    std::uint8_t sqRefIsIntra;                     // the EbReferenceObject frame-type wall
+    std::uint32_t sqMfmv0AsInt;                    // the TPL_MV_REF mfmv0 triple
+    std::int16_t sqMfmv0X;
+    std::int16_t sqMfmv0Y;
+    std::uint8_t enableMe8x8;                      // ppcs->enable_me_8x8
+    std::uint8_t enableMe16x16;                    // ppcs->enable_me_16x16
     std::uint32_t full_lambda_md[2];               // ctx->full_lambda_md[EB_8_BIT_MD / EB_10_BIT_MD]
     std::uint32_t fast_lambda_md[2];
     // mds0 state (md_process.h:1191-:1200 window).
@@ -402,6 +435,32 @@ int mdSubpelSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, S
                    const MdSubPelCtrls& md_subpel_ctrls, std::uint8_t rf, Mv2* me_mv, std::uint8_t allow_hp,
                    int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols, std::uint8_t base_q_idx,
                    MdSubpelSearchFn subpel_search_fn);
+
+// The read_refine_me_mvs walls: choose_best_av1_mv_pred (the l16 threaded
+// wall) writes the two best_pred_mv slots; the subpel TREE (fixed-stage vs
+// the threaded pruned tree) routes through subpelTreeFn.
+using ChooseBestMvPredFn = void (*)(FlCtx& ctx, std::int32_t ref_pair, Mv2 me_mv, Mv2* best_pred_mv);
+using SubpelTreeFn = MdSubpelSearchFn;
+
+// product_coding_loop.c:2685-:2760 read_refine_me_mvs_light_pd1. The pcs
+// walls thread: me_results + max_l0/max_refs (the me_mv_array read), the
+// per-ref resolved PicBufs on the carrier, me_block_offset/me_cand_offset
+// as parameters (the caller's derive_me_offsets), frm_hdr base_q_idx.
+void readRefineMeMvsLightPd1(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* me_results,
+                             std::uint32_t me_block_offset, std::uint32_t me_cand_offset, std::uint8_t max_l0,
+                             std::uint8_t max_refs, std::uint8_t base_q_idx, ChooseBestMvPredFn choose_best_mv_pred,
+                             SubpelTreeFn subpel_tree, const MdSubPelCtrls& sub_ctrls, int mi_row, int mi_col,
+                             int cm_mi_rows, int cm_mi_cols);
+
+// product_coding_loop.c:2764-:2887 read_refine_me_mvs. The pc_tree walls
+// thread: tested_blk[PART_N][0] as blk_avail_sqi, the parent's
+// tested_blk[PART_N][0] as parent_tested_n0 (the 4x4 branch).
+void readRefineMeMvs(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* me_results, std::uint8_t max_l0,
+                     std::uint8_t max_refs, std::uint8_t max_cand, std::uint8_t base_q_idx,
+                     ChooseBestMvPredFn choose_best_mv_pred, SubpelTreeFn subpel_tree,
+                     const MdSubPelCtrls& sub_ctrls, const MdNsqCtrls& nsq_ctrls, const MdSqCtrls& sq_ctrls,
+                     int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols, bool blk_avail_sqi,
+                     bool parent_tested_n0);
 
 // product_coding_loop.c:2021-:2190 md_nsq_motion_search. The pcs walls
 // thread: pa_me_data max_refs/max_l0/max_cand, enable_me_8x8/16x16,

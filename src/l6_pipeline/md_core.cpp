@@ -1492,5 +1492,228 @@ int mdSubpelSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, S
     return besterr;
 }
 
+// The l16 is_me_data_present view over the MdMeSbResults carrier.
+static l16_rdo::MeSbResults meView(const MdMeSbResults* me_results) {
+    l16_rdo::MeSbResults v;
+    v.totalMeCandidateIndex = me_results->total_me_candidate_index;
+    v.meCandidateArray = me_results->me_candidate_array;
+    return v;
+}
+
+// product_coding_loop.c:2685-:2760 read_refine_me_mvs_light_pd1.
+void readRefineMeMvsLightPd1(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* me_results,
+                             std::uint32_t me_block_offset, std::uint32_t me_cand_offset, std::uint8_t max_l0,
+                             std::uint8_t max_refs, std::uint8_t base_q_idx, ChooseBestMvPredFn choose_best_mv_pred,
+                             SubpelTreeFn subpel_tree, const MdSubPelCtrls& sub_ctrls, int mi_row, int mi_col,
+                             int cm_mi_rows, int cm_mi_cols) {
+    // init best ME cost to MAX
+    ctx->md_me_dist = (std::uint32_t)~0;
+
+    const bool subpel_enabled = sub_ctrls.enabled != 0;
+
+    const bool no_mv_stack = ctx->shut_fast_rate != 0;
+
+    const l16_rdo::MeSbResults me_view = meView(me_results);
+    for (int ref_it = 0; ref_it < ctx->totRefFrameTypes; ++ref_it) {
+        const std::int32_t ref_pair = ctx->refFrameTypeArr[ref_it];
+        int rf[2];
+        motion::amvp::av1SetRefFrame(rf, static_cast<std::int8_t>(ref_pair));
+
+        if (rf[1] == motion::amvp::kNoneFrame) {
+            const std::uint8_t list = motion::amvp::getListIdx(static_cast<std::uint8_t>(rf[0]));
+            const std::uint8_t ref = motion::amvp::getRefFrameIdx(static_cast<std::uint8_t>(rf[0]));
+
+            if (l16_rdo::isMeDataPresent(me_block_offset, me_cand_offset, &me_view, list, ref) != 0) {
+                const PicBuf& ref_pic = *ctx->refPicArr[list][ref];
+
+                const Mv2* me_mv_array_base =
+                    me_results->me_mv_array + (me_block_offset * max_refs + ref);
+                const Mv2 mv_cand = me_mv_array_base[list ? max_l0 : 0];
+                Mv2 me_mv;
+                me_mv.x = static_cast<std::int16_t>(mv_cand.x * 8);
+                me_mv.y = static_cast<std::int16_t>(mv_cand.y * 8);
+                // can only skip if using dc only b/c otherwise need cost at candidate generation
+                const bool skip_subpel = (ctx->isIntraBordered != 0 && ctx->useNeighboringModeEnabled != 0) ||
+                    (ctx->geom.sq_size <= ctx->mdSubpelMinBlkSz);
+
+                if (subpel_enabled && !skip_subpel) {
+                    if (no_mv_stack) {
+                        ctx->ref_mv.as_int = 0;
+                    } else {
+                        Mv2 best_pred_mv[2] = {};
+                        std::uint8_t drl_index = 0;
+                        (void)drl_index;
+                        choose_best_mv_pred(*ctx, ref_pair, me_mv, best_pred_mv);
+                        ctx->ref_mv.as_int = best_pred_mv[0].as_int;
+                    }
+                    if (ctx->mdSubpelSearchMethod == kSubpelFixedStageSearch) {
+                        const std::uint8_t* src = input_pic.buf + ctx->blk_org_x +
+                            (ctx->blk_org_y) * static_cast<std::int32_t>(input_pic.stride);
+                        ctx->postSubpelMeMvCost[list][ref] =
+                            static_cast<std::int32_t>(mdSubpelSearchFixedStage(ctx, ref_pic, src,
+                                                                               static_cast<int>(input_pic.stride),
+                                                                               &me_mv, sub_ctrls));
+                    } else {
+                        ctx->postSubpelMeMvCost[list][ref] =
+                            mdSubpelSearch(ctx, input_pic, ref_pic, kSpelMe, sub_ctrls,
+                                           static_cast<std::uint8_t>(rf[0]), &me_mv, 0 /* allow_hp: frm_hdr wall */,
+                                           mi_row, mi_col, cm_mi_rows, cm_mi_cols, base_q_idx, subpel_tree);
+                    }
+
+                    if (static_cast<std::uint32_t>(ctx->postSubpelMeMvCost[list][ref]) < ctx->md_me_dist) {
+                        ctx->md_me_dist = static_cast<std::uint32_t>(ctx->postSubpelMeMvCost[list][ref]);
+                    }
+                }
+                ctx->sbMeMv[list][ref].as_int = me_mv.as_int;
+                clipMvOnPicBoundary(ctx->blk_org_x, ctx->blk_org_y, static_cast<std::int32_t>(ctx->geom.bwidth),
+                                    static_cast<std::int32_t>(ctx->geom.bheight),
+                                    static_cast<std::int32_t>(ref_pic.max_width),
+                                    static_cast<std::int32_t>(ref_pic.max_height), ref_pic.border,
+                                    &ctx->sbMeMv[list][ref].x, &ctx->sbMeMv[list][ref].y);
+            }
+        }
+    }
+}
+
+// product_coding_loop.c:2764-:2887 read_refine_me_mvs.
+void readRefineMeMvs(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* me_results, std::uint8_t max_l0,
+                     std::uint8_t max_refs, std::uint8_t max_cand, std::uint8_t base_q_idx,
+                     ChooseBestMvPredFn choose_best_mv_pred, SubpelTreeFn subpel_tree,
+                     const MdSubPelCtrls& sub_ctrls, const MdNsqCtrls& nsq_ctrls, const MdSqCtrls& sq_ctrls,
+                     int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols, bool blk_avail_sqi,
+                     bool parent_tested_n0) {
+    const std::uint8_t hbd_md = 0;  // EB_8_BIT_MD
+
+    // Update input origin
+    const std::uint32_t input_origin_index =
+        static_cast<std::uint32_t>(ctx->blk_org_y) * input_pic.stride + static_cast<std::uint32_t>(ctx->blk_org_x);
+
+    const bool b_w_ne_h = ctx->geom.bwidth != ctx->geom.bheight;
+    const bool md_nsq_me_enabled = nsq_ctrls.enabled != 0;
+    const bool md_sq_me_enabled = sq_ctrls.enabled != 0;
+    const bool do_subpel = sub_ctrls.enabled != 0;
+
+    ctx->md_me_dist = (std::uint32_t)~0;
+    const l16_rdo::MeSbResults me_view = meView(me_results);
+    for (std::uint32_t ref_it = 0; ref_it < ctx->totRefFrameTypes; ++ref_it) {
+        const std::int32_t ref_pair = ctx->refFrameTypeArr[ref_it];
+        int rf[2];
+        motion::amvp::av1SetRefFrame(rf, static_cast<std::int8_t>(ref_pair));
+
+        if (rf[1] == motion::amvp::kNoneFrame) {
+            const std::uint8_t list = motion::amvp::getListIdx(static_cast<std::uint8_t>(rf[0]));
+            const std::uint8_t ref = motion::amvp::getRefFrameIdx(static_cast<std::uint8_t>(rf[0]));
+            const PicBuf& ref_pic = *ctx->refPicArr[list][ref];
+
+            // Get the ME MV
+            if (l16_rdo::isMeDataPresent(ctx->meBlockOffset, ctx->meCandOffset, &me_view, list, ref) != 0) {
+                Mv2 me_mv;
+                if (blk_avail_sqi &&
+                    // If NSQ then use the MV of SQ as default MV center
+                    b_w_ne_h &&
+                    // Not applicable for BLOCK_128X64 and BLOCK_64X128 as the 2nd part of each and BLOCK_128X128 do not share the same me_results
+                    ctx->geom.bsize != entropy::BLOCK_64X128 && ctx->geom.bsize != entropy::BLOCK_128X64) {
+                    me_mv.x = static_cast<std::int16_t>((ctx->sqSbMeMv[list][ref].x + 4) & ~0x07);
+                    me_mv.y = static_cast<std::int16_t>((ctx->sqSbMeMv[list][ref].y + 4) & ~0x07);
+                } else if (ctx->geom.bsize == entropy::BLOCK_4X4 && parent_tested_n0) {
+                    me_mv.x = static_cast<std::int16_t>((ctx->sqSbMeMv[list][ref].x + 4) & ~0x07);
+                    me_mv.y = static_cast<std::int16_t>((ctx->sqSbMeMv[list][ref].y + 4) & ~0x07);
+                } else {
+                    const Mv2* me_mv_array_base =
+                        me_results->me_mv_array + (ctx->meBlockOffset * max_refs + ref);
+                    const Mv2 mv_cand = me_mv_array_base[list ? max_l0 : 0];
+                    me_mv.x = static_cast<std::int16_t>(mv_cand.x * 8);
+                    me_mv.y = static_cast<std::int16_t>(mv_cand.y * 8);
+                }
+                clipMvOnPicBoundary(ctx->blk_org_x, ctx->blk_org_y, static_cast<std::int32_t>(ctx->geom.bwidth),
+                                    static_cast<std::int32_t>(ctx->geom.bheight),
+                                    static_cast<std::int32_t>(ref_pic.max_width),
+                                    static_cast<std::int32_t>(ref_pic.max_height), ref_pic.border, &me_mv.x,
+                                    &me_mv.y);
+                // Set ref MV
+                Mv2 best_pred_mv[2] = {};
+                std::uint8_t drl_index = 0;
+                (void)drl_index;
+                choose_best_mv_pred(*ctx, ref_pair, me_mv, best_pred_mv);
+                ctx->ref_mv.as_int = best_pred_mv[0].as_int;
+                if (b_w_ne_h) {
+                    if (md_nsq_me_enabled) {
+                        mdNsqMotionSearch(ctx, input_pic, ref_pic, input_origin_index,
+                                          static_cast<std::uint8_t>(rf[0]), me_results, &me_mv.x, &me_mv.y, nsq_ctrls,
+                                          max_refs, max_l0, ctx->enableMe8x8, ctx->enableMe16x16, kSquarePuCount,
+                                          max_cand, base_q_idx);
+                    }
+                } else if (md_sq_me_enabled) {
+                    // The TPL mfmv0 triple and the pcs walls thread as
+                    // carrier fields (the check_temporal_mv_size input).
+                    mdSqMotionSearch(ctx, input_pic, ref_pic, input_origin_index,
+                                     static_cast<std::uint8_t>(rf[0]), &me_mv.x, &me_mv.y, sq_ctrls,
+                                     ctx->sqPictureNumber, ctx->sqRefPicPoc, ctx->sqRefIsIntra, ctx->sqMfmv0AsInt,
+                                     ctx->sqMfmv0X, ctx->sqMfmv0Y, base_q_idx);
+                }
+                ctx->postSubpelMeMvCost[list][ref] = (std::int32_t)~0;
+                ctx->fpMeMv[list][ref].as_int = me_mv.as_int;
+
+                if (do_subpel) {
+                    if (ctx->mdSubpelSearchMethod == kSubpelFixedStageSearch) {
+                        const std::uint8_t* src = input_pic.buf + ctx->blk_org_x +
+                            (ctx->blk_org_y) * static_cast<std::int32_t>(input_pic.stride);
+                        ctx->postSubpelMeMvCost[list][ref] =
+                            static_cast<std::int32_t>(mdSubpelSearchFixedStage(ctx, ref_pic, src,
+                                                                               static_cast<int>(input_pic.stride),
+                                                                               &me_mv, sub_ctrls));
+                    } else {
+                        ctx->postSubpelMeMvCost[list][ref] =
+                            mdSubpelSearch(ctx, input_pic, ref_pic, kSpelMe, sub_ctrls,
+                                           static_cast<std::uint8_t>(rf[0]), &me_mv, 0, mi_row, mi_col, cm_mi_rows,
+                                           cm_mi_cols, base_q_idx, subpel_tree);
+                    }
+                    if (static_cast<std::uint32_t>(ctx->postSubpelMeMvCost[list][ref]) < ctx->md_me_dist) {
+                        ctx->md_me_dist = static_cast<std::uint32_t>(ctx->postSubpelMeMvCost[list][ref]);
+                    }
+                } else if (ctx->updatedEnablePme != 0 || ctx->refPruningEnabled != 0) {
+                    // If full-pel cost for ME MVs will be needed for other features, ensure it is computed when subpel is off
+                    const std::int32_t ref_origin_index = (ctx->blk_org_x + (me_mv.x >> 3)) +
+                        (ctx->blk_org_y + (me_mv.y >> 3)) * static_cast<std::int32_t>(ref_pic.stride);
+                    VarianceFn vf = mefnVf(ctx->geom.bsize);
+                    std::uint32_t sse;
+                    const std::uint8_t* pred_y = ref_pic.buf + ref_origin_index;
+                    const std::uint8_t* src_y = input_pic.buf + input_origin_index;
+                    ctx->fpMeDist[list][ref] =
+                        vf(pred_y, static_cast<std::int32_t>(ref_pic.stride), src_y,
+                           static_cast<std::int32_t>(input_pic.stride), &sse);
+
+                    pipeline::SvtMvCostParam mv_cost_params;
+                    // Variance is computed for 8bit, so use 8bit lambda
+                    const std::uint32_t rdmult = ctx->full_lambda_md[0];
+                    pipeline::InitMvCostParamsCtx init_ctx;
+                    init_ctx.sq_size = ctx->geom.sq_size;
+                    init_ctx.skip_diag_refinement = ctx->md_subpel_skip_diag_refinement;
+                    init_ctx.nmv_vec_cost = ctx->nmv_vec_cost;
+                    init_ctx.nmvcoststack0 = ctx->nmvcoststack0;
+                    init_ctx.nmvcoststack1 = ctx->nmvcoststack1;
+                    pipeline::svtInitMvCostParams(init_ctx, &mv_cost_params, &ctx->ref_mv, base_q_idx, rdmult,
+                                                  hbd_md);
+                    Mv2 best_mv;
+                    best_mv.as_int = me_mv.as_int;
+                    ctx->fpMeDist[list][ref] +=
+                        static_cast<std::uint32_t>(pipeline::fpMvErrCost(best_mv, mv_cost_params));
+                }
+                // Copy ME MV after subpel
+                ctx->subMeMv[list][ref].as_int = me_mv.as_int;
+                ctx->sbMeMv[list][ref].as_int = me_mv.as_int;
+                clipMvOnPicBoundary(ctx->blk_org_x, ctx->blk_org_y, static_cast<std::int32_t>(ctx->geom.bwidth),
+                                    static_cast<std::int32_t>(ctx->geom.bheight),
+                                    static_cast<std::int32_t>(ref_pic.max_width),
+                                    static_cast<std::int32_t>(ref_pic.max_height), ref_pic.border,
+                                    &ctx->sbMeMv[list][ref].x, &ctx->sbMeMv[list][ref].y);
+                if (ctx->shape == PART_N) {
+                    ctx->sqSbMeMv[list][ref].as_int = ctx->sbMeMv[list][ref].as_int;
+                }
+            }
+        }
+    }
+}
+
 }  // namespace mdc
 }  // namespace pipeline
