@@ -1800,6 +1800,260 @@ TEST_CASE("highbd_jnt_convolve_2d: derivation at bd=8, scalar oracle at bd=10 (i
     runHbdJntFamily(10, &inter::highbdJntConvolve2d, "hjnt_2d");
 }
 
+// ------------------------------------------------------------- A3E J4
+// The dispatch rung: svt_inter_predictor_pd0 (ip:1261-:1286),
+// svt_inter_predictor_light_pd1 (ip:1288-:1395) and
+// svt_highbd_inter_predictor (ip:1455-:1523). The svt_aom_convolve /
+// svt_aom_convolveHbd function-pointer tables (:1115/:1099) dispatch as
+// direct calls (the MC1 named deviation); ALL EIGHT slots of each table
+// are now live - the four jnt slots resolve with J1/J3.
+// The packed 10-bit buffer contract (PACKED_BUFFER_SIZE,
+// definitions.h:344-:346; the 8-aligned stride, ALIGN_POWER_OF_TWO
+// :996; INTERPOLATION_OFFSET = 8) is exercised through an injectable
+// packer (the PO1-parked svt_aom_pack2d_src threading), so the
+// offset/stride arithmetic is tested end to end.
+
+namespace dispatchoracle {
+
+// A real (in8 | inBit << 8) packer, the PO1-parked svt_aom_pack2d_src's
+// arithmetic at the tested shapes.
+void testPack2d(const std::uint8_t* in8, std::uint32_t in8Stride, const std::uint8_t* innBit, std::uint32_t innStride,
+                std::uint16_t* out16, std::uint32_t outStride, std::uint32_t width, std::uint32_t height) {
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            out16[y * outStride + x] =
+                (std::uint16_t)(in8[y * in8Stride + x] | ((std::uint16_t)innBit[y * innStride + x] << 8));
+        }
+    }
+}
+
+// Counts pack2d invocations (the plumbing probe).
+int g_packCalls = 0;
+void countingPack2d(const std::uint8_t* in8, std::uint32_t in8Stride, const std::uint8_t* innBit,
+                    std::uint32_t innStride, std::uint16_t* out16, std::uint32_t outStride, std::uint32_t width,
+                    std::uint32_t height) {
+    ++g_packCalls;
+    testPack2d(in8, in8Stride, innBit, innStride, out16, outStride, width, height);
+}
+
+} // namespace dispatchoracle
+
+TEST_CASE("svt_highbd_inter_predictor dispatches all eight table slots (ip:1455-1523)") {
+    using namespace dispatchoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    // Un-scaled arm: (subpelX, subpelY) select the slot; is_compound
+    // selects the jnt column. subpels here are POST-revert (q4) values.
+    const struct {
+        int subpelX, subpelY, isCompound;
+        const char* slot;
+    } cases[] = {
+        {0, 0, 0, "2d_copy_sr"}, {0, 4, 0, "y_sr"},  {4, 0, 0, "x_sr"}, {4, 4, 0, "2d_sr"},
+        {0, 0, 1, "jnt_2d_copy"}, {0, 4, 1, "jnt_y"}, {4, 0, 1, "jnt_x"}, {4, 4, 1, "jnt_2d"},
+    };
+    for (const auto& cs : cases) {
+        std::vector<std::uint16_t> plane16;
+        const int stride = 8 + 16;
+        hbdoracle::fillPlane16(plane16, stride, 8 + 16, 8, 0xD15A5Eu + (std::uint32_t)cs.subpelX * 3 + cs.subpelY);
+        const std::uint16_t* src = plane16.data() + 8 * stride + 8;
+        // The dispatcher's incoming subpels are Q10 (revert_scale_extra_bits
+        // shifts >> SCALE_EXTRA_BITS = 6), so q4 4 arrives as 256.
+        inter::SubpelParams sp{inter::kScaleSubpelShifts, inter::kScaleSubpelShifts, cs.subpelX * 64, cs.subpelY * 64};
+        inter::ScaleFactors sf;
+        inter::setupScaleFactorsForFrame(&sf, 8, 8, 8, 8); // identity, not scaled
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = convolve::filterBits;
+        cp.round1 = convolve::filterBits;
+        cp.isCompound = cs.isCompound;
+        std::vector<std::uint16_t> staging((size_t)8 * 8, 0);
+        cp.dst = staging.data();
+        cp.dstStride = 8;
+        std::vector<std::uint16_t> got((size_t)8 * 8, 0x999);
+        inter::highbdInterPredictor(src, stride, got.data(), 8, &sp, &sf, 8, 8, &cp,
+                                    convolve::makeInterpFilters(convolve::InterpFilter::EIGHTTAP_REGULAR,
+                                                                convolve::InterpFilter::EIGHTTAP_REGULAR),
+                                    0, 8);
+        // The direct-call twin of the same slot, run by hand.
+        inter::ConvolveParams cp2 = cp;
+        std::vector<std::uint16_t> staging2((size_t)8 * 8, 0);
+        cp2.dst = staging2.data();
+        std::vector<std::uint16_t> want((size_t)8 * 8, 0x999);
+        const std::uint16_t* s = src;
+        if (std::string(cs.slot) == "2d_copy_sr") {
+            inter::highbdConvolve2dCopySr(s, stride, want.data(), 8, 8, 8, reg, reg, 0, 0, &cp2, 8);
+        } else if (std::string(cs.slot) == "y_sr") {
+            inter::highbdConvolveYsr(s, stride, want.data(), 8, 8, 8, reg, reg, 0, cs.subpelY, &cp2, 8);
+        } else if (std::string(cs.slot) == "x_sr") {
+            inter::highbdConvolveXsr(s, stride, want.data(), 8, 8, 8, reg, reg, cs.subpelX, 0, &cp2, 8);
+        } else if (std::string(cs.slot) == "2d_sr") {
+            inter::highbdConvolve2dSr(s, stride, want.data(), 8, 8, 8, reg, reg, cs.subpelX, cs.subpelY, &cp2, 8);
+        } else if (std::string(cs.slot) == "jnt_2d_copy") {
+            inter::highbdJntConvolve2dCopy(s, stride, want.data(), 8, 8, 8, reg, reg, 0, 0, &cp2, 8);
+        } else if (std::string(cs.slot) == "jnt_y") {
+            inter::highbdJntConvolveY(s, stride, want.data(), 8, 8, 8, reg, reg, 0, cs.subpelY, &cp2, 8);
+        } else if (std::string(cs.slot) == "jnt_x") {
+            inter::highbdJntConvolveX(s, stride, want.data(), 8, 8, 8, reg, reg, cs.subpelX, 0, &cp2, 8);
+        } else {
+            inter::highbdJntConvolve2d(s, stride, want.data(), 8, 8, 8, reg, reg, cs.subpelX, cs.subpelY, &cp2, 8);
+        }
+        int bad = 0;
+        const bool jntSlot = cs.isCompound != 0;
+        for (int i = 0; i < 64; ++i) {
+            // The jnt slots with do_average=0 write the staging CONV_BUF
+            // (conv_params->dst), NOT the out param - compare staging for
+            // those, the out param for the sr slots.
+            const int g = jntSlot ? staging[(size_t)i] : got[(size_t)i];
+            const int v = jntSlot ? staging2[(size_t)i] : want[(size_t)i];
+            if (g != v) ++bad;
+        }
+        CHECK_MESSAGE(bad == 0, "dispatch slot mismatch");
+        if (bad) MESSAGE("slot " << std::string(cs.slot) << " diffs " << bad);
+    }
+}
+
+TEST_CASE("svt_inter_predictor_pd0 routes scaled to 2d_scale(REGULAR) and unscaled to the copy/jnt-copy slots (ip:1261-1286)") {
+    using namespace dispatchoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    // Unscaled, single-ref: the [0][0][0] copy_sr slot.
+    {
+        std::vector<std::uint16_t> plane16;
+        const int stride = 8 + 16;
+        hbdoracle::fillPlane16(plane16, stride, 8 + 16, 8, 0x0D0Au);
+        std::vector<std::uint8_t> plane8((size_t)stride * 24);
+        for (size_t i = 0; i < plane8.size(); ++i) plane8[i] = (std::uint8_t)plane16[i];
+        inter::SubpelParams sp{inter::kScaleSubpelShifts, inter::kScaleSubpelShifts, 0, 0};
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = convolve::filterBits;
+        cp.round1 = convolve::filterBits;
+        std::vector<std::uint8_t> got((size_t)8 * 8, 0x99);
+        inter::interPredictorPd0(plane8.data() + 8 * stride + 8, stride, got.data(), 8, 8, 8, &sp, &cp);
+        std::vector<std::uint8_t> want((size_t)8 * 8, 0x77);
+        inter::convolve2dCopySr(plane8.data() + 8 * stride + 8, stride, want.data(), 8, 8, 8, reg, reg, 0, 0, &cp);
+        int bad = 0;
+        for (int i = 0; i < 64; ++i)
+            if (got[i] != want[i]) ++bad;
+        CHECK_MESSAGE(bad == 0, "pd0 unscaled copy slot");
+        // is_compound=1 selects jnt_convolve_2d_copy.
+        inter::ConvolveParams cpc{};
+        std::memset(&cpc, 0, sizeof(cpc));
+        cpc.round0 = convolve::filterBits;
+        cpc.round1 = convolve::filterBits;
+        cpc.isCompound = 1;
+        std::vector<std::uint16_t> staging((size_t)8 * 8, 0);
+        cpc.dst = staging.data();
+        cpc.dstStride = 8;
+        std::vector<std::uint8_t> gotC((size_t)8 * 8, 0x99);
+        inter::interPredictorPd0(plane8.data() + 8 * stride + 8, stride, gotC.data(), 8, 8, 8, &sp, &cpc);
+        std::vector<std::uint16_t> stagingW((size_t)8 * 8, 0);
+        cpc.dst = stagingW.data();
+        std::vector<std::uint8_t> wantC((size_t)8 * 8, 0x77);
+        inter::jntConvolve2dCopy(plane8.data() + 8 * stride + 8, stride, wantC.data(), 8, 8, 8, reg, reg, 0, 0, &cpc);
+        bad = 0;
+        // do_average=0: the jnt-copy slot writes the staging CONV_BUF.
+        for (int i = 0; i < 64; ++i)
+            if (staging[i] != stagingW[i]) ++bad;
+        CHECK_MESSAGE(bad == 0, "pd0 unscaled jnt-copy slot");
+    }
+    // Scaled arm: REGULAR filters through convolve_2d_scale; identity sf
+    // (xs = ys = SCALE_SUBPEL_SHIFTS) must reproduce the unscaled pixels.
+    {
+        std::vector<std::uint8_t> plane8((size_t)24 * 24);
+        std::uint32_t seed = 0x0D00u;
+        for (size_t i = 0; i < plane8.size(); ++i) plane8[i] = (std::uint8_t)jntoracle::lcg(seed);
+        inter::ScaleFactors sf;
+        inter::setupScaleFactorsForFrame(&sf, 8, 8, 8, 8);
+        inter::SubpelParams sp{inter::kScaleSubpelShifts, inter::kScaleSubpelShifts, 0, 0};
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = convolve::filterBits;
+        cp.round1 = convolve::filterBits;
+        std::vector<std::uint8_t> got((size_t)8 * 8, 0x99);
+        inter::interPredictorPd0(plane8.data() + 8 * 24 + 8, 24, got.data(), 8, 8, 8, &sp, &cp);
+        int bad = 0;
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x)
+                if (got[(size_t)y * 8 + x] != plane8[(size_t)(8 + y) * 24 + 8 + x]) ++bad;
+        CHECK_MESSAGE(bad == 0, "pd0 scaled identity arm");
+        if (bad) MESSAGE("pd0 scaled identity diffs " << bad);
+    }
+}
+
+TEST_CASE("svt_inter_predictor_light_pd1 packs the 10-bit reference and dispatches the hbd slots (ip:1288-1395)") {
+    using namespace dispatchoracle;
+    g_packCalls = 0;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    // 8-bit arm (bd=8): the src_2b pointer is NULL, the plain convolve
+    // table routes [sx!=0][sy!=0][is_compound].
+    {
+        std::vector<std::uint8_t> plane8((size_t)24 * 24);
+        std::uint32_t seed = 0x1D1u;
+        for (size_t i = 0; i < plane8.size(); ++i) plane8[i] = (std::uint8_t)jntoracle::lcg(seed);
+        inter::SubpelParams sp{inter::kScaleSubpelShifts, inter::kScaleSubpelShifts, 4 * 64, 4 * 64};
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = convolve::filterBits;
+        cp.round1 = convolve::filterBits;
+        std::vector<std::uint8_t> got((size_t)8 * 8, 0x99);
+        inter::interPredictorLightPd1(plane8.data() + 8 * 24 + 8, nullptr, 24, got.data(), 8, 8, 8,
+                                      convolve::makeInterpFilters(convolve::InterpFilter::EIGHTTAP_REGULAR,
+                                                                  convolve::InterpFilter::EIGHTTAP_REGULAR),
+                                      &sp, &cp, 8, nullptr);
+        std::vector<std::uint8_t> want((size_t)8 * 8, 0x77);
+        inter::convolve2dSr(plane8.data() + 8 * 24 + 8, 24, want.data(), 8, 8, 8, reg, reg, 4, 4, &cp);
+        int bad = 0;
+        for (int i = 0; i < 64; ++i)
+            if (got[i] != want[i]) ++bad;
+        CHECK_MESSAGE(bad == 0, "light_pd1 8-bit 2d_sr slot");
+    }
+    // 10-bit arm: src_2b non-NULL triggers the pack path (probe counts 1)
+    // and the hbd dispatch; the packed buffer feeds highbdJntConvolve2d.
+    {
+        std::vector<std::uint8_t> plane8((size_t)24 * 24);
+        std::vector<std::uint8_t> plane2((size_t)24 * 24);
+        std::uint32_t seed = 0x2D2u;
+        for (size_t i = 0; i < plane8.size(); ++i) {
+            plane8[i] = (std::uint8_t)jntoracle::lcg(seed);
+            plane2[i] = (std::uint8_t)((jntoracle::lcg(seed)) & 3); // top 2 bits
+        }
+        inter::SubpelParams sp{inter::kScaleSubpelShifts, inter::kScaleSubpelShifts, 4 * 64, 4 * 64};
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = convolve::filterBits;
+        cp.round1 = convolve::filterBits;
+        cp.isCompound = 1;
+        std::vector<std::uint16_t> staging((size_t)8 * 8, 0);
+        cp.dst = staging.data();
+        cp.dstStride = 8;
+        std::vector<std::uint16_t> got((size_t)8 * 8, 0x999);
+        inter::interPredictorLightPd1(plane8.data() + 8 * 24 + 8, plane2.data() + 8 * 24 + 8, 24, (std::uint8_t*)got.data(),
+                                      8, 8, 8,
+                                      convolve::makeInterpFilters(convolve::InterpFilter::EIGHTTAP_REGULAR,
+                                                                  convolve::InterpFilter::EIGHTTAP_REGULAR),
+                                      &sp, &cp, 10, &countingPack2d);
+        CHECK(g_packCalls == 1);
+        // The hand-run twin: pack the same window with the SAME offsets
+        // (INTERPOLATION_OFFSET = 8 around the 8x8 block, stride aligned
+        // to 8: 8*1 + 16 = 24 -> already 8-aligned) and run the slot.
+        // src_stride16 = w*1 + 16 = 24.
+        std::vector<std::uint16_t> packed((size_t)24 * 24, 0);
+        // The kernel packs from src - offset - offset*stride over
+        // (w + 16) x (h + 16), i.e. the full 24x24 window.
+        testPack2d(plane8.data(), 24, plane2.data(), 24, packed.data(), 24, 24, 24);
+        const std::uint16_t* src10 = packed.data() + 8 * 24 + 8;
+        inter::ConvolveParams cp2 = cp;
+        std::vector<std::uint16_t> staging2((size_t)8 * 8, 0);
+        cp2.dst = staging2.data();
+        std::vector<std::uint16_t> want((size_t)8 * 8, 0x999);
+        inter::highbdJntConvolve2d(src10, 24, want.data(), 8, 8, 8, reg, reg, 4, 4, &cp2, 10);
+        int bad = 0;
+        for (int i = 0; i < 64; ++i)
+            if (got[i] != want[i]) ++bad;
+        CHECK_MESSAGE(bad == 0, "light_pd1 10-bit jnt_2d slot");
+        if (bad) MESSAGE("light_pd1 10-bit diffs " << bad);
+    }
+}
+
 TEST_CASE("jnt_convolve_2d_copy pins the shift-compose-copy path (ip:677-714)") {
     using namespace jntoracle;
     const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];

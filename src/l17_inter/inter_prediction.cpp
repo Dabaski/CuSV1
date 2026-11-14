@@ -6,6 +6,10 @@
 
 namespace inter {
 
+// PACKED_BUFFER_SIZE, definitions.h:344-:346 ((MAX_SB_SIZE + 2*8)^2 with
+// MAX_SB_SIZE = 128 -> 20736); the light_pd1 temp buffer is 4x that.
+constexpr int definitionsPackediBufferSize = (convolve::maxSbSize + (8 << 1)) * (convolve::maxSbSize + (8 << 1));
+
 // clamp, the reference's utility.h helper (three-argument clamp).
 inline std::int32_t clampInt(std::int32_t value, std::int32_t lo, std::int32_t hi) {
     return value < lo ? lo : (value > hi ? hi : value);
@@ -1262,6 +1266,217 @@ void highbdConvolve2dForIntrabc(const std::uint16_t* src, std::int32_t srcStride
         highbdConvolveXsr(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 8, 0, convParams, bd);
     } else {
         highbdConvolveYsr(src, srcStride, dst, dstStride, w, h, filterParamsX, filterParamsY, 0, 8, convParams, bd);
+    }
+}
+
+// svt_highbd_inter_predictor, inter_prediction.c:1455-:1523. Direct-call
+// dispatch of the convolveHbd table: [0][0][0] copy, [0][1][0] y, [1][0][0]
+// x, [1][1][0] 2d, [0][0][1] jnt_2d_copy, [0][1][1] jnt_y, [1][0][1] jnt_x,
+// [1][1][1] jnt_2d; the intrabc and scaled arms route as in the reference.
+void highbdInterPredictor(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                          const SubpelParams* subpelParams, const ScaleFactors* sf, std::int32_t w, std::int32_t h,
+                          ConvolveParams* convParams, std::uint32_t interpFilters, std::int32_t isIntrabc,
+                          std::int32_t bd) {
+    InterpFilterParams filterParamsX, filterParamsY;
+    const std::int32_t isScaled = hasScale(subpelParams->xs, subpelParams->ys);
+
+    convolve::getConvolveFilterParams(interpFilters, &filterParamsX, &filterParamsY, w, h);
+
+    assert(convParams->doAverage == 0 || convParams->doAverage == 1);
+    assert(sf);
+    (void)sf; // assert-only under NDEBUG; the scaled arms consume xs/ys instead
+    assert(!(isIntrabc && isScaled));
+
+    if (isScaled) {
+        if (isIntrabc && (subpelParams->subpelX != 0 || subpelParams->subpelY != 0)) {
+            highbdConvolve2dForIntrabc(src, srcStride, dst, dstStride, w, h, subpelParams->subpelX,
+                                       subpelParams->subpelY, convParams, bd);
+            return;
+        }
+        if (convParams->isCompound) {
+            assert(convParams->dst != nullptr);
+        }
+        highbdConvolve2dScale(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY,
+                              subpelParams->subpelX, subpelParams->xs, subpelParams->subpelY, subpelParams->ys,
+                              convParams, bd);
+    } else {
+        SubpelParams sp = *subpelParams;
+        revertScaleExtraBits(&sp);
+
+        if (isIntrabc && (sp.subpelX != 0 || sp.subpelY != 0)) {
+            highbdConvolve2dForIntrabc(src, srcStride, dst, dstStride, w, h, sp.subpelX, sp.subpelY, convParams, bd);
+            return;
+        }
+
+        if (convParams->isCompound) {
+            if (sp.subpelX != 0 && sp.subpelY != 0) {
+                highbdJntConvolve2d(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX,
+                                    sp.subpelY, convParams, bd);
+            } else if (sp.subpelX != 0) {
+                highbdJntConvolveX(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX, 0,
+                                   convParams, bd);
+            } else if (sp.subpelY != 0) {
+                highbdJntConvolveY(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, 0,
+                                   sp.subpelY, convParams, bd);
+            } else {
+                highbdJntConvolve2dCopy(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, 0, 0,
+                                        convParams, bd);
+            }
+        } else {
+            if (sp.subpelX != 0 && sp.subpelY != 0) {
+                highbdConvolve2dSr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX,
+                                   sp.subpelY, convParams, bd);
+            } else if (sp.subpelX != 0) {
+                highbdConvolveXsr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX, 0,
+                                  convParams, bd);
+            } else if (sp.subpelY != 0) {
+                highbdConvolveYsr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, 0, sp.subpelY,
+                                  convParams, bd);
+            } else {
+                highbdConvolve2dCopySr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, 0, 0,
+                                       convParams, bd);
+            }
+        }
+    }
+}
+
+// svt_inter_predictor_pd0, inter_prediction.c:1261-:1286. The unscaled arm
+// indexes svt_aom_convolve[0][0][is_compound] with all-zero filter/subpel
+// arguments - the [0][0] slots ignore them - so the direct-call dispatch
+// passes the same zeros (nullptr filters).
+void interPredictorPd0(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, SubpelParams* subpelParams, ConvolveParams* convParams) {
+    const std::int32_t isScaled = hasScale(subpelParams->xs, subpelParams->ys);
+    if (isScaled) {
+        InterpFilterParams filterParamsX, filterParamsY;
+        convolve::getConvolveFilterParams(
+            convolve::makeInterpFilters(convolve::InterpFilter::EIGHTTAP_REGULAR, convolve::InterpFilter::EIGHTTAP_REGULAR),
+            &filterParamsX, &filterParamsY, w, h);
+        convolve2dScale(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, subpelParams->subpelX,
+                        subpelParams->xs, subpelParams->subpelY, subpelParams->ys, convParams);
+    } else {
+        (void)subpelParams;
+        if (convParams->isCompound) {
+            jntConvolve2dCopy(src, srcStride, dst, dstStride, w, h, nullptr, nullptr, 0, 0, convParams);
+        } else {
+            convolve2dCopySr(src, srcStride, dst, dstStride, w, h, nullptr, nullptr, 0, 0, convParams);
+        }
+    }
+}
+
+// svt_inter_predictor_light_pd1, inter_prediction.c:1288-:1395.
+void interPredictorLightPd1(const std::uint8_t* src, const std::uint8_t* src2b, std::int32_t srcStride,
+                            std::uint8_t* dst, std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                            std::uint32_t interpFilters, SubpelParams* subpelParams, ConvolveParams* convParams,
+                            std::int32_t bd, Pack2dFn pack2d) {
+    InterpFilterParams filterParamsX, filterParamsY;
+    convolve::getConvolveFilterParams(interpFilters, &filterParamsX, &filterParamsY, w, h);
+    const std::int32_t isScaled = hasScale(subpelParams->xs, subpelParams->ys);
+
+    if (bd > 8) {
+        // for super-res, the reference frame block might be 2x than
+        // predictor in maximum; for reference scaling, 4x (both dims).
+        alignas(16) std::uint16_t src16[(definitionsPackediBufferSize) * 4];
+        (void)src16;
+        std::int32_t srcStride16;
+        // pack the reference into temp 16bit buffer
+        const std::uint8_t offset = 8; // INTERPOLATION_OFFSET, definitions.h:344
+        std::uint32_t widthScale = 1;
+        std::uint32_t heightScale = 1;
+        if (isScaled) {
+            widthScale = subpelParams->xs != kScaleSubpelShifts ? 2 : 1;
+            heightScale = subpelParams->ys != kScaleSubpelShifts ? 2 : 1;
+        }
+        // optimize stride from MAX_SB_SIZE to bwidth to minimum the block buffer size
+        srcStride16 = w * widthScale + (offset << 1);
+        // 16-byte align of src16
+        if (srcStride16 % 8) {
+            srcStride16 = ((srcStride16) + ((1 << (3)) - 1)) & ~((1 << (3)) - 1); // ALIGN_POWER_OF_TWO, :996
+        }
+
+        packBlock(src - offset - (offset * srcStride), srcStride, src2b - offset - (offset * srcStride), srcStride,
+                  src16, srcStride16, w * widthScale + (offset << 1), h * heightScale + (offset << 1), pack2d);
+        std::uint16_t* src10b = src16 + offset + (offset * srcStride16);
+        std::uint16_t* dst16 = (std::uint16_t*)dst;
+
+        if (isScaled) {
+            highbdConvolve2dScale(src10b, srcStride16, dst16, dstStride, w, h, &filterParamsX, &filterParamsY,
+                                  subpelParams->subpelX, subpelParams->xs, subpelParams->subpelY, subpelParams->ys,
+                                  convParams, bd);
+        } else {
+            SubpelParams sp = *subpelParams;
+            revertScaleExtraBits(&sp);
+            // convolveHbd[sx != 0][sy != 0][is_compound] as direct calls.
+            if (convParams->isCompound) {
+                if (sp.subpelX != 0 && sp.subpelY != 0) {
+                    highbdJntConvolve2d(src10b, srcStride16, dst16, dstStride, w, h, &filterParamsX, &filterParamsY,
+                                        sp.subpelX, sp.subpelY, convParams, bd);
+                } else if (sp.subpelX != 0) {
+                    highbdJntConvolveX(src10b, srcStride16, dst16, dstStride, w, h, &filterParamsX, &filterParamsY,
+                                       sp.subpelX, 0, convParams, bd);
+                } else if (sp.subpelY != 0) {
+                    highbdJntConvolveY(src10b, srcStride16, dst16, dstStride, w, h, &filterParamsX, &filterParamsY, 0,
+                                       sp.subpelY, convParams, bd);
+                } else {
+                    highbdJntConvolve2dCopy(src10b, srcStride16, dst16, dstStride, w, h, &filterParamsX,
+                                            &filterParamsY, 0, 0, convParams, bd);
+                }
+            } else {
+                if (sp.subpelX != 0 && sp.subpelY != 0) {
+                    highbdConvolve2dSr(src10b, srcStride16, dst16, dstStride, w, h, &filterParamsX, &filterParamsY,
+                                       sp.subpelX, sp.subpelY, convParams, bd);
+                } else if (sp.subpelX != 0) {
+                    highbdConvolveXsr(src10b, srcStride16, dst16, dstStride, w, h, &filterParamsX, &filterParamsY,
+                                      sp.subpelX, 0, convParams, bd);
+                } else if (sp.subpelY != 0) {
+                    highbdConvolveYsr(src10b, srcStride16, dst16, dstStride, w, h, &filterParamsX, &filterParamsY, 0,
+                                      sp.subpelY, convParams, bd);
+                } else {
+                    highbdConvolve2dCopySr(src10b, srcStride16, dst16, dstStride, w, h, &filterParamsX,
+                                           &filterParamsY, 0, 0, convParams, bd);
+                }
+            }
+        }
+    } else {
+        (void)src2b;
+        if (isScaled) {
+            convolve2dScale(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY,
+                            subpelParams->subpelX, subpelParams->xs, subpelParams->subpelY, subpelParams->ys,
+                            convParams);
+        } else {
+            SubpelParams sp = *subpelParams;
+            revertScaleExtraBits(&sp);
+            // svt_aom_convolve[sx != 0][sy != 0][is_compound] as direct calls.
+            if (convParams->isCompound) {
+                if (sp.subpelX != 0 && sp.subpelY != 0) {
+                    jntConvolve2d(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX,
+                                  sp.subpelY, convParams);
+                } else if (sp.subpelX != 0) {
+                    jntConvolveX(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX, 0,
+                                 convParams);
+                } else if (sp.subpelY != 0) {
+                    jntConvolveY(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, 0, sp.subpelY,
+                                 convParams);
+                } else {
+                    jntConvolve2dCopy(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, 0, 0,
+                                      convParams);
+                }
+            } else {
+                if (sp.subpelX != 0 && sp.subpelY != 0) {
+                    convolve2dSr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX,
+                                 sp.subpelY, convParams);
+                } else if (sp.subpelX != 0) {
+                    convolveXSR(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, sp.subpelX, 0,
+                                convParams);
+                } else if (sp.subpelY != 0) {
+                    convolveYSr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, 0, sp.subpelY,
+                                convParams);
+                } else {
+                    convolve2dCopySr(src, srcStride, dst, dstStride, w, h, &filterParamsX, &filterParamsY, 0, 0,
+                                     convParams);
+                }
+            }
+        }
     }
 }
 

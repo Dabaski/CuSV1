@@ -397,6 +397,34 @@ void highbdJntConvolve2d(const std::uint16_t* src, std::int32_t srcStride, std::
                          std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
                          std::int32_t bd);
 
+// ---------- A3E J4: the dispatch rung ----------
+
+// svt_highbd_inter_predictor, inter_prediction.c:1455-:1523. The
+// svt_aom_convolveHbd function-pointer table (:1099) dispatches as direct
+// calls (the MC1 named deviation); ALL EIGHT slots are live after J3.
+void highbdInterPredictor(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                          const SubpelParams* subpelParams, const ScaleFactors* sf, std::int32_t w, std::int32_t h,
+                          ConvolveParams* convParams, std::uint32_t interpFilters, std::int32_t isIntrabc,
+                          std::int32_t bd);
+
+// svt_inter_predictor_pd0, inter_prediction.c:1261-:1286. The scaled arm
+// routes convolve_2d_scale with the EIGHTTAP_REGULAR pair; the unscaled
+// arm is the [0][0] slot of the 8-bit table: copy_sr (single-ref) or
+// jnt_convolve_2d_copy (compound).
+void interPredictorPd0(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, SubpelParams* subpelParams, ConvolveParams* convParams);
+
+// svt_inter_predictor_light_pd1, inter_prediction.c:1288-:1395. The bd > 8
+// arm packs the reference into the 16-bit temp buffer (PACKED_BUFFER_SIZE,
+// definitions.h:344-:346; INTERPOLATION_OFFSET = 8; the stride 8-aligned
+// per ALIGN_POWER_OF_TWO, definitions.h:996) and dispatches the hbd table;
+// the 8-bit arm dispatches the plain table. The PO1-parked
+// svt_aom_pack2d_src threads as the injectable packer (packBlock).
+void interPredictorLightPd1(const std::uint8_t* src, const std::uint8_t* src2b, std::int32_t srcStride,
+                            std::uint8_t* dst, std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                            std::uint32_t interpFilters, SubpelParams* subpelParams, ConvolveParams* convParams,
+                            std::int32_t bd, Pack2dFn pack2d);
+
 // ---------- T3: sr convolve wrappers + intrabc + the dispatch ----------
 
 // CONV_BUF_TYPE* dst threading: the sr wrappers are single-ref (the jnt
