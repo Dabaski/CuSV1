@@ -138,6 +138,11 @@ struct FlCtx {
     std::uint8_t mds_subres_step;                  // ctx->mds_subres_step
     std::uint8_t uv_intra_comp_only;               // ctx->uv_intra_comp_only (written)
     std::uint8_t enable_psad;                      // ctx->enable_psad (written)
+    std::uint8_t mds_do_chroma;                    // ctx->mds_do_chroma (written)
+    std::uint8_t mds_do_ifs;                       // ctx->mds_do_ifs (written)
+    std::uint8_t target_class;                     // ctx->target_class (CandClass)
+    std::uint8_t ifs_level;                        // ctx->ifs_ctrls.level
+    std::uint32_t md_stage_1_count[kCandClassTotal];  // ctx->md_stage_1_count
     std::uint32_t full_lambda_md[2];               // ctx->full_lambda_md[EB_8_BIT_MD / EB_10_BIT_MD]
     std::uint32_t fast_lambda_md[2];
     // mds0 state (md_process.h:1191-:1200 window).
@@ -224,6 +229,38 @@ void obmcTransFaceOff(MdCandBf* cand_bf, FlCtx* ctx, const PicBuf& input_pic, st
 // product_coding_loop.c:1209-:1293 fast_loop_core (the BlockLocation*
 // flattens to input_origin_index).
 void fastLoopCore(MdCandBf* cand_bf, FlCtx* ctx, const PicBuf& input_pic, std::uint32_t input_origin_index);
+
+// product_coding_loop.c:1500-:1580 process_cand_itr (the PAETH_PRED + 1
+// = 13-entry regular_intra_cost array).
+bool processCandItr(const FlCtx& ctx, const MdCand& cand, std::uint8_t itr, l16_rdo::PredictionMode best_reg_intra_mode,
+                    std::uint64_t best_reg_intra_cost, const std::uint64_t* regular_intra_cost);
+
+// product_coding_loop.c:1448-:1464 md_stage_0_pd0 (the ctx->fast_cand_array
+// + its count travel as parameters).
+void mdStage0Pd0(FlCtx* ctx, const PicBuf& input_pic, std::uint32_t input_origin_index, std::uint32_t blk_origin_index,
+                 MdCand* fast_cand_array, std::uint32_t fast_cand_count);
+
+// filter.h:60-72 av1_make_interp_filters / av1_broadcast_interp_filter.
+std::uint32_t av1MakeInterpFilters(std::uint32_t y_filter, std::uint32_t x_filter);
+std::uint32_t av1BroadcastInterpFilter(std::uint32_t filter);
+
+// product_coding_loop.c:1466-:1498 md_stage_0_light_pd1 (the frame-header
+// interpolation_filter threads as frame_interp_filter).
+void mdStage0LightPd1(FlCtx* ctx, MdCandBf** cand_bf_ptr_array_base, MdCand* fast_cand_array,
+                      std::uint32_t fast_cand_count, const PicBuf& input_pic, std::uint32_t input_origin_index,
+                      std::uint32_t frame_interp_filter);
+
+// md_process.c:29-:33 uni_psy_bias.
+extern const std::uint8_t uniPsyBias[64];
+
+// product_coding_loop.c:1582-:1714 md_stage_0. The pcs walls thread:
+// scs->vq_ctrls.sharpness_ctrls.unipred_bias && pcs->ppcs->is_noise_level
+// fold into unipred_bias; pcs->ppcs->picture_qp into picture_qp; the
+// frm_hdr interpolation_filter into frame_interp_filter.
+void mdStage0(FlCtx* ctx, MdCandBf** cand_bf_ptr_array_base, MdCand* fast_candidate_array,
+              std::uint32_t fast_cand_count, const PicBuf& input_pic, std::uint32_t input_origin_index,
+              std::uint32_t cand_bf_start_index, std::uint32_t max_buffers, std::uint8_t unipred_bias,
+              std::uint8_t picture_qp, std::uint32_t frame_interp_filter);
 
 // coding_unit.h:37 MAX_MODE_COST (the A6C constant) re-exported at the
 // mdc surface for the test spans.

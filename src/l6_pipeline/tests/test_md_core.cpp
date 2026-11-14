@@ -8,6 +8,7 @@
 // transforms.
 #include <doctest.h>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -495,4 +496,450 @@ TEST_CASE("l6 mdc fastLoopCore routes hadamard and variance and prunes") {
     CHECK(cand.motion_mode == mdc::kSimpleTranslation);
     CHECK(fast_cost == (static_cast<std::uint64_t>(var) << 4) + 2000);
     CHECK(full_cost == fast_cost);
+}
+
+// trip 6: process_cand_itr (product_coding_loop.c:1500-:1580) - the MDS0
+// iteration gate over the three ctrl combinations and the two iterations.
+// The sentinel FILTER_INTRA_MODES = 5 (l16 rate_est); FILTER_DC_PRED = 0.
+TEST_CASE("l6 mdc processCandItr gates the three itr-0 ctrl combinations") {
+    mdc::FlCtx ctx{};
+    mdc::MdCand cand{};
+    std::vector<std::uint64_t> reg(13, 0xFFFFFFFFFFFFFFFFull);
+
+    // (i) reduce_filter_intra + any skip_angular: regular only at itr 0.
+    ctx.reduce_filter_intra = 1;
+    ctx.skip_angular_delta1_th = 10;
+    ctx.skip_angular_delta2_th = -1;
+    ctx.skip_angular_delta3_th = -1;
+    cand.angle_delta_y = 0;
+    cand.filter_intra_mode = 5;  // FILTER_INTRA_MODES sentinel
+    CHECK(mdc::processCandItr(ctx, cand, 0, l16_rdo::DC_PRED, 1000, reg.data()));
+    cand.angle_delta_y = 2;
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 0, l16_rdo::DC_PRED, 1000, reg.data()));
+    cand.angle_delta_y = 0;
+    cand.filter_intra_mode = 1;  // a filter mode
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 0, l16_rdo::DC_PRED, 1000, reg.data()));
+
+    // (ii) angular only (reduce_filter_intra off): regular + filter pass,
+    // angular rejected.
+    ctx.reduce_filter_intra = 0;
+    cand.angle_delta_y = 1;
+    cand.filter_intra_mode = 5;
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 0, l16_rdo::DC_PRED, 1000, reg.data()));
+    cand.angle_delta_y = 0;
+    CHECK(mdc::processCandItr(ctx, cand, 0, l16_rdo::DC_PRED, 1000, reg.data()));
+    cand.filter_intra_mode = 2;
+    CHECK(mdc::processCandItr(ctx, cand, 0, l16_rdo::DC_PRED, 1000, reg.data()));
+
+    // (iii) reduce_filter_intra only (no angular ths): regular + angular
+    // pass, filter rejected.
+    ctx.skip_angular_delta1_th = -1;
+    ctx.reduce_filter_intra = 1;
+    cand.angle_delta_y = 3;
+    cand.filter_intra_mode = 5;
+    CHECK(mdc::processCandItr(ctx, cand, 0, l16_rdo::DC_PRED, 1000, reg.data()));
+    cand.angle_delta_y = 0;
+    cand.filter_intra_mode = 4;
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 0, l16_rdo::DC_PRED, 1000, reg.data()));
+}
+
+TEST_CASE("l6 mdc processCandItr gates itr 1 and the angular cost bands") {
+    mdc::FlCtx ctx{};
+    mdc::MdCand cand{};
+    std::vector<std::uint64_t> reg(13, 0xFFFFFFFFFFFFFFFFull);
+
+    // (iv) reduce_filter_intra + angular: itr 1 evals angular + filter,
+    // rejects the regular candidate.
+    ctx.reduce_filter_intra = 1;
+    ctx.skip_angular_delta1_th = 10;
+    ctx.skip_angular_delta2_th = -1;
+    ctx.skip_angular_delta3_th = -1;
+    cand.angle_delta_y = 0;
+    cand.filter_intra_mode = 5;
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 1, l16_rdo::DC_PRED, 1000, reg.data()));
+    // Angular candidate survives the shape gate, then the cost band: the
+    // best_reg mode differs -> the |delta|=1 band applies. reg_cost for the
+    // mode is 2000, best 1000 -> (2000-1000)*100 = 100000 > 10*1000 ->
+    // reject.
+    cand.mode = l16_rdo::V_PRED;
+    cand.angle_delta_y = 1;
+    reg[l16_rdo::V_PRED] = 2000;
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 1, l16_rdo::SMOOTH_PRED, 1000, reg.data()));
+    // Lift the th: (100000 <= 100*1000) -> accept.
+    ctx.skip_angular_delta1_th = 100;
+    CHECK(mdc::processCandItr(ctx, cand, 1, l16_rdo::SMOOTH_PRED, 1000, reg.data()));
+    // Same parent mode -> no band check at all.
+    ctx.skip_angular_delta1_th = 10;
+    CHECK(mdc::processCandItr(ctx, cand, 1, l16_rdo::V_PRED, 1000, reg.data()));
+    // The |delta|=2 band: th1 is set but does not gate a delta-2
+    // candidate; the th2 band decides.
+    cand.angle_delta_y = 2;
+    reg[l16_rdo::V_PRED] = 2000;
+    ctx.skip_angular_delta2_th = -1;
+    CHECK(mdc::processCandItr(ctx, cand, 1, l16_rdo::SMOOTH_PRED, 1000, reg.data()));
+    ctx.skip_angular_delta2_th = 5;  // 100000 > 5*1000 -> reject
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 1, l16_rdo::SMOOTH_PRED, 1000, reg.data()));
+    ctx.skip_angular_delta2_th = 100;  // 100000 <= 100*1000 -> accept
+    CHECK(mdc::processCandItr(ctx, cand, 1, l16_rdo::SMOOTH_PRED, 1000, reg.data()));
+    // The |delta|=3 band uses th3.
+    cand.angle_delta_y = 3;
+    ctx.skip_angular_delta2_th = -1;
+    ctx.skip_angular_delta3_th = 5;  // 100000 > 5*1000 -> reject
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 1, l16_rdo::SMOOTH_PRED, 1000, reg.data()));
+    ctx.skip_angular_delta3_th = 100;
+    CHECK(mdc::processCandItr(ctx, cand, 1, l16_rdo::SMOOTH_PRED, 1000, reg.data()));
+
+    // (v) itr 1 filter candidates: FILTER_DC_PRED always tested; the others
+    // only when fimode_to_intramode[fm] == best_reg_intra_mode.
+    ctx.reduce_filter_intra = 0;
+    ctx.skip_angular_delta1_th = -1;
+    ctx.skip_angular_delta2_th = -1;
+    ctx.skip_angular_delta3_th = -1;
+    ctx.reduce_filter_intra = 1;  // the filter-only branch
+    cand.angle_delta_y = 0;
+    cand.filter_intra_mode = 0;  // FILTER_DC_PRED
+    CHECK(mdc::processCandItr(ctx, cand, 1, l16_rdo::SMOOTH_PRED, 1000, reg.data()));
+    cand.filter_intra_mode = 1;  // FILTER_V_PRED -> fimode_to_intramode[1] = V_PRED
+    CHECK(mdc::processCandItr(ctx, cand, 1, l16_rdo::V_PRED, 1000, reg.data()));
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 1, l16_rdo::H_PRED, 1000, reg.data()));
+    // The regular candidate at itr 1 with reduce-only: filter sentinel
+    // candidates are rejected.
+    cand.filter_intra_mode = 5;
+    CHECK_FALSE(mdc::processCandItr(ctx, cand, 1, l16_rdo::V_PRED, 1000, reg.data()));
+}
+
+// Mode-indexed stubs: the prediction stub fills the 8x8 pred block with
+// (i + mode) & 0xFF so the variance (the pd0 cost) is mode-dependent and
+// oracle-computable; the fast-cost stubs give mode-indexed signatures.
+namespace {
+void predFillByMode(mdc::FlCtx& ctx, mdc::MdCandBf& bf) {
+    (void)ctx;
+    const std::uint8_t m = static_cast<std::uint8_t>(bf.cand->mode);
+    // A mode-dependent SHAPE (not a shift): variance varies with the mode.
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 8; ++c)
+            bf.pred.buf[r * bf.pred.stride + c] =
+                static_cast<std::uint8_t>((r * bf.pred.stride + c) * (m + 1) & 0xFF);
+}
+std::uint64_t fastCostByMode(mdc::FlCtx& ctx, mdc::MdCandBf& bf, std::uint64_t lambda, std::uint64_t dist) {
+    (void)ctx;
+    (void)lambda;
+    (void)dist;
+    return 1000u * (static_cast<unsigned>(bf.cand->mode) + 1) + 7;
+}
+}  // namespace
+
+// trip 7: md_stage_0_pd0 (product_coding_loop.c:1448-:1464) - the two-slot
+// ping-pong: the buffer flips only when a new best appears; ties keep the
+// earlier buffer. The pd0 cost IS the variance (fast_loop_core_pd0 writes
+// the variance straight into *fast_cost).
+TEST_CASE("l6 mdc mdStage0Pd0 ping-pongs the buffers on new bests only") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.predTable[0] = predFillByMode;
+    ctx.predTable[1] = predFillByMode;
+    ctx.mds0_best_cost = 0xFFFFFFFFFFFFFFFFull;
+
+    std::uint8_t srcBuf[16 * 16] = {};
+    mdc::PicBuf input{};
+    input.buf = srcBuf;
+    input.stride = 16;
+    std::uint8_t predStorage[16 * 16] = {};
+    mdc::PicBuf predP{};
+    predP.buf = predStorage;
+    predP.stride = 16;
+
+    VarOracle o;
+    // The per-mode variance of the stub-filled block vs the zero source.
+    // The stub writes the strided 8x8 window (r*stride + c), so the
+    // scratch replicates that layout, not a contiguous 64-run.
+    const int kModes[3] = {l16_rdo::DC_PRED, l16_rdo::H_PRED, l16_rdo::PAETH_PRED};
+    std::uint8_t scratch[16 * 16] = {};
+    std::uint64_t wantVar[3];
+    for (int k = 0; k < 3; ++k) {
+        for (int r = 0; r < 8; ++r)
+            for (int c = 0; c < 8; ++c)
+                scratch[r * 16 + c] = static_cast<std::uint8_t>((r * 16 + c) * (kModes[k] + 1) & 0xFF);
+        wantVar[k] = o.variance(scratch, 16, srcBuf, 16, 8, 8);
+    }
+    REQUIRE(wantVar[0] != wantVar[1]);
+    REQUIRE(wantVar[1] != wantVar[2]);
+
+    mdc::MdCand cands[3]{};
+    cands[0].mode = static_cast<l16_rdo::PredictionMode>(kModes[0]);
+    cands[1].mode = static_cast<l16_rdo::PredictionMode>(kModes[1]);
+    cands[2].mode = static_cast<l16_rdo::PredictionMode>(kModes[2]);
+    std::uint64_t costs[3] = {};
+    mdc::MdCandBf bufs[2];
+    for (int i = 0; i < 2; ++i) {
+        bufs[i].cand = nullptr;
+        bufs[i].pred = predP;
+        bufs[i].fast_cost = &costs[i];
+        bufs[i].full_cost = &costs[i];
+    }
+    mdc::MdCandBf* ptrs[2] = {&bufs[0], &bufs[1]};
+    ctx.cand_bf_ptr_array = ptrs;
+
+    mdc::mdStage0Pd0(&ctx, input, 0, 0, cands, 3);
+    // cand0 (wantVar0) wins at buf0 and flips; cand1 (wantVar1) compares
+    // against wantVar0; cand2 lands in the other slot. The winner is the
+    // candidate whose variance is smallest.
+    const int best_k = wantVar[0] < wantVar[1] ? (wantVar[0] < wantVar[2] ? 0 : 2)
+                                               : (wantVar[1] < wantVar[2] ? 1 : 2);
+    const std::uint64_t best_cost = wantVar[best_k];
+    CHECK(ctx.mds0_best_cost == best_cost);
+    CHECK(ctx.mds0_best_idx == (best_k == 0 ? 0 : 1));
+    // The last candidate processed (index 2) sits in the slot NOT flipped
+    // by the best: the flip only happened on new bests.
+    CHECK((bufs[0].cand == &cands[2] || bufs[1].cand == &cands[2]));
+
+    // Tie case: two candidates with the same mode produce equal variances;
+    // the second does not steal the best (strict <).
+    ctx.mds0_best_cost = 0xFFFFFFFFFFFFFFFFull;
+    cands[1].mode = cands[0].mode;
+    mdc::mdStage0Pd0(&ctx, input, 0, 0, cands, 2);
+    CHECK(ctx.mds0_best_cost == wantVar[0]);
+    CHECK(ctx.mds0_best_idx == 0);
+}
+
+// trip 8: md_stage_0_light_pd1 (product_coding_loop.c:1466-:1498) - the
+// interp-filter default (SWITCHABLE -> 0, else the broadcast pair), the
+// mds_do_chroma write and the same ping-pong over light-PD1 costs
+// (shut_fast_rate -> the variance << 4).
+TEST_CASE("l6 mdc mdStage0LightPd1 seeds interp filters and walks the slots") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.predTable[0] = predFillByMode;
+    ctx.predTable[1] = predFillByMode;
+    ctx.fastCostTable[0] = fastCostByMode;
+    ctx.fastCostTable[1] = fastCostByMode;
+    ctx.shut_fast_rate = 1;
+    ctx.mds0_best_cost = 0xFFFFFFFFFFFFFFFFull;
+
+    std::uint8_t srcBuf[16 * 16] = {};
+    mdc::PicBuf input{};
+    input.buf = srcBuf;
+    input.stride = 16;
+    std::uint8_t predStorage[16 * 16] = {};
+    mdc::PicBuf predP{};
+    predP.buf = predStorage;
+    predP.stride = 16;
+
+    VarOracle o;
+    std::uint8_t scratch[16 * 16] = {};
+    const int kModes[2] = {l16_rdo::DC_PRED, l16_rdo::H_PRED};
+    std::uint64_t wantVar[2];
+    for (int k = 0; k < 2; ++k) {
+        for (int r = 0; r < 8; ++r)
+            for (int c = 0; c < 8; ++c)
+                scratch[r * 16 + c] = static_cast<std::uint8_t>((r * 16 + c) * (kModes[k] + 1) & 0xFF);
+        wantVar[k] = o.variance(scratch, 16, srcBuf, 16, 8, 8);
+    }
+
+    mdc::MdCand cands[2]{};
+    cands[0].mode = static_cast<l16_rdo::PredictionMode>(kModes[0]);
+    cands[1].mode = static_cast<l16_rdo::PredictionMode>(kModes[1]);
+    std::uint64_t costs[2] = {};
+    mdc::MdCandBf bufs[2];
+    for (int i = 0; i < 2; ++i) {
+        bufs[i].cand = nullptr;
+        bufs[i].pred = predP;
+        bufs[i].fast_cost = &costs[i];
+        bufs[i].full_cost = &costs[i];
+    }
+    mdc::MdCandBf* ptrs[2] = {&bufs[0], &bufs[1]};
+
+    // SWITCHABLE (= 4) -> the 0 default.
+    mdc::mdStage0LightPd1(&ctx, ptrs, cands, 2, input, 0, mdc::kSwitchable);
+    CHECK(ctx.mds_do_chroma == 0);
+    CHECK(cands[0].interp_filters == 0);
+    CHECK(cands[1].interp_filters == 0);
+    CHECK(cands[0].tx_depth == 0);
+    CHECK(ctx.mds0_best_cost == (wantVar[0] < wantVar[1] ? wantVar[0] << 4 : wantVar[1] << 4));
+    CHECK(ctx.mds0_best_idx == (wantVar[0] < wantVar[1] ? 0 : 1));
+
+    // A fixed filter broadcasts to the packed pair.
+    ctx.mds0_best_cost = 0xFFFFFFFFFFFFFFFFull;
+    mdc::mdStage0LightPd1(&ctx, ptrs, cands, 2, input, 0, mdc::kEighttapRegular);
+    CHECK(cands[0].interp_filters == mdc::av1BroadcastInterpFilter(mdc::kEighttapRegular));
+}
+
+// trip 9: md_stage_0 (product_coding_loop.c:1582-:1714) - the iterated
+// class-filtered walk: the regular-cost tracking, the prune_using_best_mode
+// skips, the buffer rotation over max_buffers, the mds1 count clamp and the
+// MAX_CU_COST scratch poison.
+TEST_CASE("l6 mdc mdStage0 walks two iterations with the class filter and poisons the scratch") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.predTable[0] = predFillByMode;
+    ctx.predTable[1] = predFillByMode;
+    ctx.fastCostTable[0] = fastCostByMode;
+    ctx.fastCostTable[1] = fastCostByMode;
+    ctx.shut_fast_rate = 1;
+    ctx.mds0_best_cost = 0xFFFFFFFFFFFFFFFFull;
+    for (int i = 0; i < 5; ++i) ctx.mds0_best_cost_per_class[i] = 0xFFFFFFFFFFFFFFFFull;
+    ctx.target_class = 0;
+    ctx.reduce_filter_intra = 1;  // -> tot_itr = 2
+    ctx.skip_angular_delta1_th = -1;
+    ctx.skip_angular_delta2_th = -1;
+    ctx.skip_angular_delta3_th = -1;
+    ctx.prune_using_best_mode = 0;
+    ctx.ifs_level = 1;  // IFS_MDS0 -> mds_do_ifs = 1
+
+    std::uint8_t srcBuf[16 * 16] = {};
+    mdc::PicBuf input{};
+    input.buf = srcBuf;
+    input.stride = 16;
+    std::uint8_t predStorage[3][16 * 16];
+    std::memset(predStorage, 0, sizeof(predStorage));
+
+    VarOracle o;
+    std::uint8_t scratch[16 * 16] = {};
+    const int kModes[3] = {l16_rdo::DC_PRED, l16_rdo::H_PRED, l16_rdo::PAETH_PRED};
+    std::uint64_t wantVar[3];
+    for (int k = 0; k < 3; ++k) {
+        for (int r = 0; r < 8; ++r)
+            for (int c = 0; c < 8; ++c)
+                scratch[r * 16 + c] = static_cast<std::uint8_t>((r * 16 + c) * (kModes[k] + 1) & 0xFF);
+        wantVar[k] = o.variance(scratch, 16, srcBuf, 16, 8, 8);
+    }
+    REQUIRE(wantVar[0] < wantVar[1]);
+    REQUIRE(wantVar[1] < wantVar[2]);
+
+    mdc::MdCand cands[4]{};
+    cands[0].mode = l16_rdo::DC_PRED;
+    cands[0].cand_class = 0;
+    cands[0].filter_intra_mode = 5;  // FILTER_INTRA_MODES: a regular candidate
+    cands[1].mode = l16_rdo::H_PRED;
+    cands[1].cand_class = 0;
+    cands[1].filter_intra_mode = 5;
+    cands[2].mode = l16_rdo::V_PRED;
+    cands[2].cand_class = 1;  // filtered out by the class gate
+    cands[2].filter_intra_mode = 5;
+    cands[3].mode = l16_rdo::PAETH_PRED;
+    cands[3].cand_class = 0;
+    cands[3].filter_intra_mode = 5;
+
+    std::uint64_t costs[3];
+    mdc::MdCandBf bufs[3];
+    for (int i = 0; i < 3; ++i) {
+        bufs[i].cand = nullptr;
+        bufs[i].pred.buf = predStorage[i];
+        bufs[i].pred.stride = 16;
+        bufs[i].fast_cost = &costs[i];
+        bufs[i].full_cost = &costs[i];
+        costs[i] = 777;  // a sentinel the walk must overwrite or leave
+    }
+    mdc::MdCandBf* ptrs[3] = {&bufs[0], &bufs[1], &bufs[2]};
+    std::uint64_t fast_cost_array[3] = {};
+    ctx.fast_cost_array = fast_cost_array;
+    // The buffer costs share the ctx array in the reference (each buffer's
+    // fast_cost points at its slot), so the selection reads the same
+    // storage the fast loop writes.
+    for (int i = 0; i < 3; ++i) {
+        bufs[i].fast_cost = &fast_cost_array[i];
+        bufs[i].full_cost = &costs[i];
+    }
+
+    ctx.md_stage_1_count[0] = 10;
+    mdc::mdStage0(&ctx, ptrs, cands, 4, input, 0, 0, 3, 0, 0, mdc::kSwitchable);
+
+    CHECK(ctx.mds_do_ifs == 1);
+    // The walk processed cands 0, 1, 3 (the class-1 cand skipped): the best
+    // is the smallest mode variance among them.
+    CHECK(ctx.mds0_best_cost == wantVar[0] << 4);
+    CHECK(ctx.mds0_best_class == 0);
+    CHECK(ctx.mds0_best_class0_cost == wantVar[0] << 4);
+    CHECK(ctx.mds0_best_cost_per_class[0] == wantVar[0] << 4);
+    // md_stage_1_count clamped to the processed count.
+    CHECK(ctx.md_stage_1_count[0] == 3);
+    // The scratch buffer holds MAX_CU_COST at the highest-cost index: the
+    // argmax over the three written costs.
+    const std::uint64_t w[3] = {wantVar[0] << 4, wantVar[1] << 4, wantVar[2] << 4};
+    const int argmax = w[0] > w[1] ? (w[0] > w[2] ? 0 : 2) : (w[1] > w[2] ? 1 : 2);
+    CHECK(fast_cost_array[argmax] == mdc::kMaxCuCost);
+    // The processed cands sit at the buffers the walk rotated through: the
+    // last processed (PAETH) landed at the scratch slot.
+    CHECK(bufs[argmax].cand == &cands[3]);
+    // The class-1 candidate never ran (its variance never touched a cost).
+    CHECK(costs[0] == w[0]);
+    CHECK(costs[1] == w[1]);
+    CHECK(costs[2] == w[2]);
+}
+
+TEST_CASE("l6 mdc mdStage0 pruneUsingBestMode skips H after V and smooth after DC") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.predTable[0] = predFillByMode;
+    ctx.predTable[1] = predFillByMode;
+    ctx.fastCostTable[0] = fastCostByMode;
+    ctx.fastCostTable[1] = fastCostByMode;
+    ctx.shut_fast_rate = 1;
+    ctx.mds0_best_cost = 0xFFFFFFFFFFFFFFFFull;
+    for (int i = 0; i < 5; ++i) ctx.mds0_best_cost_per_class[i] = 0xFFFFFFFFFFFFFFFFull;
+    ctx.target_class = 0;
+    ctx.reduce_filter_intra = 1;
+    ctx.skip_angular_delta1_th = -1;
+    ctx.skip_angular_delta2_th = -1;
+    ctx.skip_angular_delta3_th = -1;
+    ctx.prune_using_best_mode = 1;
+    ctx.intra_mode_end = 12;
+
+    std::uint8_t srcBuf[16 * 16] = {};
+    mdc::PicBuf input{};
+    input.buf = srcBuf;
+    input.stride = 16;
+    std::uint8_t predStorage[3][16 * 16];
+    std::memset(predStorage, 0, sizeof(predStorage));
+
+    mdc::MdCand cands[3]{};
+    // Order: H first (best_reg starts INTRA_INVALID so H runs), then DC
+    // (runs, becomes the best regular), then SMOOTH (skipped: best == DC).
+    cands[0].mode = l16_rdo::H_PRED;
+    cands[0].cand_class = 0;
+    cands[0].filter_intra_mode = 5;
+    cands[1].mode = l16_rdo::DC_PRED;
+    cands[1].cand_class = 0;
+    cands[1].filter_intra_mode = 5;
+    cands[2].mode = l16_rdo::SMOOTH_PRED;
+    cands[2].cand_class = 0;
+    cands[2].filter_intra_mode = 5;
+
+    std::uint64_t costs[3];
+    mdc::MdCandBf bufs[3];
+    for (int i = 0; i < 3; ++i) {
+        bufs[i].cand = nullptr;
+        bufs[i].pred.buf = predStorage[i];
+        bufs[i].pred.stride = 16;
+        bufs[i].full_cost = &costs[i];
+    }
+    mdc::MdCandBf* ptrs[3] = {&bufs[0], &bufs[1], &bufs[2]};
+    std::uint64_t fast_cost_array[3] = {};
+    ctx.fast_cost_array = fast_cost_array;
+    for (int i = 0; i < 3; ++i) bufs[i].fast_cost = &fast_cost_array[i];
+    ctx.md_stage_1_count[0] = 10;
+
+    mdc::mdStage0(&ctx, ptrs, cands, 3, input, 0, 0, 3, 0, 0, mdc::kSwitchable);
+    // Only H and DC processed; the best is DC (v0 < v2 by the *1 vs *3
+    // shapes).
+    CHECK(ctx.md_stage_1_count[0] == 2);
+    VarOracle o;
+    std::uint8_t scratch[16 * 16] = {};
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 8; ++c) scratch[r * 16 + c] = static_cast<std::uint8_t>((r * 16 + c) * 1 & 0xFF);
+    const std::uint64_t v_dc = o.variance(scratch, 16, srcBuf, 16, 8, 8);
+    CHECK(ctx.mds0_best_cost == v_dc << 4);
+    CHECK(ctx.mds0_best_class0_cost == v_dc << 4);
 }
