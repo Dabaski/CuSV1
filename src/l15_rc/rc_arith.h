@@ -1032,6 +1032,31 @@ void rcInitFrameStats(RcControl& rc, int sliceType, std::uint16_t b64TotalCount,
                       const std::uint32_t* me64x64Distortion, bool twoPassWithMaxBitRate,
                       double totalStatsCount);
 
+// rc_handle_superres (rc_process.c:674-736): the decision surface. The
+// ppcs/tpl_group member walls thread as SuperresPcsCarrier (one type - both
+// are PictureParentControlSet reads). NAMED PARKS: svt_aom_init_resize_
+// picture (:688, the resize machinery), the svt_aom_set_gm_controls pair
+// (:692, the EMC1/l16 wall - the super_res_off derivation stays live through
+// the setGmControls callable seam), the picture-decision fifo posts
+// (:698-709) and every svt_release_object / svt_aom_release_pa_reference_
+// objects call - the WHICH-member release decision lands in the out flags
+// (release[i] / releaseHead). ENC_SINGLE_PASS = 0; SUPERRES_RANDOM = 2;
+// RESIZE_NONE = 0.
+struct SuperresPcsCarrier {
+    bool frameSuperresEnabled;   // ppcs->frame_superres_enabled
+    bool frameResizeEnabled;     // ppcs->frame_resize_enabled
+    int temporalLayerIndex;      // ppcs->temporal_layer_index
+    std::int64_t extMgId;        // ppcs->ext_mg_id
+    bool tplEnable;              // ppcs->tpl_ctrls.enable
+    bool incompMgFrame;          // member: svt_aom_is_incomp_mg_frame twin
+                                 // (pd_process.c:5006-5008) threaded
+};
+
+bool rcHandleSuperres(int pass, int superresMode, int resizeMode, std::uint16_t meSegmentsTotalCount,
+                      SuperresPcsCarrier& ppcs, const SuperresPcsCarrier* tplGroup, std::uint32_t tplGroupSize,
+                      int& meSegmentsCompletionCount, int& meProcessedB64Count, bool* release,
+                      bool& releaseHead, const std::function<void(bool)>& setGmControls);
+
 // svt_av1_rc_postencode_update_gop_const (rc_vbr_cbr.c:1495-1561): verbatim;
 // the rolling/total bits go to the interval-param carrier; NO low-motion
 // EMA in this twin. The enc_ctx->frame_updated counter threads as an

@@ -719,3 +719,159 @@ TEST_CASE("rc_init_frame_stats pins the rate-average period and the ME-dist walk
         CHECK(rc.rateAveragePeriod == 30);
     }
 }
+
+// ---- A9D S3: rc_process.c rc_handle_superres :674-736 ----
+
+TEST_CASE("rc_handle_superres gates, the segment reset and the release walk") {
+    // ENC_SINGLE_PASS = 0; SUPERRES_NONE/FIXED/RANDOM = 0/1/2;
+    // RESIZE_NONE = 0. The parked call sites (init_resize_picture, the
+    // gm-controls pair, the fifo posts, the object releases) thread: the
+    // gm derivation arrives at the callable with the super_res_off flag,
+    // the release decisions land in the out flags.
+    {
+        // pass != ENC_SINGLE_PASS: false, NOTHING moves.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameSuperresEnabled = true;
+        int completion = 9, processed = 9;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        bool gmCalled = false;
+        CHECK(l15_rc::rcHandleSuperres(1, 4, 0, 2, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead,
+                                       [&](bool) { gmCalled = true; }) == false);
+        CHECK(completion == 9);
+        CHECK(processed == 9);
+        CHECK(gmCalled == false);
+    }
+    {
+        // superres_mode <= SUPERRES_RANDOM: false.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameSuperresEnabled = true;
+        int completion = 9, processed = 9;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 2, 0, 2, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(completion == 9);
+    }
+    {
+        // frame_superres_enabled with RESIZE_NONE: early exit true, the
+        // segment counters zeroed, super_res_off = FALSE (super-res is ON).
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameSuperresEnabled = true;
+        ppcs.tplEnable = true;
+        int completion = 5, processed = 7;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        bool superResOffSeen = true;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 3, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead,
+                                       [&](bool off) { superResOffSeen = off; }) == true);
+        CHECK(completion == 0);
+        CHECK(processed == 0);
+        CHECK(superResOffSeen == false);
+        CHECK(releaseHead == false);
+    }
+    {
+        // frame_resize_enabled with RESIZE_DYNAMIC: early exit true,
+        // super_res_off = false (resize_mode != RESIZE_NONE).
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameResizeEnabled = true;
+        int completion = 5, processed = 7;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        bool superResOffSeen = true;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 3, 1, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead,
+                                       [&](bool off) { superResOffSeen = off; }) == true);
+        CHECK(superResOffSeen == false);
+    }
+    {
+        // frame_resize_enabled with RESIZE_NONE and no superres: early exit
+        // true, super_res_off = TRUE (the resize-only case).
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameResizeEnabled = true;
+        int completion = 5, processed = 7;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        bool superResOffSeen = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead,
+                                       [&](bool off) { superResOffSeen = off; }) == true);
+        CHECK(superResOffSeen == true);
+    }
+    {
+        // No superres/resize; tpl ON at layer 0: the release walk. Member 0
+        // is incomp with ext_mg_id == head+1 (released); member 1 is
+        // non-incomp with ext_mg_id == head (released).
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.extMgId = 10;
+        ppcs.tplEnable = true;
+        ppcs.temporalLayerIndex = 0;
+        l15_rc::SuperresPcsCarrier group[2] = {};
+        group[0].incompMgFrame = true;
+        group[0].extMgId = 11;
+        group[1].incompMgFrame = false;
+        group[1].extMgId = 10;
+        int completion = 0, processed = 0;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, group, 2, completion, processed, release,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(release[0] == true);
+        CHECK(release[1] == true);
+        CHECK(releaseHead == false);
+    }
+    {
+        // The ext_mg_id quirk: an incomp member at head's OWN id (+0) is NOT
+        // released; a non-incomp member at head+1 is NOT released; an incomp
+        // member FURTHER than head+1 (the >= would catch) is NOT released -
+        // the reference's condition is equality, not a range.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.extMgId = 10;
+        ppcs.tplEnable = true;
+        ppcs.temporalLayerIndex = 0;
+        l15_rc::SuperresPcsCarrier group[3] = {};
+        group[0].incompMgFrame = true;
+        group[0].extMgId = 10;
+        group[1].incompMgFrame = false;
+        group[1].extMgId = 11;
+        group[2].incompMgFrame = true;
+        group[2].extMgId = 12;
+        int completion = 0, processed = 0;
+        bool release[3] = {false, false, false};
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, group, 3, completion, processed, release,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(release[0] == false);
+        CHECK(release[1] == false);
+        CHECK(release[2] == false);
+    }
+    {
+        // tpl ON at a NON-zero layer: no release at all.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.extMgId = 10;
+        ppcs.tplEnable = true;
+        ppcs.temporalLayerIndex = 1;
+        l15_rc::SuperresPcsCarrier group[1] = {};
+        group[0].incompMgFrame = true;
+        group[0].extMgId = 11;
+        int completion = 0, processed = 0;
+        bool release[1] = {false};
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, group, 1, completion, processed, release,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(release[0] == false);
+        CHECK(releaseHead == false);
+    }
+    {
+        // tpl OFF: the ppcs itself is released.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.tplEnable = false;
+        int completion = 0, processed = 0;
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, nullptr, 0, completion, processed, nullptr,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(releaseHead == true);
+    }
+}

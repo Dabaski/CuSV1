@@ -3038,4 +3038,66 @@ void rcInitFrameStats(RcControl& rc, int sliceType, std::uint16_t b64TotalCount,
     }
 }
 
+// rc_handle_superres (rc_process.c:674-736): the two gates, the super_res_off
+// derivation, the segment-counter reset and the release-decision walk; the
+// parked call sites are named in the header. ENC_SINGLE_PASS = 0,
+// SUPERRES_RANDOM = 2, RESIZE_NONE = 0 (EbSvtAv1Enc.h enums, counted from 0).
+bool rcHandleSuperres(int pass, int superresMode, int resizeMode, std::uint16_t meSegmentsTotalCount,
+                      SuperresPcsCarrier& ppcs, const SuperresPcsCarrier* tplGroup, std::uint32_t tplGroupSize,
+                      int& meSegmentsCompletionCount, int& meProcessedB64Count, bool* release,
+                      bool& releaseHead, const std::function<void(bool)>& setGmControls) {
+    constexpr int kEncSinglePass = 0;
+    constexpr int kSuperresRandom = 2;
+    constexpr int kResizeNone = 0;
+    (void)meSegmentsTotalCount;  // the fifo-post park consumes it
+
+    if (pass != kEncSinglePass) {
+        return false;
+    }
+
+    if (superresMode <= kSuperresRandom) {
+        return false;
+    }
+
+    // Determine denom and scale down picture by selected denom
+    // (svt_aom_init_resize_picture - the named park).
+    if (ppcs.frameSuperresEnabled || ppcs.frameResizeEnabled) {
+        // Reset gm based on super-res on/off
+        const bool superResOff = ppcs.frameSuperresEnabled == false && resizeMode == kResizeNone;
+        setGmControls(superResOff);
+
+        // Initialize Segments as picture decision process
+        meSegmentsCompletionCount = 0;
+        meProcessedB64Count = 0;
+
+        // (the segment fifo posts + the rate-control-task release - the
+        // named park.)
+
+        return true;  // Signal early exit
+    }
+
+    // PA ref objs are no longer needed if super-res isn't performed on
+    // current frame; the release CALLS are the named park - the decision
+    // lands in the out flags.
+    if (ppcs.tplEnable) {
+        if (ppcs.temporalLayerIndex == 0) {
+            for (std::uint32_t i = 0; i < tplGroupSize; i++) {
+                if (tplGroup[i].incompMgFrame) {
+                    if (tplGroup[i].extMgId == ppcs.extMgId + 1) {
+                        if (release) release[i] = true;
+                    }
+                } else {
+                    if (tplGroup[i].extMgId == ppcs.extMgId) {
+                        if (release) release[i] = true;
+                    }
+                }
+            }
+        }
+    } else {
+        releaseHead = true;
+    }
+
+    return false;
+}
+
 } // namespace l15_rc
