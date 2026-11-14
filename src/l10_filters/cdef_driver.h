@@ -252,5 +252,70 @@ struct CdefSegCtx {
 // filter call.
 void cdefSegSearch(CdefSegCtx& ctx, std::uint32_t segmentIndex);
 
+// ---------------------------------------------------------------------------
+// S8: svt_av1_cdef_frame (enc_cdef.c:300-:697) - the frame apply driver.
+// ---------------------------------------------------------------------------
+
+// CDEF_MAX_STRENGTHS (definitions.h:1440).
+constexpr int kCdefMaxStrengths = 16;
+
+// CdefFrameCtx: the threaded SequenceControlSet / PictureControlSet /
+// PictureParentControlSet surface, one named field per consumed reference
+// field. The persistent scratch (pcs->cdef_row_cdef / cdef_linebuf /
+// cdef_colbuf, the grow-on-demand allocation wall) and the stack src/src8
+// buffers (CDEF_INBUF_SIZE each) are threaded as caller-provided storage
+// (named deviation - the allocation walls are parked).
+struct CdefFrameCtx {
+    // cm: mi_rows / mi_cols / mi_stride; pcs->mi_grid_base (the mbmi
+    // reads: bsize + cdef_strength)
+    std::int32_t miRows;
+    std::int32_t miCols;
+    std::int32_t miStride;
+    CdefMb* miGrid;
+    // frm_hdr->cdef_params (the strengths + damping)
+    std::uint8_t cdefYStrength[kCdefMaxStrengths];
+    std::uint8_t cdefUvStrength[kCdefMaxStrengths];
+    std::int32_t cdefDamping;
+    // ppcs->nb_cdef_strengths
+    std::int32_t nbCdefStrengths;
+    // ppcs->cdef_search_ctrls gates
+    bool useReferenceCdefFs;
+    bool useQpStrength;
+    // scs->super_block_size / static_config.encoder_bit_depth /
+    // SVT_EFFECTIVE_IS_16BIT_PIPELINE / av1_num_planes
+    std::uint32_t sbSize;
+    int encoderBitDepth;
+    bool is16bit;
+    int numPlanes;
+    // the recon pic (svt_aom_get_recon_pic threaded): buffer + stride
+    std::uint8_t* reconBuf[3];
+    std::uint32_t reconStride[3];
+    // the persistent apply scratch: row flags (caller-provided, at least
+    // (nhfb+2)*2 bytes) and the per-plane halo buffers
+    std::uint8_t* rowCdef;
+    std::uint16_t* linebuf[3];
+    std::uint16_t* colbuf[3];
+    // the search scratch: pcs->cdef_fb_list (the SB=64 dlist cache) and
+    // pcs->cdef_dir_data
+    CdefFbEntry* cdefFbList;
+    CdefDirData* cdefDirData;
+    // the stack buffers of the reference (CDEF_INBUF_SIZE each; the
+    // 16-bit sentinel buffer is used only on the !is_16bit... rather the
+    // non-native path, the 8-bit mirror only on the native path)
+    std::uint16_t* src16;
+    std::uint8_t* src8;
+    // the svt_sb_compute_cdef_list call-site wall (the non-cache path)
+    ComputeCdefListFn computeCdefList;
+};
+
+// svt_av1_cdef_frame (enc_cdef.c:300-:697): the frame apply driver -
+// per 64x64 fb: the strength-pair read (the nb_cdef_strengths > 1
+// per-SB index), the dlist cache vs the compute_cdef_list callback, the
+// zero-strength skip, the per-plane 8-bit cdefApplyFb path or the 16-bit
+// sentinel copy dance (copy_sb8_16 body + linebuf/colbuf halos + the
+// frame-edge VERY_LARGE fills + cdefFilterFb), the curr/prev row-flag
+// swap.
+void cdefFrame(CdefFrameCtx& ctx);
+
 } // namespace cdef_driver
 } // namespace l10_filters

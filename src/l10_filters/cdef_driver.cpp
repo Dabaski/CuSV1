@@ -431,5 +431,241 @@ void cdefSegSearch(CdefSegCtx& ctx, std::uint32_t segmentIndex) {
     }
 }
 
+// svt_av1_cdef_frame (enc_cdef.c:300-:697). 1:1; the walls are the
+// CdefFrameCtx fields; cdefApplyFb / cdefCopySb8To16 / cdefCopyRect16 /
+// cdefFillRect / cdefFilterFb are the landed primitives. CDEF geometry:
+// CDEF_VBORDER 3, CDEF_HBORDER 8, CDEF_HALO 2 (kCdefBstride 144,
+// kCdefVeryLarge).
+void cdefFrame(CdefFrameCtx& ctx) {
+    constexpr std::int32_t kMiSize64x64 = 16;
+    constexpr std::int32_t kMiSizeLog2 = 2;
+    constexpr std::int32_t kCdefVBorder = 3;
+    constexpr std::int32_t kCdefHBorder = 8;
+    constexpr std::int32_t kCdefHalo = 2;
+
+    const bool is16bit = ctx.is16bit;
+    const std::int32_t numPlanes = ctx.numPlanes;
+
+    const std::int32_t coeffShift = ctx.encoderBitDepth - 8 > 0 ? ctx.encoderBitDepth - 8 : 0;
+    const std::int32_t nvfb = (ctx.miRows + kMiSize64x64 - 1) / kMiSize64x64;
+    const std::int32_t nhfb = (ctx.miCols + kMiSize64x64 - 1) / kMiSize64x64;
+    const std::uint32_t cdefSize = (nhfb + 2) * 2;
+
+    std::uint8_t* rowCdef = ctx.rowCdef;
+    memset(rowCdef, 1, cdefSize);
+    std::uint8_t* prevRowCdef = rowCdef + 1;
+    std::uint8_t* currRowCdef = prevRowCdef + nhfb + 2;
+    std::int32_t xdec[3];
+    std::int32_t ydec[3];
+    std::int32_t miWideL2[3];
+    std::int32_t miHighL2[3];
+    for (std::int32_t pli = 0; pli < numPlanes; pli++) {
+        xdec[pli] = pli == 0 ? 0 : 1;
+        ydec[pli] = pli == 0 ? 0 : 1;
+        miWideL2[pli] = kMiSizeLog2 - xdec[pli];
+        miHighL2[pli] = kMiSizeLog2 - ydec[pli];
+    }
+
+    const std::int32_t stride = (ctx.miCols << kMiSizeLog2) + 2 * kCdefHBorder;
+    // Frame-level check: if every UV strength entry is 0, no chroma block
+    // will ever be filtered.
+    bool chromaFilterOff = (numPlanes > 1);
+    if (chromaFilterOff) {
+        for (std::int32_t i = 0; i < ctx.nbCdefStrengths; i++) {
+            if (ctx.cdefUvStrength[i] != 0) {
+                chromaFilterOff = false;
+                break;
+            }
+        }
+    }
+    const std::int32_t activePlanes = chromaFilterOff ? 1 : numPlanes;
+    std::int32_t mbmiCdefStrength = 0;
+    for (std::int32_t fbr = 0; fbr < nvfb; fbr++) {
+        std::int32_t cdefLeft = 1;
+        for (std::int32_t fbc = 0; fbc < nhfb; fbc++) {
+            currRowCdef[fbc] = 0;
+
+            const CdefMb& mbmi = ctx.miGrid[kMiSize64x64 * fbr * ctx.miStride + kMiSize64x64 * fbc];
+
+            if (ctx.nbCdefStrengths > 1) {
+                mbmiCdefStrength = mbmi.cdefStrength;
+            }
+            const std::uint8_t cdefYStrength = ctx.cdefYStrength[mbmiCdefStrength];
+            const std::uint8_t cdefUvStrength = ctx.cdefUvStrength[mbmiCdefStrength];
+            if (cdefYStrength == 0 && cdefUvStrength == 0) {
+                cdefLeft = 0;
+                continue;
+            }
+            // Reuse the dlist/count computed by the search (SB=64 and the
+            // frame was actually searched).
+            const bool useDlistCache = ctx.sbSize == 64 && !ctx.useReferenceCdefFs && !ctx.useQpStrength;
+            CdefList dlistLocal[kMiSize64x64 * kMiSize64x64];
+            CdefList* dlist;
+            std::int32_t cdefCount;
+            if (useDlistCache) {
+                cdefCount = ctx.cdefFbList[fbr * nhfb + fbc].cdefCount;
+                dlist = ctx.cdefFbList[fbr * nhfb + fbc].dlist;
+            } else {
+                cdefCount = ctx.computeCdefList(
+                    ctx.miGrid, ctx.miStride, fbr * kMiSize64x64, fbc * kMiSize64x64, dlistLocal, 12);
+                dlist = dlistLocal;
+            }
+            if (cdefCount == 0) {
+                cdefLeft = 0;
+                continue;
+            }
+
+            currRowCdef[fbc] = 1;
+
+            std::int32_t nhb, nvb;
+            std::int32_t cstart = 0;
+            if (!cdefLeft) {
+                cstart = -kCdefHBorder;
+            }
+
+            nhb = ctx.miCols - kMiSize64x64 * fbc < kMiSize64x64 ? ctx.miCols - kMiSize64x64 * fbc : kMiSize64x64;
+            nvb = ctx.miRows - kMiSize64x64 * fbr < kMiSize64x64 ? ctx.miRows - kMiSize64x64 * fbr : kMiSize64x64;
+            // A fb edge is a frame boundary iff the fb sits in the first/last
+            // fb row or column.
+            const std::int32_t frameTop = (fbr == 0);
+            const std::int32_t frameLeft = (fbc == 0);
+            const std::int32_t frameBottom = (fbr == nvfb - 1);
+            const std::int32_t frameRight = (fbc == nhfb - 1);
+
+            std::int32_t dirinit = !(ctx.useReferenceCdefFs || ctx.useQpStrength);
+            // When SB 128 is used, the search for certain blocks is skipped
+            if (ctx.sbSize == 128) {
+                const int bsize = mbmi.bsize;
+                if (((fbc & 1) && (bsize == 15 || bsize == 14)) || ((fbr & 1) && (bsize == 15 || bsize == 13))) {
+                    dirinit = 0;
+                }
+            }
+            std::uint8_t (*dir)[kCdefNblocks][kCdefNblocks] = &ctx.cdefDirData[fbr * nhfb + fbc].dir;
+            std::int32_t (*var)[kCdefNblocks][kCdefNblocks] = &ctx.cdefDirData[fbr * nhfb + fbc].var;
+            for (std::int32_t pli = 0; pli < activePlanes; pli++) {
+                const std::int32_t cdefStrength = pli ? cdefUvStrength : cdefYStrength;
+                const std::int32_t damping = ctx.cdefDamping;
+
+                const std::int32_t hsize = nhb << miWideL2[pli];
+                const std::int32_t vsize = nvb << miHighL2[pli];
+                const std::int32_t rend = (fbr == nvfb - 1) ? vsize : vsize + kCdefVBorder;
+                const std::int32_t cend = (fbc == nhfb - 1) ? hsize : hsize + kCdefHBorder;
+
+                const std::int32_t coffset = fbc * kMiSize64x64 << miWideL2[pli];
+                std::uint8_t* recBuff = ctx.reconBuf[pli];
+                const std::uint32_t recStride = ctx.reconStride[pli];
+
+                // 8-bit pipeline: build src8 directly from recon and filter
+                // via the boundary-aware hybrid
+                if (!is16bit) {
+                    cdefApplyFb(recBuff, recStride, ctx.src8, reinterpret_cast<std::uint8_t*>(ctx.linebuf[pli]),
+                        reinterpret_cast<std::uint8_t*>(ctx.colbuf[pli]), prevRowCdef, fbr, fbc, nvfb, nhfb,
+                        coffset, miHighL2[pli], miWideL2[pli], nhb, nvb, stride, rend, cend, cstart, cdefLeft, *dir,
+                        &dirinit, *var, pli, dlist, cdefCount, cdefStrength, damping, coeffShift, xdec[pli],
+                        ydec[pli], frameTop, frameLeft, frameBottom, frameRight);
+                    continue;
+                }
+
+                // 16-bit sentinel path: copy the halo we need from recon
+                const int haloCol = kCdefHBorder - kCdefHalo;
+                const int haloRow = kCdefVBorder - kCdefHalo;
+                const int topOff = haloRow * kCdefBstride + kCdefHBorder;
+                const int tlOff = haloRow * kCdefBstride + haloCol;
+                const int trOff = haloRow * kCdefBstride + kCdefHBorder + hsize;
+                const int lrow = haloRow * stride;
+                const int eCs = cstart < -kCdefHalo ? -kCdefHalo : cstart;
+                const int eCright = cend > hsize + kCdefHalo ? hsize + kCdefHalo : cend;
+                const int eRbot = rend > vsize + kCdefHalo ? vsize + kCdefHalo : rend;
+                cdefCopySb8To16(&ctx.src16[kCdefVBorder * kCdefBstride + kCdefHBorder + eCs], kCdefBstride, recBuff,
+                    (kMiSize64x64 << miHighL2[pli]) * fbr, coffset + eCs, recStride, eRbot, eCright - eCs, is16bit);
+                if (!prevRowCdef[fbc]) {
+                    cdefCopySb8To16(&ctx.src16[topOff], kCdefBstride, recBuff,
+                        (kMiSize64x64 << miHighL2[pli]) * fbr - kCdefHalo, coffset, recStride, kCdefHalo, hsize,
+                        is16bit);
+                } else if (fbr > 0) {
+                    cdefCopyRect16(&ctx.src16[topOff], kCdefBstride, &ctx.linebuf[pli][lrow + coffset], stride,
+                        kCdefHalo, hsize);
+                } else {
+                    cdefFillRect(&ctx.src16[topOff], kCdefBstride, kCdefHalo, hsize, kCdefVeryLarge);
+                }
+
+                if (!prevRowCdef[fbc - 1]) {
+                    cdefCopySb8To16(&ctx.src16[tlOff], kCdefBstride, recBuff,
+                        (kMiSize64x64 << miHighL2[pli]) * fbr - kCdefHalo, coffset - kCdefHalo, recStride, kCdefHalo,
+                        kCdefHalo, is16bit);
+                } else if (fbr > 0 && fbc > 0) {
+                    cdefCopyRect16(&ctx.src16[tlOff], kCdefBstride, &ctx.linebuf[pli][lrow + coffset - kCdefHalo],
+                        stride, kCdefHalo, kCdefHalo);
+                } else {
+                    cdefFillRect(&ctx.src16[tlOff], kCdefBstride, kCdefHalo, kCdefHalo, kCdefVeryLarge);
+                }
+
+                if (!prevRowCdef[fbc + 1]) {
+                    cdefCopySb8To16(&ctx.src16[trOff], kCdefBstride, recBuff,
+                        (kMiSize64x64 << miHighL2[pli]) * fbr - kCdefHalo, coffset + hsize, recStride, kCdefHalo,
+                        kCdefHalo, is16bit);
+                } else if (fbr > 0 && fbc < nhfb - 1) {
+                    cdefCopyRect16(&ctx.src16[trOff], kCdefBstride, &ctx.linebuf[pli][lrow + coffset + hsize], stride,
+                        kCdefHalo, kCdefHalo);
+                } else {
+                    cdefFillRect(&ctx.src16[trOff], kCdefBstride, kCdefHalo, kCdefHalo, kCdefVeryLarge);
+                }
+
+                if (cdefLeft) {
+                    cdefCopyRect16(&ctx.src16[haloCol], kCdefBstride, &ctx.colbuf[pli][haloCol], kCdefHBorder,
+                        rend + kCdefVBorder, kCdefHalo);
+                }
+
+                // Save pixels for the fb to the right.
+                if (fbc < nhfb - 1) {
+                    cdefCopyRect16(&ctx.colbuf[pli][haloCol], kCdefHBorder, &ctx.src16[hsize + haloCol],
+                        kCdefBstride, rend + kCdefVBorder, kCdefHalo);
+                }
+
+                if (fbr < nvfb - 1) {
+                    cdefCopySb8To16(&ctx.linebuf[pli][coffset], stride, recBuff,
+                        (kMiSize64x64 << miHighL2[pli]) * (fbr + 1) - kCdefVBorder, coffset, recStride, kCdefVBorder,
+                        hsize, is16bit);
+                }
+
+                if (frameTop) {
+                    cdefFillRect(&ctx.src16[haloRow * kCdefBstride + haloCol], kCdefBstride, kCdefHalo,
+                        hsize + 2 * kCdefHalo, kCdefVeryLarge);
+                }
+                if (frameLeft) {
+                    cdefFillRect(&ctx.src16[haloRow * kCdefBstride + haloCol], kCdefBstride, vsize + 2 * kCdefHalo,
+                        kCdefHalo, kCdefVeryLarge);
+                }
+                if (frameBottom) {
+                    cdefFillRect(&ctx.src16[(vsize + kCdefVBorder) * kCdefBstride + haloCol], kCdefBstride,
+                        kCdefHalo, hsize + 2 * kCdefHalo, kCdefVeryLarge);
+                }
+                if (frameRight) {
+                    cdefFillRect(&ctx.src16[haloRow * kCdefBstride + kCdefHBorder + hsize], kCdefBstride,
+                        vsize + 2 * kCdefHalo, kCdefHalo, kCdefVeryLarge);
+                }
+                // dir/var init for the non-searched frames
+                if (cdefStrength || !dirinit) {
+                    cdefFilterFb(is16bit ? nullptr
+                                         : &recBuff[recStride * (kMiSize64x64 * fbr << miHighL2[pli]) +
+                                                   (fbc * kMiSize64x64 << miWideL2[pli])],
+                        is16bit ? &reinterpret_cast<std::uint16_t*>(recBuff)[recStride *
+                                                                                 (kMiSize64x64 * fbr << miHighL2[pli]) +
+                                                                             (fbc * kMiSize64x64 << miWideL2[pli])]
+                                : nullptr, recStride, &ctx.src16[kCdefVBorder * kCdefBstride + kCdefHBorder],
+                        xdec[pli], ydec[pli], *dir, &dirinit, *var, pli, dlist, cdefCount, cdefStrength, damping,
+                        coeffShift, 1); // no subsampling
+                }
+            }
+            cdefLeft = 1;
+        }
+        {
+            std::uint8_t* tmp = prevRowCdef;
+            prevRowCdef = currRowCdef;
+            currRowCdef = tmp;
+        }
+    }
+}
+
 } // namespace cdef_driver
 } // namespace l10_filters

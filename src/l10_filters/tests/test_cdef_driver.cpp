@@ -765,3 +765,259 @@ TEST_CASE("cdefSegSearch native 8-bit in8 gather has NO sentinel reset") {
     CHECK(f.inbuf8[0] == 0xAA);
     CHECK(f.inbuf8[(3 + 72) * 144 + 20] == 0xAA);
 }
+
+// ---- S8: svt_av1_cdef_frame (enc_cdef.c:300-:697) --------------------------
+namespace {
+using l10_filters::cdef_driver::CdefFrameCtx;
+using l10_filters::cdef_driver::CdefMb;
+
+int gCdefListCalls = 0;
+
+struct FrameFixture {
+    static constexpr std::int32_t kMiStride = 40;
+    CdefMb miGrid[kMiStride * kMiStride];
+    l10_filters::cdef_driver::CdefFbEntry fbList[4];
+    l10_filters::cdef_driver::CdefDirData dirData[4];
+    std::vector<std::uint8_t> rowCdef;
+    std::vector<std::uint16_t> linebuf[3];
+    std::vector<std::uint16_t> colbuf[3];
+    std::vector<std::uint16_t> src16;
+    std::vector<std::uint8_t> src8;
+    std::vector<std::uint8_t> recon8;
+    std::vector<std::uint16_t> recon16;
+    std::vector<std::uint8_t> recon8U, recon8V;
+    CdefFrameCtx ctx;
+    int cdefListCalls = 0;
+
+    // miRows/miCols in mi; mono unless planes = 3; recon noise from a
+    // small LCG; stride 144 luma / 80 chroma; border poison 0x5A
+    FrameFixture(std::int32_t miRows, std::int32_t miCols, int planes, bool sixteenBit) {
+        for (auto& mb : miGrid) {
+            mb.bsize = 12;
+            mb.cdefStrength = 0;
+        }
+        rowCdef.assign(64, 0xEE);
+        const std::int32_t lumaPx = miCols * 4, lumaRows = miRows * 4;
+        const std::int32_t chromaPx = lumaPx / 2, chromaRows = lumaRows / 2;
+        recon8.assign((lumaRows + 4) * (lumaPx + 16), 0x5A);
+        recon8U.assign((chromaRows + 4) * (chromaPx + 16), 0x5A);
+        recon8V.assign((chromaRows + 4) * (chromaPx + 16), 0x5A);
+        recon16.assign((lumaRows + 4) * (lumaPx + 16), 0x5A5A);
+        // deterministic noise in the content region
+        std::uint32_t s = 12345;
+        for (std::int32_t r = 0; r < lumaRows; ++r)
+            for (std::int32_t c = 0; c < lumaPx; ++c) {
+                s = s * 1664525u + 1013904223u;
+                recon8[r * (lumaPx + 16) + c] = static_cast<std::uint8_t>((s >> 16) & 0xFF);
+                recon16[r * (lumaPx + 16) + c] = static_cast<std::uint16_t>((s >> 16) & 0xFF);
+            }
+        for (std::int32_t r = 0; r < chromaRows; ++r)
+            for (std::int32_t c = 0; c < chromaPx; ++c) {
+                s = s * 1664525u + 1013904223u;
+                recon8U[r * (chromaPx + 16) + c] = static_cast<std::uint8_t>((s >> 16) & 0xFF);
+                recon8V[r * (chromaPx + 16) + c] = static_cast<std::uint8_t>((s >> 16) & 0xFF);
+            }
+        src16.assign(l10_filters::cdef_driver::kCdefInbufSize, 0x1111);
+        src8.assign(l10_filters::cdef_driver::kCdefInbufSize, 0x11);
+        // halo buffers at the reference's alloc sizes (uint16 elements)
+        const std::int32_t stride = lumaPx + 16;
+        for (int p = 0; p < 3; ++p) {
+            linebuf[p].assign(3 * stride, 0x2222);
+            colbuf[p].assign(((p == 0 ? 64 : 32) + 6) * 8, 0x3333);
+        }
+        for (int i = 0; i < 4; ++i) {
+            fbList[i].cdefCount = -1;
+            for (int r = 0; r < l10_filters::kCdefNblocks; ++r) {
+                dirData[i].dir[r][r] = 0;
+                dirData[i].var[r][r] = 0;
+                for (int c2 = 0; c2 < l10_filters::kCdefNblocks; ++c2) {
+                    dirData[i].dir[r][c2] = 0;
+                    dirData[i].var[r][c2] = 0;
+                }
+            }
+        }
+        ctx.miGrid = miGrid;
+        ctx.miStride = kMiStride;
+        ctx.miRows = miRows;
+        ctx.miCols = miCols;
+        ctx.cdefDamping = 3;
+        ctx.nbCdefStrengths = 1;
+        ctx.useReferenceCdefFs = false;
+        ctx.useQpStrength = false;
+        ctx.sbSize = 64;
+        ctx.encoderBitDepth = 8;
+        ctx.is16bit = sixteenBit;
+        ctx.numPlanes = planes;
+        if (sixteenBit) {
+            ctx.reconBuf[0] = reinterpret_cast<std::uint8_t*>(recon16.data());
+        } else {
+            ctx.reconBuf[0] = recon8.data();
+        }
+        ctx.reconBuf[1] = planes > 1 ? recon8U.data() : nullptr;
+        ctx.reconBuf[2] = planes > 1 ? recon8V.data() : nullptr;
+        ctx.reconStride[0] = lumaPx + 16;
+        ctx.reconStride[1] = ctx.reconStride[2] = chromaPx + 16;
+        ctx.rowCdef = rowCdef.data();
+        for (int p = 0; p < 3; ++p) {
+            ctx.linebuf[p] = linebuf[p].data();
+            ctx.colbuf[p] = colbuf[p].data();
+        }
+        ctx.cdefFbList = fbList;
+        ctx.cdefDirData = dirData;
+        ctx.src16 = src16.data();
+        ctx.src8 = src8.data();
+        ctx.computeCdefList = +[](CdefMb*, std::int32_t, std::int32_t, std::int32_t, l10_filters::CdefList* dlist,
+            int bs) -> std::int32_t {
+            (void)dlist;
+            (void)bs;
+            // the fixture cannot reach this without external state; the
+            // count is tracked via the fbList write side effect below
+            return -1;
+        };
+    }
+
+    // a cache-filling callback (64 entries for a 64 fb, 256 for 128)
+    static std::int32_t cacheFillCb(CdefMb*, std::int32_t, std::int32_t, std::int32_t, l10_filters::CdefList* dlist,
+        int bs) {
+        const int kMi = (bs == 15 || bs == 13) ? 32 : 16;
+        std::int32_t count = 0;
+        for (std::int32_t r = 0; r < kMi; r += 2)
+            for (std::int32_t c = 0; c < kMi; c += 2) {
+                dlist[count].by = static_cast<std::uint8_t>(r >> 1);
+                dlist[count].bx = static_cast<std::uint8_t>(c >> 1);
+                ++count;
+            }
+        return count;
+    }
+
+    void fillDlistCache() {
+        for (int i = 0; i < 4; ++i) {
+            fbList[i].cdefCount = 64;
+            for (std::int32_t r = 0; r < 16; r += 2)
+                for (std::int32_t c = 0; c < 16; c += 2) {
+                    fbList[i].dlist[(r / 2) * 8 + (c / 2)].by = static_cast<std::uint8_t>(r >> 1);
+                    fbList[i].dlist[(r / 2) * 8 + (c / 2)].bx = static_cast<std::uint8_t>(c >> 1);
+                }
+        }
+    }
+};
+} // namespace
+
+TEST_CASE("cdefFrame zero strengths skip everything + row flags") {
+    FrameFixture f(32, 32, 1, false);
+    for (int i = 0; i < l10_filters::cdef_driver::kCdefMaxStrengths; ++i) {
+        f.ctx.cdefYStrength[i] = 0;
+        f.ctx.cdefUvStrength[i] = 0;
+    }
+    std::vector<std::uint8_t> before = f.recon8;
+    l10_filters::cdef_driver::cdefFrame(f.ctx);
+    CHECK(f.recon8 == before);
+    // the final prev row holds the last written flags: [1],[2] = 0
+    CHECK(f.rowCdef[1] == 0);
+    CHECK(f.rowCdef[2] == 0);
+    CHECK(f.rowCdef[0] == 1);
+}
+
+TEST_CASE("cdefFrame 8-bit filtering matches the composed cdefApplyFb") {
+    FrameFixture f(16, 16, 1, false);
+    f.fillDlistCache();
+    f.ctx.cdefYStrength[0] = 47;
+    f.ctx.cdefUvStrength[0] = 0;
+    f.ctx.computeCdefList = +[](CdefMb*, std::int32_t, std::int32_t, std::int32_t, l10_filters::CdefList*, int)
+        -> std::int32_t {
+        FAIL("the dlist cache path must not call compute_cdef_list");
+        return 0;
+    };
+    const std::vector<std::uint8_t> before = f.recon8; // the pre-call noise
+    l10_filters::cdef_driver::cdefFrame(f.ctx);
+    CHECK(f.fbList[0].cdefCount == 64); // read from the cache, untouched
+    CHECK(f.rowCdef[1] == 1);
+    CHECK(f.recon8 != before); // the luma was actually filtered
+
+    // the composed comparison: the same inputs through the landed
+    // cdefApplyFb on a fresh recon copy
+    FrameFixture g(16, 16, 1, false);
+    g.recon8 = before; // the pre-call noise
+    l10_filters::CdefList dlist[64];
+    for (std::int32_t r = 0; r < 16; r += 2)
+        for (std::int32_t c = 0; c < 16; c += 2) {
+            dlist[(r / 2) * 8 + (c / 2)].by = static_cast<std::uint8_t>(r >> 1);
+            dlist[(r / 2) * 8 + (c / 2)].bx = static_cast<std::uint8_t>(c >> 1);
+        }
+    std::uint8_t rowFlags[8] = {1, 1, 1, 1, 1, 1, 1, 1}; // the memset(1) state
+    std::uint8_t dir[16][16] = {};
+    std::int32_t var[16][16] = {};
+    int dirinit = 1;
+    std::vector<std::uint8_t> src8(l10_filters::cdef_driver::kCdefInbufSize, 0x11);
+    std::vector<std::uint16_t> linebuf(3 * 144 + 16, 0x2222);
+    std::vector<std::uint16_t> colbuf(70 * 8, 0x3333);
+    l10_filters::cdefApplyFb(g.recon8.data(), 80, src8.data(), reinterpret_cast<std::uint8_t*>(linebuf.data()),
+        reinterpret_cast<std::uint8_t*>(colbuf.data()), rowFlags + 1, 0, 0, 1, 1, 0, 2, 2, 16, 16, 80, 64, 64, 0, 1, dir,
+        &dirinit, var, 0, dlist, 64, 47, 3, 0, 0, 0, 1, 1, 1, 1);
+    CHECK(f.recon8 == g.recon8);
+}
+
+TEST_CASE("cdefFrame qp-strength gate routes to the callback + dirinit 0") {
+    FrameFixture f(16, 16, 1, false);
+    f.ctx.useQpStrength = true;
+    f.ctx.cdefYStrength[0] = 47;
+    gCdefListCalls = 0;
+    f.ctx.computeCdefList = +[](CdefMb*, std::int32_t, std::int32_t, std::int32_t, l10_filters::CdefList* dlist,
+        int) -> std::int32_t {
+        ++gCdefListCalls;
+        for (std::int32_t r = 0; r < 16; r += 2)
+            for (std::int32_t c = 0; c < 16; c += 2) {
+                dlist[(r / 2) * 8 + (c / 2)].by = static_cast<std::uint8_t>(r >> 1);
+                dlist[(r / 2) * 8 + (c / 2)].bx = static_cast<std::uint8_t>(c >> 1);
+            }
+        return 64;
+    };
+    l10_filters::cdef_driver::cdefFrame(f.ctx);
+    CHECK(gCdefListCalls == 1);
+    CHECK(f.rowCdef[1] == 1);
+    // the noise recon was actually filtered (it differs from a no-op copy)
+    FrameFixture g(16, 16, 1, false);
+    CHECK(f.recon8 != g.recon8);
+}
+
+TEST_CASE("cdefFrame 16-bit sentinel path fills the frame-edge halos") {
+    FrameFixture f(16, 16, 1, true);
+    f.ctx.cdefYStrength[0] = 47;
+    f.fillDlistCache();
+    l10_filters::cdef_driver::cdefFrame(f.ctx);
+    CHECK(f.rowCdef[1] == 1);
+    const std::uint16_t sentinel = 0x7F7F;
+    // row 0 of the buffer is never written (the top halo lives at rows
+    // 1-2); the frameTop fill covers cols 6..hsize+9 of rows 1-2 and the
+    // frameLeft fill rows 1..vsize+5 of cols 6-7
+    CHECK(f.src16[0] == 0x1111);
+    CHECK(f.src16[1 * l10_filters::kCdefBstride + 6] == sentinel);
+    CHECK(f.src16[2 * l10_filters::kCdefBstride + 6] == sentinel);
+    // the body origin (row 3, col 8) carries the widened recon content;
+    // the body is eRbot x (eCright - eCs) = 64 x 64 recon cells
+    CHECK(f.src16[3 * l10_filters::kCdefBstride + 8] == f.recon16[0]);
+    CHECK(f.src16[3 * l10_filters::kCdefBstride + 8 + 63] == f.recon16[63]);
+    // col 72 (past the body) is inside the frameRight fill -> sentinel
+    CHECK(f.src16[3 * l10_filters::kCdefBstride + 72] == sentinel);
+    // the recon was written through the dst16 path (uint16 cells changed)
+    FrameFixture g(16, 16, 1, true);
+    CHECK(f.recon16 != g.recon16);
+    CHECK(f.recon16[0] <= 255); // clipped to the 8-bit range by the filter
+}
+
+TEST_CASE("cdefFrame chroma_filter_off skips the UV planes") {
+    FrameFixture f(32, 32, 3, false);
+    f.fillDlistCache();
+    for (int i = 0; i < l10_filters::cdef_driver::kCdefMaxStrengths; ++i) {
+        f.ctx.cdefYStrength[i] = 47;
+        f.ctx.cdefUvStrength[i] = 0;
+    }
+    std::vector<std::uint8_t> beforeU = f.recon8U;
+    std::vector<std::uint8_t> beforeV = f.recon8V;
+    l10_filters::cdef_driver::cdefFrame(f.ctx);
+    CHECK(f.recon8U == beforeU);
+    CHECK(f.recon8V == beforeV);
+    // the luma WAS filtered
+    FrameFixture g(32, 32, 3, false);
+    CHECK(f.recon8 != g.recon8);
+}
