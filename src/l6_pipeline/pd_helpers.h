@@ -80,6 +80,9 @@ constexpr std::uint8_t kGmDown16 = 2;
 constexpr std::uint8_t kGmAdapt0 = 3;
 constexpr std::uint8_t kGmAdapt1 = 4;
 
+// INVALID_REF = 0xF (mode_decision.h:206; the list1 table's fourth slot).
+constexpr std::int32_t kInvalidRef = 0xF;
+
 // SvtAv1FrameUpdateType ordinals (svt_av1.h; the A6C mirror's values).
 constexpr std::uint8_t kKfUpdate = 0;
 constexpr std::uint8_t kLfUpdate = 1;
@@ -118,6 +121,32 @@ void setupSkipModeAllowed(const PdPcsSkipMode& pcs, SkipModeInfo* out);
 // get_relative_dist (pd_process.c:87-:102). oh carries the
 // OrderHintInfo; a/b are the two order hints.
 std::int32_t getRelativeDist(const OrderHintInfo* oh, std::int32_t a, std::int32_t b);
+
+// svt_aom_get_gm_needed_resolutions (pd_process.c:992-:996): the three
+// downsampling needs per GmDsLevel.
+void getGmNeededResolutions(std::uint8_t ds_lvl, bool* gm_need_full, bool* gm_need_quart, bool* gm_need_sixteen);
+
+// The PictureParentControlSet/SequenceControlSet window
+// svt_aom_is_pic_skipped (:998-:1003) consumes.
+struct PdPcsSkipFlag {
+    std::uint8_t is_ref;                  // pcs->is_ref
+    std::uint8_t scs_rc_stat_gen_pass_mode;  // pcs->scs->rc_stat_gen_pass_mode
+    std::uint8_t first_frame_in_minigop;  // pcs->first_frame_in_minigop
+};
+
+// svt_aom_is_pic_skipped (pd_process.c:998-:1003).
+bool isPicSkipped(const PdPcsSkipFlag& pcs);
+
+// svt_aom_get_max_allocated_me_refs (pcs.c:88-:93): the ME allocation
+// sizing from the two used ref counts.
+void getMaxAllocatedMeRefs(std::uint8_t ref_count_used_list0, std::uint8_t ref_count_used_list1,
+                           std::uint8_t* max_ref_to_alloc, std::uint8_t* max_cand_to_alloc);
+
+// svt_get_ref_frame_type (mode_decision.c:279-:284): the to_ref_frame
+// table lookup. NAMED DUPLICATION: a file-local static twin already
+// exists at coding_loop_helpers.cpp getRefFrameType (the l6 TUs do not
+// share statics; the SYM1/l7-cannot-link-l13 precedent).
+std::int32_t getRefFrameType(std::uint8_t list, std::uint8_t ref_idx);
 
 }  // namespace pd
 }  // namespace pipeline

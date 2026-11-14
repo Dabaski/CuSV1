@@ -97,5 +97,35 @@ void setupSkipModeAllowed(const PdPcsSkipMode& pcs, SkipModeInfo* out) {
     }
 }
 
+// svt_aom_get_gm_needed_resolutions (pd_process.c:992-:996), verbatim.
+void getGmNeededResolutions(std::uint8_t ds_lvl, bool* gm_need_full, bool* gm_need_quart, bool* gm_need_sixteen) {
+    *gm_need_full = (ds_lvl == kGmFull) || (ds_lvl == kGmAdapt0);
+    *gm_need_quart = (ds_lvl == kGmDown) || (ds_lvl == kGmAdapt0) || (ds_lvl == kGmAdapt1);
+    *gm_need_sixteen = (ds_lvl == kGmDown16) || (ds_lvl == kGmAdapt1);
+}
+
+// svt_aom_is_pic_skipped (pd_process.c:998-:1003), verbatim.
+bool isPicSkipped(const PdPcsSkipFlag& pcs) {
+    if (!pcs.is_ref && pcs.scs_rc_stat_gen_pass_mode && !pcs.first_frame_in_minigop) {
+        return true;
+    }
+    return false;
+}
+
+// svt_aom_get_max_allocated_me_refs (pcs.c:88-:93), verbatim.
+void getMaxAllocatedMeRefs(std::uint8_t ref_count_used_list0, std::uint8_t ref_count_used_list1,
+                           std::uint8_t* max_ref_to_alloc, std::uint8_t* max_cand_to_alloc) {
+    *max_ref_to_alloc = ref_count_used_list0 + ref_count_used_list1;
+    *max_cand_to_alloc = ref_count_used_list0 + ref_count_used_list1 +
+        (ref_count_used_list0 * ref_count_used_list1) + (ref_count_used_list0 - 1) + (ref_count_used_list1 == 3 ? 1 : 0);
+}
+
+// svt_get_ref_frame_type (mode_decision.c:279-:284): to_ref_frame verbatim.
+std::int32_t getRefFrameType(std::uint8_t list, std::uint8_t ref_idx) {
+    static const std::int32_t to_ref_frame[2][4] = {{kLastFrame, kLast2Frame, kLast3Frame, kGoldenFrame},
+                                                    {kBwdrefFrame, kAltref2Frame, kAltrefFrame, kInvalidRef}};
+    return to_ref_frame[list][ref_idx];
+}
+
 }  // namespace pd
 }  // namespace pipeline

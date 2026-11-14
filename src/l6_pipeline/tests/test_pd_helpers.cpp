@@ -225,3 +225,81 @@ TEST_CASE("l6 pd setup_skip_mode_allowed bits=8 boundary bands") {
         CHECK(out.ref_frame_idx_1 == pd::kLastFrame + 4);
     }
 }
+
+// ---------------------------------------------------------------------------
+// PD1b: svt_aom_get_gm_needed_resolutions (pd_process.c:992-:996),
+// svt_aom_is_pic_skipped (:998-:1003), svt_aom_get_max_allocated_me_refs
+// (pcs.c:88-:93), svt_get_ref_frame_type (mode_decision.c:279-:284)
+// ---------------------------------------------------------------------------
+
+// Full GmDsLevel domain (0..4) - the three booleans per level, restated
+// as the truth table.
+TEST_CASE("l6 pd get_gm_needed_resolutions truth table over the full domain") {
+    // level: full, quart, sixteen (the reference expressions)
+    const int table[5][3] = {
+        {1, 0, 0},  // GM_FULL
+        {0, 1, 0},  // GM_DOWN
+        {0, 0, 1},  // GM_DOWN16
+        {1, 1, 0},  // GM_ADAPT_0
+        {0, 1, 1},  // GM_ADAPT_1
+    };
+    for (int lvl = 0; lvl <= 4; ++lvl) {
+        bool full = false, quart = false, sixteen = false;
+        pd::getGmNeededResolutions(static_cast<std::uint8_t>(lvl), &full, &quart, &sixteen);
+        CHECK(full == (table[lvl][0] != 0));
+        CHECK(quart == (table[lvl][1] != 0));
+        CHECK(sixteen == (table[lvl][2] != 0));
+    }
+}
+
+// 2^3 combination sweep over the is_pic_skipped gate.
+TEST_CASE("l6 pd is_pic_skipped gate over all flag combinations") {
+    for (int mask = 0; mask < 8; ++mask) {
+        const bool is_ref = (mask & 1) != 0;
+        const bool rc_stat = (mask & 2) != 0;
+        const bool first_frame = (mask & 4) != 0;
+        pd::PdPcsSkipFlag pcs{};
+        pcs.is_ref = is_ref ? 1 : 0;
+        pcs.scs_rc_stat_gen_pass_mode = rc_stat ? 1 : 0;
+        pcs.first_frame_in_minigop = first_frame ? 1 : 0;
+        const bool want = !is_ref && rc_stat && !first_frame;
+        CHECK(pd::isPicSkipped(pcs) == want);
+    }
+}
+
+// The me-refs allocator over the FULL 4x4 count domain (the callers cap
+// the counts at 4, pcs.h ref_count_used_list{0,1}); restated formula.
+TEST_CASE("l6 pd get_max_allocated_me_refs over the full 4x4 domain") {
+    for (int l0 = 0; l0 <= 4; ++l0) {
+        for (int l1 = 0; l1 <= 4; ++l1) {
+            std::uint8_t max_ref = 0, max_cand = 0;
+            pd::getMaxAllocatedMeRefs(static_cast<std::uint8_t>(l0), static_cast<std::uint8_t>(l1), &max_ref,
+                                      &max_cand);
+            const int want_ref = l0 + l1;
+            // The reference's uint8_t operands promote to int, so
+            // (l0 - 1) is -1 at l0 == 0 and the uint8 assignment wraps it
+            // to 255 - the oracle models the promotion + truncation.
+            const int want_cand = l0 + l1 + (l0 * l1) + (l0 - 1) + (l1 == 3 ? 1 : 0);
+            MESSAGE("l0=", l0, " l1=", l1, " ref=", static_cast<int>(max_ref), " want=", want_ref,
+                    " cand=", static_cast<int>(max_cand), " want=", want_cand);
+            CHECK(max_ref == want_ref);
+            CHECK(max_cand == static_cast<std::uint8_t>(want_cand));
+        }
+    }
+}
+
+// svt_get_ref_frame_type (mode_decision.c:279-:284): the to_ref_frame
+// table, restated. list0 = {LAST, LAST2, LAST3, GOLD}, list1 = {BWD,
+// ALT2, ALT, INVALID_REF}. All eight (list, idx) pairs enumerated.
+TEST_CASE("l6 pd get_ref_frame_type table over the full 2x4 domain") {
+    const int table[2][4] = {
+        {pd::kLastFrame, pd::kLast2Frame, pd::kLast3Frame, pd::kGoldenFrame},
+        {pd::kBwdrefFrame, pd::kAltref2Frame, pd::kAltrefFrame, pd::kInvalidRef},
+    };
+    for (int list = 0; list < 2; ++list) {
+        for (int idx = 0; idx < 4; ++idx) {
+            CHECK(pd::getRefFrameType(static_cast<std::uint8_t>(list), static_cast<std::uint8_t>(idx)) ==
+                  table[list][idx]);
+        }
+    }
+}
