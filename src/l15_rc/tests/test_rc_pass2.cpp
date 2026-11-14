@@ -824,3 +824,139 @@ TEST_CASE("svt_av1_new_framerate clamps below 0.1 and drives the update") {
         CHECK(rc.avgFrameBandwidth == 3000000);
     }
 }
+
+// ---- A9D S4: pass2_strategy.c frame_max_bits (:55-58) +
+// calculate_total_gf_group_bits (:186-220) ----
+
+TEST_CASE("frame_max_bits is the vbrmax share clipped to max_frame_bandwidth") {
+    // avg 10,000 * 190/100 = 19,000; the 50,000 ceiling does not bind.
+    {
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 10000;
+        rc.maxFrameBandwidth = 50000;
+        CHECK(l15_rc::frameMaxBits(rc, 190) == 19000);
+    }
+    {
+        // the ceiling binds: 19,000 > 10,000 -> 10,000.
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 10000;
+        rc.maxFrameBandwidth = 10000;
+        CHECK(l15_rc::frameMaxBits(rc, 190) == 10000);
+    }
+    {
+        // vbrmax 0: the product is 0, the CLIP3 low bound keeps 0.
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 10000;
+        rc.maxFrameBandwidth = 50000;
+        CHECK(l15_rc::frameMaxBits(rc, 0) == 0);
+    }
+}
+
+TEST_CASE("calculate_total_gf_group_bits walks the kf scaling and the clamps") {
+    // The oracle: (kf_group_bits * (gf_err / kf_error_left)) truncated, the
+    // three clamps, and the kf_group_bits -= total update.
+    {
+        // kf bits 1000, err left 500, gf err 250 -> 500 total; the kf pool
+        // drops to 500.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, 250.0) == 500);
+        CHECK(tp.kfGroupBits == 500);
+    }
+    {
+        // kf_group_bits <= 0: 0 total, and the pool does not move.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 0;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, 250.0) == 0);
+        CHECK(tp.kfGroupBits == 0);
+    }
+    {
+        // err_left <= 0: 0 total.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 0;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, 250.0) == 0);
+        CHECK(tp.kfGroupBits == 1000);
+    }
+    {
+        // the lap scaling branch: (lad_mg + 1) * 2^hier < intra_period.
+        // kf 1000 * min(frames_in_sw 30, frames_to_key 60) / 60 = 500, then
+        // * (250/500) = 250.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.framesToKey = 60;
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        // lad_mg 2, hier 3 -> 3*8 = 24 < 240.
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, true, 2, 3, 240, 30, 250.0) == 250);
+        CHECK(tp.kfGroupBits == 750);
+    }
+    {
+        // the lap gate NOT taken ((lad_mg+1)*2^hier == intra_period): the
+        // unscaled path. 3*8 = 24 == 24 -> no scaling.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.framesToKey = 60;
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, true, 2, 3, 24, 30, 250.0) == 500);
+    }
+    {
+        // negative result clamps to 0 (gf_err < 0).
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, -250.0) == 0);
+        CHECK(tp.kfGroupBits == 1000);
+    }
+    {
+        // above the kf pool: clamps at kf_group_bits (gf_err > err_left).
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, 2000.0) == 1000);
+        CHECK(tp.kfGroupBits == 0);
+    }
+    {
+        // the data-rate variability clip: max_bits * baseline_gf_interval.
+        // vbrmax 50: max_bits = 100000*50/100 = 50000; *8 = 400,000. The raw
+        // total is 800,000 (kf 1,000,000 * (400/500)); the clip binds.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 50, tp, false, 0, 0, 0, 0, 400.0) == 400000);
+        CHECK(tp.kfGroupBits == 600000);
+    }
+}

@@ -520,14 +520,34 @@ struct GfGroupStatsCarrier {
 // The TWO_PASS stats walk (firstpass.h:80-118): the FIRSTPASS_STATS read
 // window (twopass->stats_in .. stats_buf_ctx->stats_in_end) threaded as a
 // base pointer + count + walk position (input_stats pass2_strategy.c:37-45
-// and reset_fpf_position :33-35 ride it).
+// and reset_fpf_position :33-35 ride it), grown with the A9D group-bit
+// state fields.
 struct TwoPassCarrier {
     const FirstpassStatsCarrier* statsIn;  // twopass->stats_in (walk base)
     int statsInCount;                      // stats_in_end - stats_in_start
     int statsInPos;                        // the walk position
     bool hasTotalStats;                    // stats_buf_ctx->total_stats != NULL
     std::int64_t bitsLeft;                 // twopass->bits_left
+    std::int64_t kfGroupBits;              // twopass->kf_group_bits
+    std::int64_t kfGroupErrorLeft;         // twopass->kf_group_error_left
 };
+
+// frame_max_bits (pass2_strategy.c:55-58): verbatim; the
+// enc_ctx->two_pass_cfg.vbrmax_section wall threads. CLIP3(0, max,
+// value) = utility.h:101.
+int frameMaxBits(const RcControl& rc, int vbrmaxSection);
+
+// calculate_total_gf_group_bits (pass2_strategy.c:186-220): verbatim; the
+// walls thread (rc frames_to_key/baseline_gf_interval/avg+max frame
+// bandwidth; twopass kf_group_bits/kf_group_error_left - the carrier, and
+// the walk is not consumed here; the scs lap_rc/lad_mg/hierarchical_levels/
+// intra_period_length gates; pcs->frames_in_sw; the two_pass_cfg.
+// vbrmax_section wall for the frame_max_bits call). MUTATES
+// twopass.kfGroupBits (the -= total update). gfGroupErr is
+// gf_stats.gf_group_err.
+std::int64_t calculateTotalGfGroupBits(const RcControl& rc, int vbrmaxSection, TwoPassCarrier& twopass,
+                                       bool lapRc, int ladMg, int hierarchicalLevels, int intraPeriodLength,
+                                       int framesInSw, double gfGroupErr);
 
 // accumulate_this_frame_stats (pass2_strategy.c:168-171): verbatim.
 void accumulateThisFrameStats(const FirstpassStatsCarrier& stats, double modFrameErr,

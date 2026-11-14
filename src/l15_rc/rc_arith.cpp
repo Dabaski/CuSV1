@@ -3100,4 +3100,47 @@ bool rcHandleSuperres(int pass, int superresMode, int resizeMode, std::uint16_t 
     return false;
 }
 
+// ---- A9D: pass2_strategy.c (the GF group-bit allocation) ----
+
+// frame_max_bits (pass2_strategy.c:55-58): verbatim; CLIP3 (utility.h:101)
+// inlined.
+int frameMaxBits(const RcControl& rc, int vbrmaxSection) {
+    const std::int64_t maxBits = (std::int64_t)rc.avgFrameBandwidth * vbrmaxSection / 100;
+    return (int)(maxBits < 0 ? 0 : (maxBits > rc.maxFrameBandwidth ? rc.maxFrameBandwidth : maxBits));
+}
+
+// calculate_total_gf_group_bits (pass2_strategy.c:186-220): verbatim; the
+// two_pass_cfg.vbrmax_section wall threads for the frame_max_bits call.
+std::int64_t calculateTotalGfGroupBits(const RcControl& rc, int vbrmaxSection, TwoPassCarrier& twopass,
+                                       bool lapRc, int ladMg, int hierarchicalLevels, int intraPeriodLength,
+                                       int framesInSw, double gfGroupErr) {
+    const int maxBits = frameMaxBits(rc, vbrmaxSection);
+    std::int64_t totalGroupBits;
+    // Calculate the bits to be allocated to the group as a whole.
+    if ((twopass.kfGroupBits > 0) && (twopass.kfGroupErrorLeft > 0)) {
+        std::int64_t kfGroupBits;
+        if (lapRc && (ladMg + 1) * (1 << hierarchicalLevels) < intraPeriodLength) {
+            kfGroupBits = (std::int64_t)twopass.kfGroupBits * (framesInSw < rc.framesToKey ? framesInSw : rc.framesToKey) /
+                rc.framesToKey;
+        } else {
+            kfGroupBits = twopass.kfGroupBits;
+        }
+        totalGroupBits = (std::int64_t)(kfGroupBits * (gfGroupErr / twopass.kfGroupErrorLeft));
+    } else {
+        totalGroupBits = 0;
+    }
+
+    // Clamp odd edge cases.
+    totalGroupBits = (totalGroupBits < 0) ? 0
+        : (totalGroupBits > twopass.kfGroupBits) ? twopass.kfGroupBits
+                                                 : totalGroupBits;
+
+    // Clip based on user supplied data rate variability limit.
+    if (totalGroupBits > (std::int64_t)maxBits * rc.baselineGfInterval) {
+        totalGroupBits = (std::int64_t)maxBits * rc.baselineGfInterval;
+    }
+    twopass.kfGroupBits = twopass.kfGroupBits - totalGroupBits > 0 ? twopass.kfGroupBits - totalGroupBits : 0;
+    return totalGroupBits;
+}
+
 } // namespace l15_rc
