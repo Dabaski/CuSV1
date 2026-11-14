@@ -305,5 +305,49 @@ std::int8_t getSframeQpOffset(const SFramePositions& sframe_posi, std::uint64_t 
 // offset for SFRAME_DEC_POSI_BASE under RANDOM_ACCESS.
 std::int32_t sframePositionOffset(const PdScsCfg& scs, std::uint8_t sframe_mode);
 
+// ---------------------------------------------------------------------------
+// PD4: the ref-usage / ref-list-count helpers.
+// ---------------------------------------------------------------------------
+
+// svt_aom_is_pic_used_as_ref (pd_process.c:1772-:1804), the pure scalar
+// form (hierarchical_levels / temporal_layer / picture_index /
+// referencing_scheme / is_overlay).
+bool isPicUsedAsRef(std::uint32_t hierarchical_levels, std::uint32_t temporal_layer, std::uint32_t picture_index,
+                    std::uint32_t referencing_scheme, bool is_overlay);
+
+// svt_aom_is_incomp_mg_frame (pd_process.c:5006-:5008): LOW_DELAY pred
+// type under a RANDOM_ACCESS pred structure.
+bool isIncompMgFrame(std::uint8_t pred_type, std::uint8_t pred_structure);
+
+// The PictureParentControlSet window set_ref_list_counts
+// (:1806-:1901) consumes. frame_is_boosted(pcs) (enc_mode_config.h:108-
+// :110, the update_type fold) and svt_aom_is_incomp_mg_frame travel as
+// the is_base / is_incomp_mg scalars (the pcs-wall deviation named).
+struct PdPcsRefCounts {
+    std::uint8_t slice_type;
+    std::uint64_t ref_poc_array[7];  // Av1RpsNode.ref_poc_array
+    std::uint8_t base_ref_list0_count;
+    std::uint8_t base_ref_list1_count;
+    std::uint8_t non_base_ref_list0_count;
+    std::uint8_t non_base_ref_list1_count;
+    std::uint8_t is_base;       // frame_is_boosted(pcs)
+    std::uint8_t is_incomp_mg;  // svt_aom_is_incomp_mg_frame(pcs)
+    std::uint8_t is_overlay;
+    std::uint8_t pred_structure;  // scs->static_config.pred_structure
+    std::uint64_t picture_number;
+    std::uint64_t sframe_poc;     // ctx->sframe_poc
+    std::uint8_t ref_list0_count;  // out
+    std::uint8_t ref_list1_count;  // out
+};
+
+// set_ref_list_counts (pd_process.c:1806-:1901): the duplicate-POC walk
+// + the MrpCtrls caps.
+void setRefListCounts(PdPcsRefCounts& pcs);
+
+// update_ref_poc_array (pd_process.c:1903-:1911): ref_dpb_idx + the dpb
+// picture_number column (the DpbEntry flattening, the PdCtx deviation).
+void updateRefPocArray(const std::uint8_t* ref_dpb_idx, std::uint64_t* ref_poc_array,
+                       const std::uint64_t* dpb_picture_number);
+
 }  // namespace pd
 }  // namespace pipeline

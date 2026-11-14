@@ -808,3 +808,230 @@ TEST_CASE("l6 pd sframe_position_offset full domain") {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// PD4: svt_aom_is_pic_used_as_ref (:1772-:1804) + set_ref_list_counts
+// (:1806-:1901) + update_ref_poc_array (:1903-:1911)
+// ---------------------------------------------------------------------------
+
+// is_pic_used_as_ref: full hier x scheme x index x overlay domain with
+// the reference switch restated.
+TEST_CASE("l6 pd is_pic_used_as_ref over the full hier/scheme domain") {
+    for (int hier = 0; hier <= 6; ++hier) {
+        for (unsigned tl = 0; tl <= 4; ++tl) {
+            for (unsigned idx : {0u, 1u, 8u}) {
+                for (unsigned scheme = 0; scheme <= 2; ++scheme) {
+                    for (int overlay = 0; overlay <= 1; ++overlay) {
+                        bool want;
+                        if (overlay) {
+                            want = false;
+                        } else if (tl < static_cast<unsigned>(hier)) {
+                            want = true;
+                        } else {
+                            switch (hier) {
+                            case 0: want = true; break;
+                            case 1: want = scheme != 0; break;
+                            case 2:
+                            case 3: want = scheme == 0 ? false : (scheme == 1 ? true : idx == 0); break;
+                            case 4:
+                                want = scheme == 0 ? false : (scheme == 1 ? true : (idx == 0 || idx == 8));
+                                break;
+                            case 5: want = false; break;
+                            default: want = true; break;  // the assert branch falls to true
+                            }
+                        }
+                        CHECK(pd::isPicUsedAsRef(static_cast<std::uint32_t>(hier), tl, idx, scheme,
+                                                 overlay != 0) == want);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// set_ref_list_counts: every POC-alphabet configuration (3^7) x the mrp
+// cap domain x the base flag, against a restated walk. The S-frame skip
+// branch is exercised in its own case below.
+namespace {
+
+// Independent transcription of the reference walk (pd_process.c:1806-:1901).
+struct RefCounts {
+    int list0;
+    int list1;
+};
+
+RefCounts refListCountsOracle(int slice_type, const std::uint64_t* poc, int base_list0, int base_list1,
+                              int nonbase_list0, int nonbase_list1, bool is_base, bool incomp_mg, bool overlay,
+                              int pred_structure, std::uint64_t picture_number, std::uint64_t sframe_poc) {
+    if (slice_type == pd::kISlice) {
+        return {0, 0};
+    }
+    int list0_count = 1;
+    bool breakout = false;
+    for (int i = 1; i <= 3; ++i) {  // LAST2..GOLD
+        if (breakout) break;
+        for (int j = 0; j < i; ++j) {
+            if (poc[i] == poc[j]) {
+                breakout = true;
+                break;
+            }
+        }
+        if (!breakout) list0_count++;
+    }
+    const int l0 = list0_count < (is_base ? base_list0 : nonbase_list0)
+        ? list0_count
+        : (is_base ? base_list0 : nonbase_list0);
+    if (incomp_mg || overlay) {
+        return {l0, 0};
+    }
+    int list1_count = 0;
+    breakout = false;
+    for (int i = 4; i <= 6; ++i) {  // BWD..ALT
+        if (breakout) break;
+        for (int j = (i == 4) ? 1 : 0; j < i; ++j) {
+            if (j <= 3 && j + 1 > l0) continue;
+            if (pred_structure == pd::kPredRandomAccess && picture_number < sframe_poc && j <= 3 &&
+                poc[j] == sframe_poc) {
+                continue;
+            }
+            if (poc[i] == poc[j]) {
+                breakout = true;
+                break;
+            }
+        }
+        if (!breakout) list1_count++;
+    }
+    const int l1 = list1_count < (is_base ? base_list1 : nonbase_list1)
+        ? list1_count
+        : (is_base ? base_list1 : nonbase_list1);
+    return {l0, l1};
+}
+
+pd::PdPcsRefCounts makeCountsPcs(int slice_type, const std::uint64_t* poc, int base_list0, int base_list1,
+                                 int nonbase_list0, int nonbase_list1, bool is_base, bool incomp_mg, bool overlay,
+                                 int pred_structure, std::uint64_t picture_number, std::uint64_t sframe_poc) {
+    pd::PdPcsRefCounts pcs{};
+    pcs.slice_type = static_cast<std::uint8_t>(slice_type);
+    std::memcpy(pcs.ref_poc_array, poc, sizeof(pcs.ref_poc_array));
+    pcs.base_ref_list0_count = static_cast<std::uint8_t>(base_list0);
+    pcs.base_ref_list1_count = static_cast<std::uint8_t>(base_list1);
+    pcs.non_base_ref_list0_count = static_cast<std::uint8_t>(nonbase_list0);
+    pcs.non_base_ref_list1_count = static_cast<std::uint8_t>(nonbase_list1);
+    pcs.is_base = is_base ? 1 : 0;
+    pcs.is_incomp_mg = incomp_mg ? 1 : 0;
+    pcs.is_overlay = static_cast<std::uint8_t>(overlay);
+    pcs.pred_structure = static_cast<std::uint8_t>(pred_structure);
+    pcs.picture_number = picture_number;
+    pcs.sframe_poc = sframe_poc;
+    return pcs;
+}
+
+}  // namespace
+
+TEST_CASE("l6 pd set_ref_list_counts over the POC-alphabet x cap domain") {
+    const std::uint64_t alphabet[3] = {0, 77, 1234};
+    for (unsigned cfg = 0; cfg < 3u * 3u * 3u * 3u * 3u * 3u * 3u; ++cfg) {
+        std::uint64_t poc[7];
+        unsigned c = cfg;
+        for (int i = 0; i < 7; ++i) {
+            poc[i] = alphabet[c % 3];
+            c /= 3;
+        }
+        for (int cap = 0; cap <= 4; ++cap) {
+            for (int is_base = 0; is_base <= 1; ++is_base) {
+                const pd::PdPcsRefCounts pcs = makeCountsPcs(
+                    pd::kBSlice, poc, cap + 1, cap + 1, cap, cap, is_base != 0, false, false,
+                    pd::kPredLowDelay, 1000, 0);
+                const RefCounts want = refListCountsOracle(
+                    pd::kBSlice, poc, cap + 1, cap + 1, cap, cap, is_base != 0, false, false,
+                    pd::kPredLowDelay, 1000, 0);
+                pd::PdPcsRefCounts out = pcs;
+                pd::setRefListCounts(out);
+                CHECK(out.ref_list0_count == want.list0);
+                CHECK(out.ref_list1_count == want.list1);
+            }
+        }
+    }
+}
+
+TEST_CASE("l6 pd set_ref_list_counts I-slice + incomp-mg + overlay branches") {
+    std::uint64_t poc[7] = {10, 11, 12, 13, 14, 15, 16};
+    // I slice: (0, 0)
+    {
+        pd::PdPcsRefCounts out = makeCountsPcs(pd::kISlice, poc, 4, 4, 4, 4, true, false, false,
+                                               pd::kPredLowDelay, 0, 0);
+        pd::setRefListCounts(out);
+        CHECK(out.ref_list0_count == 0);
+        CHECK(out.ref_list1_count == 0);
+    }
+    // incomplete MG frame: list1 forced 0
+    {
+        pd::PdPcsRefCounts out = makeCountsPcs(pd::kBSlice, poc, 4, 4, 4, 4, true, true, false,
+                                               pd::kPredRandomAccess, 0, 0);
+        pd::setRefListCounts(out);
+        CHECK(out.ref_list0_count == 4);
+        CHECK(out.ref_list1_count == 0);
+    }
+    // overlay: list1 forced 0
+    {
+        pd::PdPcsRefCounts out = makeCountsPcs(pd::kBSlice, poc, 4, 4, 4, 4, true, false, true,
+                                               pd::kPredLowDelay, 0, 0);
+        pd::setRefListCounts(out);
+        CHECK(out.ref_list0_count == 4);
+        CHECK(out.ref_list1_count == 0);
+    }
+    // is_incomp_mg_frame predicate itself: LOW_DELAY pred_type under RA
+    // pred structure
+    CHECK(pd::isIncompMgFrame(pd::kPredLowDelay, pd::kPredRandomAccess));
+    CHECK(!pd::isIncompMgFrame(pd::kPredLowDelay, pd::kPredLowDelay));
+    CHECK(!pd::isIncompMgFrame(pd::kPredRandomAccess, pd::kPredRandomAccess));
+}
+
+TEST_CASE("l6 pd set_ref_list_counts s-frame RA skip branch") {
+    // RA + picture_number < sframe_poc + a GOLD-position poc equal to the
+    // sframe poc: the duplicate is SKIPPED, list1 keeps counting.
+    std::uint64_t poc[7] = {50, 51, 52, 53, 54, 55, 56};
+    poc[3] = 500;  // GOLD == sframe_poc
+    poc[4] = 500;  // BWD duplicates GOLD -> skipped by the s-frame branch
+    {
+        pd::PdPcsRefCounts out = makeCountsPcs(pd::kBSlice, poc, 4, 4, 4, 4, true, false, false,
+                                               pd::kPredRandomAccess, 100, 500);
+        pd::setRefListCounts(out);
+        // Oracle: j = 3 (GOLD) has poc 500 == sframe_poc and RA s-frame
+        // gate -> continue; j = 0..2 do not match 500; so BWD counts.
+        CHECK(out.ref_list1_count >= 1);
+        const RefCounts want = refListCountsOracle(pd::kBSlice, poc, 4, 4, 4, 4, true, false, false,
+                                                   pd::kPredRandomAccess, 100, 500);
+        CHECK(out.ref_list1_count == want.list1);
+    }
+    // Same array OUTSIDE the s-frame window (picture_number > sframe_poc):
+    // the dup is a real breakout.
+    {
+        pd::PdPcsRefCounts out = makeCountsPcs(pd::kBSlice, poc, 4, 4, 4, 4, true, false, false,
+                                               pd::kPredRandomAccess, 600, 500);
+        pd::setRefListCounts(out);
+        const RefCounts want = refListCountsOracle(pd::kBSlice, poc, 4, 4, 4, 4, true, false, false,
+                                                   pd::kPredRandomAccess, 600, 500);
+        CHECK(out.ref_list1_count == want.list1);
+        CHECK(out.ref_list1_count == 0);
+    }
+}
+
+// update_ref_poc_array: the seven reads over a swept dpb.
+TEST_CASE("l6 pd update_ref_poc_array reads the dpb positions") {
+    std::uint64_t dpb_poc[8];
+    for (int i = 0; i < 8; ++i) dpb_poc[i] = 3000u + static_cast<std::uint32_t>(i) * 7u;
+    for (unsigned mask = 0; mask < 256; ++mask) {
+        std::uint8_t idx[7];
+        unsigned c = mask;
+        for (int i = 0; i < 7; ++i) {
+            idx[i] = static_cast<std::uint8_t>(c % 8);
+            c /= 8;
+        }
+        std::uint64_t poc[7] = {0, 0, 0, 0, 0, 0, 0};
+        pd::updateRefPocArray(idx, poc, dpb_poc);
+        for (int i = 0; i < 7; ++i) {
+            CHECK(poc[i] == dpb_poc[idx[i]]);
+        }
+    }
+}

@@ -454,5 +454,136 @@ std::int32_t sframePositionOffset(const PdScsCfg& scs, std::uint8_t sframe_mode)
     return (sframe_mode == kSframeDecPosiBase && scs.pred_structure == kPredRandomAccess) ? 1 : 0;
 }
 
+// ---------------------------------------------------------------------------
+// PD4: the ref-usage / ref-list-count helpers.
+// ---------------------------------------------------------------------------
+
+// svt_aom_is_pic_used_as_ref (pd_process.c:1772-:1804), verbatim.
+bool isPicUsedAsRef(std::uint32_t hierarchical_levels, std::uint32_t temporal_layer, std::uint32_t picture_index,
+                    std::uint32_t referencing_scheme, bool is_overlay) {
+    if (is_overlay) {
+        return false;
+    }
+
+    // Frames below top layer are always used as ref
+    if (temporal_layer < hierarchical_levels) {
+        return true;
+    }
+
+    switch (hierarchical_levels) {
+    case 0:
+        return true;
+    case 1:
+        return referencing_scheme == 0 ? false : true;
+    case 2:
+        return referencing_scheme == 0 ? false : referencing_scheme == 1 ? true : (picture_index == 0);
+    case 3:
+        return referencing_scheme == 0 ? false : referencing_scheme == 1 ? true : (picture_index == 0);
+    case 4:
+        return referencing_scheme == 0 ? false
+            : referencing_scheme == 1  ? true
+                                       : (picture_index == 0 || picture_index == 8);
+    case 5:
+        return false;
+    default:
+        assert(0 && "Invalid hierarchical structure\n");
+        break;
+    }
+
+    return true;
+}
+
+// svt_aom_is_incomp_mg_frame (pd_process.c:5006-:5008), verbatim.
+bool isIncompMgFrame(std::uint8_t pred_type, std::uint8_t pred_structure) {
+    return (pred_type == kPredLowDelay && pred_structure == kPredRandomAccess);
+}
+
+// set_ref_list_counts (pd_process.c:1806-:1901), verbatim over the
+// carrier. The REF_FRAME_MINUS1 walk (LAST 0..ALT 6).
+void setRefListCounts(PdPcsRefCounts& pcs) {
+    if (pcs.slice_type == kISlice) {
+        pcs.ref_list0_count = 0;
+        pcs.ref_list1_count = 0;
+        return;
+    }
+
+    const bool is_base = pcs.is_base != 0;
+
+    // Get list0 count
+    std::uint8_t list0_count = 1;
+    bool breakout_flag = false;
+    // When have duplicate refs in same list or get invalid ref, cap the count
+    for (std::int32_t i = 1; i <= 3; ++i) {  // LAST2..GOLD
+        if (breakout_flag) {
+            break;
+        }
+        for (std::int32_t j = 0; j < i; ++j) {  // LAST..i-1
+            if (pcs.ref_poc_array[i] == pcs.ref_poc_array[j]) {
+                breakout_flag = true;
+                break;
+            }
+        }
+        // if no matching reference were found, increase the count
+        if (!breakout_flag) {
+            list0_count++;
+        }
+    }
+    const std::uint8_t l0_cap = is_base ? pcs.base_ref_list0_count : pcs.non_base_ref_list0_count;
+    pcs.ref_list0_count = list0_count < l0_cap ? list0_count : l0_cap;
+
+    if (pcs.is_incomp_mg || pcs.is_overlay) {
+        pcs.ref_list1_count = 0;
+        return;
+    }
+
+    // Get list1 count
+    std::uint8_t list1_count = 0;
+    breakout_flag = false;
+    // When have duplicate refs in both lists or get invalid ref, cap the count
+    for (std::int32_t i = 4; i <= 6; ++i) {  // BWD..ALT
+        if (breakout_flag) {
+            break;
+        }
+        // BWD and LAST are allowed to have matching references, as in base layer
+        for (std::int32_t j = (i == 4) ? 1 : 0; j < i; ++j) {
+            if (j <= 3 && j + 1 > pcs.ref_list0_count) {
+                continue;
+            }
+            // in S-Frame of RA mode, since the ref_list0 will be pruned in
+            // set_all_ref_frame_type(), the rest frames in S-Frame miniGop
+            // should not remove the duplicated ref_list1, which causes no
+            // ref frames in ref_list1, skip the following check only for
+            // S-Frame miniGOP
+            if (pcs.pred_structure == kPredRandomAccess && pcs.picture_number < pcs.sframe_poc && j <= 3 &&
+                pcs.ref_poc_array[j] == pcs.sframe_poc) {
+                continue;
+            }
+            if (pcs.ref_poc_array[i] == pcs.ref_poc_array[j]) {
+                breakout_flag = true;
+                break;
+            }
+        }
+        // if no matching reference were found, increase the count
+        if (!breakout_flag) {
+            list1_count++;
+        }
+    }
+    const std::uint8_t l1_cap = is_base ? pcs.base_ref_list1_count : pcs.non_base_ref_list1_count;
+    pcs.ref_list1_count = list1_count < l1_cap ? list1_count : l1_cap;
+}
+
+// update_ref_poc_array (pd_process.c:1903-:1911), verbatim over the
+// flattened dpb column.
+void updateRefPocArray(const std::uint8_t* ref_dpb_idx, std::uint64_t* ref_poc_array,
+                       const std::uint64_t* dpb_picture_number) {
+    ref_poc_array[0] = dpb_picture_number[ref_dpb_idx[0]];
+    ref_poc_array[1] = dpb_picture_number[ref_dpb_idx[1]];
+    ref_poc_array[2] = dpb_picture_number[ref_dpb_idx[2]];
+    ref_poc_array[3] = dpb_picture_number[ref_dpb_idx[3]];
+    ref_poc_array[4] = dpb_picture_number[ref_dpb_idx[4]];
+    ref_poc_array[5] = dpb_picture_number[ref_dpb_idx[5]];
+    ref_poc_array[6] = dpb_picture_number[ref_dpb_idx[6]];
+}
+
 }  // namespace pd
 }  // namespace pipeline
