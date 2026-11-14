@@ -875,3 +875,202 @@ TEST_CASE("rc_handle_superres gates, the segment reset and the release walk") {
         CHECK(releaseHead == true);
     }
 }
+
+// ---- A9D S13: rc_process.c generate_sb_qindex (:738-753) +
+// rc_process_packetization_feedback (:756-811) ----
+
+TEST_CASE("generate_sb_qindex composes the three landed primitives") {
+    // 4 SBs, all variances 0 -> rcInitSbQindex writes the base qindex
+    // everywhere; the normalize gate and the map gate route on the flags.
+    static const std::uint16_t varRow[4] = {0, 0, 0, 0};
+    static const std::uint16_t* varRows[1] = {varRow};
+    const std::uint16_t* const* var = varRows;
+    l15_rc::CrRefreshCarrier cr{};
+    cr.applyCyclicRefresh = 0;
+    l15_rc::FrameHdrCarrier hdr{};
+    hdr.baseQIdx = 120;
+    hdr.deltaQPresent = true;
+    hdr.deltaQRes = 2;
+    l15_rc::MeStatCarrier me = drvMe();
+    static const std::uint32_t costVar[1] = {5000};  // the map walk reads it
+    me.me8x8CostVariance = costVar;
+    me.b64TotalCount = 1;
+    std::uint8_t sbQ[4] = {7, 7, 7, 7};
+    std::uint8_t b64Map[4] = {7, 7, 7, 7};
+
+    l15_rc::generateSbQindex(l15_rc::kRcCbr, cr, hdr, sbQ, var, 4, me, false, 0, 8, 0, 0, 0, false, 0.0, 4, 4,
+                             false, true, l15_rc::kBslice, 1, b64Map);
+
+    // rcInitSbQindex wrote the base qindex (no CR, no boost).
+    CHECK(sbQ[0] == 120);
+    CHECK(sbQ[3] == 120);
+    // FINDING (the reference's own dead site): rc_init_sb_qindex CLEARS
+    // delta_q_present first (rc_aq.c:599), so the composition's normalize
+    // gate (delta_q_present && res != 1) never fires - the arm is
+    // unreachable by the reference's own ordering. The port reproduces it:
+    // the flag is FALSE after the composition.
+    CHECK(hdr.deltaQPresent == false);
+    // the stats-based map: sliceType B, layer 1 -> the landed
+    // generateB64MeQindexMap writes per its own rule (nonzero here).
+    CHECK(b64Map[0] != 7);  // the map walk overwrote the poison
+    {
+        // res == 1: the normalize arm would skip anyway (the dead site) -
+        // the map still runs.
+        std::uint8_t sbQ2[4] = {7, 7, 7, 7};
+        l15_rc::FrameHdrCarrier hdr2{};
+        hdr2.baseQIdx = 100;
+        hdr2.deltaQPresent = true;
+        hdr2.deltaQRes = 1;
+        l15_rc::generateSbQindex(l15_rc::kRcCbr, cr, hdr2, sbQ2, var, 4, me, false, 0, 8, 0, 0, 0, false, 0.0, 4, 4,
+                                 false, true, l15_rc::kBslice, 1, b64Map);
+        CHECK(hdr2.deltaQPresent == false);
+        CHECK(sbQ2[0] == 100);
+    }
+    {
+        // delta_q_present false: the normalize arm skips; the map gate off:
+        // the map stays the poison.
+        std::uint8_t sbQ3[4] = {7, 7, 7, 7};
+        std::uint8_t map3[4] = {7, 7, 7, 7};
+        l15_rc::FrameHdrCarrier hdr3{};
+        hdr3.baseQIdx = 90;
+        hdr3.deltaQPresent = false;
+        l15_rc::generateSbQindex(l15_rc::kRcCbr, cr, hdr3, sbQ3, var, 4, me, false, 0, 8, 0, 0, 0, false, 0.0, 4, 4,
+                                 false, false, l15_rc::kBslice, 1, map3);
+        CHECK(sbQ3[0] == 90);
+        CHECK(map3[0] == 7);
+    }
+}
+
+TEST_CASE("rc_process_packetization_feedback routes the four postencode paths") {
+    {
+        // the VBR + gop_constraint path: the param reset walk + BOTH
+        // postencode twins (the param's vbr_bits_off_target moves twice).
+        l15_rc::RcControl rc = drvRc();
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcVbr;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.isOverlay = false;
+        pcs.baseFrameTarget = 1000;
+        pcs.projectedFrameSize = 800;
+        pcs.totalNumBits = 800;
+        pcs.baseQIdx = 120;
+        pcs.layerDepth = 2;
+        pcs.showableFrame = false;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.size = 3;
+        param.processedFrameNumber = 2;
+        param.totalActualBits = 1000;
+        param.totalTargetBits = 2000;
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, false, true,
+                                               false, false, false);
+        // the count walk: 2 -> 3 == size -> the RESET fired.
+        CHECK(param.processedFrameNumber == 0);
+        CHECK(param.size == -1);
+        // postencodeUpdateGopConst does NOT touch param.vbr_bits_off_target
+        // (the rc_vbr_cbr twin handles rate factors/rolling); the twopass
+        // twin adds 1000-800 once.
+        CHECK(param.vbrBitsOffTarget == 200);
+        // updateRcCounts: showable false -> frames_since_key unchanged.
+        CHECK(rc.framesSinceKey == 8);
+    }
+    {
+        // the VBR non-gop path: the rc-side twins (rc.vbr_bits_off_target).
+        l15_rc::RcControl rc = drvRc();
+        rc.totalActualBits = 1000;
+        rc.totalTargetBits = 2000;
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcVbr;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.isOverlay = false;
+        pcs.baseFrameTarget = 1000;
+        pcs.projectedFrameSize = 800;
+        pcs.totalNumBits = 800;
+        pcs.baseQIdx = 120;
+        pcs.layerDepth = 2;
+        pcs.showableFrame = false;
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, false, false,
+                                               false, false, false);
+        CHECK(rc.vbrBitsOffTarget == 200);
+        // updateRcCounts ran (showable false: nothing moves).
+        CHECK(rc.framesSinceKey == 8);
+    }
+    {
+        // the overlay gate: the param count does NOT move, but the routing
+        // still runs.
+        l15_rc::RcControl rc = drvRc();
+        rc.totalActualBits = 1000;
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcVbr;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.isOverlay = true;
+        pcs.baseFrameTarget = 1000;
+        pcs.projectedFrameSize = 800;
+        pcs.totalNumBits = 800;
+        pcs.baseQIdx = 120;
+        pcs.layerDepth = 2;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.processedFrameNumber = 2;
+        param.size = 3;
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, false, false,
+                                               false, false, false);
+        CHECK(param.processedFrameNumber == 2);  // NOT incremented
+        CHECK(rc.vbrBitsOffTarget == 200);       // the routing ran
+    }
+    {
+        // the AOM_Q path: NOTHING runs (the parked stat-calc call site) -
+        // no param count, no rc movement.
+        l15_rc::RcControl rc = drvRc();
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcQ;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.isOverlay = false;
+        pcs.showableFrame = true;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.processedFrameNumber = 2;
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, false, false,
+                                               true, false, false);
+        CHECK(param.processedFrameNumber == 3);  // the count walk ran
+        CHECK(rc.vbrBitsOffTarget == 0);         // no postencode twin
+        CHECK(rc.framesSinceKey == 8);           // updateRcCounts NOT called (the Q path)
+    }
+    {
+        // the RTC-CBR path: postencodeUpdateRtcCbr folds the qindex.
+        l15_rc::RcControl rc = drvRc();
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcCbr;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.frameType = l15_rc::kKeyFrame;
+        pcs.isOverlay = false;
+        pcs.baseQIdx = 120;
+        pcs.totalNumBits = 800;
+        pcs.showableFrame = false;
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        const int q0Before = rc.avgFrameQindex[0];
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, true, false,
+                                               false, false, false);
+        // the KEY-frame fold: (3*q0 + 120 + 2) >> 2.
+        CHECK(rc.avgFrameQindex[0] == (int)l15_rc::roundPowerOfTwo(3 * q0Before + 120, 2));
+        CHECK(rc.framesSinceKey == 0);
+    }
+}

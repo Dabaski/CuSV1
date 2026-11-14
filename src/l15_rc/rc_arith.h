@@ -905,6 +905,45 @@ void processLadQueue(LadQueueCarrier& queue, std::uint32_t& queueHead, bool pass
                      int headEncMode, int headInputResolution, int tplLadMg, int scsHierarchicalLevels,
                      int startupMgSize, std::uint64_t lastIdrPicture, LadGroupOutputs& out);
 
+// ---- A9D: rc_process.c (the sb-qindex composition + the packetization
+// feedback routing) ----
+
+// forward declarations: the carriers are declared with the AQ-series below
+// (the S13 composition sits earlier in the header than they do).
+struct CrRefreshCarrier;
+struct MeStatCarrier;
+struct FrameHdrCarrier;
+
+// generate_sb_qindex (rc_process.c:738-753): the composition driver over
+// THREE landed primitives - rcInitSbQindex (AQ8), normalizeSbDeltaQ (AQ9,
+// gated on delta_q_present && delta_q_res != 1) and generateB64MeQindexMap
+// (gated on the stats_based_sb_lambda_modulation wall). The walls thread
+// exactly as the landed callees do.
+void generateSbQindex(int rcMode, CrRefreshCarrier& cr, FrameHdrCarrier& hdr, std::uint8_t* sbQindex,
+                      const std::uint16_t* const* variance, std::uint16_t pcsSbTotalCount,
+                      const MeStatCarrier& me, bool enableVarianceBoost, int varianceBoostStrength,
+                      int encoderBitDepth, std::uint8_t varianceOctile, std::uint8_t varianceBoostCurve,
+                      int aqMode, bool tplEnable, double r0, std::uint16_t scsSbTotalCount,
+                      std::uint16_t ppcsB64TotalCount, bool superresOrResize,
+                      bool statsBasedSbLambdaModulation, int sliceType, int temporalLayerIndex,
+                      std::uint8_t* b64MeQindex);
+
+// rc_process_packetization_feedback (rc_process.c:756-811): the routing
+// driver. NAMED PARKS: the svt_block_on_mutex/svt_release_mutex pair
+// (:763, :770), the svt_av1_coded_frames_stat_calc call site (:776, the
+// rc_crf_cqp coded-frames stat queue walk) and the object releases
+// (:800-810) - dropped; the overlay gate, the rc_param count/reset walk
+// and the FULL postencode routing port. use_rtc_cbr_path (rc_process.c,
+// rc_cfg->mode == AOM_CBR && static_config.rtc) threads as useRtcCbrPath;
+// the scs->is_short_clip and the resize_mode == RESIZE_DYNAMIC gates
+// thread (the landed callees consume them); the VBR twopass routing
+// consumes the landed S10 twins.
+void rcProcessPacketizationFeedback(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                                    const CrRefreshCarrier& cr, RcIntervalParamCarrier& rcParam,
+                                    TwoPassCarrier& twopass, std::uint16_t b64TotalCount, int bitDepth,
+                                    int& frameUpdated, bool useRtcCbrPath, bool gopConstraintRc,
+                                    bool maxBitRate, bool isShortClip, bool resizeDynamic);
+
 // MINQ_ADJ_LIMIT (rc_process.h:22) / HIGH_UNDERSHOOT_RATIO (:23).
 constexpr int kMinqAdjLimit = 48;
 constexpr int kHighUndershootRatio = 2;

@@ -4271,4 +4271,79 @@ void processLadQueue(LadQueueCarrier& queue, std::uint32_t& queueHead, bool pass
     }
 }
 
+// ---- A9D: rc_process.c (the sb-qindex composition + the packetization
+// feedback routing) ----
+
+// generate_sb_qindex (rc_process.c:738-753): verbatim composition.
+void generateSbQindex(int rcMode, CrRefreshCarrier& cr, FrameHdrCarrier& hdr, std::uint8_t* sbQindex,
+                      const std::uint16_t* const* variance, std::uint16_t pcsSbTotalCount,
+                      const MeStatCarrier& me, bool enableVarianceBoost, int varianceBoostStrength,
+                      int encoderBitDepth, std::uint8_t varianceOctile, std::uint8_t varianceBoostCurve,
+                      int aqMode, bool tplEnable, double r0, std::uint16_t scsSbTotalCount,
+                      std::uint16_t ppcsB64TotalCount, bool superresOrResize,
+                      bool statsBasedSbLambdaModulation, int sliceType, int temporalLayerIndex,
+                      std::uint8_t* b64MeQindex) {
+    rcInitSbQindex(rcMode, cr, hdr, sbQindex, variance, pcsSbTotalCount, me, enableVarianceBoost,
+                   varianceBoostStrength, encoderBitDepth, varianceOctile, varianceBoostCurve, aqMode, tplEnable,
+                   r0);
+
+    if (hdr.deltaQPresent && hdr.deltaQRes != 1) {
+        // adjust delta q res and normalize superblock delta q values to
+        // reduce signaling overhead
+        normalizeSbDeltaQ(hdr, sbQindex, scsSbTotalCount, ppcsB64TotalCount, superresOrResize);
+    }
+
+    // Derive a QP per 64x64 using ME distortions (to be used for lambda
+    // modulation only; not at Q/Q-1)
+    if (statsBasedSbLambdaModulation) {
+        generateB64MeQindexMap(hdr, me, b64MeQindex, sliceType, temporalLayerIndex);
+    }
+}
+
+// rc_process_packetization_feedback (rc_process.c:756-811): verbatim
+// routing; the parked call sites are named in the header.
+void rcProcessPacketizationFeedback(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                                    const CrRefreshCarrier& cr, RcIntervalParamCarrier& rcParam,
+                                    TwoPassCarrier& twopass, std::uint16_t b64TotalCount, int bitDepth,
+                                    int& frameUpdated, bool useRtcCbrPath, bool gopConstraintRc,
+                                    bool maxBitRate, bool isShortClip, bool resizeDynamic) {
+    // Prevent double counting frames with overlay
+    // (the rc_param_queue_mutex pair - the named park.)
+    if (!ppcs.isOverlay) {
+        rcParam.processedFrameNumber++;
+
+        // check if all the frames in the interval have arrived
+        if (rcParam.size == rcParam.processedFrameNumber) {
+            rcParamReset(rcParam);
+        }
+    }
+
+    if (rcCfg.mode == kRcQ) {
+        // (the AOM_Q + max_bit_rate svt_av1_coded_frames_stat_calc call
+        // site - the named park; nothing else happens on this path.)
+        (void)maxBitRate;
+    } else {
+        if (useRtcCbrPath) {
+            postencodeUpdateRtcCbr(rc, rcCfg, ppcs, cr, b64TotalCount, bitDepth, resizeDynamic);
+        } else {
+            if (gopConstraintRc) {
+                postencodeUpdateGopConst(rc, rcCfg, ppcs, cr, rcParam, b64TotalCount, bitDepth, frameUpdated);
+                // Qindex calculating
+                if (rcCfg.mode == kRcVbr) {
+                    twopassPostencodeUpdateGopConst(rc, rcCfg, rcParam, ppcs, isShortClip, ppcs.layerDepth);
+                }
+            } else {
+                postencodeUpdate(rc, rcCfg, ppcs, cr, b64TotalCount, bitDepth, frameUpdated);
+                // Qindex calculating
+                if (rcCfg.mode == kRcVbr) {
+                    twopassPostencodeUpdate(rc, rcCfg, twopass, ppcs, isShortClip, ppcs.layerDepth);
+                }
+            }
+        }
+        updateRcCounts(rc, ppcs);
+    }
+
+    // (the object releases - the named park.)
+}
+
 } // namespace l15_rc
