@@ -616,33 +616,25 @@ TEST_CASE("process_lad_queue pass_thru and the end-of-sequence clamp") {
         CHECK(out.extGroupSize == 0);
     }
     {
-        // the EOS clamp: a TWO-MG queue (frames 0-5, MG0 at 0-2, MG1 at 3-5)
-        // with the flag on frame 3, and frame 3 at layer 1 so it never
-        // becomes a head (exactly ONE store runs). Head 0's walk clamps
-        // target to MIN(2, mg1-mg0+1 = 2) = 2 -> the store fires at frame 5
-        // with end_mg 1 -> ext 6 / tpl 6 / params ready 0..5. (The +1 is
-        // the "include the head's MG" term: dropping it clamps to 1 and the
-        // store fires at frame 2 with ext 3 / tpl 3 / ready 0..2 - the
-        // discriminator.) Frame 0's end_of_sequence_region = true.
+        // the EOS clamp's +1 ("include the MG where the head belongs"): a
+        // TRUNCATED window makes it observable. Queue = frames 0..3 (MG0
+        // complete at 0-2; MG1 holds ONLY frame 3, ext_mg_size 3 - it can
+        // never complete) with the flag on frame 3 (layer 1, not a head).
+        // The reference: span = 1-0+1 = 2 -> target stays 2; MG1 never
+        // completes -> num_mgs 1 != 2 -> NO SEND: the head STAYS at 0 and
+        // no store runs. (Dropping the +1 clamps to 1 -> the store fires at
+        // frame 3 with ext 4 and the queue drains - the discriminator.)
         ladFill();
-        ladQueue[6] = nullptr;  // the two-MG window ends after frame 5
+        ladQueue[4] = nullptr;  // the truncated window
         ladPcs[3].endOfSequenceFlag = true;
-        ladPcs[3].temporalLayerIndex = 1;  // not a head
+        ladPcs[3].temporalLayerIndex = 1;
         l15_rc::LadGroupOutputs out = ladOut();
         l15_rc::LadQueueCarrier q = ladCarrier();
         std::uint32_t head = 0;
         l15_rc::processLadQueue(q, head, false, 1, 8, l15_rc::kInputSize4KRange, 1, 2, 0, 0, out);
-        CHECK(ladPcs[0].endOfSequenceRegion == true);
-        CHECK(head == 6);
-        for (int i = 0; i < 6; ++i) CHECK(ladQueue[i] == nullptr);
-        // the single store (frame 0's, end_mg 1): ext [0..5] = 6;
-        // limited MIN(9, 6) = 6; the reduced-0 head validates only the
-        // layer-0 member (frame 0 - frame 3 rides at layer 1 here).
-        CHECK(out.extGroupSize == 6);
-        CHECK(out.extGroup[0] == &ladPcs[0]);
-        CHECK(out.tplGroupSize == 6);
-        CHECK(out.usedTplFrameNum == 1);
-        // the params walk covered frames 0..5.
-        for (int i = 0; i < 6; ++i) CHECK(ladPcs[i].tplParamsReady == true);
+        CHECK(head == 0);
+        CHECK(ladQueue[0] == &ladPcs[0]);
+        CHECK(out.extGroupSize == 0);
+        CHECK(ladPcs[0].endOfSequenceRegion == true);  // the clamp still writes the region
     }
 }
