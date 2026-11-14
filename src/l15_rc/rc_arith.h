@@ -780,17 +780,48 @@ struct TplGroupPicView {
 };
 
 // is_frame_already_exists (initial_rc_process.c:161-168): verbatim; the
-// walk is over the first endIndex members only.
-bool isFrameAlreadyExists(const TplGroupPicView* tplGroup, int endIndex, std::uint64_t picNum);
+// walk is over the first endIndex members only (a pointer array - the
+// reference dereferences pcs->tpl_group[i]). TEMPLATED on the member view
+// type: the same body serves TplGroupPicView and LadPcsView (which extends
+// it) - the reference passes the same pcs pointers to both.
+template <typename View>
+bool isFrameAlreadyExists(const View* const* tplGroup, int endIndex, std::uint64_t picNum) {
+    for (int i = 0; i < endIndex; i++) {
+        if (tplGroup[i]->pictureNumber == picNum) {
+            return true;
+        }
+    }
+    return false;
+}
 
-// validate_pic_for_tpl (initial_rc_process.c:171-188): verbatim; the head
-// pcs walls thread: tpl_ctrls.reduced_tpl_group (the carrier), the
-// tpl_valid_pic[] byte array and used_tpl_frame_num (both head-pcs state
-// the reference mutates). NOTE the reference indexes tpl_valid_pic by the
-// EXTEND-group index (pic_index), not by the tpl-group index - the caller
+// validate_pic_for_tpl (initial_rc_process.c:171-188): verbatim (the same
+// template note as isFrameAlreadyExists). The head pcs walls thread:
+// tpl_ctrls.reduced_tpl_group (the carrier), the tpl_valid_pic[] byte array
+// and used_tpl_frame_num (both head-pcs state the reference mutates). NOTE
+// the reference indexes tpl_valid_pic by the EXTEND-group index
+// (pic_index), not by the tpl-group index - the caller
 // (store_extended_group) passes the ext-group index i.
-void validatePicForTpl(const TplControlsCarrier& tplCtrls, const TplGroupPicView* tplGroup,
-                       std::uint8_t* tplValidPic, std::uint32_t& usedTplFrameNum, int picIndex);
+template <typename View>
+void validatePicForTpl(const TplControlsCarrier& tplCtrls, const View* const* tplGroup,
+                       std::uint8_t* tplValidPic, std::uint32_t& usedTplFrameNum, int picIndex) {
+    // Check whether the i-th pic already exists in the tpl group
+    if (!isFrameAlreadyExists(tplGroup, picIndex, tplGroup[picIndex]->pictureNumber) &&
+        // In the middle pass when rc_stat_gen_pass_mode is set, pictures in
+        // the highest temporal layer are skipped, except the first one. The
+        // condition is added to prevent validating these frames for tpl
+        !tplGroup[picIndex]->picSkipped) {
+        // Discard low important pictures from tpl group
+        if (tplCtrls.reducedTplGroup >= 0) {
+            if (tplGroup[picIndex]->temporalLayerIndex <= tplCtrls.reducedTplGroup) {
+                tplValidPic[picIndex] = 1;
+                usedTplFrameNum++;
+            }
+        } else {
+            tplValidPic[picIndex] = 1;
+            usedTplFrameNum++;
+        }
+    }
+}
 
 // set_tpl_params (initial_rc_process.c:319-401): verbatim; the scs->
 // input_resolution wall threads. Writes every TplControlsCarrier field per
@@ -806,6 +837,73 @@ void setTplParams(TplControlsCarrier& tplCtrls, int tplLevel, int inputResolutio
 int setTplGroup(TplControlsCarrier& tplCtrls, bool hasPcs, int sliceType, int hierarchicalLevels,
                 int inputResolution, int tplGroupLevel, int sourceWidth, int sourceHeight, bool tplLadMg,
                 int rateControlMode);
+
+// ---- A9D: initial_rc_process.c (the LAD queue) ----
+
+// LadPcsView: the PictureParentControlSet surface the LAD walk consumes and
+// writes. It EXTENDS TplGroupPicView (the S11 member view) so the landed
+// isFrameAlreadyExists / validatePicForTpl consume it directly - the
+// reference passes the same pcs pointers to both. The cross-file predicate
+// twins (pd_process.c) thread as booleans.
+struct LadPcsView : TplGroupPicView {
+    std::int64_t extMgId;         // pcs->ext_mg_id
+    std::uint32_t extMgSize;      // pcs->ext_mg_size
+    bool endOfSequenceFlag;       // pcs->end_of_sequence_flag
+    int sliceType;                // pcs->slice_type (I_SLICE = 1)
+    int hierarchicalLevels;       // pcs->hierarchical_levels
+    bool delayedIntra;            // svt_aom_is_delayed_intra twin threaded
+    bool tplParamsReady;          // pcs->tpl_params_ready (written)
+    bool endOfSequenceRegion;     // pcs->end_of_sequence_region (written)
+    TplControlsCarrier tplCtrls;  // the member's own tpl_ctrls (written)
+};
+
+// LadQueue (initial_rc_process.c:36-40): the ring of entries; entry->pcs
+// threads as the LadPcsView pointer (NULL = the empty slot). The walk
+// contract is the reference's own: the filled region ends at a NULL entry.
+struct LadQueueCarrier {
+    LadPcsView** cirBuf;       // cir_buf (an array of nullable pcs pointers)
+    std::uint32_t cirBufSize;  // cir_buf_size
+};
+
+// OUT_Q_ADVANCE (definitions.h:63): ((h) == (size) - 1) ? 0 : (h) + 1.
+std::uint32_t outQAdvance(std::uint32_t h, std::uint32_t size);
+
+// The head-pcs container walls store_extended_group writes (ext_group,
+// tpl_group and their sizes, tpl_valid_pic, used_tpl_frame_num).
+struct LadGroupOutputs {
+    LadPcsView** extGroup;         // pcs->ext_group
+    std::uint32_t extGroupSize;    // pcs->ext_group_size
+    LadPcsView** tplGroup;         // pcs->tpl_group
+    std::uint32_t tplGroupSize;    // pcs->tpl_group_size
+    std::uint8_t* tplValidPic;     // pcs->tpl_valid_pic
+    std::uint32_t usedTplFrameNum; // pcs->used_tpl_frame_num
+};
+
+// store_extended_group (initial_rc_process.c:406-520): verbatim; the queue
+// copy walk, the ext-group reset (memset + the [0] pre-set - NOT counted in
+// used_tpl_frame_num), the limited-size derivation (the I_SLICE / startup
+// gates), the I_SLICE / gop-end tpl walk (append-then-validate - the size
+// always equals i+1 at the validate site, so tplGroup[i] == extGroup[i]) and
+// the set_tpl_params walk. NAMED PARKS: the LAD_MG_PRINT debug blocks
+// (:426-438, :505-519) and the svt_aom_assert_err guards (NDEBUG-dropped).
+// The scs walls thread (the head's input_resolution, tpl_lad_mg, static_
+// config.hierarchical_levels, static_config.startup_mg_size,
+// pcs->last_idr_picture); the head's enc_mode threads for the params walk.
+void storeExtendedGroup(LadPcsView& head, const LadQueueCarrier& queue, std::uint32_t startIdx,
+                        std::int64_t endMg, int headEncMode, int headInputResolution, int tplLadMg,
+                        int scsHierarchicalLevels, int startupMgSize, std::uint64_t lastIdrPicture,
+                        LadGroupOutputs& out);
+
+// process_lad_queue (initial_rc_process.c:527-636): the send-out decision
+// walk. NAMED PARKS: the stats-in write block (:595-618, the
+// stats_in_write_mutex + stats_buf_ctx + total_stats walls) and
+// irc_send_picture_out (:620) - dropped; the send decision, the
+// end_of_sequence_region write, the store call, the entry pop and the head
+// advance port. The head's scs->lad_mg threads as headLadMg. queueHead
+// threads the persistent queue->head (read + advanced).
+void processLadQueue(LadQueueCarrier& queue, std::uint32_t& queueHead, bool passThru, int headLadMg,
+                     int headEncMode, int headInputResolution, int tplLadMg, int scsHierarchicalLevels,
+                     int startupMgSize, std::uint64_t lastIdrPicture, LadGroupOutputs& out);
 
 // MINQ_ADJ_LIMIT (rc_process.h:22) / HIGH_UNDERSHOOT_RATIO (:23).
 constexpr int kMinqAdjLimit = 48;

@@ -3910,37 +3910,8 @@ void twopassPostencodeUpdate(RcControl& rc, const RcConfig& rcCfg, TwoPassCarrie
 
 // ---- A9D: initial_rc_process.c (the tpl-group pieces) ----
 
-// is_frame_already_exists (initial_rc_process.c:161-168): verbatim.
-bool isFrameAlreadyExists(const TplGroupPicView* tplGroup, int endIndex, std::uint64_t picNum) {
-    for (int i = 0; i < endIndex; i++) {
-        if (tplGroup[i].pictureNumber == picNum) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// validate_pic_for_tpl (initial_rc_process.c:171-188): verbatim.
-void validatePicForTpl(const TplControlsCarrier& tplCtrls, const TplGroupPicView* tplGroup,
-                       std::uint8_t* tplValidPic, std::uint32_t& usedTplFrameNum, int picIndex) {
-    // Check whether the i-th pic already exists in the tpl group
-    if (!isFrameAlreadyExists(tplGroup, picIndex, tplGroup[picIndex].pictureNumber) &&
-        // In the middle pass when rc_stat_gen_pass_mode is set, pictures in
-        // the highest temporal layer are skipped, except the first one. The
-        // condition is added to prevent validating these frames for tpl
-        !tplGroup[picIndex].picSkipped) {
-        // Discard low important pictures from tpl group
-        if (tplCtrls.reducedTplGroup >= 0) {
-            if (tplGroup[picIndex].temporalLayerIndex <= tplCtrls.reducedTplGroup) {
-                tplValidPic[picIndex] = 1;
-                usedTplFrameNum++;
-            }
-        } else {
-            tplValidPic[picIndex] = 1;
-            usedTplFrameNum++;
-        }
-    }
-}
+// (isFrameAlreadyExists / validatePicForTpl are header templates - see the
+// declaration comments for the spans and the template note.)
 
 // set_tpl_params (initial_rc_process.c:319-401): verbatim.
 void setTplParams(TplControlsCarrier& tplCtrls, int tplLevel, int inputResolution) {
@@ -4122,6 +4093,182 @@ int setTplGroup(TplControlsCarrier& tplCtrls, bool hasPcs, int sliceType, int hi
         tplCtrls.r0AdjustFactor = tplCtrls.r0AdjustFactor < 3 ? tplCtrls.r0AdjustFactor : 3;
     }
     return tplCtrls.synthBlkSize;
+}
+
+// ---- A9D: initial_rc_process.c (the LAD queue) ----
+
+// OUT_Q_ADVANCE (definitions.h:63): verbatim.
+std::uint32_t outQAdvance(std::uint32_t h, std::uint32_t size) {
+    return h == size - 1 ? 0 : h + 1;
+}
+
+// store_extended_group (initial_rc_process.c:406-520): verbatim.
+void storeExtendedGroup(LadPcsView& head, const LadQueueCarrier& queue, std::uint32_t startIdx,
+                        std::int64_t endMg, int headEncMode, int headInputResolution, int tplLadMg,
+                        int scsHierarchicalLevels, int startupMgSize, std::uint64_t lastIdrPicture,
+                        LadGroupOutputs& out) {
+    std::uint32_t picI = 0;
+    std::uint32_t qIdx = startIdx;
+    LadPcsView* entry = queue.cirBuf[qIdx];
+
+    while (entry != NULL) {
+        if (entry->extMgId <= endMg) {
+            out.extGroup[picI++] = queue.cirBuf[qIdx];
+        }
+
+        // Increment the queue_index Iterator
+        qIdx = outQAdvance(qIdx, queue.cirBufSize);
+        // get the next entry
+        entry = queue.cirBuf[qIdx];
+    }
+
+    out.extGroupSize = picI;
+    // new tpl group needs to stop at the second I
+    out.tplGroupSize = 0;
+    // MAX_TPL_EXT_GROUP_SIZE (definitions.h:60-62) = MAX_TPL_GROUP_SIZE =
+    // 512: the reference memsets the FULL array.
+    for (std::uint32_t i = 0; i < 512; ++i) out.tplValidPic[i] = 0;
+    out.tplValidPic[0] = 1;
+    out.usedTplFrameNum = 0;
+    std::uint8_t isGopEnd = 0;
+    std::int64_t lastIntraMgId = 0;
+    const std::uint32_t mgSize = 1u << head.hierarchicalLevels;
+    std::uint32_t limitedTplGroupSize = head.sliceType == kIslice
+        ? ((1 + (tplLadMg + 1) * mgSize) < out.extGroupSize ? (1 + (tplLadMg + 1) * mgSize) : out.extGroupSize)
+        : (((tplLadMg + 1) * mgSize) < out.extGroupSize ? ((tplLadMg + 1) * mgSize) : out.extGroupSize);
+    if (startupMgSize > 0) {
+        if (head.sliceType == kIslice) {
+            const std::uint32_t cand =
+                1 + tplLadMg * (1u << scsHierarchicalLevels) + mgSize;
+            limitedTplGroupSize = cand < out.extGroupSize ? cand : out.extGroupSize;
+        } else {
+            const std::uint32_t startupMg = 1u << startupMgSize;
+            if (lastIdrPicture + startupMg == head.pictureNumber) {
+                const std::uint32_t cand = tplLadMg * (1u << scsHierarchicalLevels) + mgSize;
+                limitedTplGroupSize = cand < out.extGroupSize ? cand : out.extGroupSize;
+            }
+        }
+    }
+    for (std::uint32_t i = 0; i < limitedTplGroupSize; i++) {
+        LadPcsView* curPcs = out.extGroup[i];
+        if (curPcs->sliceType == kIslice) {
+            if (curPcs->delayedIntra) {
+                if (i == 0) {
+                    out.tplGroup[out.tplGroupSize++] = curPcs;
+                    validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+                } else {
+                    break;
+                }
+            } else {
+                if (i == 0) {
+                    out.tplGroup[out.tplGroupSize++] = curPcs;
+                    validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+                } else {
+                    out.tplGroup[out.tplGroupSize++] = curPcs;
+                    validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+                    lastIntraMgId = curPcs->extMgId;
+                    isGopEnd = 1;
+                }
+            }
+        } else {
+            if (isGopEnd == 0) {
+                out.tplGroup[out.tplGroupSize++] = curPcs;
+                validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+            } else if (curPcs->extMgId == lastIntraMgId) {
+                out.tplGroup[out.tplGroupSize++] = curPcs;
+                validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+            } else {
+                break;
+            }
+        }
+    }
+
+    for (std::uint32_t picIndex = 0; picIndex < out.tplGroupSize; picIndex++) {
+        if (!out.tplGroup[picIndex]->tplParamsReady) {
+            setTplParams(out.tplGroup[picIndex]->tplCtrls, getTplParamsLevel((std::int8_t)headEncMode),
+                         headInputResolution);
+            out.tplGroup[picIndex]->tplParamsReady = 1;
+        }
+    }
+}
+
+// process_lad_queue (initial_rc_process.c:527-636): verbatim; the parked
+// call sites are named in the header.
+void processLadQueue(LadQueueCarrier& queue, std::uint32_t& queueHead, bool passThru, int headLadMg,
+                     int headEncMode, int headInputResolution, int tplLadMg, int scsHierarchicalLevels,
+                     int startupMgSize, std::uint64_t lastIdrPicture, LadGroupOutputs& out) {
+    LadPcsView* headEntry = queue.cirBuf[queueHead];
+
+    while (headEntry != NULL) {
+        LadPcsView* headPcs = headEntry;
+
+        bool sendOut;
+        if (!passThru) {
+            if (headPcs->temporalLayerIndex == 0) {
+                // delayed Intra can use the whole window relative to the next Base
+                int targetMgs = headPcs->delayedIntra ? headLadMg + 1 : headLadMg;
+                targetMgs++;  // add one for the MG including the head
+                {
+                    int numMgs = 0;  // number of MGs accumulated so far in the queue
+                    std::int64_t curMg = headPcs->extMgId;
+
+                    std::uint32_t tmpIdx = queueHead;
+                    LadPcsView* tmpEntry = queue.cirBuf[tmpIdx];
+                    std::uint32_t totAccFramesInCurMg = 0;
+                    sendOut = false;
+                    while (tmpEntry != NULL) {
+                        LadPcsView* tmpPcs = tmpEntry;
+
+                        // adjust the lad if we hit an EOS
+                        if (tmpPcs->endOfSequenceFlag) {
+                            const std::int64_t span = tmpPcs->extMgId - headPcs->extMgId + 1;
+                            const int clamp = span < 255 ? (int)span : 255;
+                            targetMgs = targetMgs < clamp ? targetMgs : clamp;
+
+                            headPcs->endOfSequenceRegion = true;
+                        }
+                        if (tmpPcs->extMgId >= curMg) {
+                            totAccFramesInCurMg++;
+
+                            if (totAccFramesInCurMg == tmpPcs->extMgSize) {
+                                numMgs++;
+                                curMg = tmpPcs->extMgId;
+                                totAccFramesInCurMg = 0;
+                            }
+
+                            if (numMgs == targetMgs) {
+                                storeExtendedGroup(*headPcs, queue, queueHead, tmpPcs->extMgId, headEncMode,
+                                                   headInputResolution, tplLadMg, scsHierarchicalLevels,
+                                                   startupMgSize, lastIdrPicture, out);
+                                sendOut = true;
+                                break;
+                            }
+                        }
+
+                        tmpIdx = outQAdvance(tmpIdx, queue.cirBufSize);
+                        tmpEntry = queue.cirBuf[tmpIdx];
+                    }
+                }
+
+            } else {
+                sendOut = true;
+            }
+        } else {
+            sendOut = true;
+        }
+
+        if (sendOut) {
+            // (the stats-in write block + irc_send_picture_out - the named
+            // parks.)
+            // take the picture out from iRc process; advance the head
+            // (head_entry->pcs = NULL - the slot empties).
+            queue.cirBuf[queueHead] = nullptr;
+            queueHead = outQAdvance(queueHead, queue.cirBufSize);
+            headEntry = queue.cirBuf[queueHead];
+        } else {
+            break;
+        }
+    }
 }
 
 } // namespace l15_rc
