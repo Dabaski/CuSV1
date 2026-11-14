@@ -195,4 +195,14 @@ void quantizeBHb(const std::int32_t* coeff, const QuantTables& tables, const std
                  int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
                  std::uint16_t* eob);
 
+// highbd_quantize_fp_helper_c (full_loop.c:329-397) qm/iqm NULL branch +
+// the svt_av1_highbd_quantize_fp_c facade (:399-418); zbin/quant_shift/
+// iscan are unused in the NULL branch (the reference (void)s them). NO
+// int16 clamp on the round add (the lowbd quantize_fp_helper_c clamps at
+// :245); the else branch zeroes qcoeff/dqcoeff per position (the scan is a
+// permutation, so every position is written exactly once).
+void quantizeFpHb(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                  int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                  std::uint16_t* eob);
+
 }  // namespace transforms

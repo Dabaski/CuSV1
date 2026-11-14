@@ -1097,4 +1097,40 @@ void quantizeBHb(const std::int32_t* coeff, const QuantTables& tables, const std
     *eob = static_cast<std::uint16_t>(eobVal + 1);
 }
 
+// highbd_quantize_fp_helper_c (full_loop.c:329-397) qm/iqm NULL branch +
+// the svt_av1_highbd_quantize_fp_c facade (:399-418). The qm branch
+// (:342-366) is PARKED with the qm family (q_matrices.h named 0% policy).
+// Reference shape: per-position zeroing in the else branch (no memset).
+void quantizeFpHb(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                  int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                  std::uint16_t* eob) {
+    const int shift = 16 - logScale;
+    int eobVal = -1;
+    const std::int32_t logScaledRoundArr[2] = {
+        static_cast<std::int32_t>((tables.roundFp[0] + ((1 << logScale) >> 1)) >> logScale),
+        static_cast<std::int32_t>((tables.roundFp[1] + ((1 << logScale) >> 1)) >> logScale)};
+    for (int i = 0; i < nCoeffs; ++i) {
+        const int rc = scan[i];
+        const int rc01 = (rc != 0);
+        const std::int32_t coeffVal = coeff[rc];
+        const int coeffSign = coeffVal < 0 ? -1 : 0;
+        const int absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+        if ((absCoeff << (1 + logScale)) >= tables.dequant[rc01]) {
+            const std::int64_t tmp = static_cast<std::int64_t>(absCoeff) + logScaledRoundArr[rc01];
+            const int absQcoeff = static_cast<int>((tmp * tables.quantFp[rc01]) >> shift);
+            qcoeff[rc] = (absQcoeff ^ coeffSign) - coeffSign;
+            const std::int32_t absDqcoeff = static_cast<std::int32_t>(
+                (static_cast<std::int64_t>(absQcoeff) * tables.dequant[rc01]) >> logScale);
+            if (absQcoeff) {
+                eobVal = i;
+            }
+            dqcoeff[rc] = (absDqcoeff ^ coeffSign) - coeffSign;
+        } else {
+            qcoeff[rc] = 0;
+            dqcoeff[rc] = 0;
+        }
+    }
+    *eob = static_cast<std::uint16_t>(eobVal + 1);
+}
+
 }  // namespace transforms

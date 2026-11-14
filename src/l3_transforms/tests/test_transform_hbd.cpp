@@ -2013,3 +2013,164 @@ TEST_CASE("quantizeBHb saturation, zbin boundaries and eob semantics") {
     CHECK(bad == 0);
     CHECK(eob64 == eobOr64);
 }
+
+namespace qh1 {
+
+// highbd_quantize_fp_helper_c (full_loop.c:329-397), qm/iqm NULL branch
+// (:367-395), transcribed from the reference text. NO int16 clamp on the
+// round add (the lowbd quantize_fp_helper_c clamps at :245); the threshold
+// is (abs_coeff << (1 + log_scale)) >= dequant and the else branch zeroes
+// qcoeff/dqcoeff per position (the scan is a permutation, so every position
+// is written exactly once)
+void quantizeFpOracle(const std::int32_t* coeff, const transforms::QuantTables& tables,
+                      const std::int16_t* scan, int count, int logScale,
+                      std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    const int shift = 16 - logScale;
+    int eobVal = -1;
+    const int logScaledRoundArr[2] = {
+        (int)(((tables.roundFp[0] < 0 ? 0 : tables.roundFp[0]) + ((1 << logScale) >> 1)) >> logScale),
+        (int)(((tables.roundFp[1] < 0 ? 0 : tables.roundFp[1]) + ((1 << logScale) >> 1)) >> logScale)};
+    for (int i = 0; i < count; ++i) {
+        const int rc = scan[i];
+        const int rc01 = (rc != 0);
+        const std::int32_t coeffVal = coeff[rc];
+        const int coeffSign = coeffVal < 0 ? -1 : 0;
+        const int absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+        if ((absCoeff << (1 + logScale)) >= tables.dequant[rc01]) {
+            const std::int64_t tmp = (std::int64_t)absCoeff + logScaledRoundArr[rc01];
+            const int absQcoeff = (int)((tmp * tables.quantFp[rc01]) >> shift);
+            qcoeff[rc] = (absQcoeff ^ coeffSign) - coeffSign;
+            const std::int32_t absDqcoeff =
+                (std::int32_t)(((std::int64_t)absQcoeff * tables.dequant[rc01]) >> logScale);
+            if (absQcoeff) {
+                eobVal = i;
+            }
+            dqcoeff[rc] = (absDqcoeff ^ coeffSign) - coeffSign;
+        } else {
+            qcoeff[rc] = 0;
+            dqcoeff[rc] = 0;
+        }
+    }
+    *eob = static_cast<std::uint16_t>(eobVal + 1);
+}
+
+}  // namespace qh1
+
+TEST_CASE("quantizeFpHb equals the landed quantizeFpN wherever the lowbd clamp is dead") {
+    // derivation: identical tables (bd 8), coefficients with
+    // abs_coeff + roundFp <= 32767 (roundFp <= (64*1336)>>7 = 668 at
+    // qindex 255, so |coeff| <= 32000 keeps the lowbd clamp dead)
+    struct FpCase { int n; int logScale; void (*scan)(std::int16_t*); void (*lowbd)(
+        const std::int32_t*, const transforms::QuantTables&, const std::int16_t*, std::int32_t*,
+        std::int32_t*, std::uint16_t*); };
+    const FpCase cases[4] = {
+        {16, 0, transforms::defaultScan4x4, transforms::quantizeFp4x4},
+        {64, 0, transforms::defaultScan8x8, transforms::quantizeFp8x8},
+        {256, 0, transforms::defaultScan16x16, transforms::quantizeFp16x16},
+        {1024, 1, transforms::defaultScan32x32, transforms::quantizeFp32x32},
+    };
+    int bad = 0;
+    for (int qi = 0; qi < 3; ++qi) {
+        transforms::QuantTables tables;
+        transforms::buildQuantTables(qh1::lcg(256), tables);
+        for (int c = 0; c < 4; ++c) {
+            std::int16_t scan[1024];
+            cases[c].scan(scan);
+            for (int trial = 0; trial < 4; ++trial) {
+                std::int32_t coeff[1024];
+                for (int i = 0; i < cases[c].n; ++i) {
+                    coeff[i] = qh1::lcg(64001) - 32000;
+                }
+                std::int32_t qcHb[1024], qcLb[1024], dqHb[1024], dqLb[1024], qcOr[1024], dqOr[1024];
+                std::uint16_t eobHb, eobLb, eobOr;
+                transforms::quantizeFpHb(coeff, tables, scan, cases[c].n, cases[c].logScale, qcHb,
+                                         dqHb, &eobHb);
+                cases[c].lowbd(coeff, tables, scan, qcLb, dqLb, &eobLb);
+                qh1::quantizeFpOracle(coeff, tables, scan, cases[c].n, cases[c].logScale, qcOr,
+                                      dqOr, &eobOr);
+                for (int i = 0; i < cases[c].n; ++i) {
+                    if (qcHb[i] != qcLb[i]) ++bad;
+                    if (dqHb[i] != dqLb[i]) ++bad;
+                    if (qcHb[i] != qcOr[i]) ++bad;
+                    if (dqHb[i] != dqOr[i]) ++bad;
+                }
+                if (eobHb != eobLb) ++bad;
+                if (eobHb != eobOr) ++bad;
+            }
+        }
+    }
+    CHECK(bad == 0);
+}
+
+TEST_CASE("quantizeFpHb drops the lowbd INT16 clamp - the divergence is load-bearing") {
+    // at qindex 255 bd 8: roundFp = (64*1336)>>7 = 668, so a coefficient of
+    // 33000 pushes abs_coeff + roundFp to 33668 - the lowbd quantize_fp
+    // clamps it to 32767 (full_loop.c:245) while the highbd path (:382) does
+    // NOT; the quant pipeline then divides both down, so the observable is
+    // the strict magnitude ordering
+    transforms::QuantTables tables;
+    transforms::buildQuantTables(255, tables);
+    std::int16_t scan[16];
+    transforms::defaultScan4x4(scan);
+    std::int32_t coeff[16] = {0};
+    coeff[0] = 33000;
+    std::int32_t qcHb[16], qcLb[16], dqHb[16], dqLb[16], qcOr[16], dqOr[16];
+    std::uint16_t eobHb, eobLb, eobOr;
+    transforms::quantizeFpHb(coeff, tables, scan, 16, 0, qcHb, dqHb, &eobHb);
+    transforms::quantizeFp4x4(coeff, tables, scan, qcLb, dqLb, &eobLb);
+    qh1::quantizeFpOracle(coeff, tables, scan, 16, 0, qcOr, dqOr, &eobOr);
+    CHECK(qcHb[0] == qcOr[0]);
+    CHECK(qcHb[0] != qcLb[0]);
+    CHECK(qcLb[0] < qcHb[0]);
+    CHECK(dqHb[0] == dqOr[0]);
+    CHECK(eobHb == 1);
+}
+
+TEST_CASE("quantizeFpHb saturation and the log_scale 2 path") {
+    transforms::QuantTables tables;
+    transforms::buildQuantTables(255, tables);
+    std::int16_t scan[64];
+    transforms::defaultScan8x8(scan);
+    // adversarial saturation: magnitudes up to 2^24 keep the reference's own
+    // (abs_coeff << (1 + log_scale)) shift inside int32 at every log_scale
+    std::int32_t coeff[64];
+    const std::int32_t big[8] = {1 << 24, -(1 << 24), 16777213, -16777213,
+                                 tables.dequant[1], -tables.dequant[1], tables.dequant[1] - 1,
+                                 -(tables.dequant[1] - 1)};
+    for (int i = 0; i < 64; ++i) {
+        coeff[i] = big[i % 8];
+    }
+    std::int32_t qc[64], dq[64], qcOr[64], dqOr[64];
+    std::uint16_t eob, eobOr;
+    transforms::quantizeFpHb(coeff, tables, scan, 64, 0, qc, dq, &eob);
+    qh1::quantizeFpOracle(coeff, tables, scan, 64, 0, qcOr, dqOr, &eobOr);
+    int bad = 0;
+    for (int i = 0; i < 64; ++i) {
+        if (qc[i] != qcOr[i]) ++bad;
+        if (dq[i] != dqOr[i]) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(eob == eobOr);
+    // all-zero block: eob 0
+    std::int32_t zero[64] = {0};
+    std::uint16_t eobZero;
+    transforms::quantizeFpHb(zero, tables, scan, 64, 0, qc, dq, &eobZero);
+    CHECK(eobZero == 0);
+    // log_scale 2 at 64x64 against the oracle
+    std::int32_t coeff64[4096], qc64[4096], dq64[4096], qcOr64[4096], dqOr64[4096];
+    std::int16_t scan64[4096];
+    transforms::defaultScan64x64(scan64);
+    for (int i = 0; i < 4096; ++i) {
+        coeff64[i] = qh1::lcg(2 << 20) - (1 << 20);
+    }
+    std::uint16_t eob64, eobOr64;
+    transforms::quantizeFpHb(coeff64, tables, scan64, 4096, 2, qc64, dq64, &eob64);
+    qh1::quantizeFpOracle(coeff64, tables, scan64, 4096, 2, qcOr64, dqOr64, &eobOr64);
+    bad = 0;
+    for (int i = 0; i < 4096; ++i) {
+        if (qc64[i] != qcOr64[i]) ++bad;
+        if (dq64[i] != dqOr64[i]) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(eob64 == eobOr64);
+}
