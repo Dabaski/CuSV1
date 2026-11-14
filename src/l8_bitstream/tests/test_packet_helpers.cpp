@@ -23,6 +23,109 @@
 
 namespace bitstream {}
 
+TEST_CASE("PK1 S2: output bitstream unit ctor sizes and reset rewinds") {
+    // svt_aom_output_bitstream_unit_ctor (bitstream_unit.c:32-45): size 0 ->
+    // null buffer + size 0; else the allocation. svt_aom_output_bitstream_
+    // reset (:50-57): the write pointer back to the beginning. Poison: the
+    // reset must not move the BEGIN pointer or the size.
+    bitstream::OutputBitstreamUnit unit{};
+    CHECK(bitstream::outputBitstreamUnitCtor(&unit, 0) == 0);  // EB_ErrorNone
+    CHECK(unit.size == 0);
+    CHECK(unit.buffer_begin_av1 == nullptr);
+    CHECK(unit.buffer_av1 == nullptr);
+    CHECK(bitstream::outputBitstreamUnitCtor(&unit, 16) == 0);
+    CHECK(unit.size == 16);
+    REQUIRE(unit.buffer_begin_av1 != nullptr);
+    CHECK(unit.buffer_av1 == unit.buffer_begin_av1);
+    unit.buffer_av1 += 5;  // pretend 5 bytes were written
+    CHECK(bitstream::outputBitstreamReset(&unit) == 0);
+    CHECK(unit.buffer_av1 == unit.buffer_begin_av1);
+    CHECK(unit.size == 16);
+    // the zero ctor's branch is not re-entered by reset (write ptr == begin)
+    CHECK(bitstream::outputBitstreamReset(&unit) == 0);
+}
+
+TEST_CASE("PK1 S2: realloc preserves the write offset; bytes-count/copy/readback") {
+    // svt_realloc_output_bitstream_unit (bitstream_unit.c:64-74): offset =
+    // buffer_av1 - buffer_begin_av1 survives the grow (sz > 0 gate :65);
+    // sz == 0 is a no-op. The Bitstream helpers (entropy_coding.c:
+    // 1264-1276): reset -> outputBitstreamReset, get_bytes_count =
+    // (int)(buffer_av1 - buffer_begin_av1), copy = memcpy from the
+    // beginning.
+    bitstream::OutputBitstreamUnit unit{};
+    REQUIRE(bitstream::outputBitstreamUnitCtor(&unit, 8) == 0);
+    unit.buffer_av1 = unit.buffer_begin_av1 + 6;
+    for (int i = 0; i < 6; ++i) unit.buffer_begin_av1[i] = (std::uint8_t)(0x10 * (i + 1));
+    CHECK(bitstream::reallocOutputBitstreamUnit(&unit, 32) == 0);
+    CHECK(unit.size == 32);
+    REQUIRE(unit.buffer_begin_av1 != nullptr);
+    CHECK(unit.buffer_av1 == unit.buffer_begin_av1 + 6);  // offset preserved
+    for (int i = 0; i < 6; ++i) CHECK(unit.buffer_begin_av1[i] == (std::uint8_t)(0x10 * (i + 1)));
+    // no-op: sz == 0
+    CHECK(bitstream::reallocOutputBitstreamUnit(&unit, 0) == 0);
+    CHECK(unit.size == 32);
+    // null unit: no-op, no crash
+    CHECK(bitstream::reallocOutputBitstreamUnit(nullptr, 16) == 0);
+    // the Bitstream wrapper helpers
+    bitstream::Bitstream bs{};
+    bs.output_bitstream_ptr = &unit;
+    CHECK(bitstream::bitstreamGetBytesCount(&bs) == 6);
+    unsigned char out[16];
+    memset(out, 0x55, sizeof(out));
+    bitstream::bitstreamCopy(&bs, out, 6);
+    for (int i = 0; i < 6; ++i) CHECK(out[i] == (std::uint8_t)(0x10 * (i + 1)));
+    CHECK(out[6] == 0x55);  // the copy extent ends at size
+    bitstream::bitstreamReset(&bs);
+    CHECK(unit.buffer_av1 == unit.buffer_begin_av1);
+    CHECK(bitstream::bitstreamGetBytesCount(&bs) == 0);
+}
+
+TEST_CASE("PK1 S2: start_encode binds the EC; ensure_capacity grows mid-stream") {
+    // aom_start_encode (bitstream_unit.h:230-236): pos = 0, the EC borrows
+    // the unit's buffer, state reset (rng 0x8000, cnt -9, low 0).
+    // svt_aom_ec_ensure_capacity (bitstream_unit.c:210-228): needed =
+    // offs + min_free; grow + re-bind the borrowed pointers past the gate.
+    // Oracle: a 200-symbol bool roundtrip through TWO forced growths,
+    // decoded with the l7 reader at the same f sequence.
+    bitstream::OutputBitstreamUnit unit{};
+    REQUIRE(bitstream::outputBitstreamUnitCtor(&unit, 8) == 0);
+    entropy::AomWriter w{};
+    bitstream::aomStartEncode(&w, &unit);
+    CHECK(w.pos == 0);
+    CHECK(w.ec.buf == unit.buffer_begin_av1);
+    CHECK(w.ec.rng == 0x8000);
+    CHECK(w.ec.cnt == -9);
+    CHECK(w.ec.low == 0);
+    CHECK(w.ec.error == 0);
+    static const unsigned fs[3] = {16384, 8192, 24576};  // 1/2, 1/4, 3/4
+    static const int vals[3] = {1, 0, 1};
+    const int n = 200;
+    int grew = 0;
+    for (int i = 0; i < n; ++i) {
+        entropy::odEcEncodeBoolQ15(&w.ec, vals[i % 3], fs[i % 3]);
+        if (i % 8 == 7) {
+            const std::uint32_t before = unit.size;
+            CHECK(bitstream::ecEnsureCapacity(&w, &unit, 16) == 0);
+            CHECK(w.ec.error == 0);
+            if (unit.size != before) ++grew;
+            CHECK(w.ec.buf == unit.buffer_begin_av1);
+        }
+    }
+    CHECK(grew >= 2);  // the 8-byte start capacity cannot hold 25 bytes
+    entropy::odEcStopEncode(&w);
+    CHECK(w.pos > 0);
+    // decode the same f/val sequence
+    entropy::OdEcDec dec{};
+    entropy::odEcDecInit(&dec, unit.buffer_begin_av1, w.pos);
+    for (int i = 0; i < n; ++i)
+        CHECK(entropy::odEcDecodeBoolQ15(&dec, fs[i % 3]) == vals[i % 3]);
+    // capacity satisfied -> no grow, error stays clean
+    const std::uint32_t szBefore = unit.size;
+    CHECK(bitstream::ecEnsureCapacity(&w, &unit, 1) == 0);
+    CHECK(unit.size == szBefore);
+    CHECK(w.ec.error == 0);
+}
+
 TEST_CASE("PK1 S1: reorder queue pos wraps head+delta modulo size") {
     // get_reorder_queue_pos (packetization_process.c:81-83):
     // (head_index + delta) % queue_size.

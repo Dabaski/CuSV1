@@ -12,16 +12,91 @@
 #include <cstdint>
 #include <vector>
 
+#include <entropy.h>
+
 namespace bitstream {
+
+// ---------------------------------------------------------------------------
+// S2: the bitstream-unit carriers (bitstream_unit.h:24-29 + the Bitstream
+// wrapper, ec_object.h). The EB_MALLOC_ARRAY/EB_REALLOC_ARRAY allocation
+// shells are carried as std::vector ownership (the grain.h carrier
+// precedent); the dctor/EB_NEW shells are PARKED NAMED.
+// ---------------------------------------------------------------------------
+
+// OutputBitstreamUnit (bitstream_unit.h:24-29, verbatim field subset):
+// size = allocated buffer size, buffer_begin_av1 = the byte buffer,
+// buffer_av1 = the write pointer. storage owns buffer_begin_av1 - the
+// EB_MALLOC_ARRAY (bitstream_unit.c:36) / EB_REALLOC_ARRAY (:70) shells
+// become vector resize; the output_bitstream_unit_dctor (:24-27) is parked
+// (vector owns).
+struct OutputBitstreamUnit {
+    std::uint32_t size = 0;
+    std::vector<std::uint8_t> storage;  // owns buffer_begin_av1
+    std::uint8_t* buffer_begin_av1 = nullptr;
+    std::uint8_t* buffer_av1 = nullptr;
+};
+
+// Bitstream (ec_object.h): output_bitstream_ptr flattened. The EB_NEW ctor
+// shell (entropy_coding.c:1258-1262) is PARKED.
+struct Bitstream {
+    OutputBitstreamUnit* output_bitstream_ptr = nullptr;
+};
+
+// ---------------------------------------------------------------------------
+// S2: the unit ctor/reset/realloc + the Bitstream size/get-bytes helpers.
+// ---------------------------------------------------------------------------
+
+// svt_aom_output_bitstream_unit_ctor (bitstream_unit.c:32-45): buffer_size
+// 0 -> size 0 + null pointers; else allocate. Deviation named: zero-init
+// (vector) where the reference's EB_MALLOC_ARRAY is uninitialized - the
+// bytes past the write pointer are never read by the ported callers.
+std::int32_t outputBitstreamUnitCtor(OutputBitstreamUnit* bitstream_ptr, std::uint32_t buffer_size);
+
+// svt_aom_output_bitstream_reset (bitstream_unit.c:50-57): the write
+// pointer back to the beginning.
+std::int32_t outputBitstreamReset(OutputBitstreamUnit* bitstream_ptr);
+
+// svt_realloc_output_bitstream_unit (bitstream_unit.c:64-74): grows to sz,
+// preserving the write offset. Deviation named: EB_REALLOC_ARRAY (:70) ->
+// vector resize + the pointer re-derivation (storage.data()); the
+// offset-preserve arithmetic (:67-:71) is verbatim.
+std::int32_t reallocOutputBitstreamUnit(OutputBitstreamUnit* output_bitstream_ptr, std::uint32_t sz);
+
+// svt_aom_bitstream_reset (entropy_coding.c:1264-1266)
+void bitstreamReset(Bitstream* bitstream_ptr);
+
+// svt_aom_bitstream_get_bytes_count (entropy_coding.c:1268-1271):
+// (int)(buffer_av1 - buffer_begin_av1).
+int bitstreamGetBytesCount(const Bitstream* bitstream_ptr);
+
+// svt_aom_bitstream_copy (entropy_coding.c:1273-1276): memcpy from the
+// buffer beginning.
+void bitstreamCopy(const Bitstream* bitstream_ptr, void* dest, int size);
+
+// aom_start_encode (bitstream_unit.h:230-236) over the l7 AomWriter.
+// Deviation named: buffer_parent (dropped in l7) is threaded as the call
+// argument to ecEnsureCapacity instead.
+void aomStartEncode(entropy::AomWriter* br, OutputBitstreamUnit* source);
+
+// svt_aom_ec_ensure_capacity (bitstream_unit.c:210-228): grow the parent
+// when offs + min_free exceeds its size, re-binding the borrowed pointers.
+// Deviation named: w->buffer_parent (dropped in l7) is threaded as the
+// parent argument.
+std::int32_t ecEnsureCapacity(entropy::AomWriter* w, OutputBitstreamUnit* parent, std::uint32_t min_free);
+
+// ---------------------------------------------------------------------------
+// S1: the reorder-queue index math + the undisplayed-queue push/pop/sort.
+// ---------------------------------------------------------------------------
 
 // UNDISP_QUEUE_SIZE (definitions.h:1444) = REF_FRAMES = 8 (definitions.h:
 // 1357-1367, the enum position: NONE_FRAME -1 .. ALTREF_FRAME 7, REF_FRAMES
-// 8). Carried locally - l8 does not include l7 (the wb-trio duplication
-// precedent).
+// 8). Carried locally - l8 does not link l7 symbols for this (the wb-trio
+// duplication precedent).
 #define UNDISP_QUEUE_SIZE 8
 
 // ---------------------------------------------------------------------------
-// Carriers: field subsets of the reference structs the ported spans consume.
+// S1 carriers: field subsets of the reference structs the ported spans
+// consume.
 // ---------------------------------------------------------------------------
 
 // EbBufferHeaderType (API/EbSvtAv1.h:80-114): the field subset the ported
@@ -61,7 +136,7 @@ struct EncodeContext {
 };
 
 // ---------------------------------------------------------------------------
-// S1: the reorder-queue index math + the undisplayed-queue push/pop/sort.
+// S1 functions.
 // ---------------------------------------------------------------------------
 
 // get_reorder_queue_pos (packetization_process.c:81-83, verbatim):
