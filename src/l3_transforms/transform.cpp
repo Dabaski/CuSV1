@@ -8587,12 +8587,14 @@ void invertQuant(std::int16_t* quant, std::int16_t* shift, std::int32_t d) {
 }
 
 // svt_aom_dc_quant_qtx (inv_transforms.c:3467) at EB_EIGHT_BIT, delta 0
+// (declared in transform.h for the QH1 bd-parameterized twin)
 std::int16_t dcQuantQtx(std::int32_t qindex) {
     const std::int32_t qClamped = qindex < 0 ? 0 : (qindex > 255 ? 255 : qindex);
     return dc_qlookup_QTX[qClamped];
 }
 
 // svt_aom_ac_quant_qtx (inv_transforms.c:3484) at EB_EIGHT_BIT, delta 0
+// (declared in transform.h for the QH1 bd-parameterized twin)
 std::int16_t acQuantQtx(std::int32_t qindex) {
     const std::int32_t qClamped = qindex < 0 ? 0 : (qindex > 255 ? 255 : qindex);
     return ac_qlookup_QTX[qClamped];

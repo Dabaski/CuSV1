@@ -24,6 +24,11 @@
 
 #include <doctest.h>
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
+#include <regex>
+#include <string>
+#include <vector>
 #include <transform.h>
 #include <transform_hbd.h>
 
@@ -1578,4 +1583,625 @@ TEST_CASE("whtFwdTxfmHb DEFAULT_SHAPE routes into the default fwd path") {
     for (int i = 0; i < 64; ++i) {
         CHECK(got[i] == landed[i]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// QH1: the A1 highbd quantizer surface. Test-side expectations for the four
+// 10/12-bit QTX lookup tables are PARSED FROM THE REFERENCE at runtime (the
+// RC1 mechanical pattern: zero hand-typed table values; PAIRED-METRIC CAVEAT
+// stated). The pinned tree is CONFIG_ENABLE_HIGH_BIT_DEPTH=0
+// (Source/API/EbConfigMacros.h:55-57), so the reference's 10/12 table arms
+// are compiled out there and the default arm returns -1; this port carries
+// the CONFIG=1 surface (the TXH1 hbd-twin precedent) and reproduces the -1
+// default arm for invalid bd.
+// ---------------------------------------------------------------------------
+namespace qh1 {
+
+std::string refText(const char* rel) {
+    std::ifstream f(std::string(REPO_ROOT "/") + rel, std::ios::binary);
+    REQUIRE_MESSAGE(f.good(), rel);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+std::vector<int> tableNumbers(const std::string& text, const std::string& decl, int expected) {
+    const std::size_t at = text.find(decl);
+    REQUIRE_MESSAGE(at != std::string::npos, decl);
+    const std::size_t start = at + decl.size();
+    const std::size_t end = text.find("};", start);
+    REQUIRE(end != std::string::npos);
+    const std::string body = text.substr(start, end - start);
+    std::vector<int> ref;
+    std::regex numRe(R"(-?\d+)");
+    for (auto n = std::regex_iterator<std::string::const_iterator>(body.begin(), body.end(), numRe);
+         n != std::regex_iterator<std::string::const_iterator>(); ++n) {
+        ref.push_back(std::atoi(n->str().c_str()));
+    }
+    REQUIRE((int)ref.size() == expected);
+    return ref;
+}
+
+}  // namespace qh1
+
+TEST_CASE("dcQuantQtxBd/acQuantQtxBd match inv_transforms.c entry-for-entry at bd 8/10/12") {
+    const std::string text = qh1::refText("/third_party/SVT-AV1/Source/Lib/Codec/inv_transforms.c");
+    const std::vector<int> dc8 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc10 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc12 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac8 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac10 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac12 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+
+    int bad = 0;
+    for (int q = 0; q < 256; ++q) {
+        if (transforms::dcQuantQtxBd(q, 8) != dc8[q]) ++bad;
+        if (transforms::dcQuantQtxBd(q, 10) != dc10[q]) ++bad;
+        if (transforms::dcQuantQtxBd(q, 12) != dc12[q]) ++bad;
+        if (transforms::acQuantQtxBd(q, 8) != ac8[q]) ++bad;
+        if (transforms::acQuantQtxBd(q, 10) != ac10[q]) ++bad;
+        if (transforms::acQuantQtxBd(q, 12) != ac12[q]) ++bad;
+    }
+    CHECK(bad == 0);
+}
+
+TEST_CASE("dcQuantQtxBd/acQuantQtxBd clamp the qindex and return -1 off the bd switch") {
+    // svt_aom_dc_quant_qtx (inv_transforms.c:3468): clamp(qindex + delta, 0,
+    // MAXQ) with delta folded 0 (the landed 8-bit twin's fold); the default
+    // arm is assert + return -1 (:3478-3481, :3495-3498)
+    CHECK(transforms::dcQuantQtxBd(-5, 8) == 4);
+    CHECK(transforms::dcQuantQtxBd(300, 12) == 21387);
+    CHECK(transforms::acQuantQtxBd(-1, 10) == 4);
+    CHECK(transforms::acQuantQtxBd(999, 12) == 29247);
+    CHECK(transforms::dcQuantQtxBd(4, 9) == -1);
+    CHECK(transforms::acQuantQtxBd(4, 16) == -1);
+}
+
+TEST_CASE("qzbinFactorBd matches svt_aom_get_qzbin_factor over all q x bd") {
+    // svt_aom_get_qzbin_factor (inv_transforms.c:3501-3514): q == 0 -> 64;
+    // else the dc-quant threshold split 148 / 592 / 2368 -> 84 / 80. The
+    // test-side oracle is the formula transcribed independently from the
+    // reference text, evaluated over the RUNTIME-PARSED dc tables (the
+    // thresholds are the only literals and each is formula-pinned here).
+    const std::string text = qh1::refText("/third_party/SVT-AV1/Source/Lib/Codec/inv_transforms.c");
+    const std::vector<int> dc8 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc10 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc12 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+    int bad = 0;
+    for (int q = 0; q < 256; ++q) {
+        const int want8 = q == 0 ? 64 : (dc8[q] < 148 ? 84 : 80);
+        const int want10 = q == 0 ? 64 : (dc10[q] < 592 ? 84 : 80);
+        const int want12 = q == 0 ? 64 : (dc12[q] < 2368 ? 84 : 80);
+        if (transforms::qzbinFactorBd(q, 8) != want8) ++bad;
+        if (transforms::qzbinFactorBd(q, 10) != want10) ++bad;
+        if (transforms::qzbinFactorBd(q, 12) != want12) ++bad;
+    }
+    CHECK(bad == 0);
+    // the threshold boundaries themselves - the arms fire on BOTH sides of
+    // every threshold: bd 8 dc8[131]=146 < 148, dc8[132]=148; bd 10
+    // dc10[131]=584 < 592, dc10[132]=592; bd 12 dc12[132]=2367 < 2368,
+    // dc12[133]=2400
+    CHECK(transforms::qzbinFactorBd(131, 8) == 84);
+    CHECK(transforms::qzbinFactorBd(132, 8) == 80);
+    CHECK(transforms::qzbinFactorBd(131, 10) == 84);
+    CHECK(transforms::qzbinFactorBd(132, 10) == 80);
+    CHECK(transforms::qzbinFactorBd(132, 12) == 84);
+    CHECK(transforms::qzbinFactorBd(133, 12) == 80);
+    CHECK(transforms::qzbinFactorBd(0, 10) == 64);
+    CHECK(transforms::qzbinFactorBd(0, 12) == 64);
+    CHECK(transforms::qzbinFactorBd(4, 7) == -1);
+}
+
+namespace qh1 {
+
+// svt_aom_invert_quant (inv_transforms.c:3516-3526), transcribed from the
+// reference text for the buildQuantTablesBd oracle
+void invertQuantOracle(std::int16_t* quant, std::int16_t* shift, std::int32_t d) {
+    std::uint32_t t;
+    std::int32_t  l, m;
+    t = static_cast<std::uint32_t>(d);
+    for (l = 0; t > 1; l++) {
+        t >>= 1;
+    }
+    m      = 1 + (1 << (16 + l)) / d;
+    *quant = static_cast<std::int16_t>(m - (1 << 16));
+    *shift = static_cast<std::int16_t>(1 << (16 - l));
+}
+
+// the luma rows of svt_av1_build_quantizer (md_config_process.c:106-135) at
+// deltas 0 / sharpness 0 - the SAME folds the landed 8-bit twin names - as
+// an independent oracle over the runtime-parsed tables
+void buildQuantTablesOracle(int q, int bd, const std::vector<int>& dc,
+                            const std::vector<int>& ac, transforms::QuantTables& t) {
+    const int quantQtx[2] = {dc[q], ac[q]};
+    const int qzbin = q == 0 ? 64 : (dc[q] < (bd == 8 ? 148 : bd == 10 ? 592 : 2368) ? 84 : 80);
+    const int qroundingFactor = q == 0 ? 64 : 48;
+    for (int i = 0; i < 2; ++i) {
+        std::int16_t qv, sv;
+        invertQuantOracle(&qv, &sv, quantQtx[i]);
+        t.quant[i] = qv;
+        t.quantShift[i] = sv;
+        t.quantFp[i] = static_cast<std::int16_t>((1 << 16) / quantQtx[i]);
+        t.roundFp[i] = static_cast<std::int16_t>((64 * quantQtx[i]) >> 7);
+        t.zbin[i] = static_cast<std::int16_t>((qzbin * quantQtx[i] + 64) >> 7);
+        t.round[i] = static_cast<std::int16_t>((qroundingFactor * quantQtx[i]) >> 7);
+        t.dequant[i] = static_cast<std::int16_t>(quantQtx[i]);
+    }
+}
+
+}  // namespace qh1
+
+TEST_CASE("buildQuantTablesBd at bd 8 equals the landed buildQuantTables for all qindex") {
+    transforms::QuantTables got, want;
+    int bad = 0;
+    for (int q = 0; q < 256; ++q) {
+        transforms::buildQuantTablesBd(q, 8, got);
+        transforms::buildQuantTables(q, want);
+        for (int i = 0; i < 2; ++i) {
+            if (got.quant[i] != want.quant[i]) ++bad;
+            if (got.quantShift[i] != want.quantShift[i]) ++bad;
+            if (got.quantFp[i] != want.quantFp[i]) ++bad;
+            if (got.roundFp[i] != want.roundFp[i]) ++bad;
+            if (got.zbin[i] != want.zbin[i]) ++bad;
+            if (got.round[i] != want.round[i]) ++bad;
+            if (got.dequant[i] != want.dequant[i]) ++bad;
+        }
+    }
+    CHECK(bad == 0);
+}
+
+TEST_CASE("buildQuantTablesBd at bd 10/12 matches the md_config_process.c oracle") {
+    const std::string text = qh1::refText("/third_party/SVT-AV1/Source/Lib/Codec/inv_transforms.c");
+    const std::vector<int> dc10 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac10 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc12 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac12 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+    transforms::QuantTables got, want;
+    int bad = 0;
+    for (int q = 0; q < 256; ++q) {
+        transforms::buildQuantTablesBd(q, 10, got);
+        qh1::buildQuantTablesOracle(q, 10, dc10, ac10, want);
+        for (int i = 0; i < 2; ++i) {
+            if (got.quant[i] != want.quant[i]) ++bad;
+            if (got.quantShift[i] != want.quantShift[i]) ++bad;
+            if (got.quantFp[i] != want.quantFp[i]) ++bad;
+            if (got.roundFp[i] != want.roundFp[i]) ++bad;
+            if (got.zbin[i] != want.zbin[i]) ++bad;
+            if (got.round[i] != want.round[i]) ++bad;
+            if (got.dequant[i] != want.dequant[i]) ++bad;
+        }
+        transforms::buildQuantTablesBd(q, 12, got);
+        qh1::buildQuantTablesOracle(q, 12, dc12, ac12, want);
+        for (int i = 0; i < 2; ++i) {
+            if (got.quant[i] != want.quant[i]) ++bad;
+            if (got.quantShift[i] != want.quantShift[i]) ++bad;
+            if (got.quantFp[i] != want.quantFp[i]) ++bad;
+            if (got.roundFp[i] != want.roundFp[i]) ++bad;
+            if (got.zbin[i] != want.zbin[i]) ++bad;
+            if (got.round[i] != want.round[i]) ++bad;
+            if (got.dequant[i] != want.dequant[i]) ++bad;
+        }
+    }
+    CHECK(bad == 0);
+    // saturation absolutes at the extreme qindices (12-bit zbin rounds up
+    // through int16 range comfortably; the fp reciprocal of the largest
+    // 12-bit quant is the smallest)
+    transforms::buildQuantTablesBd(255, 12, got);
+    CHECK(got.dequant[0] == 21387);
+    CHECK(got.dequant[1] == 29247);
+    CHECK(got.quantFp[1] == (1 << 16) / 29247);
+    CHECK(got.zbin[0] == static_cast<std::int16_t>((80 * 21387 + 64) >> 7));
+}
+
+namespace qh1 {
+
+// svt_aom_highbd_quantize_b_c (full_loop.c:85-136), qm/iqm NULL-folded
+// (wt = iwt = 1 << AOM_QM_BITS = 32, inv_transforms.h:27) - an independent
+// transcription of the reference text. NO int16 clamp on the round add
+// (that clamp exists only in the lowbd svt_aom_quantize_b_c, :67) and the
+// pre-scan COLLECTS every out-of-bin index (no early break).
+void quantizeBOracle(const std::int32_t* coeff, const transforms::QuantTables& tables,
+                     const std::int16_t* scan, int nCoeffs, int logScale,
+                     std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    const int zbins[2] = {
+        (int)(((tables.zbin[0] < 0 ? 0 : tables.zbin[0]) + ((1 << logScale) >> 1)) >> logScale),
+        (int)(((tables.zbin[1] < 0 ? 0 : tables.zbin[1]) + ((1 << logScale) >> 1)) >> logScale)};
+    // ROUND_POWER_OF_TWO(zbin, log_scale) - zbin is non-negative
+    int eobVal = -1;
+    for (int i = 0; i < nCoeffs; ++i) {
+        qcoeff[i] = 0;
+        dqcoeff[i] = 0;
+    }
+    std::int32_t idxArr[4096];
+    int idx = 0;
+    for (int i = 0; i < nCoeffs; ++i) {
+        const int rc = scan[i];
+        const std::int32_t wt = 32;
+        const std::int32_t coeffVal = coeff[rc] * wt;
+        if (coeffVal >= (zbins[rc != 0] * (1 << 5)) || coeffVal <= (zbins[rc != 0] * -(1 << 5))) {
+            idxArr[idx++] = i;
+        }
+    }
+    for (int i = 0; i < idx; ++i) {
+        const int rc = scan[idxArr[i]];
+        const std::int32_t coeffVal = coeff[rc];
+        const int coeffSign = coeffVal < 0 ? -1 : 0;
+        const std::int32_t absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+        const std::int64_t tmp1 = absCoeff + (int)(((tables.round[rc != 0] < 0 ? 0 : tables.round[rc != 0]) +
+                                                    ((1 << logScale) >> 1)) >> logScale);
+        const std::int64_t tmpw = tmp1 * 32;
+        const std::int64_t tmp2 = ((tmpw * tables.quant[rc != 0]) >> 16) + tmpw;
+        const std::int32_t absQcoeff =
+            (std::int32_t)((tmp2 * tables.quantShift[rc != 0]) >> (16 - logScale + 5));
+        qcoeff[rc] = (absQcoeff ^ coeffSign) - coeffSign;
+        // (dequant * iwt + (1 << (AOM_QM_BITS - 1))) >> AOM_QM_BITS == dequant
+        // at iwt = 32 (exact for any dequant)
+        const std::int32_t dequant = tables.dequant[rc != 0];
+        const std::int32_t absDqcoeff = (std::int32_t)(((std::int64_t)absQcoeff * dequant) >> logScale);
+        dqcoeff[rc] = (absDqcoeff ^ coeffSign) - coeffSign;
+        if (absQcoeff) {
+            eobVal = idxArr[i];
+        }
+    }
+    *eob = static_cast<std::uint16_t>(eobVal + 1);
+}
+
+std::uint32_t lcgState = 0x1234u;
+std::int32_t lcg(int bound) {  // deterministic, non-cryptographic
+    lcgState = lcgState * 1664525u + 1013904223u;
+    return (std::int32_t)((lcgState >> 8) % (unsigned)bound);
+}
+
+}  // namespace qh1
+
+TEST_CASE("quantizeBHb equals the landed quantizeBN wherever the lowbd clamp is dead") {
+    // derivation: identical tables (bd 8), coefficients with
+    // abs_coeff + round <= 32767 (round <= (48*1336)>>7 = 501 at qindex 255,
+    // so |coeff| <= 32000 keeps the lowbd INT16 clamp dead) - the two
+    // algorithms must agree bit-for-bit on qcoeff, dqcoeff and eob
+    const int sizes[3] = {16, 64, 256};
+    void (*defaultScan[3])(std::int16_t*);
+    defaultScan[0] = transforms::defaultScan4x4;
+    defaultScan[1] = transforms::defaultScan8x8;
+    defaultScan[2] = transforms::defaultScan16x16;
+    int bad = 0;
+    for (int qi = 0; qi < 3; ++qi) {
+        transforms::QuantTables tables;
+        transforms::buildQuantTables(qh1::lcg(256), tables);
+        for (int s = 0; s < 3; ++s) {
+            std::int16_t scan[256];
+            defaultScan[s](scan);
+            const int n = sizes[s];
+            for (int trial = 0; trial < 8; ++trial) {
+                std::int32_t coeff[256];
+                for (int i = 0; i < n; ++i) {
+                    coeff[i] = qh1::lcg(64001) - 32000;
+                }
+                std::int32_t qcHb[256], qcLb[256], dqHb[256], dqLb[256];
+                std::uint16_t eobHb, eobLb;
+                transforms::quantizeBHb(coeff, tables, scan, n, 0, qcHb, dqHb, &eobHb);
+                if (s == 0) {
+                    transforms::quantizeB4x4(coeff, tables, scan, qcLb, dqLb, &eobLb);
+                } else if (s == 1) {
+                    transforms::quantizeB8x8(coeff, tables, scan, qcLb, dqLb, &eobLb);
+                } else {
+                    transforms::quantizeB16x16(coeff, tables, scan, qcLb, dqLb, &eobLb);
+                }
+                for (int i = 0; i < n; ++i) {
+                    if (qcHb[i] != qcLb[i]) ++bad;
+                    if (dqHb[i] != dqLb[i]) ++bad;
+                }
+                if (eobHb != eobLb) ++bad;
+                // the transcription oracle must agree on EVERY trial
+                std::int32_t qcOr[256], dqOr[256];
+                std::uint16_t eobOr;
+                qh1::quantizeBOracle(coeff, tables, scan, n, 0, qcOr, dqOr, &eobOr);
+                for (int i = 0; i < n; ++i) {
+                    if (qcHb[i] != qcOr[i]) ++bad;
+                    if (dqHb[i] != dqOr[i]) ++bad;
+                }
+                if (eobHb != eobOr) ++bad;
+            }
+        }
+    }
+    CHECK(bad == 0);
+}
+
+TEST_CASE("quantizeBHb drops the lowbd INT16 clamp - the divergence is load-bearing") {
+    // at qindex 255 bd 8: round = (48*1336)>>7 = 501, so a coefficient of
+    // 33000 pushes abs_coeff + round to 33501 - the lowbd quantize_b clamps
+    // it to 32767 (:67) while the highbd path (full_loop.c:122) does NOT
+    transforms::QuantTables tables;
+    transforms::buildQuantTables(255, tables);
+    std::int16_t scan[16];
+    transforms::defaultScan4x4(scan);
+    std::int32_t coeff[16] = {0};
+    coeff[0] = 33000;
+    std::int32_t qcHb[16], qcLb[16], dqHb[16], dqLb[16], qcOr[16], dqOr[16];
+    std::uint16_t eobHb, eobLb, eobOr;
+    transforms::quantizeBHb(coeff, tables, scan, 16, 0, qcHb, dqHb, &eobHb);
+    transforms::quantizeB4x4(coeff, tables, scan, qcLb, dqLb, &eobLb);
+    qh1::quantizeBOracle(coeff, tables, scan, 16, 0, qcOr, dqOr, &eobOr);
+    CHECK(qcHb[0] == qcOr[0]);
+    CHECK(qcHb[0] != qcLb[0]);  // the no-clamp difference is observable
+    // the lowbd clamp (32767 on the round add, :67) yields a strictly
+    // smaller quantized magnitude - the pipeline is monotonic in tmp
+    CHECK(qcLb[0] < qcHb[0]);
+    CHECK(dqLb[0] < dqHb[0]);
+    CHECK(dqHb[0] == dqOr[0]);
+    CHECK(eobHb == 1);
+}
+
+TEST_CASE("quantizeBHb saturation, zbin boundaries and eob semantics") {
+    transforms::QuantTables tables;
+    transforms::buildQuantTables(255, tables);
+    std::int16_t scan[64];
+    transforms::defaultScan8x8(scan);
+    // adversarial saturation: magnitudes up to 2^25 (coeff*32 stays inside
+    // int32, mirroring the reference's own int32 pre-scan product)
+    std::int32_t coeff[64];
+    const std::int32_t big[8] = {1 << 24, -(1 << 24), 16777213, -16777213,
+                                 tables.zbin[1], -tables.zbin[1], tables.zbin[1] - 1, -(tables.zbin[1] - 1)};
+    for (int i = 0; i < 64; ++i) {
+        coeff[i] = big[i % 8];
+    }
+    std::int32_t qc[64], dq[64], qcOr[64], dqOr[64];
+    std::uint16_t eob, eobOr;
+    transforms::quantizeBHb(coeff, tables, scan, 64, 0, qc, dq, &eob);
+    qh1::quantizeBOracle(coeff, tables, scan, 64, 0, qcOr, dqOr, &eobOr);
+    int bad = 0;
+    for (int i = 0; i < 64; ++i) {
+        if (qc[i] != qcOr[i]) ++bad;
+        if (dq[i] != dqOr[i]) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(eob == eobOr);
+    // all-zero block: eob 0
+    std::int32_t zero[64] = {0};
+    std::uint16_t eobZero;
+    transforms::quantizeBHb(zero, tables, scan, 64, 0, qc, dq, &eobZero);
+    CHECK(eobZero == 0);
+    // a single out-of-bin coefficient at scan position k gives eob k+1
+    std::int32_t single[64] = {0};
+    single[scan[37]] = 100000;
+    std::uint16_t eobSingle;
+    transforms::quantizeBHb(single, tables, scan, 64, 0, qc, dq, &eobSingle);
+    CHECK(eobSingle == 38);
+    // log_scale 1 and 2 paths against the oracle (the 32x32/64x64 rounding):
+    // fresh non-aliased buffers
+    std::int32_t coeff32[1024], qc32[1024], dq32[1024], qcOr32[1024], dqOr32[1024];
+    std::int16_t scan32[1024];
+    transforms::defaultScan32x32(scan32);
+    for (int i = 0; i < 1024; ++i) {
+        coeff32[i] = qh1::lcg(2 << 20) - (1 << 20);
+    }
+    std::uint16_t eob32, eobOr32;
+    transforms::quantizeBHb(coeff32, tables, scan32, 1024, 1, qc32, dq32, &eob32);
+    qh1::quantizeBOracle(coeff32, tables, scan32, 1024, 1, qcOr32, dqOr32, &eobOr32);
+    bad = 0;
+    for (int i = 0; i < 1024; ++i) {
+        if (qc32[i] != qcOr32[i]) ++bad;
+        if (dq32[i] != dqOr32[i]) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(eob32 == eobOr32);
+    std::int32_t coeff64[4096], qc64[4096], dq64[4096], qcOr64[4096], dqOr64[4096];
+    std::int16_t scan64[4096];
+    transforms::defaultScan64x64(scan64);
+    for (int i = 0; i < 4096; ++i) {
+        coeff64[i] = qh1::lcg(2 << 20) - (1 << 20);
+    }
+    std::uint16_t eob64, eobOr64;
+    transforms::quantizeBHb(coeff64, tables, scan64, 4096, 2, qc64, dq64, &eob64);
+    qh1::quantizeBOracle(coeff64, tables, scan64, 4096, 2, qcOr64, dqOr64, &eobOr64);
+    bad = 0;
+    for (int i = 0; i < 4096; ++i) {
+        if (qc64[i] != qcOr64[i]) ++bad;
+        if (dq64[i] != dqOr64[i]) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(eob64 == eobOr64);
+}
+
+namespace qh1 {
+
+// highbd_quantize_fp_helper_c (full_loop.c:329-397), qm/iqm NULL branch
+// (:367-395), transcribed from the reference text. NO int16 clamp on the
+// round add (the lowbd quantize_fp_helper_c clamps at :245); the threshold
+// is (abs_coeff << (1 + log_scale)) >= dequant and the else branch zeroes
+// qcoeff/dqcoeff per position (the scan is a permutation, so every position
+// is written exactly once)
+void quantizeFpOracle(const std::int32_t* coeff, const transforms::QuantTables& tables,
+                      const std::int16_t* scan, int count, int logScale,
+                      std::int32_t* qcoeff, std::int32_t* dqcoeff, std::uint16_t* eob) {
+    const int shift = 16 - logScale;
+    int eobVal = -1;
+    const int logScaledRoundArr[2] = {
+        (int)(((tables.roundFp[0] < 0 ? 0 : tables.roundFp[0]) + ((1 << logScale) >> 1)) >> logScale),
+        (int)(((tables.roundFp[1] < 0 ? 0 : tables.roundFp[1]) + ((1 << logScale) >> 1)) >> logScale)};
+    for (int i = 0; i < count; ++i) {
+        const int rc = scan[i];
+        const int rc01 = (rc != 0);
+        const std::int32_t coeffVal = coeff[rc];
+        const int coeffSign = coeffVal < 0 ? -1 : 0;
+        const int absCoeff = (coeffVal ^ coeffSign) - coeffSign;
+        if ((absCoeff << (1 + logScale)) >= tables.dequant[rc01]) {
+            const std::int64_t tmp = (std::int64_t)absCoeff + logScaledRoundArr[rc01];
+            const int absQcoeff = (int)((tmp * tables.quantFp[rc01]) >> shift);
+            qcoeff[rc] = (absQcoeff ^ coeffSign) - coeffSign;
+            const std::int32_t absDqcoeff =
+                (std::int32_t)(((std::int64_t)absQcoeff * tables.dequant[rc01]) >> logScale);
+            if (absQcoeff) {
+                eobVal = i;
+            }
+            dqcoeff[rc] = (absDqcoeff ^ coeffSign) - coeffSign;
+        } else {
+            qcoeff[rc] = 0;
+            dqcoeff[rc] = 0;
+        }
+    }
+    *eob = static_cast<std::uint16_t>(eobVal + 1);
+}
+
+}  // namespace qh1
+
+TEST_CASE("quantizeFpHb equals the landed quantizeFpN wherever the lowbd clamp is dead") {
+    // derivation: identical tables (bd 8), coefficients with
+    // abs_coeff + roundFp <= 32767 (roundFp <= (64*1336)>>7 = 668 at
+    // qindex 255, so |coeff| <= 32000 keeps the lowbd clamp dead)
+    struct FpCase { int n; int logScale; void (*scan)(std::int16_t*); void (*lowbd)(
+        const std::int32_t*, const transforms::QuantTables&, const std::int16_t*, std::int32_t*,
+        std::int32_t*, std::uint16_t*); };
+    const FpCase cases[4] = {
+        {16, 0, transforms::defaultScan4x4, transforms::quantizeFp4x4},
+        {64, 0, transforms::defaultScan8x8, transforms::quantizeFp8x8},
+        {256, 0, transforms::defaultScan16x16, transforms::quantizeFp16x16},
+        {1024, 1, transforms::defaultScan32x32, transforms::quantizeFp32x32},
+    };
+    int bad = 0;
+    for (int qi = 0; qi < 3; ++qi) {
+        transforms::QuantTables tables;
+        transforms::buildQuantTables(qh1::lcg(256), tables);
+        for (int c = 0; c < 4; ++c) {
+            std::int16_t scan[1024];
+            cases[c].scan(scan);
+            for (int trial = 0; trial < 4; ++trial) {
+                std::int32_t coeff[1024];
+                for (int i = 0; i < cases[c].n; ++i) {
+                    coeff[i] = qh1::lcg(64001) - 32000;
+                }
+                std::int32_t qcHb[1024], qcLb[1024], dqHb[1024], dqLb[1024], qcOr[1024], dqOr[1024];
+                std::uint16_t eobHb, eobLb, eobOr;
+                transforms::quantizeFpHb(coeff, tables, scan, cases[c].n, cases[c].logScale, qcHb,
+                                         dqHb, &eobHb);
+                cases[c].lowbd(coeff, tables, scan, qcLb, dqLb, &eobLb);
+                qh1::quantizeFpOracle(coeff, tables, scan, cases[c].n, cases[c].logScale, qcOr,
+                                      dqOr, &eobOr);
+                for (int i = 0; i < cases[c].n; ++i) {
+                    if (qcHb[i] != qcLb[i]) ++bad;
+                    if (dqHb[i] != dqLb[i]) ++bad;
+                    if (qcHb[i] != qcOr[i]) ++bad;
+                    if (dqHb[i] != dqOr[i]) ++bad;
+                }
+                if (eobHb != eobLb) ++bad;
+                if (eobHb != eobOr) ++bad;
+            }
+        }
+    }
+    CHECK(bad == 0);
+}
+
+TEST_CASE("quantizeFpHb drops the lowbd INT16 clamp - the divergence is load-bearing") {
+    // at qindex 255 bd 8: roundFp = (64*1336)>>7 = 668, so a coefficient of
+    // 33000 pushes abs_coeff + roundFp to 33668 - the lowbd quantize_fp
+    // clamps it to 32767 (full_loop.c:245) while the highbd path (:382) does
+    // NOT; the quant pipeline then divides both down, so the observable is
+    // the strict magnitude ordering
+    transforms::QuantTables tables;
+    transforms::buildQuantTables(255, tables);
+    std::int16_t scan[16];
+    transforms::defaultScan4x4(scan);
+    std::int32_t coeff[16] = {0};
+    coeff[0] = 33000;
+    std::int32_t qcHb[16], qcLb[16], dqHb[16], dqLb[16], qcOr[16], dqOr[16];
+    std::uint16_t eobHb, eobLb, eobOr;
+    transforms::quantizeFpHb(coeff, tables, scan, 16, 0, qcHb, dqHb, &eobHb);
+    transforms::quantizeFp4x4(coeff, tables, scan, qcLb, dqLb, &eobLb);
+    qh1::quantizeFpOracle(coeff, tables, scan, 16, 0, qcOr, dqOr, &eobOr);
+    CHECK(qcHb[0] == qcOr[0]);
+    CHECK(qcHb[0] != qcLb[0]);
+    CHECK(qcLb[0] < qcHb[0]);
+    CHECK(dqHb[0] == dqOr[0]);
+    CHECK(eobHb == 1);
+}
+
+TEST_CASE("quantizeFpHb saturation and the log_scale 2 path") {
+    transforms::QuantTables tables;
+    transforms::buildQuantTables(255, tables);
+    std::int16_t scan[64];
+    transforms::defaultScan8x8(scan);
+    // adversarial saturation: magnitudes up to 2^24 keep the reference's own
+    // (abs_coeff << (1 + log_scale)) shift inside int32 at every log_scale
+    std::int32_t coeff[64];
+    const std::int32_t big[8] = {1 << 24, -(1 << 24), 16777213, -16777213,
+                                 tables.dequant[1], -tables.dequant[1], tables.dequant[1] - 1,
+                                 -(tables.dequant[1] - 1)};
+    for (int i = 0; i < 64; ++i) {
+        coeff[i] = big[i % 8];
+    }
+    std::int32_t qc[64], dq[64], qcOr[64], dqOr[64];
+    std::uint16_t eob, eobOr;
+    transforms::quantizeFpHb(coeff, tables, scan, 64, 0, qc, dq, &eob);
+    qh1::quantizeFpOracle(coeff, tables, scan, 64, 0, qcOr, dqOr, &eobOr);
+    int bad = 0;
+    for (int i = 0; i < 64; ++i) {
+        if (qc[i] != qcOr[i]) ++bad;
+        if (dq[i] != dqOr[i]) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(eob == eobOr);
+    // all-zero block: eob 0
+    std::int32_t zero[64] = {0};
+    std::uint16_t eobZero;
+    transforms::quantizeFpHb(zero, tables, scan, 64, 0, qc, dq, &eobZero);
+    CHECK(eobZero == 0);
+    // log_scale 2 at 64x64 against the oracle
+    std::int32_t coeff64[4096], qc64[4096], dq64[4096], qcOr64[4096], dqOr64[4096];
+    std::int16_t scan64[4096];
+    transforms::defaultScan64x64(scan64);
+    for (int i = 0; i < 4096; ++i) {
+        coeff64[i] = qh1::lcg(2 << 20) - (1 << 20);
+    }
+    std::uint16_t eob64, eobOr64;
+    transforms::quantizeFpHb(coeff64, tables, scan64, 4096, 2, qc64, dq64, &eob64);
+    qh1::quantizeFpOracle(coeff64, tables, scan64, 4096, 2, qcOr64, dqOr64, &eobOr64);
+    bad = 0;
+    for (int i = 0; i < 4096; ++i) {
+        if (qc64[i] != qcOr64[i]) ++bad;
+        if (dq64[i] != dqOr64[i]) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(eob64 == eobOr64);
+}
+
+TEST_CASE("txScale matches av1_get_tx_scale over every TxSize") {
+    // av1_get_tx_scale (coefficients.h:48-52): (pels > 256) + (pels > 1024)
+    // over tx_size_2d (:44-46). The derivation oracle computes the same
+    // predicate from the LANDED txSizeWide/txSizeHigh (common_utils.c
+    // tables) - an independent route to the same quantity
+    const transforms::TxSize all[19] = {
+        transforms::TxSize::TX_4X4,   transforms::TxSize::TX_8X8,   transforms::TxSize::TX_16X16,
+        transforms::TxSize::TX_32X32, transforms::TxSize::TX_64X64, transforms::TxSize::TX_4X8,
+        transforms::TxSize::TX_8X4,   transforms::TxSize::TX_8X16,  transforms::TxSize::TX_16X8,
+        transforms::TxSize::TX_16X32, transforms::TxSize::TX_32X16, transforms::TxSize::TX_32X64,
+        transforms::TxSize::TX_64X32, transforms::TxSize::TX_4X16,  transforms::TxSize::TX_16X4,
+        transforms::TxSize::TX_8X32,  transforms::TxSize::TX_32X8,  transforms::TxSize::TX_16X64,
+        transforms::TxSize::TX_64X16};
+    int bad = 0;
+    for (int i = 0; i < 19; ++i) {
+        const std::int32_t pels = transforms::txSizeWide(all[i]) * transforms::txSizeHigh(all[i]);
+        const std::int32_t want = (pels > 256 ? 1 : 0) + (pels > 1024 ? 1 : 0);
+        if (transforms::txScale(all[i]) != want) ++bad;
+    }
+    CHECK(bad == 0);
+    // table-verbatim absolutes (coefficients.h:44-46)
+    CHECK(transforms::txScale(transforms::TxSize::TX_4X4) == 0);
+    CHECK(transforms::txScale(transforms::TxSize::TX_16X16) == 0);
+    CHECK(transforms::txScale(transforms::TxSize::TX_32X32) == 1);
+    CHECK(transforms::txScale(transforms::TxSize::TX_64X64) == 2);
+    CHECK(transforms::txScale(transforms::TxSize::TX_8X32) == 0);   // 256 exactly
+    CHECK(transforms::txScale(transforms::TxSize::TX_32X8) == 0);   // 256 exactly
+    CHECK(transforms::txScale(transforms::TxSize::TX_16X64) == 1);  // 1024 exactly
+    CHECK(transforms::txScale(transforms::TxSize::TX_64X16) == 1);  // 1024 exactly
 }

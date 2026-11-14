@@ -445,6 +445,18 @@ struct QuantTables {
 
 void buildQuantTables(std::int32_t qindex, QuantTables& tables);
 
+// svt_aom_invert_quant (inv_transforms.c:3516-3526) - exposed for the QH1
+// bd-parameterized twin in transform_hbd.cpp
+void invertQuant(std::int16_t* quant, std::int16_t* shift, std::int32_t d);
+
+// svt_aom_dc_quant_qtx (inv_transforms.c:3467) at EB_EIGHT_BIT, delta 0 -
+// exposed for the QH1 bd-parameterized twin in transform_hbd.cpp
+std::int16_t dcQuantQtx(std::int32_t qindex);
+
+// svt_aom_ac_quant_qtx (inv_transforms.c:3484) at EB_EIGHT_BIT, delta 0 -
+// exposed for the QH1 bd-parameterized twin in transform_hbd.cpp
+std::int16_t acQuantQtx(std::int32_t qindex);
+
 // default (up-right diagonal) scan for 4x4, svt_aom_init_iscan formula
 // (coefficients.c:345-363) at W=H=4
 void defaultScan4x4(std::int16_t scan[16]);

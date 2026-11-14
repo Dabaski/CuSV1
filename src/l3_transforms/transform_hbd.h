@@ -165,4 +165,48 @@ void whtFwdTxfmHb(std::int16_t* srcDiff, int bw, std::int32_t* coeff, TxSize txS
 void highbdFwdTxfmHb(std::int16_t* srcDiff, std::int32_t* coeff, int diffStride,
                      const TxfmParamHb& txfmParam);
 
+// QH1: the A1 highbd quantizer surface. The pinned tree is
+// CONFIG_ENABLE_HIGH_BIT_DEPTH=0 (Source/API/EbConfigMacros.h:55-57), so the
+// reference's 10/12-bit table arms are compiled out there; this port carries
+// the CONFIG=1 surface (the TXH1 hbd-twin precedent) and keeps the -1
+// default arm for invalid bd.
+
+// svt_aom_dc_quant_qtx (inv_transforms.c:3467-3482); delta folded 0 (the
+// landed 8-bit twin's fold, named deviation)
+std::int16_t dcQuantQtxBd(std::int32_t qindex, int bd);
+
+// svt_aom_ac_quant_qtx (inv_transforms.c:3484-3499); delta folded 0
+std::int16_t acQuantQtxBd(std::int32_t qindex, int bd);
+
+// svt_aom_get_qzbin_factor (inv_transforms.c:3501-3514)
+std::int32_t qzbinFactorBd(std::int32_t q, int bd);
+
+// the LUMA rows of svt_av1_build_quantizer (md_config_process.c:101-135)
+// with the bit depth threaded; deltas 0 and sharpness 0 (the landed 8-bit
+// twin's folds, named deviations); the u/v chroma rows (:136-152) are an A6
+// surface, parked
+void buildQuantTablesBd(std::int32_t qindex, int bd, QuantTables& tables);
+
+// svt_aom_highbd_quantize_b_c (full_loop.c:85-136), qm/iqm NULL-folded
+// (wt = iwt = 1 << AOM_QM_BITS, the landed quantizeBN fold). NO int16 clamp
+// on the round add (that clamp exists only in the lowbd svt_aom_quantize_b_c,
+// :67) and the pre-scan COLLECTS every out-of-bin index (no early break).
+void quantizeBHb(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                 int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                 std::uint16_t* eob);
+
+// highbd_quantize_fp_helper_c (full_loop.c:329-397) qm/iqm NULL branch +
+// the svt_av1_highbd_quantize_fp_c facade (:399-418); zbin/quant_shift/
+// iscan are unused in the NULL branch (the reference (void)s them). NO
+// int16 clamp on the round add (the lowbd quantize_fp_helper_c clamps at
+// :245); the else branch zeroes qcoeff/dqcoeff per position (the scan is a
+// permutation, so every position is written exactly once).
+void quantizeFpHb(const std::int32_t* coeff, const QuantTables& tables, const std::int16_t* scan,
+                  int nCoeffs, int logScale, std::int32_t* qcoeff, std::int32_t* dqcoeff,
+                  std::uint16_t* eob);
+
+// av1_get_tx_scale (coefficients.h:48-52) over tx_size_2d (:44-46): the
+// log_scale used by the quantizer entries
+std::int32_t txScale(TxSize txSize);
+
 }  // namespace transforms
