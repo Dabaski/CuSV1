@@ -165,6 +165,11 @@ struct MiniGopStats {
 // utility.c:130-163).
 const MiniGopStats* getMiniGopStats(std::uint32_t mini_gop_index);
 
+// get_msb, portable #else body (definitions.h:628-:644): returns
+// (int32_t)floor(log2(n)). n must be > 0. Declared here (MU2 refactor:
+// was static in utility.cpp) so mathutil.h's svtLog2fSafe shares it.
+int getMsb(std::uint32_t n);
+
 // NOT_USED_VALUE - utility.h:95 (#define 0); marks unused offset columns.
 constexpr std::uint32_t kNotUsedValue = 0;
 
