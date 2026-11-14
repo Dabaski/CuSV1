@@ -572,6 +572,64 @@ void pickInterinterSeg(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsiz
 void pickInterinterMask(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
                         const std::uint8_t* p1, const std::int16_t* residual1, const std::int16_t* diff10,
                         const void* srcBase, int srcStride);
+// ---------- A3E E4: the OBMC walker + calc_target_weighted_pred family ----------
+
+// mi_size_wide/high, common_utils.c:291-:292.
+extern const std::uint8_t miSizeWide[22];
+extern const std::uint8_t miSizeHigh[22];
+
+// The walker's read surface of MbModeInfo (the AMVP1 carrier precedent):
+// is_neighbor_overlappable (inter_prediction.h:242-:244) reads
+// block_mi.ref_frame[0] > INTRA_FRAME; the step reads bsize.
+struct ObmcNbMi {
+    std::int32_t refFrame0;
+    std::uint8_t bsize;
+};
+
+// The walker's read surface of MacroBlockD: the mi pointer INTO the grid,
+// the row stride, the block extent in mi units, and the availability
+// flags.
+struct ObmcXd {
+    const ObmcNbMi* mi;
+    int miStride;
+    int n4W;
+    int n4H;
+    int upAvailable;
+    int leftAvailable;
+};
+
+// overlappable_nb_visitor_t, enc_inter_prediction.c:709-:710 (the xd/nb
+// structs thread as void* carriers).
+using ObmcVisitor = void (*)(std::uint8_t is16bit, void* xd, int relMiPos, std::uint8_t nbMiSize,
+                             const ObmcNbMi* nbMi, void* funCtxt);
+
+// foreach_overlappable_nb_above, enc_inter_prediction.c:712-:743.
+void foreachOverlappableNbAbove(std::uint8_t is16bit, int miCols, ObmcXd* xd, int miCol, int nbMax, ObmcVisitor fun,
+                                void* funCtxt);
+
+// foreach_overlappable_nb_left, enc_inter_prediction.c:745-:771.
+void foreachOverlappableNbLeft(std::uint8_t is16bit, int miRows, ObmcXd* xd, int miRow, int nbMax, ObmcVisitor fun,
+                               void* funCtxt);
+
+// calc_target_weighted_pred_ctxt (enc_inter_prediction.c, the struct the
+// two visitors consume; field order {mask_buf, wsrc_buf, tmp,
+// tmp_stride, overlap} per the reference's initializer).
+struct CalcTargetWeightedPredCtxt {
+    std::int32_t* maskBuf;
+    std::int32_t* wsrcBuf;
+    const std::uint8_t* tmp;
+    int tmpStride;
+    int overlap;
+};
+
+// svt_av1_calc_target_weighted_pred_above_c, enc_inter_prediction.c:1581-:1607.
+// The xd n4_w read threads as the bw parameter (named deviation).
+void calcTargetWeightedPredAbove(const ObmcXd& xd, int relMiCol, std::uint8_t nbMiWidth,
+                                 CalcTargetWeightedPredCtxt* ctxt);
+
+// svt_av1_calc_target_weighted_pred_left_c, enc_inter_prediction.c:1609-:1635.
+void calcTargetWeightedPredLeft(const ObmcXd& xd, int relMiRow, std::uint8_t nbMiHeight,
+                                CalcTargetWeightedPredCtxt* ctxt);
 // ---------- A3E J4: the dispatch rung ----------
 
 // svt_highbd_inter_predictor, inter_prediction.c:1455-:1523. The

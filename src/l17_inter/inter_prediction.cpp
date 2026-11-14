@@ -727,6 +727,140 @@ inline bool isInterinterCompoundUsedWedge(int bsize) {
 inline std::int64_t rdCost(std::uint32_t rdmult, std::int64_t rate, std::int64_t dist) {
     return ((rate * (std::int64_t)rdmult + ((1 << 9) >> 1)) >> 9) + (dist << 7);
 }
+// ---------- A3E E4: the OBMC walker + calc_target_weighted_pred family ----------
+
+// mi_size_wide/high, common_utils.c:291-:292.
+const std::uint8_t miSizeWide[22] = {1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16};
+const std::uint8_t miSizeHigh[22] = {1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4};
+
+// is_neighbor_overlappable, inter_prediction.h:242-:244 (INTRA_FRAME = 0).
+inline bool isNeighborOverlappable(const ObmcNbMi& mbmi) {
+    return mbmi.refFrame0 > 0;
+}
+
+// max_neighbor_obmc, enc_inter_prediction.c:707 (input: log2 of length).
+const int maxNeighborObmc[6] = {0, 1, 2, 3, 4, 4};
+
+// foreach_overlappable_nb_above, enc_inter_prediction.c:712-:743.
+void foreachOverlappableNbAbove(std::uint8_t is16bit, int miCols, ObmcXd* xd, int miCol, int nbMax, ObmcVisitor fun,
+                                void* funCtxt) {
+    if (!xd->upAvailable) {
+        return;
+    }
+
+    int nbCount = 0;
+
+    // prev_row_mi points into the mi array, starting at the beginning of
+    // the previous row.
+    const ObmcNbMi* prevRowMi = xd->mi - miCol - 1 * xd->miStride;
+    const int endCol = miCol + xd->n4W < miCols ? miCol + xd->n4W : miCols;
+    std::uint8_t miStep;
+    for (int aboveMiCol = miCol; aboveMiCol < endCol && nbCount < nbMax; aboveMiCol += miStep) {
+        const ObmcNbMi* aboveMi = prevRowMi + aboveMiCol;
+        miStep = (std::uint8_t)(miSizeWide[aboveMi[0].bsize] < miSizeWide[12 /* BLOCK_64X64 */]
+                                    ? miSizeWide[aboveMi[0].bsize]
+                                    : miSizeWide[12]);
+        // If we're considering a block with width 4, it should be treated
+        // as half of a pair of blocks with chroma information in the
+        // second. Move above_mi_col back to the start of the pair if
+        // needed, set above_mbmi to point at the block with chroma
+        // information, and set mi_step to 2 to step over the entire pair
+        // at the end of the iteration.
+        if (miStep == 1) {
+            aboveMiCol &= ~1;
+            aboveMi = prevRowMi + aboveMiCol + 1;
+            miStep = 2;
+        }
+        if (isNeighborOverlappable(*aboveMi)) {
+            ++nbCount;
+            fun(is16bit, xd, aboveMiCol - miCol, (std::uint8_t)(xd->n4W < miStep ? xd->n4W : miStep), aboveMi,
+                funCtxt);
+        }
+    }
+}
+
+// foreach_overlappable_nb_left, enc_inter_prediction.c:745-:771.
+void foreachOverlappableNbLeft(std::uint8_t is16bit, int miRows, ObmcXd* xd, int miRow, int nbMax, ObmcVisitor fun,
+                               void* funCtxt) {
+    if (!xd->leftAvailable) {
+        return;
+    }
+
+    int nbCount = 0;
+
+    // prev_col_mi points into the mi array, starting at the top of the
+    // previous column
+    const ObmcNbMi* prevColMi = xd->mi - 1 - miRow * xd->miStride;
+    const int endRow = miRow + xd->n4H < miRows ? miRow + xd->n4H : miRows;
+    std::uint8_t miStep;
+    for (int leftMiRow = miRow; leftMiRow < endRow && nbCount < nbMax; leftMiRow += miStep) {
+        const ObmcNbMi* leftMi = prevColMi + leftMiRow * xd->miStride;
+        miStep = (std::uint8_t)(miSizeHigh[leftMi[0].bsize] < miSizeHigh[12 /* BLOCK_64X64 */]
+                                    ? miSizeHigh[leftMi[0].bsize]
+                                    : miSizeHigh[12]);
+        if (miStep == 1) {
+            leftMiRow &= ~1;
+            leftMi = prevColMi + (leftMiRow + 1) * xd->miStride;
+            miStep = 2;
+        }
+        if (isNeighborOverlappable(*leftMi)) {
+            ++nbCount;
+            fun(is16bit, xd, leftMiRow - miRow, (std::uint8_t)(xd->n4H < miStep ? xd->n4H : miStep), leftMi,
+                funCtxt);
+        }
+    }
+}
+
+// svt_av1_calc_target_weighted_pred_above_c, enc_inter_prediction.c:1581-:1607.
+void calcTargetWeightedPredAbove(const ObmcXd& xd, int relMiCol, std::uint8_t nbMiWidth,
+                                 CalcTargetWeightedPredCtxt* ctxt) {
+    const int bw = xd.n4W << 2 /* MI_SIZE_LOG2 */;
+    const std::uint8_t* mask1d = getObmcMask(ctxt->overlap);
+    assert(mask1d != nullptr);
+    std::int32_t* wsrc = ctxt->wsrcBuf + (relMiCol * 4 /* MI_SIZE */);
+    std::int32_t* mask = ctxt->maskBuf + (relMiCol * 4);
+    const std::uint8_t* tmp = ctxt->tmp + relMiCol * 4;
+
+    {
+        for (int row = 0; row < ctxt->overlap; ++row) {
+            const std::uint8_t m0 = mask1d[row];
+            const std::uint8_t m1 = 64 - m0; // AOM_BLEND_A64_MAX_ALPHA - m0
+            for (int col = 0; col < nbMiWidth * 4; ++col) {
+                wsrc[col] = m1 * tmp[col];
+                mask[col] = m0;
+            }
+            wsrc += bw;
+            mask += bw;
+            tmp += ctxt->tmpStride;
+        }
+    }
+}
+
+// svt_av1_calc_target_weighted_pred_left_c, enc_inter_prediction.c:1609-:1635.
+void calcTargetWeightedPredLeft(const ObmcXd& xd, int relMiRow, std::uint8_t nbMiHeight,
+                                CalcTargetWeightedPredCtxt* ctxt) {
+    const int bw = xd.n4W << 2 /* MI_SIZE_LOG2 */;
+
+    std::int32_t* wsrc = ctxt->wsrcBuf + (relMiRow * 4 * bw);
+    std::int32_t* mask = ctxt->maskBuf + (relMiRow * 4 * bw);
+    const std::uint8_t* tmp = ctxt->tmp + (relMiRow * 4 * ctxt->tmpStride);
+    const std::uint8_t* mask1d = getObmcMask(ctxt->overlap);
+    assert(mask1d != nullptr);
+    {
+        for (int row = 0; row < nbMiHeight * 4; ++row) {
+            for (int col = 0; col < ctxt->overlap; ++col) {
+                const std::uint8_t m0 = mask1d[col];
+                const std::uint8_t m1 = 64 - m0;
+                wsrc[col] = (wsrc[col] >> 6 /* AOM_BLEND_A64_ROUND_BITS */) * m0 +
+                    (((std::int32_t)tmp[col]) << 6) * m1;
+                mask[col] = (mask[col] >> 6) * m0;
+            }
+            wsrc += bw;
+            mask += bw;
+            tmp += ctxt->tmpStride;
+        }
+    }
+}
 // ---------- A3E E3: the pick_wedge family ----------
 
 // svt_aom_subtract_block_c (pic_operators.c:58-:69) duplicated locally

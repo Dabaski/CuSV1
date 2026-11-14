@@ -2124,6 +2124,160 @@ TEST_CASE("pick_interinter_mask dispatches by type (enc:586-598)") {
     const int typeOk = (typeVal == 0) | (typeVal == 1);
     CHECK(typeOk);
 }
+// ------------------------------------------------------------- A3E E4
+// The OBMC walker + calc_target_weighted_pred family
+// (enc_inter_prediction.c:709-:771, :1581-:1636, :1755-:1819). The mi
+// grid threads through local carriers (the AMVP1 precedent): ObmcNbMi
+// carries the two fields the walker reads (ref_frame[0] for
+// is_neighbor_overlappable, bsize for the step), ObmcXd carries the
+// xd->mi/mi_stride/n4_w/n4_h/availability surface.
+
+namespace obmcoracle {
+
+// An independent transcription of foreach_overlappable_nb_above's visit
+// sequence, over the same carrier shapes.
+struct Visit {
+    int relPos;
+    int size;
+};
+
+std::vector<Visit> walkAbove(const std::vector<inter::ObmcNbMi>& grid, int miCol, int miStride, int n4W, int nbMax,
+                             int miCols) {
+    std::vector<Visit> out;
+    int nbCount = 0;
+    const int gridBase = miStride + miCol; // the index of xd->mi inside grid (row 1)
+    const int endCol = miCol + n4W < miCols ? miCol + n4W : miCols;
+    for (int aboveMiCol = miCol; aboveMiCol < endCol && nbCount < nbMax;) {
+        const int idx = gridBase - miCol - miStride + aboveMiCol;
+        int miStep = inter::miSizeWide[grid[(size_t)idx].bsize];
+        const int cap = 16; // mi_size_wide[BLOCK_64X64]
+        if (miStep > cap) miStep = cap;
+        int adjCol = aboveMiCol;
+        int adjIdx = idx;
+        if (miStep == 1) {
+            adjCol = aboveMiCol & ~1;
+            adjIdx = gridBase - miCol - miStride + adjCol + 1;
+            miStep = 2;
+        }
+        if (grid[(size_t)adjIdx].refFrame0 > 0) {
+            ++nbCount;
+            const int sz = n4W < miStep ? n4W : miStep;
+            out.push_back({adjCol - miCol, sz});
+        }
+        aboveMiCol = adjCol + miStep;
+    }
+    return out;
+}
+
+} // namespace obmcoracle
+
+TEST_CASE("foreach_overlappable_nb_above enumerates the visit sequence (enc:712-743)") {
+    // A 12x2 mi grid: row 1 is the current row (mi_row implicit via
+    // miStride); row 0 is the above row. Entries: bsize (0..21),
+    // refFrame0 (>0 = overlappable).
+    std::vector<inter::ObmcNbMi> grid(24);
+    for (auto& m : grid) {
+        m.refFrame0 = 0;
+        m.bsize = 6; // 16x16 -> mi_size 4
+    }
+    // Above row: [0..3] one overlappable 16x16 (step 4); [4..5] a width-4
+    // PAIR with the first half intra - the pairing rule must read the
+    // SECOND half (the chroma carrier) and step 2; [6..7] an overlappable
+    // 16x16 (the walk's n4W = 8 ends at col 8).
+    grid[0].refFrame0 = 1;
+    grid[4].bsize = 0;
+    grid[4].refFrame0 = 0;
+    grid[5].bsize = 0;
+    grid[5].refFrame0 = 1;
+    grid[6].refFrame0 = 1;
+    inter::ObmcXd xd{};
+    xd.mi = grid.data() + 12; // the current row start
+    xd.miStride = 12;
+    xd.n4W = 8;
+    xd.n4H = 1;
+    xd.upAvailable = 1;
+    std::vector<obmcoracle::Visit> got;
+    auto visitor = +[](std::uint8_t, void*, int relMiPos, std::uint8_t nbMiSize, const inter::ObmcNbMi*, void* ctxt) {
+        ((std::vector<obmcoracle::Visit>*)ctxt)->push_back({relMiPos, nbMiSize});
+    };
+    inter::foreachOverlappableNbAbove(0, 12, &xd, 0, 3, visitor, &got);
+    const std::vector<obmcoracle::Visit> want = obmcoracle::walkAbove(grid, 0, 12, 8, 3, 12);
+    REQUIRE(got.size() == want.size());
+    for (size_t i = 0; i < got.size(); ++i) {
+        CHECK(got[i].relPos == want[i].relPos);
+        CHECK(got[i].size == want[i].size);
+    }
+    // The nb_max cutoff: only the first nbMax overlappable neighbours
+    // fire (the walk stops once nb_count reaches it).
+    std::vector<obmcoracle::Visit> got1;
+    inter::foreachOverlappableNbAbove(0, 12, &xd, 0, 1, visitor, &got1);
+    CHECK(got1.size() == 1);
+    // up_available = 0: nothing fires.
+    xd.upAvailable = 0;
+    std::vector<obmcoracle::Visit> got0;
+    inter::foreachOverlappableNbAbove(0, 12, &xd, 0, 3, visitor, &got0);
+    CHECK(got0.empty());
+}
+
+TEST_CASE("calc_target_weighted_pred_above/left paint the wsrc/mask planes (enc:1581-1636)") {
+    // The ABOVE visitor: wsrc[col] = m1 * tmp[col]; mask[col] = m0, for
+    // overlap rows, columns 0..nb_mi_width*4-1, advanced by bw per row.
+    std::vector<std::int32_t> wsrc(16 * 8, -7), mask(16 * 8, -7);
+    std::vector<std::uint8_t> tmp(16 * 8);
+    for (size_t i = 0; i < tmp.size(); ++i) tmp[i] = (std::uint8_t)((i * 7 + 3) & 0x3F);
+    inter::CalcTargetWeightedPredCtxt ctxt{mask.data(), wsrc.data(), tmp.data(), 16, 4};
+    inter::ObmcXd xd{};
+    xd.n4W = 4; // bw = 16
+    inter::calcTargetWeightedPredAbove(xd, 2, 3, &ctxt); // rel_mi_col 2, nb width 3
+    // The independent recomputation.
+    const std::uint8_t* mask1d = inter::getObmcMask(4);
+    int bad = 0;
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 3 * 4; ++col) {
+            const std::int32_t* w = wsrc.data() + row * 16 + 2 * 4 + col;
+            const std::int32_t* mk = mask.data() + row * 16 + 2 * 4 + col;
+            const int m0 = mask1d[row];
+            const int m1 = 64 - m0;
+            if (*w != m1 * tmp[(size_t)row * 16 + 2 * 4 + col]) ++bad;
+            if (*mk != m0) ++bad;
+        }
+    }
+    CHECK(bad == 0);
+    // The LEFT visitor accumulates: wsrc = (wsrc >> 6)*m0 + (tmp << 6)*m1.
+    std::vector<std::int32_t> wsrc2(16 * 16), mask2(16 * 16);
+    for (size_t i = 0; i < wsrc2.size(); ++i) {
+        wsrc2[i] = (std::int32_t)(i * 13 + 5);
+        mask2[i] = 64;
+    }
+    std::vector<std::uint8_t> tmp2(16 * 16);
+    for (size_t i = 0; i < tmp2.size(); ++i) tmp2[i] = (std::uint8_t)((i * 11 + 1) & 0x3F);
+    // Fresh buffers with saved pre-images; ONE visitor pass.
+    std::vector<std::int32_t> wsrc3(16 * 16), mask3(16 * 16);
+    for (size_t i = 0; i < wsrc3.size(); ++i) {
+        wsrc3[i] = (std::int32_t)(i * 13 + 5);
+        mask3[i] = 64;
+    }
+    std::vector<std::int32_t> wsrcPre = wsrc3, maskPre = mask3;
+    inter::CalcTargetWeightedPredCtxt ctxt3{mask3.data(), wsrc3.data(), tmp2.data(), 16, 8};
+    inter::calcTargetWeightedPredLeft(xd, 1, 2, &ctxt3);
+    int bad3 = 0;
+    for (int row = 0; row < 2 * 4; ++row) {
+        const std::uint8_t* mask1d8 = inter::getObmcMask(8); // the ctxt's overlap
+        for (int col = 0; col < 8; ++col) {
+            const size_t idx = (size_t)(4 + row) * 16 + col;
+            const int m0 = mask1d8[col];
+            const int m1 = 64 - m0;
+            const std::int32_t wantW = ((wsrcPre[idx] >> 6) * m0) + (((std::int32_t)tmp2[idx]) << 6) * m1;
+            const std::int32_t wantM = ((maskPre[idx] >> 6) * m0);
+            if (wsrc3[idx] != wantW) ++bad3;
+            if (mask3[idx] != wantM) ++bad3;
+            if (wsrc3[idx] != wantW && bad3 <= 2)
+                MESSAGE("left (" << row << "," << col << "): got " << wsrc3[idx] << " want " << wantW << " pre "
+                                 << wsrcPre[idx] << " tmp " << (int)tmp2[idx] << " m0 " << m0);
+        }
+    }
+    CHECK(bad3 == 0);
+}
 // ------------------------------------------------------------- A3E E2
 // The curvfit RD-model family (enc_inter_prediction.c:197-:361). The two
 // grid tables are RUNTIME-DIFF-VERIFIED against the reference file
