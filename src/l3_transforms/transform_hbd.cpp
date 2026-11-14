@@ -1026,4 +1026,22 @@ std::int32_t qzbinFactorBd(std::int32_t q, int bd) {
     }
 }
 
+// the luma rows of svt_av1_build_quantizer (md_config_process.c:101-135) with
+// the bit depth threaded; deltas 0 and sharpness 0 (the landed 8-bit twin's
+// folds, named deviations). roundShift (transform.h:20) is the reference's
+// ROUND_POWER_OF_TWO at positive bits.
+void buildQuantTablesBd(std::int32_t qindex, int bd, QuantTables& tables) {
+    const std::int32_t qzbinFactorVal = qzbinFactorBd(qindex, bd);
+    const std::int32_t qroundingFactor = qindex == 0 ? 64 : 48;
+    for (int i = 0; i < 2; ++i) {
+        const std::int32_t quantQtx = i == 0 ? dcQuantQtxBd(qindex, bd) : acQuantQtxBd(qindex, bd);
+        invertQuant(&tables.quant[i], &tables.quantShift[i], quantQtx);
+        tables.quantFp[i]  = static_cast<std::int16_t>((1 << 16) / quantQtx);
+        tables.roundFp[i]  = static_cast<std::int16_t>((64 * quantQtx) >> 7);
+        tables.zbin[i]     = static_cast<std::int16_t>(roundShift(qzbinFactorVal * quantQtx, 7));
+        tables.round[i]    = static_cast<std::int16_t>((qroundingFactor * quantQtx) >> 7);
+        tables.dequant[i]  = static_cast<std::int16_t>(quantQtx);
+    }
+}
+
 }  // namespace transforms

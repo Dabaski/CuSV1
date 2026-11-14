@@ -181,4 +181,10 @@ std::int16_t acQuantQtxBd(std::int32_t qindex, int bd);
 // svt_aom_get_qzbin_factor (inv_transforms.c:3501-3514)
 std::int32_t qzbinFactorBd(std::int32_t q, int bd);
 
+// the LUMA rows of svt_av1_build_quantizer (md_config_process.c:101-135)
+// with the bit depth threaded; deltas 0 and sharpness 0 (the landed 8-bit
+// twin's folds, named deviations); the u/v chroma rows (:136-152) are an A6
+// surface, parked
+void buildQuantTablesBd(std::int32_t qindex, int bd, QuantTables& tables);
+
 }  // namespace transforms

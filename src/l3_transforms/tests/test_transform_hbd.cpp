@@ -1698,3 +1698,108 @@ TEST_CASE("qzbinFactorBd matches svt_aom_get_qzbin_factor over all q x bd") {
     CHECK(transforms::qzbinFactorBd(0, 12) == 64);
     CHECK(transforms::qzbinFactorBd(4, 7) == -1);
 }
+
+namespace qh1 {
+
+// svt_aom_invert_quant (inv_transforms.c:3516-3526), transcribed from the
+// reference text for the buildQuantTablesBd oracle
+void invertQuantOracle(std::int16_t* quant, std::int16_t* shift, std::int32_t d) {
+    std::uint32_t t;
+    std::int32_t  l, m;
+    t = static_cast<std::uint32_t>(d);
+    for (l = 0; t > 1; l++) {
+        t >>= 1;
+    }
+    m      = 1 + (1 << (16 + l)) / d;
+    *quant = static_cast<std::int16_t>(m - (1 << 16));
+    *shift = static_cast<std::int16_t>(1 << (16 - l));
+}
+
+// the luma rows of svt_av1_build_quantizer (md_config_process.c:106-135) at
+// deltas 0 / sharpness 0 - the SAME folds the landed 8-bit twin names - as
+// an independent oracle over the runtime-parsed tables
+void buildQuantTablesOracle(int q, int bd, const std::vector<int>& dc,
+                            const std::vector<int>& ac, transforms::QuantTables& t) {
+    const int quantQtx[2] = {dc[q], ac[q]};
+    const int qzbin = q == 0 ? 64 : (dc[q] < (bd == 8 ? 148 : bd == 10 ? 592 : 2368) ? 84 : 80);
+    const int qroundingFactor = q == 0 ? 64 : 48;
+    for (int i = 0; i < 2; ++i) {
+        std::int16_t qv, sv;
+        invertQuantOracle(&qv, &sv, quantQtx[i]);
+        t.quant[i] = qv;
+        t.quantShift[i] = sv;
+        t.quantFp[i] = static_cast<std::int16_t>((1 << 16) / quantQtx[i]);
+        t.roundFp[i] = static_cast<std::int16_t>((64 * quantQtx[i]) >> 7);
+        t.zbin[i] = static_cast<std::int16_t>((qzbin * quantQtx[i] + 64) >> 7);
+        t.round[i] = static_cast<std::int16_t>((qroundingFactor * quantQtx[i]) >> 7);
+        t.dequant[i] = static_cast<std::int16_t>(quantQtx[i]);
+    }
+}
+
+}  // namespace qh1
+
+TEST_CASE("buildQuantTablesBd at bd 8 equals the landed buildQuantTables for all qindex") {
+    transforms::QuantTables got, want;
+    int bad = 0;
+    for (int q = 0; q < 256; ++q) {
+        transforms::buildQuantTablesBd(q, 8, got);
+        transforms::buildQuantTables(q, want);
+        for (int i = 0; i < 2; ++i) {
+            if (got.quant[i] != want.quant[i]) ++bad;
+            if (got.quantShift[i] != want.quantShift[i]) ++bad;
+            if (got.quantFp[i] != want.quantFp[i]) ++bad;
+            if (got.roundFp[i] != want.roundFp[i]) ++bad;
+            if (got.zbin[i] != want.zbin[i]) ++bad;
+            if (got.round[i] != want.round[i]) ++bad;
+            if (got.dequant[i] != want.dequant[i]) ++bad;
+        }
+    }
+    CHECK(bad == 0);
+}
+
+TEST_CASE("buildQuantTablesBd at bd 10/12 matches the md_config_process.c oracle") {
+    const std::string text = qh1::refText("/third_party/SVT-AV1/Source/Lib/Codec/inv_transforms.c");
+    const std::vector<int> dc10 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac10 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc12 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac12 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+    transforms::QuantTables got, want;
+    int bad = 0;
+    for (int q = 0; q < 256; ++q) {
+        transforms::buildQuantTablesBd(q, 10, got);
+        qh1::buildQuantTablesOracle(q, 10, dc10, ac10, want);
+        for (int i = 0; i < 2; ++i) {
+            if (got.quant[i] != want.quant[i]) ++bad;
+            if (got.quantShift[i] != want.quantShift[i]) ++bad;
+            if (got.quantFp[i] != want.quantFp[i]) ++bad;
+            if (got.roundFp[i] != want.roundFp[i]) ++bad;
+            if (got.zbin[i] != want.zbin[i]) ++bad;
+            if (got.round[i] != want.round[i]) ++bad;
+            if (got.dequant[i] != want.dequant[i]) ++bad;
+        }
+        transforms::buildQuantTablesBd(q, 12, got);
+        qh1::buildQuantTablesOracle(q, 12, dc12, ac12, want);
+        for (int i = 0; i < 2; ++i) {
+            if (got.quant[i] != want.quant[i]) ++bad;
+            if (got.quantShift[i] != want.quantShift[i]) ++bad;
+            if (got.quantFp[i] != want.quantFp[i]) ++bad;
+            if (got.roundFp[i] != want.roundFp[i]) ++bad;
+            if (got.zbin[i] != want.zbin[i]) ++bad;
+            if (got.round[i] != want.round[i]) ++bad;
+            if (got.dequant[i] != want.dequant[i]) ++bad;
+        }
+    }
+    CHECK(bad == 0);
+    // saturation absolutes at the extreme qindices (12-bit zbin rounds up
+    // through int16 range comfortably; the fp reciprocal of the largest
+    // 12-bit quant is the smallest)
+    transforms::buildQuantTablesBd(255, 12, got);
+    CHECK(got.dequant[0] == 21387);
+    CHECK(got.dequant[1] == 29247);
+    CHECK(got.quantFp[1] == (1 << 16) / 29247);
+    CHECK(got.zbin[0] == static_cast<std::int16_t>((80 * 21387 + 64) >> 7));
+}
