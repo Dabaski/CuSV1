@@ -2459,5 +2459,85 @@ void av1PerformInverseTransformRecon(FlCtx* ctx, MdCandBf* cand_bf, const MdGeom
     } while (txb_itr < tu_total_count);
 }
 
+// md_process.c:767-:791 svt_aom_reset_mode_decision.
+void resetModeDecision(FlCtx* ctx, const MdTileGroupInfo& tile_group, int tile_cols, std::uint8_t pcs_hbd_md,
+                       std::uint8_t pic_bypass_encdec, const MdPcsNa& nas, std::uint32_t segment_index) {
+    ctx->hbd_md = pcs_hbd_md;
+    // Reset MD rate Estimation table to initial values by copying from md_rate_est_ctx
+    // (the md_rate_est_ctx pointer wall threads as nothing - the carriers
+    // hold the consumed tables directly).
+
+    // Reset Neighbor Arrays at start of new Segment / Picture
+    if (segment_index == 0) {
+        for (std::uint16_t r = tile_group.tile_group_tile_start_y; r < tile_group.tile_group_tile_end_y; r++) {
+            for (std::uint16_t c = tile_group.tile_group_tile_start_x; c < tile_group.tile_group_tile_end_x; c++) {
+                const std::uint16_t tile_idx = static_cast<std::uint16_t>(c + r * tile_cols);
+                // svt_aom_reset_mode_decision_neighbor_arrays (md_process.c
+                // :692-:720) at this tile: the depth walk over the two
+                // slots (the landed neighborArrayUnitReset), the 8-bit /
+                // 16-bit gates verbatim.
+                for (std::uint8_t depth = 0; depth < kNaTotCnt; depth++) {
+                    neighborArrayUnitReset(nas.mdleaf_partition_na[depth]);
+                    if (pcs_hbd_md != 1 /* EB_10_BIT_MD */) {
+                        neighborArrayUnitReset(nas.md_luma_recon_na[depth]);
+                        neighborArrayUnitReset(nas.md_tx_depth_1_luma_recon_na[depth]);
+                        neighborArrayUnitReset(nas.md_tx_depth_2_luma_recon_na[depth]);
+                        neighborArrayUnitReset(nas.md_cb_recon_na[depth]);
+                        neighborArrayUnitReset(nas.md_cr_recon_na[depth]);
+                    }
+                    if (pcs_hbd_md > 0 /* EB_8_BIT_MD */ || pic_bypass_encdec) {
+                        neighborArrayUnitReset(nas.md_luma_recon_na_16bit[depth]);
+                        neighborArrayUnitReset(nas.md_tx_depth_1_luma_recon_na_16bit[depth]);
+                        neighborArrayUnitReset(nas.md_tx_depth_2_luma_recon_na_16bit[depth]);
+                        neighborArrayUnitReset(nas.md_cb_recon_na_16bit[depth]);
+                        neighborArrayUnitReset(nas.md_cr_recon_na_16bit[depth]);
+                    }
+
+                    neighborArrayUnitReset(nas.md_y_dcs_na[depth]);
+                    neighborArrayUnitReset(nas.md_tx_depth_1_luma_dc_sign_level_coeff_na[depth]);
+                    neighborArrayUnitReset(nas.md_cb_dc_sign_level_coeff_na[depth]);
+                    neighborArrayUnitReset(nas.md_cr_dc_sign_level_coeff_na[depth]);
+                    neighborArrayUnitReset(nas.md_txfm_context_array[depth]);
+                }
+                (void)tile_idx;
+            }
+        }
+    }
+    // each segment inherits the bypass encdec from the picture level
+    ctx->bypass_encdec = pic_bypass_encdec;
+}
+
+// md_process.c:796-:812 svt_aom_mode_decision_configure_sb.
+void modeDecisionConfigureSb(FlCtx* ctx, std::uint8_t sb_qp, std::uint8_t me_sb_qp, const LambdaAssignPcs& pcs) {
+    /* Note(CHKN) : when Qp modulation varies QP on a sub-SB(CU) basis,  Lamda has to change based on Cu->QP , and then this code has to move inside the CU loop in MD */
+
+    // Lambda Assignement
+    ctx->qp_index = (pcs.delta_q_present || pcs.r0_delta_qp_md) ? sb_qp : pcs.base_q_idx;
+
+    ctx->me_q_index = me_sb_qp;
+
+    // av1_lambda_assign_md (md_process.c:730-:765) through the landed
+    // av1LambdaAssignMd; the LambdaAssignCtx window bridges the FlCtx
+    // lambda arrays.
+    LambdaAssignCtx lam;
+    lam.qp_index = ctx->qp_index;
+    lam.me_q_index = ctx->me_q_index;
+    lam.full_lambda_md[0] = ctx->full_lambda_md[0];
+    lam.full_lambda_md[1] = ctx->full_lambda_md[1];
+    lam.fast_lambda_md[0] = ctx->fast_lambda_md[0];
+    lam.fast_lambda_md[1] = ctx->fast_lambda_md[1];
+    lam.full_sb_lambda_md[0] = ctx->full_sb_lambda_md[0];
+    lam.full_sb_lambda_md[1] = ctx->full_sb_lambda_md[1];
+    av1LambdaAssignMd(pcs, &lam);
+    ctx->full_lambda_md[0] = lam.full_lambda_md[0];
+    ctx->full_lambda_md[1] = lam.full_lambda_md[1];
+    ctx->fast_lambda_md[0] = lam.fast_lambda_md[0];
+    ctx->fast_lambda_md[1] = lam.fast_lambda_md[1];
+    ctx->full_sb_lambda_md[0] = lam.full_sb_lambda_md[0];
+    ctx->full_sb_lambda_md[1] = lam.full_sb_lambda_md[1];
+
+    ctx->hbd_pack_done = 0;
+}
+
 }  // namespace mdc
 }  // namespace pipeline

@@ -2752,3 +2752,101 @@ TEST_CASE("l6 mdc av1PerformInverseTransformRecon composes luma and chroma recon
             CHECK(reconV[r * UVSTRIDE + c] == predV[r * UVSTRIDE + c]);
         }
 }
+
+// trip 26: svt_aom_reset_mode_decision (md_process.c:767-:791) +
+// svt_aom_mode_decision_configure_sb (:796-:812).
+TEST_CASE("l6 mdc resetModeDecision walks the tile group and configureSb assigns the lambda") {
+    mdc::FlCtx ctx{};
+    // The NA carriers: two slots, each a tiny array.
+    std::vector<std::uint8_t> storage(2 * 16 * 16);
+    pipeline::NeighborArrayUnit nas[2][16];
+    mdc::MdPcsNa carrier{};
+    for (int s = 0; s < 2; ++s) {
+        for (int k = 0; k < 16; ++k) {
+            nas[s][k].left_array = storage.data() + (s * 16 + k) * 16;
+            nas[s][k].top_array = nullptr;
+            nas[s][k].top_left_array = nullptr;
+            nas[s][k].left_array_size = 16;
+            nas[s][k].top_array_size = 0;
+            nas[s][k].top_left_array_size = 0;
+            nas[s][k].unit_size = 1;
+            nas[s][k].granularity_log2 = 0;
+        }
+    }
+    carrier.mdleaf_partition_na[0] = &nas[0][0];
+    carrier.mdleaf_partition_na[1] = &nas[1][0];
+    carrier.md_luma_recon_na[0] = &nas[0][1];
+    carrier.md_luma_recon_na[1] = &nas[1][1];
+    carrier.md_tx_depth_1_luma_recon_na[0] = &nas[0][2];
+    carrier.md_tx_depth_1_luma_recon_na[1] = &nas[1][2];
+    carrier.md_tx_depth_2_luma_recon_na[0] = &nas[0][3];
+    carrier.md_tx_depth_2_luma_recon_na[1] = &nas[1][3];
+    carrier.md_cb_recon_na[0] = &nas[0][4];
+    carrier.md_cb_recon_na[1] = &nas[1][4];
+    carrier.md_cr_recon_na[0] = &nas[0][5];
+    carrier.md_cr_recon_na[1] = &nas[1][5];
+    carrier.md_luma_recon_na_16bit[0] = &nas[0][6];
+    carrier.md_luma_recon_na_16bit[1] = &nas[1][6];
+    carrier.md_tx_depth_1_luma_recon_na_16bit[0] = &nas[0][7];
+    carrier.md_tx_depth_1_luma_recon_na_16bit[1] = &nas[1][7];
+    carrier.md_tx_depth_2_luma_recon_na_16bit[0] = &nas[0][8];
+    carrier.md_tx_depth_2_luma_recon_na_16bit[1] = &nas[1][8];
+    carrier.md_cb_recon_na_16bit[0] = &nas[0][9];
+    carrier.md_cb_recon_na_16bit[1] = &nas[1][9];
+    carrier.md_cr_recon_na_16bit[0] = &nas[0][10];
+    carrier.md_cr_recon_na_16bit[1] = &nas[1][10];
+    carrier.md_y_dcs_na[0] = &nas[0][11];
+    carrier.md_y_dcs_na[1] = &nas[1][11];
+    carrier.md_tx_depth_1_luma_dc_sign_level_coeff_na[0] = &nas[0][12];
+    carrier.md_tx_depth_1_luma_dc_sign_level_coeff_na[1] = &nas[1][12];
+    carrier.md_cb_dc_sign_level_coeff_na[0] = &nas[0][13];
+    carrier.md_cb_dc_sign_level_coeff_na[1] = &nas[1][13];
+    carrier.md_cr_dc_sign_level_coeff_na[0] = &nas[0][14];
+    carrier.md_cr_dc_sign_level_coeff_na[1] = &nas[1][14];
+    carrier.md_txfm_context_array[0] = &nas[0][15];
+    carrier.md_txfm_context_array[1] = &nas[1][15];
+
+    // Preset every array with 0x11; the reset must fill the 8-bit sets
+    // with 0xFF (hbd 0: the 8-bit set resets, the 16-bit set does not
+    // without bypass_encdec).
+    for (auto& b : storage) b = 0x11;
+    mdc::MdTileGroupInfo tg{1, 2, 0, 2};  // rows [1,2), cols [0,2): 2 tiles
+    mdc::resetModeDecision(&ctx, tg, 2, 0 /* hbd */, 0 /* bypass */, carrier, 0);
+    // Slot 0 arrays: reset. Slot 1 (the second tile in the walk): reset.
+    CHECK(nas[0][0].left_array[3] == 0xFF);
+    CHECK(nas[1][1].left_array[5] == 0xFF);
+    CHECK(nas[0][6].left_array[0] == 0x11);  // the 16-bit set untouched (hbd 0, no bypass)
+    // segment_index != 0: no reset.
+    for (auto& b : storage) b = 0x11;
+    mdc::resetModeDecision(&ctx, tg, 2, 0, 0, carrier, 1);
+    CHECK(nas[0][0].left_array[3] == 0x11);
+    // The bypass_encdec write.
+    CHECK(ctx.bypass_encdec == 0);
+    mdc::resetModeDecision(&ctx, tg, 2, 0, 1, carrier, 1);
+    CHECK(ctx.bypass_encdec == 1);
+    // With bypass AND segment 0 the 16-bit set resets too.
+    for (auto& b : storage) b = 0x11;
+    mdc::resetModeDecision(&ctx, tg, 2, 0, 1, carrier, 0);
+    CHECK(nas[0][6].left_array[0] == 0xFF);
+    CHECK(nas[0][0].left_array[3] == 0xFF);
+
+    // configureSb: delta_q_present -> sb_qp; else base_q_idx.
+    mdc::FlCtx ctx2{};
+    pipeline::LambdaAssignPcs pcs{};
+    pcs.rtc = 1;
+    pcs.delta_q_present = 1;
+    pcs.r0_delta_qp_md = 0;
+    pcs.base_q_idx = 100;
+    ctx2.full_lambda_md[0] = 7;
+    ctx2.fast_lambda_md[0] = 9;
+    mdc::modeDecisionConfigureSb(&ctx2, 41, 43, pcs);
+    CHECK(ctx2.qp_index == 41);
+    CHECK(ctx2.me_q_index == 43);
+    CHECK(ctx2.hbd_pack_done == 0);
+    // The lambda chain ran (the rtc path folds to the base tables).
+    CHECK(ctx2.full_lambda_md[0] != 7);
+    // delta_q off -> the base q index.
+    pcs.delta_q_present = 0;
+    mdc::modeDecisionConfigureSb(&ctx2, 41, 43, pcs);
+    CHECK(ctx2.qp_index == 100);
+}

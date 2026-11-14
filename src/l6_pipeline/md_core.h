@@ -237,6 +237,10 @@ struct FlCtx {
     PicBuf recon_tmp;                              // ctx->blk_ptr->recon_tmp
     std::uint32_t full_lambda_md[2];               // ctx->full_lambda_md[EB_8_BIT_MD / EB_10_BIT_MD]
     std::uint32_t fast_lambda_md[2];
+    std::uint32_t full_sb_lambda_md[2];            // ctx->full_sb_lambda_md
+    std::uint8_t qp_index;                         // ctx->qp_index
+    std::uint8_t me_q_index;                       // ctx->me_q_index
+    std::uint8_t hbd_pack_done;                    // ctx->hbd_pack_done (written)
     // mds0 state (md_process.h:1191-:1200 window).
     std::uint64_t mds0_best_cost;
     std::uint32_t mds0_best_idx;
@@ -575,6 +579,43 @@ void pmeSearch(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* me_resu
                const l16_rdo::RefPruningCtrls& pruning, const l16_rdo::RefFilteringRes filtering,
                SubpelTreeFn subpel_tree, const MdSubPelCtrls& subpel_me_ctrls, ChooseBestMvPredFn choose_best_mv_pred,
                int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols);
+
+// md_process.c:767-:791 svt_aom_reset_mode_decision. The tile-group walk
+// resets the neighbour arrays; the hbd_md/bypass_encdec writes land on
+// the carrier; the pcs-owned [slot][tile] NA arrays travel as the
+// per-slot views (the tile dimension is flattened, the A6C carrier
+// convention).
+struct MdTileGroupInfo {
+    std::uint16_t tile_group_tile_start_y;
+    std::uint16_t tile_group_tile_end_y;
+    std::uint16_t tile_group_tile_start_x;
+    std::uint16_t tile_group_tile_end_x;
+};
+struct MdPcsNa {
+    NeighborArrayUnit* mdleaf_partition_na[kNaTotCnt];
+    NeighborArrayUnit* md_luma_recon_na[kNaTotCnt];
+    NeighborArrayUnit* md_tx_depth_1_luma_recon_na[kNaTotCnt];
+    NeighborArrayUnit* md_tx_depth_2_luma_recon_na[kNaTotCnt];
+    NeighborArrayUnit* md_cb_recon_na[kNaTotCnt];
+    NeighborArrayUnit* md_cr_recon_na[kNaTotCnt];
+    NeighborArrayUnit* md_luma_recon_na_16bit[kNaTotCnt];
+    NeighborArrayUnit* md_tx_depth_1_luma_recon_na_16bit[kNaTotCnt];
+    NeighborArrayUnit* md_tx_depth_2_luma_recon_na_16bit[kNaTotCnt];
+    NeighborArrayUnit* md_cb_recon_na_16bit[kNaTotCnt];
+    NeighborArrayUnit* md_cr_recon_na_16bit[kNaTotCnt];
+    NeighborArrayUnit* md_y_dcs_na[kNaTotCnt];
+    NeighborArrayUnit* md_tx_depth_1_luma_dc_sign_level_coeff_na[kNaTotCnt];
+    NeighborArrayUnit* md_cb_dc_sign_level_coeff_na[kNaTotCnt];
+    NeighborArrayUnit* md_cr_dc_sign_level_coeff_na[kNaTotCnt];
+    NeighborArrayUnit* md_txfm_context_array[kNaTotCnt];
+};
+void resetModeDecision(FlCtx* ctx, const MdTileGroupInfo& tile_group, int tile_cols, std::uint8_t pcs_hbd_md,
+                       std::uint8_t pic_bypass_encdec, const MdPcsNa& nas, std::uint32_t segment_index);
+
+// md_process.c:796-:812 svt_aom_mode_decision_configure_sb: the qp
+// selection (delta_q_present || r0_delta_qp_md -> sb_qp else base_q_idx),
+// me_q_index, the landed av1LambdaAssignMd and the hbd_pack_done clear.
+void modeDecisionConfigureSb(FlCtx* ctx, std::uint8_t sb_qp, std::uint8_t me_sb_qp, const LambdaAssignPcs& pcs);
 
 // ---------------------------------------------------------------------------
 // The inverse-transform recon chain (full_loop.c:1755-:1789 wrapper +
