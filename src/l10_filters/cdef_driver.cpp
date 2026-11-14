@@ -1,4 +1,4 @@
-﻿#include <cmath>
+#include <cmath>
 #include <cstdint>
 
 #include "cdef_driver.h"
@@ -73,6 +73,29 @@ void pickCdefFromQp(const PickQpParams& p, std::int32_t* predYStrength, std::int
     // Pack primary + secondary
     *predYStrength = yF1 * kCdefSecStrengths + yF2;
     *predUvStrength = uvF1 * kCdefSecStrengths + uvF2;
+}
+
+// propagate_cdef_strength (enc_cdef.c:875-:895). 1:1 over the flat grid;
+// MI_SIZE_64X64 = 16 (definitions.h:376) is the 64x64 mi step.
+void propagateCdefStrength(CdefMb* miGrid, std::int32_t miStride, std::int32_t sbIndex, int bsize,
+    std::int8_t strength) {
+    constexpr std::int32_t kMiSize64x64 = 16;
+    miGrid[sbIndex].cdefStrength = strength;
+    switch (bsize) {
+    case 15: // BLOCK_128X128
+        miGrid[sbIndex + kMiSize64x64].cdefStrength = strength;
+        miGrid[sbIndex + kMiSize64x64 * miStride].cdefStrength = strength;
+        miGrid[sbIndex + kMiSize64x64 * miStride + kMiSize64x64].cdefStrength = strength;
+        break;
+    case 14: // BLOCK_128X64
+        miGrid[sbIndex + kMiSize64x64].cdefStrength = strength;
+        break;
+    case 13: // BLOCK_64X128
+        miGrid[sbIndex + kMiSize64x64 * miStride].cdefStrength = strength;
+        break;
+    default:
+        break;
+    }
 }
 
 } // namespace cdef_driver

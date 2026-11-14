@@ -63,5 +63,23 @@ struct PickQpParams {
 // y_f2/uv_f2 [0,3]; packs primary * CDEF_SEC_STRENGTHS + secondary.
 void pickCdefFromQp(const PickQpParams& p, std::int32_t* predYStrength, std::int32_t* predUvStrength);
 
+// CdefMb: the threaded MbModeInfo surface the CDEF driver reads and
+// writes - bsize (the definitions.h:883-:905 BlockSize ordinals) and
+// cdef_strength (block_structures.h:103, int8). The mi grid is threaded
+// as a FLAT array + stride (named deviation: the reference's jagged
+// MbModeInfo** cells become one owned CdefMb array, the DeblockContext
+// precedent).
+struct CdefMb {
+    int bsize;
+    std::int8_t cdefStrength;
+};
+
+// propagate_cdef_strength (enc_cdef.c:875-:895): write the strength at
+// the sb_index cell, then the 128-wide extensions: BLOCK_128X128 fans to
+// right + below + diagonal (MI_SIZE_64X64 = 16 mi steps), BLOCK_128X64 to
+// right, BLOCK_64X128 to below, everything else only the base cell.
+void propagateCdefStrength(CdefMb* miGrid, std::int32_t miStride, std::int32_t sbIndex, int bsize,
+    std::int8_t strength);
+
 } // namespace cdef_driver
 } // namespace l10_filters

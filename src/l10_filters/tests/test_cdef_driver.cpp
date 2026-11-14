@@ -3,7 +3,6 @@
 #include <vector>
 
 #include <cdef_driver.h>
-
 // A8D: the enc_cdef.c / cdef_process.c / rest_process.c driver spans.
 // S4: compute_cdef_dist (cdef_process.c:266-:290) and
 // svt_pick_cdef_from_qp (enc_cdef.c:823-:873).
@@ -184,4 +183,42 @@ TEST_CASE("computeCdefDist dispatches 16/8-bit with the doffset placement") {
         true);
     CHECK(d8 == 16 * 4);
     CHECK(d16 == 16 * 4);
+}
+namespace {
+// BlockSize ordinals (definitions.h:883-:905 order).
+constexpr int kBlock64x64 = 12;
+constexpr int kBlock64x128 = 13;
+constexpr int kBlock128x64 = 14;
+constexpr int kBlock128x128 = 15;
+} // namespace
+
+// propagate_cdef_strength (enc_cdef.c:875-:895): write the strength at the
+// sb_index cell, then the 128-block extensions (the MI_SIZE_64X64 = 16 mi
+// step). Enumerated over the four bsize classes on a stride-40 mi grid.
+TEST_CASE("propagateCdefStrength bsize classes") {
+    const std::int32_t stride = 40;
+    for (int bsizeCase = 0; bsizeCase < 4; ++bsizeCase) {
+        const int bsize = bsizeCase == 0 ? kBlock128x128
+            : bsizeCase == 1            ? kBlock128x64
+            : bsizeCase == 2            ? kBlock64x128
+                                        : kBlock64x64;
+        std::vector<l10_filters::cdef_driver::CdefMb> grid(stride * 28);
+        for (auto& mb : grid) {
+            mb.bsize = kBlock64x64;
+            mb.cdefStrength = -7;
+        }
+        const std::int32_t sbIndex = 10 * stride + 10;
+        l10_filters::cdef_driver::propagateCdefStrength(grid.data(), stride, sbIndex, bsize, 9);
+
+        CHECK(grid[sbIndex].cdefStrength == 9);
+        // right neighbor (sb + MI_SIZE_64X64 = 16)
+        CHECK(grid[sbIndex + 16].cdefStrength == (bsizeCase == 0 || bsizeCase == 1 ? 9 : -7));
+        // below neighbor (sb + MI_SIZE_64X64 * mi_stride)
+        CHECK(grid[sbIndex + 16 * stride].cdefStrength == (bsizeCase == 0 || bsizeCase == 2 ? 9 : -7));
+        // diagonal neighbor
+        CHECK(grid[sbIndex + 16 * stride + 16].cdefStrength == (bsizeCase == 0 ? 9 : -7));
+        // untouched cells stay poison (non-16 mi offsets)
+        CHECK(grid[sbIndex + 1].cdefStrength == -7);
+        CHECK(grid[sbIndex + stride].cdefStrength == -7);
+    }
 }
