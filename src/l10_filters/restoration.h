@@ -118,6 +118,13 @@ extern const std::int32_t oneByX[25];
 void extendFrameLowbd(std::uint8_t* data, std::int32_t width, std::int32_t height, std::int32_t stride,
                       std::int32_t border_horz, std::int32_t border_vert);
 
+// extend_frame_highbd (restoration.c:128-:148): the uint16 twin - per-row
+// pixel replication (no memset, the border is element-wise), then the
+// extended first/last row copies scaled by sizeof(uint16). File-local in
+// the reference; exported for direct testability (named deviation).
+void extendFrameHighbd(std::uint8_t* data, std::int32_t width, std::int32_t height, std::int32_t stride,
+                       std::int32_t border_horz, std::int32_t border_vert);
+
 // svt_extend_frame (restoration.c:150-:157): the highbd dispatcher. The
 // highbd branch is PARKED (named): assert(0), unreachable in our emission
 // (enable_restoration 0, 8-bit mono); extend_frame_highbd :128-:148 is not
@@ -130,6 +137,12 @@ void extendFrame(std::uint8_t* data, std::int32_t width, std::int32_t height, st
 // deviation).
 void copyTileLowbd(std::int32_t width, std::int32_t height, const std::uint8_t* src, std::int32_t src_stride,
                    std::uint8_t* dst, std::int32_t dst_stride);
+
+// copy_tile_highbd (restoration.c:166-:171): the uint16 twin - width
+// ELEMENTS per row (width * sizeof(uint16) bytes). File-local in the
+// reference; exported for direct testability (named deviation).
+void copyTileHighbd(std::int32_t width, std::int32_t height, const std::uint8_t* src, std::int32_t src_stride,
+                    std::uint8_t* dst, std::int32_t dst_stride);
 
 // copy_tile (restoration.c:173-:180): the highbd dispatcher; the highbd
 // branch is PARKED (named): assert(0), copy_tile_highbd :166-:171 not

@@ -1,0 +1,656 @@
+#pragma once
+
+#include <cstdint>
+#include <vector>
+
+#include "cdef.h"
+#include "restoration.h"
+
+// A8D (A8 campaign): 1:1 port of the remaining PURE / carrier-able DRIVER
+// spans of third_party/SVT-AV1/Source/Lib/Codec/enc_cdef.c, cdef_process.c
+// and rest_process.c - the CDEF3 struct-walled driver chain resolves
+// (the landed cdef.h PARKED list: svt_av1_cdef_frame, svt_pick_cdef_from_qp,
+// propagate_cdef_strength, finish_cdef_search, and the cdef_process.c
+// search/prep surfaces), plus the rest_process.c post-CDEF stage.
+//
+// LANDED (this header, per commit):
+//   S4: compute_cdef_dist (cdef_process.c:266-:290) and
+//       svt_pick_cdef_from_qp (enc_cdef.c:823-:873).
+//
+// The walls are threaded as named carriers one field per consumed
+// reference field (the RE8A DeblockContext pattern). PARKED (named):
+// the CdefContext/RestContext ctors/dctors and the FIFO/mutex machinery,
+// the allocation walls (the pcs->cdef_* / context buffers are threaded as
+// caller-provided storage), svt_sb_compute_cdef_list (the mi-grid walk,
+// threaded as a callback), svt_av1_upscale_normative_rows (the resize
+// driver, l11-walled), svt_aom_lambda_assign (the rc_process.c wall,
+// threaded as precomputed lambdas), and anything untestable. No fakes.
+
+namespace l10_filters {
+namespace cdef_driver {
+
+// compute_cdef_dist (cdef_process.c:266-:290): the is_16bit dispatch over
+// the landed 16-bit / 8-bit block-level dist walkers (cdef.h
+// cdefComputeDist16bit/cdefComputeDist8bit). doffset is a PIXEL offset:
+// the 16-bit branch reaches ((uint16_t*)dst) + doffset, the 8-bit branch
+// dst + doffset bytes.
+std::uint64_t computeCdefDist(const std::uint8_t* dst, std::int32_t doffset, std::int32_t dstride,
+    const std::uint8_t* src, const CdefList* dlist, std::int32_t cdefCount, CdefBlockSize bsize,
+    std::int32_t coeffShift, std::uint8_t subsamplingFactor, bool is16bit);
+
+// The svt_aom_ac_quant_qtx call-site wall (inv_transforms.c:3484): the
+// landed qtx tables live in l3_transforms, which l10 does not link; the
+// call site is threaded (named deviation, the LR3 scoped-court-order
+// precedent). (qindex, dc_or_ac, EbBitDepth) -> int16.
+using AcQuantQtxFn = std::int32_t (*)(std::int32_t qIndex, std::int32_t dcOrAc, std::int32_t bitDepth);
+
+// The threaded walls of svt_pick_cdef_from_qp (enc_cdef.c:823-:873):
+// frm_hdr->quantization_params.base_q_idx, ppcs->enhanced_pic->bit_depth
+// (EbBitDepth values 8/10/12), the frame-type gate
+// (KEY_FRAME || INTRA_ONLY_FRAME -> the intra branch) and the
+// is_screen_content argument.
+struct PickQpParams {
+    std::int32_t baseQIdx;
+    std::int32_t bitDepth;
+    bool isKeyFrame;
+    bool intraOnly;
+    bool isScreenContent;
+    AcQuantQtxFn acQuantQtx;
+};
+
+// svt_pick_cdef_from_qp (enc_cdef.c:823-:873): the qp-driven strength
+// prediction. q = ac_quant_qtx(base_q_idx, 0, bit_depth) >> (bit_depth -
+// 8); the SCREEN branch casts WITHOUT rounding (:838-:844), the inter and
+// intra branches roundf (:846-:860); clamps y_f1/uv_f1 [0,15] and
+// y_f2/uv_f2 [0,3]; packs primary * CDEF_SEC_STRENGTHS + secondary.
+void pickCdefFromQp(const PickQpParams& p, std::int32_t* predYStrength, std::int32_t* predUvStrength);
+
+// CdefMb: the threaded MbModeInfo surface the CDEF driver reads and
+// writes - bsize (the definitions.h:883-:905 BlockSize ordinals) and
+// cdef_strength (block_structures.h:103, int8). The mi grid is threaded
+// as a FLAT array + stride (named deviation: the reference's jagged
+// MbModeInfo** cells become one owned CdefMb array, the DeblockContext
+// precedent).
+struct CdefMb {
+    int bsize;
+    std::int8_t cdefStrength;
+};
+
+// propagate_cdef_strength (enc_cdef.c:875-:895): write the strength at
+// the sb_index cell, then the 128-wide extensions: BLOCK_128X128 fans to
+// right + below + diagonal (MI_SIZE_64X64 = 16 mi steps), BLOCK_128X64 to
+// right, BLOCK_64X128 to below, everything else only the base cell.
+void propagateCdefStrength(CdefMb* miGrid, std::int32_t miStride, std::int32_t sbIndex, int bsize,
+    std::int8_t strength);
+
+// ---------------------------------------------------------------------------
+// S6: cdef_process.c prep surfaces (the set/copy/recon trio)
+// ---------------------------------------------------------------------------
+
+// CdefPic: the threaded EbPictureBufferDesc surface (pic_buffer_desc.h
+// :40-:97), verbatim fields; the unions are flattened (y_buffer ==
+// buffer[0] etc.). bitDepth/colorFormat thread as ints (named deviation,
+// the LfSearchPic precedent).
+struct CdefPic {
+    std::uint8_t* buffer[3];
+    std::uint16_t stride[3];
+    std::uint8_t strideBitInc[3];
+    std::uint8_t* bufferAlloc;
+    std::size_t bufferAllocSz;
+    std::uint32_t lumaSize;
+    std::uint32_t chromaSize;
+    bool packedFlag;
+    std::uint16_t border;
+    std::uint16_t maxWidth;
+    std::uint16_t maxHeight;
+    std::uint16_t width;
+    std::uint16_t height;
+    int bitDepth;
+    int colorFormat;
+    std::uint32_t bufferEnableMask;
+    // test-side owned storage (the reference's buffers are external; the
+    // test fixtures need somewhere to own them)
+    std::vector<std::uint8_t> buf0, buf1, buf2;
+};
+
+// PICTURE_BUFFER_DESC_* (pic_buffer_desc.h:23-:28).
+constexpr std::uint32_t kPicBufYFlag = 1 << 0;
+constexpr std::uint32_t kPicBufCbFlag = 1 << 1;
+constexpr std::uint32_t kPicBufCrFlag = 1 << 2;
+constexpr std::uint32_t kPicBufLumaMask = kPicBufYFlag;
+constexpr std::uint32_t kPicBufFullMask = kPicBufYFlag | kPicBufCbFlag | kPicBufCrFlag;
+
+// The threaded SequenceControlSet surface of copy_recon_enc /
+// set_unscaled_input_16bit: seq_header.color_config.mono_chrome,
+// subsampling_x/y and is_16bit_pipeline.
+struct CdefScsWalls {
+    bool monoChrome;
+    int subsamplingX;
+    int subsamplingY;
+    bool is16bitPipeline;
+};
+
+// copy_recon_enc (cdef_process.c:46-:150): the 12 header field copies
+// dst <- src, the mono-chrome buffer-enable mask, the per-plane
+// alloc-size accumulation, the plane pointer setup (border arithmetic
+// scaled by the subsampling and bytes-per-pixel) and the row copy loop -
+// copy_width = ((width + sub_x) >> sub_x) * sizeof(*src_buf) <<
+// use_highbd. The EB_CALLOC_ALIGNED_ARRAY allocation wall is threaded as
+// the caller-provided bufferAlloc (named deviation).
+void copyReconEnc(const CdefScsWalls& scs, const CdefPic& src, CdefPic& dst, int numPlanes, bool skipCopy,
+    std::uint8_t* bufferAlloc);
+
+// The three callees of set_unscaled_input_16bit, threaded (the
+// pic-buffer walls; the pack_2d dispatch callees are PU1's landed
+// packunpack in l9, unlinkable from l10).
+using CopyBufferInfoFn = void (*)(const CdefPic& input, CdefPic& output);
+using Convert8To16Fn = void (*)(const CdefPic& input, CdefPic& output, int ssX, int ssY);
+using Pack2dPicFn = void (*)(const CdefPic& input, CdefPic& output);
+
+// set_unscaled_input_16bit (cdef_process.c:31-:44): copy_buffer_info
+// always, then convert_pic_8bit_to_16bit at EB_EIGHT_BIT else pack_2d_pic.
+void setUnscaledInput16bit(const CdefScsWalls& scs, const CdefPic& input, CdefPic& output, CopyBufferInfoFn copyInfo,
+    Convert8To16Fn convert8To16, Pack2dPicFn pack2dPic);
+
+// The svt_av1_upscale_normative_rows call-site wall (super_res.c, the
+// resize driver - l11-walled): threaded. (cm is not carried; the rows
+// driver takes the src/dst plane buffers, the height, the subsampling
+// and the bit depth.)
+using UpscaleNormativeRowsFn = void (*)(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst,
+    std::int32_t dstStride, std::int32_t height, std::int32_t subX, int bitDepth, bool is16bit);
+
+// svt_av1_superres_upscale_frame (cdef_process.c:152-:206): copy the
+// recon into a temp through the landed copyReconEnc, then per plane
+// upscale_normative_rows back into the recon. The temp allocation wall
+// is threaded (the caller provides the buffer); cm and the resize
+// driver walls are threaded as the callback.
+void superresUpscaleFrame(const CdefScsWalls& scs, const CdefPic& reconPic, CdefPic& temp, int numPlanes,
+    std::uint8_t* tempAlloc, UpscaleNormativeRowsFn upscaleRows, int encoderBitDepth);
+
+// ---------------------------------------------------------------------------
+// S7: cdef_seg_search (cdef_process.c:292-:666) - the per-segment strength
+// search over the 64x64 filter blocks.
+// ---------------------------------------------------------------------------
+
+// CdefFbEntry (pcs.h:157-:160): the per-fb dlist/count cache the SB=64
+// apply reuses. dlist holds the max 8x8 sub-blocks of a 64x64 fb.
+struct CdefFbEntry {
+    std::int32_t cdefCount;
+    CdefList dlist[64];
+};
+
+// CdefDirData (pcs.h:150-:153): the per-fb dir/var scratch.
+struct CdefDirData {
+    std::uint8_t dir[kCdefNblocks][kCdefNblocks];
+    std::int32_t var[kCdefNblocks][kCdefNblocks];
+};
+
+// The threaded CdefSearchControls surface (pcs.h:554-:591): the fields
+// cdef_seg_search and finish_cdef_search consume. default_first_pass_fs/
+// uv and default_second_pass_fs/uv are the full TOTAL_STRENGTHS arrays
+// (64).
+struct CdefSearchControls {
+    int firstPassFsNum;
+    int defaultSecondPassFsNum;
+    std::uint8_t defaultFirstPassFs[kCdefTotalStrengths];
+    std::uint8_t defaultSecondPassFs[kCdefTotalStrengths];
+    std::int8_t defaultFirstPassFsUv[kCdefTotalStrengths];
+    std::int8_t defaultSecondPassFsUv[kCdefTotalStrengths];
+    std::uint8_t subsamplingFactor;
+    // the finish_cdef_search fields
+    std::int8_t useReferenceCdefFs;
+    std::int8_t predYF;
+    std::int8_t predUvF;
+    bool uvFromY;
+    bool useQpStrength;
+};
+
+// The threaded CdefContext scratch (cdef_process.c:211-:222): the hoisted
+// buffers. tmpDst is uint16 to accommodate hbd content (8 bit treats it
+// as a uint8 buffer and uses half).
+struct CdefSegScratch {
+    std::uint16_t* tmpDst; // 1 << (MAX_SB_SIZE_LOG2 * 2)
+    std::uint16_t* inbuf; // CDEF_INBUF_SIZE (16-bit sentinel path)
+    std::uint8_t* inbuf8; // CDEF_INBUF_SIZE (native interior path)
+};
+
+// CDEF_INBUF_SIZE (cdef.h:41): CDEF_BSTRIDE * ((1 << MAX_SB_SIZE_LOG2) +
+// 2 * CDEF_VBORDER) = 144 * 134.
+constexpr int kCdefInbufSize = kCdefBstride * ((1 << 7) + 2 * 3);
+
+// The mse_seg carrier (pcs.h:205): two arrays of pointers to
+// TOTAL_STRENGTHS-wide rows, indexed [plane][fb][strength].
+using CdefMseSeg = std::uint64_t (*[2])[kCdefTotalStrengths];
+
+// The svt_sb_compute_cdef_list call-site wall (enc_cdef.c:153-:184, the
+// mi-grid walk): threaded as a callback. (pcsMiGrid, miStride, miRow,
+// miCol, dlist, bs) -> count. bs threads as the BlockSize ordinal.
+using ComputeCdefListFn = std::int32_t (*)(CdefMb* miGrid, std::int32_t miStride, std::int32_t miRow,
+    std::int32_t miCol, CdefList* dlist, int bs);
+
+// CdefSegCtx: the threaded PictureControlSet / SequenceControlSet /
+// PictureParentControlSet surface of cdef_seg_search, one named field per
+// consumed reference field (the DeblockContext pattern).
+struct CdefSegCtx {
+    // pcs->mi_grid_base / pcs->mi_stride / cm->mi_rows / cm->mi_cols
+    CdefMb* miGrid;
+    std::int32_t miStride;
+    std::int32_t miRows;
+    std::int32_t miCols;
+    // ppcs->aligned_width / aligned_height (the b64 segment geometry)
+    std::int32_t alignedWidth;
+    std::int32_t alignedHeight;
+    // pcs->cdef_segments_column_count / row_count
+    int cdefSegmentsColumnCount;
+    int cdefSegmentsRowCount;
+    // ppcs->cdef_search_ctrls
+    CdefSearchControls ctrls;
+    // scs->seq_header.sb_size == BLOCK_64X64, scs->static_config.
+    // encoder_bit_depth, SVT_EFFECTIVE_IS_16BIT_PIPELINE
+    bool sb64;
+    int encoderBitDepth;
+    bool is16bit;
+    // frm_hdr->quantization_params.base_q_idx (the damping)
+    std::int32_t baseQIdx;
+    // pcs->cdef_input_recon / cdef_input_source (the plane pointers) and
+    // the recon/input strides
+    const std::uint8_t* src[3];
+    const std::uint8_t* ref[3];
+    std::int32_t strideSrc[3];
+    std::int32_t strideRef[3];
+    // pcs->mse_seg / skip_cdef_seg / cdef_dir_data / cdef_fb_list
+    CdefMseSeg mseSeg;
+    std::uint8_t* skipCdefSeg;
+    CdefDirData* cdefDirData;
+    CdefFbEntry* cdefFbList;
+    // the CdefContext hoisted scratch
+    CdefSegScratch scratch;
+    // the svt_sb_compute_cdef_list call-site wall
+    ComputeCdefListFn computeCdefList;
+};
+
+// cdef_seg_search (cdef_process.c:292-:666): for each 64x64 filter block
+// in the segment and each plane, search the allowable strength pairs:
+// the 16-bit sentinel gather (the incremental VERY_LARGE reset logic) or
+// the native 8-bit halo gather, the per-plane_bsize subsampling cap, the
+// first/second pass strength loops over the landed fb filters, and the
+// mse_seg accumulation (V folds into the U row - the pli < 2 vs else
+// quirk). The chroma -1 mask gate pins default_mse_uv * 64 and skips the
+// filter call.
+void cdefSegSearch(CdefSegCtx& ctx, std::uint32_t segmentIndex);
+
+// ---------------------------------------------------------------------------
+// S8: svt_av1_cdef_frame (enc_cdef.c:300-:697) - the frame apply driver.
+// ---------------------------------------------------------------------------
+
+// CDEF_MAX_STRENGTHS (definitions.h:1440).
+constexpr int kCdefMaxStrengths = 16;
+
+// CdefFrameCtx: the threaded SequenceControlSet / PictureControlSet /
+// PictureParentControlSet surface, one named field per consumed reference
+// field. The persistent scratch (pcs->cdef_row_cdef / cdef_linebuf /
+// cdef_colbuf, the grow-on-demand allocation wall) and the stack src/src8
+// buffers (CDEF_INBUF_SIZE each) are threaded as caller-provided storage
+// (named deviation - the allocation walls are parked).
+struct CdefFrameCtx {
+    // cm: mi_rows / mi_cols / mi_stride; pcs->mi_grid_base (the mbmi
+    // reads: bsize + cdef_strength)
+    std::int32_t miRows;
+    std::int32_t miCols;
+    std::int32_t miStride;
+    CdefMb* miGrid;
+    // frm_hdr->cdef_params (the strengths + damping)
+    std::uint8_t cdefYStrength[kCdefMaxStrengths];
+    std::uint8_t cdefUvStrength[kCdefMaxStrengths];
+    std::int32_t cdefDamping;
+    // ppcs->nb_cdef_strengths
+    std::int32_t nbCdefStrengths;
+    // ppcs->cdef_search_ctrls gates
+    bool useReferenceCdefFs;
+    bool useQpStrength;
+    // scs->super_block_size / static_config.encoder_bit_depth /
+    // SVT_EFFECTIVE_IS_16BIT_PIPELINE / av1_num_planes
+    std::uint32_t sbSize;
+    int encoderBitDepth;
+    bool is16bit;
+    int numPlanes;
+    // the recon pic (svt_aom_get_recon_pic threaded): buffer + stride
+    std::uint8_t* reconBuf[3];
+    std::uint32_t reconStride[3];
+    // the persistent apply scratch: row flags (caller-provided, at least
+    // (nhfb+2)*2 bytes) and the per-plane halo buffers
+    std::uint8_t* rowCdef;
+    std::uint16_t* linebuf[3];
+    std::uint16_t* colbuf[3];
+    // the search scratch: pcs->cdef_fb_list (the SB=64 dlist cache) and
+    // pcs->cdef_dir_data
+    CdefFbEntry* cdefFbList;
+    CdefDirData* cdefDirData;
+    // the stack buffers of the reference (CDEF_INBUF_SIZE each; the
+    // 16-bit sentinel buffer is used only on the !is_16bit... rather the
+    // non-native path, the 8-bit mirror only on the native path)
+    std::uint16_t* src16;
+    std::uint8_t* src8;
+    // the svt_sb_compute_cdef_list call-site wall (the non-cache path)
+    ComputeCdefListFn computeCdefList;
+};
+
+// svt_av1_cdef_frame (enc_cdef.c:300-:697): the frame apply driver -
+// per 64x64 fb: the strength-pair read (the nb_cdef_strengths > 1
+// per-SB index), the dlist cache vs the compute_cdef_list callback, the
+// zero-strength skip, the per-plane 8-bit cdefApplyFb path or the 16-bit
+// sentinel copy dance (copy_sb8_16 body + linebuf/colbuf halos + the
+// frame-edge VERY_LARGE fills + cdefFilterFb), the curr/prev row-flag
+// swap.
+void cdefFrame(CdefFrameCtx& ctx);
+
+// ---------------------------------------------------------------------------
+// S9: finish_cdef_search (enc_cdef.c:897-:1094) - the search finisher.
+// ---------------------------------------------------------------------------
+
+// CdefFinishCtx: the threaded PictureControlSet / PictureParentControlSet
+// / FrameHeader surface. The svt_aom_lambda_assign call site
+// (rc_process.c:466, the rc wall) is threaded as the precomputed
+// fullLambda (named deviation); the RDCOST macro (rd_cost.h:36-38,
+// ROUND_POWER_OF_TWO(R*RM, AV1_PROB_COST_SHIFT=9) + D << RDDIV_BITS=7)
+// and av1_cost_literal (md_rate_estimation.h:31, n << 9) are carried
+// locally (l10 does not link l16's rd surface).
+struct CdefFinishCtx {
+    // frm_hdr->cdef_params (write) + quantization_params.base_q_idx
+    std::uint8_t cdefBits;
+    std::uint8_t cdefYStrength[kCdefMaxStrengths];
+    std::uint8_t cdefUvStrength[kCdefMaxStrengths];
+    std::uint8_t cdefDamping;
+    std::int32_t baseQIdx;
+    // ppcs->nb_cdef_strengths (write), ppcs->scs->allintra,
+    // ppcs->sc_class1 / sc_class5
+    std::int32_t nbCdefStrengths;
+    bool allintra;
+    std::uint8_t scClass1;
+    std::uint8_t scClass5;
+    // pcs->ppcs->cdef_search_ctrls
+    CdefSearchControls ctrls;
+    // pcs->ppcs->cdef_recon_ctrls.zero_fs_cost_bias (0 = off)
+    std::uint16_t zeroFsCostBias;
+    // the zero_fs_cost_bias 16-bit check:
+    // SVT_EFFECTIVE_BIT_DEPTH(encoder_bit_depth) > EB_EIGHT_BIT
+    bool is16bitPipeline;
+    // pcs walls: the mi grid + stride (the per-SB reads/writes),
+    // cm->mi_rows/cols, skip_cdef_seg, the persistent scratch
+    // (pcs->cdef_sb_index), mse_seg, the per-sb row-pointer scratch
+    // (pcs->cdef_mse_ptr[2], caller-provided arrays sized sbCount) and the
+    // cdef_dist_dev write
+    CdefMb* miGrid;
+    std::int32_t miStride;
+    std::int32_t miRows;
+    std::int32_t miCols;
+    std::uint8_t* skipCdefSeg;
+    std::int32_t* sbIndex;
+    CdefMseSeg mseSeg;
+    std::uint64_t** sbMsePtr[2];
+    std::int32_t cdefDistDev;
+    // the use_qp_strength path forwards to pickCdefFromQp with the SAME
+    // walls this carrier holds: the frame-type gate, the bit depth and the
+    // ac-quant qtx call-site wall
+    bool qpIsKeyFrame;
+    bool qpIntraOnly;
+    AcQuantQtxFn acQuantQtx;
+    // the svt_aom_lambda_assign wall (full_lambda only is consumed)
+    std::uint32_t fullLambda;
+};
+
+// finish_cdef_search (enc_cdef.c:897-:1094): the use_qp_strength path
+// (the pickCdefFromQp integration), the use_reference_cdef_fs early
+// return, the per-SB mse pointer gather (the 128-block skip conditions +
+// skip_cdef_seg), the zero_fs_cost_bias in-place mse scaling (16-bit vs
+// 8-bit branch values), the zero-cost RDCOST, the 4-iteration
+// nb_strength_bits RDO over the landed cdefJointStrengthSearchDual, the
+// cdef_dist_dev derivation, the per-SB best-gi assignment through the
+// landed propagateCdefStrength, and the filter_map remap.
+void finishCdefSearch(CdefFinishCtx& ctx);
+
+// ---------------------------------------------------------------------------
+// S10: rest_process.c - get_own_recon (:147-:190) +
+// copy_statistics_to_ref_obj_ect (:192-:251).
+// ---------------------------------------------------------------------------
+
+// RestHdr: the threaded FrameHeader surface the rest stage reads:
+// loop_filter_params.filter_level[2]/u/v, use_ref_frame_mvs, allow_intrabc,
+// frame_type, and the cdef_params strengths the ref-stat copy consumes.
+struct RestHdr {
+    std::int32_t filterLevel[2];
+    std::int32_t filterLevelU;
+    std::int32_t filterLevelV;
+    bool useRefFrameMvs;
+    bool allowIntrabc;
+    std::int32_t frameType;
+    std::uint8_t cdefYStrength[kCdefMaxStrengths];
+    std::uint8_t cdefUvStrength[kCdefMaxStrengths];
+};
+
+// RestUnitInfo (the WienerUnitInfo shape, restoration.h:188-:191): the
+// per-unit entry the wn prev-frame machinery forwards. The WienerInfo
+// member inherits the alignas(16) (C4324 padding expected - the landed
+// restoration.h pragma pattern).
+#pragma warning(push)
+#pragma warning(disable : 4324)
+struct RestUnitInfo {
+    restoration::RestorationType restorationType;
+    restoration::WienerInfo wienerInfo;
+};
+
+// RestRefStat: the threaded EbReferenceObject surface
+// (reference_object.h:21-:63), verbatim consumed fields; the sb arrays
+// are the caller-owned rows (sized b64_total_count); unitInfo is the
+// per-plane pointer array (plane -> units).
+struct RestRefStat {
+    std::uint8_t intraCodedArea;
+    std::uint8_t skipCodedArea;
+    std::uint8_t hpCodedArea;
+    std::uint8_t isMfmvUsed;
+    std::int32_t filterLevel[2];
+    std::int32_t filterLevelU;
+    std::int32_t filterLevelV;
+    std::int32_t dlfDistDev;
+    std::int32_t cdefDistDev;
+    std::uint32_t refCdefStrengthsNum;
+    std::uint8_t refCdefStrengths[2][kCdefTotalStrengths];
+    std::uint8_t* sbIntra;
+    std::uint8_t* sbSkip;
+    std::uint8_t* sb64x64Mvp;
+    std::uint32_t* sbMe64x64Dist;
+    std::uint32_t* sbMe8x8CostVar;
+    std::uint8_t* sbMinSqSize;
+    std::uint8_t* sbMaxSqSize;
+    std::uint8_t tmpLayerIdx;
+    bool isSceneChange;
+    std::int32_t frameType;
+    std::uint32_t orderHint;
+    std::uint32_t refOrderHint[7];
+    RestUnitInfo* unitInfo[3];
+};
+
+// RestPcsWalls: the threaded PictureControlSet / PictureParentControlSet
+// surface of copy_statistics_to_ref_obj_ect (the consumed fields).
+struct RestPcsWalls {
+    std::uint32_t intraCodedArea;
+    std::uint64_t skipCodedArea;
+    std::uint64_t hpCodedArea;
+    std::uint8_t temporalLayerIndex;
+    std::uint16_t b64TotalCount;
+    int sliceType; // definitions.h SliceType ordinals, I_SLICE = 0
+    std::int32_t dlfDistDev;
+    std::int32_t cdefDistDev;
+    std::uint32_t nbCdefStrengths; // ppcs->nb_cdef_strengths
+    bool enableRestoration; // ppcs->enable_restoration
+    std::uint8_t* sbIntra;
+    std::uint8_t* sbSkip;
+    std::uint8_t* sb64x64Mvp;
+    std::uint32_t* me64x64Distortion;
+    std::uint32_t* me8x8CostVariance;
+    std::uint8_t* sbMinSqSize;
+    std::uint8_t* sbMaxSqSize;
+    bool sceneChangeFlag;
+    bool isNotScaled;
+    std::uint32_t curOrderHint; // ppcs->cur_order_hint
+    std::uint32_t refOrderHint[7]; // ppcs->ref_order_hint
+    // the rst_info surface: frame_restoration_type + units_per_tile +
+    // unit_info per plane
+    restoration::RestorationType frameRestorationType[3];
+    std::int32_t unitsPerTile[3];
+    RestUnitInfo* unitInfo[3];
+};
+
+// The threaded Av1Common surface of the rest stage: the wn_filter_ctrls
+// gates and the mfmv_enabled flag.
+struct RestCmWalls {
+    bool wnFilterEnabled;
+    bool wnUsePrevFrameCoeffs;
+    bool mfmvEnabled;
+};
+
+// get_own_recon (rest_process.c:147-:190): returns the input recon when
+// boundaries are not used; otherwise copies the recon planes into
+// orgRecFrame (the stride element counts scaled by is_16bit) and returns
+// it. The svt_aom_get_recon_pic selector is threaded (the two pics
+// passed directly).
+CdefPic getOwnRecon(const CdefScsWalls& scs, const CdefPic& reconPic, const CdefPic& orgRecFrame,
+    bool useBoundariesInRestSearch, bool is16bit);
+
+// copy_statistics_to_ref_obj_ect (rest_process.c:192-:251): the ref-stat
+// field copies, the cdef strengths, the per-SB array copies, the
+// scene-change/temporal-layer fields, the mfmv-gated order-hint block
+// and the wn prev-frame unit_info walk (the I_SLICE/intrabc/rest-type
+// validity gates).
+void copyStatisticsToRefObjEct(const RestHdr& hdr, const RestCmWalls& cmWalls, const RestPcsWalls& pcs,
+    RestRefStat& obj);
+#pragma warning(pop)
+
+// ---------------------------------------------------------------------------
+// S11: svt_aom_rest_kernel_iter (rest_process.c:256-:503) - the rest
+// kernel, carried.
+// ---------------------------------------------------------------------------
+
+// The parked callees of the kernel, threaded as callbacks (each is a real
+// reference function in another stage: restoration_pick.c's
+// restoration_seg_search / rest_finish_search, restoration.c's
+// svt_av1_loop_restoration_filter_frame, enc_dec/pic stats' psnr/ssim
+// calculations, svt_aom_recon_output, pad_ref_and_set_flags and the
+// 16->8-bit recon convert - no fakes, the tests drive the dispatch).
+using RestorationSegSearchFn = void (*)(std::int32_t* rstTmpbuf, const CdefPic& orgFts, const CdefPic& cpiSource,
+    const CdefPic& trialFrameRst, void* pcsCtx, std::uint32_t segmentIndex);
+using RestFinishSearchFn = void (*)(void* pcsCtx);
+using LrFilterFrameFn = void (*)(std::int32_t* rstTmpbuf, void* frameToShow, void* cm, std::int32_t optimizedLr);
+using PsnrCalcFn = int (*)(void* pcsCtx, void* scsCtx, bool freeMemory);
+using SsimCalcFn = int (*)(void* pcsCtx, void* scsCtx, bool freeMemory);
+using ReconOutputFn = void (*)(void* pcsCtx, void* scsCtx);
+using PadRefFn = void (*)(void* pcsCtx, void* scsCtx);
+using Convert16To8Fn = void (*)(const std::uint16_t* buf16, std::int32_t stride16, std::uint8_t* buf8,
+    std::int32_t stride8, std::int32_t width, std::int32_t height);
+using PostRestResultFn = void (*)(void* pcsCtx, int tileRowIdx, int tileColIdx);
+using PostPicDemuxFn = void (*)(void* pcsCtx);
+
+// RestKernelWalls: the threaded RestContext + PictureControlSet +
+// SequenceControlSet + FrameHeader + Av1Common surface, one named field
+// per consumed reference field. The FIFO/mutex machinery (the
+// EB_GET_FULL_OBJECT / svt_block_on_mutex / release walls) stays parked -
+// the kernel runs its single-threaded form; the EbPictureBufferDesc walls
+// are the CdefPic carrier.
+struct RestKernelWalls {
+    // the RestContext scratch (the allocation walls parked: the callers
+    // own the buffers)
+    std::int32_t* rstTmpbuf;
+    CdefPic* trialFrameRst;
+    CdefPic* orgRecFrame;
+    // the input state: pcs->tot_seg_searched_rest (rw),
+    // pcs->rest_segments_total_count, the segment index
+    int totSegSearchedRest;
+    int restSegmentsTotalCount;
+    std::uint32_t segmentIndex;
+    void* pcsCtx;
+    void* scsCtx;
+    // the gates: ppcs->enable_restoration, frm_hdr->allow_intrabc,
+    // pcs->slice_type (I_SLICE = 0), scs->use_boundaries_in_rest_search,
+    // SVT_EFFECTIVE_IS_16BIT_PIPELINE
+    bool enableRestoration;
+    bool allowIntrabc;
+    int sliceType;
+    bool useBoundariesInRestSearch;
+    bool is16bit;
+    // the wn prev-frame restore inputs: the ref object's unit_info +
+    // units_per_tile per plane, and the pcs rst_info (rw) surface
+    const RestUnitInfo* refUnitInfo[3];
+    std::int32_t refUnitsPerTile[3];
+    restoration::RestorationType frameRestorationType[3];
+    std::int32_t unitsPerTile[3];
+    RestUnitInfo* unitInfo[3];
+    // the cm wn_filter_ctrls gates for the restore
+    bool wnFilterEnabled;
+    bool wnUsePrevFrameCoeffs;
+    // the pics: svt_aom_get_recon_pic (threaded), the input pic
+    // (is_16bit ? input_frame16bit : enhanced_unscaled_pic), the scaled
+    // input (pcs->scaled_input_pic, may be null)
+    const CdefPic* reconPic;
+    const CdefPic* inputPic;
+    const CdefPic* scaledInputPic;
+    // the completion-block gates: ppcs->is_ref, recon_enabled,
+    // stat_report, superres_total_recode_loop > 0, compute_psnr,
+    // compute_ssim, the aligned dims, the tile grid, the ref-stat
+    // wrapper (null check)
+    bool isRef;
+    bool reconEnabled;
+    bool statReport;
+    bool superresRecode;
+    bool computePsnr;
+    bool computeSsim;
+    std::int32_t alignedWidth;
+    std::int32_t alignedHeight;
+    int tileCols;
+    int tileRows;
+    RestRefStat* refStat;
+    RestHdr hdr;
+    RestCmWalls cmWalls;
+    RestPcsWalls pcsWalls;
+    // the pcs counters the normalization writes (pcs->intra_coded_area /
+    // skip_coded_area / hp_coded_area / avg_cnt_zeromv)
+    std::uint32_t intraCodedArea;
+    std::uint64_t skipCodedArea;
+    std::uint64_t hpCodedArea;
+    std::uint64_t avgCntZeromv;
+    // the 16->8-bit recon convert: the reference gate is
+    // is_16bit && SVT_EFFECTIVE_BIT_DEPTH(encoder_bit_depth) ==
+    // EB_EIGHT_BIT (threaded) and the y/u/v buffer pairs + strides +
+    // dims (with the border pre-offsets folded in by the caller)
+    bool conv16To8Gate;
+    const std::uint16_t* conv16Buf[3];
+    std::uint8_t* conv8Buf[3];
+    std::int32_t convStride16[3];
+    std::int32_t convStride8[3];
+    std::int32_t convWidth;
+    std::int32_t convHeight;
+    std::int32_t convChromaWidth;
+    std::int32_t convChromaHeight;
+    // the callbacks
+    RestorationSegSearchFn restorationSegSearch;
+    RestFinishSearchFn restFinishSearch;
+    LrFilterFrameFn lrFilterFrame;
+    PsnrCalcFn psnrCalculations;
+    SsimCalcFn ssimCalculations;
+    ReconOutputFn reconOutput;
+    PadRefFn padRefAndSetFlags;
+    Convert16To8Fn convert16To8;
+    PostRestResultFn postRestResults;
+    PostPicDemuxFn postPicDemux;
+};
+
+// svt_aom_rest_kernel_iter (rest_process.c:256-:503): the rest kernel.
+// The is_lr branch (get_own_recon + the is_resized input selection + the
+// wn prev-frame unit restore + restoration_seg_search), then the
+// segment-completion block: rest_finish_search + the lr filter gate (or
+// the RESTORE_NONE defaults), the stats normalization, the ref-stat
+// copy, the psnr/ssim/recon/demux dispatch and the per-tile rest-result
+// posts.
+void restKernelIter(RestKernelWalls& w);
+
+} // namespace cdef_driver
+} // namespace l10_filters
