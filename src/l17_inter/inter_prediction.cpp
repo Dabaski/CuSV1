@@ -10,6 +10,34 @@ namespace inter {
 // MAX_SB_SIZE = 128 -> 20736); the light_pd1 temp buffer is 4x that.
 constexpr int definitionsPackediBufferSize = (convolve::maxSbSize + (8 << 1)) * (convolve::maxSbSize + (8 << 1));
 
+// ---------- A3E W1: the wedge mask synthesis (storage) ----------
+
+// block_size_wide/high, common_utils.c:286-:289. Local 22-entry
+// duplicates (the l10 kBlockSizeWide precedent; l17 cannot link l14).
+const std::uint8_t kBlockSizeWide[22] = {4,  4,  8,  8,   8,   16, 16, 16, 32, 32, 32,
+                                         64, 64, 64, 128, 128, 4,  16, 8,  32, 16, 64};
+const std::uint8_t kBlockSizeHigh[22] = {4,  8,  4,   8,  16,  8,  16, 32, 16, 32, 64,
+                                         32, 64, 128, 64, 128, 16, 4,  32, 8,  64, 16};
+
+// MASK_PRIMARY_STRIDE == MASK_PRIMARY_SIZE (definitions.h:1261-:1262);
+// MAX_WEDGE_SQUARE = MAX_WEDGE_SIZE^2 (definitions.h:1259, 32x32);
+// WEDGE_WEIGHT_BITS = 6 (definitions.h:1260).
+constexpr int kMaskPrimaryStride = kMaskPrimarySize;
+constexpr int kMaxWedgeSquare = 32 * 32;
+constexpr int kWedgeWeightBits = 6;
+
+// wedge_mask_obl, inter_prediction.c:2071 ([negative][direction]).
+std::uint8_t wedgeMaskObl[2][6][kMaskPrimarySize * kMaskPrimarySize];
+
+// wedge_mask_buf, inter_prediction.c:2075 (2 * MAX_WEDGE_TYPES * 4 *
+// MAX_WEDGE_SQUARE).
+std::uint8_t wedgeMaskBuf[2 * kMaxWedgeTypes * 4 * kMaxWedgeSquare];
+
+// wedge_masks, inter_prediction.c:35 (one WedgeMasksType =
+// uint8_t*[MAX_WEDGE_TYPES] per bsize per sign; the flat index of
+// WedgeParamsType::masks is sign * kMaxWedgeTypes + wedge_index).
+const std::uint8_t* wedgeMasks[kBlockSizesAll][2][kMaxWedgeTypes];
+
 // clamp, the reference's utility.h helper (three-argument clamp).
 inline std::int32_t clampInt(std::int32_t value, std::int32_t lo, std::int32_t hi) {
     return value < lo ? lo : (value > hi ? hi : value);
@@ -353,31 +381,32 @@ const WedgeCodeType wedgeCodebook16Heqw[16] = {
     {WedgeOblique63, 2, 4},  {WedgeOblique63, 6, 4},  {WedgeOblique117, 2, 4}, {WedgeOblique117, 6, 4}};
 
 // wedge_params_lookup, inter_prediction.c:2001-:2024 (bits, codebook,
-// signflip row; the masks member is the parked runtime buffer). Rows in
-// BlockSize order, definitions.h:883-:904.
+// signflip row, masks pointer; the port's masks is the flat pointer-table
+// form described at the struct). Rows in BlockSize order,
+// definitions.h:883-:904.
 const WedgeParamsType wedgeParamsLookup[kBlockSizesAll] = {
-    {0, nullptr, nullptr},                             // BLOCK_4X4
-    {0, nullptr, nullptr},                             // BLOCK_4X8
-    {0, nullptr, nullptr},                             // BLOCK_8X4
-    {4, wedgeCodebook16Heqw, wedgeSignflipLookup[3]},  // BLOCK_8X8
-    {4, wedgeCodebook16Hgtw, wedgeSignflipLookup[4]},  // BLOCK_8X16
-    {4, wedgeCodebook16Hltw, wedgeSignflipLookup[5]},  // BLOCK_16X8
-    {4, wedgeCodebook16Heqw, wedgeSignflipLookup[6]},  // BLOCK_16X16
-    {4, wedgeCodebook16Hgtw, wedgeSignflipLookup[7]},  // BLOCK_16X32
-    {4, wedgeCodebook16Hltw, wedgeSignflipLookup[8]},  // BLOCK_32X16
-    {4, wedgeCodebook16Heqw, wedgeSignflipLookup[9]},  // BLOCK_32X32
-    {0, nullptr, nullptr},                             // BLOCK_32X64
-    {0, nullptr, nullptr},                             // BLOCK_64X32
-    {0, nullptr, nullptr},                             // BLOCK_64X64
-    {0, nullptr, nullptr},                             // BLOCK_64X128
-    {0, nullptr, nullptr},                             // BLOCK_128X64
-    {0, nullptr, nullptr},                             // BLOCK_128X128
-    {0, nullptr, nullptr},                             // BLOCK_4X16
-    {0, nullptr, nullptr},                             // BLOCK_16X4
-    {4, wedgeCodebook16Hgtw, wedgeSignflipLookup[18]}, // BLOCK_8X32
-    {4, wedgeCodebook16Hltw, wedgeSignflipLookup[19]}, // BLOCK_32X8
-    {0, nullptr, nullptr},                             // BLOCK_16X64
-    {0, nullptr, nullptr},                             // BLOCK_64X16
+    {0, nullptr, nullptr, &wedgeMasks[0][0][0]},                             // BLOCK_4X4
+    {0, nullptr, nullptr, &wedgeMasks[1][0][0]},                             // BLOCK_4X8
+    {0, nullptr, nullptr, &wedgeMasks[2][0][0]},                             // BLOCK_8X4
+    {4, wedgeCodebook16Heqw, wedgeSignflipLookup[3], &wedgeMasks[3][0][0]},  // BLOCK_8X8
+    {4, wedgeCodebook16Hgtw, wedgeSignflipLookup[4], &wedgeMasks[4][0][0]},  // BLOCK_8X16
+    {4, wedgeCodebook16Hltw, wedgeSignflipLookup[5], &wedgeMasks[5][0][0]},  // BLOCK_16X8
+    {4, wedgeCodebook16Heqw, wedgeSignflipLookup[6], &wedgeMasks[6][0][0]},  // BLOCK_16X16
+    {4, wedgeCodebook16Hgtw, wedgeSignflipLookup[7], &wedgeMasks[7][0][0]},  // BLOCK_16X32
+    {4, wedgeCodebook16Hltw, wedgeSignflipLookup[8], &wedgeMasks[8][0][0]},  // BLOCK_32X16
+    {4, wedgeCodebook16Heqw, wedgeSignflipLookup[9], &wedgeMasks[9][0][0]},  // BLOCK_32X32
+    {0, nullptr, nullptr, &wedgeMasks[10][0][0]},                            // BLOCK_32X64
+    {0, nullptr, nullptr, &wedgeMasks[11][0][0]},                            // BLOCK_64X32
+    {0, nullptr, nullptr, &wedgeMasks[12][0][0]},                            // BLOCK_64X64
+    {0, nullptr, nullptr, &wedgeMasks[13][0][0]},                            // BLOCK_64X128
+    {0, nullptr, nullptr, &wedgeMasks[14][0][0]},                            // BLOCK_128X64
+    {0, nullptr, nullptr, &wedgeMasks[15][0][0]},                            // BLOCK_128X128
+    {0, nullptr, nullptr, &wedgeMasks[16][0][0]},                            // BLOCK_4X16
+    {0, nullptr, nullptr, &wedgeMasks[17][0][0]},                            // BLOCK_16X4
+    {4, wedgeCodebook16Hgtw, wedgeSignflipLookup[18], &wedgeMasks[18][0][0]}, // BLOCK_8X32
+    {4, wedgeCodebook16Hltw, wedgeSignflipLookup[19], &wedgeMasks[19][0][0]}, // BLOCK_32X8
+    {0, nullptr, nullptr, &wedgeMasks[20][0][0]},                            // BLOCK_16X64
+    {0, nullptr, nullptr, &wedgeMasks[21][0][0]},                            // BLOCK_64X16
 };
 
 // svt_aom_is_interintra_wedge_used, inter_prediction.c:2026-:2028.
@@ -617,6 +646,135 @@ void convolve2dScale(const std::uint8_t* src, std::int32_t srcStride, std::uint8
         }
         ++srcVert;
     }
+}
+
+// ---------- A3E W1: the wedge mask synthesis (functions) ----------
+
+// shift_copy, inter_prediction.c:2053-:2062.
+void shiftCopy(const std::uint8_t* src, std::uint8_t* dst, int shift, int width) {
+    if (shift >= 0) {
+        std::memcpy(dst + shift, src, width - shift);
+        std::memset(dst, src[0], shift);
+    } else {
+        shift = -shift;
+        std::memcpy(dst, src + shift, width - shift);
+        std::memset(dst + width - shift, src[width - 1], shift);
+    }
+}
+
+// aom_convolve_copy_c, inter_prediction.c:2038-:2051 (filter args voided).
+void aomConvolveCopyC(const std::uint8_t* src, std::ptrdiff_t srcStride, std::uint8_t* dst, std::ptrdiff_t dstStride,
+                      int w, int h) {
+    for (int r = h; r > 0; --r) {
+        std::memcpy(dst, src, w);
+        src += srcStride;
+        dst += dstStride;
+    }
+}
+
+// init_wedge_primary_masks, inter_prediction.c:2077-:2130 (the
+// USE_PRECOMPUTED_WEDGE_MASK branch; the tanh fallback :2098-:2113 is the
+// #else arm, not compiled in the pinned build).
+void initWedgePrimaryMasks() {
+    const int w = kMaskPrimarySize;
+    const int h = kMaskPrimarySize;
+    const int stride = kMaskPrimaryStride;
+    // Note: index [0] stores the primary, and [1] its complement.
+    // Generate prototype by shifting the primary
+    int shift = h / 4;
+    for (int i = 0; i < h; i += 2) {
+        shiftCopy(wedgePrimaryObliqueEven, &wedgeMaskObl[0][WedgeOblique63][i * stride], shift, kMaskPrimarySize);
+        shift--;
+        shiftCopy(wedgePrimaryObliqueOdd, &wedgeMaskObl[0][WedgeOblique63][(i + 1) * stride], shift,
+                  kMaskPrimarySize);
+        std::memcpy(&wedgeMaskObl[0][WedgeVertical][i * stride], wedgePrimaryVertical,
+                    kMaskPrimarySize * sizeof(wedgePrimaryVertical[0]));
+        std::memcpy(&wedgeMaskObl[0][WedgeVertical][(i + 1) * stride], wedgePrimaryVertical,
+                    kMaskPrimarySize * sizeof(wedgePrimaryVertical[0]));
+    }
+    for (int i = 0; i < h; ++i) {
+        for (int j = 0; j < w; ++j) {
+            const int msk = wedgeMaskObl[0][WedgeOblique63][i * stride + j];
+            wedgeMaskObl[0][WedgeOblique27][j * stride + i] = (std::uint8_t)msk;
+            wedgeMaskObl[0][WedgeOblique117][i * stride + w - 1 - j] = wedgeMaskObl[0][WedgeOblique153][(w - 1 - j) * stride + i] =
+                (std::uint8_t)((1 << kWedgeWeightBits) - msk);
+            wedgeMaskObl[1][WedgeOblique63][i * stride + j] = wedgeMaskObl[1][WedgeOblique27][j * stride + i] =
+                (std::uint8_t)((1 << kWedgeWeightBits) - msk);
+            wedgeMaskObl[1][WedgeOblique117][i * stride + w - 1 - j] =
+                wedgeMaskObl[1][WedgeOblique153][(w - 1 - j) * stride + i] = (std::uint8_t)msk;
+            const int mskx = wedgeMaskObl[0][WedgeVertical][i * stride + j];
+            wedgeMaskObl[0][WedgeHorizontal][j * stride + i] = (std::uint8_t)mskx;
+            wedgeMaskObl[1][WedgeVertical][i * stride + j] = wedgeMaskObl[1][WedgeHorizontal][j * stride + i] =
+                (std::uint8_t)((1 << kWedgeWeightBits) - mskx);
+        }
+    }
+}
+
+// get_wedge_mask_inplace, inter_prediction.c:2173-:2186.
+const std::uint8_t* getWedgeMaskInplace(int wedgeIndex, int neg, int bsize) {
+    const int bh = kBlockSizeHigh[bsize];
+    const int bw = kBlockSizeWide[bsize];
+
+    assert(wedgeIndex >= 0 && wedgeIndex < (1 << getWedgeBitsLookup(bsize)));
+    const WedgeCodeType* a = wedgeParamsLookup[bsize].codebook + wedgeIndex;
+    const std::uint8_t wsignflip = wedgeParamsLookup[bsize].signflip[wedgeIndex];
+
+    const int woff = (a->xOffset * bw) >> 3;
+    const int hoff = (a->yOffset * bh) >> 3;
+    return &wedgeMaskObl[neg ^ wsignflip][a->direction][kMaskPrimaryStride * (kMaskPrimarySize / 2 - hoff) +
+                                                       kMaskPrimarySize / 2 - woff];
+}
+
+// init_wedge_masks, inter_prediction.c:2188-:2214 (file-local static in
+// the reference; named initWedgeMaskTable here to avoid clashing with the
+// public svt_av1_init_wedge_masks entry).
+void initWedgeMaskTable() {
+    std::uint8_t* dst = wedgeMaskBuf;
+    std::memset(wedgeMasks, 0, sizeof(wedgeMasks));
+    for (int bsize = 0; bsize < kBlockSizesAll; ++bsize) {
+        const int bw = kBlockSizeWide[bsize];
+        const int bh = kBlockSizeHigh[bsize];
+        const WedgeParamsType* wedgeParams = &wedgeParamsLookup[bsize];
+        const int wbits = wedgeParams->bits;
+        const int wtypes = 1 << wbits;
+        if (wbits == 0) {
+            continue;
+        }
+        for (int w = 0; w < wtypes; ++w) {
+            const std::uint8_t* mask = getWedgeMaskInplace(w, 0, bsize);
+            aomConvolveCopyC(mask, kMaskPrimaryStride, dst, bw, bw, bh);
+            wedgeMasks[bsize][0][w] = dst;
+            dst += bw * bh;
+
+            mask = getWedgeMaskInplace(w, 1, bsize);
+            aomConvolveCopyC(mask, kMaskPrimaryStride, dst, bw, bw, bh);
+            wedgeMasks[bsize][1][w] = dst;
+            dst += bw * bh;
+        }
+        assert(sizeof(wedgeMaskBuf) >= (size_t)(dst - wedgeMaskBuf));
+    }
+}
+
+// svt_av1_init_wedge_masks, inter_prediction.c:2217-:2223.
+// Equation of line: f(x, y) = a[0]*(x - a[2]*w/8) + a[1]*(y - a[3]*h/8) = 0
+void initWedgeMasks() {
+    initWedgePrimaryMasks();
+    // #if !USE_PRECOMPUTED_WEDGE_SIGN -> init_wedge_signs(): compiled out
+    // of the pinned build (USE_PRECOMPUTED_WEDGE_SIGN = 1, :1525).
+    initWedgeMaskTable();
+}
+
+// svt_aom_get_contiguous_soft_mask, inter_prediction.c:2034-:2036. The
+// reference reads masks[wedge_sign][wedge_index] over WedgeMasksType
+// (uint8_t*[MAX_WEDGE_TYPES]); the port's flat index is
+// sign * kMaxWedgeTypes + wedge_index.
+const std::uint8_t* getContiguousSoftMask(int wedgeIndex, int wedgeSign, int bsize) {
+    return wedgeParamsLookup[bsize].masks[wedgeSign * kMaxWedgeTypes + wedgeIndex];
+}
+
+// Test-only read-only view of wedge_mask_obl (see the header note).
+const std::uint8_t* wedgeMaskOblData() {
+    return &wedgeMaskObl[0][0][0];
 }
 
 // ---------- A3E J1: the jnt (compound) convolve family ----------

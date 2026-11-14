@@ -103,13 +103,16 @@ struct WedgeCodeType {
     std::int32_t yOffset;
 };
 
-// WedgeParamsType, inter_prediction.h:93-:98. NAMED DEVIATION: the
-// uint8_t* masks member (the runtime wedge_masks buffer) is parked with the
-// mask-synthesis machinery, so the port carries bits/codebook/signflip only.
+// WedgeParamsType, inter_prediction.h:93-:98. The masks member is the
+// WedgeMasksType* (uint8_t*(*/*)[MAX_WEDGE_TYPES]) of the reference: the
+// port threads it as a flat const pointer table, masks[sign *
+// kMaxWedgeTypes + wedge_index], backed by the runtime wedge_masks array
+// filled by initWedgeMasks (the W1 synthesis rung).
 struct WedgeParamsType {
     std::int32_t bits;
     const WedgeCodeType* codebook;
     const std::uint8_t* signflip;
+    const std::uint8_t* const* masks;
 };
 
 // SubpelParams, inter_prediction.h:50-:55.
@@ -396,6 +399,48 @@ void highbdJntConvolve2d(const std::uint16_t* src, std::int32_t srcStride, std::
                          const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
                          std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
                          std::int32_t bd);
+
+// ---------- A3E W1: the wedge mask synthesis ----------
+// The MC1 park ("the wedge MASK synthesis ... runtime buffers, not
+// transcribed tables") RESOLVES: the masks are COMPUTED, so they are
+// ported as code with property tests, not as tables.
+
+// block_size_wide/high (common_utils.c:286-:289), exported as data (the
+// l7 blockSizeWide pattern) so tests and the mask walker share them.
+extern const std::uint8_t kBlockSizeWide[22];
+extern const std::uint8_t kBlockSizeHigh[22];
+
+// shift_copy, inter_prediction.c:2053-:2062 (file-local static in the
+// reference; exported for testability, the DF1 cdefSign precedent).
+void shiftCopy(const std::uint8_t* src, std::uint8_t* dst, int shift, int width);
+
+// init_wedge_primary_masks, inter_prediction.c:2077-:2130 (exported for
+// the test's independent row-reconstruction oracle, DF1 precedent).
+void initWedgePrimaryMasks();
+
+// init_wedge_masks, inter_prediction.c:2188-:2214 (the static table
+// filler; exported for the same reason).
+void initWedgeMaskTable();
+
+// svt_av1_init_wedge_masks, inter_prediction.c:2217-:2223: the primary
+// planes, then the contiguous window copies (the USE_PRECOMPUTED_WEDGE_SIGN
+// branch - init_wedge_signs :2136-:2170 is compiled out of the pinned
+// build; its average rule is replicated in the test as the consistency
+// oracle against the precomputed table).
+void initWedgeMasks();
+
+// get_wedge_mask_inplace, inter_prediction.c:2173-:2186 (file-local static
+// in the reference; exported for testability, the DF1 precedent).
+const std::uint8_t* getWedgeMaskInplace(int wedgeIndex, int neg, int bsize);
+
+// svt_aom_get_contiguous_soft_mask, inter_prediction.c:2034-:2036.
+const std::uint8_t* getContiguousSoftMask(int wedgeIndex, int wedgeSign, int bsize);
+
+// Read-only view of the wedge_mask_obl plane set (inter_prediction.c:2071)
+// for the test's plane-level oracle: [neg][dir] blocks of 64x64,
+// dir-major as in the reference layout. Exported for testability (DF1
+// precedent); no production caller.
+const std::uint8_t* wedgeMaskOblData();
 
 // ---------- A3E J4: the dispatch rung ----------
 
