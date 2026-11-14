@@ -372,6 +372,37 @@ int getGfuBoostFromR0Lap(double minFactor, double maxFactor, double r0, int fram
 // svt_av1_calculate_boost_bits (rc_process.c:641-667): verbatim.
 int calculateBoostBits(int frameCount, int boost, std::int64_t totalGroupBits);
 
+// layer_fraction (pass2_strategy.c:238): the ARF-layer weight table
+// {1.0, 0.80, 0.7, 0.60, 0.60, 1.0, 1.0}.
+extern const double kLayerFraction[kMaxArfLayers + 1];
+
+// SvtAv1FrameUpdateType (EbSvtAv1Enc.h:181-190): the two overlay arms the
+// allocator zeroes.
+constexpr int kSvtAv1IntnlOverlayUpdate = 4;
+constexpr int kSvtAv1OverlayUpdate = 5;
+
+// GfGroupMemberView: the gf_group[idx] member surface the allocator
+// reads (update_type, layer_depth) and writes (base_frame_target).
+struct GfGroupMemberView {
+    int updateType;       // gf_group[idx]->update_type
+    int layerDepth;       // gf_group[idx]->layer_depth
+    int baseFrameTarget;  // gf_group[idx]->base_frame_target (OUT)
+};
+
+// allocate_gf_group_bits (pass2_strategy.c:240-307): verbatim; the pcs wall
+// threads (gf_interval drives the loops, hierarchical_levels is
+// max_arf_layer); the gf_interval PARAMETER (the reference's own argument)
+// only feeds the baseline < gf_interval>>1 doubling gate. gfGroup needs
+// >= pcs.gfInterval entries.
+void allocateGfGroupBits(const PcsCarrier& pcs, RcControl& rc, GfGroupMemberView* gfGroup,
+                         std::int64_t gfGroupBits, int gfArfBits, int gfInterval, bool keyFrame, bool useArf);
+
+// av1_gop_bit_allocation (pass2_strategy.c:457-463): the composition - the
+// landed calculateBoostBits over rc->baseline_gf_interval / rc->gfu_boost,
+// then allocate_gf_group_bits.
+void av1GopBitAllocation(const PcsCarrier& pcs, RcControl& rc, GfGroupMemberView* gfGroup, int gfInterval,
+                         bool isKeyFrame, bool useArf, std::int64_t gfGroupBits);
+
 // ---- A9R (the remaining pure arithmetic): rc_process.c rd-multiplier
 // family ----
 

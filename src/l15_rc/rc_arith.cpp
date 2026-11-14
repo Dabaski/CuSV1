@@ -3143,4 +3143,85 @@ std::int64_t calculateTotalGfGroupBits(const RcControl& rc, int vbrmaxSection, T
     return totalGroupBits;
 }
 
+// layer_fraction (pass2_strategy.c:238): verbatim.
+const double kLayerFraction[kMaxArfLayers + 1] = {1.0, 0.80, 0.7, 0.60, 0.60, 1.0, 1.0};
+
+// allocate_gf_group_bits (pass2_strategy.c:240-307): verbatim.
+void allocateGfGroupBits(const PcsCarrier& pcs, RcControl& rc, GfGroupMemberView* gfGroup,
+                         std::int64_t gfGroupBits, int gfArfBits, int gfInterval, bool keyFrame, bool useArf) {
+    std::int64_t totalGroupBits = gfGroupBits;
+    int baseFrameBits;
+    int layerFrames[kMaxArfLayers + 1] = {0};
+
+    // Subtract the extra bits set aside for ARF frames from the Group Total
+    if (useArf || !keyFrame) {
+        totalGroupBits -= gfArfBits;
+    }
+
+    if (rc.baselineGfInterval) {
+        baseFrameBits = (int)(totalGroupBits / rc.baselineGfInterval);
+    } else {
+        baseFrameBits = 1;
+    }
+
+    // For key frames the frame target rate is already set
+    const int frameIndex = keyFrame ? 1 : 0;
+
+    // Check the number of frames in each layer in case we have a
+    // non standard group length.
+    const int maxArfLayer = pcs.hierarchicalLevels;
+    for (int idx = frameIndex; idx < pcs.gfInterval; ++idx) {
+        if ((gfGroup[idx].updateType == kSvtAv1ArfUpdate) || (gfGroup[idx].updateType == kSvtAv1IntnlArfUpdate)) {
+            layerFrames[gfGroup[idx].layerDepth]++;
+        }
+    }
+    if (rc.baselineGfInterval < (gfInterval >> 1)) {
+        for (int idx = frameIndex; idx < pcs.gfInterval; ++idx) {
+            if (gfGroup[idx].updateType == kSvtAv1ArfUpdate) {
+                layerFrames[gfGroup[idx].layerDepth] += 1;
+            }
+            if (gfGroup[idx].updateType == kSvtAv1IntnlArfUpdate) {
+                layerFrames[gfGroup[idx].layerDepth] += 2;
+            }
+        }
+    }
+    // Allocate extra bits to each ARF layer
+    int layerExtraBits[kMaxArfLayers + 1] = {0};
+    for (int i = 1; i <= maxArfLayer; ++i) {
+        if (layerFrames[i]) {  // to make sure there is a picture with the depth
+            const double fraction = (i == maxArfLayer) ? 1.0 : kLayerFraction[i];
+            layerExtraBits[i] = (int)((gfArfBits * fraction) / (1 > layerFrames[i] ? 1 : layerFrames[i]));
+            gfArfBits -= (int)(gfArfBits * fraction);
+        }
+    }
+
+    // Now combine ARF layer and baseline bits to give total bits for each frame.
+    int arfExtraBits;
+    for (int idx = frameIndex; idx < pcs.gfInterval; ++idx) {
+        switch (gfGroup[idx].updateType) {
+        case kSvtAv1ArfUpdate:
+        case kSvtAv1IntnlArfUpdate:
+            arfExtraBits = layerExtraBits[gfGroup[idx].layerDepth];
+            gfGroup[idx].baseFrameTarget = baseFrameBits + arfExtraBits;
+            break;
+        case kSvtAv1IntnlOverlayUpdate:
+        case kSvtAv1OverlayUpdate:
+            gfGroup[idx].baseFrameTarget = 0;
+            break;
+        default:
+            gfGroup[idx].baseFrameTarget = baseFrameBits;
+            break;
+        }
+    }
+}
+
+// av1_gop_bit_allocation (pass2_strategy.c:457-463): verbatim.
+void av1GopBitAllocation(const PcsCarrier& pcs, RcControl& rc, GfGroupMemberView* gfGroup, int gfInterval,
+                         bool isKeyFrame, bool useArf, std::int64_t gfGroupBits) {
+    // Calculate the extra bits to be used for boosted frame(s)
+    const int gfArfBits = calculateBoostBits(rc.baselineGfInterval, rc.gfuBoost, gfGroupBits);
+    // Allocate bits to each of the frames in the GF group.
+    allocateGfGroupBits(pcs, rc, gfGroup, gfGroupBits, gfArfBits, gfInterval, isKeyFrame, useArf);
+}
+
 } // namespace l15_rc

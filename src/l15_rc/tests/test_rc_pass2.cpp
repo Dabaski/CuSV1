@@ -960,3 +960,180 @@ TEST_CASE("calculate_total_gf_group_bits walks the kf scaling and the clamps") {
         CHECK(tp.kfGroupBits == 600000);
     }
 }
+
+// ---- A9D S5: pass2_strategy.c allocate_gf_group_bits (:240-307) +
+// layer_fraction (:238) + av1_gop_bit_allocation (:457-463) ----
+
+namespace {
+
+// an 8-frame hierarchical-3 group: KF at 0, ARFs at layers 3/2, an INTNL_ARF
+// at layer 1, leaves elsewhere.
+void hier3Group(l15_rc::GfGroupMemberView* g, int* layerDepthOverride = nullptr) {
+    const int ut[8] = {0, 3, 1, 3, 1, 1, 6, 1};
+    const int ld[8] = {0, 3, 0, 2, 0, 0, 1, 0};
+    for (int i = 0; i < 8; ++i) {
+        g[i].updateType = ut[i];
+        g[i].layerDepth = layerDepthOverride ? layerDepthOverride[i] : ld[i];
+        g[i].baseFrameTarget = -1;  // poison: the walk must write every idx
+    }
+}
+
+}  // namespace
+
+TEST_CASE("allocate_gf_group_bits pins the 8-frame hier-3 allocation") {
+    l15_rc::GfGroupMemberView g[8];
+    hier3Group(g);
+    l15_rc::PcsCarrier pcs{};
+    pcs.gfInterval = 8;
+    pcs.hierarchicalLevels = 3;
+    l15_rc::RcControl rc{};
+    rc.baselineGfInterval = 8;
+    rc.gfuBoost = 2400;
+    // gfu_boost 2400 over 1000 group bits -> gf_arf_bits 750 (the >1023
+    // divisor path); total 1000-750 = 250; base = 250/8 = 31.
+    l15_rc::av1GopBitAllocation(pcs, rc, g, 8, true, true, 1000);
+    // key frame idx0 is SKIPPED (frame_index 1) - still the poison.
+    CHECK(g[0].baseFrameTarget == -1);
+    // idx1 ARF layer3: 31 + 45; idx3 ARF layer2: 31 + 105;
+    // idx6 INTNL_ARF layer1: 31 + 600.
+    CHECK(g[1].baseFrameTarget == 76);
+    CHECK(g[3].baseFrameTarget == 136);
+    CHECK(g[6].baseFrameTarget == 631);
+    // the leaves and the KF-chain idx7: 31.
+    CHECK(g[2].baseFrameTarget == 31);
+    CHECK(g[4].baseFrameTarget == 31);
+    CHECK(g[5].baseFrameTarget == 31);
+    CHECK(g[7].baseFrameTarget == 31);
+}
+
+TEST_CASE("allocate_gf_group_bits pins the overlay zero and the no-arf path") {
+    {
+        // an OVERLAY member gets 0, not the base bits.
+        l15_rc::GfGroupMemberView g[4];
+        g[0].updateType = 1; g[0].layerDepth = 0; g[0].baseFrameTarget = -1;
+        g[1].updateType = 5; g[1].layerDepth = 0; g[1].baseFrameTarget = -1;  // OVERLAY
+        g[2].updateType = 1; g[2].layerDepth = 0; g[2].baseFrameTarget = -1;
+        g[3].updateType = 4; g[3].layerDepth = 0; g[3].baseFrameTarget = -1;  // INTNL_OVERLAY
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 4;
+        pcs.hierarchicalLevels = 1;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 4;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 4, false, true, 400);
+        // gfu_boost 0 -> gf_arf_bits 0 (the calculate_boost_bits zero gate);
+        // total 400; base = 100.
+        CHECK(g[0].baseFrameTarget == 100);
+        CHECK(g[1].baseFrameTarget == 0);
+        CHECK(g[2].baseFrameTarget == 100);
+        CHECK(g[3].baseFrameTarget == 0);
+    }
+    {
+        // use_arf false + non-key: the (use_arf || !key_frame) gate still
+        // fires (!key_frame) - but gfu_boost 0 makes gf_arf_bits 0, so the
+        // whole pool is the base.
+        l15_rc::GfGroupMemberView g[4];
+        for (int i = 0; i < 4; ++i) {
+            g[i].updateType = 1;
+            g[i].layerDepth = 0;
+            g[i].baseFrameTarget = -1;
+        }
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 4;
+        pcs.hierarchicalLevels = 1;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 4;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 4, false, false, 400);
+        CHECK(g[0].baseFrameTarget == 100);
+        CHECK(g[3].baseFrameTarget == 100);
+    }
+    {
+        // use_arf false + KEY: the (use_arf || !key_frame) gate FAILS - no
+        // subtraction; the pool stays whole but the ARF layer still takes
+        // its extra bits out of gf_arf_bits.
+        l15_rc::GfGroupMemberView g[4];
+        for (int i = 0; i < 4; ++i) {
+            g[i].updateType = (i == 1) ? 3 : 1;
+            g[i].layerDepth = (i == 1) ? 1 : 0;
+            g[i].baseFrameTarget = -1;
+        }
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 4;
+        pcs.hierarchicalLevels = 1;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 4;
+        rc.gfuBoost = 400;
+        // gfu_boost 400 -> chunks 400+400=800; arf = 400*400/800 = 200.
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 4, true, false, 400);
+        // NO subtraction: total 400; base = 100; the ARF layer1 (max layer)
+        // takes fraction 1.0 of gf_arf_bits -> extra 200.
+        CHECK(g[0].baseFrameTarget == -1);  // key frame: skipped
+        CHECK(g[1].baseFrameTarget == 100 + 200);
+        CHECK(g[2].baseFrameTarget == 100);
+        CHECK(g[3].baseFrameTarget == 100);
+    }
+    {
+        // baseline_gf_interval 0: base_frame_bits = 1.
+        l15_rc::GfGroupMemberView g[2];
+        for (int i = 0; i < 2; ++i) {
+            g[i].updateType = 1;
+            g[i].layerDepth = 0;
+            g[i].baseFrameTarget = -1;
+        }
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 2;
+        pcs.hierarchicalLevels = 1;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 0;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 2, false, false, 400);
+        CHECK(g[0].baseFrameTarget == 1);
+        CHECK(g[1].baseFrameTarget == 1);
+    }
+    {
+        // the doubling loop: baseline 2 < 8>>1 = 4 -> the ARF/INTNL_ARF
+        // layer_frames DOUBLE-count (+1 / +2), splitting the extra bits.
+        l15_rc::GfGroupMemberView g[8];
+        hier3Group(g);
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.hierarchicalLevels = 3;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 2;
+        rc.gfuBoost = 2400;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 8, true, true, 1000);
+        // REFERENCE QUIRK: av1_gop_bit_allocation passes rc->baseline_gf_
+        // interval (=2 here, NOT the gf_interval param) as the frame count
+        // to calculate_boost_bits: chunks = 2*100+2400 = 2600, the >1023
+        // divisor halves both -> 1200*1000/1300 = 923.
+        // total = 1000-923 = 77; base = 77/2 = 38.
+        // layer_frames after both walks: layer1 = 1+2 = 3, layer2 = 2,
+        // layer3 = 2.
+        // i=1: extra[1] = (int)(923*0.8)/3 = 246; arf -= 738 -> 185.
+        // i=2: extra[2] = (int)(185*0.7)/2 = 64; arf -= 129 -> 56.
+        // i=3: extra[3] = 56/2 = 28.
+        CHECK(g[1].baseFrameTarget == 38 + 28);
+        CHECK(g[3].baseFrameTarget == 38 + 64);
+        CHECK(g[6].baseFrameTarget == 38 + 246);
+        CHECK(g[2].baseFrameTarget == 38);
+    }
+    {
+        // the doubling gate's OTHER side: baseline 5 is NOT < 8>>1 = 4, so
+        // no doubling (a mutation that compares against gf_interval itself
+        // would fire here - 5 < 8).
+        l15_rc::GfGroupMemberView g[8];
+        hier3Group(g);
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.hierarchicalLevels = 3;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 5;
+        rc.gfuBoost = 2400;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 8, true, true, 1000);
+        // arf = calculate_boost_bits(5, 2400, 1000): chunks 2900 -> divisor
+        // 2 -> 1200*1000/1450 = 827; total = 173; base = 34; NO doubling:
+        // extra[1] = 661, extra[2] = 116, extra[3] = 50.
+        CHECK(g[1].baseFrameTarget == 34 + 50);
+        CHECK(g[3].baseFrameTarget == 34 + 116);
+        CHECK(g[6].baseFrameTarget == 34 + 661);
+        CHECK(g[2].baseFrameTarget == 34);
+    }
+}
