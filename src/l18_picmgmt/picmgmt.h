@@ -273,4 +273,66 @@ void picBufDescAssign(PicBufferDesc* picBuf, const PicBufferDescInitData* d, std
                       const std::uint32_t bufferSize[3], const std::uint32_t bufferBitIncSize[3],
                       std::uint32_t bytesPerPixel);
 
+// Yv12BufferConfig (pic_buffer_desc.h:105-190), minimal carry: the fields
+// the two link functions write.
+constexpr std::int32_t YV12_FLAG_HIGHBITDEPTH = 8; // pic_buffer_desc.h:104
+
+struct Yv12BufferConfig {
+    std::int32_t yWidth;
+    std::int32_t uvWidth;
+    std::int32_t yHeight;
+    std::int32_t uvHeight;
+    std::int32_t yCropWidth;
+    std::int32_t uvCropWidth;
+    std::int32_t yCropHeight;
+    std::int32_t uvCropHeight;
+    std::int32_t yStride;
+    std::int32_t uvStride;
+    std::uint8_t* yBuffer;
+    std::uint8_t* uBuffer;
+    std::uint8_t* vBuffer;
+    std::int32_t border;
+    std::int32_t subsamplingX;
+    std::int32_t subsamplingY;
+    std::int32_t flags;
+};
+
+// svt_picture_buffer_desc_ctor_noy8b (pic_buffer_desc.c:35-:145): the
+// 8-bit-biased ctor with the /4 bit-inc quirk (:80/:87/:94 and the /4
+// pointer offsets :112/:124/:137) and y_buffer NEVER assigned (:72).
+// bytes_per_pixel stays 1 even at 10-bit input (:39 is never recomputed).
+// packed_flag forced false (:63). EB_MALLOC_ALIGNED_ARRAY is the standard
+// heap here (named deviation; no alignment guarantee).
+EbErrorType pictureBufferDescCtorNoy8b(PicBufferDesc* picBuf, const PicBufferDescInitData* d);
+
+// svt_picture_buffer_desc_noy8b_update (:152-:186): the layout update with
+// bit_depth/color_format/packed_flag=false/buffer_enable_mask writes.
+EbErrorType pictureBufferDescNoy8bUpdate(PicBufferDesc* picBuf, const PicBufferDescInitData* d);
+
+// svt_picture_buffer_desc_update (:192-:219): the layout update that does
+// NOT touch bit_depth/color_format/packed_flag/buffer_enable_mask.
+EbErrorType pictureBufferDescUpdate(PicBufferDesc* picBuf, const PicBufferDescInitData* d);
+
+// svt_recon_picture_buffer_desc_update (:417-:442): the recon variant sets
+// bit_depth/color_format/packed_flag=(depth>8)/buffer_enable_mask and does
+// NOT touch the bit-inc strides.
+EbErrorType reconPictureBufferDescUpdate(PicBufferDesc* picBuf, const PicBufferDescInitData* d);
+
+// svt_recon_picture_buffer_desc_ctor (:450-:516): bytes_per_pixel = 1 (8-bit)
+// or 2 (else, :456), the EB_CALLOC_ALIGNED_ARRAY zero-fill (:493, standard
+// heap here - named deviation), the y/u/v pointer walk (:496-:512), NO
+// split-mode handling (the bit-inc pointers are never written).
+EbErrorType reconPictureBufferDescCtor(PicBufferDesc* picBuf, const PicBufferDescInitData* d);
+
+// svt_aom_link_eb_to_aom_buffer_desc_8bit (:518-:547): the field copy with
+// uv_width = width / 2 (integer division) and hardcoded subsampling 1/1.
+void linkEbToAomBufferDesc8bit(PicBufferDesc* picBuffDsc, Yv12BufferConfig* aomBuffDsc);
+
+// svt_aom_link_eb_to_aom_buffer_desc (:549-:631): the general twin with
+// pad_right/pad_bottom crop arithmetic and the 16-bit branch whose pointers
+// go through CONVERT_TO_BYTEPTR = (uint8_t*)((uintptr_t)(x) >> 1)
+// (definitions.h) and flags = YV12_FLAG_HIGHBITDEPTH (:629).
+void linkEbToAomBufferDesc(PicBufferDesc* picBuffDsc, Yv12BufferConfig* aomBuffDsc, std::uint16_t padRight,
+                           std::uint16_t padBottom, bool is16bit);
+
 } // namespace l18_picmgmt

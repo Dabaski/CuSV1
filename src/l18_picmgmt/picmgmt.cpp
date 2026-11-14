@@ -2,10 +2,12 @@
 // Reference: third_party/SVT-AV1/Source/Lib/Codec/pcs.c.
 #include "picmgmt.h"
 
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 
 namespace l18_picmgmt {
+
 
 // svt_aom_get_out_buffer_size (pcs.c:374-379): the raw 4:2:0 frame size / 4
 // as the starting bitstream capacity; the entropy writer grows on demand.
@@ -336,6 +338,363 @@ void picBufDescAssign(PicBufferDesc* picBuf, const PicBufferDescInitData* d, std
                  (picBuf->vStrideBitInc * (picBuf->border >> ssY))) * bytesPerPixel;
             assignedSpace += bufferBitIncSize[2];
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pic_buffer_desc.c spans: the ctor/update family and the aom link.
+// ---------------------------------------------------------------------------
+
+// svt_picture_buffer_desc_ctor_noy8b (pic_buffer_desc.c:35-:145): verbatim
+// arithmetic. The svt_aom_assert_err stride-8 check (:55) is kept as a
+// plain assert - dead under NDEBUG exactly as the reference's Release.
+EbErrorType pictureBufferDescCtorNoy8b(PicBufferDesc* picBuf, const PicBufferDescInitData* d) {
+    //for 10bit we force split mode + 2b-compressed
+    std::uint32_t bytesPerPixel = 1;
+    const std::uint16_t ssX = (d->colorFormat == EB_YUV444) ? 0 : 1;
+    const std::uint16_t ssY = ((d->colorFormat == EB_YUV444 || d->colorFormat == EB_YUV422) ? 0 : 1);
+
+    // Set the Picture Buffer Static variables
+    picBuf->width = d->maxWidth;
+    picBuf->height = d->maxHeight;
+    picBuf->maxWidth = d->maxWidth;
+    picBuf->maxHeight = d->maxHeight;
+    picBuf->bitDepth = d->bitDepth;
+    picBuf->colorFormat = d->colorFormat;
+    picBuf->yStride = static_cast<std::uint16_t>(d->maxWidth + (2 * d->border) /*left + right border*/);
+
+    assert(picBuf->yStride % 8 == 0);
+
+    picBuf->uStride = picBuf->vStride = static_cast<std::uint16_t>((picBuf->yStride + ssX) >> ssX);
+    picBuf->border = d->border;
+
+    picBuf->lumaSize = static_cast<std::uint32_t>(picBuf->yStride) * (d->maxHeight + (2 * d->border));
+    picBuf->chromaSize =
+        static_cast<std::uint32_t>(picBuf->uStride) * ((d->maxHeight + ssY + (2 * d->border)) >> ssY);
+    picBuf->packedFlag = false;
+
+    if (d->splitMode) {
+        picBuf->yStrideBitInc = picBuf->yStride;
+        picBuf->uStrideBitInc = picBuf->uStride;
+        picBuf->vStrideBitInc = picBuf->vStride;
+    }
+    picBuf->bufferEnableMask = d->bufferEnableMask;
+
+    picBuf->yBuffer = nullptr;
+    // Get frame size to alloc
+    std::uint32_t allocSz = 0;
+    std::uint32_t bufferSize[3] = {0};
+    std::uint32_t bufferBitIncSize[3] = {0};
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Y_FLAG) {
+        if (d->splitMode) {
+            allocSz += bufferBitIncSize[0] = picBuf->lumaSize * bytesPerPixel / 4;
+        }
+    }
+
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cb_FLAG) {
+        allocSz += bufferSize[1] = picBuf->chromaSize * bytesPerPixel;
+        if (d->splitMode) {
+            allocSz += bufferBitIncSize[1] = picBuf->chromaSize * bytesPerPixel / 4;
+        }
+    }
+
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cr_FLAG) {
+        allocSz += bufferSize[2] = picBuf->chromaSize * bytesPerPixel;
+        if (d->splitMode) {
+            allocSz += bufferBitIncSize[2] = picBuf->chromaSize * bytesPerPixel / 4;
+        }
+    }
+
+    // Allocate the Picture Buffers (luma & chroma)
+    if (allocSz) {
+        picBuf->bufferAlloc = static_cast<std::uint8_t*>(std::malloc(allocSz));
+    } else {
+        picBuf->bufferAlloc = nullptr;
+    }
+    picBuf->bufferAllocSz = allocSz;
+    std::uint32_t assignedSpace = 0;
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Y_FLAG) {
+        picBuf->yBufferBitInc = nullptr;
+        if (d->splitMode) {
+            picBuf->yBufferBitInc = picBuf->bufferAlloc + assignedSpace +
+                ((picBuf->border + (picBuf->yStrideBitInc * picBuf->border)) / 4) * bytesPerPixel;
+            assignedSpace += bufferBitIncSize[0];
+        }
+    }
+
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cb_FLAG) {
+        picBuf->uBuffer = picBuf->bufferAlloc + assignedSpace +
+            ((picBuf->border >> ssX) + (picBuf->uStride * (picBuf->border >> ssY))) * bytesPerPixel;
+        assignedSpace += bufferSize[1];
+        picBuf->uBufferBitInc = nullptr;
+        if (d->splitMode) {
+            picBuf->uBufferBitInc = picBuf->bufferAlloc + assignedSpace +
+                (((picBuf->border >> ssX) + (picBuf->uStrideBitInc * (picBuf->border >> ssY))) / 4) *
+                    bytesPerPixel;
+            assignedSpace += bufferBitIncSize[1];
+        }
+    }
+
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cr_FLAG) {
+        picBuf->vBuffer = picBuf->bufferAlloc + assignedSpace +
+            ((picBuf->border >> ssX) + (picBuf->vStride * (picBuf->border >> ssY))) * bytesPerPixel;
+        assignedSpace += bufferSize[2];
+        picBuf->vBufferBitInc = nullptr;
+        if (d->splitMode) {
+            picBuf->vBufferBitInc = picBuf->bufferAlloc + assignedSpace +
+                (((picBuf->border >> ssX) + (picBuf->vStrideBitInc * (picBuf->border >> ssY))) / 4) *
+                    bytesPerPixel;
+            assignedSpace += bufferBitIncSize[2];
+        }
+    }
+
+    return EB_ErrorNone;
+}
+
+// svt_picture_buffer_desc_noy8b_update (pic_buffer_desc.c:152-:186).
+EbErrorType pictureBufferDescNoy8bUpdate(PicBufferDesc* picBuf, const PicBufferDescInitData* d) {
+    const std::uint16_t ssX = (d->colorFormat == EB_YUV444) ? 0 : 1;
+    const std::uint16_t ssY = ((d->colorFormat == EB_YUV444 || d->colorFormat == EB_YUV422) ? 0 : 1);
+
+    picBuf->width = d->maxWidth;
+    picBuf->height = d->maxHeight;
+    picBuf->maxWidth = d->maxWidth;
+    picBuf->maxHeight = d->maxHeight;
+    picBuf->bitDepth = d->bitDepth;
+    picBuf->colorFormat = d->colorFormat;
+    picBuf->yStride = static_cast<std::uint16_t>(d->maxWidth + (2 * d->border) /*left + right border*/);
+
+    assert(picBuf->yStride % 8 == 0);
+
+    picBuf->uStride = picBuf->vStride = static_cast<std::uint16_t>((picBuf->yStride + ssX) >> ssX);
+    picBuf->border = d->border;
+
+    picBuf->lumaSize = static_cast<std::uint32_t>(picBuf->yStride) * (d->maxHeight + (2 * d->border));
+    picBuf->chromaSize =
+        static_cast<std::uint32_t>(picBuf->uStride) * ((d->maxHeight + ssY + (2 * d->border)) >> ssY);
+    picBuf->packedFlag = false;
+
+    if (d->splitMode == true) {
+        picBuf->yStrideBitInc = picBuf->yStride;
+        picBuf->uStrideBitInc = picBuf->uStride;
+        picBuf->vStrideBitInc = picBuf->vStride;
+    }
+    picBuf->bufferEnableMask = d->bufferEnableMask;
+
+    return EB_ErrorNone;
+}
+
+// svt_picture_buffer_desc_update (pic_buffer_desc.c:192-:219): note what is
+// NOT written - bit_depth, color_format, packed_flag, buffer_enable_mask.
+EbErrorType pictureBufferDescUpdate(PicBufferDesc* picBuf, const PicBufferDescInitData* d) {
+    const std::uint16_t ssX = (d->colorFormat == EB_YUV444) ? 0 : 1;
+    const std::uint16_t ssY = ((d->colorFormat == EB_YUV444 || d->colorFormat == EB_YUV422) ? 0 : 1);
+
+    picBuf->width = d->maxWidth;
+    picBuf->height = d->maxHeight;
+    picBuf->maxWidth = d->maxWidth;
+    picBuf->maxHeight = d->maxHeight;
+    picBuf->yStride = static_cast<std::uint16_t>(d->maxWidth + (2 * d->border) /*left + right border*/);
+    picBuf->uStride = picBuf->vStride = static_cast<std::uint16_t>((picBuf->yStride + ssX) >> ssX);
+    picBuf->border = d->border;
+
+    picBuf->lumaSize = static_cast<std::uint32_t>(picBuf->yStride) * (d->maxHeight + (2 * d->border));
+    picBuf->chromaSize =
+        static_cast<std::uint32_t>(picBuf->uStride) * ((d->maxHeight + ssY + (2 * d->border)) >> ssY);
+
+    if (d->splitMode) {
+        picBuf->yStrideBitInc = picBuf->yStride;
+        picBuf->uStrideBitInc = picBuf->uStride;
+        picBuf->vStrideBitInc = picBuf->vStride;
+    }
+
+    return EB_ErrorNone;
+}
+
+// svt_recon_picture_buffer_desc_update (pic_buffer_desc.c:417-:442).
+EbErrorType reconPictureBufferDescUpdate(PicBufferDesc* picBuf, const PicBufferDescInitData* d) {
+    const std::uint16_t ssX = (d->colorFormat == EB_YUV444) ? 0 : 1;
+    const std::uint16_t ssY = ((d->colorFormat == EB_YUV444 || d->colorFormat == EB_YUV422) ? 0 : 1);
+
+    picBuf->width = d->maxWidth;
+    picBuf->height = d->maxHeight;
+    picBuf->maxWidth = d->maxWidth;
+    picBuf->maxHeight = d->maxHeight;
+    picBuf->bitDepth = d->bitDepth;
+    picBuf->colorFormat = d->colorFormat;
+    picBuf->yStride = static_cast<std::uint16_t>(d->maxWidth + (2 * d->border) /*left + right borders*/);
+    picBuf->uStride = picBuf->vStride = static_cast<std::uint16_t>((picBuf->yStride + ssX) >> ssX);
+    picBuf->border = d->border;
+
+    picBuf->lumaSize = static_cast<std::uint32_t>(picBuf->yStride) * (d->maxHeight + (2 * d->border));
+    picBuf->chromaSize =
+        static_cast<std::uint32_t>(picBuf->uStride) * ((d->maxHeight + ssY + (2 * d->border)) >> ssY);
+    picBuf->packedFlag = (d->bitDepth > EB_EIGHT_BIT) ? true : false;
+
+    picBuf->bufferEnableMask = d->bufferEnableMask;
+
+    return EB_ErrorNone;
+}
+
+// svt_recon_picture_buffer_desc_ctor (pic_buffer_desc.c:450-:516).
+EbErrorType reconPictureBufferDescCtor(PicBufferDesc* picBuf, const PicBufferDescInitData* d) {
+    const std::uint16_t ssX = (d->colorFormat == EB_YUV444) ? 0 : 1;
+    const std::uint16_t ssY = ((d->colorFormat == EB_YUV444 || d->colorFormat == EB_YUV422) ? 0 : 1);
+
+    std::uint32_t bytesPerPixel = (d->bitDepth == EB_EIGHT_BIT) ? 1 : 2;
+
+    // Set the Picture Buffer Static variables
+    picBuf->width = d->maxWidth;
+    picBuf->height = d->maxHeight;
+    picBuf->maxWidth = d->maxWidth;
+    picBuf->maxHeight = d->maxHeight;
+    picBuf->bitDepth = d->bitDepth;
+    picBuf->colorFormat = d->colorFormat;
+    picBuf->yStride = static_cast<std::uint16_t>(d->maxWidth + (2 * d->border) /*left + right border*/);
+    picBuf->uStride = picBuf->vStride = static_cast<std::uint16_t>((picBuf->yStride + ssX) >> ssX);
+    picBuf->border = d->border;
+
+    picBuf->lumaSize = static_cast<std::uint32_t>(picBuf->yStride) * (d->maxHeight + (2 * d->border));
+    picBuf->chromaSize =
+        static_cast<std::uint32_t>(picBuf->uStride) * ((d->maxHeight + ssY + (2 * d->border)) >> ssY);
+    picBuf->packedFlag = (d->bitDepth > EB_EIGHT_BIT) ? true : false;
+
+    picBuf->bufferEnableMask = d->bufferEnableMask;
+
+    // Get frame size to alloc
+    std::uint32_t allocSz = 0;
+    std::uint32_t bufferSize[3] = {0};
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Y_FLAG) {
+        allocSz += bufferSize[0] = picBuf->lumaSize * bytesPerPixel;
+    }
+
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cb_FLAG) {
+        allocSz += bufferSize[1] = picBuf->chromaSize * bytesPerPixel;
+    }
+
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cr_FLAG) {
+        allocSz += bufferSize[2] = picBuf->chromaSize * bytesPerPixel;
+    }
+
+    // Allocate the Picture Buffers (luma & chroma) - the zero-fill is part
+    // of the reference contract (EB_CALLOC_ALIGNED_ARRAY, :493).
+    picBuf->bufferAlloc = static_cast<std::uint8_t*>(std::calloc(allocSz, 1));
+    picBuf->bufferAllocSz = allocSz;
+    std::uint32_t assignedSpace = 0;
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Y_FLAG) {
+        picBuf->yBuffer = picBuf->bufferAlloc +
+            (picBuf->border + (picBuf->yStride * picBuf->border)) * bytesPerPixel;
+        assignedSpace += bufferSize[0];
+    }
+
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cb_FLAG) {
+        picBuf->uBuffer = picBuf->bufferAlloc + assignedSpace +
+            ((picBuf->border >> ssX) + (picBuf->uStride * (picBuf->border >> ssY))) * bytesPerPixel;
+        assignedSpace += bufferSize[1];
+    }
+
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cr_FLAG) {
+        picBuf->vBuffer = picBuf->bufferAlloc + assignedSpace +
+            ((picBuf->border >> ssX) + (picBuf->vStride * (picBuf->border >> ssY))) * bytesPerPixel;
+        assignedSpace += bufferSize[2];
+    }
+
+    return EB_ErrorNone;
+}
+
+// svt_aom_link_eb_to_aom_buffer_desc_8bit (pic_buffer_desc.c:518-:547).
+void linkEbToAomBufferDesc8bit(PicBufferDesc* picBuffDsc, Yv12BufferConfig* aomBuffDsc) {
+    // Forces an 8 bit version
+    // Note: Not all fields are connected. Add more connections as needed.
+    aomBuffDsc->yBuffer = picBuffDsc->yBuffer;
+    aomBuffDsc->uBuffer = picBuffDsc->uBuffer;
+    aomBuffDsc->vBuffer = picBuffDsc->vBuffer;
+
+    aomBuffDsc->yWidth = picBuffDsc->width;
+    aomBuffDsc->uvWidth = picBuffDsc->width / 2;
+
+    aomBuffDsc->yHeight = picBuffDsc->height;
+    aomBuffDsc->uvHeight = picBuffDsc->height / 2;
+
+    aomBuffDsc->yStride = picBuffDsc->yStride;
+    aomBuffDsc->uvStride = picBuffDsc->uStride;
+
+    aomBuffDsc->border = picBuffDsc->border;
+
+    aomBuffDsc->subsamplingX = 1;
+    aomBuffDsc->subsamplingY = 1;
+
+    aomBuffDsc->yCropWidth = aomBuffDsc->yWidth;
+    aomBuffDsc->uvCropWidth = aomBuffDsc->uvWidth;
+    aomBuffDsc->yCropHeight = aomBuffDsc->yHeight;
+    aomBuffDsc->uvCropHeight = aomBuffDsc->uvHeight;
+
+    aomBuffDsc->flags = 0;
+}
+
+// CONVERT_TO_BYTEPTR (definitions.h): (uint8_t*)(((uintptr_t)(x)) >> 1).
+static std::uint8_t* convertToByteptr(const std::uint8_t* x) {
+    return reinterpret_cast<std::uint8_t*>(reinterpret_cast<std::uintptr_t>(x) >> 1);
+}
+
+// svt_aom_link_eb_to_aom_buffer_desc (pic_buffer_desc.c:549-:631). The
+// is_16bit parameter is consumed only by the reference's (void) cast :551 -
+// the branch decision reads bit_depth directly; the parameter stays 1:1.
+void linkEbToAomBufferDesc(PicBufferDesc* picBuffDsc, Yv12BufferConfig* aomBuffDsc, std::uint16_t padRight,
+                           std::uint16_t padBottom, bool is16bit) {
+    (void)is16bit;
+
+    const std::int32_t ssX = 1, ssY = 1;
+    //NOTe:  Not all fileds are connected. add more connections as needed.
+    if (picBuffDsc->bitDepth == EB_EIGHT_BIT) {
+        aomBuffDsc->yBuffer = picBuffDsc->yBuffer;
+        aomBuffDsc->uBuffer = picBuffDsc->uBuffer;
+        aomBuffDsc->vBuffer = picBuffDsc->vBuffer;
+
+        aomBuffDsc->yWidth = picBuffDsc->width;
+        aomBuffDsc->uvWidth = (picBuffDsc->width + ssX) >> ssX;
+
+        aomBuffDsc->yHeight = picBuffDsc->height;
+        aomBuffDsc->uvHeight = (picBuffDsc->height + ssY) >> ssY;
+
+        aomBuffDsc->yStride = picBuffDsc->yStride;
+        aomBuffDsc->uvStride = picBuffDsc->uStride;
+
+        aomBuffDsc->border = picBuffDsc->border;
+
+        aomBuffDsc->subsamplingX = ssX;
+        aomBuffDsc->subsamplingY = ssY;
+
+        aomBuffDsc->yCropWidth = aomBuffDsc->yWidth - padRight;
+        aomBuffDsc->uvCropWidth = (aomBuffDsc->yCropWidth + ssX) >> ssX;
+        aomBuffDsc->yCropHeight = aomBuffDsc->yHeight - padBottom;
+        aomBuffDsc->uvCropHeight = (aomBuffDsc->yCropHeight + ssY) >> ssY;
+
+        aomBuffDsc->flags = 0;
+    } else {
+        aomBuffDsc->yBuffer = convertToByteptr(picBuffDsc->yBuffer);
+        aomBuffDsc->uBuffer = convertToByteptr(picBuffDsc->uBuffer);
+        aomBuffDsc->vBuffer = convertToByteptr(picBuffDsc->vBuffer);
+
+        aomBuffDsc->yWidth = picBuffDsc->width;
+        aomBuffDsc->uvWidth = (picBuffDsc->width + ssX) >> ssX;
+
+        aomBuffDsc->yHeight = picBuffDsc->height;
+        aomBuffDsc->uvHeight = (picBuffDsc->height + ssY) >> ssY;
+
+        aomBuffDsc->yStride = picBuffDsc->yStride;
+        aomBuffDsc->uvStride = picBuffDsc->uStride;
+
+        aomBuffDsc->border = picBuffDsc->border;
+
+        aomBuffDsc->subsamplingX = ssX;
+        aomBuffDsc->subsamplingY = ssY;
+
+        aomBuffDsc->yCropWidth = aomBuffDsc->yWidth - padRight;
+        aomBuffDsc->uvCropWidth = (aomBuffDsc->yCropWidth + ssX) >> ssX;
+        aomBuffDsc->yCropHeight = aomBuffDsc->yHeight - padBottom;
+        aomBuffDsc->uvCropHeight = (aomBuffDsc->yCropHeight + ssY) >> ssY;
+        aomBuffDsc->flags = YV12_FLAG_HIGHBITDEPTH;
     }
 }
 

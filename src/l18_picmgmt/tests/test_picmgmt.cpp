@@ -1,4 +1,4 @@
-#include <doctest.h>
+﻿#include <doctest.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -799,4 +799,309 @@ TEST_CASE("picBufDescAssign partial masks leave unowned planes NULL") {
         CHECK(pic.bufferAlloc == base);
         std::free(base);
     }
+}
+
+// ---------------------------------------------------------------------------
+// C5: the ctor/update family of pic_buffer_desc.c:
+//   svt_picture_buffer_desc_ctor_noy8b :35-:145 (the /4 bit-inc variant;
+//     y_buffer stays NULL; packed_flag forced false),
+//   svt_picture_buffer_desc_noy8b_update :152-:186,
+//   svt_picture_buffer_desc_update :192-:219 (does NOT touch
+//     bit_depth/color_format/packed_flag/buffer_enable_mask),
+//   svt_recon_picture_buffer_desc_update :417-:442,
+//   svt_recon_picture_buffer_desc_ctor :450-:516 (the calloc-zeroed recon
+//     buffer; no split handling),
+//   svt_aom_link_eb_to_aom_buffer_desc_8bit :518-:547 and
+//   svt_aom_link_eb_to_aom_buffer_desc :549-:631 (the 16-bit branch uses
+//     the CONVERT_TO_BYTEPTR >>1 address transform, definitions.h).
+// The EB_MALLOC/CALLOC aligned-array walls use the standard heap (named
+// deviation); the reference's EB_FREE-backed dctors stay parked.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("pictureBufferDescCtorNoy8b allocates with the /4 bit-inc quirk") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    // poison: the ctor must overwrite or leave per its contract
+    pic.yBuffer = reinterpret_cast<std::uint8_t*>(0x5A);
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 128;
+    d.maxHeight = 96;
+    d.border = 32;
+    d.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+    d.splitMode = false;
+    CHECK(l18_picmgmt::pictureBufferDescCtorNoy8b(&pic, &d) == 0);
+    // Layout fields.
+    CHECK(pic.yStride == 192);
+    CHECK(pic.uStride == 96);
+    CHECK(pic.vStride == 96);
+    CHECK(pic.lumaSize == 192u * 160u);
+    CHECK(pic.chromaSize == 96u * 80u);
+    CHECK(pic.packedFlag == false); // forced false in this ctor (:63)
+    CHECK(pic.bufferEnableMask == 7u);
+    // The quirk: y_buffer is set to NULL at :72 and never pointed into the
+    // allocation - the Y branch only handles the bit-inc pointer.
+    CHECK(pic.yBuffer == nullptr);
+    // u/v at the chroma offsets ((border>>ss_x) + u_stride*(border>>ss_y)):
+    // (32>>1) + 96*(32>>1) = 16 + 1536 = 1552.
+    CHECK(pic.uBuffer - pic.bufferAlloc == static_cast<std::ptrdiff_t>(16 + 96u * 16));
+    CHECK(pic.vBuffer - pic.bufferAlloc ==
+          static_cast<std::ptrdiff_t>(pic.chromaSize + 16 + 96u * 16));
+    // No split: no bit-inc pointers. The Y branch contributes NO alloc size
+    // (the reference comments the luma term out at :78), so the 8-bit
+    // non-split allocation is chroma + chroma only.
+    CHECK(pic.yBufferBitInc == nullptr);
+    CHECK(pic.uBufferBitInc == nullptr);
+    CHECK(pic.vBufferBitInc == nullptr);
+    CHECK(pic.bufferAllocSz == 2u * pic.chromaSize);
+    std::free(pic.bufferAlloc);
+
+    // 10-bit split: bpp stays 1 in THIS ctor (bytes_per_pixel is declared 1
+    // and never recomputed, :39), bit-inc sizes are size/4.
+    l18_picmgmt::PicBufferDesc pic10 = {};
+    l18_picmgmt::PicBufferDescInitData d10 = {};
+    d10.maxWidth = 128;
+    d10.maxHeight = 96;
+    d10.border = 32;
+    d10.bitDepth = l18_picmgmt::EB_TEN_BIT;
+    d10.colorFormat = l18_picmgmt::EB_YUV420;
+    d10.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+    d10.splitMode = true;
+    CHECK(l18_picmgmt::pictureBufferDescCtorNoy8b(&pic10, &d10) == 0);
+    CHECK(pic10.yStrideBitInc == 192);
+    CHECK(pic10.uStrideBitInc == 96);
+    CHECK(pic10.packedFlag == false);
+    const std::uint32_t luma = pic10.lumaSize;
+    const std::uint32_t chroma = pic10.chromaSize;
+    CHECK(pic10.bufferAllocSz == luma / 4u + chroma + chroma / 4u + chroma + chroma / 4u);
+    // Walk order: y_inc (at the /4 luma offset), u, u_inc, v, v_inc.
+    CHECK(pic10.yBuffer == nullptr); // still never assigned
+    // Chroma offset 1552 = (32>>1) + 96*(32>>1); its /4 = 388 feeds the
+    // bit-inc offsets.
+    CHECK(pic10.yBufferBitInc - pic10.bufferAlloc ==
+          static_cast<std::ptrdiff_t>((32 + 192u * 32) / 4u));
+    CHECK(pic10.uBuffer - pic10.bufferAlloc ==
+          static_cast<std::ptrdiff_t>(luma / 4u + 16 + 96u * 16));
+    CHECK(pic10.uBufferBitInc - pic10.bufferAlloc ==
+          static_cast<std::ptrdiff_t>(luma / 4u + chroma + (16 + 96u * 16) / 4u));
+    CHECK(pic10.vBuffer - pic10.bufferAlloc ==
+          static_cast<std::ptrdiff_t>(luma / 4u + chroma + chroma / 4u + 16 + 96u * 16));
+    CHECK(pic10.vBufferBitInc - pic10.bufferAlloc ==
+          static_cast<std::ptrdiff_t>(luma / 4u + chroma + chroma / 4u + chroma + (16 + 96u * 16) / 4u));
+    std::free(pic10.bufferAlloc);
+}
+
+TEST_CASE("pictureBufferDescNoy8bUpdate mirrors the ctor layout without allocation") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    pic.yBuffer = reinterpret_cast<std::uint8_t*>(0x77); // untouched by updates
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 320;
+    d.maxHeight = 180;
+    d.border = 32;
+    d.bitDepth = l18_picmgmt::EB_TEN_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV422;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_LUMA_MASK;
+    d.splitMode = true;
+    CHECK(l18_picmgmt::pictureBufferDescNoy8bUpdate(&pic, &d) == 0);
+    CHECK(pic.width == 320);
+    CHECK(pic.height == 180);
+    CHECK(pic.bitDepth == l18_picmgmt::EB_TEN_BIT);
+    CHECK(pic.colorFormat == l18_picmgmt::EB_YUV422);
+    CHECK(pic.yStride == 384);
+    CHECK(pic.uStride == 192); // (384+1)>>1
+    CHECK(pic.lumaSize == 384u * 244u);
+    CHECK(pic.chromaSize == 192u * 244u); // ss_y = 0 for 422
+    CHECK(pic.packedFlag == false);       // forced false (:176)
+    CHECK(pic.bufferEnableMask == 1u);
+    CHECK(pic.yStrideBitInc == 384);
+    CHECK(pic.yBuffer == reinterpret_cast<std::uint8_t*>(0x77)); // no pointer writes
+}
+
+TEST_CASE("pictureBufferDescUpdate leaves depth format packed and mask untouched") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    pic.bitDepth = l18_picmgmt::EB_TWELVE_BIT;
+    pic.colorFormat = l18_picmgmt::EB_YUV444;
+    pic.packedFlag = true;
+    pic.bufferEnableMask = 0x1234u;
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 64;
+    d.maxHeight = 48;
+    d.border = 16;
+    d.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = 7u;
+    d.splitMode = false;
+    CHECK(l18_picmgmt::pictureBufferDescUpdate(&pic, &d) == 0);
+    // The update writes ONLY width/height/max/strides/sizes/border and the
+    // split strides - depth/format/packed/mask are NOT in its walk
+    // (:192-:219).
+    CHECK(pic.width == 64);
+    CHECK(pic.height == 48);
+    CHECK(pic.yStride == 96);
+    CHECK(pic.uStride == 48);
+    CHECK(pic.lumaSize == 96u * 80u);
+    CHECK(pic.chromaSize == 48u * 40u);
+    CHECK(pic.bitDepth == l18_picmgmt::EB_TWELVE_BIT); // poison survived
+    CHECK(pic.colorFormat == l18_picmgmt::EB_YUV444);
+    CHECK(pic.packedFlag == true);
+    CHECK(pic.bufferEnableMask == 0x1234u);
+    // split off: the bit-inc strides stay untouched.
+    pic.yStrideBitInc = 123;
+    l18_picmgmt::PicBufferDescInitData d2 = d;
+    d2.splitMode = true;
+    CHECK(l18_picmgmt::pictureBufferDescUpdate(&pic, &d2) == 0);
+    CHECK(pic.yStrideBitInc == 96);
+    CHECK(pic.uStrideBitInc == 48);
+}
+
+TEST_CASE("reconPictureBufferDescUpdate sets depth packed and mask") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    pic.yStrideBitInc = 0xBEEF; // recon_update does NOT touch bit-inc strides
+    pic.uStrideBitInc = 0xBEEF;
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 128;
+    d.maxHeight = 128;
+    d.border = 32;
+    d.bitDepth = l18_picmgmt::EB_TEN_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+    CHECK(l18_picmgmt::reconPictureBufferDescUpdate(&pic, &d) == 0);
+    CHECK(pic.bitDepth == l18_picmgmt::EB_TEN_BIT);
+    CHECK(pic.colorFormat == l18_picmgmt::EB_YUV420);
+    CHECK(pic.packedFlag == true); // bit_depth > EB_EIGHT_BIT (:437)
+    CHECK(pic.bufferEnableMask == 7u);
+    CHECK(pic.yStride == 192);
+    CHECK(pic.uStride == 96);
+    CHECK(pic.lumaSize == 192u * 192u);
+    CHECK(pic.chromaSize == 96u * 96u);
+    CHECK(pic.yStrideBitInc == 0xBEEF); // poison survived
+    // 8-bit flips packed_flag back to false.
+    d.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+    CHECK(l18_picmgmt::reconPictureBufferDescUpdate(&pic, &d) == 0);
+    CHECK(pic.packedFlag == false);
+}
+
+TEST_CASE("reconPictureBufferDescCtor calloc-zeroes and assigns y/u/v") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    pic.yBuffer = reinterpret_cast<std::uint8_t*>(0x44);
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 64;
+    d.maxHeight = 64;
+    d.border = 16;
+    d.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+    CHECK(l18_picmgmt::reconPictureBufferDescCtor(&pic, &d) == 0);
+    CHECK(pic.bufferAllocSz == pic.lumaSize + 2u * pic.chromaSize);
+    CHECK(pic.yBuffer - pic.bufferAlloc == static_cast<std::ptrdiff_t>(16 + 96u * 16));
+    // Chroma offsets: (16>>1) + 48*(16>>1) = 8 + 384 = 392.
+    CHECK(pic.uBuffer - pic.bufferAlloc == static_cast<std::ptrdiff_t>(pic.lumaSize + 8 + 48u * 8));
+    CHECK(pic.vBuffer - pic.bufferAlloc ==
+          static_cast<std::ptrdiff_t>(pic.lumaSize + pic.chromaSize + 8 + 48u * 8));
+    CHECK(pic.packedFlag == false);
+    // The calloc-zero contract: the recon ctor zero-fills the allocation
+    // (EB_CALLOC_ALIGNED_ARRAY, :493) - every byte readable.
+    for (std::size_t i = 0; i < pic.bufferAllocSz; ++i) {
+        if (pic.bufferAlloc[i] != 0) {
+            CHECK(pic.bufferAlloc[i] == 0);
+            break;
+        }
+    }
+    std::free(pic.bufferAlloc);
+}
+
+TEST_CASE("reconPictureBufferDescCtor 10-bit packs two bytes per pixel") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 64;
+    d.maxHeight = 64;
+    d.border = 16;
+    d.bitDepth = l18_picmgmt::EB_TEN_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+    d.splitMode = true; // recon ctor IGNORES split_mode (no bit-inc walk)
+    CHECK(l18_picmgmt::reconPictureBufferDescCtor(&pic, &d) == 0);
+    CHECK(pic.bufferAllocSz == 2u * (pic.lumaSize + 2u * pic.chromaSize));
+    CHECK(pic.packedFlag == true);
+    // No bit-inc pointers written: poison in, poison out.
+    std::uint8_t* firstAlloc = pic.bufferAlloc;
+    pic.yBufferBitInc = reinterpret_cast<std::uint8_t*>(0x88);
+    l18_picmgmt::PicBufferDescInitData d2 = d;
+    CHECK(l18_picmgmt::reconPictureBufferDescCtor(&pic, &d2) == 0);
+    CHECK(pic.yBufferBitInc == reinterpret_cast<std::uint8_t*>(0x88));
+    std::free(firstAlloc);
+    std::free(pic.bufferAlloc);
+}
+
+TEST_CASE("linkEbToAomBufferDesc8bit copies the field set") {
+    l18_picmgmt::PicBufferDesc src = {};
+    src.yBuffer = reinterpret_cast<std::uint8_t*>(0x1000);
+    src.uBuffer = reinterpret_cast<std::uint8_t*>(0x2000);
+    src.vBuffer = reinterpret_cast<std::uint8_t*>(0x3000);
+    src.width = 13; // odd: uv_width = width / 2 = 6 (integer division, :527)
+    src.height = 65;
+    src.yStride = 96;
+    src.uStride = 48;
+    src.border = 32;
+    l18_picmgmt::Yv12BufferConfig aom = {};
+    aom.flags = 0xEE;
+    l18_picmgmt::linkEbToAomBufferDesc8bit(&src, &aom);
+    CHECK(aom.yBuffer == src.yBuffer);
+    CHECK(aom.uBuffer == src.uBuffer);
+    CHECK(aom.vBuffer == src.vBuffer);
+    CHECK(aom.yWidth == 13);
+    CHECK(aom.uvWidth == 6); // 13/2, NOT (13+1)>>1
+    CHECK(aom.yHeight == 65);
+    CHECK(aom.uvHeight == 32);
+    CHECK(aom.yStride == 96);
+    CHECK(aom.uvStride == 48);
+    CHECK(aom.border == 32);
+    CHECK(aom.subsamplingX == 1);
+    CHECK(aom.subsamplingY == 1);
+    CHECK(aom.yCropWidth == 13);
+    CHECK(aom.uvCropWidth == 6);
+    CHECK(aom.yCropHeight == 65);
+    CHECK(aom.uvCropHeight == 32);
+    CHECK(aom.flags == 0);
+}
+
+TEST_CASE("linkEbToAomBufferDesc 8-bit and the 16-bit CONVERT branch") {
+    l18_picmgmt::PicBufferDesc src = {};
+    src.width = 13;
+    src.height = 65;
+    src.yStride = 96;
+    src.uStride = 48;
+    src.border = 32;
+    l18_picmgmt::Yv12BufferConfig aom = {};
+    // 8-bit branch: uv_width = (13+1)>>1 = 7, crop arithmetic with pads.
+    src.yBuffer = reinterpret_cast<std::uint8_t*>(0x1000);
+    src.uBuffer = reinterpret_cast<std::uint8_t*>(0x2000);
+    src.vBuffer = reinterpret_cast<std::uint8_t*>(0x3000);
+    src.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+    l18_picmgmt::linkEbToAomBufferDesc(&src, &aom, 5, 1, false);
+    CHECK(aom.yWidth == 13);
+    CHECK(aom.uvWidth == 7); // (13+1)>>1, different from the 8bit variant
+    CHECK(aom.yHeight == 65);
+    CHECK(aom.uvHeight == 33);
+    CHECK(aom.yCropWidth == 13 - 5);
+    CHECK(aom.uvCropWidth == (8 + 1) >> 1); // ((13-5)+1)>>1
+    CHECK(aom.yCropHeight == 65 - 1);
+    CHECK(aom.uvCropHeight == (64 + 1) >> 1);
+    CHECK(aom.subsamplingX == 1);
+    CHECK(aom.subsamplingY == 1);
+    CHECK(aom.flags == 0);
+    // 16-bit branch: the pointers go through CONVERT_TO_BYTEPTR (>>1) and
+    // the flag is YV12_FLAG_HIGHBITDEPTH (8).
+    src.yBuffer = reinterpret_cast<std::uint8_t*>(0x1000);
+    src.uBuffer = reinterpret_cast<std::uint8_t*>(0x2000);
+    src.vBuffer = reinterpret_cast<std::uint8_t*>(0x3002);
+    src.bitDepth = l18_picmgmt::EB_TEN_BIT;
+    l18_picmgmt::linkEbToAomBufferDesc(&src, &aom, 0, 0, true);
+    CHECK(aom.yBuffer == reinterpret_cast<std::uint8_t*>(0x1000 >> 1));
+    CHECK(aom.uBuffer == reinterpret_cast<std::uint8_t*>(0x2000 >> 1));
+    CHECK(aom.vBuffer == reinterpret_cast<std::uint8_t*>(0x3002 >> 1));
+    CHECK(aom.flags == l18_picmgmt::YV12_FLAG_HIGHBITDEPTH);
+    CHECK(aom.yWidth == 13);
+    CHECK(aom.uvWidth == 7);
+    CHECK(aom.yCropWidth == 13);
 }
