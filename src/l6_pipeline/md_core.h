@@ -56,6 +56,14 @@ enum SubpelForceStop { kEighthPel = 0, kQuarterPel, kHalfPel, kFullPel };
 // definitions.h:1890-1894 MotionMode (mode_decision.h reads the two).
 enum MotionMode { kSimpleTranslation = 0, kObmcCausal = 1, kWarpedCausal = 2 };
 
+// me_sb_results.h:25 SQUARE_PU_COUNT + motion_estimation.h:97-:130: the
+// three PU tables the NSQ MVC derivation walks (mechanically extracted;
+// the RC1 runtime diff-verify test is the authority).
+constexpr std::uint32_t kSquarePuCount = 85;
+extern const std::uint32_t partitionWidth[kSquarePuCount];
+extern const std::uint32_t partitionHeight[kSquarePuCount];
+extern const std::uint32_t puSearchIndexMap[kSquarePuCount][2];
+
 // ---------------------------------------------------------------------------
 // Carriers (the RE8A DeblockContext / A6C MdCtx precedent)
 // ---------------------------------------------------------------------------
@@ -153,6 +161,13 @@ struct FlCtx {
     std::int16_t sprs_lev0_end_x;
     std::int16_t sprs_lev0_start_y;
     std::int16_t sprs_lev0_end_y;
+    std::uint32_t geom_offset_x;                   // ctx->geom_offset_x/y (derive_me_offsets)
+    std::uint32_t geom_offset_y;
+    std::uint32_t sb_ptr_index;                    // ctx->sb_ptr->index
+    // ctx->mvp_array[list][ref] / ctx->mvp_count[list][ref] (the check_
+    // spatial_mv_size inputs, pointer-per-(list,ref) on the carrier).
+    const Mv2* mvpArr[2][4];
+    std::uint8_t mvpCnt[2][4];
     std::uint32_t full_lambda_md[2];               // ctx->full_lambda_md[EB_8_BIT_MD / EB_10_BIT_MD]
     std::uint32_t fast_lambda_md[2];
     // mds0 state (md_process.h:1191-:1200 window).
@@ -281,6 +296,69 @@ void mdFullPelSearchLargeLbd(const pipeline::SvtMvCostParam& mv_cost_params, FlC
                              std::int16_t search_position_end_x, std::int16_t search_position_start_y,
                              std::int16_t search_position_end_y, std::int16_t sparse_search_step,
                              std::int16_t* best_mvx, std::int16_t* best_mvy, std::uint32_t* best_cost);
+
+// The MeSbResults carrier with the ME-MV array (me_sb_results.h:38-46; the
+// l16 md_slices twin lacks me_mv_array - the NSQ/SQ spans read it).
+struct MdMeSbResults {
+    std::uint8_t* total_me_candidate_index;
+    Mv2* me_mv_array;                       // [PU * max_refs + ref] (list-0) / + max_l0 + ref (list-1)
+    l16_rdo::MeCandidate* me_candidate_array;
+};
+
+// MdNsqMotionSearchCtrls (md_process.h:291-:302, the consumed fields).
+struct MdNsqCtrls {
+    std::uint8_t enabled;
+    DistortionType dist_type;
+    std::uint8_t full_pel_search_width;
+    std::uint8_t full_pel_search_height;
+    std::uint8_t enable_psad;
+};
+
+// MdSqMotionSearchCtrls (md_process.h:304-:352, the consumed fields).
+struct MdSqCtrls {
+    std::uint8_t enabled;
+    DistortionType dist_type;
+    std::uint16_t pame_distortion_th;
+    std::uint8_t sprs_lev0_enabled;
+    std::uint8_t sprs_lev0_step;
+    std::uint16_t sprs_lev0_w;
+    std::uint16_t sprs_lev0_h;
+    std::uint16_t max_sprs_lev0_w;
+    std::uint16_t max_sprs_lev0_h;
+    std::int16_t sprs_lev0_multiplier;
+    std::uint8_t sprs_lev1_enabled;
+    std::uint8_t sprs_lev1_step;
+    std::uint16_t sprs_lev1_w;
+    std::uint16_t sprs_lev1_h;
+    std::uint16_t max_sprs_lev1_w;
+    std::uint16_t max_sprs_lev1_h;
+    std::int16_t sprs_lev1_multiplier;
+    std::uint8_t sprs_lev2_enabled;
+    std::uint8_t sprs_lev2_step;
+    std::uint16_t sprs_lev2_w;
+    std::uint16_t sprs_lev2_h;
+    std::uint8_t enable_psad;
+};
+
+// product_coding_loop.c:2021-:2190 md_nsq_motion_search. The pcs walls
+// thread: pa_me_data max_refs/max_l0/max_cand, enable_me_8x8/16x16,
+// max_number_of_pus_per_sb (= SQUARE_PU_COUNT, resource_coordination_
+// process.c); the ref pic travels pre-resolved (the scaled-ref park).
+void mdNsqMotionSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, std::uint32_t input_origin_index,
+                       std::uint8_t rf, const MdMeSbResults* me_results, std::int16_t* me_mv_x, std::int16_t* me_mv_y,
+                       const MdNsqCtrls& nsq_ctrls, std::uint8_t max_refs, std::uint8_t max_l0,
+                       std::uint8_t enable_me_8x8, std::uint8_t enable_me_16x16,
+                       std::uint8_t max_number_of_pus_per_sb, std::uint8_t max_cand, std::uint8_t base_q_idx);
+
+// product_coding_loop.c:2270-:2457 md_sq_motion_search. The pcs walls
+// thread: picture_number - ref_pic_poc dist (the two int64s), the ref
+// frame-type gate as ref_is_intra (the EbReferenceObject frame-type wall),
+// the TPL mfmv0 triple (the check_temporal_mv_size input) and the pre-
+// resolved ref PicBuf.
+void mdSqMotionSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, std::uint32_t input_origin_index,
+                      std::uint8_t rf, std::int16_t* me_mv_x, std::int16_t* me_mv_y, const MdSqCtrls& sq_ctrls,
+                      std::int64_t picture_number, std::int64_t ref_pic_poc, std::uint8_t ref_is_intra,
+                      std::uint32_t mfmv0_as_int, std::int16_t mfmv0_x, std::int16_t mfmv0_y, std::uint8_t base_q_idx);
 
 // product_coding_loop.c:1582-:1714 md_stage_0. The pcs walls thread:
 // scs->vq_ctrls.sharpness_ctrls.unipred_bias && pcs->ppcs->is_noise_level

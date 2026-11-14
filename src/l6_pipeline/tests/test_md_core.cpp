@@ -8,8 +8,10 @@
 // transforms.
 #include <doctest.h>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <vector>
 
 #include <amvp.h>
@@ -1272,4 +1274,378 @@ TEST_CASE("l6 mdc mdFullPelSearchLargeLbd covers the padded window via the pme k
     CHECK(best_cost == want_cost);
     CHECK(best_x == want_x);
     CHECK(best_y == want_y);
+}
+
+// trip 12: the SQUARE_PU_COUNT = 85 tables (motion_estimation.h:97-:130)
+// the NSQ MVC derivation consumes: partition_width / partition_height /
+// pu_search_index_map. RC1 precedent: the oracle parses the reference
+// header itself and diffs every entry.
+TEST_CASE("l6 mdc pu tables match the reference header byte for byte") {
+    std::ifstream f(REPO_ROOT "\\third_party\\SVT-AV1\\Source\\Lib\\Codec\\motion_estimation.h", std::ios::binary);
+    REQUIRE(f.is_open());
+    std::vector<char> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const std::string text(buf.begin(), buf.end());
+    // Strip // comments first: the reference initializers carry per-row
+    // count comments ("// (1)", "// (4)", ...) whose digits would pollute
+    // the number scan.
+    std::string clean;
+    bool in_comment = false;
+    for (char c : text) {
+        if (in_comment) {
+            if (c == '\n') {
+                in_comment = false;
+                clean += c;
+            }
+        } else if (c == '/' ) {
+            in_comment = true;  // tentatively; a lone '/' is dropped, fine
+        } else {
+            clean += c;
+        }
+    }
+    const std::string& src_text = clean;
+
+    // Extract the named initializer, brace-depth matched (the map's body
+    // nests per-row braces).
+    auto extract = [&src_text](const char* name) {
+        const std::size_t at = src_text.find(name);
+        REQUIRE(at != std::string::npos);
+        const std::size_t open = src_text.find('{', at);
+        REQUIRE(open != std::string::npos);
+        int depth = 1;
+        std::size_t close = open + 1;
+        while (depth > 0 && close < src_text.size()) {
+            if (src_text[close] == '{') {
+                ++depth;
+            } else if (src_text[close] == '}') {
+                --depth;
+            }
+            ++close;
+        }
+        REQUIRE(depth == 0);
+        return src_text.substr(open + 1, close - open - 1);
+    };
+    auto parse = [](const std::string& body) {
+        std::vector<long> vals;
+        std::string cur;
+        for (char c : body) {
+            if ((c >= '0' && c <= '9') || c == '-') {
+                cur += c;
+            } else if (!cur.empty()) {
+                vals.push_back(std::strtol(cur.c_str(), nullptr, 10));
+                cur.clear();
+            }
+        }
+        if (!cur.empty()) vals.push_back(std::strtol(cur.c_str(), nullptr, 10));
+        return vals;
+    };
+    const std::vector<long> wRef = parse(extract("partition_width[SQUARE_PU_COUNT]"));
+    const std::vector<long> hRef = parse(extract("partition_height[SQUARE_PU_COUNT]"));
+    const std::vector<long> mRef = parse(extract("pu_search_index_map[SQUARE_PU_COUNT][2]"));
+    REQUIRE(wRef.size() == 85);
+    REQUIRE(hRef.size() == 85);
+    REQUIRE(mRef.size() == 170);
+    for (int i = 0; i < 85; ++i) {
+        CHECK(mdc::partitionWidth[i] == wRef[i]);
+        CHECK(mdc::partitionHeight[i] == hRef[i]);
+        CHECK(mdc::puSearchIndexMap[i][0] == mRef[i * 2]);
+        CHECK(mdc::puSearchIndexMap[i][1] == mRef[i * 2 + 1]);
+    }
+}
+
+// trip 13: md_nsq_motion_search (product_coding_loop.c:2021-:2190). The
+// MVC derivation over the PU tables (the width/height match + the block
+// window + the ME-data gate), the round-to-integer of every entry, the
+// degenerate-ladder trick (full_pel_search_* = 0 -> one position per
+// search) that makes the center selection directly observable, and the
+// step-4 ladder finding an integer match the centers miss. The dedup of
+// equal MVC entries is a pure search-count optimization - no observable
+// output difference (noted, not testable without instrumentation).
+namespace {
+struct NsqFixture {
+    std::vector<std::uint8_t> srcPlane;
+    std::vector<std::uint8_t> refPlane;
+    mdc::PicBuf input{};
+    mdc::PicBuf ref{};
+    std::vector<std::uint8_t> totalCnt;
+    std::vector<l16_rdo::MeCandidate> cands;
+    std::vector<pipeline::Mv2> mvArr;
+    mdc::MdMeSbResults me{};
+};
+NsqFixture makeNsqFixture(int shift, bool list1) {
+    NsqFixture fx;
+    fx.srcPlane.assign(64 * 64, 0);
+    fx.refPlane.assign((64 + 64) * (64 + 64), 0);
+    for (int r = 0; r < 64; ++r)
+        for (int c = 0; c < 64; ++c) fx.srcPlane[r * 64 + c] = static_cast<std::uint8_t>(((r * 64 + c) * 2654435761u) >> 24);
+    // ref(x, y) = src(x + shift, y) for EVERY plane sample (border
+    // included, modular wrap): the block sits at the origin, so the
+    // negative search positions read the top/left border rows and those
+    // must carry the shifted pattern too.
+    for (int r = 0; r < 64 + 64; ++r)
+        for (int c = 0; c < 64 + 64; ++c) {
+            const int sy = ((r - 32) % 64 + 64) % 64;
+            const int sx = ((c - 32 + shift) % 64 + 64) % 64;
+            fx.refPlane[r * (64 + 64) + c] = fx.srcPlane[sy * 64 + sx];
+        }
+    fx.input.buf = fx.srcPlane.data();
+    fx.input.stride = 64;
+    fx.ref.buf = fx.refPlane.data() + 32 * (64 + 64) + 32;
+    fx.ref.stride = 64 + 64;
+    fx.ref.max_width = 64;
+    fx.ref.max_height = 64;
+    fx.ref.border = 32;
+    fx.totalCnt.assign(85, 0);
+    fx.cands.assign(85 * 23, {});
+    fx.mvArr.assign(85 * 8, pipeline::Mv2{0, 0});
+    fx.me.total_me_candidate_index = fx.totalCnt.data();
+    fx.me.me_mv_array = fx.mvArr.data();
+    fx.me.me_candidate_array = fx.cands.data();
+    (void)list1;
+    return fx;
+}
+void plantPu(NsqFixture& fx, int pu, int mv_x, bool list1) {
+    fx.totalCnt[pu] = 1;
+    l16_rdo::MeCandidate& c = fx.cands[pu * 23];
+    c.direction = 0;
+    c.ref0List = list1 ? 1 : 0;  // the list the ref_idx_l0 slot belongs to
+    c.refIdxL0 = 0;
+    fx.mvArr[pu * 8 + (list1 ? 4 : 0)] = pipeline::Mv2{static_cast<std::int16_t>(mv_x), 0};
+}
+mdc::FlCtx nsqCtx() {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_16X32;
+    ctx.geom.bwidth = 16;
+    ctx.geom.bheight = 32;
+    ctx.geom.sq_size = 16;
+    ctx.blk_org_x = 0;
+    ctx.blk_org_y = 0;
+    ctx.sb_origin_x = 0;
+    ctx.sb_origin_y = 0;
+    ctx.geom_offset_x = 0;
+    ctx.geom_offset_y = 0;
+    ctx.ref_mv.x = 0;
+    ctx.ref_mv.y = 0;
+    ctx.md_subpel_skip_diag_refinement = 3;
+    ctx.fast_lambda_md[0] = 1024;
+    ctx.full_lambda_md[0] = 1024;
+    return ctx;
+}
+}  // namespace
+
+TEST_CASE("l6 mdc mdNsqMotionSearch picks the best MVC center and gates the PU window") {
+    NsqFixture fx = makeNsqFixture(2, false);
+    // PU 5 = the 16x16 PU at (0,0), inside the 16x32 block: perfect match.
+    plantPu(fx, 5, -2, false);
+    // PU 9 = the 16x16 PU at (0,16), also inside: same MV (dedup'd).
+    plantPu(fx, 9, -2, false);
+    // PU 1 = the 32x32 PU at (0,0): partition width 32 != min 16 -> the
+    // width gate must reject it even though its MV is perfect.
+    plantPu(fx, 1, -16, false);
+    // PU 21 = the 8x8 PU at (0,0): partition 8 != 16 -> rejected.
+    plantPu(fx, 21, -16, false);
+
+    mdc::FlCtx ctx = nsqCtx();
+    mdc::MdNsqCtrls ctrls{};
+    ctrls.dist_type = mdc::DIST_SAD;
+    ctrls.full_pel_search_width = 0;
+    ctrls.full_pel_search_height = 0;
+    ctrls.enable_psad = 0;
+
+    std::int16_t me_x = 0, me_y = 0;
+    mdc::mdNsqMotionSearch(&ctx, fx.input, fx.ref, 0, amvp::kLastFrame, &fx.me, &me_x, &me_y, ctrls, 8, 4, 1, 1, 85,
+                           23, 100);
+    CHECK(ctx.enable_psad == 0);
+    // The best center is the PU-5 MV (-2 full-pel -> -16 1/8-pel); the
+    // SQ (0) and the out-of-window PUs never win.
+    CHECK(me_x == -16);
+    CHECK(me_y == 0);
+}
+
+TEST_CASE("l6 mdc mdNsqMotionSearch ladder refines and the list-1 slot indexes") {
+    // (a) The step-4 ladder reaches an integer match the centers miss.
+    NsqFixture fx = makeNsqFixture(8, false);  // true match at (-8, 0)
+    mdc::FlCtx ctx = nsqCtx();
+    mdc::MdNsqCtrls ctrls{};
+    ctrls.dist_type = mdc::DIST_SAD;
+    ctrls.full_pel_search_width = 16;
+    ctrls.full_pel_search_height = 0;
+    ctrls.enable_psad = 0;
+    std::int16_t me_x = 0, me_y = 0;
+    mdc::mdNsqMotionSearch(&ctx, fx.input, fx.ref, 0, amvp::kLastFrame, &fx.me, &me_x, &me_y, ctrls, 8, 4, 1, 1, 85,
+                           23, 100);
+    CHECK(me_x == -64);
+    CHECK(me_y == 0);
+
+    // (b) The list-1 slot: plant the perfect MV in [pu*max_refs + max_l0]
+    // for a BWDREF (list 1, ref 0) candidate.
+    NsqFixture fx1 = makeNsqFixture(2, true);
+    plantPu(fx1, 5, -2, true);
+    mdc::FlCtx ctx1 = nsqCtx();
+    std::int16_t me1_x = 0, me1_y = 0;
+    mdc::mdNsqMotionSearch(&ctx1, fx1.input, fx1.ref, 0, amvp::kBwdrefFrame, &fx1.me, &me1_x, &me1_y, ctrls, 8, 4, 1,
+                           1, 85, 23, 100);
+    CHECK(me1_x == -16);
+    CHECK(me1_y == 0);
+
+    // (c) The MVC round-to-integer: the SQ MV 5 (1/8 pel) rounds to 8, the
+    // center search at the true match (-16... shift 2 -> -16) hmm: with the
+    // SQ MV rounding to 8 and the true match at -16 the PU-5 entry still
+    // wins; use shift -1 (match at +8) so the ROUNDED SQ MV is the winner.
+    NsqFixture fx2 = makeNsqFixture(-1, false);  // ref(x) = src(x - 1): match at (+1, 0)
+    mdc::FlCtx ctx2 = nsqCtx();
+    std::int16_t me2_x = 5, me2_y = 0;  // 0.625 px -> rounds to 8 = the match
+    mdc::mdNsqMotionSearch(&ctx2, fx2.input, fx2.ref, 0, amvp::kLastFrame, &fx2.me, &me2_x, &me2_y, ctrls, 8, 4, 1, 1,
+                           85, 23, 100);
+    CHECK(me2_x == 8);
+    CHECK(me2_y == 0);
+}
+
+// trip 14: md_sq_motion_search (product_coding_loop.c:2270-:2457). The
+// high-motion gate (RDCOST(fast_lambda, 16, pa_me_cost) vs the per-pixel
+// th), the spatial vs temporal multiplier derivation, the sparse level
+// scaling formula and the lev0 box write.
+namespace {
+mdc::FlCtx sqCtx() {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_64X64;
+    ctx.geom.bwidth = 64;
+    ctx.geom.bheight = 64;
+    ctx.geom.sq_size = 64;
+    ctx.blk_org_x = 0;
+    ctx.blk_org_y = 0;
+    ctx.sb_origin_x = 0;
+    ctx.sb_origin_y = 0;
+    ctx.ref_mv.x = 0;
+    ctx.ref_mv.y = 0;
+    ctx.md_subpel_skip_diag_refinement = 3;
+    ctx.fast_lambda_md[0] = 0;  // the RDCOST gate reduces to the distortion pair
+    ctx.full_lambda_md[0] = 1024;
+    return ctx;
+}
+}  // namespace
+
+TEST_CASE("l6 mdc mdSqMotionSearch gates on distortion and expands via the sparse ladder") {
+    // Planes: src patterned; ref = src shifted by (+16, 0) (the match at
+    // integer +16 -> mv 128). The bordered ref plane is 144 wide with
+    // border 40 so the +-32 lev0 window never trips the border clamps
+    // (the clamps would shift the step-4 grid off the match).
+    std::vector<std::uint8_t> srcPlane(64 * 64);
+    std::vector<std::uint8_t> refPlane(144 * 144);
+    for (int r = 0; r < 64; ++r)
+        for (int c = 0; c < 64; ++c) srcPlane[r * 64 + c] = static_cast<std::uint8_t>(((r * 64 + c) * 2654435761u) >> 24);
+    for (int r = 0; r < 144; ++r)
+        for (int c = 0; c < 144; ++c) {
+            const int sy = ((r - 40) % 64 + 64) % 64;
+            const int sx = ((c - 40 - 16) % 64 + 64) % 64;  // ref(x) = src(x - 16)
+            refPlane[r * 144 + c] = srcPlane[sy * 64 + sx];
+        }
+    mdc::PicBuf input{};
+    input.buf = srcPlane.data();
+    input.stride = 64;
+    mdc::PicBuf ref{};
+    ref.buf = refPlane.data() + 40 * 144 + 40;
+    ref.stride = 144;
+    ref.max_width = 64;
+    ref.max_height = 64;
+    ref.border = 40;
+
+    mdc::FlCtx ctx = sqCtx();
+    mdc::MdSqCtrls ctrls{};
+    ctrls.dist_type = mdc::DIST_SAD;
+    ctrls.pame_distortion_th = 1;
+    ctrls.sprs_lev0_enabled = 1;
+    ctrls.sprs_lev0_step = 4;
+    ctrls.sprs_lev0_w = 16;
+    ctrls.sprs_lev0_h = 16;
+    ctrls.max_sprs_lev0_w = 64;
+    ctrls.max_sprs_lev0_h = 64;
+    ctrls.sprs_lev0_multiplier = 100;
+    ctrls.enable_psad = 0;
+
+    // Spatial path: one MVP above the HIGH threshold -> multiplier 3.
+    std::vector<pipeline::Mv2> mvp(1);
+    mvp[0] = pipeline::Mv2{3000, 0};
+    ctx.mvpArr[0][0] = mvp.data();
+    ctx.mvpCnt[0][0] = 1;
+
+    std::int16_t me_x = 0, me_y = 0;
+    mdc::mdSqMotionSearch(&ctx, input, ref, 0, amvp::kLastFrame, &me_x, &me_y, ctrls, 10, 8, 1, 0, 0, 0, 100);
+    // The lev0 ladder: dist = |10-8| = 2 -> scaled 2; w = 100*MIN(16*3*2,
+    // 64)/100 = 64 -> the +-32 step-4 window reaches +16: SAD 0 there.
+    CHECK(me_x == 128);
+    CHECK(me_y == 0);
+    CHECK(ctx.sprs_lev0_start_x == -32);
+    CHECK(ctx.sprs_lev0_end_x == 32);
+    CHECK(ctx.sprs_lev0_start_y == -32);
+    CHECK(ctx.sprs_lev0_end_y == 32);
+    CHECK(ctx.enable_psad == 0);
+}
+
+TEST_CASE("l6 mdc mdSqMotionSearch low distortion keeps the pa-me mv and the temporal path scales") {
+    std::vector<std::uint8_t> srcPlane(64 * 64);
+    std::vector<std::uint8_t> refPlane(144 * 144);
+    for (int r = 0; r < 64; ++r)
+        for (int c = 0; c < 64; ++c) srcPlane[r * 64 + c] = static_cast<std::uint8_t>(((r * 64 + c) * 2654435761u) >> 24);
+    for (int r = 0; r < 144; ++r)
+        for (int c = 0; c < 144; ++c) {
+            const int sy = ((r - 40) % 64 + 64) % 64;
+            const int sx = ((c - 40 - 16) % 64 + 64) % 64;
+            refPlane[r * 144 + c] = srcPlane[sy * 64 + sx];
+        }
+    mdc::PicBuf input{};
+    input.buf = srcPlane.data();
+    input.stride = 64;
+    mdc::PicBuf ref{};
+    ref.buf = refPlane.data() + 40 * 144 + 40;
+    ref.stride = 144;
+    ref.max_width = 64;
+    ref.max_height = 64;
+    ref.border = 40;
+
+    mdc::FlCtx ctx = sqCtx();
+    mdc::MdSqCtrls ctrls{};
+    ctrls.dist_type = mdc::DIST_SAD;
+    ctrls.pame_distortion_th = 1;
+    ctrls.sprs_lev0_enabled = 1;
+    ctrls.sprs_lev0_step = 4;
+    ctrls.sprs_lev0_w = 16;
+    ctrls.sprs_lev0_h = 16;
+    ctrls.max_sprs_lev0_w = 64;
+    ctrls.max_sprs_lev0_h = 64;
+    ctrls.sprs_lev0_multiplier = 100;
+    ctrls.enable_psad = 0;
+
+    // (a) The gate closed: th * area >> the pa-me distortion -> no
+    // expansion; the mv stays the pa-me result (the window-0 search keeps
+    // the input mv).
+    ctx.fast_lambda_md[0] = 0;
+    std::int16_t me_x = 0, me_y = 0;
+    // th huge: RDCOST(0, 16, th*4096) dwarfs any SAD.
+    mdc::MdSqCtrls ctrls_hi = ctrls;
+    ctrls_hi.pame_distortion_th = 0xFFFF;
+    mdc::mdSqMotionSearch(&ctx, input, ref, 0, amvp::kLastFrame, &me_x, &me_y, ctrls_hi, 10, 8, 1, 0, 0, 0, 100);
+    CHECK(me_x == 0);
+    CHECK(me_y == 0);
+    CHECK(ctx.sprs_lev0_start_x == 0);  // untouched by the skipped ladder
+    CHECK(ctx.sprs_lev0_end_x == 0);
+
+    // (b) The temporal path: mfmv0 above the MEDIUM th -> multiplier 2;
+    // dist 2 -> scaled 2 -> w = 100*MIN(16*2*2, 64)/100 = 64 -> +-32.
+    me_x = 0;
+    me_y = 0;
+    ctx.sprs_lev0_start_x = 77;  // a canary the ladder must overwrite
+    mdc::mdSqMotionSearch(&ctx, input, ref, 0, amvp::kLastFrame, &me_x, &me_y, ctrls, 10, 8, 0,
+                          0x11223344, 3000, 0, 100);
+    CHECK(me_x == 128);
+    CHECK(ctx.sprs_lev0_start_x == -32);
+    CHECK(ctx.sprs_lev0_end_x == 32);
+
+    // (c) The temporal INVALID_MV -> multiplier 0 -> no expansion.
+    me_x = 0;
+    me_y = 0;
+    ctx.sprs_lev0_start_x = 77;
+    mdc::mdSqMotionSearch(&ctx, input, ref, 0, amvp::kLastFrame, &me_x, &me_y, ctrls, 10, 8, 0,
+                          motion::amvp::kInvalidMv, 3000, 0, 100);
+    CHECK(me_x == 0);
+    CHECK(ctx.sprs_lev0_start_x == 77);
 }

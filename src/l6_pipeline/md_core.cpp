@@ -6,11 +6,49 @@
 
 #include <md_slices.h>
 #include <motion.h>
+#include <motion_search.h>
 #include <packunpack.h>
 #include <picops.h>
 
 namespace pipeline {
 namespace mdc {
+
+// me_sb_results.h:25 SQUARE_PU_COUNT + motion_estimation.h:97-:130, the
+// three PU tables verbatim.
+const std::uint32_t partitionWidth[kSquarePuCount] = {
+    64,
+    32, 32, 32, 32,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+};
+const std::uint32_t partitionHeight[kSquarePuCount] = {
+    64,
+    32, 32, 32, 32,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+};
+const std::uint32_t puSearchIndexMap[kSquarePuCount][2] = {
+    {0, 0},
+    {0, 0},  {32, 0}, {0, 32}, {32, 32},
+    {0, 0},  {16, 0}, {32, 0}, {48, 0},
+    {0, 16}, {16, 16}, {32, 16}, {48, 16},
+    {0, 32}, {16, 32}, {32, 32}, {48, 32},
+    {0, 48}, {16, 48}, {32, 48}, {48, 48},
+    {0, 0},  {8, 0},  {16, 0}, {24, 0}, {32, 0}, {40, 0}, {48, 0}, {56, 0},
+    {0, 8},  {8, 8},  {16, 8}, {24, 8}, {32, 8}, {40, 8}, {48, 8}, {56, 8},
+    {0, 16}, {8, 16}, {16, 16}, {24, 16}, {32, 16}, {40, 16}, {48, 16}, {56, 16},
+    {0, 24}, {8, 24}, {16, 24}, {24, 24}, {32, 24}, {40, 24}, {48, 24}, {56, 24},
+    {0, 32}, {8, 32}, {16, 32}, {24, 32}, {32, 32}, {40, 32}, {48, 32}, {56, 32},
+    {0, 40}, {8, 40}, {16, 40}, {24, 40}, {32, 40}, {40, 40}, {48, 40}, {56, 40},
+    {0, 48}, {8, 48}, {16, 48}, {24, 48}, {32, 48}, {40, 48}, {48, 48}, {56, 48},
+    {0, 56}, {8, 56}, {16, 56}, {24, 56}, {32, 56}, {40, 56}, {48, 56}, {56, 56},
+};
 
 // definitions.h:457 ROUND_POWER_OF_TWO (the local-helper precedent).
 static std::int64_t roundPowerOfTwo64(std::int64_t value, int n) {
@@ -831,6 +869,397 @@ void mdFullPelSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic,
                 *best_mvy = best_mv.y;
                 *best_cost = cost;
             }
+        }
+    }
+}
+
+// mode_decision.h:206 MAX_MD_NSQ_SARCH_MVC_CNT... no: product_coding_loop.c
+// :2019 #define MAX_MD_NSQ_SARCH_MVC_CNT 6.
+constexpr std::uint32_t kMaxMdNsqSearchMvcCnt = 6;
+
+// product_coding_loop.c:2021-:2190 md_nsq_motion_search.
+void mdNsqMotionSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, std::uint32_t input_origin_index,
+                       std::uint8_t rf, const MdMeSbResults* me_results, std::int16_t* me_mv_x, std::int16_t* me_mv_y,
+                       const MdNsqCtrls& nsq_ctrls, std::uint8_t max_refs, std::uint8_t max_l0,
+                       std::uint8_t enable_me_8x8, std::uint8_t enable_me_16x16,
+                       std::uint8_t max_number_of_pus_per_sb, std::uint8_t max_cand, std::uint8_t base_q_idx) {
+    const std::uint8_t list_idx = motion::amvp::getListIdx(rf);
+    const std::uint8_t ref_idx = motion::amvp::getRefFrameIdx(rf);
+    // Step 0: derive the MVC list for the NSQ search; 1 SQ MV (default MV for NSQ) and up to 4 sub-block MV(s) (e.g. if 16x8 then 2 8x8, if 32x8 then 4 8x8)
+    std::int16_t mvc_x_array[kMaxMdNsqSearchMvcCnt];
+    std::int16_t mvc_y_array[kMaxMdNsqSearchMvcCnt];
+    std::int8_t mvc_count = 0;
+    // The l16 is_me_data_present view over the carrier's arrays.
+    l16_rdo::MeSbResults me_view;
+    me_view.totalMeCandidateIndex = me_results->total_me_candidate_index;
+    me_view.meCandidateArray = me_results->me_candidate_array;
+    ctx->enable_psad = nsq_ctrls.enable_psad;
+    // SQ MV (default MVC for NSQ)
+    mvc_x_array[mvc_count] = *me_mv_x;
+    mvc_y_array[mvc_count] = *me_mv_y;
+    mvc_count++;
+    if ((ctx->geom.bwidth != 4 && ctx->geom.bheight != 4) && ctx->geom.sq_size >= 16) {
+        const std::uint8_t min_size = ctx->geom.bwidth < ctx->geom.bheight ? static_cast<std::uint8_t>(ctx->geom.bwidth)
+                                                                           : static_cast<std::uint8_t>(ctx->geom.bheight);
+        const std::uint32_t number_of_pus = enable_me_16x16
+            ? (enable_me_8x8 ? max_number_of_pus_per_sb : MAX_SB64_PU_COUNT_NO_8X8)
+            : MAX_SB64_PU_COUNT_WO_16X16;
+        // Origin of the current block relative to its parent 64x64 block
+        Position blk_geom_offset;
+        blk_geom_offset.x = static_cast<std::uint32_t>(ctx->blk_org_x) - ctx->sb_origin_x - ctx->geom_offset_x;
+        blk_geom_offset.y = static_cast<std::uint32_t>(ctx->blk_org_y) - ctx->sb_origin_y - ctx->geom_offset_y;
+        // Derive the sub-block(s) MVs (additional MVC for NSQ)
+        for (std::uint32_t block_index = 0; block_index < number_of_pus; block_index++) {
+            if ((min_size == partitionWidth[block_index] || min_size == partitionHeight[block_index]) &&
+                ((puSearchIndexMap[block_index][0] >= (unsigned)blk_geom_offset.x) &&
+                 (puSearchIndexMap[block_index][0] < (unsigned)blk_geom_offset.x + ctx->geom.bwidth)) &&
+                ((puSearchIndexMap[block_index][1] >= (unsigned)blk_geom_offset.y) &&
+                 (puSearchIndexMap[block_index][1] < (unsigned)blk_geom_offset.y + ctx->geom.bheight)) &&
+                l16_rdo::isMeDataPresent(block_index, block_index * max_cand, &me_view, list_idx, ref_idx)) {
+                if (list_idx == 0) {
+                    mvc_x_array[mvc_count] = static_cast<std::int16_t>(
+                        me_results->me_mv_array[block_index * max_refs + ref_idx].x * 8);
+                    mvc_y_array[mvc_count] = static_cast<std::int16_t>(
+                        me_results->me_mv_array[block_index * max_refs + ref_idx].y * 8);
+                } else {
+                    mvc_x_array[mvc_count] = static_cast<std::int16_t>(
+                        me_results->me_mv_array[block_index * max_refs + max_l0 + ref_idx].x * 8);
+                    mvc_y_array[mvc_count] = static_cast<std::int16_t>(
+                        me_results->me_mv_array[block_index * max_refs + max_l0 + ref_idx].y * 8);
+                }
+                std::uint8_t is_present = 0;
+                for (std::int16_t mvc_index = 0; mvc_index < mvc_count; mvc_index++) {
+                    if (mvc_x_array[mvc_count] == mvc_x_array[mvc_index] &&
+                        mvc_y_array[mvc_count] == mvc_y_array[mvc_index]) {
+                        is_present = 1;
+                        break;
+                    }
+                }
+                if (!is_present) {
+                    mvc_count++;
+                }
+            }
+        }
+    }
+    mvc_x_array[mvc_count] = 0;
+    mvc_y_array[mvc_count] = 0;
+
+    std::uint8_t is_present = 0;
+    for (std::int16_t mvc_index = 0; mvc_index < mvc_count; mvc_index++) {
+        if (mvc_x_array[mvc_count] == mvc_x_array[mvc_index] && mvc_y_array[mvc_count] == mvc_y_array[mvc_index]) {
+            is_present = 1;
+            break;
+        }
+    }
+    if (!is_present) {
+        mvc_count++;
+    }
+    // Search Center
+    std::int16_t search_center_mvx = mvc_x_array[0];
+    std::int16_t search_center_mvy = mvc_y_array[0];
+    std::uint32_t search_center_cost = (std::uint32_t)~0;
+    const std::uint8_t hbd = 0;  // EB_8_BIT_MD
+    // -------
+    // Use scaled references if resolution of the reference is different from that of the input
+    // -------
+    // (the ref PicBuf travels pre-resolved as the parameter - the scaled-ref
+    // park; the reference's svt_aom_use_scaled_rec_refs_if_needed is a no-op
+    // at equal resolutions).
+
+    for (std::int16_t mvc_index = 0; mvc_index < mvc_count; mvc_index++) {
+        // Round-up the search center to the closest integer
+        mvc_x_array[mvc_index] = (mvc_x_array[mvc_index] + 4) & ~0x07;
+        mvc_y_array[mvc_index] = (mvc_y_array[mvc_index] + 4) & ~0x07;
+        mdFullPelSearch(ctx,
+                        input_pic,
+                        ref_pic,
+                        input_origin_index,
+                        nsq_ctrls.dist_type,
+                        mvc_x_array[mvc_index],
+                        mvc_y_array[mvc_index],
+                        0,
+                        0,
+                        0,
+                        0,
+                        1,
+                        0,
+                        &search_center_mvx,
+                        &search_center_mvy,
+                        &search_center_cost,
+                        hbd,
+                        base_q_idx);
+    }
+
+    *me_mv_x = search_center_mvx;
+    *me_mv_y = search_center_mvy;
+    std::int16_t best_search_mvx = (std::int16_t)~0;
+    std::int16_t best_search_mvy = (std::int16_t)~0;
+    std::uint32_t best_search_cost = (std::uint32_t)~0;
+    mdFullPelSearch(ctx,
+                    input_pic,
+                    ref_pic,
+                    input_origin_index,
+                    nsq_ctrls.dist_type,
+                    search_center_mvx,
+                    search_center_mvy,
+                    -(nsq_ctrls.full_pel_search_width >> 1),
+                    +(nsq_ctrls.full_pel_search_width >> 1),
+                    -(nsq_ctrls.full_pel_search_height >> 1),
+                    +(nsq_ctrls.full_pel_search_height >> 1),
+                    4,
+                    0,
+                    &best_search_mvx,
+                    &best_search_mvy,
+                    &best_search_cost,
+                    hbd,
+                    base_q_idx);
+    mdFullPelSearch(ctx,
+                    input_pic,
+                    ref_pic,
+                    input_origin_index,
+                    nsq_ctrls.dist_type,
+                    best_search_mvx,
+                    best_search_mvy,
+                    -2,
+                    +2,
+                    -2,
+                    +2,
+                    2,
+                    0,
+                    &best_search_mvx,
+                    &best_search_mvy,
+                    &best_search_cost,
+                    hbd,
+                    base_q_idx);
+
+    mdFullPelSearch(ctx,
+                    input_pic,
+                    ref_pic,
+                    input_origin_index,
+                    nsq_ctrls.dist_type,
+                    best_search_mvx,
+                    best_search_mvy,
+                    -1,
+                    +1,
+                    -1,
+                    +1,
+                    1,
+                    0,
+                    &best_search_mvx,
+                    &best_search_mvy,
+                    &best_search_cost,
+                    hbd,
+                    base_q_idx);
+    if (best_search_cost < search_center_cost) {
+        *me_mv_x = best_search_mvx;
+        *me_mv_y = best_search_mvy;
+    }
+}
+
+// product_coding_loop.c:2270-:2457 md_sq_motion_search.
+void mdSqMotionSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, std::uint32_t input_origin_index,
+                      std::uint8_t rf, std::int16_t* me_mv_x, std::int16_t* me_mv_y, const MdSqCtrls& sq_ctrls,
+                      std::int64_t picture_number, std::int64_t ref_pic_poc, std::uint8_t ref_is_intra,
+                      std::uint32_t mfmv0_as_int, std::int16_t mfmv0_x, std::int16_t mfmv0_y,
+                      std::uint8_t base_q_idx) {
+    const std::uint8_t hbd_md = 0;  // EB_8_BIT_MD
+    const std::uint8_t list_idx = motion::amvp::getListIdx(rf);
+    const std::uint8_t ref_idx = motion::amvp::getRefFrameIdx(rf);
+    // -------
+    // Use scaled references if resolution of the reference is different from that of the input
+    // -------
+    // (the ref PicBuf travels pre-resolved - the scaled-ref park).
+
+    std::uint16_t dist;
+    {
+        const std::int16_t diff16 = static_cast<std::int16_t>(picture_number - ref_pic_poc);
+        dist = static_cast<std::uint16_t>(diff16 < 0 ? -diff16 : diff16);
+    }
+    std::uint8_t search_area_multiplier = 0;
+    ctx->enable_psad = sq_ctrls.enable_psad;
+    // Get pa_me distortion and MVs
+    std::int16_t pa_me_mvx = (std::int16_t)~0;
+    std::int16_t pa_me_mvy = (std::int16_t)~0;
+    std::uint32_t pa_me_cost = (std::uint32_t)~0;
+    mdFullPelSearch(ctx,
+                    input_pic,
+                    ref_pic,
+                    input_origin_index,
+                    sq_ctrls.dist_type,
+                    *me_mv_x,
+                    *me_mv_y,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1,
+                    0,
+                    &pa_me_mvx,
+                    &pa_me_mvy,
+                    &pa_me_cost,
+                    hbd_md,
+                    base_q_idx);
+    // Identify potential high active block(s) and ME failure using 2 checks : (1) high ME_MV distortion, (2) active co - located block for non - intra ref(Temporal - MV(s)) or active surrounding block(s) for intra ref(Spatial - MV(s))
+    if (ctx->geom.sq_size <= 64) {
+        const std::uint32_t fast_lambda = ctx->hbd_md ? ctx->fast_lambda_md[1] : ctx->fast_lambda_md[0];
+
+        // Check if pa_me distortion is above the per-pixel threshold.  Rate is set to 16.
+        if (static_cast<std::uint64_t>(rdCost(fast_lambda, 16, pa_me_cost)) >
+            static_cast<std::uint64_t>(rdCost(fast_lambda, 16,
+                                              static_cast<std::uint64_t>(sq_ctrls.pame_distortion_th) *
+                                                  ctx->geom.bwidth * ctx->geom.bheight))) {
+            search_area_multiplier = !ref_is_intra
+                ? checkTemporalMvSize(mfmv0_as_int, mfmv0_x, mfmv0_y)
+                : checkSpatialMvSize(ctx->mvpArr[list_idx][ref_idx], ctx->mvpCnt[list_idx][ref_idx], me_mv_x, me_mv_y);
+        }
+    }
+
+    // If high motion was detected, perform an expanded ME search
+    if (search_area_multiplier) {
+        std::int16_t best_search_mvx = (std::int16_t)~0;
+        std::int16_t best_search_mvy = (std::int16_t)~0;
+        std::uint32_t best_search_cost = (std::uint32_t)~0;
+
+        dist = motion::getScaledPictureDistance(dist);
+
+        // Sparse-search Level_0
+        if (sq_ctrls.sprs_lev0_enabled) {
+            const std::uint16_t sprs_lev0_w =
+                static_cast<std::uint16_t>(sq_ctrls.sprs_lev0_multiplier *
+                                           (sq_ctrls.sprs_lev0_w * search_area_multiplier * dist <
+                                                    sq_ctrls.max_sprs_lev0_w
+                                                ? sq_ctrls.sprs_lev0_w * search_area_multiplier * dist
+                                                : sq_ctrls.max_sprs_lev0_w)) /
+                100;
+            const std::uint16_t sprs_lev0_h =
+                static_cast<std::uint16_t>(sq_ctrls.sprs_lev0_multiplier *
+                                           (sq_ctrls.sprs_lev0_h * search_area_multiplier * dist <
+                                                    sq_ctrls.max_sprs_lev0_h
+                                                ? sq_ctrls.sprs_lev0_h * search_area_multiplier * dist
+                                                : sq_ctrls.max_sprs_lev0_h)) /
+                100;
+            const std::uint8_t sprs_lev0_step = sq_ctrls.sprs_lev0_step;
+
+            // Derive start/end position of sparse search (must be a multiple of the step size)
+            const std::int16_t search_position_start_x =
+                -static_cast<std::int16_t>(((sprs_lev0_w >> 1) / sprs_lev0_step) * sprs_lev0_step);
+            const std::int16_t search_position_end_x =
+                +static_cast<std::int16_t>(((sprs_lev0_w >> 1) / sprs_lev0_step) * sprs_lev0_step);
+            const std::int16_t search_position_start_y =
+                -static_cast<std::int16_t>(((sprs_lev0_h >> 1) / sprs_lev0_step) * sprs_lev0_step);
+            const std::int16_t search_position_end_y =
+                +static_cast<std::int16_t>(((sprs_lev0_h >> 1) / sprs_lev0_step) * sprs_lev0_step);
+
+            ctx->sprs_lev0_start_x = static_cast<std::int16_t>((*me_mv_x >> 3) + search_position_start_x);
+            ctx->sprs_lev0_end_x = static_cast<std::int16_t>((*me_mv_x >> 3) + search_position_end_x);
+            ctx->sprs_lev0_start_y = static_cast<std::int16_t>((*me_mv_y >> 3) + search_position_start_y);
+            ctx->sprs_lev0_end_y = static_cast<std::int16_t>((*me_mv_y >> 3) + search_position_end_y);
+            mdFullPelSearch(ctx,
+                            input_pic,
+                            ref_pic,
+                            input_origin_index,
+                            sq_ctrls.dist_type,
+                            *me_mv_x,
+                            *me_mv_y,
+                            search_position_start_x,
+                            search_position_end_x,
+                            search_position_start_y,
+                            search_position_end_y,
+                            sprs_lev0_step,
+                            0,
+                            &best_search_mvx,
+                            &best_search_mvy,
+                            &best_search_cost,
+                            hbd_md,
+                            base_q_idx);
+            *me_mv_x = best_search_mvx;
+            *me_mv_y = best_search_mvy;
+        }
+
+        // Sparse-search Level_1
+        if (sq_ctrls.sprs_lev1_enabled) {
+            const std::uint16_t sprs_lev1_w =
+                static_cast<std::uint16_t>(sq_ctrls.sprs_lev1_multiplier *
+                                           (sq_ctrls.sprs_lev1_w * search_area_multiplier * dist <
+                                                    sq_ctrls.max_sprs_lev1_w
+                                                ? sq_ctrls.sprs_lev1_w * search_area_multiplier * dist
+                                                : sq_ctrls.max_sprs_lev1_w)) /
+                100;
+            const std::uint16_t sprs_lev1_h =
+                static_cast<std::uint16_t>(sq_ctrls.sprs_lev1_multiplier *
+                                           (sq_ctrls.sprs_lev1_h * search_area_multiplier * dist <
+                                                    sq_ctrls.max_sprs_lev1_h
+                                                ? sq_ctrls.sprs_lev1_h * search_area_multiplier * dist
+                                                : sq_ctrls.max_sprs_lev1_h)) /
+                100;
+            const std::uint8_t sprs_lev1_step = sq_ctrls.sprs_lev1_step;
+
+            // Derive start/end position of sparse search (must be a multiple of the step size)
+            std::int16_t search_position_start_x =
+                -static_cast<std::int16_t>(((sprs_lev1_w >> 1) / sprs_lev1_step) * sprs_lev1_step);
+            std::int16_t search_position_end_x =
+                +static_cast<std::int16_t>(((sprs_lev1_w >> 1) / sprs_lev1_step) * sprs_lev1_step);
+            std::int16_t search_position_start_y =
+                -static_cast<std::int16_t>(((sprs_lev1_h >> 1) / sprs_lev1_step) * sprs_lev1_step);
+            std::int16_t search_position_end_y =
+                +static_cast<std::int16_t>(((sprs_lev1_h >> 1) / sprs_lev1_step) * sprs_lev1_step);
+
+            search_position_start_x = (search_position_start_x % 4 == 0) ? search_position_start_x - 2
+                                                                         : search_position_start_x;
+            search_position_end_x = (search_position_end_x % 4 == 0) ? search_position_end_x + 2
+                                                                     : search_position_end_x;
+            search_position_start_y = (search_position_start_y % 4 == 0) ? search_position_start_y - 2
+                                                                         : search_position_start_y;
+            search_position_end_y = (search_position_end_y % 4 == 0) ? search_position_end_y + 2
+                                                                     : search_position_end_y;
+            mdFullPelSearch(ctx,
+                            input_pic,
+                            ref_pic,
+                            input_origin_index,
+                            sq_ctrls.dist_type,
+                            *me_mv_x,
+                            *me_mv_y,
+                            search_position_start_x,
+                            search_position_end_x,
+                            search_position_start_y,
+                            search_position_end_y,
+                            sprs_lev1_step,
+                            (sq_ctrls.sprs_lev0_enabled && sq_ctrls.sprs_lev0_step == 4) ? 1 : 0,
+                            &best_search_mvx,
+                            &best_search_mvy,
+                            &best_search_cost,
+                            hbd_md,
+                            base_q_idx);
+            *me_mv_x = best_search_mvx;
+            *me_mv_y = best_search_mvy;
+        }
+
+        // Sparse-search Level_2
+        if (sq_ctrls.sprs_lev2_enabled) {
+            mdFullPelSearch(ctx,
+                            input_pic,
+                            ref_pic,
+                            input_origin_index,
+                            sq_ctrls.dist_type,
+                            *me_mv_x,
+                            *me_mv_y,
+                            -static_cast<std::int16_t>(((sq_ctrls.sprs_lev2_w >> 1) / sq_ctrls.sprs_lev2_step) *
+                                                       sq_ctrls.sprs_lev2_step),
+                            +static_cast<std::int16_t>(((sq_ctrls.sprs_lev2_w >> 1) / sq_ctrls.sprs_lev2_step) *
+                                                       sq_ctrls.sprs_lev2_step),
+                            -static_cast<std::int16_t>(((sq_ctrls.sprs_lev2_h >> 1) / sq_ctrls.sprs_lev2_step) *
+                                                       sq_ctrls.sprs_lev2_step),
+                            +static_cast<std::int16_t>(((sq_ctrls.sprs_lev2_h >> 1) / sq_ctrls.sprs_lev2_step) *
+                                                       sq_ctrls.sprs_lev2_step),
+                            sq_ctrls.sprs_lev2_step,
+                            0,
+                            &best_search_mvx,
+                            &best_search_mvy,
+                            &best_search_cost,
+                            hbd_md,
+                            base_q_idx);
+            *me_mv_x = best_search_mvx;
+            *me_mv_y = best_search_mvy;
         }
     }
 }
