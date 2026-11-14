@@ -165,4 +165,17 @@ void whtFwdTxfmHb(std::int16_t* srcDiff, int bw, std::int32_t* coeff, TxSize txS
 void highbdFwdTxfmHb(std::int16_t* srcDiff, std::int32_t* coeff, int diffStride,
                      const TxfmParamHb& txfmParam);
 
+// QH1: the A1 highbd quantizer surface. The pinned tree is
+// CONFIG_ENABLE_HIGH_BIT_DEPTH=0 (Source/API/EbConfigMacros.h:55-57), so the
+// reference's 10/12-bit table arms are compiled out there; this port carries
+// the CONFIG=1 surface (the TXH1 hbd-twin precedent) and keeps the -1
+// default arm for invalid bd.
+
+// svt_aom_dc_quant_qtx (inv_transforms.c:3467-3482); delta folded 0 (the
+// landed 8-bit twin's fold, named deviation)
+std::int16_t dcQuantQtxBd(std::int32_t qindex, int bd);
+
+// svt_aom_ac_quant_qtx (inv_transforms.c:3484-3499); delta folded 0
+std::int16_t acQuantQtxBd(std::int32_t qindex, int bd);
+
 }  // namespace transforms

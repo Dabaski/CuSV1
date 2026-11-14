@@ -24,6 +24,11 @@
 
 #include <doctest.h>
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
+#include <regex>
+#include <string>
+#include <vector>
 #include <transform.h>
 #include <transform_hbd.h>
 
@@ -1578,4 +1583,80 @@ TEST_CASE("whtFwdTxfmHb DEFAULT_SHAPE routes into the default fwd path") {
     for (int i = 0; i < 64; ++i) {
         CHECK(got[i] == landed[i]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// QH1: the A1 highbd quantizer surface. Test-side expectations for the four
+// 10/12-bit QTX lookup tables are PARSED FROM THE REFERENCE at runtime (the
+// RC1 mechanical pattern: zero hand-typed table values; PAIRED-METRIC CAVEAT
+// stated). The pinned tree is CONFIG_ENABLE_HIGH_BIT_DEPTH=0
+// (Source/API/EbConfigMacros.h:55-57), so the reference's 10/12 table arms
+// are compiled out there and the default arm returns -1; this port carries
+// the CONFIG=1 surface (the TXH1 hbd-twin precedent) and reproduces the -1
+// default arm for invalid bd.
+// ---------------------------------------------------------------------------
+namespace qh1 {
+
+std::string refText(const char* rel) {
+    std::ifstream f(std::string(REPO_ROOT "/") + rel, std::ios::binary);
+    REQUIRE_MESSAGE(f.good(), rel);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+std::vector<int> tableNumbers(const std::string& text, const std::string& decl, int expected) {
+    const std::size_t at = text.find(decl);
+    REQUIRE_MESSAGE(at != std::string::npos, decl);
+    const std::size_t start = at + decl.size();
+    const std::size_t end = text.find("};", start);
+    REQUIRE(end != std::string::npos);
+    const std::string body = text.substr(start, end - start);
+    std::vector<int> ref;
+    std::regex numRe(R"(-?\d+)");
+    for (auto n = std::regex_iterator<std::string::const_iterator>(body.begin(), body.end(), numRe);
+         n != std::regex_iterator<std::string::const_iterator>(); ++n) {
+        ref.push_back(std::atoi(n->str().c_str()));
+    }
+    REQUIRE((int)ref.size() == expected);
+    return ref;
+}
+
+}  // namespace qh1
+
+TEST_CASE("dcQuantQtxBd/acQuantQtxBd match inv_transforms.c entry-for-entry at bd 8/10/12") {
+    const std::string text = qh1::refText("/third_party/SVT-AV1/Source/Lib/Codec/inv_transforms.c");
+    const std::vector<int> dc8 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc10 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc12 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac8 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac10 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> ac12 =
+        qh1::tableNumbers(text, "static const int16_t ac_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+
+    int bad = 0;
+    for (int q = 0; q < 256; ++q) {
+        if (transforms::dcQuantQtxBd(q, 8) != dc8[q]) ++bad;
+        if (transforms::dcQuantQtxBd(q, 10) != dc10[q]) ++bad;
+        if (transforms::dcQuantQtxBd(q, 12) != dc12[q]) ++bad;
+        if (transforms::acQuantQtxBd(q, 8) != ac8[q]) ++bad;
+        if (transforms::acQuantQtxBd(q, 10) != ac10[q]) ++bad;
+        if (transforms::acQuantQtxBd(q, 12) != ac12[q]) ++bad;
+    }
+    CHECK(bad == 0);
+}
+
+TEST_CASE("dcQuantQtxBd/acQuantQtxBd clamp the qindex and return -1 off the bd switch") {
+    // svt_aom_dc_quant_qtx (inv_transforms.c:3468): clamp(qindex + delta, 0,
+    // MAXQ) with delta folded 0 (the landed 8-bit twin's fold); the default
+    // arm is assert + return -1 (:3478-3481, :3495-3498)
+    CHECK(transforms::dcQuantQtxBd(-5, 8) == 4);
+    CHECK(transforms::dcQuantQtxBd(300, 12) == 21387);
+    CHECK(transforms::acQuantQtxBd(-1, 10) == 4);
+    CHECK(transforms::acQuantQtxBd(999, 12) == 29247);
+    CHECK(transforms::dcQuantQtxBd(4, 9) == -1);
+    CHECK(transforms::acQuantQtxBd(4, 16) == -1);
 }
