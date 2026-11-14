@@ -3701,4 +3701,211 @@ void initSecondPass(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf, Fi
     twopass.kfZeroMotionPct = 100;
 }
 
+// ---- A9D: pass2_strategy.c (the twopass postencode pair) ----
+
+// svt_av1_twopass_postencode_update_gop_const (pass2_strategy.c:1063-1174):
+// verbatim.
+void twopassPostencodeUpdateGopConst(RcControl& rc, const RcConfig& rcCfg, RcIntervalParamCarrier& rcParam,
+                                     const PcsCarrier& ppcs, bool isShortClip, int layerDepth) {
+    // VBR correction is done through rc->vbr_bits_off_target. Based on the
+    // sign of this value, a limited % adjustment is made to the target rate
+    // of subsequent frames, to try and push it back towards 0. This method
+    // is designed to prevent extreme behaviour at the end of a clip
+    // or group of frames.
+    rcParam.vbrBitsOffTarget += ppcs.baseFrameTarget - ppcs.projectedFrameSize;
+    // Target vs actual bits for this arf group.
+    int rateErrorEstimateTarget = 0;
+    // Calculate the pct rc error.
+    if (rcParam.totalActualBits) {
+        if (rcParam.totalTargetBits) {
+            rateErrorEstimateTarget = (int)((rcParam.vbrBitsOffTarget * 100) / rcParam.totalTargetBits);
+        }
+        rcParam.rateErrorEstimate = (int)((rcParam.vbrBitsOffTarget * 100) / rcParam.totalActualBits);
+        rcParam.rateErrorEstimate = clampInt(rcParam.rateErrorEstimate, -100, 100);
+    } else {
+        rcParam.rateErrorEstimate = 0;
+    }
+
+    // Update the active best quality pyramid.
+    if (!ppcs.isOverlay) {
+        for (int i = layerDepth; i <= kMaxArfLayers; ++i) {
+            rc.activeBestQuality[i] = ppcs.baseQIdx;
+        }
+    }
+
+    // If the rate control is drifting consider adjustment to min or maxq.
+    if (!ppcs.isOverlay) {
+        const int maxqAdjLimit = rc.worstQuality - rc.activeWorstQuality;
+        const int minqAdjLimit = kMinqAdjLimit;
+
+        // Undershoot.
+        if (rcParam.rateErrorEstimate > rcCfg.underShootPct) {
+            --rcParam.extendMaxq;
+            if (rcParam.rollingTargetBits >= rcParam.rollingActualBits) {
+                ++rcParam.extendMinq;
+            }
+            // Overshoot.
+        } else if (rcParam.rateErrorEstimate < -rcCfg.overShootPct) {
+            --rcParam.extendMinq;
+            if (rcParam.rollingTargetBits < rcParam.rollingActualBits) {
+                rcParam.extendMaxq += (isShortClip) ? (rateErrorEstimateTarget < -100 ? 10 : 2) : 1;
+            }
+        } else {
+            // Adjustment for extreme local overshoot.
+            if (ppcs.projectedFrameSize > (2 * ppcs.baseFrameTarget) &&
+                ppcs.projectedFrameSize > (2 * rc.avgFrameBandwidth)) {
+                ++rcParam.extendMaxq;
+            }
+
+            // Unwind undershoot or overshoot adjustment.
+            if (rcParam.rollingTargetBits < rcParam.rollingActualBits) {
+                --rcParam.extendMinq;
+            } else if (rcParam.rollingTargetBits > rcParam.rollingActualBits) {
+                --rcParam.extendMaxq;
+            }
+            if (isShortClip) {
+                if (rcParam.extendMinq > minqAdjLimit / 3) {
+                    rcParam.extendMinq -= 5;
+                }
+                if (rcParam.extendMaxq < -maxqAdjLimit / 3) {
+                    rcParam.extendMaxq += 5;
+                }
+            }
+        }
+        if (isShortClip) {
+            rcParam.extendMinq = clampInt(rcParam.extendMinq, -minqAdjLimit / 4, minqAdjLimit);
+        } else {
+            rcParam.extendMinq = clampInt(rcParam.extendMinq, 0, minqAdjLimit);
+        }
+        if (!isShortClip) {
+            rcParam.extendMaxq = clampInt(rcParam.extendMaxq, 0, maxqAdjLimit);
+        }
+
+        // If there is a big and undexpected undershoot then feed the extra
+        // bits back in quickly. One situation where this may happen is if a
+        // frame is unexpectedly almost perfectly predicted by the ARF or GF
+        // but not very well predcited by the previous frame.
+        if (!frameIsKfGfArf(ppcs) && !ppcs.isOverlay) {
+            const int fastExtraThresh = ppcs.baseFrameTarget / kHighUndershootRatio;
+            if (ppcs.projectedFrameSize < fastExtraThresh && rcParam.rateErrorEstimate > 0) {
+                rcParam.vbrBitsOffTargetFast += fastExtraThresh - ppcs.projectedFrameSize;
+                rcParam.vbrBitsOffTargetFast =
+                    rcParam.vbrBitsOffTargetFast < (4 * rc.avgFrameBandwidth)
+                        ? rcParam.vbrBitsOffTargetFast
+                        : (4 * rc.avgFrameBandwidth);
+
+                // Fast adaptation of minQ if necessary to use up the extra bits.
+                if (rc.avgFrameBandwidth) {
+                    rcParam.extendMinqFast = (int)(rcParam.vbrBitsOffTargetFast * 8 / rc.avgFrameBandwidth);
+                }
+                rcParam.extendMinqFast = rcParam.extendMinqFast < (minqAdjLimit - rcParam.extendMinq)
+                                             ? rcParam.extendMinqFast
+                                             : (minqAdjLimit - rcParam.extendMinq);
+            } else if (rcParam.vbrBitsOffTargetFast) {
+                rcParam.extendMinqFast = rcParam.extendMinqFast < (minqAdjLimit - rcParam.extendMinq)
+                                             ? rcParam.extendMinqFast
+                                             : (minqAdjLimit - rcParam.extendMinq);
+            } else {
+                rcParam.extendMinqFast = 0;
+            }
+        }
+    }
+}
+
+// svt_av1_twopass_postencode_update (pass2_strategy.c:1176-1269): verbatim.
+void twopassPostencodeUpdate(RcControl& rc, const RcConfig& rcCfg, TwoPassCarrier& twopass,
+                             const PcsCarrier& ppcs, bool isShortClip, int layerDepth) {
+    // VBR correction is done through rc->vbr_bits_off_target. Based on the
+    // sign of this value, a limited % adjustment is made to the target rate
+    // of subsequent frames, to try and push it back towards 0. This method
+    // is designed to prevent extreme behaviour at the end of a clip
+    // or group of frames.
+    rc.vbrBitsOffTarget += ppcs.baseFrameTarget - ppcs.projectedFrameSize;
+    // Target vs actual bits for this arf group.
+    int rateErrorEstimateTarget = 0;
+    // Calculate the pct rc error.
+    if (rc.totalActualBits) {
+        if (rc.totalTargetBits) {
+            rateErrorEstimateTarget = (int)((rc.vbrBitsOffTarget * 100) / rc.totalTargetBits);
+        }
+        rc.rateErrorEstimate = (int)((rc.vbrBitsOffTarget * 100) / rc.totalActualBits);
+        rc.rateErrorEstimate = clampInt(rc.rateErrorEstimate, -100, 100);
+    } else {
+        rc.rateErrorEstimate = 0;
+    }
+
+    // Update the active best quality pyramid.
+    if (!ppcs.isOverlay) {
+        for (int i = layerDepth; i <= kMaxArfLayers; ++i) {
+            rc.activeBestQuality[i] = ppcs.baseQIdx;
+        }
+    }
+
+    // If the rate control is drifting consider adjustment to min or maxq.
+    if (!ppcs.isOverlay) {
+        const int maxqAdjLimit = rc.worstQuality - rc.activeWorstQuality;
+        const int minqAdjLimit = kMinqAdjLimit;
+
+        // Undershoot.
+        if (rc.rateErrorEstimate > rcCfg.underShootPct) {
+            --twopass.extendMaxq;
+            if (rc.rollingTargetBits >= rc.rollingActualBits) {
+                ++twopass.extendMinq;
+            }
+            // Overshoot.
+        } else if (rc.rateErrorEstimate < -rcCfg.overShootPct) {
+            --twopass.extendMinq;
+            if (rc.rollingTargetBits < rc.rollingActualBits) {
+                twopass.extendMaxq += (isShortClip) ? (rateErrorEstimateTarget < -100 ? 10 : 2) : 1;
+            }
+        } else {
+            // Adjustment for extreme local overshoot.
+            if (ppcs.projectedFrameSize > (2 * ppcs.baseFrameTarget) &&
+                ppcs.projectedFrameSize > (2 * rc.avgFrameBandwidth)) {
+                ++twopass.extendMaxq;
+            }
+
+            // Unwind undershoot or overshoot adjustment.
+            if (rc.rollingTargetBits < rc.rollingActualBits) {
+                --twopass.extendMinq;
+            } else if (rc.rollingTargetBits > rc.rollingActualBits) {
+                --twopass.extendMaxq;
+            }
+        }
+
+        twopass.extendMinq = clampInt(twopass.extendMinq, 0, minqAdjLimit);
+        if (!isShortClip) {
+            twopass.extendMaxq = clampInt(twopass.extendMaxq, 0, maxqAdjLimit);
+        }
+
+        // If there is a big and undexpected undershoot then feed the extra
+        // bits back in quickly. One situation where this may happen is if a
+        // frame is unexpectedly almost perfectly predicted by the ARF or GF
+        // but not very well predcited by the previous frame.
+        if (!frameIsKfGfArf(ppcs) && !ppcs.isOverlay) {
+            const int fastExtraThresh = ppcs.baseFrameTarget / kHighUndershootRatio;
+            if (ppcs.projectedFrameSize < fastExtraThresh && rc.rateErrorEstimate > 0) {
+                rc.vbrBitsOffTargetFast += fastExtraThresh - ppcs.projectedFrameSize;
+                rc.vbrBitsOffTargetFast = rc.vbrBitsOffTargetFast < (4 * rc.avgFrameBandwidth)
+                                              ? rc.vbrBitsOffTargetFast
+                                              : (4 * rc.avgFrameBandwidth);
+
+                // Fast adaptation of minQ if necessary to use up the extra bits.
+                if (rc.avgFrameBandwidth) {
+                    twopass.extendMinqFast = (int)(rc.vbrBitsOffTargetFast * 8 / rc.avgFrameBandwidth);
+                }
+                twopass.extendMinqFast = twopass.extendMinqFast < (minqAdjLimit - twopass.extendMinq)
+                                             ? twopass.extendMinqFast
+                                             : (minqAdjLimit - twopass.extendMinq);
+            } else if (rc.vbrBitsOffTargetFast) {
+                twopass.extendMinqFast = twopass.extendMinqFast < (minqAdjLimit - twopass.extendMinq)
+                                             ? twopass.extendMinqFast
+                                             : (minqAdjLimit - twopass.extendMinq);
+            } else {
+                twopass.extendMinqFast = 0;
+            }
+        }
+    }
+}
+
 } // namespace l15_rc

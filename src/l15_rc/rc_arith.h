@@ -39,6 +39,10 @@ constexpr int kMaxHierarchicalLevel = 6;
 constexpr int kMaxTemporalLayers = 6;
 constexpr int kMaxMinigopSize = 1 << (kMaxTemporalLayers - 1);
 
+// MAX_ARF_LAYERS (rc_process.h:35) - hoisted above RATE_CONTROL, which
+// sizes active_best_quality by it (the A9D postencode pyramid).
+constexpr int kMaxArfLayers = 6;
+
 // RATE_CONTROL carrier (rc_process.h:108-202): mirrors of the consumed
 // fields only; grows with the slices that consume them.
 struct RcControl {
@@ -107,6 +111,10 @@ struct RcControl {
     // the A9D pass-init walls (pass2_strategy.c:971-1058).
     std::int64_t vbrBitsOffTargetFast;  // rc->vbr_bits_off_target_fast
     int rateErrorEstimate;              // rc->rate_error_estimate
+
+    // the A9D twopass-postencode wall (pass2_strategy.c:1063-1269): the
+    // active-best-quality pyramid + MINQ_ADJ_LIMIT (rc_process.h:22).
+    int activeBestQuality[kMaxArfLayers + 1];  // rc->active_best_quality
 
     // the A9D rc_init_frame_stats rate-averaging period
     // (rc->rate_average_periodin_frames, uint64 in the reference).
@@ -204,6 +212,9 @@ struct PcsCarrier {
     // (pass2_strategy.c:761-845).
     int isNewGfGroup;                // pcs->is_new_gf_group
     bool gfUpdateDue;                // pcs->gf_update_due
+
+    // the A9D twopass-postencode wall (pass2_strategy.c:1063-1269).
+    int layerDepth;                  // ppcs->layer_depth
 
     // the A9D rc-process walls (rc_process.c:568-605).
     bool disableCdfUpdate;           // frm_hdr.disable_cdf_update
@@ -317,7 +328,6 @@ constexpr int kMaxQpValue = 63;
 constexpr int kBperMbNormbits = 9;
 constexpr int kStaticKfGroupThresh = 99;
 constexpr int kMaxGfInterval = 32;
-constexpr int kMaxArfLayers = 6;
 constexpr int kCriticalBufferLevel = 15;
 constexpr int kOptimalBufferLevel = 70;
 constexpr double kMaxGfuBoostFactor = 10.0;
@@ -578,6 +588,9 @@ struct TwoPassCarrier {
     double modifiedErrorMax;               // twopass->modified_error_max
     double modifiedErrorLeft;              // twopass->modified_error_left
     int kfZeroMotionPct;                   // twopass->kf_zeromotion_pct
+    int extendMinq;                        // twopass->extend_minq
+    int extendMaxq;                        // twopass->extend_maxq
+    int extendMinqFast;                    // twopass->extend_minq_fast
 };
 
 // lap_rc_init (pass2_strategy.c:512-555): verbatim; the walls thread (the
@@ -731,6 +744,27 @@ void initSecondPass(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf, Fi
 // duration starts at 1.0 and the stat_struct is NOT accumulated.
 void twopassZeroStats(FirstpassStatsCarrier* section);
 void accumulateStats(FirstpassStatsCarrier* section, const FirstpassStatsCarrier* frame);
+
+// MINQ_ADJ_LIMIT (rc_process.h:22) / HIGH_UNDERSHOOT_RATIO (:23).
+constexpr int kMinqAdjLimit = 48;
+constexpr int kHighUndershootRatio = 2;
+
+// svt_av1_twopass_postencode_update_gop_const (pass2_strategy.c:1063-1174):
+// verbatim; the state lives on the RcIntervalParamCarrier (the gop-const
+// interval param), the quality pyramid on RcControl.activeBestQuality and
+// the rc walls (worst/active_worst quality, avg_frame_bandwidth) on
+// RcControl. The scs->is_short_clip gate threads as isShortClip; the
+// ppcs->layer_depth threads (the pyramid start).
+void twopassPostencodeUpdateGopConst(RcControl& rc, const RcConfig& rcCfg, RcIntervalParamCarrier& rcParam,
+                                     const PcsCarrier& ppcs, bool isShortClip, int layerDepth);
+
+// svt_av1_twopass_postencode_update (pass2_strategy.c:1176-1269): verbatim;
+// the twin that keeps the rate error on rc and the extend_* state on the
+// TWO_PASS carrier. NOTE: this twin has NO is_short_clip else-branch
+// adjust block (the gop-const twin's :1130-1137 block is absent) and its
+// extend_minq clamp is the plain (0, minq_adj_limit) form.
+void twopassPostencodeUpdate(RcControl& rc, const RcConfig& rcCfg, TwoPassCarrier& twopass,
+                             const PcsCarrier& ppcs, bool isShortClip, int layerDepth);
 
 // frame_max_bits (pass2_strategy.c:55-58): verbatim; the
 // enc_ctx->two_pass_cfg.vbrmax_section wall threads. CLIP3(0, max,

@@ -1858,6 +1858,256 @@ TEST_CASE("init_second_pass accumulates, derives the framerate and walks the err
     CHECK(tp.kfZeroMotionPct == 100);
 }
 
+// ---- A9D S10: pass2_strategy.c svt_av1_twopass_postencode_update_gop_const
+// (:1063-1174) + svt_av1_twopass_postencode_update (:1176-1269) ----
+
+namespace {
+
+l15_rc::RcControl peRc() {
+    l15_rc::RcControl rc{};
+    rc.worstQuality = 255;
+    rc.activeWorstQuality = 100;   // maxq_adj_limit = 155
+    rc.avgFrameBandwidth = 10000;
+    rc.rollingTargetBits = 500;
+    rc.rollingActualBits = 400;
+    for (int i = 0; i < 7; ++i) rc.activeBestQuality[i] = -1;
+    return rc;
+}
+
+l15_rc::PcsCarrier pePcs() {
+    l15_rc::PcsCarrier pcs{};
+    pcs.baseFrameTarget = 1000;
+    pcs.projectedFrameSize = 800;  // undershoot: +200
+    pcs.isOverlay = false;
+    pcs.layerDepth = 2;
+    pcs.baseQIdx = 120;
+    pcs.frameType = l15_rc::kInterFrame;       // not kf_gf_arf
+    pcs.updateType = l15_rc::kSvtAv1LfUpdate;  // not kf_gf_arf
+    return pcs;
+}
+
+}  // namespace
+
+TEST_CASE("twopass_postencode_update_gop_const pins the undershoot arm") {
+    l15_rc::RcControl rc = peRc();
+    l15_rc::RcConfig cfg{};
+    cfg.underShootPct = 10;
+    cfg.overShootPct = 40;
+    l15_rc::RcIntervalParamCarrier param{};
+    param.vbrBitsOffTarget = 0;
+    param.totalActualBits = 1000;
+    param.totalTargetBits = 2000;
+    param.rollingTargetBits = 500;
+    param.rollingActualBits = 400;
+    param.extendMinq = 2;
+    param.extendMaxq = 2;
+    param.extendMinqFast = 5;
+    param.vbrBitsOffTargetFast = 7;
+    l15_rc::PcsCarrier pcs = pePcs();
+
+    l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+
+    // vbr_bits_off_target += 1000 - 800 = +200.
+    CHECK(param.vbrBitsOffTarget == 200);
+    // rate_error = (200*100)/1000 = 20; target = (200*100)/2000 = 10.
+    CHECK(param.rateErrorEstimate == 20);
+    // the pyramid: [2..6] = 120, [0..1] untouched (-1).
+    CHECK(rc.activeBestQuality[1] == -1);
+    CHECK(rc.activeBestQuality[2] == 120);
+    CHECK(rc.activeBestQuality[6] == 120);
+    // undershoot: --extend_maxq (2->1); rolling 500 >= 400 -> ++extend_minq
+    // (2->3); the clamps keep both.
+    CHECK(param.extendMinq == 3);
+    CHECK(param.extendMaxq == 1);
+    // the fast block: projected 800 < thresh 500? NO; vbr_off_fast 7 ->
+    // extend_minq_fast = MIN(5, 48-3) = 5.
+    CHECK(param.extendMinqFast == 5);
+    CHECK(param.vbrBitsOffTargetFast == 7);
+}
+
+TEST_CASE("twopass_postencode_update_gop_const pins the overshoot and the fast feed") {
+    {
+        // overshoot: base 500, projected 1200 -> -700; rate_error = -70
+        // < -40 -> --extend_minq; rolling 500 < 600 -> extend_maxq += 1.
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.totalTargetBits = 2000;
+        param.rollingTargetBits = 500;
+        param.rollingActualBits = 600;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 500;
+        pcs.projectedFrameSize = 1200;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        CHECK(param.vbrBitsOffTarget == -700);
+        CHECK(param.rateErrorEstimate == -70);
+        CHECK(param.extendMinq == 1);
+        CHECK(param.extendMaxq == 3);
+    }
+    {
+        // the fast feed: base 2000, projected 100 -> thresh 1000 > 100 and
+        // rate_error 20 > 0 -> vbr_off_fast += 900 (clamped to
+        // 4*avg_frame_bandwidth = 40000 - no clamp here);
+        // extend_minq_fast = (int)(900 * 8 / 10000) = 0; MIN(0, 47) = 0.
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.totalTargetBits = 2000;
+        param.rollingTargetBits = 500;
+        param.rollingActualBits = 400;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        param.extendMinqFast = 5;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 2000;
+        pcs.projectedFrameSize = 100;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        CHECK(param.vbrBitsOffTarget == 1900);
+        CHECK(param.vbrBitsOffTargetFast == 900);
+        CHECK(param.extendMinqFast == 0);
+    }
+    {
+        // the kf_gf_arf frame: the fast block SKIPPED entirely (the state
+        // keeps its values).
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.extendMinqFast = 5;
+        param.vbrBitsOffTargetFast = 7;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.updateType = l15_rc::kSvtAv1ArfUpdate;  // kf_gf_arf
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        CHECK(param.extendMinqFast == 5);
+        CHECK(param.vbrBitsOffTargetFast == 7);
+    }
+    {
+        // the overlay frame: NO pyramid write, NO extend adjustments.
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.isOverlay = true;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        CHECK(rc.activeBestQuality[2] == -1);
+        CHECK(param.extendMinq == 2);
+        CHECK(param.extendMaxq == 2);
+    }
+    {
+        // the short-clip overshoot: rate_error_estimate_target < -100
+        // (-700*100/500 = -140) -> extend_maxq += 10; the short-clip
+        // extend_minq clamp lower bound -12.
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.totalTargetBits = 500;
+        param.rollingTargetBits = 500;
+        param.rollingActualBits = 600;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 500;
+        pcs.projectedFrameSize = 1200;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, true, pcs.layerDepth);
+        CHECK(param.extendMinq == 1);
+        CHECK(param.extendMaxq == 12);
+    }
+    {
+        // the extreme-local-overshoot else arm: avg_frame_bandwidth 200 ->
+        // projected 500 > 2*base 200 and > 2*avg 400 -> ++extend_maxq;
+        // rolling 100 < 200 -> --extend_minq (the unwind).
+        l15_rc::RcControl rc = peRc();
+        rc.avgFrameBandwidth = 200;
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 5;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 100000;
+        param.totalTargetBits = 200000;
+        param.rollingTargetBits = 100;
+        param.rollingActualBits = 200;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 100;
+        pcs.projectedFrameSize = 500;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        // rate_error = (400*100)/100000 = 0 -> the else arm.
+        CHECK(param.rateErrorEstimate == 0);
+        CHECK(param.extendMinq == 1);
+        CHECK(param.extendMaxq == 3);
+    }
+}
+
+TEST_CASE("twopass_postencode_update pins the rc/twopass state split") {
+    {
+        // undershoot on the rc/twopass walls.
+        l15_rc::RcControl rc = peRc();
+        rc.totalActualBits = 1000;
+        rc.totalTargetBits = 2000;
+        rc.vbrBitsOffTargetFast = 7;
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::TwoPassCarrier tp{};
+        tp.extendMinq = 2;
+        tp.extendMaxq = 2;
+        tp.extendMinqFast = 5;
+        l15_rc::PcsCarrier pcs = pePcs();
+        l15_rc::twopassPostencodeUpdate(rc, cfg, tp, pcs, false, pcs.layerDepth);
+        CHECK(rc.vbrBitsOffTarget == 200);
+        CHECK(rc.rateErrorEstimate == 20);
+        CHECK(rc.activeBestQuality[2] == 120);
+        CHECK(tp.extendMinq == 3);
+        CHECK(tp.extendMaxq == 1);
+        CHECK(tp.extendMinqFast == 5);
+    }
+    {
+        // the twopass twin has NO short-clip else-block: the else arm with
+        // short clip does NOT run the -5/+5 adjustments. avg_frame_bandwidth
+        // 200 makes the local-overshoot ++ fire; the unwind then pulls it
+        // back (--), netting the original value.
+        l15_rc::RcControl rc = peRc();
+        rc.avgFrameBandwidth = 200;
+        rc.totalActualBits = 100000;
+        rc.totalTargetBits = 200000;
+        rc.rollingTargetBits = 300;  // > actual -> the unwind hits extend_maxq
+        rc.rollingActualBits = 200;
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 5;
+        cfg.overShootPct = 40;
+        l15_rc::TwoPassCarrier tp{};
+        tp.extendMinq = 40;  // > 48/3 = 16: the gop-const twin would -5
+        tp.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 100;
+        pcs.projectedFrameSize = 500;
+        l15_rc::twopassPostencodeUpdate(rc, cfg, tp, pcs, true, pcs.layerDepth);
+        // else arm: ++extend_maxq (2->3, projected 500 > 2*avg 400); unwind
+        // rolling 300 > 200 -> --extend_maxq (3->2); NO short-clip block;
+        // extend_minq stays 40 (clamped 0..48); extend_maxq NOT clamped
+        // (short clip).
+        CHECK(tp.extendMinq == 40);
+        CHECK(tp.extendMaxq == 2);
+    }
+}
+
 TEST_CASE("kf_group_rate_assingment pins the lap path and the clip") {
     const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
     {
