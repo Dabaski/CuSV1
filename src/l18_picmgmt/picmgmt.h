@@ -8,6 +8,7 @@
 // and scheduler walls thread as parameters. No reference headers.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace l18_picmgmt {
@@ -125,6 +126,78 @@ struct SbGeom {
 };
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// pic_buffer_desc.c spans. The shared enums (EbSvtAv1Formats.h:101-110,
+// verbatim values) and the PICTURE_BUFFER_DESC_* flags (pic_buffer_desc.h:
+// 23-29, verbatim).
+// ---------------------------------------------------------------------------
+
+enum EbBitDepth {
+    EB_EIGHT_BIT = 8,
+    EB_TEN_BIT = 10,
+    EB_TWELVE_BIT = 12,
+    EB_SIXTEEN_BIT = 16,  // Not supported
+    EB_THIRTYTWO_BIT = 32, // Not supported
+};
+
+enum EbColorFormat { EB_YUV400, EB_YUV420, EB_YUV422, EB_YUV444 };
+
+constexpr std::uint32_t PICTURE_BUFFER_DESC_Y_FLAG = 1u << 0;
+constexpr std::uint32_t PICTURE_BUFFER_DESC_Cb_FLAG = 1u << 1;
+constexpr std::uint32_t PICTURE_BUFFER_DESC_Cr_FLAG = 1u << 2;
+constexpr std::uint32_t PICTURE_BUFFER_DESC_LUMA_MASK = PICTURE_BUFFER_DESC_Y_FLAG;
+constexpr std::uint32_t PICTURE_BUFFER_DESC_CHROMA_MASK = PICTURE_BUFFER_DESC_Cb_FLAG | PICTURE_BUFFER_DESC_Cr_FLAG;
+constexpr std::uint32_t PICTURE_BUFFER_DESC_FULL_MASK =
+    PICTURE_BUFFER_DESC_Y_FLAG | PICTURE_BUFFER_DESC_Cb_FLAG | PICTURE_BUFFER_DESC_Cr_FLAG;
+
+// EbPictureBufferDesc (pic_buffer_desc.h:34-103), minimal carry: the fields
+// the ported layout spans write or read. The union views (buffer[],
+// stride[]) are carried as their named scalar fields (named deviation: the
+// unions exist for indexed access this layer's spans never take). The dctor
+// pointer is not carried (the object-lifecycle shell is parked).
+struct PicBufferDesc {
+    std::uint8_t* yBuffer;        // pic_buffer_desc.h:41
+    std::uint8_t* uBuffer;        // :42
+    std::uint8_t* vBuffer;        // :43
+    std::uint8_t* yBufferBitInc;  // :53
+    std::uint8_t* uBufferBitInc;  // :54
+    std::uint8_t* vBufferBitInc;  // :55
+    std::uint16_t yStride;        // :64
+    std::uint16_t uStride;        // :65
+    std::uint16_t vStride;        // :66
+    std::uint16_t yStrideBitInc;  // :75
+    std::uint16_t uStrideBitInc;  // :76
+    std::uint16_t vStrideBitInc;  // :77
+    std::uint8_t* bufferAlloc;    // :85
+    std::size_t bufferAllocSz;    // :86
+    std::uint32_t lumaSize;       // :87
+    std::uint32_t chromaSize;     // :88
+    bool packedFlag;              // :89
+    std::uint16_t border;         // :92
+    std::uint16_t maxWidth;       // :93
+    std::uint16_t maxHeight;      // :94
+    std::uint16_t width;          // :95
+    std::uint16_t height;         // :96
+    EbBitDepth bitDepth;          // :97
+    EbColorFormat colorFormat;    // :98
+    std::uint32_t bufferEnableMask; // :100
+};
+
+// EbPictureBufferDescInitData (pic_buffer_desc.h:234-247), verbatim fields.
+struct PicBufferDescInitData {
+    std::uint16_t maxWidth;
+    std::uint16_t maxHeight;
+    EbBitDepth bitDepth;
+    EbColorFormat colorFormat;
+    std::uint32_t bufferEnableMask;
+    std::int32_t restUnitsPerTile;
+    std::uint16_t border;
+    bool splitMode;
+    std::uint8_t mfmv;
+    bool is16bitPipeline;
+    std::int32_t sbTotalCount;
+};
+
 // The SequenceControlSet carrier: grows with the ported spans. Today it
 // holds exactly the fields the geometry inits (pcs.c:1488-:1552) and the
 // SCS copy (sequence_control_set.c:163-:228) consume: b64_size
@@ -179,5 +252,25 @@ EbErrorType deriveInputResolution(ResolutionRange* inputResolution, std::uint32_
 // the src pointer is non-null. The carrier's non-carried SCS members are
 // named-parked (the full SCS field surface).
 EbErrorType copySequenceControlSet(Scs* dst, const Scs* src);
+
+// ---------------------------------------------------------------------------
+// pic_buffer_desc.c spans: the layout math.
+// ---------------------------------------------------------------------------
+
+// svt_pic_buf_desc_calc (pic_buffer_desc.c:224-278): compute all static
+// descriptor fields and return the total backing size (+ per-plane sizes and
+// bytes-per-pixel for picBufDescAssign). No allocation. File-local static in
+// the reference; exported for direct testability (named deviation). The
+// svt_aom_assert_err stride-8 check (:55 twin lives in the ctors) is not
+// part of this shared calc - the reference's calc has no assert.
+std::uint32_t picBufDescCalc(PicBufferDesc* picBuf, const PicBufferDescInitData* d, std::uint32_t bufferSize[3],
+                             std::uint32_t bufferBitIncSize[3], std::uint32_t* bytesPerPixelOut);
+
+// svt_pic_buf_desc_assign (pic_buffer_desc.c:280-:323): point the
+// descriptor's y/u/v(+bit_inc) into base. File-local static in the
+// reference; exported (named deviation).
+void picBufDescAssign(PicBufferDesc* picBuf, const PicBufferDescInitData* d, std::uint8_t* base,
+                      const std::uint32_t bufferSize[3], const std::uint32_t bufferBitIncSize[3],
+                      std::uint32_t bytesPerPixel);
 
 } // namespace l18_picmgmt

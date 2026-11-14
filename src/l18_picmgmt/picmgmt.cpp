@@ -228,4 +228,115 @@ EbErrorType copySequenceControlSet(Scs* dst, const Scs* src) {
     return EB_ErrorNone;
 }
 
+// ---------------------------------------------------------------------------
+// pic_buffer_desc.c spans: the layout math.
+// ---------------------------------------------------------------------------
+
+// svt_pic_buf_desc_calc (pic_buffer_desc.c:224-278): verbatim arithmetic.
+std::uint32_t picBufDescCalc(PicBufferDesc* picBuf, const PicBufferDescInitData* d, std::uint32_t bufferSize[3],
+                             std::uint32_t bufferBitIncSize[3], std::uint32_t* bytesPerPixelOut) {
+    std::uint32_t bytesPerPixel =
+        (d->bitDepth == EB_EIGHT_BIT) ? 1 : (d->bitDepth <= EB_SIXTEEN_BIT) ? 2 : 4;
+    if (d->bitDepth > EB_EIGHT_BIT && d->bitDepth <= EB_SIXTEEN_BIT && d->splitMode) {
+        bytesPerPixel = 1;
+    }
+    const std::uint16_t ssX = (d->colorFormat == EB_YUV444) ? 0 : 1;
+    const std::uint16_t ssY = ((d->colorFormat == EB_YUV444 || d->colorFormat == EB_YUV422) ? 0 : 1);
+
+    picBuf->width = d->maxWidth;
+    picBuf->height = d->maxHeight;
+    picBuf->maxWidth = d->maxWidth;
+    picBuf->maxHeight = d->maxHeight;
+    picBuf->bitDepth = d->bitDepth;
+    picBuf->colorFormat = d->colorFormat;
+    picBuf->yStride = static_cast<std::uint16_t>(d->maxWidth + 2 * d->border /*left + right border*/);
+    picBuf->uStride = picBuf->vStride = static_cast<std::uint16_t>((picBuf->yStride + ssX) >> ssX);
+    picBuf->border = d->border;
+    picBuf->lumaSize = static_cast<std::uint32_t>(picBuf->yStride) * (d->maxHeight + (2 * d->border));
+    picBuf->chromaSize =
+        static_cast<std::uint32_t>(picBuf->uStride) * ((d->maxHeight + ssY + (2 * d->border)) >> ssY);
+    picBuf->packedFlag = bytesPerPixel > 1 ? true : false;
+    if (d->splitMode) {
+        picBuf->yStrideBitInc = picBuf->yStride;
+        picBuf->uStrideBitInc = picBuf->uStride;
+        picBuf->vStrideBitInc = picBuf->vStride;
+    }
+    picBuf->bufferEnableMask = d->bufferEnableMask;
+
+    std::uint32_t allocSz = 0;
+    bufferSize[0] = bufferSize[1] = bufferSize[2] = 0;
+    bufferBitIncSize[0] = bufferBitIncSize[1] = bufferBitIncSize[2] = 0;
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Y_FLAG) {
+        allocSz += bufferSize[0] = picBuf->lumaSize * bytesPerPixel;
+        if (d->splitMode) {
+            allocSz += bufferBitIncSize[0] = picBuf->lumaSize * bytesPerPixel;
+        }
+    }
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cb_FLAG) {
+        allocSz += bufferSize[1] = picBuf->chromaSize * bytesPerPixel;
+        if (d->splitMode) {
+            allocSz += bufferBitIncSize[1] = picBuf->chromaSize * bytesPerPixel;
+        }
+    }
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cr_FLAG) {
+        allocSz += bufferSize[2] = picBuf->chromaSize * bytesPerPixel;
+        if (d->splitMode) {
+            allocSz += bufferBitIncSize[2] = picBuf->chromaSize * bytesPerPixel;
+        }
+    }
+    *bytesPerPixelOut = bytesPerPixel;
+    return allocSz;
+}
+
+// svt_pic_buf_desc_assign (pic_buffer_desc.c:280-:323): verbatim walk.
+void picBufDescAssign(PicBufferDesc* picBuf, const PicBufferDescInitData* d, std::uint8_t* base,
+                      const std::uint32_t bufferSize[3], const std::uint32_t bufferBitIncSize[3],
+                      std::uint32_t bytesPerPixel) {
+    const std::uint16_t ssX = (d->colorFormat == EB_YUV444) ? 0 : 1;
+    const std::uint16_t ssY = ((d->colorFormat == EB_YUV444 || d->colorFormat == EB_YUV422) ? 0 : 1);
+
+    picBuf->bufferAlloc = base;
+    std::uint32_t assignedSpace = 0;
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Y_FLAG) {
+        picBuf->yBuffer =
+            base + (picBuf->border + (picBuf->yStride * picBuf->border)) * bytesPerPixel;
+        assignedSpace += bufferSize[0];
+        picBuf->yBufferBitInc = nullptr;
+        if (d->splitMode) {
+            picBuf->yBufferBitInc =
+                base + assignedSpace +
+                (picBuf->border + (picBuf->yStrideBitInc * picBuf->border)) * bytesPerPixel;
+            assignedSpace += bufferBitIncSize[0];
+        }
+    }
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cb_FLAG) {
+        picBuf->uBuffer =
+            base + assignedSpace +
+            ((picBuf->border >> ssX) + (picBuf->uStride * (picBuf->border >> ssY))) * bytesPerPixel;
+        assignedSpace += bufferSize[1];
+        picBuf->uBufferBitInc = nullptr;
+        if (d->splitMode) {
+            picBuf->uBufferBitInc =
+                base + assignedSpace +
+                ((picBuf->border >> ssX) +
+                 (picBuf->uStrideBitInc * (picBuf->border >> ssY))) * bytesPerPixel;
+            assignedSpace += bufferBitIncSize[1];
+        }
+    }
+    if (d->bufferEnableMask & PICTURE_BUFFER_DESC_Cr_FLAG) {
+        picBuf->vBuffer =
+            base + assignedSpace +
+            ((picBuf->border >> ssX) + (picBuf->vStride * (picBuf->border >> ssY))) * bytesPerPixel;
+        assignedSpace += bufferSize[2];
+        picBuf->vBufferBitInc = nullptr;
+        if (d->splitMode) {
+            picBuf->vBufferBitInc =
+                base + assignedSpace +
+                ((picBuf->border >> ssX) +
+                 (picBuf->vStrideBitInc * (picBuf->border >> ssY))) * bytesPerPixel;
+            assignedSpace += bufferBitIncSize[2];
+        }
+    }
+}
+
 } // namespace l18_picmgmt

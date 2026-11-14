@@ -414,3 +414,389 @@ TEST_CASE("copySequenceControlSet deep-copies arrays and leaves src untouched") 
     std::free(dstBare.sframePosi.sframeQps);
     std::free(dstBare.sframePosi.sframeQpOffsets);
 }
+
+// ---------------------------------------------------------------------------
+// C4: svt_pic_buf_desc_calc (pic_buffer_desc.c:224-278) and
+// svt_pic_buf_desc_assign (:280-:323) - the buffer-size layout math and the
+// plane pointer assignment. Both are file-local static in the reference;
+// exported for direct testability (named deviation, LR1 boxsum1 precedent).
+// ---------------------------------------------------------------------------
+
+// Independent arithmetic oracle for the calc half (NOT calling the port):
+// mirrors the reference layout formulas as standalone expressions.
+struct ExpectedLayout {
+    std::uint16_t yStride;
+    std::uint16_t uvStride;
+    std::uint32_t lumaSize;
+    std::uint32_t chromaSize;
+    std::uint32_t bufferSize[3];
+    std::uint32_t bitIncSize[3];
+    std::uint32_t allocSz;
+    std::uint32_t bpp;
+    bool packedFlag;
+};
+
+static ExpectedLayout expectedLayout(std::uint16_t width, std::uint16_t height, std::uint16_t border,
+                                     l18_picmgmt::EbBitDepth bitDepth, l18_picmgmt::EbColorFormat fmt,
+                                     std::uint32_t mask, bool split) {
+    ExpectedLayout e = {};
+    const std::uint16_t ssX = (fmt == l18_picmgmt::EB_YUV444) ? 0 : 1;
+    const std::uint16_t ssY = (fmt == l18_picmgmt::EB_YUV444 || fmt == l18_picmgmt::EB_YUV422) ? 0 : 1;
+    std::uint32_t bpp = (bitDepth == l18_picmgmt::EB_EIGHT_BIT)
+        ? 1u
+        : (bitDepth <= l18_picmgmt::EB_SIXTEEN_BIT) ? 2u : 4u;
+    if (bitDepth > l18_picmgmt::EB_EIGHT_BIT && bitDepth <= l18_picmgmt::EB_SIXTEEN_BIT && split) {
+        bpp = 1u;
+    }
+    e.yStride = static_cast<std::uint16_t>(width + 2 * border);
+    e.uvStride = static_cast<std::uint16_t>((e.yStride + ssX) >> ssX);
+    e.lumaSize = static_cast<std::uint32_t>(e.yStride) * (height + 2u * border);
+    e.chromaSize = static_cast<std::uint32_t>(e.uvStride) * ((height + ssY + 2u * border) >> ssY);
+    e.packedFlag = bpp > 1;
+    e.bpp = bpp;
+    if (mask & 1u) { // PICTURE_BUFFER_DESC_Y_FLAG
+        e.bufferSize[0] = e.lumaSize * bpp;
+        e.allocSz += e.bufferSize[0];
+        if (split) {
+            e.bitIncSize[0] = e.lumaSize * bpp;
+            e.allocSz += e.bitIncSize[0];
+        }
+    }
+    if (mask & 2u) { // PICTURE_BUFFER_DESC_Cb_FLAG
+        e.bufferSize[1] = e.chromaSize * bpp;
+        e.allocSz += e.bufferSize[1];
+        if (split) {
+            e.bitIncSize[1] = e.chromaSize * bpp;
+            e.allocSz += e.bitIncSize[1];
+        }
+    }
+    if (mask & 4u) { // PICTURE_BUFFER_DESC_Cr_FLAG
+        e.bufferSize[2] = e.chromaSize * bpp;
+        e.allocSz += e.bufferSize[2];
+        if (split) {
+            e.bitIncSize[2] = e.chromaSize * bpp;
+            e.allocSz += e.bitIncSize[2];
+        }
+    }
+    return e;
+}
+
+static void checkCalcAgainstOracle(const l18_picmgmt::PicBufferDesc& got, const ExpectedLayout& e,
+                                   const l18_picmgmt::PicBufferDescInitData& d) {
+    CHECK(got.width == d.maxWidth);
+    CHECK(got.height == d.maxHeight);
+    CHECK(got.maxWidth == d.maxWidth);
+    CHECK(got.maxHeight == d.maxHeight);
+    CHECK(got.bitDepth == d.bitDepth);
+    CHECK(got.colorFormat == d.colorFormat);
+    CHECK(got.yStride == e.yStride);
+    CHECK(got.uStride == e.uvStride);
+    CHECK(got.vStride == e.uvStride);
+    CHECK(got.border == d.border);
+    CHECK(got.lumaSize == e.lumaSize);
+    CHECK(got.chromaSize == e.chromaSize);
+    CHECK(got.packedFlag == e.packedFlag);
+    CHECK(got.bufferEnableMask == d.bufferEnableMask);
+    if (d.splitMode) {
+        CHECK(got.yStrideBitInc == e.yStride);
+        CHECK(got.uStrideBitInc == e.uvStride);
+        CHECK(got.vStrideBitInc == e.uvStride);
+    }
+}
+
+TEST_CASE("picBufDescCalc 8-bit 420 Y-only: strides, sizes, packed_flag") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 192;
+    d.maxHeight = 108;
+    d.border = 32;
+    d.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_Y_FLAG;
+    std::uint32_t bs[3] = {9, 9, 9};
+    std::uint32_t bbi[3] = {9, 9, 9};
+    std::uint32_t bpp = 9;
+    const std::uint32_t sz = l18_picmgmt::picBufDescCalc(&pic, &d, bs, bbi, &bpp);
+    checkCalcAgainstOracle(pic, expectedLayout(192, 108, 32, l18_picmgmt::EB_EIGHT_BIT,
+                                               l18_picmgmt::EB_YUV420, 1u, false),
+                           d);
+    CHECK(bpp == 1);
+    CHECK(bs[0] == pic.lumaSize);
+    CHECK(bs[1] == 0);
+    CHECK(bs[2] == 0);
+    CHECK(bbi[0] == 0); // split off: no bit-inc sizes
+    CHECK(sz == pic.lumaSize);
+    CHECK(pic.bufferEnableMask == l18_picmgmt::PICTURE_BUFFER_DESC_Y_FLAG);
+}
+
+TEST_CASE("picBufDescCalc chroma masks and full-mask sum") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 64;
+    d.maxHeight = 64;
+    d.border = 16;
+    d.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+    std::uint32_t bs[3] = {0, 0, 0};
+    std::uint32_t bbi[3] = {0, 0, 0};
+    std::uint32_t bpp = 0;
+    const std::uint32_t sz = l18_picmgmt::picBufDescCalc(&pic, &d, bs, bbi, &bpp);
+    const ExpectedLayout e = expectedLayout(64, 64, 16, l18_picmgmt::EB_EIGHT_BIT,
+                                            l18_picmgmt::EB_YUV420, 7u, false);
+    checkCalcAgainstOracle(pic, e, d);
+    CHECK(sz == e.allocSz);
+    CHECK(bs[0] == e.lumaSize);
+    CHECK(bs[1] == e.chromaSize);
+    CHECK(bs[2] == e.chromaSize);
+    CHECK(sz == pic.lumaSize + 2u * pic.chromaSize);
+}
+
+TEST_CASE("picBufDescCalc 420/422/444 subsampling bands") {
+    const l18_picmgmt::EbColorFormat fmts[] = {l18_picmgmt::EB_YUV400, l18_picmgmt::EB_YUV420,
+                                               l18_picmgmt::EB_YUV422, l18_picmgmt::EB_YUV444};
+    for (l18_picmgmt::EbColorFormat fmt : fmts) {
+        l18_picmgmt::PicBufferDesc pic = {};
+        l18_picmgmt::PicBufferDescInitData d = {};
+        d.maxWidth = 320;
+        d.maxHeight = 180;
+        d.border = 32;
+        d.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+        d.colorFormat = fmt;
+        d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+        std::uint32_t bs[3] = {0, 0, 0};
+        std::uint32_t bbi[3] = {0, 0, 0};
+        std::uint32_t bpp = 0;
+        l18_picmgmt::picBufDescCalc(&pic, &d, bs, bbi, &bpp);
+        checkCalcAgainstOracle(pic, expectedLayout(320, 180, 32, l18_picmgmt::EB_EIGHT_BIT, fmt, 7u, false), d);
+    }
+    // Spot the ss arithmetic directly: 420/400 ss_y=1 (400 counts as ss_x=1
+    // ss_y=1 by the reference's ternaries), 422 ss_y=0, 444 both 0.
+    l18_picmgmt::PicBufferDesc p420 = {};
+    l18_picmgmt::PicBufferDescInitData d420 = {};
+    d420.maxWidth = 160;
+    d420.maxHeight = 90;
+    d420.border = 31; // odd border: the (h + ss_y + 2b) >> ss_y rounding
+    d420.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+    d420.colorFormat = l18_picmgmt::EB_YUV420;
+    d420.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_Cb_FLAG;
+    std::uint32_t bs[3] = {0, 0, 0};
+    std::uint32_t bbi[3] = {0, 0, 0};
+    std::uint32_t bpp = 0;
+    l18_picmgmt::picBufDescCalc(&p420, &d420, bs, bbi, &bpp);
+    // y_stride = 160 + 62 = 222; u_stride = (222+1)>>1 = 111;
+    // chroma_size = 111 * ((90 + 1 + 62) >> 1) = 111 * 76.
+    CHECK(p420.yStride == 222);
+    CHECK(p420.uStride == 111);
+    CHECK(p420.chromaSize == 111u * 76u);
+}
+
+TEST_CASE("picBufDescCalc bit-depth ladder and split_mode bit-inc sizes") {
+    const l18_picmgmt::EbBitDepth depths[] = {l18_picmgmt::EB_EIGHT_BIT, l18_picmgmt::EB_TEN_BIT,
+                                              l18_picmgmt::EB_TWELVE_BIT, l18_picmgmt::EB_SIXTEEN_BIT,
+                                              l18_picmgmt::EB_THIRTYTWO_BIT};
+    for (l18_picmgmt::EbBitDepth depth : depths) {
+        for (int split = 0; split <= 1; ++split) {
+            l18_picmgmt::PicBufferDesc pic = {};
+            l18_picmgmt::PicBufferDescInitData d = {};
+            d.maxWidth = 128;
+            d.maxHeight = 96;
+            d.border = 32;
+            d.bitDepth = depth;
+            d.colorFormat = l18_picmgmt::EB_YUV420;
+            d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+            d.splitMode = split != 0;
+            std::uint32_t bs[3] = {0, 0, 0};
+            std::uint32_t bbi[3] = {0, 0, 0};
+            std::uint32_t bpp = 0;
+            const std::uint32_t sz = l18_picmgmt::picBufDescCalc(&pic, &d, bs, bbi, &bpp);
+            const ExpectedLayout e = expectedLayout(128, 96, 32, depth, l18_picmgmt::EB_YUV420, 7u, split != 0);
+            checkCalcAgainstOracle(pic, e, d);
+            CHECK(bpp == e.bpp);
+            CHECK(sz == e.allocSz);
+            CHECK(bs[0] == e.bufferSize[0]);
+            CHECK(bs[1] == e.bufferSize[1]);
+            CHECK(bbi[0] == e.bitIncSize[0]);
+        }
+    }
+    // Spot the split quirk: 10-bit split forces bpp 1 (bytes_per_pixel = 1),
+    // so the bit-inc sizes EQUAL the plane sizes; 10-bit non-split is bpp 2.
+    l18_picmgmt::PicBufferDesc pic = {};
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 128;
+    d.maxHeight = 96;
+    d.border = 32;
+    d.bitDepth = l18_picmgmt::EB_TEN_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_Y_FLAG;
+    d.splitMode = true;
+    std::uint32_t bs[3] = {0, 0, 0};
+    std::uint32_t bbi[3] = {0, 0, 0};
+    std::uint32_t bpp = 0;
+    const std::uint32_t sz = l18_picmgmt::picBufDescCalc(&pic, &d, bs, bbi, &bpp);
+    CHECK(bpp == 1);
+    CHECK(pic.packedFlag == false); // bpp == 1 -> packed_flag false (pic_buffer_desc.c:245)
+    CHECK(bs[0] == bbi[0]);
+    CHECK(sz == bs[0] + bbi[0]);
+}
+
+TEST_CASE("picBufDescCalc full-domain oracle over the whole grid") {
+    const std::uint16_t widths[] = {1, 7, 8, 13, 64, 70, 193};
+    const std::uint16_t heights[] = {1, 5, 16, 31, 90, 127};
+    const std::uint16_t borders[] = {0, 32, 64};
+    const l18_picmgmt::EbBitDepth depths[] = {l18_picmgmt::EB_EIGHT_BIT, l18_picmgmt::EB_TEN_BIT,
+                                              l18_picmgmt::EB_TWELVE_BIT, l18_picmgmt::EB_SIXTEEN_BIT,
+                                              l18_picmgmt::EB_THIRTYTWO_BIT};
+    const l18_picmgmt::EbColorFormat fmts[] = {l18_picmgmt::EB_YUV400, l18_picmgmt::EB_YUV420,
+                                               l18_picmgmt::EB_YUV422, l18_picmgmt::EB_YUV444};
+    const std::uint32_t masks[] = {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u};
+    for (std::uint16_t w : widths) {
+        for (std::uint16_t h : heights) {
+            for (std::uint16_t b : borders) {
+                for (l18_picmgmt::EbBitDepth depth : depths) {
+                    for (l18_picmgmt::EbColorFormat fmt : fmts) {
+                        for (std::uint32_t mask : masks) {
+                            for (int split = 0; split <= 1; ++split) {
+                                l18_picmgmt::PicBufferDesc pic = {};
+                                pic.packedFlag = true; // poison: calc must set it
+                                l18_picmgmt::PicBufferDescInitData d = {};
+                                d.maxWidth = w;
+                                d.maxHeight = h;
+                                d.border = b;
+                                d.bitDepth = depth;
+                                d.colorFormat = fmt;
+                                d.bufferEnableMask = mask;
+                                d.splitMode = split != 0;
+                                std::uint32_t bs[3] = {0xEE, 0xEE, 0xEE};
+                                std::uint32_t bbi[3] = {0xEE, 0xEE, 0xEE};
+                                std::uint32_t bpp = 0xEE;
+                                const std::uint32_t sz =
+                                    l18_picmgmt::picBufDescCalc(&pic, &d, bs, bbi, &bpp);
+                                const ExpectedLayout e = expectedLayout(w, h, b, depth, fmt, mask, split != 0);
+                                checkCalcAgainstOracle(pic, e, d);
+                                CHECK(bpp == e.bpp);
+                                CHECK(sz == e.allocSz);
+                                for (int i = 0; i < 3; ++i) {
+                                    CHECK(bs[i] == e.bufferSize[i]);
+                                    CHECK(bbi[i] == e.bitIncSize[i]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 1:1 target: svt_pic_buf_desc_assign (pic_buffer_desc.c:280-:323): the
+// plane pointers into a caller-provided base. The oracle computes the byte
+// offsets independently from the same layout quantities.
+static std::size_t yOffset(const l18_picmgmt::PicBufferDesc& p, std::uint32_t bpp) {
+    return (static_cast<std::size_t>(p.border) + static_cast<std::size_t>(p.yStride) * p.border) * bpp;
+}
+static std::size_t uvOffset(const l18_picmgmt::PicBufferDesc& p, std::uint32_t bpp, std::uint16_t ssX,
+                            std::uint16_t ssY) {
+    return (static_cast<std::size_t>(p.border >> ssX) +
+            static_cast<std::size_t>(p.uStride) * (p.border >> ssY)) * bpp;
+}
+
+TEST_CASE("picBufDescAssign points every plane at the right offset") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 192;
+    d.maxHeight = 108;
+    d.border = 32;
+    d.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+    std::uint32_t bs[3];
+    std::uint32_t bbi[3];
+    std::uint32_t bpp = 0;
+    const std::uint32_t sz = l18_picmgmt::picBufDescCalc(&pic, &d, bs, bbi, &bpp);
+    std::uint8_t* base = static_cast<std::uint8_t*>(std::malloc(sz));
+    std::memset(base, 0, sz);
+    l18_picmgmt::picBufDescAssign(&pic, &d, base, bs, bbi, bpp);
+    CHECK(pic.bufferAlloc == base);
+    CHECK(pic.yBuffer - base == static_cast<std::ptrdiff_t>(yOffset(pic, bpp)));
+    // u sits after the Y plane.
+    CHECK(pic.uBuffer - base ==
+          static_cast<std::ptrdiff_t>(bs[0] + uvOffset(pic, bpp, 1, 1)));
+    // v sits after the U plane.
+    CHECK(pic.vBuffer - base ==
+          static_cast<std::ptrdiff_t>(bs[0] + bs[1] + uvOffset(pic, bpp, 1, 1)));
+    // The y bit-inc pointer is NULL without split (pic_buffer_desc.c:291).
+    CHECK(pic.yBufferBitInc == nullptr);
+    CHECK(pic.uBufferBitInc == nullptr);
+    CHECK(pic.vBufferBitInc == nullptr);
+    std::free(base);
+}
+
+TEST_CASE("picBufDescAssign split-mode bit-inc plane offsets") {
+    l18_picmgmt::PicBufferDesc pic = {};
+    l18_picmgmt::PicBufferDescInitData d = {};
+    d.maxWidth = 128;
+    d.maxHeight = 96;
+    d.border = 32;
+    d.bitDepth = l18_picmgmt::EB_TEN_BIT;
+    d.colorFormat = l18_picmgmt::EB_YUV420;
+    d.bufferEnableMask = l18_picmgmt::PICTURE_BUFFER_DESC_FULL_MASK;
+    d.splitMode = true; // 10-bit split: bpp forced to 1, bit-inc sizes == plane sizes
+    std::uint32_t bs[3];
+    std::uint32_t bbi[3];
+    std::uint32_t bpp = 0;
+    const std::uint32_t sz = l18_picmgmt::picBufDescCalc(&pic, &d, bs, bbi, &bpp);
+    CHECK(bpp == 1);
+    std::uint8_t* base = static_cast<std::uint8_t*>(std::malloc(sz));
+    std::memset(base, 0, sz);
+    l18_picmgmt::picBufDescAssign(&pic, &d, base, bs, bbi, bpp);
+    // Order: y, y_inc, u, u_inc, v, v_inc (the assigned_space walk).
+    CHECK(pic.yBuffer - base == static_cast<std::ptrdiff_t>(yOffset(pic, bpp)));
+    CHECK(pic.yBufferBitInc - base ==
+          static_cast<std::ptrdiff_t>(bs[0] + yOffset(pic, bpp)));
+    CHECK(pic.uBuffer - base ==
+          static_cast<std::ptrdiff_t>(bs[0] + bbi[0] + uvOffset(pic, bpp, 1, 1)));
+    CHECK(pic.uBufferBitInc - base ==
+          static_cast<std::ptrdiff_t>(bs[0] + bbi[0] + bs[1] + uvOffset(pic, bpp, 1, 1)));
+    CHECK(pic.vBuffer - base ==
+          static_cast<std::ptrdiff_t>(bs[0] + bbi[0] + bs[1] + bbi[1] + uvOffset(pic, bpp, 1, 1)));
+    CHECK(pic.vBufferBitInc - base ==
+          static_cast<std::ptrdiff_t>(bs[0] + bbi[0] + bs[1] + bbi[1] + bs[2] + uvOffset(pic, bpp, 1, 1)));
+    std::free(base);
+}
+
+TEST_CASE("picBufDescAssign partial masks leave unowned planes NULL") {
+    const std::uint32_t masks[] = {0u, 1u, 2u, 4u, 3u, 5u, 6u};
+    for (std::uint32_t mask : masks) {
+        l18_picmgmt::PicBufferDesc pic = {};
+        // Poison all three: assign writes ONLY the owned planes (the
+        // reference has no else-branch; the real ctors rely on the
+        // EB_NEW calloc-zero, so unowned planes RETAIN their prior value).
+        pic.yBuffer = reinterpret_cast<std::uint8_t*>(0x11);
+        pic.uBuffer = reinterpret_cast<std::uint8_t*>(0x22);
+        pic.vBuffer = reinterpret_cast<std::uint8_t*>(0x33);
+        l18_picmgmt::PicBufferDescInitData d = {};
+        d.maxWidth = 64;
+        d.maxHeight = 64;
+        d.border = 16;
+        d.bitDepth = l18_picmgmt::EB_EIGHT_BIT;
+        d.colorFormat = l18_picmgmt::EB_YUV420;
+        d.bufferEnableMask = mask;
+        std::uint32_t bs[3];
+        std::uint32_t bbi[3];
+        std::uint32_t bpp = 0;
+        const std::uint32_t sz = l18_picmgmt::picBufDescCalc(&pic, &d, bs, bbi, &bpp);
+        std::uint8_t* base = static_cast<std::uint8_t*>(std::malloc(sz > 0 ? sz : 1));
+        l18_picmgmt::picBufDescAssign(&pic, &d, base, bs, bbi, bpp);
+        CHECK((mask & 1u) ? (pic.yBuffer == base + yOffset(pic, bpp))
+                          : (pic.yBuffer == reinterpret_cast<std::uint8_t*>(0x11)));
+        // u sits after the owned planes BEFORE it (Y when owned).
+        const std::size_t uBase = ((mask & 1u) ? bs[0] : 0u);
+        CHECK((mask & 2u) ? (pic.uBuffer == base + uBase + uvOffset(pic, bpp, 1, 1))
+                          : (pic.uBuffer == reinterpret_cast<std::uint8_t*>(0x22)));
+        CHECK((mask & 4u) ? (pic.vBuffer == base + uBase + ((mask & 2u) ? bs[1] : 0u) + uvOffset(pic, bpp, 1, 1))
+                          : (pic.vBuffer == reinterpret_cast<std::uint8_t*>(0x33)));
+        CHECK(pic.bufferAlloc == base);
+        std::free(base);
+    }
+}
