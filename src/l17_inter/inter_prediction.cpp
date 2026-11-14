@@ -943,6 +943,210 @@ void highbdConvolve2dCopySr(const std::uint16_t* src, std::int32_t srcStride, st
     }
 }
 
+// svt_av1_highbd_jnt_convolve_x_c, inter_prediction.c:908-:951. Same
+// arithmetic as the 8-bit jntConvolveX; the OUTPUT is the dst16 parameter
+// (clip at bd) and offset_bits/round_offset carry bd.
+void highbdJntConvolveX(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst16,
+                        std::int32_t dst16Stride, std::int32_t w, std::int32_t h,
+                        const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                        std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                        std::int32_t bd) {
+    ConvBufType* dst = convParams->dst;
+    std::int32_t dstStride = convParams->dstStride;
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+    const std::int32_t bits = convolve::filterBits - convParams->round1;
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    const std::int32_t roundOffset = (1 << (offsetBits - convParams->round1)) +
+        (1 << (offsetBits - convParams->round1 - 1));
+    const std::int32_t roundBits = 2 * convolve::filterBits - convParams->round0 - convParams->round1;
+    assert(roundBits >= 0);
+    (void)filterParamsY;
+    (void)subpelYQ4;
+    assert(bits >= 0);
+    // horizontal filter
+    const std::int16_t* xFilter = convolve::getInterpFilterSubpelKernel(*filterParamsX, subpelXQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t res = 0;
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                res += xFilter[k] * src[y * srcStride + x - foHoriz + k];
+            }
+            res = (1 << bits) * roundPowerOfTwo(res, convParams->round0);
+            res += roundOffset;
+
+            if (convParams->doAverage) {
+                std::int32_t tmp = dst[y * dstStride + x];
+                if (convParams->useJntCompAvg) {
+                    tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                    tmp = tmp >> kDistPrecisionBits;
+                } else {
+                    tmp += res;
+                    tmp = tmp >> 1;
+                }
+                tmp -= roundOffset;
+                dst16[y * dst16Stride + x] = static_cast<std::uint16_t>(clipPixelHighbd(roundPowerOfTwo(tmp, roundBits), bd));
+            } else {
+                dst[y * dstStride + x] = static_cast<ConvBufType>(res);
+            }
+        }
+    }
+}
+
+// svt_av1_highbd_jnt_convolve_y_c, inter_prediction.c:953-:996. Scale
+// (1 << bits) BEFORE round_1, + round_offset (bd-carried), compose, subtract.
+void highbdJntConvolveY(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst16,
+                        std::int32_t dst16Stride, std::int32_t w, std::int32_t h,
+                        const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                        std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                        std::int32_t bd) {
+    ConvBufType* dst = convParams->dst;
+    std::int32_t dstStride = convParams->dstStride;
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    const std::int32_t bits = convolve::filterBits - convParams->round0;
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    const std::int32_t roundOffset = (1 << (offsetBits - convParams->round1)) +
+        (1 << (offsetBits - convParams->round1 - 1));
+    const std::int32_t roundBits = 2 * convolve::filterBits - convParams->round0 - convParams->round1;
+    assert(roundBits >= 0);
+    (void)filterParamsX;
+    (void)subpelXQ4;
+    assert(bits >= 0);
+    // vertical filter
+    const std::int16_t* yFilter = convolve::getInterpFilterSubpelKernel(*filterParamsY, subpelYQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t res = 0;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                res += yFilter[k] * src[(y - foVert + k) * srcStride + x];
+            }
+            res *= (1 << bits);
+            res = roundPowerOfTwo(res, convParams->round1) + roundOffset;
+
+            if (convParams->doAverage) {
+                std::int32_t tmp = dst[y * dstStride + x];
+                if (convParams->useJntCompAvg) {
+                    tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                    tmp = tmp >> kDistPrecisionBits;
+                } else {
+                    tmp += res;
+                    tmp = tmp >> 1;
+                }
+                tmp -= roundOffset;
+                dst16[y * dst16Stride + x] = static_cast<std::uint16_t>(clipPixelHighbd(roundPowerOfTwo(tmp, roundBits), bd));
+            } else {
+                dst[y * dstStride + x] = static_cast<ConvBufType>(res);
+            }
+        }
+    }
+}
+
+// svt_av1_highbd_jnt_convolve_2d_copy_c, inter_prediction.c:998-:1035.
+void highbdJntConvolve2dCopy(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst16,
+                             std::int32_t dst16Stride, std::int32_t w, std::int32_t h,
+                             const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                             std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                             std::int32_t bd) {
+    ConvBufType* dst = convParams->dst;
+    std::int32_t dstStride = convParams->dstStride;
+    const std::int32_t bits = convolve::filterBits * 2 - convParams->round1 - convParams->round0;
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    const std::int32_t roundOffset = (1 << (offsetBits - convParams->round1)) +
+        (1 << (offsetBits - convParams->round1 - 1));
+    assert(bits >= 0);
+    (void)filterParamsX;
+    (void)filterParamsY;
+    (void)subpelXQ4;
+    (void)subpelYQ4;
+
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            ConvBufType res = static_cast<ConvBufType>(src[y * srcStride + x] << bits);
+            res += static_cast<ConvBufType>(roundOffset);
+            if (convParams->doAverage) {
+                std::int32_t tmp = dst[y * dstStride + x];
+                if (convParams->useJntCompAvg) {
+                    tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                    tmp = tmp >> kDistPrecisionBits;
+                } else {
+                    tmp += res;
+                    tmp = tmp >> 1;
+                }
+                tmp -= roundOffset;
+                dst16[y * dst16Stride + x] = static_cast<std::uint16_t>(clipPixelHighbd(roundPowerOfTwo(tmp, bits), bd));
+            } else {
+                dst[y * dstStride + x] = res;
+            }
+        }
+    }
+}
+
+// svt_av1_highbd_jnt_convolve_2d_c, inter_prediction.c:1037-:1097. The
+// bd-carried bias (1 << (bd + FB - 1)) distinguishes the hbd 2d form from
+// its 8-bit twin (hardwired bd=8 there); staging via ConvBufType in the
+// int16 im_block, exactly the reference's cast chain.
+void highbdJntConvolve2d(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst16,
+                         std::int32_t dst16Stride, std::int32_t w, std::int32_t h,
+                         const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                         std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                         std::int32_t bd) {
+    std::int16_t imBlock[(convolve::maxSbSize + kMaxFilterTap - 1) * convolve::maxSbSize];
+    ConvBufType* dst = convParams->dst;
+    std::int32_t dstStride = convParams->dstStride;
+    std::int32_t imH = h + filterParamsY->taps - 1;
+    std::int32_t imStride = w;
+    const std::int32_t foVert = filterParamsY->taps / 2 - 1;
+    const std::int32_t foHoriz = filterParamsX->taps / 2 - 1;
+
+    const std::int32_t roundBits = 2 * convolve::filterBits - convParams->round0 - convParams->round1;
+    assert(roundBits >= 0);
+
+    // horizontal filter
+    const std::uint16_t* srcHoriz = src - foVert * srcStride;
+    const std::int16_t* xFilter = convolve::getInterpFilterSubpelKernel(*filterParamsX, subpelXQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < imH; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = (1 << (bd + convolve::filterBits - 1));
+            for (std::int32_t k = 0; k < filterParamsX->taps; ++k) {
+                sum += xFilter[k] * srcHoriz[y * srcStride + x - foHoriz + k];
+            }
+            assert(0 <= sum && sum < (1 << (bd + convolve::filterBits + 1)));
+            (void)bd;
+            imBlock[y * imStride + x] =
+                static_cast<std::int16_t>(static_cast<ConvBufType>(roundPowerOfTwo(sum, convParams->round0)));
+        }
+    }
+
+    // vertical filter
+    std::int16_t* srcVert = imBlock + foVert * imStride;
+    const std::int32_t offsetBits = bd + 2 * convolve::filterBits - convParams->round0;
+    const std::int16_t* yFilter = convolve::getInterpFilterSubpelKernel(*filterParamsY, subpelYQ4 & convolve::subpelMask);
+    for (std::int32_t y = 0; y < h; ++y) {
+        for (std::int32_t x = 0; x < w; ++x) {
+            std::int32_t sum = 1 << offsetBits;
+            for (std::int32_t k = 0; k < filterParamsY->taps; ++k) {
+                sum += yFilter[k] * srcVert[(y - foVert + k) * imStride + x];
+            }
+            assert(0 <= sum && sum < (1 << (offsetBits + 2)));
+            ConvBufType res = static_cast<ConvBufType>(roundPowerOfTwo(sum, convParams->round1));
+            if (convParams->doAverage) {
+                std::int32_t tmp = dst[y * dstStride + x];
+                if (convParams->useJntCompAvg) {
+                    tmp = tmp * convParams->fwdOffset + res * convParams->bckOffset;
+                    tmp = tmp >> kDistPrecisionBits;
+                } else {
+                    tmp += res;
+                    tmp = tmp >> 1;
+                }
+                tmp -= (1 << (offsetBits - convParams->round1)) + (1 << (offsetBits - convParams->round1 - 1));
+                dst16[y * dst16Stride + x] =
+                    static_cast<std::uint16_t>(clipPixelHighbd(roundPowerOfTwo(tmp, roundBits), bd));
+            } else {
+                dst[y * dstStride + x] = res;
+            }
+        }
+    }
+}
+
 // svt_av1_highbd_convolve_2d_scale_c, inter_prediction.c:831-:906. The
 // SCALE_SUBPEL_BITS=10 stepping (x_step_qn/y_step_qn); the compound
 // branches carry dst16 in conv_params (use_dist_wtd_comp_avg or plain

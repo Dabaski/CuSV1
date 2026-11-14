@@ -1613,6 +1613,193 @@ TEST_CASE("highbd_convolve_2d_for_intrabc dispatches like the 8-bit twin at bd=8
     }
 }
 
+// ------------------------------------------------------------- A3E J3
+// The highbd jnt (compound) family (ip:908-:1097). The dst16 OUTPUT
+// (clip at bd) is the uint16 analogue of the 8-bit family's dst8; the
+// staging CONV_BUF (conv_params->dst) carries the same res values. The
+// derivation fixture: at bd=8 the dst16 output must equal the landed
+// 8-bit jnt family's dst8 on the same data.
+
+void runHbdJntFamily(int bd, void (*kern)(const std::uint16_t*, std::int32_t, std::uint16_t*, std::int32_t,
+                                          std::int32_t, std::int32_t, const convolve::InterpFilterParams*,
+                                          const convolve::InterpFilterParams*, std::int32_t, std::int32_t,
+                                          inter::ConvolveParams*, std::int32_t),
+                     const char* label) {
+    using namespace jntoracle;
+    const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
+    const Cfg cfgs[] = {
+        {8, 8, 4, 4, 7, 7, 9, 7, 1, 1},   {8, 8, 4, 4, 7, 7, 9, 7, 1, 0},   {13, 5, 1, 15, 7, 7, 12, 4, 1, 1},
+        {4, 8, 15, 1, 7, 7, 5, 11, 1, 0}, {5, 4, 2, 13, 4, 7, 13, 3, 1, 1}, {1, 3, 8, 8, 7, 7, 9, 7, 1, 1},
+    };
+    for (const Cfg& c : cfgs) {
+        std::vector<std::uint16_t> plane16;
+        const int stride = c.w + 16;
+        const int vmax = (1 << bd) - 1;
+        {
+            std::uint32_t seed = 0xBEEFu + (std::uint32_t)c.w * 7 + c.h * 5 + bd;
+            plane16.resize((size_t)stride * (c.h + 16));
+            for (size_t i = 0; i < plane16.size(); ++i) plane16[i] = (std::uint16_t)(hbdoracle::lcg16(seed) & vmax);
+        }
+        const std::uint16_t* src = plane16.data() + 8 * stride + 8;
+        std::vector<std::uint16_t> dst16Init((size_t)c.w * c.h);
+        std::uint32_t dstSeed = 0xCAFEu + (std::uint32_t)c.h + bd;
+        for (size_t i = 0; i < dst16Init.size(); ++i) dst16Init[i] = (std::uint16_t)(hbdoracle::lcg16(dstSeed) * 131u);
+        inter::ConvolveParams cp{};
+        std::memset(&cp, 0, sizeof(cp));
+        cp.round0 = c.round0;
+        cp.round1 = c.round1;
+        cp.useJntCompAvg = c.useJnt;
+        cp.fwdOffset = c.fwd;
+        cp.bckOffset = c.bck;
+        cp.doAverage = c.doAverage;
+        cp.dst = dst16Init.data();
+        cp.dstStride = c.w;
+        std::vector<std::uint16_t> dst16Out((size_t)c.w * c.h + 8, 0xABCD);
+        kern(src, stride, dst16Out.data(), c.w, c.w, c.h, reg, reg, c.subpelX, c.subpelY, &cp, bd);
+        int bad = 0;
+        if (bd == 8) {
+            // Derivation: the 8-bit jnt family on the same data must give
+            // the same values. When do_average=1 the observable is the
+            // OUTPUT buffer (dst16Out vs the 8-bit dst8); when 0, it is
+            // the staging CONV_BUF (both kernels write res there).
+            std::vector<std::uint8_t> plane8((size_t)stride * (c.h + 16));
+            for (size_t i = 0; i < plane8.size(); ++i) plane8[i] = (std::uint8_t)plane16[i];
+            std::vector<std::uint16_t> dst16Copy = dst16Init;
+            inter::ConvolveParams cp8 = cp;
+            cp8.dst = dst16Copy.data();
+            std::vector<std::uint8_t> dst8((size_t)c.w * c.h, 0);
+            void (*kern8)(const std::uint8_t*, std::int32_t, std::uint8_t*, std::int32_t, std::int32_t, std::int32_t,
+                          const convolve::InterpFilterParams*, const convolve::InterpFilterParams*, std::int32_t,
+                          std::int32_t, inter::ConvolveParams*) = nullptr;
+            if (std::string(label) == "hjnt_x") kern8 = &inter::jntConvolveX;
+            else if (std::string(label) == "hjnt_y") kern8 = &inter::jntConvolveY;
+            else if (std::string(label) == "hjnt_copy") kern8 = &inter::jntConvolve2dCopy;
+            else kern8 = &inter::jntConvolve2d;
+            kern8(plane8.data() + 8 * stride + 8, stride, dst8.data(), c.w, c.w, c.h, reg, reg, c.subpelX, c.subpelY,
+                  &cp8);
+            for (int y = 0; y < c.h; ++y)
+                for (int x = 0; x < c.w; ++x) {
+                    if (c.doAverage) {
+                        if (dst16Out[(size_t)y * c.w + x] != dst8[(size_t)y * c.w + x]) ++bad;
+                    } else if (dst16Init[(size_t)y * c.w + x] != dst16Copy[(size_t)y * c.w + x]) {
+                        ++bad;
+                    }
+                }
+            CHECK_MESSAGE(bad == 0, "hjnt bd8 derivation mismatch");
+        } else {
+            // bd=10 scalar oracle: the same compose, clipped at bd. This
+            // is the SECOND transcription of the family's arithmetic.
+            for (int y = 0; y < c.h; ++y) {
+                for (int x = 0; x < c.w; ++x) {
+                    std::int32_t res;
+                    if (std::string(label) == "hjnt_x") {
+                        const int tapsX = reg->taps, foH = tapsX / 2 - 1;
+                        const int bits = kFb - c.round1;
+                        const std::int16_t* xf =
+                            convolve::getInterpFilterSubpelKernel(*reg, c.subpelX & convolve::subpelMask);
+                        std::int32_t s = 0;
+                        for (int k = 0; k < tapsX; ++k) s += xf[k] * src[y * stride + x - foH + k];
+                        res = (1 << bits) * ((s + ((1 << c.round0) >> 1)) >> c.round0);
+                        const int offsetBits = bd + 2 * kFb - c.round0;
+                        res += (1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1));
+                    } else if (std::string(label) == "hjnt_y") {
+                        const int tapsY = reg->taps, foV = tapsY / 2 - 1;
+                        const int bits = kFb - c.round0;
+                        const std::int16_t* yf =
+                            convolve::getInterpFilterSubpelKernel(*reg, c.subpelY & convolve::subpelMask);
+                        std::int32_t s = 0;
+                        for (int k = 0; k < tapsY; ++k) s += yf[k] * src[(y - foV + k) * stride + x];
+                        s *= (1 << bits);
+                        const int offsetBits = bd + 2 * kFb - c.round0;
+                        res = ((s + ((1 << c.round1) >> 1)) >> c.round1) +
+                            ((1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1)));
+                    } else if (std::string(label) == "hjnt_copy") {
+                        const int bits = 2 * kFb - c.round1 - c.round0;
+                        const int offsetBits = bd + 2 * kFb - c.round0;
+                        res = (int)(std::uint16_t)(src[y * stride + x] << bits) +
+                            ((1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1)));
+                    } else {
+                        // hjnt_2d: two-pass compose
+                        const int tapsX = reg->taps, tapsY = reg->taps;
+                        const int foH = tapsX / 2 - 1, foV = tapsY / 2 - 1;
+                        const int imH = c.h + tapsY - 1;
+                        std::vector<std::uint16_t> im((size_t)imH * c.w);
+                        const std::int16_t* xf =
+                            convolve::getInterpFilterSubpelKernel(*reg, c.subpelX & convolve::subpelMask);
+                        for (int r = 0; r < imH; ++r) {
+                            for (int xx = 0; xx < c.w; ++xx) {
+                                std::int32_t s = 1 << (bd + kFb - 1);
+                                for (int k = 0; k < tapsX; ++k)
+                                    s += xf[k] * src[(r - foV) * stride + (xx - foH + k)];
+                                im[(size_t)r * c.w + xx] =
+                                    (std::uint16_t)((s + ((1 << c.round0) >> 1)) >> c.round0);
+                            }
+                        }
+                        const int offsetBits = bd + 2 * kFb - c.round0;
+                        const std::int16_t* yf =
+                            convolve::getInterpFilterSubpelKernel(*reg, c.subpelY & convolve::subpelMask);
+                        std::int32_t s = 1 << offsetBits;
+                        for (int k = 0; k < tapsY; ++k) s += yf[k] * im[(size_t)(y + k) * c.w + x];
+                        res = (s + ((1 << c.round1) >> 1)) >> c.round1;
+                    }
+                    if (c.doAverage) {
+                        std::int32_t t = dst16Init[(size_t)y * c.w + x];
+                        if (c.useJnt) {
+                            t = t * c.fwd + res * c.bck;
+                            t >>= 4;
+                        } else {
+                            t += res;
+                            t >>= 1;
+                        }
+                        const int roundBits = 2 * kFb - c.round0 - c.round1;
+                        // The single-axis/copy forms subtract roundOffset
+                        // (computed from offsetBits with bd=8!); the 2d
+                        // form subtracts the SAME expression. See the
+                        // reference: round_offset uses offset_bits which
+                        // carries bd, EXCEPT 2d's inline subtract also
+                        // carries bd. Both are bd-carried here.
+                        const int offsetBits = (std::string(label) == "hjnt_2d") ? bd + 2 * kFb - c.round0
+                                                                                : bd + 2 * kFb - c.round0;
+                        const int roundOffset =
+                            (1 << (offsetBits - c.round1)) + (1 << (offsetBits - c.round1 - 1));
+                        t -= roundOffset;
+                        std::int32_t v = (t + ((1 << roundBits) >> 1)) >> roundBits;
+                        v = v < 0 ? 0 : (v > vmax ? vmax : v);
+                        if (dst16Out[(size_t)y * c.w + x] != (std::uint16_t)v) ++bad;
+                    } else {
+                        if (dst16Init[(size_t)y * c.w + x] != (std::uint16_t)res) ++bad;
+                    }
+                }
+            }
+            CHECK_MESSAGE(bad == 0, "hjnt bd10 scalar mismatch");
+        }
+        if (bad) {
+            MESSAGE(std::string(label) << " bd " << bd << " cfg " << c.w << "x" << c.h << " avg " << c.doAverage
+                                       << " diffs " << bad);
+        }
+    }
+}
+
+TEST_CASE("highbd_jnt_convolve_x: derivation at bd=8, scalar oracle at bd=10 (ip:908-951)") {
+    runHbdJntFamily(8, &inter::highbdJntConvolveX, "hjnt_x");
+    runHbdJntFamily(10, &inter::highbdJntConvolveX, "hjnt_x");
+}
+
+TEST_CASE("highbd_jnt_convolve_y: derivation at bd=8, scalar oracle at bd=10 (ip:953-996)") {
+    runHbdJntFamily(8, &inter::highbdJntConvolveY, "hjnt_y");
+    runHbdJntFamily(10, &inter::highbdJntConvolveY, "hjnt_y");
+}
+
+TEST_CASE("highbd_jnt_convolve_2d_copy: derivation at bd=8, scalar oracle at bd=10 (ip:998-1035)") {
+    runHbdJntFamily(8, &inter::highbdJntConvolve2dCopy, "hjnt_copy");
+    runHbdJntFamily(10, &inter::highbdJntConvolve2dCopy, "hjnt_copy");
+}
+
+TEST_CASE("highbd_jnt_convolve_2d: derivation at bd=8, scalar oracle at bd=10 (ip:1037-1097)") {
+    runHbdJntFamily(8, &inter::highbdJntConvolve2d, "hjnt_2d");
+    runHbdJntFamily(10, &inter::highbdJntConvolve2d, "hjnt_2d");
+}
+
 TEST_CASE("jnt_convolve_2d_copy pins the shift-compose-copy path (ip:677-714)") {
     using namespace jntoracle;
     const convolve::InterpFilterParams* reg = &convolve::interpFilterParamsList[(int)convolve::InterpFilter::EIGHTTAP_REGULAR];
