@@ -296,4 +296,114 @@ void setupPredBlock(BlockSize bsize, Buf2D dst[MAX_PLANES_MD], const Yv12Lite* s
     setupPredPlane(dst, bsize, dst[0].buf, src->yCropWidth, src->yCropHeight, dst[0].stride, miRow, miCol, 0, 0);
 }
 
+// ---------------------------------------------------------------------------
+// A4M-7: the variance-map + DC-only surface.
+// ---------------------------------------------------------------------------
+
+// var_log2_lut / var_grid_lut / var_base_lut (product_coding_loop.c
+// :8054-8056, verbatim).
+static const std::uint8_t kVarLog2Lut[4] = {6, 5, 4, 3};
+static const std::uint8_t kVarGridLut[4] = {1, 2, 4, 8};
+static const std::uint8_t kVarBaseLut[4] = {0, 1, 5, 21};
+
+// get_msb (definitions.h:628-644, portable body; the file-local rate_est.cpp
+// twin is not exported, so the l7-l13 duplication precedent applies).
+static std::int32_t getMsbA4m(std::uint32_t n) {
+    std::int32_t log = 0;
+    std::uint32_t value = n;
+    for (std::int32_t i = 4; i >= 0; --i) {
+        const std::int32_t shift = (1 << i);
+        const std::uint32_t x = value >> shift;
+        if (x != 0) {
+            value = x;
+            log += shift;
+        }
+    }
+    return log;
+}
+
+// svt_aom_get_blk_var_map (product_coding_loop.c:8058-8099, verbatim;
+// svt_log2f == get_msb, definitions.h:592).
+void getBlkVarMap(std::int32_t blockSize, std::int32_t orgX, std::int32_t orgY, std::int32_t* blkIdx,
+                  std::int32_t subIdx[4]) {
+    // Map block size to level: 64->0, 32->1, 16->2, 8->3
+    const std::int32_t lvl = 6 - getMsbA4m(blockSize);  // svt_log2f == get_msb (definitions.h:592)
+
+    // Valid range is block_size in [8, 64], i.e. lvl in [0, 3].
+    // Anything outside that range has no variance data; return safe sentinel values.
+    if (lvl < 0 || lvl > 3) {
+        *blkIdx = 0;
+        subIdx[0] = subIdx[1] = subIdx[2] = subIdx[3] = 0;
+        return;
+    }
+
+    // Parent block
+    const std::int32_t shift = kVarLog2Lut[lvl];
+    const std::int32_t grid = kVarGridLut[lvl];
+    const std::int32_t base = kVarBaseLut[lvl];
+
+    const std::int32_t gx = orgX >> shift;
+    const std::int32_t gy = orgY >> shift;
+
+    *blkIdx = base + gy * grid + gx;
+
+    // Sub-blocks: only valid when lvl < 3 (i.e. block_size >= 16).
+    // For block_size == 8 (lvl == 3), sub_lvl would be 4 which is out of bounds.
+    // Callers must not use sub_idx[] when block_size < 16.
+    const std::int32_t subLvl = lvl + 1;
+    if (subLvl < 4) {
+        const std::int32_t subShift = kVarLog2Lut[subLvl];
+        const std::int32_t subBase = kVarBaseLut[subLvl];
+        const std::int32_t subGrid = kVarGridLut[subLvl];
+
+        const std::int32_t sx = orgX >> subShift;
+        const std::int32_t sy = orgY >> subShift;
+
+        subIdx[0] = subBase + (sy + 0) * subGrid + (sx + 0);
+        subIdx[1] = subBase + (sy + 0) * subGrid + (sx + 1);
+        subIdx[2] = subBase + (sy + 1) * subGrid + (sx + 0);
+        subIdx[3] = subBase + (sy + 1) * subGrid + (sx + 1);
+    } else {
+        subIdx[0] = subIdx[1] = subIdx[2] = subIdx[3] = 0;
+    }
+}
+
+// is_dc_only_safe (mode_decision.c:847-881, verbatim over the carrier;
+// the :858 MIN/MAX folds inline, the :849-852 asserts NDEBUG-dropped).
+std::int32_t isDcOnlySafe(const DcOnlyCarrier& c) {
+    // Early exit if pruning not enabled, SB-128, NSQ, or 4x4 (no variance available)
+    if (!c.pruneUsingEdgeInfo || c.superBlockSize == 128 || c.shape != PART_N_MD || c.sqSize == 4) {
+        return 0;
+    }
+
+    // Block variance lookup
+    std::int32_t blkIdx;
+    std::int32_t subIdx[4];
+    const std::int32_t blkOrgX = (std::int32_t)(c.blkOrgX - c.sbOriginX);  // :857 Position blk_org
+    const std::int32_t blkOrgY = (std::int32_t)(c.blkOrgY - c.sbOriginY);
+    getBlkVarMap(c.sqSize, blkOrgX, blkOrgY, &blkIdx, subIdx);
+
+    const std::uint16_t* sbVar = c.sbVar;  // :860 ppcs->variance[ctx->sb_index]
+    const std::uint32_t blkVar = sbVar[blkIdx];
+
+    // For 8x8, we do not have 4x4 sub-variance, skip spread check
+    if (c.sqSize == 8) {
+        return (blkVar < 2000);
+    }
+
+    // For 16x16 and above, compute spread from sub-blocks
+    std::uint32_t minVar = 0xFFFFFFFFu;  // UINT32_MAX
+    std::uint32_t maxVar = 0;
+
+    for (int i = 0; i < 4; i++) {
+        const std::uint32_t v = sbVar[subIdx[i]];
+        minVar = v < minVar ? v : minVar;  // MIN (:874)
+        maxVar = v > maxVar ? v : maxVar;  // MAX (:875)
+    }
+
+    const std::uint32_t spreadVar = maxVar - minVar;
+
+    return (blkVar < 2000 && spreadVar < 4000);
+}
+
 }  // namespace l16_rdo

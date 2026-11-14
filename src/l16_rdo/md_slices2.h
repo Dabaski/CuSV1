@@ -304,4 +304,53 @@ void setupPredPlane(Buf2D* dst, BlockSize bsize, std::uint8_t* src, std::int32_t
 void setupPredBlock(BlockSize bsize, Buf2D dst[MAX_PLANES_MD], const Yv12Lite* src, std::int32_t miRow,
                     std::int32_t miCol);
 
+// ---------------------------------------------------------------------------
+// A4M-7: the variance-map + DC-only surface.
+// ---------------------------------------------------------------------------
+
+// Part (definitions.h:929-940, the MD ctx->shape enum, verbatim order).
+enum Part {
+    PART_N_MD,
+    PART_H_MD,
+    PART_V_MD,
+    PART_H4_MD,
+    PART_V4_MD,
+    PART_HA_MD,
+    PART_HB_MD,
+    PART_VA_MD,
+    PART_VB_MD,
+    PART_S_MD,
+};
+
+// svt_aom_get_blk_var_map (product_coding_loop.c:8054-8099). Module-boundary
+// carry (l16_rdo cannot link the l6 coding_loop surface; the l7-l13
+// duplication precedent): svt_log2f is get_msb (definitions.h:592), the
+// three LUTs are :8054-8056 verbatim, the out-of-range row is the :8064-8068
+// sentinel.
+void getBlkVarMap(std::int32_t blockSize, std::int32_t orgX, std::int32_t orgY, std::int32_t* blkIdx,
+                  std::int32_t subIdx[4]);
+
+// The is_dc_only_safe wall set (mode_decision.c:847-861): the pcs->scs->
+// super_block_size / ctx->shape / ctx->blk_geom->sq_size / the two origins /
+// ctx->sb_index and the ppcs->variance[sb_index] row. The intra_ctrls.
+// prune_using_edge_info flag (md_process.h:785) threads as the first field.
+struct DcOnlyCarrier {
+    bool pruneUsingEdgeInfo;      // :849 ctx->intra_ctrls.prune_using_edge_info
+    std::uint32_t superBlockSize; // :849 pcs->scs->super_block_size
+    Part shape;                   // :849 ctx->shape
+    std::int32_t sqSize;          // :849/:864 ctx->blk_geom->sq_size
+    std::uint32_t blkOrgX;        // :857 ctx->blk_org_x
+    std::uint32_t blkOrgY;        // :857 ctx->blk_org_y
+    std::uint32_t sbOriginX;      // :857 ctx->sb_origin_x
+    std::uint32_t sbOriginY;      // :857 ctx->sb_origin_y
+    std::uint32_t sbIndex;        // :860 ctx->sb_index
+    const std::uint16_t* sbVar;   // :860 pcs->ppcs->variance[sb_index]
+};
+
+// is_dc_only_safe (mode_decision.c:847-881): the 8x8 row returns
+// blk_var < 2000 with no spread check; 16x16+ folds the four sub_idx
+// entries and adds spread < 4000. Deviation, named: the reference returns
+// uint8_t; the port returns int (the same 0/1).
+std::int32_t isDcOnlySafe(const DcOnlyCarrier& c);
+
 }  // namespace l16_rdo

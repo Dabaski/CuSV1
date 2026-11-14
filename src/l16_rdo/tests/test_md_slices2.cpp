@@ -686,3 +686,147 @@ TEST_CASE("l16_rdo setupPredBlock wires the three planes and offsets the luma") 
     CHECK(dst[1].stride == 16);
     CHECK(dst[2].stride == 16);
 }
+
+// ---------------------------------------------------------------------------
+// A4M-7: svt_aom_get_blk_var_map (product_coding_loop.c:8054-8099) +
+// is_dc_only_safe (mode_decision.c:847-881).
+// ---------------------------------------------------------------------------
+using l16_rdo::getBlkVarMap;
+using l16_rdo::isDcOnlySafe;
+using l16_rdo::DcOnlyCarrier;
+using l16_rdo::Part;
+using l16_rdo::PART_N_MD;
+using l16_rdo::PART_H_MD;
+
+TEST_CASE("l16_rdo getBlkVarMap enumerates the four levels") {
+    // product_coding_loop.c:8054-8099. lvl = 6 - get_msb(block_size):
+    // 64 -> 0, 32 -> 1, 16 -> 2, 8 -> 3; the var_base_lut = {0, 1, 5, 21},
+    // var_grid_lut = {1, 2, 4, 8}, var_log2_lut = {6, 5, 4, 3}.
+    int blk = -1, sub[4] = {-1, -1, -1, -1};
+    // 64x64 at SB origin: base 0, grid 1 -> blk_idx 0. The sub walk uses
+    // the SUB-level shift (5): sx = sy = 0, sub base 1 grid 2.
+    getBlkVarMap(64, 0, 0, &blk, sub);
+    CHECK(blk == 0);
+    CHECK(sub[0] == 1);
+    CHECK(sub[1] == 2);
+    CHECK(sub[2] == 3);
+    CHECK(sub[3] == 4);
+    // 64x64 in the right-bottom SB quadrant (org 32,32): blk_idx 0; the
+    // sub sx/sy = 32>>5 = 1.
+    getBlkVarMap(64, 32, 32, &blk, sub);
+    CHECK(blk == 0);
+    CHECK(sub[0] == 1 + (1 + 0) * 2 + (1 + 0));
+    // 32x32 at org (32, 0): shift 5, grid 2, base 1 -> gx = 1, gy = 0 ->
+    // blk_idx = 2. The sub shift is 4: sx = 2, sy = 0 (base 5, grid 4).
+    getBlkVarMap(32, 32, 0, &blk, sub);
+    CHECK(blk == 2);
+    CHECK(sub[0] == 5 + 0 * 4 + 2);
+    CHECK(sub[1] == 5 + 0 * 4 + 3);
+    CHECK(sub[2] == 5 + 1 * 4 + 2);
+    CHECK(sub[3] == 5 + 1 * 4 + 3);
+    // 16x16 at org (16, 48): shift 4, grid 4, base 5 -> gx = 1, gy = 3 ->
+    // blk_idx = 18. The sub shift is 3: sx = 2, sy = 6 (base 21, grid 8).
+    getBlkVarMap(16, 16, 48, &blk, sub);
+    CHECK(blk == 18);
+    CHECK(sub[0] == 21 + (6 + 0) * 8 + (2 + 0));
+    CHECK(sub[1] == 21 + (6 + 0) * 8 + (2 + 1));
+    CHECK(sub[2] == 21 + (6 + 1) * 8 + (2 + 0));
+    CHECK(sub[3] == 21 + (6 + 1) * 8 + (2 + 1));
+    // 8x8 at org (24, 8): shift 3, grid 8, base 21 -> blk = 21 + 1*8 + 3
+    // = 32; sub_lvl = 4 is OUT of the lut -> sub zeroed.
+    getBlkVarMap(8, 24, 8, &blk, sub);
+    CHECK(blk == 32);
+    CHECK(sub[0] == 0);
+    CHECK(sub[1] == 0);
+    CHECK(sub[2] == 0);
+    CHECK(sub[3] == 0);
+    // Out-of-range block_size (4): the safe sentinel row.
+    getBlkVarMap(4, 0, 0, &blk, sub);
+    CHECK(blk == 0);
+    CHECK(sub[0] == 0);
+    CHECK(sub[3] == 0);
+}
+
+TEST_CASE("l16_rdo isDcOnlySafe gates on the SB/shape/size and variance spread") {
+    // mode_decision.c:847-881. sbVar layout: the flat per-SB row
+    // (pcs->ppcs->variance[sb_index]); the 8x8 row returns blk_var < 2000
+    // with NO spread check; 16x16+ folds min/max over the four sub_idx
+    // entries and requires spread < 4000 as well.
+    std::uint16_t sbVar[64];
+    for (int i = 0; i < 64; ++i) {
+        sbVar[i] = (std::uint16_t)(100 + i);
+    }
+
+    // The all-allowed carrier: prune on, SB64, PART_N, 16x16 block at SB
+    // origin. blk_idx = 5 + 0*4 + 0 = 5 -> var 105; subs at base 21:
+    // 121..124 (row 0: 21,22,29,30? no: sub grid 8 -> 21+0, 21+1, 21+8,
+    // 21+9 = 121,122,129,130). Wait: sub_idx = sub_base + (sy+i)*8 +
+    // (sx+j) = 21+0, 21+1, 21+8, 21+9. sbVar[21] = 121, [22] = 122,
+    // [29] = 129, [30] = 130.
+    DcOnlyCarrier c;
+    c.pruneUsingEdgeInfo = 1;
+    c.superBlockSize = 64;
+    c.shape = PART_N_MD;
+    c.sqSize = 16;
+    c.blkOrgX = 0;
+    c.blkOrgY = 0;
+    c.sbOriginX = 0;
+    c.sbOriginY = 0;
+    c.sbIndex = 0;
+    c.sbVar = sbVar;
+    // blk_var 105 < 2000; spread = 130 - 121 = 9 < 4000 -> safe.
+    CHECK(isDcOnlySafe(c) == 1);
+
+    // The first gate rows (:849-852), each flips to 0:
+    c.pruneUsingEdgeInfo = 0;
+    CHECK(isDcOnlySafe(c) == 0);
+    c.pruneUsingEdgeInfo = 1;
+    c.superBlockSize = 128;
+    CHECK(isDcOnlySafe(c) == 0);
+    c.superBlockSize = 64;
+    c.shape = PART_H_MD;  // shape != PART_N
+    CHECK(isDcOnlySafe(c) == 0);
+    c.shape = PART_N_MD;
+
+    // sq_size == 4: the no-variance early-out (:850-852).
+    c.sqSize = 4;
+    CHECK(isDcOnlySafe(c) == 0);
+    c.sqSize = 16;
+
+    // The 8x8 row (:864-866): blk_var < 2000 -> 1, >= 2000 -> 0, no spread.
+    c.sqSize = 8;
+    c.blkOrgX = 40;
+    c.blkOrgY = 8;  // blk_idx = 21 + 1*8 + 5 = 34 -> var 134 < 2000 -> 1.
+    CHECK(isDcOnlySafe(c) == 1);
+    sbVar[34] = 2000;  // the boundary itself is NOT < 2000 -> 0.
+    CHECK(isDcOnlySafe(c) == 0);
+    sbVar[34] = 134;
+    // Spread does not matter at 8x8: set the (unused) sub rows extreme.
+    sbVar[60] = 65535;
+    sbVar[61] = 65535;
+    CHECK(isDcOnlySafe(c) == 1);
+
+    // The 16x16 spread row (:869-881): blk_var < 2000 but spread >= 4000
+    // -> 0. 16x16 at org (32, 16): blk_idx = 5 + 1*4 + 2 = 11 -> 111;
+    // subs = 21 + (2..3)*8 + (4..5) = 41,42,49,50 -> 141,142,149,150.
+    c.sqSize = 16;
+    c.blkOrgX = 32;
+    c.blkOrgY = 16;
+    CHECK(isDcOnlySafe(c) == 1);
+    sbVar[42] = 5200;
+    sbVar[49] = 5300;
+    sbVar[50] = 5400;
+    // blk_var 111 < 2000; sbVar[41] = 141 stays the MIN: spread =
+    // 5400 - 141 = 5259 >= 4000 -> 0.
+    CHECK(isDcOnlySafe(c) == 0);
+    sbVar[42] = 4000;
+    sbVar[49] = 4100;
+    sbVar[50] = 4140;
+    // max = 4140, spread = 4140 - 141 = 3999 < 4000 -> 1 again.
+    CHECK(isDcOnlySafe(c) == 1);
+    // The blk_var boundary: < 2000 strict.
+    sbVar[11] = 2000;
+    CHECK(isDcOnlySafe(c) == 0);
+    sbVar[11] = 1999;
+    CHECK(isDcOnlySafe(c) == 1);
+}
