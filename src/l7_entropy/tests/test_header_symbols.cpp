@@ -11,6 +11,7 @@
 
 #include <doctest.h>
 
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 
@@ -1197,5 +1198,370 @@ TEST_CASE("writeTileInfo tile-count literal + size-bytes walk vs oracle") {
         CHECK_EQ(pcs.tile_size_bytes_minus_1, 0);
         CHECK_EQ(h.bits(), 1u);
         CHECK_EQ(h.bitAt(0), 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C4: the sequence-header family + global motion + film grain + the OBU
+// shells.
+// ---------------------------------------------------------------------------
+TEST_CASE("writeBitstreamLevel + addTrailingBits + writeObuMetadata exact bits") {
+    // write_bitstream_level :3693-:3697: LEVEL_BITS = 5 (LEVEL_MAJOR_BITS 3 +
+    // LEVEL_MINOR_BITS 2, definitions.h:390-:392); major_minor_to_seq_level_idx
+    // = (major - 2) << 2 + minor.
+    for (int major = 2; major <= 7; ++major) {
+        for (int minor = 0; minor <= 3; ++minor) {
+            WbHarness h;
+            entropy::writeBitstreamLevel(major, minor, &h.wb);
+            CHECK_EQ(h.bits(), 5u);
+            const int idx = ((major - 2) << 2) + minor;
+            for (int b = 0; b < 5; ++b) {
+                REQUIRE(h.bitAt((std::uint32_t)b) == ((idx >> (4 - b)) & 1));
+            }
+        }
+    }
+    // add_trailing_bits :3668-:3675: 0x80 literal when aligned, 1 bit else.
+    {
+        WbHarness h;
+        entropy::wbWriteBit(&h.wb, 1);
+        entropy::addTrailingBits(&h.wb);
+        CHECK_EQ(h.bits(), 2u);  // 1 + 1 (not byte aligned)
+    }
+    {
+        WbHarness h;
+        entropy::wbWriteLiteral(&h.wb, 1, 8);
+        entropy::addTrailingBits(&h.wb);
+        CHECK_EQ(h.bits(), 16u);
+        CHECK_EQ(h.bitAt(8), 1);
+        CHECK_EQ(h.bitAt(9), 0);
+        std::uint32_t ones = 0;
+        for (int b = 10; b < 16; ++b) ones += (std::uint32_t)h.bitAt((std::uint32_t)b);
+        CHECK_EQ(ones, 0u);
+    }
+    // write_obu_metadata :3678-:3691 over a 3-byte payload.
+    {
+        WbHarness h;
+        const std::uint8_t payload[3] = {0xAB, 0x01, 0xFF};
+        const std::uint32_t bytes =
+            entropy::writeObuMetadata(29, payload, 3, &h.wb);
+        CHECK_EQ(bytes, 5u);  // type(8) + 24 + trailing 8 (aligned at 32) = 40 bits
+        CHECK_EQ(h.bits(), 40u);
+        for (int b = 0; b < 8; ++b) REQUIRE(h.bitAt((std::uint32_t)b) == ((29 >> (7 - b)) & 1));
+        REQUIRE(h.bitAt(8) == 1);
+        REQUIRE(h.bitAt(9) == 0);
+        REQUIRE(h.bitAt(10) == 1);
+        REQUIRE(h.bitAt(11) == 0);
+        // The null payload writes nothing.
+        WbHarness h2;
+        CHECK_EQ(entropy::writeObuMetadata(29, NULL, 0, &h2.wb), 0u);
+        CHECK_EQ(h2.bits(), 0u);
+    }
+}
+
+TEST_CASE("writeTileGroupHeader exact bits + gates") {
+    // tiles_log2 = 0 -> nothing written.
+    {
+        std::uint8_t buf[16] = {0};
+        CHECK_EQ(entropy::writeTileGroupHeader(buf, 0, 0, 0, 1), 0u);
+    }
+    // tiles_log2 = 3, flag 0 -> one bit.
+    {
+        std::uint8_t buf[16] = {0};
+        CHECK_EQ(entropy::writeTileGroupHeader(buf, 0, 0, 3, 0), 1u);
+        CHECK_EQ((buf[0] >> 7) & 1, 0);
+    }
+    // tiles_log2 = 3, flag 1 -> 1 + 3 + 3 bits = 1 byte.
+    {
+        std::uint8_t buf[16] = {0};
+        CHECK_EQ(entropy::writeTileGroupHeader(buf, 2, 5, 3, 1), 1u);
+        // bit 0 = flag 1; literal(2, 3) = 010; literal(5, 3) = 101 ->
+        // byte 0b1_010_101 = 0x2A.
+        CHECK_EQ(buf[0], 0xAA);  // 1_010_101 = flag + literal(2,3) + literal(5,3)
+    }
+}
+
+TEST_CASE("writeColorConfig branch matrix vs oracle") {
+    // The CICP unspecified gate: primaries 2 / transfer 2 / matrix 2 -> no
+    // color description.
+    for (int prof = 0; prof < 3; ++prof) {
+        WbHarness h;
+        entropy::HdrSeqHeader sh{};
+        sh.profile = prof;
+        sh.color_primaries = 2;
+        sh.transfer_characteristics = 2;
+        sh.matrix_coefficients = 2;
+        sh.subsampling_x = 1;
+        sh.subsampling_y = 1;
+        sh.chroma_u_ac_qindex_offset = 0;
+        sh.chroma_v_ac_qindex_offset = 0;
+        sh.chroma_u_dc_qindex_offset = 0;
+        sh.chroma_v_dc_qindex_offset = 0;
+        sh.encoder_bit_depth = 8;
+        entropy::writeColorConfig(&sh, &h.wb);
+        // write_bitdepth first (1 bit for main/high 8-bit; 1 for professional
+        // 8-bit), the mono bit, no color description, color_range, then the
+        // separate_uv_delta_q bit.
+        const int want[3] = {7, 6, 7};
+        CHECK_EQ(h.bits(), (std::uint32_t)want[prof]);  // + chroma_pos(2)
+    }
+    // The color-description branch: three 8-bit literals.
+    {
+        WbHarness h;
+        entropy::HdrSeqHeader sh{};
+        sh.profile = 0;
+        sh.color_primaries = 1;
+        sh.transfer_characteristics = 13;
+        sh.matrix_coefficients = 0;
+        sh.color_range = 1;
+        sh.subsampling_x = 1;
+        sh.subsampling_y = 1;
+        entropy::writeColorConfig(&sh, &h.wb);
+        // 1 (bitdepth) + 1 (mono) + 1 (desc) + 24 (3 x 8) + 1 (range,
+        // BT709/SRGB/IDENTITY takes the sRGB branch which writes NO range
+        // bit...) - the reference writes the range bit in the else branch
+        // only: primaries 1 + transfer 13 + matrix 0 -> the sRGB combo ->
+        // no range bit, no subsampling writes, then separate_uv.
+        CHECK_EQ(h.bits(), 1u + 1u + 1u + 24u + 1u);
+    }
+}
+
+TEST_CASE("writeSequenceHeader frame-size-bits derivation") {
+    // The width/height bits are derived and WRITTEN BACK to the carrier
+    // (:2772-:2773): 256 wide needs 8 bits, 144 needs 8.
+    {
+        WbHarness h;
+        entropy::HdrSeqHeader sh{};
+        sh.max_frame_width = 256;
+        sh.max_frame_height = 144;
+        sh.reduced_still_picture_header = 1;
+        entropy::writeSequenceHeader(&sh, &h.wb);
+        CHECK_EQ(sh.frame_width_bits, 8);
+        CHECK_EQ(sh.frame_height_bits, 8);
+        // 4 + 4 + 8 + 8 = 24 dims bits + the 6 tail bits (:2795-:2838).
+        CHECK_EQ(h.bits(), 30u);
+    }
+    // A 512x512 frame: 10-bit dims (svt_log2f(512) = 9, 512 > 512? no ->
+    // 9 bits, min 1 enforced).
+    {
+        WbHarness h;
+        entropy::HdrSeqHeader sh{};
+        sh.max_frame_width = 512;
+        sh.max_frame_height = 512;
+        sh.reduced_still_picture_header = 1;
+        entropy::writeSequenceHeader(&sh, &h.wb);
+        CHECK_EQ(sh.frame_width_bits, 9);
+        CHECK_EQ(sh.frame_height_bits, 9);
+        CHECK_EQ(h.bits(), 32u);  // 26 dims + 6 tail
+    }
+    // The reduced-still-picture short-circuit: only the dim bits.
+    {
+        WbHarness h;
+        entropy::HdrSeqHeader sh{};
+        sh.max_frame_width = 1;
+        sh.max_frame_height = 1;
+        sh.reduced_still_picture_header = 1;
+        entropy::writeSequenceHeader(&sh, &h.wb);
+        CHECK_EQ(h.bits(), 16u);  // 10 dims + 6 tail
+    }
+}
+
+TEST_CASE("writeGlobalMotionParams identity vs translation vs oracle shape") {
+    // IDENTITY: one bit (type != IDENTITY = 0).
+    {
+        WbHarness h;
+        entropy::HdrWarpParams p{}, ref{};
+        entropy::writeGlobalMotionParams(&p, &ref, &h.wb, 1);
+        CHECK_EQ(h.bits(), 1u);
+        CHECK_EQ(h.bitAt(0), 0);
+    }
+    // TRANSLATION: type bit + no rotzoom bit + the two wmmat pairs through
+    // the signed refsubexpfin with (1 << (HD_GM_ABS_TRANS_ONLY_BITS - !hp)) + 1
+    // = (1 << 8) + 1 = 257 symbols, recentered around ref 0.
+    {
+        WbHarness h;
+        entropy::HdrWarpParams p{}, ref{};
+        p.wmtype = (entropy::TransformationType)1;  // TRANSLATION
+        p.wmmat[0] = 1 << HD_GM_TRANS_PREC_DIFF;    // +1.0 in trans prec
+        p.wmmat[1] = -(1 << HD_GM_TRANS_PREC_DIFF);
+        entropy::writeGlobalMotionParams(&p, &ref, &h.wb, 1);
+        CHECK_EQ(h.bitAt(0), 1);  // type != IDENTITY
+        CHECK_EQ(h.bitAt(1), 0);  // not ROTZOOM
+        CHECK_EQ(h.bitAt(2), 1);  // TRANSLATION
+        // The recenter of v = 1 around r = 0 with n = 257: v > r<<1 -> v
+        // passthrough = 1; subexpfin(257, 3, 1): 257 <= 3*8? no -> count 1,
+        // t = (1 >= 8) = 0 -> literal(1, 3) -> the code writes a bool 0 then
+        // literal bits.
+        CHECK_EQ(h.bitAt(3), 0);
+        // v2 = -1.0: recenter_nonneg(0, 510) -> v > 0<<1 -> 510; the
+        // subexpfin walk takes several rungs.
+    }
+}
+
+TEST_CASE("writeFrameSizeWithRefs found-gate vs not-found composition") {
+    // found on the first ref: bit 1 + the superres write.
+    {
+        WbHarness h;
+        entropy::HdrSeqHeader sh_ref{}; entropy::HdrAv1Common cm_ref{}; entropy::HdrPcs pcs = c2Pcs(&sh_ref, &cm_ref);
+        pcs.scs->enable_superres = 0;
+        pcs.av1_cm->frm_size.superres_denominator = 8;
+        const std::uint32_t hints[7] = {7, 0, 0, 0, 0, 0, 0};
+        const int dims[7] = {1, 0, 0, 0, 0, 0, 0};
+        entropy::writeFrameSizeWithRefs(&pcs, &h.wb, hints, dims);
+        CHECK_EQ(h.bits(), 1u);  // found bit + superres DISABLED writes nothing
+        CHECK_EQ(h.bitAt(0), 1);
+    }
+    // not found anywhere: the full write_frame_size with override = 1.
+    {
+        WbHarness h;
+        entropy::HdrSeqHeader sh_ref{}; entropy::HdrAv1Common cm_ref{}; entropy::HdrPcs pcs = c2Pcs(&sh_ref, &cm_ref);
+        pcs.scs->enable_superres = 0;
+        pcs.scs->frame_width_bits = 8;
+        pcs.scs->frame_height_bits = 8;
+        pcs.av1_cm->frm_size.superres_upscaled_width = 256;
+        pcs.av1_cm->frm_size.superres_upscaled_height = 144;
+        pcs.av1_cm->frm_size.superres_denominator = 8;
+        pcs.frame_resize_enabled = 0;
+        const std::uint32_t hints[7] = {0, 0, 0, 0, 0, 0, 0};
+        const int dims[7] = {0, 0, 0, 0, 0, 0, 0};
+        entropy::writeFrameSizeWithRefs(&pcs, &h.wb, hints, dims);
+        // 7 not-found bits + override(16) + superres(0, disabled) + render(1).
+        CHECK_EQ(h.bits(), 24u);
+        // coded_width = 255 after the 7 not-found bits (stream offset 7).
+        for (int b = 0; b < 8; ++b) REQUIRE(h.bitAt((std::uint32_t)(7 + b)) == ((255 >> (7 - b)) & 1));
+        // coded_height = 143 in the next 8.
+        for (int b = 0; b < 8; ++b) REQUIRE(h.bitAt((std::uint32_t)(15 + b)) == ((143 >> (7 - b)) & 1));
+        // The not-found bits are all zero.
+        for (int b = 0; b < 7; ++b) REQUIRE(h.bitAt((std::uint32_t)b) == 0);
+    }
+}
+
+TEST_CASE("writeUncompressedHeaderObu keyframe-with-reduced-header path") {
+    // The reduced-still-picture path: no show/type bits, no override bit,
+    // straight to the frame-size + tile + quantization chain.
+    {
+        WbHarness h;
+        entropy::HdrSeqHeader sh{};
+        entropy::HdrAv1Common cm{};
+        entropy::HdrPcs pcs{};
+        sh.reduced_still_picture_header = 1;
+        sh.max_frame_width = 256;
+        sh.max_frame_height = 144;
+        sh.seq_force_screen_content_tools = 0;
+        sh.enable_order_hint = 0;
+        sh.cdef_level = 0;
+        sh.enable_restoration = 0;
+        sh.film_grain_params_present = 0;
+        sh.subsampling_x = 1;
+        sh.subsampling_y = 1;
+        cm.mi_cols = 256;
+        cm.mi_rows = 144;
+        cm.frm_size.frame_width = 256;
+        cm.frm_size.frame_height = 144;
+        cm.frm_size.superres_upscaled_width = 256;
+        cm.frm_size.superres_upscaled_height = 144;
+        cm.frm_size.superres_denominator = 8;
+        pcs.scs = &sh;
+        pcs.av1_cm = &cm;
+        pcs.log2_sb_size = 4;
+        pcs.nb_cdef_strengths = 0;
+        pcs.frm_hdr.frame_type = entropy::HD_KEY_FRAME;
+        pcs.frm_hdr.coded_lossless = 1;
+        pcs.frm_hdr.tx_mode = entropy::HD_ONLY_4X4;
+        entropy::writeUncompressedHeaderObu(&sh, &pcs, &h.wb, 0);
+        // The reduced path: no bits before the frame size. The frame size:
+        // override flag 0 (256 == max 256, 144 == max 144) -> no override
+        // literal; superres disabled -> 1 bit; render 0 -> 1 bit.
+        // The tiles: 1 tile -> uniform + no terminators = 1 bit.
+        // quantization: base_q_idx 8 bits + delta 1 bit + qmatrix 1 bit.
+        // segmentation: 1 bit (disabled). loopfilter: no (coded_lossless 1).
+        // cdef: no. restoration: no (enable 0). tx_mode: coded_lossless 1 ->
+        // assert only. comp inter: allow_comp_inter_inter 0 -> no bit.
+        // skip mode: allowed 0 -> no bit. warped: intra-only -> no bit.
+        // reduced_tx_set: 1 bit. global motion: intra-only -> no bit.
+        // film grain: not present -> no bit.
+        CHECK_GT(h.bits(), 0u);
+        CHECK_EQ(pcs.tile_size_bytes_minus_1, 0u);
+    }
+}
+
+TEST_CASE("writeSequenceHeaderObu reduced path byte-exact") {
+    std::uint8_t buf[64] = {0};
+    entropy::HdrSeqHeader sh{};
+    sh.profile = 0;
+    sh.still_picture = 1;
+    sh.reduced_still_picture_header = 1;
+    sh.level_major = 2;
+    sh.level_minor = 0;
+    sh.max_frame_width = 256;
+    sh.max_frame_height = 144;
+    sh.filter_intra_level = 1;
+    sh.enable_intra_edge_filter = 0;
+    sh.enable_superres = 0;
+    sh.cdef_level = 1;
+    sh.enable_restoration = 1;
+    sh.film_grain_params_present = 0;
+    sh.color_primaries = 2;
+    sh.transfer_characteristics = 2;
+    sh.matrix_coefficients = 2;
+    sh.color_range = 0;
+    sh.subsampling_x = 1;
+    sh.subsampling_y = 1;
+    sh.encoder_bit_depth = 8;
+    sh.frame_width_bits = 8;
+    sh.frame_height_bits = 8;
+    const std::uint32_t bytes = entropy::writeSequenceHeaderObu(&sh, buf, 1);
+    // profile 3 + still 1 + reduced 1 + level 5 + width-bits 4 + height-bits 4
+    // + width 8 + height 8 + sb128 1 + filter-intra 1 + edge 1 + superres 1
+    // + cdef 1 + restoration 1 + mono-bit? no (profile != HIGH writes the
+    // mono bit) 1 + color desc 1 (unspecified) + separate_uv 1 = 40 bits + 8
+    // trailing = 48 bits = 6 bytes.
+    CHECK_EQ(bytes, 7u);  // 56 bits incl. the mono bit and the 6 seq tail bits
+    CHECK_EQ(sh.frame_width_bits, 8);
+    CHECK_EQ(sh.frame_height_bits, 8);
+}
+
+TEST_CASE("writeGlobalMotionParams rotzoom + affine vs oracle") {
+    // ROTZOOM: type bit 1, rotzoom bit 1 (no translation bit), then the two
+    // alpha pairs through the signed refsubexpfin with n = HD_GM_ALPHA_MAX + 1
+    // = 4097, recentered around the default ref wmmat[2] = 1 << 16 (the
+    // ref2 = -1 center) and wmmat[3] = 0 (ref3 = 0 center).
+    {
+        WbHarness h;
+        entropy::HdrWarpParams p{}, ref{};
+        ref.wmtype = (entropy::TransformationType)0;
+        ref.wmmat[2] = 1 << 16;
+        ref.wmmat[3] = 0;
+        ref.wmmat[4] = 0;
+        ref.wmmat[5] = 1 << 16;
+        p.wmtype = (entropy::TransformationType)2;  // ROTZOOM
+        p.wmmat[2] = 1 << 16;  // no alpha change: v2 == ref2 == -1
+        p.wmmat[3] = 0;
+        entropy::writeGlobalMotionParams(&p, &ref, &h.wb, 1);
+        CHECK_EQ(h.bitAt(0), 1);  // type != IDENTITY
+        CHECK_EQ(h.bitAt(1), 1);  // type == ROTZOOM
+        // With v == ref the recentered value is 0 -> the subexpfin writes a
+        // bool rung then a literal per the oracle; assert a fixed short
+        // stream: the two zero-recentered pairs each take the first rung.
+        CHECK_LT(h.bits(), 40u);
+    }
+    // The ROTZOOM-bit polarity: a TRANSLATION type must NOT read the
+    // rotzoom bit as 1.
+    {
+        WbHarness h;
+        entropy::HdrWarpParams p{}, ref{};
+        p.wmtype = (entropy::TransformationType)2;
+        p.wmmat[3] = 1 << HD_GM_ALPHA_PREC_DIFF;
+        entropy::writeGlobalMotionParams(&p, &ref, &h.wb, 1);
+        CHECK_EQ(h.bitAt(1), 1);
+    }
+    // AFFINE: the rotzoom bit is 0 and the translation bit is 0.
+    {
+        WbHarness h;
+        entropy::HdrWarpParams p{}, ref{};
+        p.wmtype = (entropy::TransformationType)3;
+        entropy::writeGlobalMotionParams(&p, &ref, &h.wb, 1);
+        CHECK_EQ(h.bitAt(0), 1);
+        CHECK_EQ(h.bitAt(1), 0);  // not ROTZOOM
+        CHECK_EQ(h.bitAt(2), 0);  // not TRANSLATION
     }
 }
