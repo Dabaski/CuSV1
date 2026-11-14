@@ -65,6 +65,7 @@ constexpr int kMaxWedgeTypes = 1 << 4;            // definitions.h:1256
 constexpr int kBlockSizesAll = 22;                // definitions.h:882-:905
 constexpr int kMaxFilterTap = 8;                  // inter_prediction.c:274
 constexpr int kAv1ProbCostShift = 9;              // md_rate_estimation.h:29
+constexpr int kDistPrecisionBits = 4;             // definitions.h:430 (DIST_PRECISION_BITS)
 
 // ---------- enums and small structs ----------
 
@@ -102,13 +103,16 @@ struct WedgeCodeType {
     std::int32_t yOffset;
 };
 
-// WedgeParamsType, inter_prediction.h:93-:98. NAMED DEVIATION: the
-// uint8_t* masks member (the runtime wedge_masks buffer) is parked with the
-// mask-synthesis machinery, so the port carries bits/codebook/signflip only.
+// WedgeParamsType, inter_prediction.h:93-:98. The masks member is the
+// WedgeMasksType* (uint8_t*(*/*)[MAX_WEDGE_TYPES]) of the reference: the
+// port threads it as a flat const pointer table, masks[sign *
+// kMaxWedgeTypes + wedge_index], backed by the runtime wedge_masks array
+// filled by initWedgeMasks (the W1 synthesis rung).
 struct WedgeParamsType {
     std::int32_t bits;
     const WedgeCodeType* codebook;
     const std::uint8_t* signflip;
+    const std::uint8_t* const* masks;
 };
 
 // SubpelParams, inter_prediction.h:50-:55.
@@ -252,6 +256,428 @@ std::int32_t getWedgeBitsLookup(int bsize);
 
 // svt_aom_get_wedge_params_bits, inter_prediction.c:2064-:2066.
 std::int32_t getWedgeParamsBits(int bsize);
+
+// ---------- A3E J1: the jnt (compound) convolve family, 8-bit ----------
+
+// svt_av1_jnt_convolve_2d_c, inter_prediction.c:529-:585. The MC1 park
+// ("the jnt compound convolve family :529-:714") RESOLVES here: the pinned
+// build has CONFIG_ENABLE_INTER_COMPOUND=1 (EbConfigMacros.h:187), so the
+// jnt slots are live dispatch targets, not dead code.
+void jntConvolve2d(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                   std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                   const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                   ConvolveParams* convParams);
+
+// svt_av1_jnt_convolve_y_c, inter_prediction.c:587-:630. The single-axis
+// order quirk is pinned by test: res is scaled by (1 << bits) with
+// bits = FILTER_BITS - round_0 BEFORE the round_1, then round_offset is
+// added back in (the 2d form has no such scale).
+void jntConvolveY(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                  std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                  const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                  ConvolveParams* convParams);
+
+// svt_av1_jnt_convolve_x_c, inter_prediction.c:632-:675. The x twin's order
+// is the INVERSE of the y twin: res = (1 << bits) * ROUND(res, round_0)
+// with bits = FILTER_BITS - round_1, then round_offset is added.
+void jntConvolveX(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                  std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                  const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                  ConvolveParams* convParams);
+
+// ---------- A3E J2: the highbd sr convolve family ----------
+
+// svt_av1_highbd_convolve_2d_copy_sr_c, inter_prediction.c:716-:732. The
+// MC1 park ("the highbd convolve family :716-:1098") RESOLVES here: the
+// pinned build has CONFIG_ENABLE_HIGH_BIT_DEPTH=1 (EbConfigMacros.h:175),
+// so the hbd slots are live dispatch targets. The src/dst planes are
+// uint16 (the reference's CONVERT_TO_SHORTPTR form); bd threads the clip.
+void highbdConvolve2dCopySr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                            std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                            const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                            std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                            std::int32_t bd);
+
+// svt_av1_highbd_convolve_2d_copy_sr_c, inter_prediction.c:716-:732. The
+// MC1 park ("the highbd convolve family :716-:1098") RESOLVES here: the
+// pinned build has CONFIG_ENABLE_HIGH_BIT_DEPTH=1 (EbConfigMacros.h:175),
+// so the hbd slots are live dispatch targets. The src/dst planes are
+// uint16 (the reference's CONVERT_TO_SHORTPTR form); bd threads the clip.
+void highbdConvolve2dCopySr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                            std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                            const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                            std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                            std::int32_t bd);
+
+// svt_av1_highbd_convolve_x_sr_c, inter_prediction.c:734-:759. The clip is
+// bd-parameterized (clip_pixel_highbd), the 8-bit twin's is hardwired 8.
+void highbdConvolveXsr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams, std::int32_t bd);
+
+
+// svt_av1_highbd_convolve_y_sr_c, inter_prediction.c:761-:785. Same shape as
+// the x twin, vertical pass, res rounded by FILTER_BITS directly.
+void highbdConvolveYsr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams, std::int32_t bd);
+
+// svt_av1_highbd_convolve_2d_sr_c, inter_prediction.c:787-:829. Two quirks
+// vs the 8-bit twin, both pinned by test: the horizontal intermediate is
+// stored through ConvBufType (uint16 truncation of the round_0 result) and
+// the vertical res is a plain int32 (no int16 cast) before the bd clip.
+void highbdConvolve2dSr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                        std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                        const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                        ConvolveParams* convParams, std::int32_t bd);
+
+// svt_av1_highbd_convolve_2d_scale_c, inter_prediction.c:831-:906. The
+// SCALE_SUBPEL_BITS=10 stepping; the compound branches carry dst16 in
+// conv_params (use_dist_wtd_comp_avg or plain average), all clipped at bd.
+void highbdConvolve2dScale(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                           std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                           const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                           std::int32_t subpelXQn, std::int32_t xStepQn, std::int32_t subpelYQn, std::int32_t yStepQn,
+                           ConvolveParams* convParams, std::int32_t bd);
+
+// highbd_convolve_2d_for_intrabc, inter_prediction.c:1243-:1257. The same
+// three-arm dispatch as the 8-bit twin, BILINEAR filters at fixed subpel
+// 8, bd threaded to the kernels.
+void highbdConvolve2dForIntrabc(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst,
+                                std::int32_t dstStride, std::int32_t w, std::int32_t h, std::int32_t subpelXQ4,
+                                std::int32_t subpelYQ4, ConvolveParams* convParams, std::int32_t bd);
+void highbdConvolveYsr(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams, std::int32_t bd);
+
+// svt_av1_jnt_convolve_2d_copy_c, inter_prediction.c:677-:714. The no-subpel
+// compound copy: res = src << bits (bits = 2*FILTER_BITS - round_1 -
+// round_0), + round_offset as ConvBufType, then the same compose tail.
+void jntConvolve2dCopy(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst8, std::int32_t dst8Stride,
+                       std::int32_t w, std::int32_t h, const InterpFilterParams* filterParamsX,
+                       const InterpFilterParams* filterParamsY, std::int32_t subpelXQ4, std::int32_t subpelYQ4,
+                       ConvolveParams* convParams);
+
+// ---------- A3E J3: the highbd jnt (compound) family ----------
+
+// svt_av1_highbd_jnt_convolve_x_c, inter_prediction.c:908-:951. The dst16
+// OUTPUT parameter is the uint16 analogue of the 8-bit family's dst8 (clip
+// at bd); the staging CONV_BUF (conv_params->dst) carries res. The x order
+// quirk (round BEFORE the (1 << bits) scale) is inherited from the 8-bit
+// twin; offset_bits/round_offset are bd-carried here.
+void highbdJntConvolveX(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst16,
+                        std::int32_t dst16Stride, std::int32_t w, std::int32_t h,
+                        const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                        std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                        std::int32_t bd);
+
+// svt_av1_highbd_jnt_convolve_y_c, inter_prediction.c:953-:996. The y
+// order quirk (scale (1 << bits) BEFORE round_1) inherited from the 8-bit
+// twin; offset_bits/round_offset bd-carried.
+void highbdJntConvolveY(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst16,
+                        std::int32_t dst16Stride, std::int32_t w, std::int32_t h,
+                        const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                        std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                        std::int32_t bd);
+
+// svt_av1_highbd_jnt_convolve_2d_copy_c, inter_prediction.c:998-:1035. The
+// copy twin: res = src << bits, + round_offset (ConvBufType arithmetic).
+void highbdJntConvolve2dCopy(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst16,
+                             std::int32_t dst16Stride, std::int32_t w, std::int32_t h,
+                             const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                             std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                             std::int32_t bd);
+
+// svt_av1_highbd_jnt_convolve_2d_c, inter_prediction.c:1037-:1097. The 2d
+// twin of the 8-bit jntConvolve2d: bd-carried bias (1 << (bd + FB - 1)),
+// ConvBufType staging in the int16 im_block, dst16 output clipped at bd.
+void highbdJntConvolve2d(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst16,
+                         std::int32_t dst16Stride, std::int32_t w, std::int32_t h,
+                         const InterpFilterParams* filterParamsX, const InterpFilterParams* filterParamsY,
+                         std::int32_t subpelXQ4, std::int32_t subpelYQ4, ConvolveParams* convParams,
+                         std::int32_t bd);
+
+// ---------- A3E W1: the wedge mask synthesis ----------
+// The MC1 park ("the wedge MASK synthesis ... runtime buffers, not
+// transcribed tables") RESOLVES: the masks are COMPUTED, so they are
+// ported as code with property tests, not as tables.
+
+// block_size_wide/high (common_utils.c:286-:289), exported as data (the
+// l7 blockSizeWide pattern) so tests and the mask walker share them.
+extern const std::uint8_t kBlockSizeWide[22];
+extern const std::uint8_t kBlockSizeHigh[22];
+
+// ---------- A3E S2: the tail utilities ----------
+
+// svt_aom_sum_squares_i16_c, inter_prediction.c:2533-:2541. The
+// do/while(--n) contract requires N >= 1 (callers pass bw * bh >= 64).
+std::uint64_t sumSquaresI16(const std::int16_t* src, std::uint32_t n);
+
+// svt_av1_wedge_sse_from_residuals_c, inter_prediction.c:2468-:2477. The
+// partial term clamps to int16 (the reference's SIMD-parity note).
+std::uint64_t wedgeSseFromResiduals(const std::int16_t* r1, const std::int16_t* d, const std::uint8_t* m, int n);
+
+// obmc_mask_N tables + svt_av1_get_obmc_mask, inter_prediction.c:2543-:2574.
+const std::uint8_t* getObmcMask(int length);
+
+// svt_aom_mode_context_analyzer, inter_prediction.c:2576-:2592. rf threads
+// as the two MvReferenceFrame ints (INTRA_FRAME = 0, definitions.h:1359).
+std::int16_t modeContextAnalyzer(std::int16_t modeContext, const std::int32_t* rf);
+
+// shift_copy, inter_prediction.c:2053-:2062 (file-local static in the
+// reference; exported for testability, the DF1 cdefSign precedent).
+void shiftCopy(const std::uint8_t* src, std::uint8_t* dst, int shift, int width);
+
+// init_wedge_primary_masks, inter_prediction.c:2077-:2130 (exported for
+// the test's independent row-reconstruction oracle, DF1 precedent).
+void initWedgePrimaryMasks();
+
+// init_wedge_masks, inter_prediction.c:2188-:2214 (the static table
+// filler; exported for the same reason).
+void initWedgeMaskTable();
+
+// svt_av1_init_wedge_masks, inter_prediction.c:2217-:2223: the primary
+// planes, then the contiguous window copies (the USE_PRECOMPUTED_WEDGE_SIGN
+// branch - init_wedge_signs :2136-:2170 is compiled out of the pinned
+// build; its average rule is replicated in the test as the consistency
+// oracle against the precomputed table).
+void initWedgeMasks();
+
+// get_wedge_mask_inplace, inter_prediction.c:2173-:2186 (file-local static
+// in the reference; exported for testability, the DF1 precedent).
+const std::uint8_t* getWedgeMaskInplace(int wedgeIndex, int neg, int bsize);
+
+// svt_aom_get_contiguous_soft_mask, inter_prediction.c:2034-:2036.
+const std::uint8_t* getContiguousSoftMask(int wedgeIndex, int wedgeSign, int bsize);
+
+// Read-only view of the wedge_mask_obl plane set (inter_prediction.c:2071)
+// for the test's plane-level oracle: [neg][dir] blocks of 64x64,
+// dir-major as in the reference layout. Exported for testability (DF1
+// precedent); no production caller.
+const std::uint8_t* wedgeMaskOblData();
+
+// Mv, mv.h:46-:58 (the union; the ported spans consume only x/y, so the
+// as_int alias is parked - named deviation).
+struct Mv {
+    std::int16_t x;
+    std::int16_t y;
+};
+
+// svt_aom_find_ref_dv, inter_prediction.c:2401-:2412. The TileInfo
+// (mi_row_start), mib_size, mi_row and mi_col thread as parameters (the
+// tile struct is the AMVP1 carrier precedent); mi_col is voided as in the
+// reference.
+void findRefDv(Mv* refDv, int miRowStart, int mibSize, int miRow);
+
+// svt_av1_skip_u4x4_pred_in_obmc, inter_prediction.c:2414-:2436.
+// DISABLE_CHROMA_U8X8_OBMC = 0 (inter_prediction.h:41): the one-sided
+// branch; bsize threads as the 0..21 index.
+int skipU4x4PredInObmc(int bsize, int dir, int subsamplingX, int subsamplingY);
+
+// svt_aom_scale_chroma_bsize, intra_prediction.c:2492-:2544 (the
+// definition lives in intra_prediction.c; declared at
+// inter_prediction.c:1198). bsize threads as the 0..21 index.
+int scaleChromaBsize(int bsize, int subsamplingX, int subsamplingY);
+// ---------- A3E E2: the curvfit RD-model family ----------
+
+// interp_rgrid_curv / interp_dgrid_curv, enc_inter_prediction.c:204-:270,
+// mechanically extracted literal-for-literal (RC1 precedent).
+extern const double interpRgridCurv[4][65];
+extern const double interpDgridCurv[2][65];
+
+// bsize_curvfit_model_cat_lookup, enc_inter_prediction.c:197-:198.
+extern const std::uint8_t bsizeCurvfitModelCatLookup[kBlockSizesAll];
+
+// av1_model_rd_curvfit, enc_inter_prediction.c:294-:312 (static in the
+// reference; exported for the test oracle, DF1 precedent).
+void modelRdCurvfit(int bsize, double sseNorm, double xqr, double* rateF, double* distbysseF);
+
+// model_rd_with_curvfit, enc_inter_prediction.c:316-:361. The pcs/dequants
+// wall threads as the quantizer value (the dequants->y_dequant_qtx
+// [current_q_index][1] read is caller-side); the dequant shift is the
+// reference's constant 3 (named deviation).
+void modelRdWithCurvfit(int bsize, std::int64_t sse, int numSamples, std::int16_t quantizer, std::uint32_t rdmult,
+                        std::uint32_t* rate, std::uint64_t* dist);
+// ---------- A3E E1: the enc-side MV clamp ----------
+
+// clamp_mv (mv.h:70-:73) duplicated locally (the SYM1 wb-trio precedent;
+// l17 cannot link l5 where the port's clampMv lives).
+inline void clampMvLocal(Mv* mv, std::int32_t minCol, std::int32_t maxCol, std::int32_t minRow,
+                         std::int32_t maxRow) {
+    mv->x = (std::int16_t)(mv->x < minCol ? minCol : (mv->x > maxCol ? maxCol : mv->x));
+    mv->y = (std::int16_t)(mv->y < minRow ? minRow : (mv->y > maxRow ? maxRow : mv->y));
+}
+
+// clamp_mv_to_umv_border_sb, enc_inter_prediction.c:55-:75. The xd
+// mb_to_left/right/top/bottom_edge fields thread as the four int
+// parameters (the AMVP1 carrier precedent).
+Mv clampMvToUmvBorderSb(std::int32_t mbToLeftEdge, std::int32_t mbToRightEdge, std::int32_t mbToTopEdge,
+                        std::int32_t mbToBottomEdge, const Mv* srcMv, std::int32_t bw, std::int32_t bh,
+                        std::int32_t ssX, std::int32_t ssY);
+
+// eb_num_pels_log2_lookup, common_utils.c.
+extern const std::uint8_t ebNumPelsLog2Lookup[kBlockSizesAll];
+// ---------- A3E E3: the pick_wedge family ----------
+
+// InterInterCompoundData, definitions.h:1280-:1293 (the fields the pick
+// family consumes).
+struct InterInterCompoundData {
+    CompoundType type;
+    std::uint8_t wedgeIndex;
+    std::uint8_t wedgeSign;
+    DiffwtdMaskType maskType;
+};
+
+// The ModeDecisionContext / PictureControlSet fields the pick family
+// consumes (the AMVP1 carrier precedent). hbdMd is the FOLDED
+// SVT_EFFECTIVE_HBD_MD (0 = 8-bit, 1 = 10-bit; the EB_DUAL_BIT_MD fold
+// is caller-side - named deviation).
+struct WedgePickCtx {
+    std::uint8_t hbdMd;
+    std::uint32_t fullLambdaMd[2]; // [EB_8_BIT_MD, EB_10_BIT_MD]
+    std::uint8_t useRate;          // inter_comp_ctrls.use_rate
+    std::uint8_t useRdModel;       // inter_intra_comp_ctrls.use_rd_model
+    std::int16_t quantizer;        // dequants->y_dequant_qtx[q][1]
+    std::int32_t blkOrgX;
+    std::int32_t blkOrgY;
+};
+
+// pick_wedge, enc_inter_prediction.c:424-:487. srcBase is the ALREADY
+// OFFSET source pointer (the reference's y_buffer + blk_org_x +
+// blk_org_y * y_stride), read as uint8 or uint16 per hbdMd.
+void pickWedge(WedgePickCtx& ctx, const void* srcBase, int srcStride, int bsize, const std::uint8_t* p0,
+               const std::int16_t* residual1, const std::int16_t* diff10, std::int8_t* bestSign,
+               std::int8_t* bestIndex);
+
+// pick_wedge_fixed_sign, enc_inter_prediction.c:490-:523. wedgeIdxCost
+// threads the ctx->md_rate_est_ctx->wedge_idx_fac_bits[bsize] row (the
+// reference indexes [bsize][wedge_index] inside).
+std::int64_t pickWedgeFixedSign(WedgePickCtx& ctx, int bsize, const std::int16_t* residual1,
+                                const std::int16_t* diff10, std::int8_t wedgeSign, std::int8_t* bestIndex,
+                                const int* wedgeIdxCost);
+
+// pick_interinter_wedge, enc_inter_prediction.c:525-:538.
+void pickInterinterWedge(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
+                         const std::int16_t* residual1, const std::int16_t* diff10, const void* srcBase,
+                         int srcStride);
+
+// pick_interinter_seg, enc_inter_prediction.c:540-:584.
+void pickInterinterSeg(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
+                       const std::uint8_t* p1, const std::int16_t* residual1, const std::int16_t* diff10);
+
+// pick_interinter_mask, enc_inter_prediction.c:586-:598.
+void pickInterinterMask(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
+                        const std::uint8_t* p1, const std::int16_t* residual1, const std::int16_t* diff10,
+                        const void* srcBase, int srcStride);
+// ---------- A3E E4: the OBMC walker + calc_target_weighted_pred family ----------
+
+// mi_size_wide/high, common_utils.c:291-:292.
+extern const std::uint8_t miSizeWide[22];
+extern const std::uint8_t miSizeHigh[22];
+
+// The walker's read surface of MbModeInfo (the AMVP1 carrier precedent):
+// is_neighbor_overlappable (inter_prediction.h:242-:244) reads
+// block_mi.ref_frame[0] > INTRA_FRAME; the step reads bsize.
+struct ObmcNbMi {
+    std::int32_t refFrame0;
+    std::uint8_t bsize;
+};
+
+// The walker's read surface of MacroBlockD: the mi pointer INTO the grid,
+// the row stride, the block extent in mi units, and the availability
+// flags.
+struct ObmcXd {
+    const ObmcNbMi* mi;
+    int miStride;
+    int n4W;
+    int n4H;
+    int upAvailable;
+    int leftAvailable;
+};
+
+// overlappable_nb_visitor_t, enc_inter_prediction.c:709-:710 (the xd/nb
+// structs thread as void* carriers).
+using ObmcVisitor = void (*)(std::uint8_t is16bit, void* xd, int relMiPos, std::uint8_t nbMiSize,
+                             const ObmcNbMi* nbMi, void* funCtxt);
+
+// foreach_overlappable_nb_above, enc_inter_prediction.c:712-:743.
+void foreachOverlappableNbAbove(std::uint8_t is16bit, int miCols, ObmcXd* xd, int miCol, int nbMax, ObmcVisitor fun,
+                                void* funCtxt);
+
+// foreach_overlappable_nb_left, enc_inter_prediction.c:745-:771.
+void foreachOverlappableNbLeft(std::uint8_t is16bit, int miRows, ObmcXd* xd, int miRow, int nbMax, ObmcVisitor fun,
+                               void* funCtxt);
+
+// calc_target_weighted_pred_ctxt (enc_inter_prediction.c, the struct the
+// two visitors consume; field order {mask_buf, wsrc_buf, tmp,
+// tmp_stride, overlap} per the reference's initializer).
+struct CalcTargetWeightedPredCtxt {
+    std::int32_t* maskBuf;
+    std::int32_t* wsrcBuf;
+    const std::uint8_t* tmp;
+    int tmpStride;
+    int overlap;
+};
+
+// svt_av1_calc_target_weighted_pred_above_c, enc_inter_prediction.c:1581-:1607.
+// The xd n4_w read threads as the bw parameter (named deviation).
+void calcTargetWeightedPredAbove(const ObmcXd& xd, int relMiCol, std::uint8_t nbMiWidth,
+                                 CalcTargetWeightedPredCtxt* ctxt);
+
+// svt_av1_calc_target_weighted_pred_left_c, enc_inter_prediction.c:1609-:1635.
+void calcTargetWeightedPredLeft(const ObmcXd& xd, int relMiRow, std::uint8_t nbMiHeight,
+                                CalcTargetWeightedPredCtxt* ctxt);
+// ---------- A3E E5: the subpel-params + tf predictor rung ----------
+
+// compute_subpel_params, enc_inter_prediction.c:2394-:2444. The scs
+// (super_block_size) and xd (mb_to_*_edge) walls thread as parameters;
+// SCALE_EXTRA_OFF = (1 << SCALE_EXTRA_BITS) / 2 (definitions.h:445).
+void computeSubpelParams(int superBlockSize, std::int16_t preY, std::int16_t preX, Mv mv, const ScaleFactors* sf,
+                         std::uint16_t frameWidth, std::uint16_t frameHeight, std::uint8_t blkWidth,
+                         std::uint8_t blkHeight, std::int32_t mbToLeftEdge, std::int32_t mbToRightEdge,
+                         std::int32_t mbToTopEdge, std::int32_t mbToBottomEdge, std::uint32_t ssY, std::uint32_t ssX,
+                         SubpelParams* subpelParams, std::int32_t* posY, std::int32_t* posX);
+
+// tf_inter_predictor, enc_inter_prediction.c:2446-:2501. The scs/xd walls
+// thread as in computeSubpelParams; the dispatch is the landed
+// interPredictor / highbdInterPredictor pair.
+void tfInterPredictor(int superBlockSize, const std::uint8_t* srcPtr, std::uint8_t* dstPtr, std::int16_t preY,
+                      std::int16_t preX, Mv mv, const ScaleFactors* sf, ConvolveParams* convParams,
+                      std::uint32_t interpFilters, std::uint16_t frameWidth, std::uint16_t frameHeight,
+                      std::uint8_t blkWidth, std::uint8_t blkHeight, std::int32_t mbToLeftEdge,
+                      std::int32_t mbToRightEdge, std::int32_t mbToTopEdge, std::int32_t mbToBottomEdge,
+                      std::int32_t srcStride, std::int32_t dstStride, std::uint8_t bitDepth,
+                      std::uint8_t subsamplingShift);
+// ---------- A3E J4: the dispatch rung ----------
+
+// svt_highbd_inter_predictor, inter_prediction.c:1455-:1523. The
+// svt_aom_convolveHbd function-pointer table (:1099) dispatches as direct
+// calls (the MC1 named deviation); ALL EIGHT slots are live after J3.
+void highbdInterPredictor(const std::uint16_t* src, std::int32_t srcStride, std::uint16_t* dst, std::int32_t dstStride,
+                          const SubpelParams* subpelParams, const ScaleFactors* sf, std::int32_t w, std::int32_t h,
+                          ConvolveParams* convParams, std::uint32_t interpFilters, std::int32_t isIntrabc,
+                          std::int32_t bd);
+
+// svt_inter_predictor_pd0, inter_prediction.c:1261-:1286. The scaled arm
+// routes convolve_2d_scale with the EIGHTTAP_REGULAR pair; the unscaled
+// arm is the [0][0] slot of the 8-bit table: copy_sr (single-ref) or
+// jnt_convolve_2d_copy (compound).
+void interPredictorPd0(const std::uint8_t* src, std::int32_t srcStride, std::uint8_t* dst, std::int32_t dstStride,
+                       std::int32_t w, std::int32_t h, SubpelParams* subpelParams, ConvolveParams* convParams);
+
+// svt_inter_predictor_light_pd1, inter_prediction.c:1288-:1395. The bd > 8
+// arm packs the reference into the 16-bit temp buffer (PACKED_BUFFER_SIZE,
+// definitions.h:344-:346; INTERPOLATION_OFFSET = 8; the stride 8-aligned
+// per ALIGN_POWER_OF_TWO, definitions.h:996) and dispatches the hbd table;
+// the 8-bit arm dispatches the plain table. The PO1-parked
+// svt_aom_pack2d_src threads as the injectable packer (packBlock).
+void interPredictorLightPd1(const std::uint8_t* src, const std::uint8_t* src2b, std::int32_t srcStride,
+                            std::uint8_t* dst, std::int32_t dstStride, std::int32_t w, std::int32_t h,
+                            std::uint32_t interpFilters, SubpelParams* subpelParams, ConvolveParams* convParams,
+                            std::int32_t bd, Pack2dFn pack2d);
 
 // ---------- T3: sr convolve wrappers + intrabc + the dispatch ----------
 
