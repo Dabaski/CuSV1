@@ -148,5 +148,111 @@ void getMaxAllocatedMeRefs(std::uint8_t ref_count_used_list0, std::uint8_t ref_c
 // share statics; the SYM1/l7-cannot-link-l13 precedent).
 std::int32_t getRefFrameType(std::uint8_t list, std::uint8_t ref_idx);
 
+// ---------------------------------------------------------------------------
+// The ref-mgmt slot state machine (pd_process.c:1164-:1492).
+// ---------------------------------------------------------------------------
+
+// pd_process.h:52-:56 DpbEntry (the consumed field).
+struct DpbEntry {
+    std::uint64_t picture_number;
+};
+
+// pcs.h:745-:749 RefMgmt.
+struct RefMgmt {
+    std::uint32_t store_id;
+    std::uint32_t clear_id;
+    std::uint32_t use_id;
+};
+
+// pred_structure.h:65-:69 Av1RpsNode (verbatim field set).
+struct Av1RpsNode {
+    std::uint8_t refresh_frame_mask;
+    std::uint8_t ref_dpb_index[7];
+    std::uint64_t ref_poc_array[7];
+};
+
+// The PictureDecisionContext window (pd_process.h:98-:99, :148 + the
+// dpb). NAMED DEVIATION: the reference's dpb is a DpbEntry array; the
+// carrier holds the consumed picture_number column flat.
+struct PdCtx {
+    std::uint32_t pic_id_per_dpb_slot[kRefFrames];
+    std::uint64_t dpb_picture_number[kRefFrames];
+    std::uint8_t lay0_toggle;
+    std::uint8_t lay1_toggle;
+};
+
+// The SequenceControlSet window the family reads: static_config.rtc /
+// hierarchical_levels / pred_structure / max_managed_refs (pcs.c
+// static_config) + mrp_ctrls.ld_reduce_ref_buffs (definitions.h:111+).
+struct PdScsCfg {
+    std::uint8_t rtc;
+    std::uint8_t hierarchical_levels;
+    std::uint8_t pred_structure;
+    std::uint8_t max_managed_refs;
+    std::uint8_t ld_reduce_ref_buffs;
+};
+
+// The PictureParentControlSet window for the ref-mgmt family + the
+// frm_hdr/pcs display fields set_key_frame_rps writes.
+struct PdPcsRefMgmt {
+    RefMgmt ref_mgmt;
+    Av1RpsNode av1_ref_signal;
+    std::uint64_t picture_number;
+    std::uint8_t temporal_layer_index;
+    std::uint8_t is_overlay;
+    std::uint8_t ref_list0_count;
+    std::uint8_t ref_list1_count;
+    std::uint8_t show_frame;      // frm_hdr->show_frame
+    std::uint8_t has_show_existing;  // pcs->has_show_existing
+    PdScsCfg scs;
+};
+
+// LAY1_OFF / LAY2_OFF (pd_process.c:46-:47).
+constexpr std::uint32_t kLay1Off = 3;
+constexpr std::uint32_t kLay2Off = 5;
+
+// definitions.h:649-:654 svt_numbits, verbatim.
+std::int32_t svtNumbits(unsigned int x);
+
+// definitions.h:614-:618 svt_ctz (the MSVC _BitScanForward branch; the
+// GCC branch is __builtin_ctz on the same semantics).
+std::int32_t svtCtz(unsigned long x);
+
+// ref_mgmt_reset_state (pd_process.c:1164-:1166).
+void refMgmtResetState(PdCtx* ctx);
+
+// ref_mgmt_stored_mask (pd_process.c:1174-:1182).
+std::uint8_t refMgmtStoredMask(const PdCtx& ctx);
+
+// ref_mgmt_find_slot (pd_process.c:1193-:1203): returns kRefFrames on
+// miss (id 0 is the no-id sentinel).
+std::uint8_t refMgmtFindSlot(const PdCtx& ctx, std::uint32_t pic_id);
+
+// apply_ref_clear (pd_process.c:1206-:1216). DEVIATION (named): the
+// SVT_ERROR warn on miss becomes a silent no-op - the port has no error
+// channel; the no-op + unchanged state is the observable behavior.
+void applyRefClear(PdPcsRefMgmt& pcs, PdCtx* ctx);
+
+// exclusive_write_slots_mask_ld_cbr (pd_process.c:1227-:1259).
+std::uint8_t exclusiveWriteSlotsMaskLdCbr(const PdScsCfg& scs);
+
+// svt_aom_ref_mgmt_storeable_slots_mask (pd_process.c:1261-:1278).
+std::uint8_t refMgmtStoreableSlotsMask(const PdScsCfg& scs);
+
+// apply_ref_store (pd_process.c:1291-:1327): returns the picked slot or
+// kRefFrames on failure (duplicate id, cap, full safe pool). The
+// SVT_ERROR warns become silent no-ops (the deviation above).
+std::uint8_t applyRefStore(PdPcsRefMgmt& pcs, PdCtx* ctx);
+
+// apply_ref_use (pd_process.c:1338-:1357).
+bool applyRefUse(PdPcsRefMgmt& pcs, const PdCtx& ctx);
+
+// apply_ref_mgmt_events (pd_process.c:1380-:1480): the CLEAR -> STORE ->
+// refresh guard -> USE dispatcher.
+void applyRefMgmtEvents(PdPcsRefMgmt& pcs, PdCtx* ctx);
+
+// set_key_frame_rps (pd_process.c:1482-:1492).
+void setKeyFrameRps(PdPcsRefMgmt& pcs, PdCtx* ctx);
+
 }  // namespace pd
 }  // namespace pipeline

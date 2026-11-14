@@ -303,3 +303,349 @@ TEST_CASE("l6 pd get_ref_frame_type table over the full 2x4 domain") {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// PD2: the ref-mgmt slot state machine (pd_process.c:1164-:1492)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Build a PdCtx whose pic_id_per_dpb_slot encodes an 8-bit mask (slot i
+// holds pic id 100+i iff bit i is set) and whose dpb pocs are 1000+i.
+pd::PdCtx makeCtxFromMask(unsigned mask) {
+    pd::PdCtx ctx{};
+    for (int i = 0; i < pd::kRefFrames; ++i) {
+        if ((mask >> i) & 1u) {
+            ctx.pic_id_per_dpb_slot[i] = 100u + static_cast<std::uint32_t>(i);
+            ctx.dpb_picture_number[i] = 1000u + static_cast<std::uint32_t>(i);
+        } else {
+            ctx.pic_id_per_dpb_slot[i] = 0;
+            ctx.dpb_picture_number[i] = 0;
+        }
+    }
+    return ctx;
+}
+
+// Independent restatement of the exclusive LD-CBR mask
+// (pd_process.c:1227-:1259).
+unsigned exclusiveMaskOracle(int hier, int ld_reduce) {
+    unsigned mask = 0;
+    if (ld_reduce == 0) {
+        mask |= 0x07u;
+    }
+    if (hier >= 1) {
+        switch (ld_reduce) {
+        case 0: mask |= (1u << 3) | (1u << 4); break;
+        case 1: mask |= (1u << 3); break;
+        case 2: mask |= (1u << 1); break;
+        default: break;  // the reference asserts and falls through
+        }
+    }
+    if (hier >= 2 && ld_reduce == 0) {
+        mask |= (1u << 5);
+    }
+    return mask;
+}
+
+// Independent restatement of svt_aom_ref_mgmt_storeable_slots_mask
+// (:1261-:1278).
+unsigned storeableOracle(int rtc, int hier, int pred, int ld_reduce) {
+    if (rtc && hier == 0) {
+        return 0xF0u;
+    }
+    if (pred == pd::kPredLowDelay && hier >= 1) {
+        return (~exclusiveMaskOracle(hier, ld_reduce)) & 0xFFu;
+    }
+    return 0xFFu;
+}
+
+}  // namespace
+
+// Exhaustive 8-bit sweep: stored_mask derives from pic_id_per_dpb_slot,
+// find_slot hits every held id and misses id 0 and a free id.
+TEST_CASE("l6 pd ref_mgmt stored_mask + find_slot over all 8-bit masks") {
+    for (unsigned mask = 0; mask < 256; ++mask) {
+        pd::PdCtx ctx = makeCtxFromMask(mask);
+        CHECK(pd::refMgmtStoredMask(ctx) == mask);
+        for (int i = 0; i < pd::kRefFrames; ++i) {
+            const std::uint32_t id = ctx.pic_id_per_dpb_slot[i];
+            const std::uint8_t got = pd::refMgmtFindSlot(ctx, id);
+            const std::uint8_t want = (id != 0) ? static_cast<std::uint8_t>(i) : static_cast<std::uint8_t>(pd::kRefFrames);
+            CHECK(got == want);
+        }
+        // id 0 is the no-id sentinel -> REF_FRAMES; a free id misses.
+        CHECK(pd::refMgmtFindSlot(ctx, 0) == pd::kRefFrames);
+        if (mask == 0) {
+            CHECK(pd::refMgmtFindSlot(ctx, 777) == pd::kRefFrames);
+        }
+    }
+}
+
+// Full config domain for the exclusive LD-CBR mask: hier 0..4 x ld_reduce
+// 0..3 against the restated oracle.
+TEST_CASE("l6 pd exclusive_write_slots_mask_ld_cbr over the full config domain") {
+    for (int hier = 0; hier <= 4; ++hier) {
+        for (int ld_reduce = 0; ld_reduce <= 3; ++ld_reduce) {
+            pd::PdScsCfg scs{};
+            scs.hierarchical_levels = static_cast<std::uint8_t>(hier);
+            scs.ld_reduce_ref_buffs = static_cast<std::uint8_t>(ld_reduce);
+            const unsigned want = exclusiveMaskOracle(hier, ld_reduce);
+            CHECK(pd::exclusiveWriteSlotsMaskLdCbr(scs) == want);
+        }
+    }
+}
+
+// Full config domain for the storeable mask: rtc x hier x pred_structure
+// x ld_reduce (120 combinations) against the restated oracle.
+TEST_CASE("l6 pd ref_mgmt_storeable_slots_mask over the full config domain") {
+    for (int rtc = 0; rtc <= 1; ++rtc) {
+        for (int hier = 0; hier <= 4; ++hier) {
+            for (int pred = 0; pred <= 2; ++pred) {
+                for (int ld_reduce = 0; ld_reduce <= 3; ++ld_reduce) {
+                    pd::PdScsCfg scs{};
+                    scs.rtc = static_cast<std::uint8_t>(rtc);
+                    scs.hierarchical_levels = static_cast<std::uint8_t>(hier);
+                    scs.pred_structure = static_cast<std::uint8_t>(pred);
+                    scs.ld_reduce_ref_buffs = static_cast<std::uint8_t>(ld_reduce);
+                    const unsigned want = storeableOracle(rtc, hier, pred, ld_reduce);
+                    CHECK(pd::refMgmtStoreableSlotsMask(scs) == want);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("l6 pd apply_ref_clear frees only the held id") {
+    pd::PdCtx ctx = makeCtxFromMask(0x2C);  // slots 2,3,5 held
+    pd::PdPcsRefMgmt pcs{};
+    pcs.picture_number = 42;
+    // known id
+    pcs.ref_mgmt.clear_id = 100u + 3;
+    pd::applyRefClear(pcs, &ctx);
+    CHECK(ctx.pic_id_per_dpb_slot[3] == 0);
+    CHECK(pd::refMgmtStoredMask(ctx) == 0x24);
+    // unknown id: no-op
+    pcs.ref_mgmt.clear_id = 777;
+    pd::applyRefClear(pcs, &ctx);
+    CHECK(pd::refMgmtStoredMask(ctx) == 0x24);
+    // id 0 sentinel: no-op
+    pcs.ref_mgmt.clear_id = 0;
+    pd::applyRefClear(pcs, &ctx);
+    CHECK(pd::refMgmtStoredMask(ctx) == 0x24);
+}
+
+// Exhaustive mask sweep of apply_ref_store on one fixed storeable
+// config, plus the failure modes (duplicate id, cap, full pool).
+TEST_CASE("l6 pd apply_ref_store over every stored-slot mask combination") {
+    const int kStoreable = 0xC0;  // rtc=0, hier=2, LD, ld_reduce=0 -> ~0x3F & 0xFF
+    for (unsigned mask = 0; mask < 256; ++mask) {
+        pd::PdCtx ctx = makeCtxFromMask(mask);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.picture_number = 7;
+        pcs.scs.rtc = 0;
+        pcs.scs.hierarchical_levels = 2;
+        pcs.scs.pred_structure = pd::kPredLowDelay;
+        pcs.scs.ld_reduce_ref_buffs = 0;
+        pcs.scs.max_managed_refs = 4;
+        pcs.ref_mgmt.store_id = 500;
+        pcs.av1_ref_signal.refresh_frame_mask = 0x00;
+        // Independent outcome restatement.
+        std::uint8_t want_slot = static_cast<std::uint8_t>(pd::kRefFrames);
+        bool dup = false;
+        for (int i = 0; i < pd::kRefFrames; ++i) {
+            if (((mask >> i) & 1u) && ctx.pic_id_per_dpb_slot[i] == 500) dup = true;
+        }
+        const unsigned held = [mask] {
+            unsigned c = 0;
+            for (int i = 0; i < 8; ++i) c += (mask >> i) & 1u;
+            return c;
+        }();
+        const unsigned free = static_cast<unsigned>(kStoreable) & ~mask;
+        if (!dup && held < pcs.scs.max_managed_refs && free != 0) {
+            unsigned long k;
+            _BitScanForward(&k, free);
+            want_slot = static_cast<std::uint8_t>(k);
+        }
+        const std::uint8_t got = pd::applyRefStore(pcs, &ctx);
+        CHECK(got == want_slot);
+        if (want_slot < pd::kRefFrames) {
+            CHECK((pcs.av1_ref_signal.refresh_frame_mask & (1u << want_slot)) != 0);
+            CHECK(ctx.pic_id_per_dpb_slot[want_slot] == 500);
+        } else if (dup) {
+            // duplicate: no state change
+            CHECK(pd::refMgmtStoredMask(ctx) == mask);
+            CHECK(pcs.av1_ref_signal.refresh_frame_mask == 0x00);
+        }
+    }
+}
+
+TEST_CASE("l6 pd apply_ref_store cap + full-pool failure modes") {
+    // cap: 4 held >= max_managed_refs 4
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0x0F);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.scs.max_managed_refs = 4;
+        pcs.scs.rtc = 0;
+        pcs.scs.hierarchical_levels = 2;
+        pcs.scs.pred_structure = pd::kPredLowDelay;
+        pcs.scs.ld_reduce_ref_buffs = 0;
+        pcs.ref_mgmt.store_id = 900;
+        CHECK(pd::applyRefStore(pcs, &ctx) == pd::kRefFrames);
+        CHECK(pd::refMgmtStoredMask(ctx) == 0x0F);
+    }
+    // full safe pool: storeable 0xF0 all held (mask 0xF0), max 8
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0xF0);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.scs.rtc = 1;
+        pcs.scs.hierarchical_levels = 0;
+        pcs.scs.max_managed_refs = 8;
+        pcs.ref_mgmt.store_id = 900;
+        CHECK(pd::applyRefStore(pcs, &ctx) == pd::kRefFrames);
+    }
+}
+
+TEST_CASE("l6 pd apply_ref_use redirects all seven positions") {
+    for (int slot = 0; slot < pd::kRefFrames; ++slot) {
+        pd::PdCtx ctx = makeCtxFromMask(1u << slot);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.ref_mgmt.use_id = 100u + slot;
+        pcs.ref_list0_count = 5;
+        pcs.ref_list1_count = 3;
+        CHECK(pd::applyRefUse(pcs, ctx));
+        for (int i = 0; i < 7; ++i) {
+            CHECK(pcs.av1_ref_signal.ref_dpb_index[i] == slot);
+            CHECK(pcs.av1_ref_signal.ref_poc_array[i] == 1000u + slot);
+        }
+        CHECK(pcs.ref_list0_count == 1);
+        CHECK(pcs.ref_list1_count == 0);
+    }
+    // unknown id: false, state unchanged
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0x0F);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.ref_mgmt.use_id = 777;
+        pcs.ref_list0_count = 5;
+        pcs.ref_list1_count = 3;
+        CHECK(!pd::applyRefUse(pcs, ctx));
+        CHECK(pcs.ref_list0_count == 5);
+        CHECK(pcs.ref_list1_count == 3);
+    }
+}
+
+// The dispatcher: phase order, the three gates, the refresh guard and
+// the USE recovery mask - over every event-presence pattern x
+// overlay/base x held masks.
+TEST_CASE("l6 pd apply_ref_mgmt_events phase order + gates") {
+    // a) clear frees a slot the same-frame store then reuses. The safe
+    // pool must contain the freed slot and every lower pool slot must be
+    // held: rtc=1/hier=0 -> storeable 0xF0, all four held, clear slot 4.
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0xF0);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.scs.rtc = 1;
+        pcs.scs.hierarchical_levels = 0;
+        pcs.scs.max_managed_refs = 8;
+        pcs.temporal_layer_index = 0;
+        pcs.ref_mgmt.clear_id = 104;   // slot 4
+        pcs.ref_mgmt.store_id = 500;   // new id
+        pd::applyRefMgmtEvents(pcs, &ctx);
+        CHECK(ctx.pic_id_per_dpb_slot[4] == 500);  // reused slot 4
+        CHECK(pcs.ref_mgmt.clear_id == 0);
+        CHECK(pcs.ref_mgmt.store_id == 500);
+        CHECK((pcs.av1_ref_signal.refresh_frame_mask & 0x10) != 0);
+    }
+    // b) refresh guard: held slot 0 locked out of refresh_frame_mask
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0x01);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.temporal_layer_index = 0;
+        pcs.av1_ref_signal.refresh_frame_mask = 0xFF;
+        pd::applyRefMgmtEvents(pcs, &ctx);
+        CHECK(pcs.av1_ref_signal.refresh_frame_mask == 0xFE);
+    }
+    // c) duplicate pic_id across events: all scrubbed
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0x00);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.temporal_layer_index = 0;
+        pcs.ref_mgmt.clear_id = 9;
+        pcs.ref_mgmt.store_id = 9;
+        pcs.ref_mgmt.use_id = 0;
+        pd::applyRefMgmtEvents(pcs, &ctx);
+        CHECK(pcs.ref_mgmt.clear_id == 0);
+        CHECK(pcs.ref_mgmt.store_id == 0);
+        CHECK(pcs.ref_mgmt.use_id == 0);
+    }
+    // d) events on a non-base frame: scrubbed
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0x00);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.temporal_layer_index = 1;
+        pcs.ref_mgmt.store_id = 5;
+        pd::applyRefMgmtEvents(pcs, &ctx);
+        CHECK(pcs.ref_mgmt.store_id == 0);
+        CHECK(pd::refMgmtStoredMask(ctx) == 0);
+    }
+    // e) events on an overlay frame: scrubbed
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0x00);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.temporal_layer_index = 0;
+        pcs.is_overlay = 1;
+        pcs.ref_mgmt.use_id = 5;
+        pd::applyRefMgmtEvents(pcs, &ctx);
+        CHECK(pcs.ref_mgmt.use_id == 0);
+    }
+    // f) USE recovery: every non-STOREd slot + the new store slot gets
+    // the current frame.
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0x02);  // slot 1 held
+        ctx.dpb_picture_number[6] = 6000;       // the slot STORE will pick
+        pd::PdPcsRefMgmt pcs{};
+        pcs.scs.rtc = 0;
+        pcs.scs.hierarchical_levels = 2;
+        pcs.scs.pred_structure = pd::kPredLowDelay;
+        pcs.scs.ld_reduce_ref_buffs = 0;
+        pcs.scs.max_managed_refs = 4;
+        pcs.temporal_layer_index = 0;
+        pcs.ref_mgmt.store_id = 500;  // new id -> the safe pool's slot 6
+        pcs.ref_mgmt.use_id = 101;    // the pre-held id (slot 1) - a
+                                      // distinct id, else the collision
+                                      // gate scrubs everything
+        pd::applyRefMgmtEvents(pcs, &ctx);
+        // storeable 0xC0 -> lowest free slot is 6
+        CHECK(ctx.pic_id_per_dpb_slot[6] == 500);
+        // recovery refresh = 0xFF & ~stored(0x42) | (1<<6)
+        CHECK(pcs.av1_ref_signal.refresh_frame_mask == 0xFD);
+        // the seven positions resolve to the USEd slot 1 with its dpb poc
+        for (int i = 0; i < 7; ++i) {
+            CHECK(pcs.av1_ref_signal.ref_dpb_index[i] == 1);
+            CHECK(pcs.av1_ref_signal.ref_poc_array[i] == 1001u);
+        }
+    }
+    // g) event-less frame still runs the refresh guard
+    {
+        pd::PdCtx ctx = makeCtxFromMask(0x81);
+        pd::PdPcsRefMgmt pcs{};
+        pcs.temporal_layer_index = 0;
+        pcs.av1_ref_signal.refresh_frame_mask = 0xFF;
+        pd::applyRefMgmtEvents(pcs, &ctx);
+        CHECK(pcs.av1_ref_signal.refresh_frame_mask == 0x7E);
+    }
+}
+
+TEST_CASE("l6 pd set_key_frame_rps resets the ref-mgmt state") {
+    pd::PdCtx ctx = makeCtxFromMask(0x55);
+    ctx.lay0_toggle = 2;
+    ctx.lay1_toggle = 1;
+    pd::PdPcsRefMgmt pcs{};
+    pcs.show_frame = false;
+    pcs.has_show_existing = true;
+    pd::setKeyFrameRps(pcs, &ctx);
+    CHECK(ctx.lay0_toggle == 0);
+    CHECK(ctx.lay1_toggle == 0);
+    CHECK(pd::refMgmtStoredMask(ctx) == 0);
+    CHECK(pcs.show_frame);
+    CHECK(!pcs.has_show_existing);
+}

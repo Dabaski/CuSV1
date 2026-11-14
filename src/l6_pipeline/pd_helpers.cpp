@@ -4,6 +4,8 @@
 
 #include <cassert>
 #include <climits>
+#include <cstring>
+#include <intrin.h>
 
 namespace pipeline {
 namespace pd {
@@ -125,6 +127,243 @@ std::int32_t getRefFrameType(std::uint8_t list, std::uint8_t ref_idx) {
     static const std::int32_t to_ref_frame[2][4] = {{kLastFrame, kLast2Frame, kLast3Frame, kGoldenFrame},
                                                     {kBwdrefFrame, kAltref2Frame, kAltrefFrame, kInvalidRef}};
     return to_ref_frame[list][ref_idx];
+}
+
+// ---------------------------------------------------------------------------
+// The ref-mgmt slot state machine (pd_process.c:1164-:1492).
+// ---------------------------------------------------------------------------
+
+// definitions.h:649-:654 svt_numbits, verbatim.
+std::int32_t svtNumbits(unsigned int x) {
+    x = x - ((x >> 1) & 0x55555555u);
+    x = (x & 0x33333333u) + ((x >> 2) & 0x33333333u);
+    x = (x + (x >> 4)) & 0x0F0F0F0Fu;
+    return static_cast<std::int32_t>((x * 0x01010101u) >> 24);
+}
+
+// definitions.h:614-:618 svt_ctz, the MSVC branch.
+std::int32_t svtCtz(unsigned long x) {
+    unsigned long k;
+    _BitScanForward(&k, x);
+    return static_cast<std::int32_t>(k);
+}
+
+// ref_mgmt_reset_state (pd_process.c:1164-:1166), verbatim.
+void refMgmtResetState(PdCtx* ctx) {
+    std::memset(ctx->pic_id_per_dpb_slot, 0, sizeof(ctx->pic_id_per_dpb_slot));
+}
+
+// ref_mgmt_stored_mask (pd_process.c:1174-:1182), verbatim.
+std::uint8_t refMgmtStoredMask(const PdCtx& ctx) {
+    std::uint8_t m = 0;
+    for (std::uint8_t i = 0; i < kRefFrames; ++i) {
+        if (ctx.pic_id_per_dpb_slot[i] != 0) {
+            m |= static_cast<std::uint8_t>(1u << i);
+        }
+    }
+    return m;
+}
+
+// ref_mgmt_find_slot (pd_process.c:1193-:1203), verbatim.
+std::uint8_t refMgmtFindSlot(const PdCtx& ctx, std::uint32_t pic_id) {
+    if (pic_id == 0) {
+        return static_cast<std::uint8_t>(kRefFrames);  // 0 = "no id" sentinel
+    }
+    for (std::uint8_t i = 0; i < kRefFrames; ++i) {
+        if (ctx.pic_id_per_dpb_slot[i] == pic_id) {
+            return i;
+        }
+    }
+    return static_cast<std::uint8_t>(kRefFrames);
+}
+
+// apply_ref_clear (pd_process.c:1206-:1216), verbatim minus the SVT_ERROR
+// channel (named deviation: the warn is a silent no-op).
+void applyRefClear(PdPcsRefMgmt& pcs, PdCtx* ctx) {
+    (void)pcs;
+    const std::uint32_t pid = pcs.ref_mgmt.clear_id;
+    const std::uint8_t slot = refMgmtFindSlot(*ctx, pid);
+    if (slot >= kRefFrames) {
+        return;
+    }
+    ctx->pic_id_per_dpb_slot[slot] = 0;
+}
+
+// exclusive_write_slots_mask_ld_cbr (pd_process.c:1227-:1259), verbatim.
+std::uint8_t exclusiveWriteSlotsMaskLdCbr(const PdScsCfg& scs) {
+    std::uint8_t mask = 0;
+    const std::uint8_t hier = scs.hierarchical_levels;
+    const std::uint8_t ld_reduce = scs.ld_reduce_ref_buffs;
+
+    // TID-0: single-bit `1 << lay0_toggle` (toggle in {0,1,2}) only at
+    // ld_reduce=0; backup bits (`| 0xf0` / `| 0xfc`) make it non-exclusive otherwise.
+    if (ld_reduce == 0) {
+        mask |= 0x07u;
+    }
+    // TID-1: always single-bit; slot depends on ld_reduce.
+    if (hier >= 1) {
+        switch (ld_reduce) {
+        case 0:
+            mask |= static_cast<std::uint8_t>((1u << kLay1Off) | (1u << (kLay1Off + 1)));
+            break;
+        case 1:
+            mask |= static_cast<std::uint8_t>(1u << kLay1Off);
+            break;
+        case 2:
+            mask |= static_cast<std::uint8_t>(1u << 1);
+            break;
+        default:
+            assert(0 && "unhandled ld_reduce_ref_buffs");
+            break;
+        }
+    }
+    // TID-2: ld_reduce > 0 force-zeros TID-2 refresh, so only exclusive at ld_reduce=0.
+    if (hier >= 2 && ld_reduce == 0) {
+        mask |= static_cast<std::uint8_t>(1u << kLay2Off);
+    }
+    return mask;
+}
+
+// svt_aom_ref_mgmt_storeable_slots_mask (pd_process.c:1261-:1278),
+// verbatim.
+std::uint8_t refMgmtStoreableSlotsMask(const PdScsCfg& scs) {
+    if (scs.rtc && scs.hierarchical_levels == 0) {
+        return 0xF0u;
+    }
+    if (scs.pred_structure == kPredLowDelay && scs.hierarchical_levels >= 1) {
+        return static_cast<std::uint8_t>(~exclusiveWriteSlotsMaskLdCbr(scs) & 0xFFu);
+    }
+    // RA / other paths: not LTR-eligible (rejected in enc_settings.c).
+    return 0xFFu;
+}
+
+// apply_ref_store (pd_process.c:1291-:1327), verbatim minus the SVT_ERROR
+// channel.
+std::uint8_t applyRefStore(PdPcsRefMgmt& pcs, PdCtx* ctx) {
+    const std::uint32_t pid = pcs.ref_mgmt.store_id;
+    if (refMgmtFindSlot(*ctx, pid) < kRefFrames) {
+        return static_cast<std::uint8_t>(kRefFrames);
+    }
+    // Enforce the simultaneous-hold cap to match buffer-pool sizing.
+    const std::uint8_t held = static_cast<std::uint8_t>(svtNumbits(refMgmtStoredMask(*ctx)));
+    if (held >= pcs.scs.max_managed_refs) {
+        return static_cast<std::uint8_t>(kRefFrames);
+    }
+    const std::uint8_t storeable_mask = refMgmtStoreableSlotsMask(pcs.scs);
+    const std::uint8_t free = static_cast<std::uint8_t>(storeable_mask & ~refMgmtStoredMask(*ctx));
+    if (free == 0) {
+        return static_cast<std::uint8_t>(kRefFrames);
+    }
+    const std::uint8_t slot = static_cast<std::uint8_t>(svtCtz(free));
+    // Force-refresh the picked slot so the current frame's reconstruction
+    // lands there, independent of what the branch's RPS chose.
+    pcs.av1_ref_signal.refresh_frame_mask |= static_cast<std::uint8_t>(1u << slot);
+    ctx->pic_id_per_dpb_slot[slot] = pid;
+    return slot;
+}
+
+// apply_ref_use (pd_process.c:1338-:1357), verbatim.
+bool applyRefUse(PdPcsRefMgmt& pcs, const PdCtx& ctx) {
+    const std::uint32_t pid = pcs.ref_mgmt.use_id;
+    const std::uint8_t slot = refMgmtFindSlot(ctx, pid);
+    if (slot >= kRefFrames) {
+        return false;
+    }
+    Av1RpsNode* rps = &pcs.av1_ref_signal;
+    const std::uint64_t poc = ctx.dpb_picture_number[slot];
+    /* AV1 ref positions LAST..ALT = INTER_REFS_PER_FRAME (7) entries. */
+    for (std::int32_t i = 0; i < kInterRefsPerFrame; ++i) {
+        rps->ref_dpb_index[i] = slot;
+        rps->ref_poc_array[i] = poc;
+    }
+    pcs.ref_list0_count = 1;
+    pcs.ref_list1_count = 0;
+    return true;
+}
+
+// apply_ref_mgmt_events (pd_process.c:1380-:1480), verbatim.
+void applyRefMgmtEvents(PdPcsRefMgmt& pcs, PdCtx* ctx) {
+    std::uint8_t new_store_slot = static_cast<std::uint8_t>(kRefFrames);
+    const bool have_event =
+        pcs.ref_mgmt.store_id != 0 || pcs.ref_mgmt.clear_id != 0 || pcs.ref_mgmt.use_id != 0;
+    bool events_ok = have_event;
+
+    if (have_event) {
+        if (pcs.is_overlay) {
+            events_ok = false;
+        } else {
+            const bool is_base = pcs.temporal_layer_index == 0;
+            if (!is_base) {
+                events_ok = false;
+            } else {
+                // Reject pic_id collisions across same-frame events.
+                const std::uint32_t s = pcs.ref_mgmt.store_id;
+                const std::uint32_t c = pcs.ref_mgmt.clear_id;
+                const std::uint32_t u = pcs.ref_mgmt.use_id;
+                if ((s != 0 && s == c) || (s != 0 && s == u) || (c != 0 && c == u)) {
+                    events_ok = false;
+                }
+            }
+        }
+        if (!events_ok) {
+            pcs.ref_mgmt.store_id = pcs.ref_mgmt.clear_id = pcs.ref_mgmt.use_id = 0;
+        }
+    }
+
+    // Phase 1: CLEAR - frees slots before STORE so freed slots can be reused.
+    if (pcs.ref_mgmt.clear_id != 0) {
+        applyRefClear(pcs, ctx);
+        // apply_ref_clear() warns on miss; clear the field so downstream
+        // consumers don't see a "phantom" CLEAR after the warning.
+        pcs.ref_mgmt.clear_id = 0;
+    }
+
+    // Phase 2: STORE - claim a free slot from refresh_frame_mask.
+    if (pcs.ref_mgmt.store_id != 0) {
+        new_store_slot = applyRefStore(pcs, ctx);
+        if (new_store_slot >= kRefFrames) {
+            pcs.ref_mgmt.store_id = 0;
+        }
+    }
+
+    // Phase 3: refresh guard - preserve all previously-STOREd slots from
+    // overwrite. The new STORE's slot (if any) is excluded from the preserve
+    // set so the current frame's data lands there. Always runs (even without
+    // events) so a held slot from an earlier frame is never overwritten.
+    {
+        const std::uint8_t stored_mask = refMgmtStoredMask(*ctx);
+        const std::uint8_t preserve_mask = (new_store_slot < kRefFrames)
+            ? static_cast<std::uint8_t>(stored_mask & static_cast<std::uint8_t>(~(1u << new_store_slot)))
+            : stored_mask;
+        pcs.av1_ref_signal.refresh_frame_mask = static_cast<std::uint8_t>(
+            pcs.av1_ref_signal.refresh_frame_mask & static_cast<std::uint8_t>(~preserve_mask));
+    }
+
+    // Phase 4: USE - override refs, then recovery-point refresh.
+    if (pcs.ref_mgmt.use_id != 0) {
+        if (applyRefUse(pcs, *ctx)) {
+            // Recovery-point refresh: every non-STOREd slot gets the current
+            // frame so future frames can only reference STOREd anchors or
+            // this recovery point.
+            std::uint8_t refresh_mask = static_cast<std::uint8_t>(0xFFu & ~refMgmtStoredMask(*ctx));
+            if (new_store_slot < kRefFrames) {
+                // The just-STOREd slot must also receive current frame data.
+                refresh_mask |= static_cast<std::uint8_t>(1u << new_store_slot);
+            }
+            pcs.av1_ref_signal.refresh_frame_mask = refresh_mask;
+        }
+    }
+}
+
+// set_key_frame_rps (pd_process.c:1482-:1492), verbatim.
+void setKeyFrameRps(PdPcsRefMgmt& pcs, PdCtx* pd_ctx) {
+    pd_ctx->lay0_toggle = 0;
+    pd_ctx->lay1_toggle = 0;
+    // KF refreshes all 8 DPB slots, so all previously-STOREd refs are invalidated.
+    refMgmtResetState(pd_ctx);
+
+    pcs.show_frame = 1;
+    pcs.has_show_existing = 0;
 }
 
 }  // namespace pd
