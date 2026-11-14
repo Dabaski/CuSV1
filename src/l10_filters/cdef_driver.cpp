@@ -667,5 +667,220 @@ void cdefFrame(CdefFrameCtx& ctx) {
     }
 }
 
+// finish_cdef_search (enc_cdef.c:897-:1094). 1:1; the lambda-assign wall
+// is threaded (fullLambda - only full_lambda is consumed), the
+// RDCOST/av1_cost_literal macros carried locally (rd_cost.h:36-38 /
+// md_rate_estimation.h:31: RPOT(R*RM, 9) + D << 7 / n << 9),
+// CDEF_STRENGTH_BITS 6 (cdef.h:21), CDEF_DAMPING_FROM_QP (3 +
+// (base_q_idx >> 6), enc_cdef.c:895), CDEF_MAX_STRENGTHS 16
+// (definitions.h:1440).
+void finishCdefSearch(CdefFinishCtx& ctx) {
+    constexpr std::int32_t kMiSize64x64 = 16;
+    constexpr int kCdefStrengthBits = 6;
+    const int kAv1ProbCostShift = 9;
+    const int kRddivBits = 7;
+
+    // RDCOST(RM, R, D) (rd_cost.h:36-38): RPOT(R * RM, 9) + D << 7.
+    auto rdcost = [&](std::int64_t rate, std::int64_t dist) -> std::int64_t {
+        return ((rate * (std::int64_t)ctx.fullLambda + ((std::int64_t)1 << (kAv1ProbCostShift - 1))) >>
+                   kAv1ProbCostShift) +
+            (dist * ((std::int64_t)1 << kRddivBits));
+    };
+    // av1_cost_literal(n) (md_rate_estimation.h:31).
+    auto costLiteral = [](int n) -> std::int64_t { return (std::int64_t)n << kAv1ProbCostShift; };
+
+    const std::int32_t miRows = ctx.miRows;
+    const std::int32_t miCols = ctx.miCols;
+
+    std::uint64_t bestTotMse = (std::uint64_t)1 << 63;
+    std::int32_t sbCount;
+    const std::int32_t nvfb = (miRows + kMiSize64x64 - 1) / kMiSize64x64;
+    const std::int32_t nhfb = (miCols + kMiSize64x64 - 1) / kMiSize64x64;
+
+    const CdefSearchControls* cdefSearchCtrls = &ctx.ctrls;
+
+    if (cdefSearchCtrls->useQpStrength) {
+        const bool allintra = ctx.allintra;
+        const std::uint8_t scClass1 = ctx.scClass1;
+        const std::uint8_t scClass5 = ctx.scClass5;
+        const int sc = allintra ? scClass5 : scClass1;
+        std::int32_t predY, predUv;
+        PickQpParams p;
+        p.baseQIdx = ctx.baseQIdx;
+        p.bitDepth = ctx.is16bitPipeline ? 10 : 8;
+        p.isKeyFrame = ctx.qpIsKeyFrame;
+        p.intraOnly = ctx.qpIntraOnly;
+        p.isScreenContent = sc != 0;
+        p.acQuantQtx = ctx.acQuantQtx;
+        pickCdefFromQp(p, &predY, &predUv);
+        ctx.cdefBits = 0;
+        ctx.nbCdefStrengths = 1;
+        ctx.cdefYStrength[0] = static_cast<std::uint8_t>(predY);
+        ctx.cdefUvStrength[0] = static_cast<std::uint8_t>(predUv);
+        ctx.cdefDamping = static_cast<std::uint8_t>(3 + ((ctx.baseQIdx) >> 6));
+        // nb_cdef_strengths==1 -> apply uses strength index 0 for every SB;
+        // no per-SB cdef_strength propagation needed.
+        return;
+    }
+
+    const int firstPassFsNum = cdefSearchCtrls->firstPassFsNum;
+    const int defaultSecondPassFsNum = cdefSearchCtrls->defaultSecondPassFsNum;
+
+    ctx.cdefBits = 0;
+    ctx.nbCdefStrengths = 1;
+    ctx.cdefYStrength[0] = static_cast<std::uint8_t>(cdefSearchCtrls->predYF);
+    ctx.cdefUvStrength[0] = static_cast<std::uint8_t>(cdefSearchCtrls->predUvF);
+    ctx.cdefDamping = static_cast<std::uint8_t>(3 + ((ctx.baseQIdx) >> 6));
+
+    if (cdefSearchCtrls->useReferenceCdefFs) {
+        return;
+    }
+
+    // Persistent per-pcs scratch: the per-sb mse pointer arrays
+    // (pcs->cdef_mse_ptr, into the mse_seg blocks) and the sb_index list.
+    std::int32_t* sbIndex = ctx.sbIndex;
+
+    const std::int32_t startGi = 0;
+    const std::int32_t endGi = firstPassFsNum + defaultSecondPassFsNum;
+    std::int32_t nbStrengths;
+    std::int32_t nbStrengthBits = 0;
+
+    // svt_aom_lambda_assign(pcs, &fast, &full, bd, q, false) - the rc wall
+    // is threaded; only full_lambda is consumed.
+    sbCount = 0;
+
+    for (std::int32_t fbr = 0; fbr < nvfb; ++fbr) {
+        for (std::int32_t fbc = 0; fbc < nhfb; ++fbc) {
+            const CdefMb& mbmi = ctx.miGrid[kMiSize64x64 * fbr * ctx.miStride + kMiSize64x64 * fbc];
+            if (((fbc & 1) && (mbmi.bsize == 15 || mbmi.bsize == 14)) ||
+                ((fbr & 1) && (mbmi.bsize == 15 || mbmi.bsize == 13))) {
+                continue;
+            }
+            if (ctx.skipCdefSeg[fbr * nhfb + fbc]) {
+                continue;
+            }
+
+            ctx.sbMsePtr[0][sbCount] = reinterpret_cast<std::uint64_t*>(ctx.mseSeg[0]) +
+                (std::size_t)(fbr * nhfb + fbc) * kCdefTotalStrengths;
+            ctx.sbMsePtr[1][sbCount] = reinterpret_cast<std::uint64_t*>(ctx.mseSeg[1]) +
+                (std::size_t)(fbr * nhfb + fbc) * kCdefTotalStrengths;
+            sbIndex[sbCount] = kMiSize64x64 * fbr * ctx.miStride + kMiSize64x64 * fbc;
+            sbCount++;
+        }
+    }
+
+    // Scale down the cost of the (0,0) filter strength to bias selection
+    // towards off.  When off, we can save the cost of the application
+    if (ctx.zeroFsCostBias) {
+        const bool is16bit = ctx.is16bitPipeline;
+        std::uint16_t factor;
+        for (std::int32_t i = 0; i < sbCount; i++) {
+            if (is16bit) {
+                factor = ctx.zeroFsCostBias;
+                if (ctx.sbMsePtr[0][i][0] < 5000) {
+                    factor = factor - 10 < 64 ? factor - 10 : 64;
+                } else if (ctx.sbMsePtr[0][i][0] < 10000) {
+                    factor = factor - 5 < 64 ? factor - 5 : 64;
+                } else if (ctx.sbMsePtr[0][i][0] > 25000) {
+                    factor = factor + 1 < 64 ? factor + 1 : 64;
+                }
+                ctx.sbMsePtr[0][i][0] = (factor * ctx.sbMsePtr[0][i][0]) >> 6;
+
+                factor = ctx.zeroFsCostBias;
+                if (ctx.sbMsePtr[1][i][0] < 5000) {
+                    factor = factor - 10 < 64 ? factor - 10 : 64;
+                } else if (ctx.sbMsePtr[1][i][0] < 10000) {
+                    factor = factor - 5 < 64 ? factor - 5 : 64;
+                } else if (ctx.sbMsePtr[1][i][0] > 25000) {
+                    factor = factor + 1 < 64 ? factor + 1 : 64;
+                }
+                ctx.sbMsePtr[1][i][0] = (factor * ctx.sbMsePtr[1][i][0]) >> 6;
+            } else {
+                factor = ctx.zeroFsCostBias;
+                if (ctx.sbMsePtr[0][i][0] > 25000) {
+                    factor = factor + 2 < 64 ? factor + 2 : 64;
+                } else if (ctx.sbMsePtr[0][i][0] > 10000) {
+                    factor = factor + 1 < 64 ? factor + 1 : 64;
+                }
+                ctx.sbMsePtr[0][i][0] = (factor * ctx.sbMsePtr[0][i][0]) >> 6;
+
+                factor = ctx.zeroFsCostBias;
+                if (ctx.sbMsePtr[1][i][0] > 25000) {
+                    factor = factor + 2 < 64 ? factor + 2 : 64;
+                } else if (ctx.sbMsePtr[1][i][0] > 10000) {
+                    factor = factor + 1 < 64 ? factor + 1 : 64;
+                }
+                ctx.sbMsePtr[1][i][0] = (factor * ctx.sbMsePtr[1][i][0]) >> 6;
+            }
+        }
+    }
+
+    // Compute cost of (strength=0) to derive pcs->cdef_dist_dev
+    std::int64_t zeroDist = 0;
+    for (std::int32_t i = 0; i < sbCount; i++) {
+        zeroDist += ctx.sbMsePtr[0][i][0] + ctx.sbMsePtr[1][i][0];
+    }
+    const std::uint64_t zeroCost = (std::uint64_t)rdcost(costLiteral(kCdefStrengthBits * 2), zeroDist << 4);
+
+    // Search for different numbers of signalling bits
+    std::int32_t bestLev0[kCdefMaxStrengths] = {0};
+    std::int32_t bestLev1[kCdefMaxStrengths] = {0};
+    for (std::int32_t i = 0; i <= 3; i++) {
+        nbStrengths = 1 << i;
+        const std::uint64_t totMse = (std::uint64_t)cdefJointStrengthSearchDual(
+            bestLev0, bestLev1, nbStrengths, ctx.sbMsePtr, sbCount, startGi, endGi);
+
+        const int totalBits = sbCount * i + nbStrengths * kCdefStrengthBits * 2;
+        const std::uint64_t cost = (std::uint64_t)rdcost(costLiteral(totalBits), totMse * 16);
+        if (cost < bestTotMse) {
+            bestTotMse = cost;
+            nbStrengthBits = i;
+            for (std::int32_t j = 0; j < 1 << nbStrengthBits; j++) {
+                ctx.cdefYStrength[j] = static_cast<std::uint8_t>(bestLev0[j]);
+                ctx.cdefUvStrength[j] = static_cast<std::uint8_t>(
+                    cdefSearchCtrls->uvFromY ? bestLev0[j] : bestLev1[j]);
+            }
+        }
+    }
+
+    ctx.cdefDistDev = zeroCost == 0 ? 0 : (std::int32_t)(1000 - ((1000 * bestTotMse) / zeroCost));
+    nbStrengths = 1 << nbStrengthBits;
+
+    ctx.cdefBits = static_cast<std::uint8_t>(nbStrengthBits);
+    ctx.nbCdefStrengths = nbStrengths;
+
+    // Assign each filter block its best strength index
+    for (std::int32_t i = 0; i < sbCount; i++) {
+        std::int32_t bestGi = 0;
+        std::uint64_t bestMse = (std::uint64_t)1 << 63;
+        for (std::int32_t gi = 0; gi < ctx.nbCdefStrengths; gi++) {
+            const std::uint64_t curr =
+                ctx.sbMsePtr[0][i][ctx.cdefYStrength[gi]] + ctx.sbMsePtr[1][i][ctx.cdefUvStrength[gi]];
+            if (curr < bestMse) {
+                bestGi = gi;
+                bestMse = curr;
+            }
+        }
+        propagateCdefStrength(ctx.miGrid, ctx.miStride, sbIndex[i], ctx.miGrid[sbIndex[i]].bsize,
+            static_cast<std::int8_t>(bestGi));
+    }
+
+    // Map search indices back to actual filter strengths
+    std::int32_t filterMap[kCdefTotalStrengths] = {0};
+    for (std::int32_t i = 0; i < firstPassFsNum; i++) {
+        filterMap[i] = cdefSearchCtrls->defaultFirstPassFs[i];
+    }
+    for (std::int32_t i = 0; i < defaultSecondPassFsNum; i++) {
+        filterMap[firstPassFsNum + i] = cdefSearchCtrls->defaultSecondPassFs[i];
+    }
+
+    for (std::int32_t i = 0; i < ctx.nbCdefStrengths; i++) {
+        ctx.cdefYStrength[i] = static_cast<std::uint8_t>(filterMap[ctx.cdefYStrength[i]]);
+        ctx.cdefUvStrength[i] = static_cast<std::uint8_t>(filterMap[ctx.cdefUvStrength[i]]);
+    }
+
+    ctx.cdefDamping = static_cast<std::uint8_t>(3 + ((ctx.baseQIdx) >> 6));
+}
+
 } // namespace cdef_driver
 } // namespace l10_filters

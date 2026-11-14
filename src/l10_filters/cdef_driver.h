@@ -166,8 +166,9 @@ struct CdefDirData {
 };
 
 // The threaded CdefSearchControls surface (pcs.h:554-:591): the fields
-// cdef_seg_search consumes. default_first_pass_fs/uv and
-// default_second_pass_fs/uv are the full TOTAL_STRENGTHS arrays (64).
+// cdef_seg_search and finish_cdef_search consume. default_first_pass_fs/
+// uv and default_second_pass_fs/uv are the full TOTAL_STRENGTHS arrays
+// (64).
 struct CdefSearchControls {
     int firstPassFsNum;
     int defaultSecondPassFsNum;
@@ -176,6 +177,12 @@ struct CdefSearchControls {
     std::int8_t defaultFirstPassFsUv[kCdefTotalStrengths];
     std::int8_t defaultSecondPassFsUv[kCdefTotalStrengths];
     std::uint8_t subsamplingFactor;
+    // the finish_cdef_search fields
+    std::int8_t useReferenceCdefFs;
+    std::int8_t predYF;
+    std::int8_t predUvF;
+    bool uvFromY;
+    bool useQpStrength;
 };
 
 // The threaded CdefContext scratch (cdef_process.c:211-:222): the hoisted
@@ -316,6 +323,71 @@ struct CdefFrameCtx {
 // frame-edge VERY_LARGE fills + cdefFilterFb), the curr/prev row-flag
 // swap.
 void cdefFrame(CdefFrameCtx& ctx);
+
+// ---------------------------------------------------------------------------
+// S9: finish_cdef_search (enc_cdef.c:897-:1094) - the search finisher.
+// ---------------------------------------------------------------------------
+
+// CdefFinishCtx: the threaded PictureControlSet / PictureParentControlSet
+// / FrameHeader surface. The svt_aom_lambda_assign call site
+// (rc_process.c:466, the rc wall) is threaded as the precomputed
+// fullLambda (named deviation); the RDCOST macro (rd_cost.h:36-38,
+// ROUND_POWER_OF_TWO(R*RM, AV1_PROB_COST_SHIFT=9) + D << RDDIV_BITS=7)
+// and av1_cost_literal (md_rate_estimation.h:31, n << 9) are carried
+// locally (l10 does not link l16's rd surface).
+struct CdefFinishCtx {
+    // frm_hdr->cdef_params (write) + quantization_params.base_q_idx
+    std::uint8_t cdefBits;
+    std::uint8_t cdefYStrength[kCdefMaxStrengths];
+    std::uint8_t cdefUvStrength[kCdefMaxStrengths];
+    std::uint8_t cdefDamping;
+    std::int32_t baseQIdx;
+    // ppcs->nb_cdef_strengths (write), ppcs->scs->allintra,
+    // ppcs->sc_class1 / sc_class5
+    std::int32_t nbCdefStrengths;
+    bool allintra;
+    std::uint8_t scClass1;
+    std::uint8_t scClass5;
+    // pcs->ppcs->cdef_search_ctrls
+    CdefSearchControls ctrls;
+    // pcs->ppcs->cdef_recon_ctrls.zero_fs_cost_bias (0 = off)
+    std::uint16_t zeroFsCostBias;
+    // the zero_fs_cost_bias 16-bit check:
+    // SVT_EFFECTIVE_BIT_DEPTH(encoder_bit_depth) > EB_EIGHT_BIT
+    bool is16bitPipeline;
+    // pcs walls: the mi grid + stride (the per-SB reads/writes),
+    // cm->mi_rows/cols, skip_cdef_seg, the persistent scratch
+    // (pcs->cdef_sb_index), mse_seg, the per-sb row-pointer scratch
+    // (pcs->cdef_mse_ptr[2], caller-provided arrays sized sbCount) and the
+    // cdef_dist_dev write
+    CdefMb* miGrid;
+    std::int32_t miStride;
+    std::int32_t miRows;
+    std::int32_t miCols;
+    std::uint8_t* skipCdefSeg;
+    std::int32_t* sbIndex;
+    CdefMseSeg mseSeg;
+    std::uint64_t** sbMsePtr[2];
+    std::int32_t cdefDistDev;
+    // the use_qp_strength path forwards to pickCdefFromQp with the SAME
+    // walls this carrier holds: the frame-type gate, the bit depth and the
+    // ac-quant qtx call-site wall
+    bool qpIsKeyFrame;
+    bool qpIntraOnly;
+    AcQuantQtxFn acQuantQtx;
+    // the svt_aom_lambda_assign wall (full_lambda only is consumed)
+    std::uint32_t fullLambda;
+};
+
+// finish_cdef_search (enc_cdef.c:897-:1094): the use_qp_strength path
+// (the pickCdefFromQp integration), the use_reference_cdef_fs early
+// return, the per-SB mse pointer gather (the 128-block skip conditions +
+// skip_cdef_seg), the zero_fs_cost_bias in-place mse scaling (16-bit vs
+// 8-bit branch values), the zero-cost RDCOST, the 4-iteration
+// nb_strength_bits RDO over the landed cdefJointStrengthSearchDual, the
+// cdef_dist_dev derivation, the per-SB best-gi assignment through the
+// landed propagateCdefStrength, and the filter_map remap.
+void finishCdefSearch(CdefFinishCtx& ctx);
 
 } // namespace cdef_driver
 } // namespace l10_filters

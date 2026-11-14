@@ -1021,3 +1021,230 @@ TEST_CASE("cdefFrame chroma_filter_off skips the UV planes") {
     FrameFixture g(32, 32, 3, false);
     CHECK(f.recon8 != g.recon8);
 }
+
+// ---- S9: finish_cdef_search (enc_cdef.c:897-:1094) -------------------------
+namespace {
+using l10_filters::cdef_driver::CdefFinishCtx;
+using l10_filters::cdef_driver::CdefMb;
+using l10_filters::cdef_driver::CdefSearchControls;
+
+struct FinishFixture {
+    // 2 fbs in one fb row (mi 16x32), stride 40
+    static constexpr std::int32_t kMiStride = 40;
+    CdefMb miGrid[kMiStride * 4];
+    std::uint8_t skip[4] = {0, 0, 0, 0};
+    std::int32_t sbIndex[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    std::uint64_t msePlane0[4][l10_filters::kCdefTotalStrengths];
+    std::uint64_t msePlane1[4][l10_filters::kCdefTotalStrengths];
+    std::uint64_t* mseRows0[8];
+    std::uint64_t* mseRows1[8];
+    std::uint64_t** sbMsePtrStorage[2] = {nullptr, nullptr};
+    CdefFinishCtx ctx;
+
+    FinishFixture() {
+        for (auto& mb : miGrid) {
+            mb.bsize = 12;
+            mb.cdefStrength = -9;
+        }
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < l10_filters::kCdefTotalStrengths; ++j) {
+                msePlane0[i][j] = 0xAAAAAAAAAAAAAAAAull;
+                msePlane1[i][j] = 0xAAAAAAAAAAAAAAAAull;
+            }
+        for (int i = 0; i < 8; ++i) {
+            mseRows0[i] = msePlane0[i / 2] + (i % 2) * 0; // overwritten below
+            mseRows1[i] = msePlane1[i / 2];
+        }
+        sbMsePtrStorage[0] = mseRows0;
+        sbMsePtrStorage[1] = mseRows1;
+        ctx.cdefBits = 0xEE;
+        ctx.cdefDamping = 0xEE;
+        for (int i = 0; i < l10_filters::cdef_driver::kCdefMaxStrengths; ++i) {
+            ctx.cdefYStrength[i] = 0xEE;
+            ctx.cdefUvStrength[i] = 0xEE;
+        }
+        ctx.nbCdefStrengths = -1;
+        ctx.baseQIdx = 0;
+        ctx.allintra = false;
+        ctx.scClass1 = 0;
+        ctx.scClass5 = 1;
+        ctx.zeroFsCostBias = 0;
+        ctx.is16bitPipeline = false;
+        ctx.qpIsKeyFrame = false;
+        ctx.qpIntraOnly = false;
+        ctx.acQuantQtx = testAcQuantQtx;
+        ctx.miGrid = miGrid;
+        ctx.miStride = kMiStride;
+        ctx.miRows = 16;
+        ctx.miCols = 32;
+        ctx.skipCdefSeg = skip;
+        ctx.sbIndex = sbIndex;
+        ctx.mseSeg[0] = msePlane0;
+        ctx.mseSeg[1] = msePlane1;
+        ctx.sbMsePtr[0] = mseRows0;
+        ctx.sbMsePtr[1] = mseRows1;
+        ctx.cdefDistDev = -12345;
+        ctx.fullLambda = 1000;
+        CdefSearchControls& c = ctx.ctrls;
+        c.firstPassFsNum = 2;
+        c.defaultSecondPassFsNum = 2;
+        for (int i = 0; i < l10_filters::kCdefTotalStrengths; ++i) {
+            c.defaultFirstPassFs[i] = 10;
+            c.defaultSecondPassFs[i] = 12;
+            c.defaultFirstPassFsUv[i] = 0;
+            c.defaultSecondPassFsUv[i] = 0;
+        }
+        c.defaultFirstPassFs[0] = 10;
+        c.defaultFirstPassFs[1] = 11;
+        c.defaultSecondPassFs[0] = 12;
+        c.defaultSecondPassFs[1] = 13;
+        c.useReferenceCdefFs = 0;
+        c.predYF = 4;
+        c.predUvF = 9;
+        c.uvFromY = false;
+        c.useQpStrength = false;
+    }
+
+    void setMse(int fb, const std::uint64_t luma[4], const std::uint64_t chroma[4]) {
+        for (int s = 0; s < 4; ++s) {
+            msePlane0[fb][s] = luma[s];
+            msePlane1[fb][s] = chroma[s];
+        }
+    }
+};
+} // namespace
+
+TEST_CASE("finishCdefSearch use_qp_strength path") {
+    FinishFixture f;
+    f.ctx.ctrls.useQpStrength = true;
+    f.ctx.baseQIdx = 21; // testAcQuantQtx -> q = 100
+    f.ctx.qpIsKeyFrame = false;
+    f.ctx.qpIntraOnly = false;
+    // screen content: sc = scClass1 = 0 -> isScreenContent false -> the
+    // inter roundf branch (q = 100 -> y 4/0, uv 0/0)
+    l10_filters::cdef_driver::finishCdefSearch(f.ctx);
+    CHECK(f.ctx.cdefBits == 0);
+    CHECK(f.ctx.nbCdefStrengths == 1);
+    CHECK(f.ctx.cdefYStrength[0] == 4);
+    CHECK(f.ctx.cdefUvStrength[0] == 0);
+    CHECK(f.ctx.cdefDamping == 3 + (21 >> 6));
+}
+
+TEST_CASE("finishCdefSearch use_reference_cdef_fs early return") {
+    FinishFixture f;
+    f.ctx.ctrls.predYF = 4;
+    f.ctx.ctrls.predUvF = 9;
+    f.ctx.ctrls.useReferenceCdefFs = 1;
+    l10_filters::cdef_driver::finishCdefSearch(f.ctx);
+    CHECK(f.ctx.cdefBits == 0);
+    CHECK(f.ctx.nbCdefStrengths == 1);
+    CHECK(f.ctx.cdefYStrength[0] == 4);
+    CHECK(f.ctx.cdefUvStrength[0] == 9);
+    CHECK(f.ctx.cdefDamping == 3);
+    CHECK(f.ctx.cdefDistDev == -12345); // untouched (the early return)
+}
+
+TEST_CASE("finishCdefSearch single-pair RDO + propagate + filter_map") {
+    FinishFixture f;
+    const std::uint64_t luma[2][4] = {{100, 200, 50, 300}, {100, 200, 50, 300}};
+    const std::uint64_t chroma[2][4] = {{100, 20, 400, 10}, {100, 20, 400, 10}};
+    f.setMse(0, luma[0], chroma[0]);
+    f.setMse(1, luma[1], chroma[1]);
+    l10_filters::cdef_driver::finishCdefSearch(f.ctx);
+
+    // the RDO: nb=1 gives tot 120 (= 2*(50+10)); its cost beats nb=2 (the
+    // second pair cannot improve, and 12 extra signalling bits + the
+    // second pair cost more) -> nb_bits 0, nb 1
+    CHECK(f.ctx.cdefBits == 0);
+    CHECK(f.ctx.nbCdefStrengths == 1);
+    // the winning pair is (lev0, lev1) = (2, 3) -> filter_map[2] = 12,
+    // filter_map[3] = 13 (uv_from_y false)
+    CHECK(f.ctx.cdefYStrength[0] == 12);
+    CHECK(f.ctx.cdefUvStrength[0] == 13);
+    // the damping rewrite
+    CHECK(f.ctx.cdefDamping == 3);
+    // the per-SB propagation: both fbs take gi 0 -> strength 0
+    CHECK(f.miGrid[0].cdefStrength == 0);
+    CHECK(f.miGrid[16].cdefStrength == 0);
+    // sbIndex filled in raster order
+    CHECK(f.sbIndex[0] == 0);
+    CHECK(f.sbIndex[1] == 16);
+    // cdef_dist_dev: zero_cost = RDCOST(1000, 12<<9, 400<<4) where the
+    // rate is av1_cost_literal(12) = 12 << 9 = 6144:
+    //   RPOT(6144*1000, 9) = 12000; 6400 << 7 = 819200 -> 831200
+    // best cost = RDCOST(1000, 6144, 120*16 = 1920):
+    //   RPOT(6144*1000, 9) = 12000; 1920 << 7 = 245760 -> 257760
+    // cdef_dist_dev = 1000 - 257760000/831200 = 1000 - 310 = 690
+    CHECK(f.ctx.cdefDistDev == 690);
+}
+
+TEST_CASE("finishCdefSearch two-pair RDO with opposite per-fb optima") {
+    FinishFixture f;
+    const std::uint64_t luma0[4] = {100, 100, 10, 100};
+    const std::uint64_t chroma0[4] = {100, 100, 10, 100};
+    const std::uint64_t luma1[4] = {100, 100, 100, 10};
+    const std::uint64_t chroma1[4] = {100, 100, 100, 10};
+    f.setMse(0, luma0, chroma0);
+    f.setMse(1, luma1, chroma1);
+    l10_filters::cdef_driver::finishCdefSearch(f.ctx);
+
+    // nb=2 wins (the two fbs want different pairs; tot 40 beats the
+    // single-pair 220)
+    CHECK(f.ctx.cdefBits == 1);
+    CHECK(f.ctx.nbCdefStrengths == 2);
+    // pairs (2,2) and (3,3) -> remap: y/uv = {filter_map[2], filter_map[3]}
+    CHECK(f.ctx.cdefYStrength[0] == 12);
+    CHECK(f.ctx.cdefYStrength[1] == 13);
+    CHECK(f.ctx.cdefUvStrength[0] == 12);
+    CHECK(f.ctx.cdefUvStrength[1] == 13);
+    // the per-SB best gi: fb0 -> gi 0 (pair (2,2)), fb1 -> gi 1 (pair (3,3))
+    CHECK(f.miGrid[0].cdefStrength == 0);
+    CHECK(f.miGrid[16].cdefStrength == 1);
+}
+
+TEST_CASE("finishCdefSearch zero_fs_cost_bias 8-bit in-place scaling") {
+    FinishFixture f;
+    const std::uint64_t luma0[4] = {8000, 8000, 8000, 8000};
+    const std::uint64_t chroma0[4] = {1000, 1000, 1000, 1000};
+    f.setMse(0, luma0, chroma0);
+    f.ctx.zeroFsCostBias = 64;
+    // the 8-bit branch: luma 8000 is in (10000... no: the 8-bit branch has
+    // NO below-10000 adjustment - only >25000 (+2) and >10000 (+1). 8000
+    // hits neither -> factor stays 64 -> (64*8000)>>6 = 8000 (no-op).
+    l10_filters::cdef_driver::finishCdefSearch(f.ctx);
+    CHECK(f.msePlane0[0][0] == 8000);
+    CHECK(f.msePlane1[0][0] == 1000);
+
+    // the 16-bit branch adjusts BELOW: <5000 -> min(bias-10, 64);
+    // <10000 -> min(bias-5, 64). luma 8000 -> 59 -> (59*8000)>>6 = 7375;
+    // chroma 1000 -> 54 -> (54*1000)>>6 = 843.
+    FinishFixture g;
+    g.setMse(0, luma0, chroma0);
+    g.ctx.zeroFsCostBias = 64;
+    g.ctx.is16bitPipeline = true;
+    l10_filters::cdef_driver::finishCdefSearch(g.ctx);
+    CHECK(g.msePlane0[0][0] == (59 * 8000) >> 6);
+    CHECK(g.msePlane1[0][0] == (54 * 1000) >> 6);
+}
+
+TEST_CASE("finishCdefSearch skip_cdef_seg + 128-block gather skips") {
+    FinishFixture f;
+    // fb 1 is 128x64 at fbc 1 (odd) -> skipped by the bsize condition; fb 2
+    // marked skip_cdef_seg
+    f.miGrid[16].bsize = 14; // BLOCK_128X64
+    f.skip[2] = 1;
+    const std::uint64_t luma0[4] = {100, 200, 50, 300};
+    const std::uint64_t chroma0[4] = {100, 20, 400, 10};
+    f.setMse(0, luma0, chroma0);
+    f.setMse(1, luma0, chroma0);
+    l10_filters::cdef_driver::finishCdefSearch(f.ctx);
+    // only fb 0 survived the gather: sbCount 1
+    CHECK(f.sbIndex[0] == 0);
+    CHECK(f.sbIndex[1] == -1);
+    // the single-sb RDO with fb0's tables: nb=1 pair (2,3) tot 120
+    CHECK(f.ctx.cdefYStrength[0] == 12);
+    CHECK(f.ctx.cdefUvStrength[0] == 13);
+    CHECK(f.miGrid[0].cdefStrength == 0);
+    // fb1's mi cell untouched (propagate never ran for it)
+    CHECK(f.miGrid[16].cdefStrength == -9);
+}
