@@ -187,6 +187,11 @@ struct PcsCarrier {
     // the A9R calculate_gf_stats consumes (pass2_strategy.c:341-390).
     int gfInterval;                  // pcs->gf_interval
     bool idrFlag;                    // pcs->idr_flag
+
+    // the A9D rc-process walls (rc_process.c:568-605).
+    bool disableCdfUpdate;           // frm_hdr.disable_cdf_update
+    int overshootSeen;               // ppcs->overshoot_seen
+    int undershootSeen;              // ppcs->undershoot_seen
 };
 
 // ASSIGN_MINQ_TABLE (rc_tables.h:36-39, the CONFIG_ENABLE_HIGH_BIT_DEPTH=0
@@ -981,14 +986,35 @@ void rcUpdateRateCorrectionFactors(RcControl& rc, const RcConfig& rcCfg, PcsCarr
                                    const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int width,
                                    int height, int bitDepth);
 
-// RateControlIntervalParamContext (pcs.h), consumed fields only - grows
-// with the slices that consume it (the carrier-grows precedent).
+// RateControlIntervalParamContext (encode_context.h), consumed fields only -
+// grows with the slices that consume them (the carrier-grows precedent).
 struct RcIntervalParamCarrier {
+    std::uint64_t firstPoc;      // first_poc
+    std::int32_t size;           // size
+    std::int32_t processedFrameNumber;  // processed_frame_number
+    std::int64_t vbrBitsOffTarget;      // vbr_bits_off_target
+    std::int64_t vbrBitsOffTargetFast;  // vbr_bits_off_target_fast
     int rollingTargetBits;       // rc_param_ptr->rolling_target_bits
     int rollingActualBits;       // rc_param_ptr->rolling_actual_bits
-    std::int64_t totalActualBits;  // rc_param_ptr->total_actual_bits
-    std::int64_t totalTargetBits;  // rc_param_ptr->total_target_bits
+    int rateErrorEstimate;       // rate_error_estimate
+    std::int64_t totalActualBits;  // total_actual_bits
+    std::int64_t totalTargetBits;  // total_target_bits
+    int extendMinq;              // extend_minq
+    int extendMaxq;              // extend_maxq
+    int extendMinqFast;          // extend_minq_fast
 };
+
+// rc_param_reset (rc_process.c:555-566): verbatim; resets the interval-param
+// carrier into its default values (first_poc / rolling bits untouched).
+void rcParamReset(RcIntervalParamCarrier& rcParam);
+
+// svt_aom_update_rc_counts (rc_process.c:568-590): verbatim; the
+// frm_hdr.showable_frame / disable_cdf_update gates ride the PcsCarrier.
+void updateRcCounts(RcControl& rc, const PcsCarrier& ppcs);
+
+// reset_rc_param (rc_process.c:592-605): verbatim; resets the ppcs recode
+// counters (loop_count, overshoot_seen, undershoot_seen).
+void resetRcParam(PcsCarrier& ppcs);
 
 // svt_av1_rc_postencode_update_gop_const (rc_vbr_cbr.c:1495-1561): verbatim;
 // the rolling/total bits go to the interval-param carrier; NO low-motion

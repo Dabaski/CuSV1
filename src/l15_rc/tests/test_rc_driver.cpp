@@ -582,3 +582,101 @@ TEST_CASE("roundPowerOfTwo pins the definitions rounding shift") {
     // value=552, n=2: (552 + 2) >> 2 = 554 >> 2 = 138.
     CHECK(l15_rc::roundPowerOfTwo(552, 2) == 138);
 }
+
+// ---- A9D S1: rc_process.c rc_param_reset :555-566 +
+// svt_aom_update_rc_counts :568-590 + reset_rc_param :592-605 ----
+
+TEST_CASE("rc_param_reset resets the interval-param carrier") {
+    l15_rc::RcIntervalParamCarrier param{};
+    param.firstPoc = 7;
+    param.size = 5;
+    param.processedFrameNumber = 5;
+    param.vbrBitsOffTarget = 12345;
+    param.vbrBitsOffTargetFast = 999;
+    param.rollingTargetBits = 100;
+    param.rollingActualBits = 90;
+    param.rateErrorEstimate = 12;
+    param.totalActualBits = 500000;
+    param.totalTargetBits = 480000;
+    param.extendMinq = 3;
+    param.extendMaxq = 4;
+    param.extendMinqFast = 2;
+
+    l15_rc::rcParamReset(param);
+
+    // rc_param_reset (rc_process.c:555-566) writes ELEVEN fields; first_poc,
+    // rolling_target_bits and rolling_actual_bits are NOT touched.
+    CHECK(param.size == -1);
+    CHECK(param.processedFrameNumber == 0);
+    CHECK(param.vbrBitsOffTarget == 0);
+    CHECK(param.vbrBitsOffTargetFast == 0);
+    CHECK(param.rateErrorEstimate == 0);
+    CHECK(param.totalActualBits == 0);
+    CHECK(param.totalTargetBits == 0);
+    CHECK(param.extendMinq == 0);
+    CHECK(param.extendMaxq == 0);
+    CHECK(param.extendMinqFast == 0);
+    // the untouched trio keeps its values.
+    CHECK(param.firstPoc == 7);
+    CHECK(param.rollingTargetBits == 100);
+    CHECK(param.rollingActualBits == 90);
+}
+
+TEST_CASE("update_rc_counts walks the showable gate and the cdf branch") {
+    // svt_aom_update_rc_counts (rc_process.c:568-590): showable frames
+    // increment frames_since_key and decrement frames_to_key; the
+    // disable_cdf_update branch moves frames_since_cdf_update.
+    {
+        l15_rc::RcControl rc = drvRc();
+        rc.framesSinceKey = 8;
+        rc.framesToKey = 20;
+        rc.framesSinceCdfUpdate = 0;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.showableFrame = true;
+        pcs.disableCdfUpdate = false;
+        l15_rc::updateRcCounts(rc, pcs);
+        CHECK(rc.framesSinceKey == 9);
+        CHECK(rc.framesToKey == 19);
+        CHECK(rc.framesSinceCdfUpdate == 0);
+    }
+    {
+        l15_rc::RcControl rc = drvRc();
+        rc.framesSinceKey = 8;
+        rc.framesToKey = 20;
+        rc.framesSinceCdfUpdate = 3;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.showableFrame = true;
+        pcs.disableCdfUpdate = true;
+        l15_rc::updateRcCounts(rc, pcs);
+        CHECK(rc.framesSinceKey == 9);
+        CHECK(rc.framesToKey == 19);
+        CHECK(rc.framesSinceCdfUpdate == 4);
+    }
+    {
+        // not showable: NOTHING moves (the whole walk is inside the gate).
+        l15_rc::RcControl rc = drvRc();
+        rc.framesSinceKey = 8;
+        rc.framesToKey = 20;
+        rc.framesSinceCdfUpdate = 3;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.showableFrame = false;
+        pcs.disableCdfUpdate = false;
+        l15_rc::updateRcCounts(rc, pcs);
+        CHECK(rc.framesSinceKey == 8);
+        CHECK(rc.framesToKey == 20);
+        CHECK(rc.framesSinceCdfUpdate == 3);
+    }
+}
+
+TEST_CASE("reset_rc_param zeroes the ppcs recode counters") {
+    // reset_rc_param (rc_process.c:592-605): loop_count + the recode
+    // seen-flags on the ppcs wall.
+    l15_rc::PcsCarrier pcs = drvPcs();
+    pcs.loopCount = 4;
+    pcs.overshootSeen = 1;
+    pcs.undershootSeen = 1;
+    l15_rc::resetRcParam(pcs);
+    CHECK(pcs.loopCount == 0);
+    CHECK(pcs.overshootSeen == 0);
+    CHECK(pcs.undershootSeen == 0);
+}

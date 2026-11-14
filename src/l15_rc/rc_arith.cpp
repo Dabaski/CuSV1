@@ -2966,4 +2966,46 @@ int getGfuQTpl(const RcControl& rc, int targetActiveQuality, int bitDepth) {
     return q;
 }
 
+// ---- A9D: rc_process.c (the interval-param resets and the rc counts) ----
+
+// rc_param_reset (rc_process.c:555-566): verbatim.
+void rcParamReset(RcIntervalParamCarrier& rcParam) {
+    rcParam.size = -1;
+    rcParam.processedFrameNumber = 0;
+    rcParam.vbrBitsOffTarget = 0;
+    rcParam.vbrBitsOffTargetFast = 0;
+    rcParam.rateErrorEstimate = 0;
+    rcParam.totalActualBits = 0;
+    rcParam.totalTargetBits = 0;
+    rcParam.extendMinq = 0;
+    rcParam.extendMaxq = 0;
+    rcParam.extendMinqFast = 0;
+}
+
+// svt_aom_update_rc_counts (rc_process.c:568-590): verbatim; the scs/enc_ctx
+// walls thread (the rc carrier + the ppcs frm_hdr gates).
+void updateRcCounts(RcControl& rc, const PcsCarrier& ppcs) {
+    if (ppcs.showableFrame) {
+        // If this is a show_existing_frame with a source other than altref,
+        // or if it is not a displayed forward keyframe, the keyframe update
+        // counters were incremented when it was originally encoded.
+        rc.framesSinceKey++;
+        rc.framesToKey--;
+        // Reset whenever the CDF is updated for the current frame,
+        // covering keyframes, warmup, scene changes, and periodic updates.
+        if (!ppcs.disableCdfUpdate) {
+            rc.framesSinceCdfUpdate = 0;
+        } else {
+            rc.framesSinceCdfUpdate++;
+        }
+    }
+}
+
+// reset_rc_param (rc_process.c:592-605): verbatim.
+void resetRcParam(PcsCarrier& ppcs) {
+    ppcs.loopCount = 0;
+    ppcs.overshootSeen = 0;
+    ppcs.undershootSeen = 0;
+}
+
 } // namespace l15_rc
