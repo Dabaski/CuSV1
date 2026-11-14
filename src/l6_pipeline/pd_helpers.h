@@ -398,5 +398,87 @@ struct PdPcsModulate {
 // (product_coding_loop.c:47).
 std::int32_t refPicsModulation(const PdPcsModulate& pcs, std::int32_t noise_levels_log1p_fp16);
 
+// ---------------------------------------------------------------------------
+// PO2 park resolution: the pic_operators.c remainder (:162-:189 the
+// pack2d/unpack2d dispatches, :481-:645 the five EbPictureBufferDesc-
+// walled pic drivers).
+// ---------------------------------------------------------------------------
+
+// svt_aom_un_pack2d (pic_operators.c:162-:171). FUNCTION-IDENTITY
+// DEVIATION (named): both dispatch branches resolve to the same C body
+// (common_dsp_rtcd.c:1704-:1705 SET_ONLY_C maps
+// svt_aom_un_pack2d_16_bit_src_mul4 to svt_enc_msb_un_pack2_d), so the
+// port routes both to the landed PU1 kernel; only the SIMD twins differ,
+// and the ASM surface is excluded from the port.
+void unpack2d(const std::uint16_t* in16_bit_buffer, std::uint32_t in_stride, std::uint8_t* out8_bit_buffer,
+              std::uint32_t out8_stride, std::uint8_t* outn_bit_buffer, std::uint32_t outn_stride,
+              std::uint32_t width, std::uint32_t height);
+
+// svt_aom_pack2d_src (pic_operators.c:173-:182), the same
+// function-identity routing to svt_enc_msb_pack2_d.
+void pack2dSrc(std::uint8_t* in8_bit_buffer, std::uint32_t in8_stride, std::uint8_t* inn_bit_buffer,
+               std::uint32_t inn_stride, std::uint16_t* out16_bit_buffer, std::uint32_t out_stride,
+               std::uint32_t width, std::uint32_t height);
+
+// svt_aom_compressed_pack_sb (pic_operators.c:184-:189): the single
+// callee pass-through.
+void compressedPackSb(const std::uint8_t* in8_bit_buffer, std::uint32_t in8_stride,
+                      const std::uint8_t* inn_bit_buffer, std::uint32_t inn_stride,
+                      std::uint16_t* out16_bit_buffer, std::uint32_t out_stride, std::uint32_t width,
+                      std::uint32_t height);
+
+// The EbPictureBufferDesc window the five pic drivers consume
+// (picture_buffer_desc.h): the plane pointers, strides, bit-inc planes,
+// the metadata copy_buffer_info needs. The pointers are caller-owned
+// (the EbMalloc wall is the caller's).
+struct PicPackDesc {
+    const std::uint8_t* y_buffer;
+    const std::uint8_t* u_buffer;
+    const std::uint8_t* v_buffer;
+    const std::uint8_t* y_buffer_bit_inc;
+    const std::uint8_t* u_buffer_bit_inc;
+    const std::uint8_t* v_buffer_bit_inc;
+    std::uint32_t y_stride;
+    std::uint32_t u_stride;
+    std::uint32_t v_stride;
+    std::uint32_t y_stride_bit_inc;
+    std::uint32_t u_stride_bit_inc;
+    std::uint32_t v_stride_bit_inc;
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t border;
+    std::uint32_t max_width;
+    std::uint32_t max_height;
+    std::uint32_t luma_size;
+    std::uint32_t chroma_size;
+};
+
+// svt_aom_pack_2d_pic (pic_operators.c:481-:508): Y + U + V, the U/V
+// dims >>1, the bit-inc strides >>2, out strides = the plane strides.
+void pack2dPic(const PicPackDesc& input_picture, std::uint16_t* const packed[3]);
+
+// svt_aom_convert_pic_8bit_to_16bit (pic_operators.c:510-:545): three
+// convert calls with the ss_x/ss_y-scaled U/V dims + the dst
+// width/height write.
+void convertPic8bitTo16bit(const PicPackDesc& src_8bit, PicPackDesc& dst_16bit, std::uint32_t ss_x,
+                           std::uint32_t ss_y);
+
+// svt_aom_copy_buffer_info (pic_operators.c:547-:561): the thirteen
+// metadata fields.
+void copyBufferInfo(const PicPackDesc& src_ptr, PicPackDesc& dst_ptr);
+
+// svt_aom_pack_highbd_pic (pic_operators.c:563-:603): the border-backed
+// pointer arithmetic (y_buffer - (border + stride*border), the bit-inc
+// by border/4 + comp_stride*border), width = (uint16)y_stride and
+// height = (uint16)(border*2 + height); a null buffer_16bit[1]/[2]
+// skips U/V.
+void packHighbdPic(const PicPackDesc& pic_ptr, std::uint16_t* const buffer_16bit[3], std::uint32_t ss_x,
+                   std::uint32_t ss_y);
+
+// svt_aom_unpack_highbd_pic (pic_operators.c:605-:645): the same
+// arithmetic through unpack_and_2bcompress.
+void unpackHighbdPic(const std::uint16_t* const buffer_highbd[3], PicPackDesc& pic_ptr, std::uint32_t ss_x,
+                     std::uint32_t ss_y);
+
 }  // namespace pd
 }  // namespace pipeline

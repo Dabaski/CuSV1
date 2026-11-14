@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <pd_helpers.h>
+#include <packunpack.h>
 
 namespace pd = pipeline::pd;
 
@@ -1235,4 +1236,238 @@ TEST_CASE("l6 pd ref_pics_modulation qp_opt scaling") {
             CHECK(pd::refPicsModulation(pcs, 100) == want);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// PO2: the pic_operators.c remainder (pd_process.h brief: the pack2d /
+// unpack2d dispatches :162-:189 + the five EbPictureBufferDesc-walled
+// pic drivers :481-:645, PO1's park resolved).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A small packed YUV setup: Y 8x4, bit-inc planes, UV 4x2.
+struct PackFixture {
+    static constexpr std::uint32_t kW = 8;
+    static constexpr std::uint32_t kH = 4;
+    std::vector<std::uint8_t> y, u, v;
+    std::vector<std::uint8_t> ybi, ubi, vbi;  // bit-inc planes (2bpp packed)
+    std::vector<std::uint16_t> py, pu, pv;
+    pd::PicPackDesc desc{};
+
+    PackFixture() {
+        y.resize(kW * kH);
+        u.resize((kW / 2) * (kH / 2));
+        v.resize((kW / 2) * (kH / 2));
+        // pic_buffer_desc.c:66: y_stride_bit_inc = y_stride - the bit-inc
+        // plane is allocated at the main plane's byte pitch; the >>2 in
+        // pack_2d_pic converts it to the compressed row stride.
+        ybi.resize(kW * kH);
+        ubi.resize((kW / 2) * (kH / 2));
+        vbi.resize((kW / 2) * (kH / 2));
+        for (std::size_t i = 0; i < y.size(); ++i) y[i] = static_cast<std::uint8_t>(i * 7 + 1);
+        for (std::size_t i = 0; i < u.size(); ++i) u[i] = static_cast<std::uint8_t>(i * 11 + 3);
+        for (std::size_t i = 0; i < v.size(); ++i) v[i] = static_cast<std::uint8_t>(i * 13 + 5);
+        for (std::size_t i = 0; i < ybi.size(); ++i) ybi[i] = static_cast<std::uint8_t>(i * 29 + 9);
+        desc.y_buffer = y.data();
+        desc.u_buffer = u.data();
+        desc.v_buffer = v.data();
+        desc.y_stride = kW;
+        desc.u_stride = kW / 2;
+        desc.v_stride = kW / 2;
+        desc.y_buffer_bit_inc = ybi.data();
+        desc.u_buffer_bit_inc = ubi.data();
+        desc.v_buffer_bit_inc = vbi.data();
+        desc.y_stride_bit_inc = kW;
+        desc.u_stride_bit_inc = kW / 2;
+        desc.v_stride_bit_inc = kW / 2;
+        desc.width = kW;
+        desc.height = kH;
+        py.resize(kW * kH);
+        pu.resize((kW / 2) * (kH / 2));
+        pv.resize((kW / 2) * (kH / 2));
+    }
+};
+
+}  // namespace
+
+// The dispatch parity: both branches of svt_aom_un_pack2d /
+// svt_aom_pack2d_src route to the same C body (common_dsp_rtcd.c:1704-
+// :1705 SET_ONLY_C maps the mul4 pointer to svt_enc_msb_pack2_d /
+// svt_enc_msb_un_pack2_d) - the function-identity claim pinned by
+// comparing the routed output against the landed PU1 kernel directly.
+TEST_CASE("l6 pd unpack2d + pack2d_src routes both parities to the PU1 kernel") {
+    std::vector<std::uint16_t> in16(5 * 3);
+    for (std::size_t i = 0; i < in16.size(); ++i) in16[i] = static_cast<std::uint16_t>(0x1234u + i * 257u);
+    std::vector<std::uint8_t> out8(15, 0xEE), outn(15, 0xDD);
+    std::vector<std::uint8_t> ref8(15, 0xEE), refn(15, 0xDD);
+    // odd path (width 5, height 3)
+    pd::unpack2d(in16.data(), 5, out8.data(), 5, outn.data(), 5, 5, 3);
+    analysis::packunpack::msbUnPack2d(in16.data(), 5, ref8.data(), refn.data(), 5, 5, 5, 3);
+    CHECK(out8 == ref8);
+    CHECK(outn == refn);
+    // mul4 path (width 4, height 2) must give the same result as the
+    // direct kernel (the routing identity)
+    std::vector<std::uint16_t> in16b(8);
+    for (std::size_t i = 0; i < 8; ++i) in16b[i] = static_cast<std::uint16_t>(0x0F0Fu + i * 31u);
+    std::vector<std::uint8_t> a8(8, 0), an(8, 0), b8(8, 0), bn(8, 0);
+    pd::unpack2d(in16b.data(), 4, a8.data(), 4, an.data(), 4, 4, 2);
+    analysis::packunpack::msbUnPack2d(in16b.data(), 4, b8.data(), bn.data(), 4, 4, 4, 2);
+    CHECK(a8 == b8);
+    CHECK(an == bn);
+    // pack2d_src: both parities
+    std::vector<std::uint8_t> p8(15, 0x55), pn(15, 0x66), rp8(15, 0x55), rpn(15, 0x66);
+    std::vector<std::uint16_t> po(15), rpo(15);
+    for (std::size_t i = 0; i < p8.size(); ++i) {
+        p8[i] = static_cast<std::uint8_t>(i + 1);
+        rp8[i] = static_cast<std::uint8_t>(i + 1);
+        pn[i] = static_cast<std::uint8_t>(0xC0 >> (i % 4));
+        rpn[i] = pn[i];
+    }
+    pd::pack2dSrc(p8.data(), 5, pn.data(), 5, po.data(), 5, 5, 3);
+    analysis::packunpack::msbPack2d(rp8.data(), 5, rpn.data(), 5, rpo.data(), 5, 5, 3);
+    CHECK(po == rpo);
+}
+
+TEST_CASE("l6 pd compressed_pack_sb routes to the PU1 kernel") {
+    std::vector<std::uint8_t> in8(16, 0x40), inn(4, 0xA5);
+    std::vector<std::uint16_t> out(16), ref(16);
+    pd::compressedPackSb(in8.data(), 4, inn.data(), 1, out.data(), 4, 4, 4);
+    analysis::packunpack::compressedPackMsb(in8.data(), 4, inn.data(), 1, ref.data(), 4, 4, 4);
+    CHECK(out == ref);
+}
+
+TEST_CASE("l6 pd pack_2d_pic packs all three planes with the bit-inc >> 2") {
+    PackFixture f;
+    std::uint16_t* packed[3] = {f.py.data(), f.pu.data(), f.pv.data()};
+    pd::pack2dPic(f.desc, packed);
+    // Y: full w/h, out stride = y_stride, bit-inc stride = y_stride_bit_inc >> 2
+    std::vector<std::uint16_t> refY(f.kW * f.kH);
+    analysis::packunpack::compressedPackMsb(f.y.data(), f.kW, f.ybi.data(), f.kW >> 2, refY.data(), f.kW, f.kW,
+                                            f.kH);
+    CHECK(std::vector<std::uint16_t>(f.py.begin(), f.py.end()) == refY);
+    // U: w>>1 x h>>1, out stride u_stride, bit-inc stride u_stride_bit_inc >> 2
+    std::vector<std::uint16_t> refU((f.kW / 2) * (f.kH / 2));
+    analysis::packunpack::compressedPackMsb(f.u.data(), f.kW / 2, f.ubi.data(), (f.kW / 2) >> 2, refU.data(),
+                                            f.kW / 2, f.kW / 2, f.kH / 2);
+    CHECK(std::vector<std::uint16_t>(f.pu.begin(), f.pu.end()) == refU);
+    // V likewise with v_stride
+    std::vector<std::uint16_t> refV((f.kW / 2) * (f.kH / 2));
+    analysis::packunpack::compressedPackMsb(f.v.data(), f.kW / 2, f.vbi.data(), (f.kW / 2) >> 2, refV.data(),
+                                            f.kW / 2, f.kW / 2, f.kH / 2);
+    CHECK(std::vector<std::uint16_t>(f.pv.begin(), f.pv.end()) == refV);
+}
+
+TEST_CASE("l6 pd convert_pic_8bit_to_16bit converts three planes + writes dst dims") {
+    PackFixture f;
+    pd::PicPackDesc dst{};
+    std::vector<std::uint16_t> dy(f.kW * f.kH, 0), du(f.kW / 2 * f.kH / 2, 0), dv(f.kW / 2 * f.kH / 2, 0);
+    dst.y_buffer = reinterpret_cast<const std::uint8_t*>(dy.data());
+    dst.u_buffer = reinterpret_cast<const std::uint8_t*>(du.data());
+    dst.v_buffer = reinterpret_cast<const std::uint8_t*>(dv.data());
+    dst.y_stride = f.kW;
+    dst.u_stride = f.kW / 2;
+    dst.v_stride = f.kW / 2;
+    dst.width = 99;
+    dst.height = 88;
+    pd::convertPic8bitTo16bit(f.desc, dst, 1, 1);
+    std::vector<std::uint16_t> refY(f.kW * f.kH);
+    analysis::packunpack::convert8bitTo16bit(f.y.data(), f.kW, refY.data(), f.kW, f.kW, f.kH);
+    CHECK(dy == refY);
+    std::vector<std::uint16_t> refU((f.kW / 2) * (f.kH / 2));
+    analysis::packunpack::convert8bitTo16bit(f.u.data(), f.kW / 2, refU.data(), f.kW / 2, f.kW / 2, f.kH / 2);
+    CHECK(du == refU);
+    std::vector<std::uint16_t> refV((f.kW / 2) * (f.kH / 2));
+    analysis::packunpack::convert8bitTo16bit(f.v.data(), f.kW / 2, refV.data(), f.kW / 2, f.kW / 2, f.kH / 2);
+    CHECK(dv == refV);
+    CHECK(dst.width == f.kW);
+    CHECK(dst.height == f.kH);
+}
+
+TEST_CASE("l6 pd copy_buffer_info copies the thirteen metadata fields") {
+    pd::PicPackDesc src{};
+    src.width = 1;
+    src.height = 2;
+    src.max_width = 3;
+    src.max_height = 4;
+    src.y_stride = 5;
+    src.u_stride = 6;
+    src.v_stride = 7;
+    src.border = 8;
+    src.y_stride_bit_inc = 9;
+    src.u_stride_bit_inc = 10;
+    src.v_stride_bit_inc = 11;
+    src.luma_size = 12;
+    src.chroma_size = 13;
+    pd::PicPackDesc dst{};
+    pd::copyBufferInfo(src, dst);
+    CHECK(dst.width == 1);
+    CHECK(dst.height == 2);
+    CHECK(dst.max_width == 3);
+    CHECK(dst.max_height == 4);
+    CHECK(dst.y_stride == 5);
+    CHECK(dst.u_stride == 6);
+    CHECK(dst.v_stride == 7);
+    CHECK(dst.border == 8);
+    CHECK(dst.y_stride_bit_inc == 9);
+    CHECK(dst.u_stride_bit_inc == 10);
+    CHECK(dst.v_stride_bit_inc == 11);
+    CHECK(dst.luma_size == 12);
+    CHECK(dst.chroma_size == 13);
+}
+
+TEST_CASE("l6 pd pack_highbd_pic packs with the border-offset arithmetic") {
+    // plane with a border of 2 rows/cols: allocate (w + 2*border) x
+    // (h + 2*border), the desc points INTO the border.
+    constexpr std::uint32_t kB = 2, kW = 8, kH = 4;
+    std::vector<std::uint8_t> plane((kW + 2 * kB) * (kH + 2 * kB), 0x21);
+    std::vector<std::uint8_t> bitinc((kW + 2 * kB) * (kH + 2 * kB) / 4, 0x3C);
+    pd::PicPackDesc pic{};
+    pic.y_buffer = plane.data() + kB + (kW + 2 * kB) * kB;
+    pic.y_stride = kW + 2 * kB;
+    pic.y_buffer_bit_inc = bitinc.data() + kB / 4 + ((kW + 2 * kB) / 4) * kB;
+    pic.y_stride_bit_inc = (kW + 2 * kB) / 4;
+    pic.width = kW;
+    pic.height = kH;
+    pic.border = kB;
+    std::vector<std::uint16_t> packedY(pic.y_stride * (2 * kB + kH), 0);
+    std::uint16_t* bufs[3] = {packedY.data(), nullptr, nullptr};
+    pd::packHighbdPic(pic, bufs, 1, 1);  // U/V null -> only Y packed
+    // Oracle: the same arithmetic restated - width = y_stride, height =
+    // border*2 + height, comp stride = y_stride/4, the buffer backed up
+    // by border + stride*border and the bit-inc by border/4 + comp*border.
+    std::vector<std::uint16_t> ref(packedY.size(), 0);
+    const std::uint32_t w16 = pic.y_stride;
+    const std::uint32_t h16 = kB * 2 + kH;
+    const std::uint32_t comp = pic.y_stride / 4;
+    analysis::packunpack::compressedPackMsb(
+        plane.data(),  // y_buffer - (border + stride*border)
+        pic.y_stride, bitinc.data(), comp, ref.data(), pic.y_stride, w16, h16);
+    CHECK(packedY == ref);
+}
+
+TEST_CASE("l6 pd unpack_highbd_pic unpacks with the border-offset arithmetic") {
+    constexpr std::uint32_t kB = 2, kW = 8, kH = 4;
+    std::vector<std::uint16_t> hi((kW + 2 * kB) * (kH + 2 * kB), 0);
+    for (std::size_t i = 0; i < hi.size(); ++i) hi[i] = static_cast<std::uint16_t>(0x0123u + i * 97u);
+    std::vector<std::uint8_t> out8((kW + 2 * kB) * (kH + 2 * kB), 0), out2((kW + 2 * kB) * (kH + 2 * kB) / 4, 0);
+    pd::PicPackDesc pic{};
+    pic.y_buffer = out8.data() + kB + (kW + 2 * kB) * kB;
+    pic.y_stride = kW + 2 * kB;
+    pic.y_buffer_bit_inc = out2.data() + kB / 4 + ((kW + 2 * kB) / 4) * kB;
+    pic.y_stride_bit_inc = (kW + 2 * kB) / 4;
+    pic.width = kW;
+    pic.height = kH;
+    pic.border = kB;
+    const std::uint16_t* bufs[3] = {hi.data(), nullptr, nullptr};
+    pd::unpackHighbdPic(bufs, pic, 1, 1);
+    // Oracle: the same unpack_and_2bcompress call restated.
+    std::vector<std::uint8_t> r8(out8.size(), 0), r2(out2.size(), 0);
+    const std::uint32_t w16 = pic.y_stride;
+    const std::uint32_t h16 = kB * 2 + kH;
+    const std::uint32_t comp = pic.y_stride / 4;
+    analysis::packunpack::unpackAnd2bCompress(hi.data(), pic.y_stride, r8.data(), pic.y_stride, r2.data(), comp,
+                                              w16, h16);
+    CHECK(out8 == r8);
+    CHECK(out2 == r2);
 }

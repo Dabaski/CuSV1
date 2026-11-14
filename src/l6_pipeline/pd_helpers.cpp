@@ -2,6 +2,7 @@
 // pd_helpers.h for the park list and carrier conventions.
 #include <pd_helpers.h>
 
+#include <packunpack.h>
 #include <mode_config.h>
 
 #include <cassert>
@@ -737,6 +738,181 @@ std::int32_t refPicsModulation(const PdPcsModulate& pcs, std::int32_t noise_leve
             static_cast<std::int32_t>(q_weight_denom);
     }
     return offset;
+}
+
+// ---------------------------------------------------------------------------
+// PO2 park resolution: the pic_operators.c remainder.
+// ---------------------------------------------------------------------------
+
+// svt_aom_un_pack2d (pic_operators.c:162-:171): both branches route to
+// the landed PU1 kernel (the function-identity deviation named in the
+// header).
+void unpack2d(const std::uint16_t* in16_bit_buffer, std::uint32_t in_stride, std::uint8_t* out8_bit_buffer,
+              std::uint32_t out8_stride, std::uint8_t* outn_bit_buffer, std::uint32_t outn_stride,
+              std::uint32_t width, std::uint32_t height) {
+    analysis::packunpack::msbUnPack2d(in16_bit_buffer, in_stride, out8_bit_buffer, outn_bit_buffer, out8_stride,
+                                      outn_stride, width, height);
+}
+
+// svt_aom_pack2d_src (pic_operators.c:173-:182), same routing.
+void pack2dSrc(std::uint8_t* in8_bit_buffer, std::uint32_t in8_stride, std::uint8_t* inn_bit_buffer,
+               std::uint32_t inn_stride, std::uint16_t* out16_bit_buffer, std::uint32_t out_stride,
+               std::uint32_t width, std::uint32_t height) {
+    analysis::packunpack::msbPack2d(in8_bit_buffer, in8_stride, inn_bit_buffer, inn_stride, out16_bit_buffer,
+                                    out_stride, width, height);
+}
+
+// svt_aom_compressed_pack_sb (pic_operators.c:184-:189), same routing.
+void compressedPackSb(const std::uint8_t* in8_bit_buffer, std::uint32_t in8_stride,
+                      const std::uint8_t* inn_bit_buffer, std::uint32_t inn_stride,
+                      std::uint16_t* out16_bit_buffer, std::uint32_t out_stride, std::uint32_t width,
+                      std::uint32_t height) {
+    analysis::packunpack::compressedPackMsb(in8_bit_buffer, in8_stride, inn_bit_buffer, inn_stride,
+                                            out16_bit_buffer, out_stride, width, height);
+}
+
+// svt_aom_pack_2d_pic (pic_operators.c:481-:508), verbatim over the
+// carrier.
+void pack2dPic(const PicPackDesc& input_picture, std::uint16_t* const packed[3]) {
+    analysis::packunpack::compressedPackMsb(input_picture.y_buffer, input_picture.y_stride,
+                                            input_picture.y_buffer_bit_inc, input_picture.y_stride_bit_inc >> 2,
+                                            packed[0], input_picture.y_stride, input_picture.width,
+                                            input_picture.height);
+
+    analysis::packunpack::compressedPackMsb(input_picture.u_buffer, input_picture.v_stride,
+                                            input_picture.u_buffer_bit_inc, input_picture.v_stride_bit_inc >> 2,
+                                            packed[1], input_picture.v_stride, input_picture.width >> 1,
+                                            input_picture.height >> 1);
+
+    analysis::packunpack::compressedPackMsb(input_picture.v_buffer, input_picture.v_stride,
+                                            input_picture.v_buffer_bit_inc, input_picture.v_stride_bit_inc >> 2,
+                                            packed[2], input_picture.v_stride, input_picture.width >> 1,
+                                            input_picture.height >> 1);
+}
+
+// svt_aom_convert_pic_8bit_to_16bit (pic_operators.c:510-:545),
+// verbatim over the carrier.
+void convertPic8bitTo16bit(const PicPackDesc& src_8bit, PicPackDesc& dst_16bit, std::uint32_t ss_x,
+                           std::uint32_t ss_y) {
+    // Y
+    std::uint16_t* buffer_16bit = const_cast<std::uint16_t*>(reinterpret_cast<const std::uint16_t*>(dst_16bit.y_buffer));
+    std::uint32_t stride_16bit = dst_16bit.y_stride;
+    const std::uint8_t* buffer_8bit = src_8bit.y_buffer;
+    std::uint32_t stride_8bit = src_8bit.y_stride;
+    analysis::packunpack::convert8bitTo16bit(buffer_8bit, stride_8bit, buffer_16bit, stride_16bit, src_8bit.width,
+                                             src_8bit.height);
+
+    // Cb
+    buffer_16bit = reinterpret_cast<std::uint16_t*>(const_cast<std::uint8_t*>(dst_16bit.u_buffer));
+    stride_16bit = dst_16bit.u_stride;
+    buffer_8bit = src_8bit.u_buffer;
+    stride_8bit = src_8bit.u_stride;
+    analysis::packunpack::convert8bitTo16bit(buffer_8bit, stride_8bit, buffer_16bit, stride_16bit,
+                                             src_8bit.width >> ss_x, src_8bit.height >> ss_y);
+
+    // Cr
+    buffer_16bit = reinterpret_cast<std::uint16_t*>(const_cast<std::uint8_t*>(dst_16bit.v_buffer));
+    stride_16bit = dst_16bit.v_stride;
+    buffer_8bit = src_8bit.v_buffer;
+    stride_8bit = src_8bit.v_stride;
+    analysis::packunpack::convert8bitTo16bit(buffer_8bit, stride_8bit, buffer_16bit, stride_16bit,
+                                             src_8bit.width >> ss_x, src_8bit.height >> ss_y);
+
+    dst_16bit.width = src_8bit.width;
+    dst_16bit.height = src_8bit.height;
+}
+
+// svt_aom_copy_buffer_info (pic_operators.c:547-:561), verbatim.
+void copyBufferInfo(const PicPackDesc& src_ptr, PicPackDesc& dst_ptr) {
+    dst_ptr.width = src_ptr.width;
+    dst_ptr.height = src_ptr.height;
+    dst_ptr.max_width = src_ptr.max_width;
+    dst_ptr.max_height = src_ptr.max_height;
+    dst_ptr.y_stride = src_ptr.y_stride;
+    dst_ptr.u_stride = src_ptr.u_stride;
+    dst_ptr.v_stride = src_ptr.v_stride;
+    dst_ptr.border = src_ptr.border;
+    dst_ptr.y_stride_bit_inc = src_ptr.y_stride_bit_inc;
+    dst_ptr.u_stride_bit_inc = src_ptr.u_stride_bit_inc;
+    dst_ptr.v_stride_bit_inc = src_ptr.v_stride_bit_inc;
+    dst_ptr.luma_size = src_ptr.luma_size;
+    dst_ptr.chroma_size = src_ptr.chroma_size;
+}
+
+// svt_aom_pack_highbd_pic (pic_operators.c:563-:603), verbatim over the
+// carrier.
+void packHighbdPic(const PicPackDesc& pic_ptr, std::uint16_t* const buffer_16bit[3], std::uint32_t ss_x,
+                   std::uint32_t ss_y) {
+    const std::uint16_t width = static_cast<std::uint16_t>(pic_ptr.y_stride);
+    const std::uint16_t height = static_cast<std::uint16_t>(pic_ptr.border * 2 + pic_ptr.height);
+
+    const std::uint32_t comp_stride_y = pic_ptr.y_stride / 4;
+
+    analysis::packunpack::compressedPackMsb(
+        pic_ptr.y_buffer - (pic_ptr.border + (pic_ptr.y_stride * pic_ptr.border)), pic_ptr.y_stride,
+        pic_ptr.y_buffer_bit_inc - (pic_ptr.border / 4) - (comp_stride_y * pic_ptr.border), comp_stride_y,
+        buffer_16bit[0 /*Y*/], pic_ptr.y_stride, width, height);
+
+    if (buffer_16bit[1 /*U*/]) {
+        const std::uint32_t comp_stride_cb = pic_ptr.u_stride / 4;
+        analysis::packunpack::compressedPackMsb(
+            pic_ptr.u_buffer - ((pic_ptr.border >> ss_x) + (pic_ptr.u_stride * (pic_ptr.border >> ss_y))),
+            pic_ptr.u_stride,
+            pic_ptr.u_buffer_bit_inc - ((pic_ptr.border >> ss_x) / 4 + (comp_stride_cb * (pic_ptr.border >> ss_y))),
+            comp_stride_cb, buffer_16bit[1 /*U*/], pic_ptr.u_stride, (width + ss_x) >> ss_x,
+            (height + ss_y) >> ss_y);
+    }
+    if (buffer_16bit[2 /*V*/]) {
+        const std::uint32_t comp_stride_cr = pic_ptr.v_stride / 4;
+        analysis::packunpack::compressedPackMsb(
+            pic_ptr.v_buffer - ((pic_ptr.border >> ss_x) + (pic_ptr.v_stride * (pic_ptr.border >> ss_y))),
+            pic_ptr.v_stride,
+            pic_ptr.v_buffer_bit_inc - ((pic_ptr.border >> ss_x) / 4 + (comp_stride_cr * (pic_ptr.border >> ss_y))),
+            comp_stride_cr, buffer_16bit[2 /*V*/], pic_ptr.v_stride, (width + ss_x) >> ss_x,
+            (height + ss_y) >> ss_y);
+    }
+}
+
+// svt_aom_unpack_highbd_pic (pic_operators.c:605-:645), verbatim over
+// the carrier.
+void unpackHighbdPic(const std::uint16_t* const buffer_highbd[3], PicPackDesc& pic_ptr, std::uint32_t ss_x,
+                     std::uint32_t ss_y) {
+    const std::uint16_t width = static_cast<std::uint16_t>(pic_ptr.y_stride);
+    const std::uint16_t height = static_cast<std::uint16_t>(pic_ptr.border * 2 + pic_ptr.height);
+
+    const std::uint32_t comp_stride_y = pic_ptr.y_stride / 4;
+    const std::uint32_t comp_stride_cb = pic_ptr.u_stride / 4;
+    const std::uint32_t comp_stride_cr = pic_ptr.v_stride / 4;
+
+    analysis::packunpack::unpackAnd2bCompress(buffer_highbd[0 /*Y*/], pic_ptr.y_stride,
+                                              const_cast<std::uint8_t*>(
+                                                  pic_ptr.y_buffer - (pic_ptr.border + (pic_ptr.y_stride * pic_ptr.border))),
+                                              pic_ptr.y_stride,
+                                              const_cast<std::uint8_t*>(
+                                                  pic_ptr.y_buffer_bit_inc - (pic_ptr.border / 4) - (comp_stride_y * pic_ptr.border)),
+                                              comp_stride_y, width, height);
+
+    if (buffer_highbd[1 /*U*/]) {
+        analysis::packunpack::unpackAnd2bCompress(
+            buffer_highbd[1 /*U*/], pic_ptr.u_stride,
+            const_cast<std::uint8_t*>(pic_ptr.u_buffer -
+                                      ((pic_ptr.border >> ss_x) + (pic_ptr.u_stride * (pic_ptr.border >> ss_y)))),
+            pic_ptr.u_stride,
+            const_cast<std::uint8_t*>(pic_ptr.u_buffer_bit_inc -
+                                      ((pic_ptr.border >> ss_x) / 4 + (comp_stride_cb * (pic_ptr.border >> ss_y)))),
+            comp_stride_cb, (width + ss_x) >> ss_x, (height + ss_y) >> ss_y);
+    }
+
+    if (buffer_highbd[2 /*V*/]) {
+        analysis::packunpack::unpackAnd2bCompress(
+            buffer_highbd[2 /*V*/], pic_ptr.v_stride,
+            const_cast<std::uint8_t*>(pic_ptr.v_buffer -
+                                      ((pic_ptr.border >> ss_x) + (pic_ptr.v_stride * (pic_ptr.border >> ss_y)))),
+            pic_ptr.v_stride,
+            const_cast<std::uint8_t*>(pic_ptr.v_buffer_bit_inc -
+                                      ((pic_ptr.border >> ss_x) / 4 + (comp_stride_cr * (pic_ptr.border >> ss_y)))),
+            comp_stride_cr, (width + ss_x) >> ss_x, (height + ss_y) >> ss_y);
+    }
 }
 
 }  // namespace pd
