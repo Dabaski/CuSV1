@@ -7,6 +7,8 @@
 // Span map (grow per commit):
 //   A4M-1  mv_check_bounds                        mode_decision.c:3000-3003
 //   A4M-1  derive_ssim_threshold_factor_for_full_md  :3875-3877
+//   A4M-2  av1_set_ref_frame (carry)              inter_prediction.h:487-496
+//   A4M-2  valid_ref_frame_type                   mode_decision.c:3489-3504
 #pragma once
 
 #include <cstdint>
@@ -62,5 +64,44 @@ std::int32_t mvCheckBounds(const MvLimits* mv_limits, const Mv* mv);
 // A4M-1: derive_ssim_threshold_factor_for_full_md (mode_decision.c:3875-3877).
 // The scs wall threads as the input-resolution enum it reads.
 double deriveSsimThresholdFactorForFullMd(ResolutionRange inputResolution);
+
+// ---------------------------------------------------------------------------
+// A4M-2: the reference-frame type surface. The landed rate_est.h spells
+// INTRA_FRAME as a macro (= 0) and the MvRefFrameExt enum as MVX_*; the
+// reference names here carry the _MV suffix (the MD-side int8 MvReferenceFrame
+// domain, definitions.h:1357-1386 + :1593).
+// ---------------------------------------------------------------------------
+typedef std::int8_t MvReferenceFrame;  // definitions.h:1593
+
+// definitions.h:1357-1386 + :1389 (REFS_PER_FRAME = 7) + :1377 + :1419.
+constexpr MvReferenceFrame NONE_FRAME_MV = -1;
+constexpr MvReferenceFrame INTRA_FRAME_MV = 0;
+constexpr MvReferenceFrame LAST_FRAME_MV = 1;
+constexpr MvReferenceFrame LAST2_FRAME_MV = 2;
+constexpr MvReferenceFrame LAST3_FRAME_MV = 3;
+constexpr MvReferenceFrame GOLDEN_FRAME_MV = 4;
+constexpr MvReferenceFrame BWDREF_FRAME_MV = 5;
+constexpr MvReferenceFrame ALTREF2_FRAME_MV = 6;
+constexpr MvReferenceFrame ALTREF_FRAME_MV = 7;
+constexpr int REF_FRAMES_MV = 8;             // definitions.h:1384 LAST_BWD_FRAME
+constexpr int TOTAL_REFS_PER_FRAME_MV = 8;   // definitions.h:1377
+constexpr int FWD_REFS_MV = 4;               // definitions.h:1376
+constexpr int BWD_REFS_MV = 3;               // definitions.h:1378
+constexpr int TOTAL_UNIDIR_COMP_REFS_MV = 9;  // definitions.h:1367
+constexpr int TOTAL_COMP_REFS_MV = FWD_REFS_MV * BWD_REFS_MV + TOTAL_UNIDIR_COMP_REFS_MV;  // :1382 = 21
+constexpr int MODE_CTX_REF_FRAMES_MV = TOTAL_REFS_PER_FRAME_MV + TOTAL_COMP_REFS_MV;       // :1419 = 29
+
+// av1_set_ref_frame (inter_prediction.h:487-496). Module-boundary carry
+// (l16_rdo cannot link l5_motion; the l7-l13 duplication precedent): the
+// landed twin is l5 amvp.cpp:183; the ref_frame_map row set is
+// inter_prediction.h:461-485.
+void av1SetRefFrame(MvReferenceFrame* rf, std::int8_t refFrameType);
+
+// valid_ref_frame_type (mode_decision.c:3489-3504): the pcs wall threads as
+// the ref_frame_type_arr pointer + count (md_process.h:944). Deviation,
+// named: the reference's rf parameter is non-const and never written - the
+// port takes it const.
+bool validRefFrameType(const MvReferenceFrame rf[2], const MvReferenceFrame* refFrameTypeArr,
+                       std::uint8_t totRefFrameTypes);
 
 }  // namespace l16_rdo

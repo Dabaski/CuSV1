@@ -14,8 +14,14 @@ using l16_rdo::MvLimits;
 using l16_rdo::Mv;
 using l16_rdo::mvCheckBounds;
 using l16_rdo::deriveSsimThresholdFactorForFullMd;
+using l16_rdo::validRefFrameType;
 using l16_rdo::INPUT_SIZE_720p_RANGE;
 using l16_rdo::INPUT_SIZE_1080p_RANGE;
+using l16_rdo::INTRA_FRAME_MV;
+using l16_rdo::LAST_FRAME_MV;
+using l16_rdo::BWDREF_FRAME_MV;
+using l16_rdo::ALTREF_FRAME_MV;
+using l16_rdo::NONE_FRAME_MV;
 
 // ---------------------------------------------------------------------------
 // A4M-1: mv_check_bounds (mode_decision.c:3000-3003).
@@ -90,4 +96,61 @@ TEST_CASE("l16_rdo deriveSsimThresholdFactorForFullMd splits at 1080p") {
     CHECK(deriveSsimThresholdFactorForFullMd(INPUT_SIZE_1080p_RANGE) == 1.02);
     CHECK(deriveSsimThresholdFactorForFullMd(l16_rdo::INPUT_SIZE_4K_RANGE) == 1.02);
     CHECK(deriveSsimThresholdFactorForFullMd(l16_rdo::INPUT_SIZE_8K_RANGE) == 1.02);
+}
+
+// ---------------------------------------------------------------------------
+// A4M-2: valid_ref_frame_type (mode_decision.c:3489-3504) over the
+// av1_set_ref_frame carry (inter_prediction.h:487-496).
+// ---------------------------------------------------------------------------
+TEST_CASE("l16_rdo validRefFrameType matches the ref-frame-type array walk") {
+    // mode_decision.c:3489-3504: rf[0] == INTRA_FRAME short-circuits true;
+    // otherwise rf must equal av1_set_ref_frame(ref_frame_type_arr[i]) for
+    // some i < tot_ref_frame_types. The array here is the pcs carrier
+    // (ref_frame_type_arr, md_process.h:944).
+    // A live PCS array for a low-delay single-ref-ish frame:
+    // {LAST_FRAME, ALTREF_FRAME, LAST|ALTREF compound (type 16 =
+    // map row 8), BWDREF}.
+    const l16_rdo::MvReferenceFrame arr[4] = {LAST_FRAME_MV, ALTREF_FRAME_MV, 16 /*LAST|ALTREF*/, BWDREF_FRAME_MV};
+
+    // INTRA_FRAME first: skip validation (the :3492-3494 early-out).
+    const l16_rdo::MvReferenceFrame rfIntra[2] = {INTRA_FRAME_MV, NONE_FRAME_MV};
+    CHECK(validRefFrameType(rfIntra, arr, 4) == true);
+    // INTRA_FRAME first even with a compound second slot: still the early-out.
+    const l16_rdo::MvReferenceFrame rfIntra2[2] = {INTRA_FRAME_MV, ALTREF_FRAME_MV};
+    CHECK(validRefFrameType(rfIntra2, arr, 4) == true);
+
+    // LAST + NONE: type 0 of the array.
+    const l16_rdo::MvReferenceFrame rfLast[2] = {LAST_FRAME_MV, NONE_FRAME_MV};
+    CHECK(validRefFrameType(rfLast, arr, 4) == true);
+    // ALTREF + NONE: type 1.
+    const l16_rdo::MvReferenceFrame rfAlt[2] = {ALTREF_FRAME_MV, NONE_FRAME_MV};
+    CHECK(validRefFrameType(rfAlt, arr, 4) == true);
+    // LAST + ALTREF: type 9 = ref_frame_map[1] = {LAST, ALTREF}.
+    const l16_rdo::MvReferenceFrame rfLastAlt[2] = {LAST_FRAME_MV, ALTREF_FRAME_MV};
+    CHECK(validRefFrameType(rfLastAlt, arr, 4) == true);
+    // BWDREF + NONE: type 3.
+    const l16_rdo::MvReferenceFrame rfBwd[2] = {BWDREF_FRAME_MV, NONE_FRAME_MV};
+    CHECK(validRefFrameType(rfBwd, arr, 4) == true);
+
+    // Reversed pair (ALTREF first): no row of the map is (ALTREF, LAST) ->
+    // false.
+    const l16_rdo::MvReferenceFrame rfSwap[2] = {ALTREF_FRAME_MV, LAST_FRAME_MV};
+    CHECK(validRefFrameType(rfSwap, arr, 4) == false);
+    // LAST2 (not in the array): false.
+    const l16_rdo::MvReferenceFrame rfLast2[2] = {2 /*LAST2_FRAME*/, NONE_FRAME_MV};
+    CHECK(validRefFrameType(rfLast2, arr, 4) == false);
+    // The compound pair (LAST, LAST3) = ref_frame_map row 13 (uni dir idx 1):
+    // not in the array -> false.
+    const l16_rdo::MvReferenceFrame rfLastLast3[2] = {LAST_FRAME_MV, 3 /*LAST3_FRAME*/};
+    CHECK(validRefFrameType(rfLastLast3, arr, 4) == false);
+
+    // tot_ref_frame_types = 0: only the INTRA early-out can pass.
+    const l16_rdo::MvReferenceFrame rfX[2] = {LAST_FRAME_MV, NONE_FRAME_MV};
+    CHECK(validRefFrameType(rfX, arr, 0) == false);
+    CHECK(validRefFrameType(rfIntra, arr, 0) == true);
+
+    // The truncated walk: with count = 3 the BWDREF row (index 3) is not
+    // consulted.
+    CHECK(validRefFrameType(rfBwd, arr, 3) == false);
+    CHECK(validRefFrameType(rfBwd, arr, 4) == true);
 }
