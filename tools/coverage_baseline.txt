@@ -13,21 +13,21 @@
 # The number itself is also printed by every plain run, together with the
 # inputs that produced it, so this file is a convenience and never the
 # only place the figure exists.
-generated  : 2026-11-12
+generated  : 2026-11-13
 reference  : third_party/SVT-AV1 pinned snapshot, CHANGELOG 4.2.0
-areas file : 74452 B, sha256:BE676960F3D72F7F
+areas file : 78277 B, sha256:6CAE21EA17129D5B
 surface    : 254 files, 157718 non-blank lines
-coverage   : 30.3%  (47,719 covered, 157,718 denominator)
+coverage   : 37.6%  (59,297 covered, 157,718 denominator)
 
-A1    Transform/TX                                    9   27008      41%    11087
+A1    Transform/TX                                    9   27008      43%    11568
 A2    Intra prediction                                4    3478      91%     3156
-A3    Inter prediction + motion estimation           44   17738      17%     3056
-A4    Mode decision + RDO + pc_tree                  18   31088      23%     7041
-A5    Entropy coding (CABAC/OD)                      11    8460      61%     5167
-A6    Coding loop + PCS + block structures           22   13928      15%     2114
+A3    Inter prediction + motion estimation           44   17738      31%     5437
+A4    Mode decision + RDO + pc_tree                  18   31088      36%    11217
+A5    Entropy coding (CABAC/OD)                      11    8460      71%     5985
+A6    Coding loop + PCS + block structures           22   13928      33%     4535
 A7    Bitstream + OBU + headers                       5    1436      40%      574
-A8    Post-filters (deblock/CDEF/restoration/grain)     27   10600      44%     4699
-A9    Rate control                                   17    5951      46%     2725
+A8    Post-filters (deblock/CDEF/restoration/grain)     27   10600      52%     5530
+A9    Rate control                                   17    5951      54%     3195
 A10   Picture management + threading                 30    9662       0%        0
 A11   Content analysis + temporal filtering          16   12028      42%     5047
 A12   Palette + segmentation + misc                   8    1612      34%      550

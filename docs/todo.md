@@ -2689,7 +2689,7 @@ completing it moves the metric. Read it before picking work.
 
 | id | SVT area | non-blank | cov% | covered | this file |
 |---|---|---|---|---|---|
-| A1 | Transform/TX | 27,008 | 43% | 11,569 | 1.3 |
+| A1 | Transform/TX | 27,008 | 43% | 11,568 | 1.3 |
 | A2 | Intra prediction | 3,478 | 91% | 3,156 | 1.1 (CFL deferred) |
 | A3 | Inter pred + ME/MC | 17,738 | 31% | 5,437 | 2.2, 2.3, 2.4 |
 | A4 | Mode decision + RDO | 31,088 | 36% | 11,217 | 1.6 (the RE-series campaign) |
@@ -2779,36 +2779,46 @@ last and label it as table transcription, not encoder progress.
     LUT-domain chroma chains (RT9 step 3b/3c); quantizer (fp/b, all
     sizes, q0..q255 gate lines, log_scale 0/0/0/1/2); default scans
     through 64x64; the compacted 1024-position token domain at 64x64
-    (the FS2 scan contract)
+    (the FS2 scan contract); the highbd transform twin (TXH1, 482 nb:
+    the bd-parameterized inv core/facades and the fwd chain)
 [x] l4: full intra predictor set, all 13 modes, 4x4..64x64, GPU kernels,
     corner-blend/upsample/edge-filter regimes, chroma fold (uv2y) +
     NeighborContext/filt_type + disable_edge_filter
 [x] l5: SAD 4x4..64x64 host+GPU, strided uint8; the hash-motion +
-    global-motion surface (HM1) and the adaptive-MV-prediction candidate
+    global-motion surface (HM1), the adaptive-MV-prediction candidate
     machinery (AMVP1, 1,523 nb: the scan family, the MVP table, the DRL
     and the DV validity bands; the mi-grid/mi-map walls parked named)
-[x] l6: mode decision (13-candidate SAD policy - OURS, documented), frame
+    and the pure motion-search helpers (A3M, 1,361 nb: the av1me/mcomp/
+    motion_estimation cost/search/SAD surfaces; the ME drivers parked)
+[x] l6: mode decision (RD-lite policy over 13 intra candidates:
+    variance distortion + rate cost, the angle delta enumerated - OURS,
+    documented), frame
     loops at 4x4..64x64 (Recon/Auto/ReconQ/AutoQ), real-TR gather, symbol
     emission (kf modes/delta/FI + partition + skip + token chains) at ALL
     FIVE geometries, running partition contexts (multi-block grids), AND
     the chroma-emitting SB-tree walk (encodeFrameChromaQ: the Z-order
     DFS leaf order, the chroma-ownership rule, the partition/skip
     surfaces, the bottom-left extension gather under the Z-order gate);
-    the struct-free pic_operators kernels (PO1) and the source-ops
+    the struct-free pic_operators kernels (PO1), the source-ops
     TPL/SSIM-rdmult surface (SRC1, 380 nb ported of 2,014, the
-    pcs/scs/me/tpl walls parked named)
+    pcs/scs/me/tpl walls parked named) and the coding-loop pure helpers
+    (A6C, 2,420 nb: the neighbour-array/stage/sort family, the NSQ/
+    subsize/uv-txsize surfaces, the MV/ME helpers and update_coeff_cdf)
 [x] l7: od_ec enc/dec (verbatim), update_cdf, writer/reader wrappers, KF
     mode/delta/FI surfaces, partition/skip symbols, the full token chain,
     qindex-bucketed coefficient CDFs (TD5, spec init_coeff_cdfs),
     LIVE neighbour-derived contexts (getKfYModeCtx, getTxbCtx +
     skip_contexts + nz-map + the chroma +7 base),
     updatePartitionContext (ECP1), and the chroma surfaces (uv_mode,
-    uv angle-delta, six component-dim CDF families, ComponentType)
+    uv angle-delta, six component-dim CDF families, ComponentType);
+    the inter symbol + context surface (A5E, 818 nb: the comp/intra-inter/
+    motion-mode/inter-mode/drl/mv/filter/ref-mode families and
+    write_ref_frames, with the 19 inter CDF default extracts)
 [x] l8: bit writer, uleb128, OBU/SPS/frame-header/TU assembly (v1 lossless
     22-bit, v2 lossy q100 40-bit, color v3 42-bit), per-size SPS (maxDim
-    parameterized), NINE committed artifacts - grayscale d4 30B /
-    d8 30B / d16 44B / d32 47B / d64 441B + color color4 183B /
-    color8 137B / color16 133B / color32 165B
+    parameterized), NINE committed artifacts - grayscale d4 33B /
+    d8 30B / d16 43B / d32 66B / d64 440B + color color4 214B /
+    color8 161B / color16 136B / color32 165B (the RE7 tx-type regen)
 [x] MILESTONE: decoder-accepted AND content-bit-identical at EVERY
     geometry (libdav1d via ffmpeg; verify_decode4.ps1 -Geometry N);
     color full-plane 1:1 at ALL FOUR color artifacts (4/4 CLOSED:
