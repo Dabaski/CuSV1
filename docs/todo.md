@@ -2682,7 +2682,7 @@ A0. SLICE-LEVEL STATE (the live register)
 |    the first picture-management slice, 0% -> 9%), A11D +197 (A11 the
 |    temporal-filtering central path; the child hit its context window
 |    after T5 and the judge took over - the T6 pad worktree edit was
-|    discarded, the 5 green commits merged) and A13U +380 (A13
+|    discarded, the five T1-T5 slices (6 commits) merged) and A13U +380 (A13
 |    mathutils/svt_psnr/svt_time/svt_malloc + the A6P definitions.h and
 |    A11D svt_psnr carries).
 |    MEASURED AT CLOSE: ctest 19/19 (274.92 s; l18_picmgmt joined), GATE
@@ -2701,6 +2701,17 @@ A0. SLICE-LEVEL STATE (the live register)
 |    left the T4 header declaration removed and the header broken, so the
 |    judge reverted the three uncommitted files and merged the five
 |    verified commits.
+|    POST-CLOSE VERIFICATION (2026-11-14, the independent audit): the first
+|    full run found the suite intermittently red - three latent l5
+|    test-fixture OOBs (the A3M computeDistortion fixture passing b64Index
+|    1 with a single B64Geom -> divide-by-zero when the adjacent stack
+|    read was zero; the A3M check00Center Case B reading ~642 bytes past
+|    its 128x128 ref vector -> SIGSEGV; the pre-existing SW1 OBMC sweep
+|    allocating 17,024 B against a 17,273 B max-stride read -> SIGSEGV).
+|    All three are test-side (the ports match the reference). Repaired,
+|    then the l5 target ran 60/60 and three consecutive full runs passed
+|    19/19 (278.30/278.37/278.31 s); the campaign-close 274.92 s run was
+|    a lucky pass over the latent fixtures.
 
 ------------------------------------------------------------
 0.5 COVERAGE MAP (which roadmap items move the north-star metric)
@@ -2879,7 +2890,9 @@ last and label it as table transcription, not encoder progress.
     provenance.md, decode_conformance.md, bitstream.md, color.md,
     layers.md, emission.md, cs5c_deltas.md, this file
 [x] MEASURED 2026-11-14 (the 45.8% campaign close): full ctest 19/19
-    (274.92 s), GATE 427/427 diff 0 (885,347 B), portable-C coverage
+    (274.92 s at the close; 278.30/278.37/278.31 s on three post-fix
+    runs after the three latent l5 test-fixture OOBs were repaired
+    test-side), GATE 427/427 diff 0 (885,347 B), portable-C coverage
     45.8% (72,279/157,718), 9 committed .obu artifacts (all content-1:1
     on every plane; untouched by the campaign)
 

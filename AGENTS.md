@@ -1,4 +1,3 @@
-- l18_picmgmt - A10P (2026-11-14): the first picture-management slice, in src/l18_picmgmt (namespace l18_picmgmt, ctest target l18_picmgmt): pic_buffer_desc layout calc/assign + ctor/update, reference_object ring/param updates, sequence_control_set resolution/copy, svt_threads synchronization primitives and the pcs.c geometry/alloc-size helpers; 913 nb, 37 TEST_CASEs. The allocation/ctor/dctor walls are parked named. Host only.
  AGENTS.md
 
 ## Prime directive: incremental TDD only (Uncle Bob's Three Laws)
@@ -355,10 +354,21 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   (A13 26% -> 33%, 1,386 -> 1,766). The 2026-11-13 measurement was 37.6%
   (59,297), +11,578 from 47,719 at the 2026-11-12 30.3% close. All
   coverage-only: no conformance movement, the nine artifacts untouched.
-- **ctest: 19/19 passed, 0 failed, 274.92 s** (re-measured 2026-11-14 on
-  the campaign-close tree; the suite is 19 targets since A10P added
-  l18_picmgmt; l4_intra is the slow one, `pipeline` (about 54 s) and
-  `l3_transforms` next; the rest under 1 s). The 2026-11-13 37.6% close
+- **ctest: 19/19 passed, 0 failed, 278.30 s** (re-measured 2026-11-14 on
+  the campaign-close tree, after the l5 fixture repairs below; the
+  campaign-close run recorded 274.92 s. The suite is 19 targets since A10P
+  added l18_picmgmt; l4_intra is the slow one, `pipeline` (about 54 s) and
+  `l3_transforms` next; the rest under 1 s). THE VERIFICATION FLAKE (found
+  2026-11-14, repaired test-side; the ports match the reference): three
+  latent l5 test-fixture OOBs made the suite intermittently red - the
+  A3M computeDistortion fixture passed b64Index 1 with a single B64Geom
+  (a divide-by-zero when the adjacent read landed on zero; observed once
+  in a full run), the A3M check00Center Case B read ~642 bytes past its
+  128x128 ref vector (observed SIGSEGV 1/25), and the pre-existing SW1
+  OBMC sweep allocated 17,024 B against a 17,273 B max-stride read
+  (observed SIGSEGV 1/50). Post-repair: the l5 target ran 60/60 clean
+  and three consecutive full runs passed 19/19 (278.30/278.37/278.31 s).
+  The 2026-11-13 37.6% close
   measured 18/18 in 278.70 s; the run before it (after the two l10
   fixture repairs) 18/18 in 279.32 s. Earlier runs of the same tree: the
   2026-11-12 campaign close 18/18 (281.39 s), the RE8A landing 17/17
@@ -370,8 +380,8 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   (294.41 s), the TF1/PU1/PO1 run 278.04 s (14 targets), the
   LR3/PAL1/TX1 run 272.63 s, the GR1/AN21/CV1 run 264.97 s (13 targets),
   the LR2 run 260.65 s (11 targets), and the AN-series runs
-  260.65-280.41 s. The l10 fixture repairs the 37.6% close carried stay
-  in force (test-side only).
+  260.65-280.41 s. The l10 and l5 fixture repairs
+  stay in force (test-side only).
 - **GATE: 427/427 lines, diff 0.** `expected_primitives.txt` is **885,347
   bytes**, 427 lines (the RE7 tx-type regen: +450 B from the RE6 884,897 -
   the derived-type emission's token/tx-type symbols; rebuilt and
@@ -390,7 +400,7 @@ Quote these numbers only with their date; they are re-measured, not permanent.
   SYM1 +436 in A5 + +45 in A12) and wave 7 (IP1 +203 across A3/A13/A14,
   SUB1 +149 in A14) and wave 8 (SW1 +119 the SAD wrapper instances, HB1
   +168 the hbd twins) and wave 9 (RS2 +273 the hbd resize 1D family - the hbd park resolves, AM1+AN20 +386 the vmaf activity-masking family + the preprocessing statistics + the firstpass pure pair - the A4 RDO input side) and wave 10 (RE1 +485 in A4 - the rate-estimation core, the campaign's foundation slice, conformance-free) and wave 11 (RE2 +1,222 the optimize_b trellis + the scan/tx carries + the nz-map LUT carry - charged A1+A4+A5+A13; the JUDGE'S J3 SURVIVOR sharpened - the fast-path zbin-trim had no boundary fixture) and wave 12 (RE3 +576 the rd_cost.c symbol-cost surface - three carry double-counts struck at merge, three judge probes all killed) and wave 13 (RE4 +476 the ac_bias psy-distortion family + the intra candidate-injection family + the FI ERRATA - FILTER_INTRA_MODES 7 -> 5 with the mis-citation fixed and the fimodeToIntradir content corrected) and wave 14 (TF2 +234 the temporal-filtering hbd twins - the TF1 park resolves; the block-error pre-shifts are HARD-CODED >>4/>>6 at hbd, not bd-parameterized) and wave 15 (the 30.3% campaign: AMVP1 +1,523 + MC1 +524 in A3; EMC1 +4,050 + MD1 +572 in A4; SRC1 +380 in A6; A8W1 +770 in A8; RC2 +2,447 in A9) and wave 16 (the 37.6% campaign: TXH1 +482 in A1; A3W +1,019 + A3M +1,361 in A3; EMC2 +4,174 in A4; A5E +818 in A5; A6C +2,420 in A6; A8R +831 in A8; A9R +470 in A9) and wave 17 (the 45.8% campaign: A1Q +270 in A1; A2 +42; A3E +1,380 in A3; A4M +1,087 and A4C +2,125 in A4; A5H +1,831 in A5; A6P +1,062 in A6; A7P +421 in A7; A8D +1,583 in A8; A9D +1,691 in A9; A10P +913 in A10; A11D +197 in A11; A13U +380 in A13) - all span-measured; register entries in docs/todo.md
-  section A0); A1 prints 43% (11,568 of 27,008), A3 31% (5,437 of 17,738), A4 36% (11,217 of 31,088), A5 71% (5,985 of 8,460), A6 33% (4,535 of 13,928), A8 52% (5,530 of 10,600), A9 54% (3,195 of 5,951), A11 42% (5,047 of 12,028), A13 19% (1,037 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is COVERAGE-ONLY (it moves no conformance count).
+  section A0); A1 prints 44% (11,883 of 27,008), A2 92% (3,198 of 3,478), A3 41% (7,287 of 17,738), A4 50% (15,679 of 31,088), A5 92% (7,816 of 8,460), A6 25% (3,483 of 13,928), A7 69% (995 of 1,436), A8 67% (7,113 of 10,600), A9 82% (4,886 of 5,951), A10 9% (913 of 9,662), A11 44% (5,244 of 12,028), A13 33% (1,766 of 5,357), A14 prints 100% (1,466 of 1,466 - COMPLETE). All of it is COVERAGE-ONLY (it moves no conformance count).
   PARSE-BUG EPISODE (recorded, wave 4): an embedded
   pipe in a prose sentence (get_msb(x|1)) split the A12 row's 5 fields
   and the tool silently printed A12 as 0 files/0 lines - caught by the
@@ -1203,6 +1213,8 @@ are partly right and I re-measured rather than restated them:
   product widened at the int64 accumulator); coverage-only, no
   emission change. A3W (2026-11-13): the warped-motion + RANSAC surface lands in warped_motion.{h,cpp} + ransac.{h,cpp} - 1,019 nb of warped_motion.c (div lut, projection/affine/shear, warp, shear params, select_samples) and ransac.c (scoring/fitting/ransac_internal); 48 TEST_CASEs; the hbd warp twins and the dead limited-precision branch parked named.
  A3E (2026-11-14): the inter_prediction.c highbd/jnt convolve families + intrabc, the pd0/light-pd1/highbd inter predictors, the wedge mask/soft mask, scale_chroma_bsize, clamp_mv_to_umv_border_sb, the curvfit RD model, the pick_wedge family and the OBMC walkers; 1,380 nb.
+
+- l18_picmgmt - A10P (2026-11-14): the first picture-management slice, in src/l18_picmgmt (namespace l18_picmgmt, ctest target l18_picmgmt): pic_buffer_desc layout calc/assign + ctor/update, reference_object ring/param updates, sequence_control_set resolution/copy, svt_threads synchronization primitives and the pcs.c geometry/alloc-size helpers; 913 nb, 37 TEST_CASEs. The allocation/ctor/dctor walls are parked named. Host only.
 
 ## Completion metric (the portable-C coverage number)
 
