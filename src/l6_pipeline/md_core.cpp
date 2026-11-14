@@ -1715,5 +1715,161 @@ void readRefineMeMvs(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* m
     }
 }
 
+// product_coding_loop.c:2895-:2955 get_sb_tpl_inter_stats.
+bool getSbTplInterStats(const TplPcsWindow& ppcs, std::uint32_t sb_origin_x, std::uint32_t sb_origin_y,
+                        std::uint8_t* sb_inter_selection, std::uint8_t* sb_max_list0_ref_idx,
+                        std::uint8_t* sb_max_list1_ref_idx) {
+    // Check that TPL data is available and that INTRA was tested in TPL.
+    // Note that not all INTRA modes may be tested in TPL.
+    if (ppcs.tpl_enable && ppcs.tpl_src_data_ready &&
+        (ppcs.temporal_layer_index < ppcs.hierarchical_levels || !ppcs.disable_intra_pred_nref)) {
+        const int aligned16_width = (ppcs.aligned_width + 15) >> 4;
+        const uint32_t mb_origin_x = sb_origin_x;
+        const uint32_t mb_origin_y = sb_origin_y;
+        const int tpl_blk_size = ppcs.dispenser_search_level == 0 ? 16
+            : ppcs.dispenser_search_level == 1                                    ? 32
+                                                                                  : 64;
+        // tpl_src_stats_buffer is created for 16x16 always, so TPL dispenser is for larger block sizes
+        // the step between blocks must be adjusted
+        const int tpl_blk_step = ppcs.dispenser_search_level == 0 ? 1
+            : ppcs.dispenser_search_level == 1                                    ? 2
+                                                                                    : 4;
+
+        // Get actual SB width (for cases of incomplete SBs)
+        const int sb_cols = 1 > (ppcs.sb_width / tpl_blk_size) ? 1 : (ppcs.sb_width / tpl_blk_size);
+        const int sb_rows = 1 > (ppcs.sb_height / tpl_blk_size) ? 1 : (ppcs.sb_height / tpl_blk_size);
+
+        std::uint8_t tot_cnt = 0;
+        std::uint8_t inter_cnt = 0;
+        std::uint8_t max_list_ref_idx[2] = {0};
+
+        // Loop over all blocks in the SB
+        for (int i = 0; i < sb_rows; i++) {
+            const TplSrcStatsWindow* tpl_src_stats_buffer =
+                ppcs.tpl_src_stats + static_cast<std::size_t>(((mb_origin_y >> 4) + (i * tpl_blk_step)) *
+                                                                  aligned16_width) +
+                (mb_origin_x >> 4);
+            for (int j = 0; j < sb_cols; j++) {
+                tot_cnt++;
+                if (static_cast<std::int32_t>(tpl_src_stats_buffer->best_mode) >= l16_rdo::NEARESTMV) {
+                    std::uint8_t list_index = tpl_src_stats_buffer->best_rf_idx < 4 ? 0 : 1;
+                    std::uint8_t ref_pic_index = tpl_src_stats_buffer->best_rf_idx >= 4
+                        ? static_cast<std::uint8_t>(tpl_src_stats_buffer->best_rf_idx - 4)
+                        : static_cast<std::uint8_t>(tpl_src_stats_buffer->best_rf_idx);
+
+                    max_list_ref_idx[list_index] =
+                        max_list_ref_idx[list_index] > ref_pic_index ? max_list_ref_idx[list_index] : ref_pic_index;
+                    inter_cnt++;
+                }
+
+                tpl_src_stats_buffer += tpl_blk_step;
+            }
+        }
+
+        *sb_inter_selection = static_cast<std::uint8_t>((inter_cnt * 100) / tot_cnt);
+        *sb_max_list0_ref_idx = max_list_ref_idx[0];
+        *sb_max_list1_ref_idx = max_list_ref_idx[1];
+        return true;
+    }
+    return false;
+}
+
+// product_coding_loop.c:2957-:3045 perform_md_reference_pruning.
+void performMdReferencePruning(FlCtx* ctx, const l16_rdo::RefPruningCtrls& pruning, const MdMeSbResults* me_results,
+                               const TplPcsWindow* tpl_window, std::uint8_t picture_qp) {
+    std::uint32_t early_inter_distortion_array[MAX_NUM_OF_REF_PIC_LIST * REF_LIST_MAX_DEPTH];
+    std::memset(early_inter_distortion_array, 0xFE, sizeof(early_inter_distortion_array));
+    std::uint32_t offset_tab[MAX_NUM_OF_REF_PIC_LIST][REF_LIST_MAX_DEPTH] = {{0}};
+    std::memset(ctx->refFilteringRes, 0, sizeof(ctx->refFilteringRes));
+    std::uint32_t min_dist = (std::uint32_t)~0;
+    int use_tpl_info = 0;
+    std::uint8_t sb_max_list0_ref_idx = 0;  // written whenever use_tpl_info becomes 1
+    std::uint8_t sb_max_list1_ref_idx = 0;
+    std::uint8_t sb_inter_selection = 0;
+    if (pruning.useTplInfoOffset && tpl_window != nullptr && tpl_window->tpl_enable) {
+        if (getSbTplInterStats(*tpl_window, ctx->sb_origin_x, ctx->sb_origin_y, &sb_inter_selection,
+                               &sb_max_list0_ref_idx, &sb_max_list1_ref_idx)) {
+            use_tpl_info = 1;
+        }
+    }
+    const l16_rdo::MeSbResults me_view = meView(me_results);
+    for (std::uint32_t ref_it = 0; ref_it < ctx->totRefFrameTypes; ++ref_it) {
+        const std::int32_t ref_pair = ctx->refFrameTypeArr[ref_it];
+        int rf[2];
+        motion::amvp::av1SetRefFrame(rf, static_cast<std::int8_t>(ref_pair));
+
+        if (rf[1] == motion::amvp::kNoneFrame) {
+            std::uint32_t best_mvp_distortion = static_cast<std::uint32_t>(static_cast<std::int32_t>(~0));
+            const std::uint8_t list_idx = motion::amvp::getListIdx(static_cast<std::uint8_t>(rf[0]));
+            const std::uint8_t ref_idx = motion::amvp::getRefFrameIdx(static_cast<std::uint8_t>(rf[0]));
+            // Only use TPL info if all references are tested
+            if (use_tpl_info) {
+                if ((list_idx == 0 && ref_idx > sb_max_list0_ref_idx) ||
+                    (list_idx == 1 && ref_idx > sb_max_list1_ref_idx)) {
+                    offset_tab[list_idx][ref_idx] += pruning.useTplInfoOffset;
+                }
+            }
+            // Step 1: derive the best MVP in term of distortion
+            best_mvp_distortion = ctx->bestFpMvpDist[list_idx][ref_idx];
+
+            // Evaluate the PA_ME MVs (if available)
+            std::uint32_t pa_me_distortion = (std::uint32_t)~0;  // any non zero value
+            if (l16_rdo::isMeDataPresent(ctx->meBlockOffset, ctx->meCandOffset, &me_view, list_idx, ref_idx) != 0) {
+                pa_me_distortion = ctx->fpMeDist[list_idx][ref_idx];
+            }
+            // early_inter_distortion_array
+            early_inter_distortion_array[list_idx * REF_LIST_MAX_DEPTH + ref_idx] =
+                pa_me_distortion < best_mvp_distortion ? pa_me_distortion : best_mvp_distortion;
+            if (early_inter_distortion_array[list_idx * REF_LIST_MAX_DEPTH + ref_idx] < min_dist) {
+                min_dist = early_inter_distortion_array[list_idx * REF_LIST_MAX_DEPTH + ref_idx];
+            }
+        }
+    }
+    const std::uint32_t th =
+        (static_cast<std::uint32_t>(pruning.checkClosestMultiplier) * (ctx->geom.bheight * ctx->geom.bwidth) *
+         picture_qp) /
+        24;
+    if (pruning.checkClosestMultiplier && early_inter_distortion_array[0] < th &&
+        early_inter_distortion_array[REF_LIST_MAX_DEPTH] < th) {
+        for (unsigned li = 0; li < MAX_NUM_OF_REF_PIC_LIST; li++) {
+            for (unsigned ri = 0; ri < REF_LIST_MAX_DEPTH; ri++) {
+                for (unsigned gi = 0; gi < TOT_INTER_GROUP; gi++) {
+                    if (ri == 0 || pruning.maxDevToBest[gi] == (std::uint32_t)~0) {
+                        ctx->refFilteringRes[gi][li][ri] = 1;
+                    }
+                }
+            }
+        }
+    } else {
+        // Sort early_inter_distortion_array
+        const unsigned num_of_cand_to_sort = MAX_NUM_OF_REF_PIC_LIST * REF_LIST_MAX_DEPTH;
+        std::uint32_t dev_to_the_best[MAX_NUM_OF_REF_PIC_LIST * REF_LIST_MAX_DEPTH] = {0};
+        for (unsigned i = 0; i < num_of_cand_to_sort - 1; ++i) {
+            const std::uint64_t hi = early_inter_distortion_array[i] > 1 ? early_inter_distortion_array[i] : 1;
+            const std::uint64_t lo = min_dist > 1 ? min_dist : 1;
+            dev_to_the_best[i] = static_cast<std::uint32_t>(((static_cast<std::int64_t>(hi) - static_cast<std::int64_t>(lo)) * 100) / static_cast<std::int64_t>(lo));
+        }
+        for (unsigned li = 0; li < MAX_NUM_OF_REF_PIC_LIST; li++) {
+            for (unsigned ri = 0; ri < REF_LIST_MAX_DEPTH; ri++) {
+                for (unsigned gi = 0; gi < TOT_INTER_GROUP; gi++) {
+                    const std::uint32_t offset = offset_tab[li][ri];
+                    const std::uint32_t pruning_th = (offset == (std::uint32_t)~0 || pruning.maxDevToBest[gi] == 0)
+                        ? 0
+                        : (pruning.maxDevToBest[gi] == (std::uint32_t)~0)
+                        ? (std::uint32_t)~0
+                        : (0 > (static_cast<std::int64_t>(pruning.maxDevToBest[gi]) - static_cast<std::int64_t>(offset))
+                              ? 0
+                              : static_cast<std::uint32_t>(static_cast<std::int64_t>(pruning.maxDevToBest[gi]) -
+                                                           static_cast<std::int64_t>(offset)));
+
+                    if (dev_to_the_best[li * REF_LIST_MAX_DEPTH + ri] < pruning_th) {
+                        ctx->refFilteringRes[gi][li][ri] = 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
 }  // namespace mdc
 }  // namespace pipeline

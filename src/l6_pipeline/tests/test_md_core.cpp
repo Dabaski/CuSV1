@@ -2131,3 +2131,189 @@ TEST_CASE("l6 mdc readRefineMeMvs derives the me_mv per branch and dispatches ns
     CHECK(ctx.fpMeMv[0][0].x == 8);
     CHECK(ctx.fpMeMv[0][0].y == -8);
 }
+
+// trip 19: get_sb_tpl_inter_stats (product_coding_loop.c:2895-:2955). The
+// SB walk over the flat TPL stats array: the dispenser level -> block
+// size/step, the intra/inter classification (is_intra_mode vs
+// NEARESTMV), the per-list max ref idx and the inter percentage.
+TEST_CASE("l6 mdc getSbTplInterStats walks the SB grid and classifies inter") {
+    // A 64x64 SB at origin (0,0); dispenser level 0 -> 16x16 blocks, step
+    // 1: 4x4 = 16 blocks in a 128-wide aligned grid.
+    std::vector<mdc::TplSrcStatsWindow> stats(8 * 128);
+    for (auto& s : stats) {
+        s.best_mode = l16_rdo::DC_PRED;   // intra
+        s.best_rf_idx = 0;
+    }
+    // Make blocks (1,0) and (2,1) inter: list 1 ref 2 and list 0 ref 3.
+    stats[0 * 128 + 1] = mdc::TplSrcStatsWindow{l16_rdo::NEARESTMV, 6};   // list 1, ref 2
+    stats[1 * 128 + 2] = mdc::TplSrcStatsWindow{l16_rdo::NEWMV, 3};       // list 0, ref 3
+
+    mdc::TplPcsWindow ppcs{};
+    ppcs.tpl_enable = 1;
+    ppcs.tpl_src_data_ready = 1;
+    ppcs.disable_intra_pred_nref = 0;
+    ppcs.temporal_layer_index = 1;
+    ppcs.hierarchical_levels = 2;
+    ppcs.aligned_width = 2048;  // aligned16_width = 128
+    ppcs.dispenser_search_level = 0;
+    ppcs.sb_width = 64;
+    ppcs.sb_height = 64;
+    ppcs.tpl_src_stats = stats.data();
+    ppcs.tpl_src_stride = 128;
+
+    std::uint8_t inter_sel = 0, max0 = 0, max1 = 0;
+    bool ok = mdc::getSbTplInterStats(ppcs, 0, 0, &inter_sel, &max0, &max1);
+    CHECK(ok);
+    CHECK(inter_sel == (2 * 100) / 16);
+    CHECK(max0 == 3);
+    CHECK(max1 == 2);
+
+    // The gate: tpl off -> false and the outs untouched.
+    mdc::TplPcsWindow off = ppcs;
+    off.tpl_enable = 0;
+    inter_sel = 7;
+    CHECK_FALSE(mdc::getSbTplInterStats(off, 0, 0, &inter_sel, &max0, &max1));
+    CHECK(inter_sel == 7);
+
+    // The disable_intra_pred_nref gate at the top temporal layer.
+    mdc::TplPcsWindow nref = ppcs;
+    nref.temporal_layer_index = 2;
+    nref.hierarchical_levels = 2;
+    nref.disable_intra_pred_nref = 1;
+    CHECK_FALSE(mdc::getSbTplInterStats(nref, 0, 0, &inter_sel, &max0, &max1));
+
+    // The dispenser level 2: 64-blocks, step 4 - a 64x64 SB holds exactly
+    // ONE block (the (0,0) one), so the single visited slot decides.
+    std::vector<mdc::TplSrcStatsWindow> stats2(16 * 128);
+    for (auto& s : stats2) {
+        s.best_mode = l16_rdo::PAETH_PRED;
+        s.best_rf_idx = 0;
+    }
+    stats2[0] = mdc::TplSrcStatsWindow{l16_rdo::NEARESTMV, 5};  // rf_idx 5 = list 1, ref 1
+    mdc::TplPcsWindow lv2 = ppcs;
+    lv2.dispenser_search_level = 2;
+    lv2.tpl_src_stats = stats2.data();
+    ok = mdc::getSbTplInterStats(lv2, 0, 0, &inter_sel, &max0, &max1);
+    CHECK(ok);
+    CHECK(inter_sel == 100);
+    CHECK(max0 == 0);
+    CHECK(max1 == 1);
+}
+
+// trip 20: perform_md_reference_pruning (product_coding_loop.c:2957-:3045).
+// The early-distortion collection, the closest-multiplier shortcut and the
+// deviation-threshold branch over the full (group, list, ref) grid.
+TEST_CASE("l6 mdc performMdReferencePruning fills the filtering verdicts") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.totRefFrameTypes = 2;
+    ctx.refFrameTypeArr[0] = amvp::kLastFrame;    // list 0 ref 0
+    ctx.refFrameTypeArr[1] = amvp::kBwdrefFrame;  // list 1 ref 0
+    ctx.meBlockOffset = 5;
+    ctx.meCandOffset = 5 * 23;
+
+    RrmFixture fx = makeRrm(0, 0);
+    fx.totalCnt[5] = 1;  // ME data present for the block
+    l16_rdo::MeCandidate& c = fx.cands[5 * 23];
+    c.direction = 0;
+    c.ref0List = 0;
+    c.refIdxL0 = 0;
+
+    ctx.bestFpMvpDist[0][0] = 1000;
+    ctx.bestFpMvpDist[1][0] = 2000;
+    ctx.fpMeDist[0][0] = 800;   // the ME data present -> min 800
+    ctx.fpMeDist[1][0] = 3000;  // present too -> min(3000, 2000) = 2000
+
+    l16_rdo::RefPruningCtrls pruning{};
+    // check_closest_multiplier = 0 -> the deviation branch.
+    pruning.maxDevToBest[0] = 50;              // PA_ME_GROUP
+    for (int g = 1; g < TOT_INTER_GROUP; ++g) pruning.maxDevToBest[g] = (std::uint32_t)~0;
+    pruning.useTplInfoOffset = 0;
+    pruning.checkClosestMultiplier = 0;
+
+    mdc::performMdReferencePruning(&ctx, pruning, &fx.me, nullptr, 30);
+    // min_dist = 800. dev[l0r0] = 0 -> every group: 0 < th -> do_ref=1.
+    // dev[l1r0] = (2000-800)*100/800 = 150 -> do_ref only where th > 150:
+    // gi=0 th=50 -> no; gi!=0 th=~0 -> yes.
+    for (int g = 0; g < TOT_INTER_GROUP; ++g) {
+        CHECK(ctx.refFilteringRes[g][0][0] == 1);
+        CHECK(ctx.refFilteringRes[g][1][0] == (g == 0 ? 0 : 1));
+        // ri != 0 slots keep the 0xFE preset: dev is huge, so the th =
+        // ~0 groups enable them and th = 50 does not (the reference's own
+        // preset interaction).
+        CHECK(ctx.refFilteringRes[g][0][1] == (g == 0 ? 0 : 1));
+    }
+
+    // The closest-multiplier shortcut: th = 1 * 64 * 30 / 24 = 80; both
+    // early[0] (800) and early[4] (2000) are >= 80 -> the shortcut does
+    // NOT fire. Make the distortions tiny to fire it.
+    ctx.bestFpMvpDist[0][0] = 10;
+    ctx.bestFpMvpDist[1][0] = 20;
+    ctx.fpMeDist[0][0] = 5;
+    ctx.fpMeDist[1][0] = 6;
+    pruning.checkClosestMultiplier = 1;
+    mdc::performMdReferencePruning(&ctx, pruning, &fx.me, nullptr, 30);
+    // ri == 0 (every list) + every group -> do_ref = 1; ri != 0: the shortcut writes ri==0 always, plus every slot for
+    // the th = ~0 groups (g != 0 here).
+    for (int g = 0; g < TOT_INTER_GROUP; ++g) {
+        CHECK(ctx.refFilteringRes[g][0][0] == 1);
+        CHECK(ctx.refFilteringRes[g][1][0] == 1);
+        // ri != 0: the shortcut writes ri==0 always, plus every slot for
+        // the th = ~0 groups (g != 0 here).
+        CHECK(ctx.refFilteringRes[g][0][2] == (g == 0 ? 0 : 1));
+    }
+
+    // The mixed case: only early[0] under th -> the shortcut must NOT
+    // fire (the conjunction), so the list-1 verdicts follow the deviation
+    // branch (dev[l1r0] = (2000-800)*100/800 = 150 -> th 50 rejects g0).
+    ctx.bestFpMvpDist[0][0] = 10;
+    ctx.bestFpMvpDist[1][0] = 2000;
+    ctx.fpMeDist[0][0] = 5;
+    ctx.fpMeDist[1][0] = 3000;
+    mdc::performMdReferencePruning(&ctx, pruning, &fx.me, nullptr, 30);
+    CHECK(ctx.refFilteringRes[0][0][0] == 1);  // early[0] = 5 < 80... no wait
+    CHECK(ctx.refFilteringRes[0][1][0] == 0);  // the deviation branch: 150 > 50
+    CHECK(ctx.refFilteringRes[1][1][0] == 1);  // th = ~0
+    pruning.checkClosestMultiplier = 0;
+
+    // The TPL offset: use_tpl_info_offset with a tpl window whose TPL
+    // blocks picked list-0 refs only -> sb_max_list1 = 0, so the list-1
+    // ref-1 pair gains the offset and its threshold drops below the dev.
+    std::vector<mdc::TplSrcStatsWindow> stats(8 * 128);
+    for (auto& s : stats) {
+        s.best_mode = l16_rdo::NEARESTMV;
+        s.best_rf_idx = 0;  // list 0 ref 0
+    }
+    mdc::TplPcsWindow tpl{};
+    tpl.tpl_enable = 1;
+    tpl.tpl_src_data_ready = 1;
+    tpl.temporal_layer_index = 0;
+    tpl.hierarchical_levels = 0;
+    tpl.aligned_width = 2048;
+    tpl.dispenser_search_level = 0;
+    tpl.sb_width = 64;
+    tpl.sb_height = 64;
+    tpl.tpl_src_stats = stats.data();
+    tpl.tpl_src_stride = 128;
+    ctx.totRefFrameTypes = 3;
+    ctx.refFrameTypeArr[2] = amvp::kAltref2Frame;  // list 1 ref 1
+    pruning.checkClosestMultiplier = 0;
+    pruning.useTplInfoOffset = 30;
+    for (int g = 0; g < TOT_INTER_GROUP; ++g) pruning.maxDevToBest[g] = 100;
+    ctx.bestFpMvpDist[0][0] = 1000;
+    ctx.bestFpMvpDist[1][0] = 1000;
+    ctx.bestFpMvpDist[1][1] = 1360;  // dev = (1360-800)*100/800 = 70
+    ctx.fpMeDist[0][0] = 800;
+    ctx.fpMeDist[1][0] = 800;
+    mdc::performMdReferencePruning(&ctx, pruning, &fx.me, &tpl, 30);
+    // dev[l0r0] = 0 < 100 -> 1; dev[l1r0] = 0 < 100 -> 1; dev[l1r1] = 70:
+    // the offset 30 drops th to 70 -> 70 < 70 false -> 0.
+    CHECK(ctx.refFilteringRes[0][0][0] == 1);
+    CHECK(ctx.refFilteringRes[0][1][0] == 1);
+    CHECK(ctx.refFilteringRes[0][1][1] == 0);
+    // Without the TPL window the same dev passes th = 100.
+    mdc::performMdReferencePruning(&ctx, pruning, &fx.me, nullptr, 30);
+    CHECK(ctx.refFilteringRes[0][1][1] == 1);
+}

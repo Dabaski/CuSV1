@@ -201,6 +201,9 @@ struct FlCtx {
     std::int16_t sqMfmv0Y;
     std::uint8_t enableMe8x8;                      // ppcs->enable_me_8x8
     std::uint8_t enableMe16x16;                    // ppcs->enable_me_16x16
+    // The ref-pruning state (perform_md_reference_pruning).
+    std::uint32_t bestFpMvpDist[2][4];             // ctx->best_fp_mvp_dist
+    std::uint8_t refFilteringRes[TOT_INTER_GROUP][2][4];  // ctx->ref_filtering_res .do_ref
     std::uint32_t full_lambda_md[2];               // ctx->full_lambda_md[EB_8_BIT_MD / EB_10_BIT_MD]
     std::uint32_t fast_lambda_md[2];
     // mds0 state (md_process.h:1191-:1200 window).
@@ -461,6 +464,44 @@ void readRefineMeMvs(FlCtx* ctx, const PicBuf& input_pic, const MdMeSbResults* m
                      const MdSubPelCtrls& sub_ctrls, const MdNsqCtrls& nsq_ctrls, const MdSqCtrls& sq_ctrls,
                      int mi_row, int mi_col, int cm_mi_rows, int cm_mi_cols, bool blk_avail_sqi,
                      bool parent_tested_n0);
+
+// The TplSrcStats window (coding_unit.h:250-:258) - the consumed fields.
+struct TplSrcStatsWindow {
+    std::uint8_t best_mode;   // PredictionMode
+    std::int32_t best_rf_idx;
+};
+
+// The ppcs window get_sb_tpl_inter_stats consumes (md_process.h /
+// product_coding_loop.c:2895-:2955). The tpl_src_stats_buffer is the
+// caller's flat [aligned16_height * aligned16_width] array; the walk
+// indexes it with the SB origin.
+struct TplPcsWindow {
+    std::uint8_t tpl_enable;                  // ppcs->tpl_ctrls.enable
+    std::uint8_t tpl_src_data_ready;          // ppcs->tpl_src_data_ready
+    std::uint8_t disable_intra_pred_nref;     // ppcs->tpl_ctrls.disable_intra_pred_nref
+    std::uint8_t temporal_layer_index;
+    std::uint8_t hierarchical_levels;
+    std::int32_t aligned_width;               // (ppcs->aligned_width + 15) >> 4 happens in the body
+    std::uint8_t dispenser_search_level;      // tpl_ctrls.dispenser_search_level
+    std::int32_t sb_width;                    // sb_geom[ctx->sb_index].width
+    std::int32_t sb_height;
+    const TplSrcStatsWindow* tpl_src_stats;   // the flat array base
+    std::int32_t tpl_src_stride;              // aligned16_width
+};
+
+// product_coding_loop.c:2895-:2955 get_sb_tpl_inter_stats. The
+// CONFIG_ENABLE_TPL=0 stub (product_coding_loop.c:2897-:2900) is dead
+// under the pinned default build (EbConfigMacros.h:229-:231 CONFIG=1) -
+// the body is the live code.
+bool getSbTplInterStats(const TplPcsWindow& ppcs, std::uint32_t sb_origin_x, std::uint32_t sb_origin_y,
+                        std::uint8_t* sb_inter_selection, std::uint8_t* sb_max_list0_ref_idx,
+                        std::uint8_t* sb_max_list1_ref_idx);
+
+// product_coding_loop.c:2957-:3045 perform_md_reference_pruning. The
+// pcs walls thread: ppcs->picture_qp, the tpl window (the
+// get_sb_tpl_inter_stats input), me_results + the me offsets.
+void performMdReferencePruning(FlCtx* ctx, const l16_rdo::RefPruningCtrls& pruning, const MdMeSbResults* me_results,
+                               const TplPcsWindow* tpl_window, std::uint8_t picture_qp);
 
 // product_coding_loop.c:2021-:2190 md_nsq_motion_search. The pcs walls
 // thread: pa_me_data max_refs/max_l0/max_cand, enable_me_8x8/16x16,
