@@ -65,6 +65,8 @@ the layers above can hold it; they have no SVT counterpart.
 
 ## l3_transforms - transforms + quantizer
 
+A1Q (2026-11-14) added the highbd quantizer family in transform_hbd.cpp: the bd-threaded buildQuantTables, quantizeBHb/quantizeFpHb, the 10/12-bit QTX rows and txScale (270 nb). The qm/iqm branches stay parked.
+
 TXH1 (2026-11-13) added the highbd twin in `transform_hbd.{h,cpp}`: the bd-parameterized inverse core over uint16 r/w buffers, the bd stage-range ladder, the 16-type facades, the lossless iwht pair, the recon/dispatch chain and the fwd chain. 482 nb newly charged; the TX1 surface is not re-counted.
 
 Fixed-point transforms at every size 4x4..64x64, verbatim SVT
@@ -178,6 +180,8 @@ named. 91 cases / 783 assertions.
 
 ## l6_pipeline - composition + decision
 
+A6P (2026-11-14) added pd_helpers.{h,cpp} (1,062 nb A6): the pd_process.c ref-management/skip-mode/sframe helpers, the pic_operators pack2d/driver remainder and the coding_loop.c CFL/recon-copy helpers. The CFL helpers themselves are intra_prediction.c surface (42 nb charged to A2).
+
 A6C (2026-11-13) added `coding_loop_helpers.{h,cpp}` (2,420 nb): the neighbour-array update/copy/reset family, the stage/sort helpers, the NSQ/subsize/uv-txsize surfaces, the MV/ME helpers, the lambda chain and update_coeff_cdf. The context-generation wall stays parked.
 
 Block and frame composition at 4x4..64x64, intra-only. The pipeline
@@ -259,6 +263,8 @@ above, not zeros).
   pad content is one call of `svt_aom_generate_padding`.
 
 ## l7_entropy - entropy coder + symbols
+
+A5H (2026-11-14) added header_symbols.{h,cpp} (1,831 nb): the entropy_coding.c frame-header/tile-info writer surface and the primitive bit writers, with the sequence header, color config, global motion and film grain writers. The coefficient and inter symbol surfaces were already landed (A5E/TS1/TS2).
 
 A5E (2026-11-13) added `inter_symbols.{h,cpp}` (818 nb): the inter symbol + context surface of `entropy_coding.c` (comp/intra-inter/motion-mode/inter-mode/drl/mv/filter/ref-mode families and write_ref_frames) with the 19 inter CDF default extracts. The frame-header and tile writers stay parked.
 
@@ -380,6 +386,8 @@ yet. The families:
 
 ## l10_filters - post-filter kernels (DF/CDEF/LR/GR)
 
+A8D (2026-11-14) added cdef_driver.{h,cpp} (1,583 nb): cdef_frame/pick_from_qp/propagate/finish, the cdef_process compute_dist/seg_search/copy_recon/superres path, the rest-kernel iter, the grain hbd twins and the restoration hbd extend/copy/selfguided branches.
+
 A8R (2026-11-13) added `restoration_pick.{h,cpp}` (831 nb): the pixel-projection/subspace family, the sgr search (encode/apply/search/count), the wiener normal equations/linsolve/decompose/score/finalize/count and both hbd twins. The RestSearchCtxt/rsc drivers stay parked.
 
 The deblocking, CDEF and restoration kernel families, 1:1 with the
@@ -484,7 +492,7 @@ misplaced it in inter_prediction.c - grep 0 hits there).
   `get_msb(x|1)`. The roi_map/PCS walls and the (declared-but-never-
   defined) `temporally_update_qps` stay parked.
 
-## l14_utility - block geometry + utilities (U1)
+## l14_utility - block geometry + utilities (U1 + A13U)
 
 The `utility.c` surface (347 nb) + the `common_utils.c` dependencies
 (31 nb): the block geometry builder `svt_aom_build_blk_geom`, the
@@ -495,6 +503,8 @@ all 11 geometries and the GEOM_2 85-block cross-check against
 through the algorithm) pin the tables. Host only.
 
 ## l15_rc - rate-control tables + arithmetic (RC1/RC2)
+
+A9D (2026-11-14) added 1,691 nb: the rc_process reset/update/init/superres/sb-qindex surface, the pass2 GF allocation/interval/lap/kf/postencode families and the initial_rc tpl-group/LAD surface.
 
 A9R (2026-11-13) added 470 nb: the rc_process.c rd-multiplier/lambda family, the initial_rc_process.c tpl-level pair + set_1pvbr_param, and the pass2_strategy.c two-pass stats/correction/GF arithmetic. The queue/PCS/SCS drivers and the TPL-lambda wall stay parked.
 
@@ -521,6 +531,8 @@ the mutex ops, the debug prints and the pick-q/rate-allocation shell
 stay parked named.
 
 ## l16_rdo - rate estimation + trellis + symbol costs (RE-series)
+
+A4M (2026-11-14) added md_slices2 (1,087 nb): the mode_decision.c remainder. A4C (2026-11-14) added md_core (2,125 nb): the product_coding_loop.c fast-loop/stage/search/recon-chain remainder and the md_process.c tail.
 
 EMC2 (2026-11-13) completed the `enc_mode_config.c` conveyor in `mode_config.{h,cpp}` (4,174 nb): the remaining NIC/NSQ/intra/pd0/pd1/tx/cfl/rate-est/mds0/depth-refinement setters, the max-block-size and enc-dec derivation families, and the light-pd1/default/rtc/allintra drivers. The pic-level config coordinators stay parked.
 
@@ -637,7 +649,7 @@ mode-config conveyor and the pure-arithmetic mode-decision helpers).
   `mv_is_already_injected`, the uni/bipred validity pairs). 23
   TEST_CASEs; coverage-only.
 
-## l17_inter - inter prediction (MC1 + A3W)
+## l17_inter - inter prediction (MC1 + A3W + A3E)
 
 MC1 (2026-11-12) landed the inter-prediction compound/dist-weighted/scale
 surface and the sr-convolve family in `inter_prediction.{h,cpp}` (524 nb).
@@ -646,6 +658,9 @@ A3W (2026-11-13) added the warped-motion + RANSAC surface in
 projection/affine/shear fit, the 8-bit warp, the shear params, the sample
 selection, and the RANSAC scoring/fitting/internal walk. The hbd warp twins
 and the dead `USE_LIMITED_PREC_MULT` branch stay parked. Host only.
+
+## l18_picmgmt - picture management + threading (A10P)
+A10P (2026-11-14) created the first picture-management layer (913 nb, ctest target l18_picmgmt): pic_buffer_desc layout calc/assign + ctor/update, reference_object ring/param updates, sequence_control_set resolution/copy, svt_threads synchronization primitives, and the pcs.c geometry/alloc-size helpers. Host only; the allocation/ctor/dctor walls are parked named.
 
 ## The frame encode flow (encodeFrameAuto16x16, step by step)
 
