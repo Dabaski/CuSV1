@@ -1,6 +1,14 @@
 #include "temporal_filter.h"
 
+#include <cassert>
 #include <cstdlib>
+
+namespace analysis {
+// OD_DIVU (bitstream_unit.h:48-54) reads the magic-multiplier table that
+// AN14 landed in noise_util.cpp; the extern declaration matches the
+// definition there (and analysis.h:1049).
+extern std::uint32_t odDivuSmallConsts[1024][2];
+}  // namespace analysis
 
 namespace analysis {
 namespace temporal {
@@ -99,6 +107,17 @@ int32_t getMsb(uint32_t n) {
         ++position;
     }
     return position;
+}
+
+// OD_DIVU (bitstream_unit.h:48-54): the multiply-unroll division for
+// d < OD_DIVU_DMAX (1024), plain division otherwise. svt_log2f = get_msb
+// (definitions.h:591-592).
+uint32_t odDivu(uint32_t x, uint32_t d) {
+    if (d < 1024) {
+        return (uint32_t)((odDivuSmallConsts[d - 1][0] * (uint64_t)x + odDivuSmallConsts[d - 1][1]) >> 32) >>
+               getMsb(d);
+    }
+    return x / d;
 }
 
 }  // namespace
@@ -858,5 +877,88 @@ void applyFilteringCentralHbd(bool tfChroma, const uint16_t* const* src,
         }
     }
 }
+
+// A11D-T2: 1:1 port of svt_aom_get_final_filtered_pixels_c
+// (temporal_filtering.c:2426-2489). The consumed MeContext field
+// (tf_chroma) is threaded as the tfChroma parameter (the b64Variance
+// carrier pattern); TF_BW/TF_BH = 64 (temporal_filtering.h:23-:24). The
+// 8-bit and highbd destination triples are the reference's EbByte*/and
+// uint16_t** shapes; the unused one is nullptr per call. The chroma row
+// advance is stride[PLANE_U] (the reference's :2468), and the chroma
+// k index is shared across U/V. The division is the OD_DIVU macro
+// (bitstream_unit.h:48-54) over the AN14 table.
+void getFinalFilteredPixels(bool tfChroma, bool isHighbd,
+                            uint8_t* const* src8, uint16_t* const* src16,
+                            uint32_t** accum, uint16_t** count,
+                            const uint32_t* stride,
+                            int blkYSrcOffset, int blkChSrcOffset,
+                            uint16_t blkWidthCh, uint16_t blkHeightCh) {
+    if (!isHighbd) {
+        // Process luma
+        int pos = blkYSrcOffset;
+        for (int i = 0, k = 0; i < 64 /*TF_BH*/; i++) {
+            for (int j = 0; j < 64 /*TF_BW*/; j++, k++) {
+                assert(odDivu(accum[0 /*PLANE_Y*/][k] + (count[0 /*PLANE_Y*/][k] >> 1),
+                              count[0 /*PLANE_Y*/][k]) < 256);
+                src8[0 /*PLANE_Y*/][pos] =
+                    (uint8_t)odDivu(accum[0 /*PLANE_Y*/][k] + (count[0 /*PLANE_Y*/][k] >> 1),
+                                    count[0 /*PLANE_Y*/][k]);
+                pos++;
+            }
+            pos += stride[0 /*PLANE_Y*/] - 64 /*TF_BW*/;
+        }
+        // Process chroma
+        if (tfChroma) {
+            pos = blkChSrcOffset;
+            for (int i = 0, k = 0; i < blkHeightCh; i++) {
+                for (int j = 0; j < blkWidthCh; j++, k++) {
+                    assert(odDivu(accum[1 /*PLANE_U*/][k] + (count[1 /*PLANE_U*/][k] >> 1),
+                                  count[1 /*PLANE_U*/][k]) < 256);
+                    src8[1 /*PLANE_U*/][pos] =
+                        (uint8_t)odDivu(accum[1 /*PLANE_U*/][k] + (count[1 /*PLANE_U*/][k] >> 1),
+                                        count[1 /*PLANE_U*/][k]);
+                    // The reference's second assert reads PLANE_U (the
+                    // :2468 quirk) before the V write.
+                    assert(odDivu(accum[1 /*PLANE_U*/][k] + (count[1 /*PLANE_U*/][k] >> 1),
+                                  count[1 /*PLANE_U*/][k]) < 256);
+                    src8[2 /*PLANE_V*/][pos] =
+                        (uint8_t)odDivu(accum[2 /*PLANE_V*/][k] + (count[2 /*PLANE_V*/][k] >> 1),
+                                        count[2 /*PLANE_V*/][k]);
+                    pos++;
+                }
+                pos += stride[1 /*PLANE_U*/] - blkWidthCh;
+            }
+        }
+    } else {
+        // Process luma
+        int pos = blkYSrcOffset;
+        for (int i = 0, k = 0; i < 64 /*TF_BH*/; i++) {
+            for (int j = 0; j < 64 /*TF_BW*/; j++, k++) {
+                src16[0 /*PLANE_Y*/][pos] =
+                    (uint16_t)odDivu(accum[0 /*PLANE_Y*/][k] + (count[0 /*PLANE_Y*/][k] >> 1),
+                                     count[0 /*PLANE_Y*/][k]);
+                pos++;
+            }
+            pos += stride[0 /*PLANE_Y*/] - 64 /*TF_BW*/;
+        }
+        // Process chroma
+        if (tfChroma) {
+            pos = blkChSrcOffset;
+            for (int i = 0, k = 0; i < blkHeightCh; i++) {
+                for (int j = 0; j < blkWidthCh; j++, k++) {
+                    src16[1 /*PLANE_U*/][pos] =
+                        (uint16_t)odDivu(accum[1 /*PLANE_U*/][k] + (count[1 /*PLANE_U*/][k] >> 1),
+                                         count[1 /*PLANE_U*/][k]);
+                    src16[2 /*PLANE_V*/][pos] =
+                        (uint16_t)odDivu(accum[2 /*PLANE_V*/][k] + (count[2 /*PLANE_V*/][k] >> 1),
+                                         count[2 /*PLANE_V*/][k]);
+                    pos++;
+                }
+                pos += stride[1 /*PLANE_U*/] - blkWidthCh;
+            }
+        }
+    }
 }
-}
+
+}  // namespace temporal
+}  // namespace analysis

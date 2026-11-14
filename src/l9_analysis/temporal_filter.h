@@ -44,6 +44,22 @@ void applyFilteringCentralHbd(bool tfChroma, const uint16_t* const* src,
                               uint16_t blkWidth, uint16_t blkHeight,
                               uint32_t ssX, uint32_t ssY, uint16_t srcStrideY);
 
+// A11D-T2: 1:1 port of svt_aom_get_final_filtered_pixels_c
+// (temporal_filtering.c:2426-2489). The consumed MeContext field
+// (tf_chroma) is threaded as the tfChroma parameter; the luma block is
+// TF_BW x TF_BH = 64x64 (temporal_filtering.h:23-:24) and the chroma
+// block is caller-supplied. The 8-bit and highbd destination triples are
+// the reference's EbByte* and uint16_t** shapes; the unused one is
+// nullptr per call. The chroma row advance is stride[PLANE_U] - blkWidthCh
+// (the reference's :2468), and the chroma k index is shared across U/V.
+// The division is the reference's OD_DIVU macro (bitstream_unit.h:48-54).
+void getFinalFilteredPixels(bool tfChroma, bool isHighbd,
+                            uint8_t* const* src8, uint16_t* const* src16,
+                            uint32_t** accum, uint16_t** count,
+                            const uint32_t* stride,
+                            int blkYSrcOffset, int blkChSrcOffset,
+                            uint16_t blkWidthCh, uint16_t blkHeightCh);
+
 // 1:1 port of svt_aom_noise_log1p_fp16 (temporal_filtering.c:568-586).
 int32_t noiseLog1pFp16(int32_t noiseLevelFp16);
 

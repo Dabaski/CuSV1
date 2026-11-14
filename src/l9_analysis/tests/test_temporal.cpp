@@ -1802,3 +1802,184 @@ TEST_CASE("l9 temporal non-zz hbd medium wrapper derivation equals the 8-bit twi
     // luma (the S14 finding, now through the hbd wrapper).
     CHECK_NE(uH.count[0], fH.count[0]);
 }
+
+// A11D-T2: get_final_filtered_pixels_c (temporal_filtering.c:2426-:2489).
+// The test-side transcription oracle below is a SECOND independent
+// transcription of the reference body (the A3M search-oracle precedent):
+// the port's output must match it entry for entry. The OD_DIVU table's
+// functional contract is x/d (the AN14 sentinel test over every d in
+// 1..1024), so the oracle uses plain division - the reference's
+// round-to-nearest form (accum + (count >> 1)) / count. The destination
+// buffers are poison-filled before the call; every written entry is
+// asserted and the untouched tail stays poison (the A11D poison-carrier
+// discipline).
+namespace {
+// Independent transcription of temporal_filtering.c:2426-:2489. PLANE_Y/U/V
+// = 0/1/2; TF_BW/TF_BH = 64 (temporal_filtering.h:23-:24); the chroma row
+// advance is stride[PLANE_U] - blk_width_ch (the reference uses the U
+// plane's stride, not the V plane's). The OD_DIVU table's contract is x/d
+// (the AN14 sentinel test), so the oracle uses plain division.
+void getFinalFilteredPixelsRef(bool tfChroma, bool isHighbd,
+                               uint8_t* const* src8, uint16_t* const* src16,
+                               uint32_t** accum, uint16_t** count,
+                               const uint32_t* stride,
+                               int blkYSrcOffset, int blkChSrcOffset,
+                               uint16_t blkWidthCh, uint16_t blkHeightCh) {
+    if (!isHighbd) {
+        // Process luma
+        int pos = blkYSrcOffset;
+        for (int i = 0, k = 0; i < 64; i++) {
+            for (int j = 0; j < 64; j++, k++) {
+                src8[0][pos] = (uint8_t)((accum[0][k] + (count[0][k] >> 1)) / count[0][k]);
+                pos++;
+            }
+            pos += stride[0] - 64;
+        }
+        // Process chroma
+        if (tfChroma) {
+            pos = blkChSrcOffset;
+            for (int i = 0, k = 0; i < blkHeightCh; i++) {
+                for (int j = 0; j < blkWidthCh; j++, k++) {
+                    src8[1][pos] = (uint8_t)((accum[1][k] + (count[1][k] >> 1)) / count[1][k]);
+                    src8[2][pos] = (uint8_t)((accum[2][k] + (count[2][k] >> 1)) / count[2][k]);
+                    pos++;
+                }
+                pos += stride[1] - blkWidthCh;
+            }
+        }
+    } else {
+        // Process luma
+        int pos = blkYSrcOffset;
+        for (int i = 0, k = 0; i < 64; i++) {
+            for (int j = 0; j < 64; j++, k++) {
+                src16[0][pos] = (uint16_t)((accum[0][k] + (count[0][k] >> 1)) / count[0][k]);
+                pos++;
+            }
+            pos += stride[0] - 64;
+        }
+        // Process chroma
+        if (tfChroma) {
+            pos = blkChSrcOffset;
+            for (int i = 0, k = 0; i < blkHeightCh; i++) {
+                for (int j = 0; j < blkWidthCh; j++, k++) {
+                    src16[1][pos] = (uint16_t)((accum[1][k] + (count[1][k] >> 1)) / count[1][k]);
+                    src16[2][pos] = (uint16_t)((accum[2][k] + (count[2][k] >> 1)) / count[2][k]);
+                    pos++;
+                }
+                pos += stride[1] - blkWidthCh;
+            }
+        }
+    }
+}
+}  // namespace
+
+TEST_CASE("l9 temporal getFinalFilteredPixels 4:2:0 oracle + poison carriers + stride") {
+    using analysis::temporal::getFinalFilteredPixels;
+    // 64x64 luma block in stride 70 (64 content + 6 pad), chroma 32x32 in
+    // stride 36 (32 content + 4 pad). The strides differ per plane; the
+    // port's chroma row advance must use stride[PLANE_U] (the reference's
+    // :2468), not stride[PLANE_Y].
+    constexpr uint32_t kStrideY = 70;
+    constexpr uint32_t kStrideCh = 36;
+    const uint32_t stride[3] = {kStrideY, kStrideCh, kStrideCh};
+    std::vector<uint8_t> dst8(64 * 70 + 2 * 32 * 36, 0xAB);
+    uint8_t* dst8Ptr[3] = {dst8.data(), dst8.data() + 64 * 70, dst8.data() + 64 * 70 + 32 * 36};
+
+    std::vector<uint32_t> accum(3 * 64 * 64);
+    std::vector<uint16_t> count(3 * 64 * 64);
+    // Deterministic accum/count: the oracle's division is exact, so the
+    // expected values differ per plane (the U and V planes' values differ
+    // via the p * 11 term - a V-write mutation reading U's accum is
+    // caught by the expected-value mismatch).
+    for (int p = 0; p < 3; ++p) {
+        for (int k = 0; k < 64 * 64; ++k) {
+            const uint16_t c = (uint16_t)(1000 + (k % 7));
+            const uint32_t r = (uint32_t)((k * 37 + p * 11) % 256);
+            const uint32_t err = (uint32_t)(k % c);
+            count[p * 64 * 64 + k] = c;
+            accum[p * 64 * 64 + k] = c * r + err;
+        }
+    }
+    uint32_t* accumPtr[3] = {accum.data(), accum.data() + 64 * 64, accum.data() + 2 * 64 * 64};
+    uint16_t* countPtr[3] = {count.data(), count.data() + 64 * 64, count.data() + 2 * 64 * 64};
+
+    getFinalFilteredPixels(true, false, dst8Ptr, nullptr, accumPtr, countPtr, stride, 0, 0, 32, 32);
+
+    // Luma: 64 rows x 64 columns at pos = i*70 + j; the untouched tail
+    // (j in [64,70) per row) stays poison.
+    for (int i = 0; i < 64; ++i) {
+        for (int j = 0; j < 64; ++j) {
+            const int k = i * 64 + j;
+            const uint32_t c = (uint32_t)(1000 + (k % 7));
+            const uint32_t r = (uint32_t)((k * 37) % 256);
+            const uint32_t err = (uint32_t)(k % c);
+            const uint8_t expected = (uint8_t)((c * r + err + (c >> 1)) / c);
+            CHECK_EQ(dst8Ptr[0][i * kStrideY + j], expected);
+        }
+        for (int j = 64; j < 70; ++j) {
+            CHECK_EQ(dst8Ptr[0][i * kStrideY + j], 0xAB);
+        }
+    }
+    // Chroma: 32 rows x 32 columns at pos = i*36 + j; the untouched tail
+    // (j in [32,36) per row) stays poison. The U and V planes share the
+    // same k index (the reference's chroma loop advances k once per
+    // pixel, both planes) and the U/V values differ via the p * 11 term.
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 0; i < 32; ++i) {
+            for (int j = 0; j < 32; ++j) {
+                const int k = i * 32 + j;
+                const uint32_t c = (uint32_t)(1000 + (k % 7));
+                const uint32_t r = (uint32_t)((k * 37 + p * 11) % 256);
+                const uint32_t err = (uint32_t)(k % c);
+                const uint8_t expected = (uint8_t)((c * r + err + (c >> 1)) / c);
+                CHECK_EQ(dst8Ptr[p][i * kStrideCh + j], expected);
+            }
+            for (int j = 32; j < 36; ++j) {
+                CHECK_EQ(dst8Ptr[p][i * kStrideCh + j], 0xAB);
+            }
+        }
+    }
+}
+
+TEST_CASE("l9 temporal getFinalFilteredPixels luma-only leaves chroma poison") {
+    using analysis::temporal::getFinalFilteredPixels;
+    constexpr uint32_t kStrideY = 70;
+    constexpr uint32_t kStrideCh = 36;
+    const uint32_t stride[3] = {kStrideY, kStrideCh, kStrideCh};
+    std::vector<uint8_t> dst8(64 * 70 + 2 * 32 * 36, 0xAB);
+    uint8_t* dst8Ptr[3] = {dst8.data(), dst8.data() + 64 * 70, dst8.data() + 64 * 70 + 32 * 36};
+
+    std::vector<uint32_t> accum(3 * 64 * 64);
+    std::vector<uint16_t> count(3 * 64 * 64);
+    for (int p = 0; p < 3; ++p) {
+        for (int k = 0; k < 64 * 64; ++k) {
+            const uint16_t c = (uint16_t)(1000 + (k % 7));
+            const uint32_t r = (uint32_t)((k * 37) % 256);
+            const uint32_t err = (uint32_t)(k % c);
+            count[p * 64 * 64 + k] = c;
+            accum[p * 64 * 64 + k] = c * r + err;
+        }
+    }
+    uint32_t* accumPtr[3] = {accum.data(), accum.data() + 64 * 64, accum.data() + 2 * 64 * 64};
+    uint16_t* countPtr[3] = {count.data(), count.data() + 64 * 64, count.data() + 2 * 64 * 64};
+
+    getFinalFilteredPixels(false, false, dst8Ptr, nullptr, accumPtr, countPtr, stride, 0, 0, 32, 32);
+
+    // Luma written; the chroma planes stay poison (the reference's
+    // chroma branch is gated on tf_chroma).
+    for (int i = 0; i < 64; ++i) {
+        for (int j = 0; j < 64; ++j) {
+            const int k = i * 64 + j;
+            const uint32_t c = (uint32_t)(1000 + (k % 7));
+            const uint32_t r = (uint32_t)((k * 37) % 256);
+            const uint32_t err = (uint32_t)(k % c);
+            const uint8_t expected = (uint8_t)((c * r + err + (c >> 1)) / c);
+            CHECK_EQ(dst8Ptr[0][i * kStrideY + j], expected);
+        }
+    }
+    for (int p = 1; p < 3; ++p) {
+        for (int i = 0; i < 32 * 36; ++i) {
+            CHECK_EQ(dst8Ptr[p][i], 0xAB);
+        }
+    }
+}
