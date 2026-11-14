@@ -16,6 +16,45 @@ namespace l18_picmgmt {
 // pcs.c spans. The shared enums/constants (verbatim values).
 // ---------------------------------------------------------------------------
 
+// ResolutionRange (definitions.h:1808-1817, verbatim). Duplicated from
+// l16_rdo/mode_config.h - l18 cannot link l16 (the SYM1 duplication
+// precedent).
+enum ResolutionRange {
+    INPUT_SIZE_240p_RANGE = 0,
+    INPUT_SIZE_360p_RANGE = 1,
+    INPUT_SIZE_480p_RANGE = 2,
+    INPUT_SIZE_720p_RANGE = 3,
+    INPUT_SIZE_1080p_RANGE = 4,
+    INPUT_SIZE_4K_RANGE = 5,
+    INPUT_SIZE_8K_RANGE = 6,
+    INPUT_SIZE_COUNT = 7,
+};
+
+// The resolution thresholds (definitions.h:1819-1824), verbatim.
+constexpr std::uint32_t inputSize240pTh = 0x28500;   // 0.165 Million
+constexpr std::uint32_t inputSize360pTh = 0x4CE00;   // 0.315 Million
+constexpr std::uint32_t inputSize480pTh = 0xA1400;   // 0.661 Million
+constexpr std::uint32_t inputSize720pTh = 0x16DA00;  // 1.5 Million
+constexpr std::uint32_t inputSize1080pTh = 0x535200; // 5.46 Million
+constexpr std::uint32_t inputSize4kTh = 0x140A000;   // 21 Million
+
+// SvtAv1FrameScaleEvts (EbSvtAv1Enc.h:192-197), verbatim fields.
+struct FrameScaleEvts {
+    std::uint32_t evtNum;
+    std::int64_t* startFrameNums;
+    std::uint32_t* resizeKfDenoms;
+    std::uint32_t* resizeDenoms;
+};
+
+// SvtAv1SFramePositions (EbSvtAv1Enc.h:199-205), verbatim fields.
+struct SframePosi {
+    std::uint32_t sframeNum;
+    std::uint64_t* sframePosis;
+    std::uint32_t sframeQpNum;
+    std::uint8_t* sframeQps;
+    std::int8_t* sframeQpOffsets;
+};
+
 // EbErrorType (EbSvtAv1.h:122-140): only the values the ported spans return.
 enum EbErrorType {
     EB_ErrorNone = 0,
@@ -68,12 +107,6 @@ EbErrorType segmentationMapCtor(SegmentationNeighborMap* segNeighborMap, std::ui
                                 std::uint16_t picHeight);
 void segmentationMapDctor(SegmentationNeighborMap* segNeighborMap);
 
-// ---------------------------------------------------------------------------
-// The SequenceControlSet carrier: grows with the ported spans; today the
-// sb-geometry init functions (pcs.c:1488-:1552) consume b64_size
-// (sequence_control_set.h:131) and sb_size (:135) only.
-// ---------------------------------------------------------------------------
-
 // B64Geom (pcs.h:406-412), verbatim fields.
 struct B64Geom {
     std::uint16_t orgX;
@@ -91,10 +124,26 @@ struct SbGeom {
     std::uint8_t height;
 };
 
-// The SequenceControlSet carrier consumed by the geometry inits.
+// ---------------------------------------------------------------------------
+// The SequenceControlSet carrier: grows with the ported spans. Today it
+// holds exactly the fields the geometry inits (pcs.c:1488-:1552) and the
+// SCS copy (sequence_control_set.c:163-:228) consume: b64_size
+// (sequence_control_set.h:131), sb_size (:135), b64_total_count (:134),
+// picture_width/height_in_sb (:136-:137), the sb_geom/b64_geom pointers
+// (:68/:70) and the frame_scale_evts / sframe_posi members the copy
+// deep-copies.
+// ---------------------------------------------------------------------------
+
 struct Scs {
-    std::uint8_t b64Size;   // sequence_control_set.h:131
-    std::uint16_t sbSize;   // :135
+    std::uint8_t b64Size;             // sequence_control_set.h:131
+    std::uint16_t sbSize;             // :135
+    std::uint16_t b64TotalCount;      // :134
+    std::uint16_t pictureWidthInSb;   // :136
+    std::uint16_t pictureHeightInSb;  // :137
+    SbGeom* sbGeom;                   // :68
+    B64Geom* b64Geom;                 // :70
+    FrameScaleEvts frameScaleEvts;    // static_config.frame_scale_evts (EbSvtAv1Enc.h:192-197)
+    SframePosi sframePosi;            // static_config.sframe_posi (EbSvtAv1Enc.h:199-205)
 };
 
 // DIVIDE_AND_CEIL (utility.h): ((x) + ((y) - 1)) / (y).
@@ -114,5 +163,21 @@ EbErrorType allocSbGeoms(SbGeom** geom, int width, int height);
 void freeSbGeoms(SbGeom* geom);
 void copySbGeoms(SbGeom* dstGeom, const SbGeom* srcGeom, std::uint16_t width, std::uint16_t height);
 EbErrorType sbGeomInit(Scs* scs, std::uint16_t width, std::uint16_t height, SbGeom** sbGeoms);
+
+// ---------------------------------------------------------------------------
+// sequence_control_set.c spans.
+// ---------------------------------------------------------------------------
+
+// svt_aom_derive_input_resolution (sequence_control_set.c:120-139): the
+// strict-< band ladder over the definitions.h:1819-1824 thresholds.
+EbErrorType deriveInputResolution(ResolutionRange* inputResolution, std::uint32_t inputSize);
+
+// copy_sequence_control_set (sequence_control_set.c:163-:228): free the dst
+// geometry arrays, whole-copy the carrier scalars (*dst = *src, :171),
+// deep-copy b64_geom (:173-:174), sb_geom (:177-:178), and the three
+// frame_scale_evts (:180-:200) + three sframe_posi (:201-:223) arrays when
+// the src pointer is non-null. The carrier's non-carried SCS members are
+// named-parked (the full SCS field surface).
+EbErrorType copySequenceControlSet(Scs* dst, const Scs* src);
 
 } // namespace l18_picmgmt

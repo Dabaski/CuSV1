@@ -208,3 +208,209 @@ TEST_CASE("sbGeomInit and the sb-geom alloc/copy/free trio") {
     CHECK(geoms != first);
     l18_picmgmt::freeSbGeoms(geoms);
 }
+
+// ---------------------------------------------------------------------------
+// C3: svt_aom_derive_input_resolution (sequence_control_set.c:120-139) and
+// copy_sequence_control_set (:163-:228).
+// ---------------------------------------------------------------------------
+
+// 1:1 target: derive_input_resolution. The thresholds are the test's
+// oracle: INPUT_SIZE_240p_TH 0x28500, 360p 0x4CE00, 480p 0xA1400,
+// 720p 0x16DA00, 1080p 0x535200, 4K 0x140A000 (definitions.h:1819-1824).
+// Each band is < TH (strict), so TH-1 stays in the band and TH moves up.
+static l18_picmgmt::ResolutionRange expectedResolution(std::uint32_t inputSize) {
+    if (inputSize < 0x28500u) {
+        return l18_picmgmt::INPUT_SIZE_240p_RANGE;
+    }
+    if (inputSize < 0x4CE00u) {
+        return l18_picmgmt::INPUT_SIZE_360p_RANGE;
+    }
+    if (inputSize < 0xA1400u) {
+        return l18_picmgmt::INPUT_SIZE_480p_RANGE;
+    }
+    if (inputSize < 0x16DA00u) {
+        return l18_picmgmt::INPUT_SIZE_720p_RANGE;
+    }
+    if (inputSize < 0x535200u) {
+        return l18_picmgmt::INPUT_SIZE_1080p_RANGE;
+    }
+    if (inputSize < 0x140A000u) {
+        return l18_picmgmt::INPUT_SIZE_4K_RANGE;
+    }
+    return l18_picmgmt::INPUT_SIZE_8K_RANGE;
+}
+
+TEST_CASE("deriveInputResolution enumerates every band boundary") {
+    // The exact boundary bands: TH-1 stays, TH moves up.
+    const std::uint32_t bands[] = {0x28500u, 0x4CE00u, 0xA1400u, 0x16DA00u, 0x535200u, 0x140A000u};
+    for (std::uint32_t th : bands) {
+        l18_picmgmt::ResolutionRange below = static_cast<l18_picmgmt::ResolutionRange>(-1);
+        l18_picmgmt::ResolutionRange at = static_cast<l18_picmgmt::ResolutionRange>(-1);
+        l18_picmgmt::deriveInputResolution(&below, th - 1);
+        l18_picmgmt::deriveInputResolution(&at, th);
+        CHECK(below == expectedResolution(th - 1));
+        CHECK(at == expectedResolution(th));
+        CHECK(at != below); // the strict-< boundary really moves the band
+    }
+    // Full-domain sweep over 0..40M in coarse steps plus 0 and the max.
+    for (std::uint32_t s = 0; s <= 40000000u; s += 9973u) {
+        l18_picmgmt::ResolutionRange got = static_cast<l18_picmgmt::ResolutionRange>(-1);
+        l18_picmgmt::deriveInputResolution(&got, s);
+        CHECK(got == expectedResolution(s));
+    }
+    l18_picmgmt::ResolutionRange got = static_cast<l18_picmgmt::ResolutionRange>(-1);
+    l18_picmgmt::deriveInputResolution(&got, 0u);
+    CHECK(got == l18_picmgmt::INPUT_SIZE_240p_RANGE);
+    l18_picmgmt::deriveInputResolution(&got, 0xFFFFFFFFu);
+    CHECK(got == l18_picmgmt::INPUT_SIZE_8K_RANGE);
+}
+
+// 1:1 target: copy_sequence_control_set (sequence_control_set.c:163-:228):
+// free the dst sb/b64 arrays, whole-copy the non-pointer members, then
+// deep-copy b64_geom (malloc+memcpy), sb_geom (alloc_sb_geoms +
+// copy_sb_geoms), and the six frame_scale_evts / sframe_posi arrays (only
+// when the src pointer is non-null). Cited: :164-:169 the frees, :171
+// *dst = *src, :173-:174 the b64 copy, :177-:178 the sb geoms, :180-:200
+// the evts trio, :201-:223 the sframe trio.
+TEST_CASE("copySequenceControlSet deep-copies arrays and leaves src untouched") {
+    using namespace l18_picmgmt;
+    Scs src = {};
+    src.b64Size = 64;
+    src.sbSize = 128;
+    // The counts must agree with the grids the real inits produce for
+    // 130x64: ceil(130/64) = 3 cells across, 1 row.
+    src.b64TotalCount = 3;
+    src.pictureWidthInSb = 3;
+    src.pictureHeightInSb = 1;
+    src.frameScaleEvts.evtNum = 3;
+    src.frameScaleEvts.startFrameNums = static_cast<std::int64_t*>(std::malloc(sizeof(std::int64_t) * 3));
+    src.frameScaleEvts.resizeKfDenoms = static_cast<std::uint32_t*>(std::malloc(sizeof(std::uint32_t) * 3));
+    src.frameScaleEvts.resizeDenoms = static_cast<std::uint32_t*>(std::malloc(sizeof(std::uint32_t) * 3));
+    src.frameScaleEvts.startFrameNums[0] = 11;
+    src.frameScaleEvts.startFrameNums[1] = 22;
+    src.frameScaleEvts.startFrameNums[2] = 33;
+    src.frameScaleEvts.resizeKfDenoms[0] = 160;
+    src.frameScaleEvts.resizeKfDenoms[1] = 180;
+    src.frameScaleEvts.resizeKfDenoms[2] = 200;
+    src.frameScaleEvts.resizeDenoms[0] = 1000;
+    src.frameScaleEvts.resizeDenoms[1] = 1001;
+    src.frameScaleEvts.resizeDenoms[2] = 1002;
+    src.sframePosi.sframeNum = 2;
+    src.sframePosi.sframePosis = static_cast<std::uint64_t*>(std::malloc(sizeof(std::uint64_t) * 2));
+    src.sframePosi.sframePosis[0] = 7;
+    src.sframePosi.sframePosis[1] = 8;
+    src.sframePosi.sframeQpNum = 2;
+    src.sframePosi.sframeQps = static_cast<std::uint8_t*>(std::malloc(2));
+    src.sframePosi.sframeQps[0] = 40;
+    src.sframePosi.sframeQps[1] = 50;
+    src.sframePosi.sframeQpOffsets = static_cast<std::int8_t*>(std::malloc(2));
+    src.sframePosi.sframeQpOffsets[0] = 5;
+    src.sframePosi.sframeQpOffsets[1] = 6;
+    // src geometry arrays, filled with the real inits.
+    CHECK(b64GeomInit(&src, 130, 64, &src.b64Geom) == 0);
+    CHECK(sbGeomInit(&src, 130, 64, &src.sbGeom) == 0);
+
+    // dst: poisoned scalars, non-null old geometry arrays (the free-before
+    // path at :164-:169 must run), poisoned evts/sframe pointers.
+    Scs dst = {};
+    dst.b64TotalCount = 0xEEEE;
+    dst.pictureWidthInSb = 0xEEEE;
+    dst.pictureHeightInSb = 0xEEEE;
+    dst.frameScaleEvts.evtNum = 0xEEEE;
+    dst.sframePosi.sframeNum = 0xEEEE;
+    dst.sframePosi.sframeQpNum = 0xEEEE;
+    dst.sbGeom = nullptr;
+    CHECK(allocSbGeoms(&dst.sbGeom, 5, 5) == 0);
+    dst.b64Geom = static_cast<B64Geom*>(std::malloc(sizeof(B64Geom) * 3));
+
+    CHECK(copySequenceControlSet(&dst, &src) == 0);
+
+    // The scalars arrived (the *dst = *src line).
+    CHECK(dst.b64TotalCount == 3);
+    CHECK(dst.pictureWidthInSb == 3);
+    CHECK(dst.pictureHeightInSb == 1);
+    CHECK(dst.frameScaleEvts.evtNum == 3);
+    CHECK(dst.sframePosi.sframeNum == 2);
+    CHECK(dst.sframePosi.sframeQpNum == 2);
+    // The geometry arrays are FRESH allocations (not src's pointers).
+    CHECK(dst.b64Geom != src.b64Geom);
+    CHECK(dst.sbGeom != src.sbGeom);
+    for (int i = 0; i < 3; ++i) { // ceil(130/64)=3 x ceil(64/64)=1
+        CHECK(dst.b64Geom[i].orgX == src.b64Geom[i].orgX);
+        CHECK(dst.b64Geom[i].width == src.b64Geom[i].width);
+        CHECK(dst.sbGeom[i].orgX == src.sbGeom[i].orgX);
+        CHECK(dst.sbGeom[i].width == src.sbGeom[i].width);
+    }
+    // The six arrays are deep copies, independent of src.
+    CHECK(dst.frameScaleEvts.startFrameNums != src.frameScaleEvts.startFrameNums);
+    CHECK(dst.frameScaleEvts.startFrameNums[0] == 11);
+    CHECK(dst.frameScaleEvts.startFrameNums[2] == 33);
+    CHECK(dst.frameScaleEvts.resizeKfDenoms[1] == 180);
+    CHECK(dst.frameScaleEvts.resizeDenoms[2] == 1002);
+    CHECK(dst.sframePosi.sframePosis != src.sframePosi.sframePosis);
+    CHECK(dst.sframePosi.sframePosis[1] == 8);
+    CHECK(dst.sframePosi.sframeQps[1] == 50);
+    CHECK(dst.sframePosi.sframeQpOffsets[0] == 5);
+    dst.frameScaleEvts.startFrameNums[0] = 999;
+    dst.sframePosi.sframeQps[0] = 99;
+    dst.b64Geom[0].width = 77;
+    dst.sbGeom[0].orgY = 77;
+    CHECK(src.frameScaleEvts.startFrameNums[0] == 11);
+    CHECK(src.sframePosi.sframeQps[0] == 40);
+    CHECK(src.b64Geom[0].width == 64);
+    CHECK(src.sbGeom[0].orgY == 0);
+
+    // The all-null src event/sframe pointers variant: dst inherits NULLs.
+    // The geometry arrays themselves must exist: the reference's memcpy at
+    // :174 has no null guard (the encoder always inits geometry before a
+    // copy), so a null src.b64Geom would crash the REAL function too.
+    Scs bare = {};
+    bare.b64TotalCount = 1;
+    bare.b64Size = 64;
+    bare.sbSize = 128;
+    bare.pictureWidthInSb = 1;
+    bare.pictureHeightInSb = 1;
+    CHECK(b64GeomInit(&bare, 64, 64, &bare.b64Geom) == 0);
+    CHECK(sbGeomInit(&bare, 64, 64, &bare.sbGeom) == 0);
+    Scs dstBare = {};
+    dstBare.frameScaleEvts.evtNum = 0xEEEE;
+    dstBare.sframePosi.sframeNum = 0xEEEE;
+    CHECK(copySequenceControlSet(&dstBare, &bare) == 0);
+    CHECK(dstBare.b64TotalCount == 1);
+    CHECK(dstBare.frameScaleEvts.startFrameNums == nullptr);
+    CHECK(dstBare.frameScaleEvts.resizeKfDenoms == nullptr);
+    CHECK(dstBare.frameScaleEvts.resizeDenoms == nullptr);
+    CHECK(dstBare.sframePosi.sframePosis == nullptr);
+    CHECK(dstBare.sframePosi.sframeQps == nullptr);
+    CHECK(dstBare.sframePosi.sframeQpOffsets == nullptr);
+    CHECK(dstBare.b64Geom != nullptr);
+    CHECK(dstBare.sbGeom != nullptr);
+    std::free(dstBare.b64Geom);
+    freeSbGeoms(dstBare.sbGeom);
+    std::free(bare.b64Geom);
+    freeSbGeoms(bare.sbGeom);
+
+    // teardown (the port's dctors are the parked EbDtor walls; free by hand).
+    std::free(src.frameScaleEvts.startFrameNums);
+    std::free(src.frameScaleEvts.resizeKfDenoms);
+    std::free(src.frameScaleEvts.resizeDenoms);
+    std::free(src.sframePosi.sframePosis);
+    std::free(src.sframePosi.sframeQps);
+    std::free(src.sframePosi.sframeQpOffsets);
+    std::free(src.b64Geom);
+    freeSbGeoms(src.sbGeom);
+    std::free(dst.frameScaleEvts.startFrameNums);
+    std::free(dst.frameScaleEvts.resizeKfDenoms);
+    std::free(dst.frameScaleEvts.resizeDenoms);
+    std::free(dst.sframePosi.sframePosis);
+    std::free(dst.sframePosi.sframeQps);
+    std::free(dst.sframePosi.sframeQpOffsets);
+    std::free(dst.b64Geom);
+    freeSbGeoms(dst.sbGeom);
+    std::free(dstBare.frameScaleEvts.startFrameNums);
+    std::free(dstBare.frameScaleEvts.resizeKfDenoms);
+    std::free(dstBare.frameScaleEvts.resizeDenoms);
+    std::free(dstBare.sframePosi.sframePosis);
+    std::free(dstBare.sframePosi.sframeQps);
+    std::free(dstBare.sframePosi.sframeQpOffsets);
+}

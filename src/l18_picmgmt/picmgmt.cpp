@@ -3,6 +3,7 @@
 #include "picmgmt.h"
 
 #include <cstdlib>
+#include <cstring>
 
 namespace l18_picmgmt {
 
@@ -125,6 +126,104 @@ EbErrorType sbGeomInit(Scs* scs, std::uint16_t width, std::uint16_t height, SbGe
         sbGeom->height =
             static_cast<std::uint8_t>(height - sbGeom->orgY < scs->sbSize ? height - sbGeom->orgY : scs->sbSize);
     }
+
+    return EB_ErrorNone;
+}
+
+// ---------------------------------------------------------------------------
+// sequence_control_set.c spans.
+// ---------------------------------------------------------------------------
+
+// svt_aom_derive_input_resolution (sequence_control_set.c:120-139): the
+// strict-< band ladder over the INPUT_SIZE_*_TH thresholds.
+EbErrorType deriveInputResolution(ResolutionRange* inputResolution, std::uint32_t inputSize) {
+    EbErrorType returnError = EB_ErrorNone;
+    if (inputSize < inputSize240pTh) {
+        *inputResolution = INPUT_SIZE_240p_RANGE;
+    } else if (inputSize < inputSize360pTh) {
+        *inputResolution = INPUT_SIZE_360p_RANGE;
+    } else if (inputSize < inputSize480pTh) {
+        *inputResolution = INPUT_SIZE_480p_RANGE;
+    } else if (inputSize < inputSize720pTh) {
+        *inputResolution = INPUT_SIZE_720p_RANGE;
+    } else if (inputSize < inputSize1080pTh) {
+        *inputResolution = INPUT_SIZE_1080p_RANGE;
+    } else if (inputSize < inputSize4kTh) {
+        *inputResolution = INPUT_SIZE_4K_RANGE;
+    } else {
+        *inputResolution = INPUT_SIZE_8K_RANGE;
+    }
+
+    return returnError;
+}
+
+// copy_sequence_control_set (sequence_control_set.c:163-:228): the carrier
+// carries the deep-copied members; the reference's *dst = *src (:171)
+// becomes the whole-carrier assignment.
+EbErrorType copySequenceControlSet(Scs* dst, const Scs* src) {
+    if (dst->sbGeom != nullptr) {
+        freeSbGeoms(dst->sbGeom);
+    }
+    if (dst->b64Geom != nullptr) {
+        std::free(dst->b64Geom);
+    }
+    // Copy the non-pointer members
+    *dst = *src;
+
+    dst->b64Geom = static_cast<B64Geom*>(
+        std::malloc(sizeof(B64Geom) * static_cast<std::size_t>(dst->b64TotalCount)));
+    std::memcpy(dst->b64Geom, src->b64Geom, sizeof(B64Geom) * dst->b64TotalCount);
+
+    // allocate buffers and copy data preserving dst pointers
+    allocSbGeoms(&dst->sbGeom, dst->pictureWidthInSb, dst->pictureHeightInSb);
+    copySbGeoms(dst->sbGeom, src->sbGeom, dst->pictureWidthInSb, dst->pictureHeightInSb);
+
+    if (src->frameScaleEvts.startFrameNums) {
+        dst->frameScaleEvts.startFrameNums =
+            static_cast<std::int64_t*>(std::malloc(sizeof(std::int64_t) * src->frameScaleEvts.evtNum));
+        std::memcpy(dst->frameScaleEvts.startFrameNums,
+                    src->frameScaleEvts.startFrameNums,
+                    sizeof(std::int64_t) * src->frameScaleEvts.evtNum);
+    }
+    if (src->frameScaleEvts.resizeKfDenoms) {
+        dst->frameScaleEvts.resizeKfDenoms =
+            static_cast<std::uint32_t*>(std::malloc(sizeof(std::uint32_t) * src->frameScaleEvts.evtNum));
+        std::memcpy(dst->frameScaleEvts.resizeKfDenoms,
+                    src->frameScaleEvts.resizeKfDenoms,
+                    sizeof(std::uint32_t) * src->frameScaleEvts.evtNum);
+    }
+    if (src->frameScaleEvts.resizeDenoms) {
+        dst->frameScaleEvts.resizeDenoms =
+            static_cast<std::uint32_t*>(std::malloc(sizeof(std::uint32_t) * src->frameScaleEvts.evtNum));
+        std::memcpy(dst->frameScaleEvts.resizeDenoms,
+                    src->frameScaleEvts.resizeDenoms,
+                    sizeof(std::uint32_t) * src->frameScaleEvts.evtNum);
+    }
+    if (src->sframePosi.sframePosis) {
+        dst->sframePosi.sframePosis =
+            static_cast<std::uint64_t*>(std::malloc(sizeof(std::uint64_t) * src->sframePosi.sframeNum));
+        std::memcpy(dst->sframePosi.sframePosis,
+                    src->sframePosi.sframePosis,
+                    sizeof(std::uint64_t) * src->sframePosi.sframeNum);
+    }
+    if (src->sframePosi.sframeQps) {
+        dst->sframePosi.sframeQps = static_cast<std::uint8_t*>(std::malloc(sizeof(src->sframePosi.sframeQps[0]) *
+                                                                          src->sframePosi.sframeQpNum));
+        std::memcpy(dst->sframePosi.sframeQps,
+                    src->sframePosi.sframeQps,
+                    sizeof(src->sframePosi.sframeQps[0]) * src->sframePosi.sframeQpNum);
+    }
+    if (src->sframePosi.sframeQpOffsets) {
+        dst->sframePosi.sframeQpOffsets = static_cast<std::int8_t*>(
+            std::malloc(sizeof(src->sframePosi.sframeQpOffsets[0]) * src->sframePosi.sframeQpNum));
+        std::memcpy(dst->sframePosi.sframeQpOffsets,
+                    src->sframePosi.sframeQpOffsets,
+                    sizeof(src->sframePosi.sframeQpOffsets[0]) * src->sframePosi.sframeQpNum);
+    }
+
+    // Continue this process for all other pointers within the struct...
+    // (the reference's own comment :225 - the remaining SCS pointer members
+    // are the named-parked full-field surface)
 
     return EB_ErrorNone;
 }
