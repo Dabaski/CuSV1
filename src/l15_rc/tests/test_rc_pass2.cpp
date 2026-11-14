@@ -1240,3 +1240,231 @@ TEST_CASE("lap_rc_group_error_calc caps at frames_to_key and rewinds") {
         CHECK(tp.statsInPos == 0);
     }
 }
+
+// ---- A9D S7: pass2_strategy.c set_kf_interval_variables (:594-627) +
+// get_kf_group_bits (:629-642) + kf_group_rate_assingment (:651-742) ----
+
+namespace {
+
+// the KF fixture: a 4-stat window, the caller's frame (total_num_bits 50)
+// already consumed - the walk starts at pos 1 (the caller-advanced
+// convention). total_num_bits 100/200/300/400.
+std::vector<l15_rc::FirstpassStatsCarrier> kfWindow() {
+    std::vector<l15_rc::FirstpassStatsCarrier> v;
+    const std::uint64_t nb[4] = {100, 200, 300, 400};
+    for (int i = 0; i < 4; ++i) {
+        l15_rc::FirstpassStatsCarrier s{};
+        s.frame = (double)i;
+        s.codedError = 1.0;
+        s.count = 1.0;
+        s.duration = 1.0;
+        s.statStruct.totalNumBits = nb[i];
+        v.push_back(s);
+    }
+    return v;
+}
+
+l15_rc::TwoPassCarrier kfWalk(const std::vector<l15_rc::FirstpassStatsCarrier>& stats) {
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = (int)stats.size();
+    tp.statsInPos = 1;  // the caller already consumed stats[0]
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 100000;
+    tp.modifiedErrorLeft = 1000.0;
+    tp.kfGroupBits = -1;  // poison: the assignment must overwrite
+    tp.kfGroupErrorLeft = -1;
+    return tp;
+}
+
+l15_rc::FirstpassStatsCarrier kfArg() {
+    l15_rc::FirstpassStatsCarrier arg{};
+    arg.codedError = 1.0;
+    arg.count = 1.0;
+    arg.duration = 1.0;
+    arg.statStruct.totalNumBits = 50;
+    return arg;
+}
+
+l15_rc::RcControl kfRc() {
+    l15_rc::RcControl rc{};
+    rc.avgFrameBandwidth = 10000;
+    rc.maxFrameBandwidth = 1000000;
+    rc.kfBoost = 400;
+    rc.framesToKey = -1;  // poison
+    rc.framesSinceKey = 8;
+    rc.framesSinceCdfUpdate = 8;
+    return rc;
+}
+
+}  // namespace
+
+TEST_CASE("set_kf_interval_variables walks, caps and writes the lap outcomes") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    {
+        // non-lap: frames_to_key = MIN(intra+1, walked). From the
+        // caller-advanced pos 1 the window holds 3 elements + the <= quirk
+        // extra iteration -> walked = 4 -> MIN(11, 4) = 4.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        double kfGroupErr = 0.0;
+        l15_rc::setKfIntervalVariables(tp, arg, &kfGroupErr, 11, false, false, 10, rc, param);
+        CHECK(rc.framesToKey == 4);
+        // the accumulated error: arg 50 + 200 + 300 + 400 = 950.
+        CHECK(std::fabs(kfGroupErr - 950.0) <= 1e-9);
+        // no rewind here (the caller kf_group_rate_assingment rewinds).
+        CHECK(tp.statsInPos == 4);
+        CHECK(param.endOfSeqSeen == 0);
+    }
+    {
+        // the NULL kf_group_err: the walk runs, nothing accumulates.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        l15_rc::setKfIntervalVariables(tp, arg, nullptr, 11, false, false, 10, rc, param);
+        CHECK(rc.framesToKey == 4);
+    }
+    {
+        // num_frames_to_detect_scenecut == 0: early return, NOTHING moves.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        double kfGroupErr = 7.0;
+        l15_rc::setKfIntervalVariables(tp, arg, &kfGroupErr, 0, false, false, 10, rc, param);
+        CHECK(rc.framesToKey == -1);
+        CHECK(std::fabs(kfGroupErr - 7.0) <= 1e-9);
+        CHECK(tp.statsInPos == 1);
+    }
+    {
+        // lap + !end_of_sequence_region: frames_to_key = intra + 1.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        double kfGroupErr = 0.0;
+        l15_rc::setKfIntervalVariables(tp, arg, &kfGroupErr, 11, true, false, 10, rc, param);
+        CHECK(rc.framesToKey == 11);
+        CHECK(param.endOfSeqSeen == 0);
+    }
+    {
+        // lap + end_of_sequence_region: the param's end_of_seq_seen = 1 and
+        // the MIN path applies.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        double kfGroupErr = 0.0;
+        l15_rc::setKfIntervalVariables(tp, arg, &kfGroupErr, 11, true, true, 10, rc, param);
+        CHECK(rc.framesToKey == 4);
+        CHECK(param.endOfSeqSeen == 1);
+    }
+}
+
+TEST_CASE("get_kf_group_bits selects the lap bandwidth or the error split") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    l15_rc::RcControl rc = kfRc();
+    rc.framesToKey = 11;
+    l15_rc::TwoPassCarrier tp = kfWalk(stats);
+    {
+        // non-lap: bits_left * (err / modified_error_left).
+        CHECK(l15_rc::getKfGroupBits(false, 3, 10, false, rc, tp, 950.0) == 95000);
+    }
+    {
+        // lap + frames_in_sw < intra + !eos: frames_to_key * bandwidth.
+        CHECK(l15_rc::getKfGroupBits(true, 3, 10, false, rc, tp, 950.0) == 110000);
+    }
+    {
+        // lap + eos: the error split despite lap.
+        CHECK(l15_rc::getKfGroupBits(true, 3, 10, true, rc, tp, 950.0) == 95000);
+    }
+    {
+        // lap + frames_in_sw >= intra: the error split.
+        CHECK(l15_rc::getKfGroupBits(true, 10, 10, false, rc, tp, 950.0) == 95000);
+    }
+}
+
+TEST_CASE("kf_group_rate_assingment pins the one-pass composition") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    l15_rc::TwoPassCarrier tp = kfWalk(stats);
+    l15_rc::RcControl rc = kfRc();
+    l15_rc::PcsCarrier pcs{};
+    l15_rc::RcIntervalParamCarrier param{};
+    l15_rc::FirstpassStatsCarrier arg = kfArg();
+    l15_rc::kfGroupRateAssignment(pcs, rc, tp, arg, param, false, 10, 3000000, 30.0, 190, 1);
+    // walked kf_group_err 950, frames_to_key MIN(11, 4) = 4.
+    // kf_group_bits: 100000 * (950/1000) = 95000; the max_grp_bits clip:
+    // 19000 * 4 = 76000 -> kf_group_bits 76000.
+    // bits_left: 100000 - 76000 = 24000.
+    // kf_bits = calculate_boost_bits(MIN(4, INT_MAX) - 1 = 3, 400, 76000):
+    // chunks 700 -> 400*76000/700 = 43428.
+    CHECK(rc.framesToKey == 4);
+    CHECK(rc.framesSinceKey == 0);
+    CHECK(rc.framesSinceCdfUpdate == 0);
+    CHECK(tp.kfGroupBits == 76000 - 43428);
+    CHECK(tp.bitsLeft == 24000);
+    CHECK(pcs.baseFrameTarget == 43428);
+    // kf_group_error_left = 950 - 50 = 900.
+    CHECK(tp.kfGroupErrorLeft == 900);
+    // modified_error_left = 1000 - 950 = 50.
+    CHECK(std::fabs(tp.modifiedErrorLeft - 50.0) <= 1e-9);
+    CHECK(tp.kfZeroMotionPct == 0);
+    CHECK(tp.statsInPos == 1);
+}
+
+TEST_CASE("kf_group_rate_assingment pins the two-pass kf_bits branch") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    l15_rc::TwoPassCarrier tp = kfWalk(stats);
+    l15_rc::RcControl rc = kfRc();
+    l15_rc::PcsCarrier pcs{};
+    l15_rc::RcIntervalParamCarrier param{};
+    l15_rc::FirstpassStatsCarrier arg = kfArg();
+    l15_rc::kfGroupRateAssignment(pcs, rc, tp, arg, param, false, 10, 3000000, 30.0, 190, 2);
+    // passes == 2: kf_bits = (int)(kf_group_bits * (stats_in - 1)->
+    // stat_struct.total_num_bits / kf_group_err) = 76000 * 100 / 950 = 8000.
+    CHECK(pcs.baseFrameTarget == 8000);
+    CHECK(tp.kfGroupBits == 76000 - 8000);
+}
+
+TEST_CASE("kf_group_rate_assingment pins the lap path and the clip") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    {
+        // lap: frames_to_key = intra + 1 = 11; kf_group_bits =
+        // 11 * 10000 = 110000 (frames_in_sw 3 < 10); the max_grp_bits clip
+        // 19000 * 11 = 209000 -> no clip.
+        // bits_left -= (110000 + (3 - 11) * 100000) = 100000 + 690000.
+        // frames_to_key_clipped = (int)(5 * 30) = 150 >= 11 -> no bit clip.
+        // kf_bits = calculate_boost_bits(MIN(11, 150) - 1 = 10, 400,
+        // 110000): chunks 1400 -> 400*110000/1400 = 31428.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::PcsCarrier pcs{};
+        l15_rc::RcIntervalParamCarrier param{};
+        pcs.framesInSw = 3;
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        l15_rc::kfGroupRateAssignment(pcs, rc, tp, arg, param, true, 10, 3000000, 30.0, 190, 1);
+        CHECK(rc.framesToKey == 11);
+        CHECK(tp.kfGroupBits == 110000 - 31428);
+        CHECK(tp.bitsLeft == 100000 - (110000 - 800000));
+        CHECK(pcs.baseFrameTarget == 31428);
+    }
+    {
+        // the kf_group_bits clip: a tiny max_frame_bandwidth. avg 10000,
+        // vbrmax 10 -> max_bits 1000; max_grp_bits = 1000 * 4 = 4000 ->
+        // kf_group_bits 4000; bits_left 96000.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        rc.maxFrameBandwidth = 2000;
+        l15_rc::PcsCarrier pcs{};
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        // kf_group_bits 4000; then kf_bits = calculate_boost_bits(3, 400,
+        // 4000): chunks 700 -> 400*4000/700 = 2285; the final -= gives 1715.
+        l15_rc::kfGroupRateAssignment(pcs, rc, tp, arg, param, false, 10, 3000000, 30.0, 10, 1);
+        CHECK(tp.kfGroupBits == 4000 - 2285);
+        CHECK(tp.bitsLeft == 96000);
+    }
+}

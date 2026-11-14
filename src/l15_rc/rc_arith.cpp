@@ -3289,4 +3289,144 @@ double lapRcGroupErrorCalc(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFr
     return modifiedErrorTotal;
 }
 
+// set_kf_interval_variables (pass2_strategy.c:594-627): verbatim.
+void setKfIntervalVariables(TwoPassCarrier& twopass, FirstpassStatsCarrier& thisFrame, double* kfGroupErr,
+                            int numFramesToDetectScenecut, bool lapRc, bool endOfSequenceRegion,
+                            int intraPeriodLength, RcControl& rc, RcIntervalParamCarrier& rcParam) {
+    int framesToKey = 0;
+    if (numFramesToDetectScenecut == 0) {
+        return;
+    }
+
+    while (twopass.statsInPos <= twopass.statsInCount && framesToKey < numFramesToDetectScenecut) {
+        // Accumulate kf group error.
+        if (kfGroupErr != NULL) {
+            *kfGroupErr += calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+        }
+
+        ++framesToKey;
+        if (EOF == inputStats(twopass, thisFrame)) {
+            break;
+        }
+    }
+    if (lapRc && endOfSequenceRegion) {
+        rcParam.endOfSeqSeen = 1;
+    }
+    if (lapRc && !endOfSequenceRegion) {
+        rc.framesToKey = intraPeriodLength + 1;
+    } else {
+        rc.framesToKey = (intraPeriodLength + 1) < framesToKey ? (intraPeriodLength + 1) : framesToKey;
+    }
+}
+
+// get_kf_group_bits (pass2_strategy.c:629-642): verbatim.
+std::int64_t getKfGroupBits(bool lapRc, int framesInSw, int intraPeriodLength, bool endOfSequenceRegion,
+                            const RcControl& rc, const TwoPassCarrier& twopass, double kfGroupErr) {
+    std::int64_t kfGroupBits;
+    if (lapRc && framesInSw < intraPeriodLength && !endOfSequenceRegion) {
+        kfGroupBits = (std::int64_t)rc.framesToKey * rc.avgFrameBandwidth;
+    } else {
+        kfGroupBits = (std::int64_t)(twopass.bitsLeft * (kfGroupErr / twopass.modifiedErrorLeft));
+    }
+
+    return kfGroupBits;
+}
+
+// kf_group_rate_assingment (pass2_strategy.c:651-742): verbatim.
+void kfGroupRateAssignment(PcsCarrier& pcs, RcControl& rc, TwoPassCarrier& twopass,
+                           FirstpassStatsCarrier thisFrame, RcIntervalParamCarrier& rcParam, bool lapRc,
+                           int intraPeriodLength, std::int64_t targetBitRate, double newFramerate,
+                           int vbrmaxSection, std::uint8_t passes) {
+    int kfBits = 0;
+    double kfModErr;
+    double kfGroupErr = 0.0;
+    int framesToKeyClipped = INT_MAX;
+    std::int64_t kfGroupBitsClipped = INT64_MAX;
+
+    rc.framesSinceKey = 0;
+    rc.framesSinceCdfUpdate = 0;
+    const int startPosition = twopass.statsInPos;
+
+    twopass.kfGroupBits = 0;        // Total bits available to kf group
+    twopass.kfGroupErrorLeft = 0;   // Group modified error score.
+    kfModErr = calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+    setKfIntervalVariables(twopass, thisFrame, &kfGroupErr, intraPeriodLength + 1, lapRc,
+                           pcs.endOfSequenceRegion, intraPeriodLength, rc, rcParam);
+
+    // Calculate the number of bits that should be assigned to the kf group.
+    if ((twopass.bitsLeft > 0 && twopass.modifiedErrorLeft > 0.0) || lapRc) {
+        // Maximum number of bits for a single normal frame (not key frame).
+        const int maxBits = frameMaxBits(rc, vbrmaxSection);
+
+        // Maximum number of bits allocated to the key frame group.
+        std::int64_t maxGrpBits;
+
+        // Default allocation based on bits left and relative
+        // complexity of the section.
+        twopass.kfGroupBits = getKfGroupBits(lapRc, pcs.framesInSw, intraPeriodLength, pcs.endOfSequenceRegion, rc,
+                                             twopass, kfGroupErr);
+        // Clip based on maximum per frame rate defined by the user.
+        maxGrpBits = (std::int64_t)maxBits * (std::int64_t)rc.framesToKey;
+        if (twopass.kfGroupBits > maxGrpBits) {
+            twopass.kfGroupBits = maxGrpBits;
+        }
+    } else {
+        twopass.kfGroupBits = 0;
+    }
+    twopass.kfGroupBits = twopass.kfGroupBits > 0 ? twopass.kfGroupBits : 0;
+    if (lapRc) {
+        // For 1 PASS VBR, as the lookahead is moving, the bits left is
+        // recalculated for the next KF. The second term is added again as it
+        // is part of look ahead of the next KF
+        twopass.bitsLeft -= (twopass.kfGroupBits +
+                             (std::int64_t)(((std::int64_t)pcs.framesInSw - (std::int64_t)rc.framesToKey) *
+                                            ((double)targetBitRate / newFramerate)));
+    } else {
+        twopass.bitsLeft = twopass.bitsLeft - twopass.kfGroupBits > 0 ? twopass.bitsLeft - twopass.kfGroupBits : 0;
+    }
+    if (lapRc) {
+        // In the case of single pass based on LAP, frames to key may have an
+        // inaccurate value, and hence should be clipped to an appropriate
+        // interval.
+        framesToKeyClipped = (int)(kMaxKfBitsIntervalSinglePass * newFramerate);
+        // This variable calculates the bits allocated to kf_group with a
+        // clipped frames_to_key.
+        if (rc.framesToKey > framesToKeyClipped) {
+            kfGroupBitsClipped = (std::int64_t)((double)twopass.kfGroupBits * framesToKeyClipped /
+                                                rc.framesToKey);
+        }
+    }
+    // Reset the first pass file position.
+    twopass.statsInPos = startPosition;
+
+    // Store the zero motion percentage
+    twopass.kfZeroMotionPct = 0;
+    // Work out how many bits to allocate for the key frame itself.
+    // In case of LAP enabled for VBR, if the frames_to_key value is
+    // very high, we calculate the bits based on a clipped value of
+    // frames_to_key.
+    if (passes == 2) {
+        kfBits = (int)(twopass.kfGroupBits * twopass.statsIn[twopass.statsInPos - 1].statStruct.totalNumBits /
+                       kfGroupErr);
+    } else {
+        const int ftkMin = rc.framesToKey < framesToKeyClipped ? rc.framesToKey : framesToKeyClipped;
+        const std::int64_t bitsMin = twopass.kfGroupBits < kfGroupBitsClipped ? twopass.kfGroupBits
+                                                                              : kfGroupBitsClipped;
+        kfBits = calculateBoostBits(ftkMin - 1, rc.kfBoost, bitsMin);
+    }
+
+    twopass.kfGroupBits -= kfBits;
+
+    // Save the bits to spend on the key frame.
+    pcs.baseFrameTarget = kfBits;
+
+    // Note the total error score of the kf group minus the key frame itself.
+    twopass.kfGroupErrorLeft = (std::int64_t)(kfGroupErr - kfModErr);
+
+    // Adjust the count of total modified error left.
+    // The count of bits left is adjusted elsewhere based on real coded frame
+    // sizes.
+    twopass.modifiedErrorLeft -= kfGroupErr;
+}
+
 } // namespace l15_rc

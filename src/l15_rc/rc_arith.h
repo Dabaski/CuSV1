@@ -192,6 +192,10 @@ struct PcsCarrier {
     int gfInterval;                  // pcs->gf_interval
     bool idrFlag;                    // pcs->idr_flag
 
+    // the A9D kf-rate-assignment walls (pass2_strategy.c:594-742).
+    bool endOfSequenceRegion;        // pcs->end_of_sequence_region
+    int framesInSw;                  // pcs->frames_in_sw
+
     // the A9D rc-process walls (rc_process.c:568-605).
     bool disableCdfUpdate;           // frm_hdr.disable_cdf_update
     int overshootSeen;               // ppcs->overshoot_seen
@@ -564,6 +568,7 @@ struct TwoPassCarrier {
     double modifiedErrorMin;               // twopass->modified_error_min
     double modifiedErrorMax;               // twopass->modified_error_max
     double modifiedErrorLeft;              // twopass->modified_error_left
+    int kfZeroMotionPct;                   // twopass->kf_zeromotion_pct
 };
 
 // lap_rc_init (pass2_strategy.c:512-555): verbatim; the walls thread (the
@@ -579,6 +584,39 @@ void lapRcInit(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, std::in
 // lap_rc_group_error_calc (pass2_strategy.c:562-581): verbatim; the walk cap
 // is rc->frames_to_key. Returns modified_error_total; the position rewinds.
 double lapRcGroupErrorCalc(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, int framesToKey);
+
+// forward declaration: the full carrier is declared with the postencode
+// family below (the reference's rate_control_param_ptr wall).
+struct RcIntervalParamCarrier;
+
+// set_kf_interval_variables (pass2_strategy.c:594-627): verbatim; the walls
+// thread (lap_rc, pcs->end_of_sequence_region, static_config.
+// intra_period_length, the rate_control_param_ptr->end_of_seq_seen on the
+// RcIntervalParamCarrier). kfGroupErr may be NULL (the reference's own
+// guard). The <= end quirk applies (see lapRcInit).
+void setKfIntervalVariables(TwoPassCarrier& twopass, FirstpassStatsCarrier& thisFrame, double* kfGroupErr,
+                            int numFramesToDetectScenecut, bool lapRc, bool endOfSequenceRegion,
+                            int intraPeriodLength, RcControl& rc, RcIntervalParamCarrier& rcParam);
+
+// get_kf_group_bits (pass2_strategy.c:629-642): verbatim; the walls thread
+// (lap_rc, pcs->frames_in_sw, intra_period_length,
+// pcs->end_of_sequence_region).
+std::int64_t getKfGroupBits(bool lapRc, int framesInSw, int intraPeriodLength, bool endOfSequenceRegion,
+                            const RcControl& rc, const TwoPassCarrier& twopass, double kfGroupErr);
+
+// MAX_KF_BITS_INTERVAL_SINGLE_PASS (pass2_strategy.c:644).
+constexpr int kMaxKfBitsIntervalSinglePass = 5;
+
+// kf_group_rate_assingment (pass2_strategy.c:651-742): verbatim; the walls
+// thread (lap_rc, intra_period_length, static_config target_bit_rate +
+// new_framerate, the two_pass_cfg.vbrmax_section, twopass->passes, the
+// pcs->rate_control_param_ptr on RcIntervalParamCarrier).
+// The caller-advanced walk convention holds: (twopass->stats_in - 1) after
+// the rewind reads the CALLER'S this_frame element (statsInPos >= 1).
+void kfGroupRateAssignment(PcsCarrier& pcs, RcControl& rc, TwoPassCarrier& twopass,
+                           FirstpassStatsCarrier thisFrame, RcIntervalParamCarrier& rcParam, bool lapRc,
+                           int intraPeriodLength, std::int64_t targetBitRate, double newFramerate,
+                           int vbrmaxSection, std::uint8_t passes);
 
 // frame_max_bits (pass2_strategy.c:55-58): verbatim; the
 // enc_ctx->two_pass_cfg.vbrmax_section wall threads. CLIP3(0, max,
@@ -1074,6 +1112,7 @@ struct RcIntervalParamCarrier {
     int extendMinq;              // extend_minq
     int extendMaxq;              // extend_maxq
     int extendMinqFast;          // extend_minq_fast
+    std::uint8_t endOfSeqSeen;   // end_of_seq_seen
 };
 
 // rc_param_reset (rc_process.c:555-566): verbatim; resets the interval-param
