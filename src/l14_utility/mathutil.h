@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <utility.h>
 
 namespace l14_utility {
 
@@ -109,5 +110,58 @@ constexpr std::int32_t kMinSignedValue = ~0 - static_cast<std::int32_t>(~0u >> 1
 // MIN_HIERARCHICAL_LEVEL(1, utility.h:171).
 constexpr std::uint32_t kMiniGopOffsetCount = 5;
 extern const std::uint8_t miniGopOffset[5];
+
+// ------------------------------------------------------------------
+// common_utils.c/h remnants (CU1).
+// ------------------------------------------------------------------
+
+// TxSize - definitions.h:951-:983 verbatim order. Mirror deviation: l14
+// carries its own mirror (the BlockSize mirror precedent in utility.h);
+// the entropy::TxSize copies live in l7 and the transform::TxSize in l3,
+// neither linkable from l14 (they are added before l6 which links l14).
+enum TxSize {
+    TX_4X4,
+    TX_8X8,
+    TX_16X16,
+    TX_32X32,
+    TX_64X64,
+    TX_4X8,
+    TX_8X4,
+    TX_8X16,
+    TX_16X8,
+    TX_16X32,
+    TX_32X16,
+    TX_32X64,
+    TX_64X32,
+    TX_4X16,
+    TX_16X4,
+    TX_8X32,
+    TX_32X8,
+    TX_16X64,
+    TX_64X16,
+    TX_SIZES_ALL,
+    TX_SIZES = TX_4X8,
+    TX_SIZES_LARGEST = TX_64X64,
+    TX_INVALID = 255
+};
+
+// Dep twins, DUPLICATED from the landed l6 A6C surface (l14 cannot link
+// l6: l6 links l14) - the SYM1 wb-trio / A3M svt_mv_cost precedent:
+// blocksize_to_txsize (common_utils.c:214-:237, indexed by
+// BLOCK_SIZES_ALL), tx_depth_to_tx_size (common_utils.c:95-:115, [3]
+// [BLOCK_SIZES_ALL]), av1_get_adjusted_tx_size (common_utils.h:100-:113).
+extern const TxSize blocksizeToTxsize[BLOCK_SIZES_ALL];
+extern const TxSize txDepthToTxSize[3][22];
+TxSize av1GetAdjustedTxSize(TxSize tx_size);
+
+// eb_sub_tx_size_map - common_utils.c:73-:93 verbatim (the only
+// common_utils.c table not landed elsewhere: grep-verified 0 hits for
+// ebSubTxSizeMap before this slice).
+extern const TxSize ebSubTxSizeMap[TX_SIZES_ALL];
+
+// av1_get_tx_size - common_utils.h:152-:163 verbatim: plane 0 reads
+// tx_depth_to_tx_size, plane > 0 folds the 4:2:0 plane bsize through
+// blocksize_to_txsize + av1_get_adjusted_tx_size.
+TxSize av1GetTxSize(std::int32_t bsize, int tx_depth, int plane);
 
 }  // namespace l14_utility

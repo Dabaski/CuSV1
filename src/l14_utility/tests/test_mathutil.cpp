@@ -1,6 +1,82 @@
 #include <doctest.h>
 #include <mathutil.h>
 
+// Independent dims transcription for the TxSize enum order (the CU1
+// ebSubTxSizeMap oracle derives every row from these, not from the
+// ported table).
+namespace {
+struct TxDims {
+    int w, h;
+};
+TxDims txDims(int tx) {
+    static const TxDims d[19] = {{4, 4},   {8, 8},   {16, 16}, {32, 32}, {64, 64},  {4, 8},  {8, 4},
+                                 {8, 16},  {16, 8},  {16, 32}, {32, 16}, {32, 64},  {64, 32}, {4, 16},
+                                 {16, 4},  {8, 32},  {32, 8},  {16, 64}, {64, 16}};
+    return d[tx];
+}
+int txIndexFor(int w, int h) {
+    for (int i = 0; i < 19; ++i) {
+        if (txDims(i).w == w && txDims(i).h == h) {
+            return i;
+        }
+    }
+    return -1;
+}
+}  // namespace
+
+// eb_sub_tx_size_map - common_utils.c:73-93. The oracle derives each row
+// independently: the longer dimension halves (floor 4), the shorter
+// stays; squares halve both.
+TEST_CASE("ebSubTxSizeMap matches the longer-dimension-halving oracle") {
+    for (int tx = 0; tx < 19; ++tx) {
+        const TxDims d = txDims(tx);
+        int w2, h2;
+        if (d.w > d.h) {
+            w2 = d.w / 2 < 4 ? 4 : d.w / 2;
+            h2 = d.h;
+        } else if (d.w < d.h) {
+            w2 = d.w;
+            h2 = d.h / 2 < 4 ? 4 : d.h / 2;
+        } else {
+            w2 = d.w / 2 < 4 ? 4 : d.w / 2;
+            h2 = d.h / 2 < 4 ? 4 : d.h / 2;
+        }
+        const int expected = txIndexFor(w2, h2);
+        CHECK(expected >= 0);
+        CHECK((int)l14_utility::ebSubTxSizeMap[tx] == expected);
+    }
+    // Spots from the reference rows, typed from common_utils.c directly.
+    CHECK(l14_utility::ebSubTxSizeMap[l14_utility::TX_64X64] == l14_utility::TX_32X32);
+    CHECK(l14_utility::ebSubTxSizeMap[l14_utility::TX_4X4] == l14_utility::TX_4X4);
+    CHECK(l14_utility::ebSubTxSizeMap[l14_utility::TX_16X64] == l14_utility::TX_16X32);
+    CHECK(l14_utility::ebSubTxSizeMap[l14_utility::TX_64X16] == l14_utility::TX_32X16);
+}
+
+// av1_get_tx_size - common_utils.h:152-163. Luma (plane 0) reads
+// tx_depth_to_tx_size; the spots are typed from common_utils.c:95-115.
+TEST_CASE("av1GetTxSize luma reads tx_depth_to_tx_size") {
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_32X32, 0, 0) == l14_utility::TX_32X32);
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_16X16, 1, 0) == l14_utility::TX_8X8);
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_16X16, 2, 0) == l14_utility::TX_4X4);
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_4X16, 1, 0) == l14_utility::TX_4X8);
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_64X16, 2, 0) == l14_utility::TX_16X16);
+}
+
+// Chroma (plane > 0) folds get_plane_block_size -> blocksize_to_txsize ->
+// av1_get_adjusted_tx_size. The >64 or 64xN shapes collapse (the
+// adjusted-tx cases common_utils.h:100-113 carry).
+TEST_CASE("av1GetTxSize chroma folds plane size through the adjusted tx") {
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_32X32, 0, 1) == l14_utility::TX_16X16);
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_4X4, 0, 1) == l14_utility::TX_4X4);
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_64X128, 0, 1) == l14_utility::TX_32X32);
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_128X128, 0, 1) == l14_utility::TX_32X32);
+    // BLOCK_16X64 -> plane 8x32 -> TX_8X32, which is NOT in the adjusted
+    // switch (common_utils.h:100-113), so the default returns it as is.
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_16X64, 0, 1) == l14_utility::TX_8X32);
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_64X16, 0, 1) == l14_utility::TX_32X8);
+    CHECK(l14_utility::av1GetTxSize(l14_utility::BLOCK_4X16, 0, 1) == l14_utility::TX_4X8);
+}
+
 TEST_CASE("isPowerOfTwo over the power band and its quirk at 0") {
     for (int k = 0; k <= 30; ++k) {
         CHECK(l14_utility::isPowerOfTwo(1u << k) == true);

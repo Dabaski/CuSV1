@@ -127,4 +127,107 @@ int svtLog2fSafe(std::uint32_t x) {
 
 const std::uint8_t miniGopOffset[5] = {1, 3, 7, 15, 31};
 
+// ------------------------------------------------------------------
+// common_utils.c/h remnants (CU1). The two dep tables are duplicates of
+// the landed l6 A6C surface (l14 cannot link l6).
+// ------------------------------------------------------------------
+const TxSize blocksizeToTxsize[BLOCK_SIZES_ALL] = {
+    TX_4X4,   // BLOCK_4X4
+    TX_4X8,   // BLOCK_4X8
+    TX_8X4,   // BLOCK_8X4
+    TX_8X8,   // BLOCK_8X8
+    TX_8X16,  // BLOCK_8X16
+    TX_16X8,  // BLOCK_16X8
+    TX_16X16, // BLOCK_16X16
+    TX_16X32, // BLOCK_16X32
+    TX_32X16, // BLOCK_32X16
+    TX_32X32, // BLOCK_32X32
+    TX_32X64, // BLOCK_32X64
+    TX_64X32, // BLOCK_64X32
+    TX_64X64, // BLOCK_64X64
+    TX_64X64, // BLOCK_64X128
+    TX_64X64, // BLOCK_128X64
+    TX_64X64, // BLOCK_128X128
+    TX_4X16,  // BLOCK_4X16
+    TX_16X4,  // BLOCK_16X4
+    TX_8X32,  // BLOCK_8X32
+    TX_32X8,  // BLOCK_32X8
+    TX_16X64, // BLOCK_16X64
+    TX_64X16  // BLOCK_64X16
+};
+
+const TxSize txDepthToTxSize[3][22] = {
+    // tx_depth 0
+    {TX_4X4,   TX_4X8,   TX_8X4,   TX_8X8,   TX_8X16,  TX_16X8,  TX_16X16,
+     TX_16X32, TX_32X16, TX_32X32, TX_32X64, TX_64X32, TX_64X64,
+     TX_64X64, //TX_64X128,
+     TX_64X64, //TX_128X64,
+     TX_64X64, //TX_128X128,
+     TX_4X16,  TX_16X4,  TX_8X32,  TX_32X8,  TX_16X64, TX_64X16},
+    // tx_depth 1:
+    {TX_4X4,   TX_4X8,   TX_8X4,   TX_4X4,   TX_8X8,   TX_8X8,   TX_8X8,
+     TX_16X16, TX_16X16, TX_16X16, TX_32X32, TX_32X32, TX_32X32,
+     TX_64X64, //TX_64X128,
+     TX_64X64, //TX_128X64,
+     TX_64X64, //TX_128X128,
+     TX_4X8,   TX_8X4,   TX_8X16,  TX_16X8,  TX_16X32, TX_32X16},
+    // tx_depth 2
+    {TX_4X4,   TX_4X8, TX_8X4, TX_8X8, TX_4X4,   TX_4X4,  TX_4X4, TX_8X8, TX_8X8, TX_8X8, TX_16X16, TX_16X16, TX_16X16,
+     TX_64X64, //TX_64X128,
+     TX_64X64, //TX_128X64,
+     TX_64X64, //TX_128X128,
+     TX_4X4,   TX_4X4, TX_8X8, TX_8X8, TX_16X16, TX_16X16}};
+
+TxSize av1GetAdjustedTxSize(TxSize tx_size) {
+    switch (tx_size) {
+    case TX_64X64:
+    case TX_64X32:
+    case TX_32X64:
+        return TX_32X32;
+    case TX_64X16:
+        return TX_32X16;
+    case TX_16X64:
+        return TX_16X32;
+    default:
+        return tx_size;
+    }
+}
+
+const TxSize ebSubTxSizeMap[TX_SIZES_ALL] = {
+    TX_4X4,   // TX_4X4
+    TX_4X4,   // TX_8X8
+    TX_8X8,   // TX_16X16
+    TX_16X16, // TX_32X32
+    TX_32X32, // TX_64X64
+    TX_4X4,   // TX_4X8
+    TX_4X4,   // TX_8X4
+    TX_8X8,   // TX_8X16
+    TX_8X8,   // TX_16X8
+    TX_16X16, // TX_16X32
+    TX_16X16, // TX_32X16
+    TX_32X32, // TX_32X64
+    TX_32X32, // TX_64X32
+    TX_4X8,   // TX_4X16
+    TX_8X4,   // TX_16X4
+    TX_8X16,  // TX_8X32
+    TX_16X8,  // TX_32X8
+    TX_16X32, // TX_16X64
+    TX_32X16, // TX_64X16
+};
+
+TxSize av1GetTxSize(std::int32_t bsize, int tx_depth, int plane) {
+    if (plane == 0) {
+        return txDepthToTxSize[tx_depth][bsize];
+    }
+
+    std::uint32_t ss_x = plane > 0 ? 1 : 0;
+    std::uint32_t ss_y = plane > 0 ? 1 : 0;
+    const BlockSize plane_bsize = getPlaneBlockSize(static_cast<BlockSize>(bsize), (int)ss_x, (int)ss_y);
+    TxSize uv_tx = TX_INVALID;
+    if (plane_bsize < BLOCK_SIZES_ALL) {
+        uv_tx = blocksizeToTxsize[plane_bsize];
+    }
+    return av1GetAdjustedTxSize(uv_tx);
+}
+
 }  // namespace l14_utility
