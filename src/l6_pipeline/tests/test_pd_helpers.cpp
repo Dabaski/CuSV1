@@ -13,6 +13,8 @@
 #include <vector>
 
 #include <pd_helpers.h>
+#include <intra.h>
+#include <coding_loop_helpers.h>
 #include <packunpack.h>
 
 namespace pd = pipeline::pd;
@@ -1470,4 +1472,425 @@ TEST_CASE("l6 pd unpack_highbd_pic unpacks with the border-offset arithmetic") {
                                               w16, h16);
     CHECK(out8 == r8);
     CHECK(out2 == r2);
+}
+
+// ---------------------------------------------------------------------------
+// CL2: the coding_loop.c remainder - the CFL trio (intra_prediction.c
+// :421-:472, intra_prediction.h:134-:141) + the CFL-prediction
+// composition (coding_loop.c:199-:287) + the recon-copy helpers
+// (:681-:718, :1075-:1121, :1346-:1425)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::int32_t kCflBufLine = 32;  // definitions.h:329
+
+// Oracle: the 2x2 luma sum << 1 per output cell (rows step CFL_BUF_LINE).
+void subsamplingOracle(const std::uint8_t* input, int input_stride, std::int16_t* output_q3, int width, int height) {
+    for (int j = 0; j < height; j += 2) {
+        for (int i = 0; i < width; i += 2) {
+            const int bot = i + input_stride;
+            output_q3[(j >> 1) * kCflBufLine + (i >> 1)] =
+                static_cast<std::int16_t>((input[i] + input[i + 1] + input[bot] + input[bot + 1]) << 1);
+        }
+        input += input_stride << 1;
+    }
+}
+
+void subsamplingOracleHbd(const std::uint16_t* input, int input_stride, std::int16_t* output_q3, int width,
+                          int height) {
+    for (int j = 0; j < height; j += 2) {
+        for (int i = 0; i < width; i += 2) {
+            const int bot = i + input_stride;
+            output_q3[(j >> 1) * kCflBufLine + (i >> 1)] =
+                static_cast<std::int16_t>((input[i] + input[i + 1] + input[bot] + input[bot + 1]) << 1);
+        }
+        input += input_stride << 1;
+    }
+}
+
+// Oracle: the DC subtract with the int16 per-cell wrap.
+void subtractAverageOracle(std::int16_t* buf, int width, int height, int round_offset, int num_pel_log2) {
+    int sum = 0;
+    const std::int16_t* p = buf;
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) sum += p[i];
+        p += kCflBufLine;
+    }
+    const int avg = (sum + round_offset) >> num_pel_log2;
+    std::int16_t* q = buf;
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            q[i] = static_cast<std::int16_t>(q[i] - static_cast<std::int16_t>(avg));
+        }
+        q += kCflBufLine;
+    }
+}
+
+}  // namespace
+
+TEST_CASE("l6 pd cfl luma subsampling lbd/hbd over the size domain") {
+    for (int dim : {4, 8, 16, 32}) {
+        std::vector<std::uint8_t> luma(dim * dim * 2);
+        for (std::size_t i = 0; i < luma.size(); ++i) luma[i] = static_cast<std::uint8_t>(i * 13 + 5);
+        std::vector<std::int16_t> got((dim / 2) * kCflBufLine + kCflBufLine, -777);
+        std::vector<std::int16_t> want(got.size(), -777);
+        pd::cflLumaSubsampling420Lbd(luma.data(), dim, got.data(), dim, dim);
+        subsamplingOracle(luma.data(), dim, want.data(), dim, dim);
+        CHECK(got == want);
+        // hbd twin on widened input
+        std::vector<std::uint16_t> luma16(luma.size());
+        for (std::size_t i = 0; i < luma16.size(); ++i) luma16[i] = luma[i];
+        pd::cflLumaSubsampling420Hbd(luma16.data(), dim, got.data(), dim, dim);
+        subsamplingOracleHbd(luma16.data(), dim, want.data(), dim, dim);
+        CHECK(got == want);
+    }
+    // odd width: the loop steps 2, so the trailing column is dropped
+    {
+        std::vector<std::uint8_t> luma(9 * 9, 0);
+        for (std::size_t i = 0; i < luma.size(); ++i) luma[i] = static_cast<std::uint8_t>(i + 1);
+        std::vector<std::int16_t> got(kCflBufLine * 5, -777);
+        std::vector<std::int16_t> want(got.size(), -777);
+        pd::cflLumaSubsampling420Lbd(luma.data(), 9, got.data(), 9, 9);
+        subsamplingOracle(luma.data(), 9, want.data(), 9, 9);
+        CHECK(got == want);
+    }
+}
+
+TEST_CASE("l6 pd subtract_average over the size/round domain") {
+    for (int wh : {4, 8, 16, 32}) {
+        for (int num_pel_log2 : {4, 5, 6, 7, 8}) {
+            std::vector<std::int16_t> buf(kCflBufLine * wh, 0);
+            for (std::size_t i = 0; i < buf.size(); ++i) buf[i] = static_cast<std::int16_t>(i * 31 - 4000);
+            std::vector<std::int16_t> want = buf;
+            pd::subtractAverage(buf.data(), wh, wh, 128, num_pel_log2);
+            subtractAverageOracle(want.data(), wh, wh, 128, num_pel_log2);
+            CHECK(buf == want);
+        }
+    }
+    // the round_offset semantic: avg = (sum + round_offset) >> log2
+    {
+        std::vector<std::int16_t> buf(kCflBufLine * 4, 100);
+        std::vector<std::int16_t> want = buf;
+        pd::subtractAverage(buf.data(), 4, 4, 8, 4);
+        subtractAverageOracle(want.data(), 4, 4, 8, 4);
+        CHECK(buf == want);
+    }
+}
+
+// cfl_idx_to_alpha over the FULL alpha_idx x joint_sign x pred domain
+// (256 x 9 x 2 = 4608 combinations) against the restated macros.
+TEST_CASE("l6 pd cfl_idx_to_alpha over the full domain") {
+    for (int idx = 0; idx < 256; ++idx) {
+        for (int js = 0; js < 9; ++js) {
+            // CFL_SIGN_U(js) = ((js+1)*11)>>5; CFL_SIGN_V(js) = (js+1) - 3*sign_u
+            const int sign_u = ((js + 1) * 11) >> 5;
+            const int sign_v = (js + 1) - 3 * sign_u;
+            // U plane
+            int want_u = 0;
+            if (sign_u != 0) {
+                const int abs_alpha = idx >> 4;  // CFL_IDX_U
+                want_u = sign_u == 2 ? abs_alpha + 1 : -abs_alpha - 1;
+            }
+            // V plane
+            int want_v = 0;
+            if (sign_v != 0) {
+                const int abs_alpha = idx & 15;  // CFL_IDX_V
+                want_v = sign_v == 2 ? abs_alpha + 1 : -abs_alpha - 1;
+            }
+            CHECK(pd::cflIdxToAlpha(idx, js, 0 /*CFL_PRED_U*/) == want_u);
+            CHECK(pd::cflIdxToAlpha(idx, js, 1 /*CFL_PRED_V*/) == want_v);
+        }
+    }
+}
+
+// The composition (coding_loop.c:199-:287): subsample -> subtract
+// average -> predict U then V at the offsets, against the landed l4
+// cflPredictLbd composed with the oracle subsampling/subtract. The
+// block is 16x16: UV tx 8x8, the subsample dims fall back to bwidth/
+// bheight (8 != 16), q3 spans 8 CFL_BUF_LINE rows.
+TEST_CASE("l6 pd generate_cfl_prediction composes the landed chain at 8-bit") {
+    constexpr int kW = 16, kH = 16;
+    std::vector<std::uint8_t> recon(kW * kH);
+    for (std::size_t i = 0; i < recon.size(); ++i) recon[i] = static_cast<std::uint8_t>((i * 37 + 11) & 0xFF);
+    std::vector<std::uint8_t> predU(64, 0x40), predV(64, 0x40);
+    std::vector<std::uint8_t> wantU = predU, wantV = predV;
+    // cfl alpha idx 0x83 (u abs 8, v abs 3), joint signs 8 (both pos)
+    pd::CflPredCarrier c{};
+    std::vector<std::int16_t> q3(kCflBufLine * (kH / 2), 0);
+    std::vector<std::int16_t> q3want(kCflBufLine * (kH / 2), 0);
+    c.recon_y = recon.data();
+    c.recon_y_stride = kW;
+    c.recon_origin_x = 0;
+    c.recon_origin_y = 0;
+    c.is_16bit = 0;
+    c.bwidth = kW;
+    c.bheight = kH;
+    c.bwidth_uv = kW / 2;
+    c.bheight_uv = kH / 2;
+    c.bsize = entropy::BLOCK_16X16;
+    c.pred_buf_q3 = q3.data();
+    c.pred_u = predU.data();
+    c.pred_u_stride = kW / 2;
+    c.pred_cb_offset = 0;
+    c.pred_v = predV.data();
+    c.pred_v_stride = kW / 2;
+    c.pred_cr_offset = 0;
+    c.cfl_alpha_idx = 0x83;
+    c.cfl_alpha_signs = 8;
+    c.bit_depth = 8;
+    pd::generateCflPrediction(c);
+    // oracle: subsample (dims -> bwidth = 16), subtract average (tx 8x8,
+    // round = 64/2 = 32, log2 = 3+3), predict U then V with the landed
+    // l4 kernel.
+    subsamplingOracle(recon.data(), kW, q3want.data(), kW, kH);
+    subtractAverageOracle(q3want.data(), 8, 8, 32, 6);
+    const int alpha_u = pd::cflIdxToAlpha(0x83, 8, 0);
+    const int alpha_v = pd::cflIdxToAlpha(0x83, 8, 1);
+    intra::cflPredictLbd(q3want.data(), wantU.data(), kW / 2, wantU.data(), kW / 2, alpha_u, 8, 8, 8);
+    intra::cflPredictLbd(q3want.data(), wantV.data(), kW / 2, wantV.data(), kW / 2, alpha_v, 8, 8, 8);
+    CHECK(predU == wantU);
+    CHECK(predV == wantV);
+}
+
+// the hbd twin path of the composition.
+TEST_CASE("l6 pd generate_cfl_prediction hbd path matches the landed hbd chain") {
+    constexpr int kW = 16, kH = 16;
+    std::vector<std::uint8_t> reconBytes(kW * kH * 2);
+    for (std::size_t i = 0; i < kW * kH; ++i) {
+        const std::uint16_t v = static_cast<std::uint16_t>(512 + i * 61);
+        reconBytes[i * 2] = static_cast<std::uint8_t>(v & 0xFF);
+        reconBytes[i * 2 + 1] = static_cast<std::uint8_t>(v >> 8);
+    }
+    std::vector<std::uint16_t> predU(64, 512), predV(64, 512);
+    std::vector<std::uint16_t> wantU = predU, wantV = predV;
+    std::vector<std::int16_t> q3(kCflBufLine * (kH / 2), 0), q3want(kCflBufLine * (kH / 2), 0);
+    pd::CflPredCarrier c{};
+    c.recon_y = reconBytes.data();
+    c.recon_y_stride = kW;
+    c.is_16bit = 1;
+    c.bwidth = kW;
+    c.bheight = kH;
+    c.bwidth_uv = kW / 2;
+    c.bheight_uv = kH / 2;
+    c.bsize = entropy::BLOCK_16X16;
+    c.pred_buf_q3 = q3.data();
+    c.pred_u = reinterpret_cast<std::uint8_t*>(predU.data());
+    c.pred_u_stride = kW / 2;
+    c.pred_v = reinterpret_cast<std::uint8_t*>(predV.data());
+    c.pred_v_stride = kW / 2;
+    c.cfl_alpha_idx = 0x83;
+    c.cfl_alpha_signs = 8;
+    c.bit_depth = 10;
+    pd::generateCflPrediction(c);
+    subsamplingOracleHbd(reinterpret_cast<const std::uint16_t*>(reconBytes.data()), kW, q3want.data(), kW, kH);
+    subtractAverageOracle(q3want.data(), 8, 8, 32, 6);
+    const int alpha_u = pd::cflIdxToAlpha(0x83, 8, 0);
+    const int alpha_v = pd::cflIdxToAlpha(0x83, 8, 1);
+    intra::cflPredictHbd(q3want.data(), wantU.data(), kW / 2, wantU.data(), kW / 2, alpha_u, 10, 8, 8);
+    intra::cflPredictHbd(q3want.data(), wantV.data(), kW / 2, wantV.data(), kW / 2, alpha_v, 10, 8, 8);
+    CHECK(predU == wantU);
+    CHECK(predV == wantV);
+}
+
+// svt_aom_store16bit_input_src (coding_loop.c:681-:718): the three
+// plane copies with the sb dims halved for UV.
+TEST_CASE("l6 pd store16bit_input_src copies the three planes with the UV halving") {
+    constexpr int kSW = 6, kSH = 4;  // sb dims (even, UV = 3x2)
+    std::vector<std::uint16_t> srcY(8 * 6, 0), srcU(4 * 4, 0), srcV(4 * 4, 0);
+    for (std::size_t i = 0; i < srcY.size(); ++i) srcY[i] = static_cast<std::uint16_t>(i + 1);
+    for (std::size_t i = 0; i < srcU.size(); ++i) srcU[i] = static_cast<std::uint16_t>(0x100 + i);
+    for (std::size_t i = 0; i < srcV.size(); ++i) srcV[i] = static_cast<std::uint16_t>(0x200 + i);
+    std::vector<std::uint16_t> dstY(8 * 6, 0xEE), dstU(4 * 4, 0xEE), dstV(4 * 4, 0xEE);
+    pd::store16bitInputSrc(srcY.data(), 8, srcU.data(), 4, srcV.data(), 4, dstY.data(), 8, dstU.data(), 4,
+                           dstV.data(), 4, 0, 0, kSW, kSH);
+    for (int r = 0; r < kSH; ++r) {
+        for (int c = 0; c < kSW; ++c) CHECK(dstY[r * 8 + c] == srcY[r * 8 + c]);
+    }
+    for (int r = 0; r < kSH / 2; ++r) {
+        for (int c = 0; c < kSW / 2; ++c) {
+            CHECK(dstU[r * 4 + c] == srcU[r * 4 + c]);
+            CHECK(dstV[r * 4 + c] == srcV[r * 4 + c]);
+        }
+    }
+    // the sb offset lands the copy at dst + sb_x + sb_y*stride
+    std::vector<std::uint16_t> dstY2(10 * 8, 0x55);
+    pd::store16bitInputSrc(srcY.data(), 8, srcU.data(), 4, srcV.data(), 4, dstY2.data(), 10, dstU.data(), 4,
+                           dstV.data(), 4, 2, 2, kSW, kSH);
+    for (int r = 0; r < kSH; ++r) {
+        for (int c = 0; c < kSW; ++c) {
+            CHECK(dstY2[(2 + r) * 10 + 2 + c] == srcY[r * 8 + c]);
+        }
+    }
+    // outside untouched: rows 6..7 (the copy spans rows 2..5, cols 2..7)
+    for (int r = 6; r < 8; ++r) {
+        for (int c = 0; c < 10; ++c) {
+            CHECK(dstY2[r * 10 + c] == 0x55);
+        }
+    }
+}
+
+// svt_aom_convert_recon_16bit_to_8bit (coding_loop.c:1075-:1121).
+TEST_CASE("l6 pd convert_recon_16bit_to_8bit narrows at the block origin + uv round") {
+    constexpr int kW = 12, kH = 12;
+    std::vector<std::uint16_t> r16(kW * kH);
+    for (std::size_t i = 0; i < r16.size(); ++i) r16[i] = static_cast<std::uint16_t>(0x1000u + i * 17u);
+    // SEPARATE planes per component (the reference's three plane buffers;
+    // aliasing one buffer would let the UV writes stomp the Y region).
+    std::vector<std::uint8_t> y8(kW * kH, 0x77), u8(kW * kH, 0x77), v8(kW * kH, 0x77);
+    pd::Recon16To8Carrier c{};
+    c.y16 = reinterpret_cast<const std::uint8_t*>(r16.data());
+    c.y16_stride = kW;
+    c.u16 = reinterpret_cast<const std::uint8_t*>(r16.data());
+    c.u16_stride = kW;
+    c.v16 = reinterpret_cast<const std::uint8_t*>(r16.data());
+    c.v16_stride = kW;
+    c.y8 = y8.data();
+    c.y8_stride = kW;
+    c.u8 = u8.data();
+    c.u8_stride = kW;
+    c.v8 = v8.data();
+    c.v8_stride = kW;
+    c.blk_org_x = 4;
+    c.blk_org_y = 4;
+    c.bwidth = 8;
+    c.bheight = 8;
+    c.bwidth_uv = 4;
+    c.bheight_uv = 4;
+    pd::convertRecon16bitTo8bit(c);
+    // Y: at the block origin
+    for (int r = 0; r < 8; ++r) {
+        for (int cc = 0; cc < 8; ++cc) {
+            CHECK(y8[(4 + r) * kW + 4 + cc] == static_cast<std::uint8_t>(r16[(4 + r) * kW + 4 + cc] & 0xFF));
+        }
+    }
+    // outside untouched
+    CHECK(y8[0] == 0x77);
+    // UV: ROUND_UV(4)>>1 = 0, dims 4x4
+    for (int r = 0; r < 4; ++r) {
+        for (int cc = 0; cc < 4; ++cc) {
+            CHECK(u8[r * kW + cc] == static_cast<std::uint8_t>(r16[r * kW + cc] & 0xFF));
+            CHECK(v8[r * kW + cc] == static_cast<std::uint8_t>(r16[r * kW + cc] & 0xFF));
+        }
+    }
+}
+
+// copy_recon (coding_loop.c:1346-:1425): both bit depths + the UV
+// ROUND_UV offsets. SEPARATE ep/md planes per component (the reference's
+// three plane buffers; aliasing one buffer lets the UV writes stomp the
+// Y-check region).
+TEST_CASE("l6 pd copy_recon copies at the block origin in both bit depths") {
+    // 8-bit path
+    {
+        constexpr int kW = 16, kH = 16;
+        std::vector<std::uint8_t> mdy(kW * kH), mdu(kW * kH), mdv(kW * kH);
+        for (std::size_t i = 0; i < mdy.size(); ++i) {
+            mdy[i] = static_cast<std::uint8_t>(i + 3);
+            mdu[i] = static_cast<std::uint8_t>(i * 5 + 7);
+            mdv[i] = static_cast<std::uint8_t>(i * 7 + 11);
+        }
+        std::vector<std::uint8_t> epy(kW * kH, 0x11), epu(kW * kH, 0x11), epv(kW * kH, 0x11);
+        pd::CopyReconCarrier c{};
+        c.hbd = 0;
+        c.ep_y = epy.data();
+        c.ep_y_stride = kW;
+        c.md_y = mdy.data();
+        c.md_y_stride = kW;
+        c.ep_u = epu.data();
+        c.ep_u_stride = kW;
+        c.md_u = mdu.data();
+        c.md_u_stride = kW;
+        c.ep_v = epv.data();
+        c.ep_v_stride = kW;
+        c.md_v = mdv.data();
+        c.md_v_stride = kW;
+        c.blk_org_x = 2;
+        c.blk_org_y = 2;
+        c.bwidth = 8;
+        c.bheight = 8;
+        c.bwidth_uv = 4;
+        c.bheight_uv = 4;
+        c.has_uv = 1;
+        pd::copyRecon(c);
+        for (int r = 0; r < 8; ++r) {
+            for (int cc = 0; cc < 8; ++cc) CHECK(epy[(2 + r) * kW + 2 + cc] == mdy[r * kW + cc]);
+        }
+        // UV at ROUND_UV(2)>>1 = 0
+        for (int r = 0; r < 4; ++r) {
+            for (int cc = 0; cc < 4; ++cc) {
+                CHECK(epu[r * kW + cc] == mdu[r * kW + cc]);
+                CHECK(epv[r * kW + cc] == mdv[r * kW + cc]);
+            }
+        }
+    }
+    // hbd path (uint16 planes through the byte-pointer carrier)
+    {
+        constexpr int kW = 16, kH = 16;
+        std::vector<std::uint16_t> mdy(kW * kH), mdu(kW * kH), mdv(kW * kH);
+        for (std::size_t i = 0; i < mdy.size(); ++i) {
+            mdy[i] = static_cast<std::uint16_t>(0xAB00u + i);
+            mdu[i] = static_cast<std::uint16_t>(0xCD00u + i);
+            mdv[i] = static_cast<std::uint16_t>(0xEF00u + i);
+        }
+        std::vector<std::uint16_t> epy(kW * kH, 0x1111), epu(kW * kH, 0x1111), epv(kW * kH, 0x1111);
+        pd::CopyReconCarrier c{};
+        c.hbd = 1;
+        c.ep_y = reinterpret_cast<std::uint8_t*>(epy.data());
+        c.ep_y_stride = kW;
+        c.md_y = reinterpret_cast<std::uint8_t*>(mdy.data());
+        c.md_y_stride = kW;
+        c.ep_u = reinterpret_cast<std::uint8_t*>(epu.data());
+        c.ep_u_stride = kW;
+        c.md_u = reinterpret_cast<std::uint8_t*>(mdu.data());
+        c.md_u_stride = kW;
+        c.ep_v = reinterpret_cast<std::uint8_t*>(epv.data());
+        c.ep_v_stride = kW;
+        c.md_v = reinterpret_cast<std::uint8_t*>(mdv.data());
+        c.md_v_stride = kW;
+        c.blk_org_x = 2;
+        c.blk_org_y = 2;
+        c.bwidth = 8;
+        c.bheight = 8;
+        c.bwidth_uv = 4;
+        c.bheight_uv = 4;
+        c.has_uv = 1;
+        pd::copyRecon(c);
+        for (int r = 0; r < 8; ++r) {
+            for (int cc = 0; cc < 8; ++cc) CHECK(epy[(2 + r) * kW + 2 + cc] == mdy[r * kW + cc]);
+        }
+        for (int r = 0; r < 4; ++r) {
+            for (int cc = 0; cc < 4; ++cc) {
+                CHECK(epu[r * kW + cc] == mdu[r * kW + cc]);
+                CHECK(epv[r * kW + cc] == mdv[r * kW + cc]);
+            }
+        }
+    }
+    // has_uv = 0: the UV planes untouched
+    {
+        constexpr int kW = 16, kH = 16;
+        std::vector<std::uint8_t> mdy(kW * kH, 9), mdu(kW * kH, 9), mdv(kW * kH, 9);
+        std::vector<std::uint8_t> epy(kW * kH, 0x11), epu(kW * kH, 0x11), epv(kW * kH, 0x11);
+        pd::CopyReconCarrier c{};
+        c.hbd = 0;
+        c.ep_y = epy.data();
+        c.ep_y_stride = kW;
+        c.md_y = mdy.data();
+        c.md_y_stride = kW;
+        c.ep_u = epu.data();
+        c.ep_u_stride = kW;
+        c.md_u = mdu.data();
+        c.md_u_stride = kW;
+        c.ep_v = epv.data();
+        c.ep_v_stride = kW;
+        c.md_v = mdv.data();
+        c.md_v_stride = kW;
+        c.blk_org_x = 0;
+        c.blk_org_y = 0;
+        c.bwidth = 8;
+        c.bheight = 8;
+        c.has_uv = 0;
+        pd::copyRecon(c);
+        CHECK(epu[kW] == 0x11);  // the UV planes untouched
+        CHECK(epv[kW] == 0x11);
+    }
 }

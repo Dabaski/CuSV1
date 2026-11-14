@@ -28,6 +28,8 @@
 #include <cstdint>
 #include <cstddef>
 
+#include <entropy.h>
+
 namespace pipeline {
 namespace pd {
 
@@ -479,6 +481,135 @@ void packHighbdPic(const PicPackDesc& pic_ptr, std::uint16_t* const buffer_16bit
 // arithmetic through unpack_and_2bcompress.
 void unpackHighbdPic(const std::uint16_t* const buffer_highbd[3], PicPackDesc& pic_ptr, std::uint32_t ss_x,
                      std::uint32_t ss_y);
+
+// ---------------------------------------------------------------------------
+// CL2 park resolution: the coding_loop.c remainder - the CFL trio
+// (intra_prediction.c:421-:472 + intra_prediction.h:134-:141, the A2
+// file; they land here because the coding_loop.c composition :199-:287
+// is their consumer - the A6C neighbour-arrays precedent) + the
+// recon-copy helpers.
+// ---------------------------------------------------------------------------
+
+// definitions.h:329 CFL_BUF_LINE; :1112-:1115 CFL_IDX_U/V; :1119-:1128
+// the sign macros.
+constexpr std::int32_t kCflBufLine = 32;
+constexpr std::int32_t kCflAlphabetSizeLog2 = 4;
+
+// cfl_idx_to_alpha (intra_prediction.h:134-:141). pred_type: 0 =
+// CFL_PRED_U, 1 = CFL_PRED_V.
+std::int32_t cflIdxToAlpha(std::int32_t alpha_idx, std::int32_t joint_sign, std::int32_t pred_type);
+
+// svt_cfl_luma_subsampling_420_lbd_c (intra_prediction.c:421-:431): the
+// 2x2 luma sum << 1, output rows step CFL_BUF_LINE.
+void cflLumaSubsampling420Lbd(const std::uint8_t* input, std::int32_t input_stride, std::int16_t* output_q3,
+                              std::int32_t width, std::int32_t height);
+
+// svt_cfl_luma_subsampling_420_hbd_c (:437-:445), the uint16 twin.
+void cflLumaSubsampling420Hbd(const std::uint16_t* input, std::int32_t input_stride, std::int16_t* output_q3,
+                              std::int32_t width, std::int32_t height);
+
+// svt_subtract_average_c (:451-:472): the DC over CFL_BUF_LINE rows,
+// (sum + round_offset) >> num_pel_log2, subtracted per cell.
+void subtractAverage(std::int16_t* pred_buf_q3, std::int32_t width, std::int32_t height,
+                     std::int32_t round_offset, std::int32_t num_pel_log2);
+
+// The window av1_encode_generate_cfl_prediction (coding_loop.c:199-:287)
+// consumes. The recon/pred plane pointers stay byte buffers (the
+// reference's EbPictureBufferDesc convention); the hbd paths
+// reinterpret them exactly as the reference casts.
+struct CflPredCarrier {
+    const std::uint8_t* recon_y;
+    std::uint32_t recon_y_stride;
+    std::uint32_t recon_origin_x;  // round_origin_x/y
+    std::uint32_t recon_origin_y;
+    std::uint8_t is_16bit;
+    std::uint32_t bwidth;
+    std::uint32_t bheight;
+    std::uint32_t bwidth_uv;
+    std::uint32_t bheight_uv;
+    entropy::BlockSize bsize;  // blk_geom->bsize (the av1_get_max_uv_txsize input)
+    std::int16_t* pred_buf_q3;
+    std::uint8_t* pred_u;
+    std::uint32_t pred_u_stride;
+    std::uint32_t pred_cb_offset;
+    std::uint8_t* pred_v;
+    std::uint32_t pred_v_stride;
+    std::uint32_t pred_cr_offset;
+    std::int32_t cfl_alpha_idx;    // blk_ptr->block_mi.cfl_alpha_idx
+    std::int32_t cfl_alpha_signs;  // blk_ptr->block_mi.cfl_alpha_signs
+    std::int32_t bit_depth;        // ed_ctx->bit_depth (8 on the lbd path)
+};
+
+// av1_encode_generate_cfl_prediction (coding_loop.c:199-:287): the
+// composition over the landed l4 cflPredict twins + the trio above.
+void generateCflPrediction(const CflPredCarrier& c);
+
+// svt_aom_store16bit_input_src (coding_loop.c:681-:718), the
+// EbPictureBufferDesc/pcs->input_frame16bit walls flattened to the six
+// plane pointers + strides (the named deviation; the field plumbing is
+// 1:1).
+void store16bitInputSrc(const std::uint16_t* src_y, std::uint32_t src_y_stride, const std::uint16_t* src_u,
+                        std::uint32_t src_u_stride, const std::uint16_t* src_v, std::uint32_t src_v_stride,
+                        std::uint16_t* dst_y, std::uint32_t dst_y_stride, std::uint16_t* dst_u,
+                        std::uint32_t dst_u_stride, std::uint16_t* dst_v, std::uint32_t dst_v_stride,
+                        std::uint32_t sb_x, std::uint32_t sb_y, std::uint32_t sb_w, std::uint32_t sb_h);
+
+// The window svt_aom_convert_recon_16bit_to_8bit (:1075-:1121)
+// consumes: the 16-bit and 8-bit recon descriptors' plane pointers +
+// strides (the svt_aom_get_recon_pic / ref-object selection is the
+// caller's - the named deviation) + the ctx block geometry.
+struct Recon16To8Carrier {
+    const std::uint8_t* y16;
+    std::uint32_t y16_stride;
+    const std::uint8_t* u16;
+    std::uint32_t u16_stride;
+    const std::uint8_t* v16;
+    std::uint32_t v16_stride;
+    std::uint8_t* y8;
+    std::uint32_t y8_stride;
+    std::uint8_t* u8;
+    std::uint32_t u8_stride;
+    std::uint8_t* v8;
+    std::uint32_t v8_stride;
+    std::uint32_t blk_org_x;
+    std::uint32_t blk_org_y;
+    std::uint32_t bwidth;
+    std::uint32_t bheight;
+    std::uint32_t bwidth_uv;
+    std::uint32_t bheight_uv;
+};
+
+// svt_aom_convert_recon_16bit_to_8bit (coding_loop.c:1075-:1121).
+void convertRecon16bitTo8bit(const Recon16To8Carrier& c);
+
+// The window copy_recon (:1346-:1425) consumes: the ep (recon) and md
+// (recon_tmp) plane pointers + strides; the hbd flag is
+// SVT_EFFECTIVE_BIT_DEPTH(encoder_bit_depth) > EB_EIGHT_BIT.
+struct CopyReconCarrier {
+    std::uint8_t* ep_y;
+    std::uint32_t ep_y_stride;
+    const std::uint8_t* md_y;
+    std::uint32_t md_y_stride;
+    std::uint8_t* ep_u;
+    std::uint32_t ep_u_stride;
+    const std::uint8_t* md_u;
+    std::uint32_t md_u_stride;
+    std::uint8_t* ep_v;
+    std::uint32_t ep_v_stride;
+    const std::uint8_t* md_v;
+    std::uint32_t md_v_stride;
+    std::uint32_t blk_org_x;
+    std::uint32_t blk_org_y;
+    std::uint32_t bwidth;
+    std::uint32_t bheight;
+    std::uint32_t bwidth_uv;
+    std::uint32_t bheight_uv;
+    std::uint8_t has_uv;
+    std::uint8_t hbd;
+};
+
+// copy_recon (coding_loop.c:1346-:1425).
+void copyRecon(const CopyReconCarrier& c);
 
 }  // namespace pd
 }  // namespace pipeline

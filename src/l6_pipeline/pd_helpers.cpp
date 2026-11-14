@@ -2,6 +2,14 @@
 // pd_helpers.h for the park list and carrier conventions.
 #include <pd_helpers.h>
 
+// intra.h FIRST: rate_est.h:325 defines UV_INTRA_MODES as a macro (the
+// same value as intra.h's enum constant); including intra.h after the
+// rate_est chain breaks its UvPredictionMode enum parse. This order
+// keeps both readable (the macro lands after the enumerator, the C4005
+// pair is benign and already inside coding_loop_helpers.h's disabled
+// window).
+#include <intra.h>
+#include <coding_loop_helpers.h>
 #include <packunpack.h>
 #include <mode_config.h>
 
@@ -912,6 +920,276 @@ void unpackHighbdPic(const std::uint16_t* const buffer_highbd[3], PicPackDesc& p
             const_cast<std::uint8_t*>(pic_ptr.v_buffer_bit_inc -
                                       ((pic_ptr.border >> ss_x) / 4 + (comp_stride_cr * (pic_ptr.border >> ss_y)))),
             comp_stride_cr, (width + ss_x) >> ss_x, (height + ss_y) >> ss_y);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CL2 park resolution: the coding_loop.c remainder.
+// ---------------------------------------------------------------------------
+
+// definitions.h:592 svt_log2f = get_msb (floor log2); the tx dims are
+// powers of two so the shift is exact.
+std::int32_t getMsbLog2(std::uint32_t n) {
+    assert(n != 0);
+    unsigned long first_set_bit;
+    _BitScanReverse(&first_set_bit, n);
+    return static_cast<std::int32_t>(first_set_bit);
+}
+
+// cfl_idx_to_alpha (intra_prediction.h:134-:141), verbatim over the
+// macros (CFL_SIGN_U = ((js+1)*11)>>5, CFL_SIGN_V = (js+1) - 3*sign_u,
+// CFL_IDX_U = idx>>4, CFL_IDX_V = idx & 15).
+std::int32_t cflIdxToAlpha(std::int32_t alpha_idx, std::int32_t joint_sign, std::int32_t pred_type) {
+    constexpr std::int32_t kCflSigns = 3;
+    const std::int32_t alpha_sign = (pred_type == 0 /*CFL_PRED_U*/)
+        ? (((joint_sign + 1) * 11) >> 5)
+        : ((joint_sign + 1) - kCflSigns * (((joint_sign + 1) * 11) >> 5));
+    if (alpha_sign == 0 /*CFL_SIGN_ZERO*/) {
+        return 0;
+    }
+    const std::int32_t abs_alpha_q3 =
+        (pred_type == 0) ? (alpha_idx >> kCflAlphabetSizeLog2) : (alpha_idx & ((1 << kCflAlphabetSizeLog2) - 1));
+    return (alpha_sign == 2 /*CFL_SIGN_POS*/) ? abs_alpha_q3 + 1 : -abs_alpha_q3 - 1;
+}
+
+// svt_cfl_luma_subsampling_420_lbd_c (intra_prediction.c:421-:431),
+// verbatim.
+void cflLumaSubsampling420Lbd(const std::uint8_t* input, std::int32_t input_stride, std::int16_t* output_q3,
+                              std::int32_t width, std::int32_t height) {
+    for (std::int32_t j = 0; j < height; j += 2) {
+        for (std::int32_t i = 0; i < width; i += 2) {
+            const std::int32_t bot = i + input_stride;
+            output_q3[i >> 1] = static_cast<std::int16_t>((input[i] + input[i + 1] + input[bot] + input[bot + 1]) << 1);
+        }
+        input += input_stride << 1;
+        output_q3 += kCflBufLine;
+    }
+}
+
+// svt_cfl_luma_subsampling_420_hbd_c (:437-:445), verbatim.
+void cflLumaSubsampling420Hbd(const std::uint16_t* input, std::int32_t input_stride, std::int16_t* output_q3,
+                              std::int32_t width, std::int32_t height) {
+    for (std::int32_t j = 0; j < height; j += 2, input += input_stride << 1, output_q3 += kCflBufLine) {
+        for (std::int32_t i = 0; i < width; i += 2) {
+            const std::int32_t bot = i + input_stride;
+            output_q3[i >> 1] = static_cast<std::int16_t>((input[i] + input[i + 1] + input[bot] + input[bot + 1]) << 1);
+        }
+    }
+}
+
+// svt_subtract_average_c (intra_prediction.c:451-:472), verbatim.
+void subtractAverage(std::int16_t* pred_buf_q3, std::int32_t width, std::int32_t height,
+                     std::int32_t round_offset, std::int32_t num_pel_log2) {
+    std::int32_t sum_q3 = 0;
+    std::int16_t* pred_buf = pred_buf_q3;
+    for (std::int32_t j = 0; j < height; j++) {
+        for (std::int32_t i = 0; i < width; i++) {
+            sum_q3 += pred_buf[i];
+        }
+        pred_buf += kCflBufLine;
+    }
+    const std::int32_t avg_q3 = (sum_q3 + round_offset) >> num_pel_log2;
+    for (std::int32_t j = 0; j < height; j++) {
+        for (std::int32_t i = 0; i < width; i++) {
+            pred_buf_q3[i] -= static_cast<std::int16_t>(avg_q3);
+        }
+        pred_buf_q3 += kCflBufLine;
+    }
+}
+
+// av1_encode_generate_cfl_prediction (coding_loop.c:199-:287), verbatim
+// over the carrier; the tx-size dimensions come from the landed l7
+// tables and the predict twins from the landed l4.
+void generateCflPrediction(const CflPredCarrier& c) {
+    const std::uint32_t recon_luma_offset = (c.recon_origin_y * c.recon_y_stride) + c.recon_origin_x;
+
+    // Down sample Luma
+    if (c.is_16bit) {
+        cflLumaSubsampling420Hbd(reinterpret_cast<const std::uint16_t*>(c.recon_y) + recon_luma_offset,
+                                 c.recon_y_stride, c.pred_buf_q3,
+                                 c.bwidth_uv == c.bwidth ? (c.bwidth_uv << 1) : c.bwidth,
+                                 c.bheight_uv == c.bheight ? (c.bheight_uv << 1) : c.bheight);
+    } else {
+        cflLumaSubsampling420Lbd(c.recon_y + recon_luma_offset, c.recon_y_stride, c.pred_buf_q3,
+                                 c.bwidth_uv == c.bwidth ? (c.bwidth_uv << 1) : c.bwidth,
+                                 c.bheight_uv == c.bheight ? (c.bheight_uv << 1) : c.bheight);
+    }
+
+    const entropy::TxSize tx_size_uv = av1GetMaxUvTxsize(c.bsize, 1, 1);
+    const std::int32_t tx_width_uv = entropy::txSizeWide[tx_size_uv];
+    const std::int32_t tx_height_uv = entropy::txSizeHigh[tx_size_uv];
+
+    const std::int32_t round_offset = (tx_width_uv * tx_height_uv) / 2;
+
+    subtractAverage(c.pred_buf_q3, tx_width_uv, tx_height_uv, round_offset,
+                    getMsbLog2(static_cast<std::uint32_t>(tx_width_uv)) +
+                        getMsbLog2(static_cast<std::uint32_t>(tx_height_uv)));
+
+    const std::int32_t alpha_q3_cb = cflIdxToAlpha(c.cfl_alpha_idx, c.cfl_alpha_signs, 0 /*CFL_PRED_U*/);
+    const std::int32_t alpha_q3_cr = cflIdxToAlpha(c.cfl_alpha_idx, c.cfl_alpha_signs, 1 /*CFL_PRED_V*/);
+
+    if (c.is_16bit) {
+        intra::cflPredictHbd(c.pred_buf_q3, reinterpret_cast<const std::uint16_t*>(c.pred_u) + c.pred_cb_offset,
+                             static_cast<int>(c.pred_u_stride),
+                             reinterpret_cast<std::uint16_t*>(c.pred_u) + c.pred_cb_offset,
+                             static_cast<int>(c.pred_u_stride), alpha_q3_cb, c.bit_depth, tx_width_uv,
+                             tx_height_uv);
+        intra::cflPredictHbd(c.pred_buf_q3, reinterpret_cast<const std::uint16_t*>(c.pred_v) + c.pred_cr_offset,
+                             static_cast<int>(c.pred_v_stride),
+                             reinterpret_cast<std::uint16_t*>(c.pred_v) + c.pred_cr_offset,
+                             static_cast<int>(c.pred_v_stride), alpha_q3_cr, c.bit_depth, tx_width_uv,
+                             tx_height_uv);
+    } else {
+        intra::cflPredictLbd(c.pred_buf_q3, c.pred_u + c.pred_cb_offset, static_cast<int>(c.pred_u_stride),
+                             c.pred_u + c.pred_cb_offset, static_cast<int>(c.pred_u_stride), alpha_q3_cb, 8,
+                             tx_width_uv, tx_height_uv);
+        intra::cflPredictLbd(c.pred_buf_q3, c.pred_v + c.pred_cr_offset, static_cast<int>(c.pred_v_stride),
+                             c.pred_v + c.pred_cr_offset, static_cast<int>(c.pred_v_stride), alpha_q3_cr, 8,
+                             tx_width_uv, tx_height_uv);
+    }
+}
+
+// svt_aom_store16bit_input_src (coding_loop.c:681-:718), verbatim over
+// the flattened planes.
+void store16bitInputSrc(const std::uint16_t* src_y, std::uint32_t src_y_stride, const std::uint16_t* src_u,
+                        std::uint32_t src_u_stride, const std::uint16_t* src_v, std::uint32_t src_v_stride,
+                        std::uint16_t* dst_y, std::uint32_t dst_y_stride, std::uint16_t* dst_u,
+                        std::uint32_t dst_u_stride, std::uint16_t* dst_v, std::uint32_t dst_v_stride,
+                        std::uint32_t sb_x, std::uint32_t sb_y, std::uint32_t sb_w, std::uint32_t sb_h) {
+    const std::uint16_t* from_ptr = src_y;
+    std::uint16_t* to_ptr = dst_y + sb_x + (sb_y * dst_y_stride);
+
+    for (std::uint32_t row_it = 0; row_it < sb_h; row_it++) {
+        std::memcpy(to_ptr + row_it * dst_y_stride, from_ptr + row_it * src_y_stride, sb_w * 2);
+    }
+
+    sb_x = sb_x / 2;
+    sb_y = sb_y / 2;
+    sb_w = sb_w / 2;
+    sb_h = sb_h / 2;
+
+    from_ptr = src_u;
+    to_ptr = dst_u + sb_x + (sb_y * dst_u_stride);
+
+    for (std::uint32_t row_it = 0; row_it < sb_h; row_it++) {
+        std::memcpy(to_ptr + row_it * dst_u_stride, from_ptr + row_it * src_u_stride, sb_w * 2);
+    }
+
+    from_ptr = src_v;
+    to_ptr = dst_v + sb_x + (sb_y * dst_v_stride);
+
+    for (std::uint32_t row_it = 0; row_it < sb_h; row_it++) {
+        std::memcpy(to_ptr + row_it * dst_v_stride, from_ptr + row_it * src_v_stride, sb_w * 2);
+    }
+}
+
+// definitions.h:327 ROUND_UV.
+std::uint32_t roundUv(std::uint32_t x) {
+    return ((x >> 3) << 3);
+}
+
+// svt_aom_convert_recon_16bit_to_8bit (coding_loop.c:1075-:1121),
+// verbatim over the carrier.
+void convertRecon16bitTo8bit(const Recon16To8Carrier& c) {
+    const std::uint16_t* dst_16bit =
+        reinterpret_cast<const std::uint16_t*>(c.y16) + c.blk_org_x + (c.blk_org_y * c.y16_stride);
+    const std::int32_t dst_stride_16bit = static_cast<std::int32_t>(c.y16_stride);
+    std::uint8_t* dst = c.y8 + c.blk_org_x + (c.blk_org_y * c.y8_stride);
+    std::int32_t dst_stride = static_cast<std::int32_t>(c.y8_stride);
+
+    analysis::packunpack::convert16bitTo8bit(dst_16bit, dst_stride_16bit, dst, dst_stride, c.bwidth, c.bheight);
+
+    // copy recon from 16bit to 8bit (the UV planes)
+    const std::uint32_t pred_buf_x_offest = roundUv(c.blk_org_x) >> 1;
+    const std::uint32_t pred_buf_y_offest = roundUv(c.blk_org_y) >> 1;
+
+    dst_16bit = reinterpret_cast<const std::uint16_t*>(c.u16) + pred_buf_x_offest +
+        (pred_buf_y_offest * c.u16_stride);
+    const std::int32_t dst_stride_16bit_u = static_cast<std::int32_t>(c.u16_stride);
+    dst = c.u8 + pred_buf_x_offest + (pred_buf_y_offest * c.u8_stride);
+    dst_stride = static_cast<std::int32_t>(c.u8_stride);
+
+    analysis::packunpack::convert16bitTo8bit(dst_16bit, dst_stride_16bit_u, dst, dst_stride, c.bwidth_uv,
+                                             c.bheight_uv);
+
+    dst_16bit = reinterpret_cast<const std::uint16_t*>(c.v16) +
+        (pred_buf_x_offest + (pred_buf_y_offest * c.v16_stride));
+    const std::int32_t dst_stride_16bit_v = static_cast<std::int32_t>(c.v16_stride);
+    dst = c.v8 + pred_buf_x_offest + (pred_buf_y_offest * c.v8_stride);
+    dst_stride = static_cast<std::int32_t>(c.v8_stride);
+
+    analysis::packunpack::convert16bitTo8bit(dst_16bit, dst_stride_16bit_v, dst, dst_stride, c.bwidth_uv,
+                                             c.bheight_uv);
+}
+
+// copy_recon (coding_loop.c:1346-:1425), verbatim over the carrier.
+void copyRecon(const CopyReconCarrier& c) {
+    if (c.hbd) {
+        const std::uint32_t recon_luma_offset = (c.blk_org_y * c.ep_y_stride) + c.blk_org_x;
+        std::uint16_t* ep_recon = reinterpret_cast<std::uint16_t*>(c.ep_y) + recon_luma_offset;
+        const std::uint16_t* md_recon = reinterpret_cast<const std::uint16_t*>(c.md_y);
+
+        for (std::uint32_t i = 0; i < c.bheight; i++) {
+            std::memcpy(ep_recon + i * c.ep_y_stride, md_recon + i * c.md_y_stride, c.bwidth * sizeof(std::uint16_t));
+        }
+
+        if (c.has_uv) {
+            const std::uint32_t round_origin_x = roundUv(c.blk_org_x);
+            const std::uint32_t round_origin_y = roundUv(c.blk_org_y);
+
+            // Cr
+            const std::uint32_t recon_cr_offset = ((round_origin_y >> 1) * c.ep_v_stride) + (round_origin_x >> 1);
+            std::uint16_t* ep_recon_cr = reinterpret_cast<std::uint16_t*>(c.ep_v) + recon_cr_offset;
+            const std::uint16_t* md_recon_cr = reinterpret_cast<const std::uint16_t*>(c.md_v);
+
+            for (std::uint32_t i = 0; i < c.bheight_uv; i++) {
+                std::memcpy(ep_recon_cr + i * c.ep_v_stride, md_recon_cr + i * c.md_v_stride,
+                            c.bwidth_uv * sizeof(std::uint16_t));
+            }
+
+            // Cb
+            const std::uint32_t recon_cb_offset = ((round_origin_y >> 1) * c.ep_u_stride) + (round_origin_x >> 1);
+            std::uint16_t* ep_recon_cb = reinterpret_cast<std::uint16_t*>(c.ep_u) + recon_cb_offset;
+            const std::uint16_t* md_recon_cb = reinterpret_cast<const std::uint16_t*>(c.md_u);
+
+            for (std::uint32_t i = 0; i < c.bheight_uv; i++) {
+                std::memcpy(ep_recon_cb + i * c.ep_u_stride, md_recon_cb + i * c.md_u_stride,
+                            c.bwidth_uv * sizeof(std::uint16_t));
+            }
+        }
+    } else {
+        const std::uint32_t recon_luma_offset = (c.blk_org_y * c.ep_y_stride) + c.blk_org_x;
+        std::uint8_t* ep_recon = c.ep_y + recon_luma_offset;
+        const std::uint8_t* md_recon = c.md_y;
+
+        for (std::uint32_t i = 0; i < c.bheight; i++) {
+            std::memcpy(ep_recon + i * c.ep_y_stride, md_recon + i * c.md_y_stride, c.bwidth * sizeof(std::uint8_t));
+        }
+
+        if (c.has_uv) {
+            const std::uint32_t round_origin_x = roundUv(c.blk_org_x);
+            const std::uint32_t round_origin_y = roundUv(c.blk_org_y);
+
+            // Cr
+            const std::uint32_t recon_cr_offset = ((round_origin_y >> 1) * c.ep_v_stride) + (round_origin_x >> 1);
+            std::uint8_t* ep_recon_cr = c.ep_v + recon_cr_offset;
+            const std::uint8_t* md_recon_cr = c.md_v;
+
+            for (std::uint32_t i = 0; i < c.bheight_uv; i++) {
+                std::memcpy(ep_recon_cr + i * c.ep_v_stride, md_recon_cr + i * c.md_v_stride,
+                            c.bwidth_uv * sizeof(std::uint8_t));
+            }
+
+            // Cb
+            const std::uint32_t recon_cb_offset = ((round_origin_y >> 1) * c.ep_u_stride) + (round_origin_x >> 1);
+            std::uint8_t* ep_recon_cb = c.ep_u + recon_cb_offset;
+            const std::uint8_t* md_recon_cb = c.md_u;
+
+            for (std::uint32_t i = 0; i < c.bheight_uv; i++) {
+                std::memcpy(ep_recon_cb + i * c.ep_u_stride, md_recon_cb + i * c.md_u_stride,
+                            c.bwidth_uv * sizeof(std::uint8_t));
+            }
+        }
     }
 }
 
