@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cmath>
 
+
+
 namespace inter {
 
 // PACKED_BUFFER_SIZE, definitions.h:344-:346 ((MAX_SB_SIZE + 2*8)^2 with
@@ -709,6 +711,215 @@ Mv clampMvToUmvBorderSb(std::int32_t mbToLeftEdge, std::int32_t mbToRightEdge, s
     return clampedMv;
 }
 
+// eb_num_pels_log2_lookup, common_utils.c (the num-pixels log2 table).
+const std::uint8_t ebNumPelsLog2Lookup[kBlockSizesAll] = {4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11,
+                                                          11, 12, 13, 13, 14, 6, 6, 8, 8, 10, 10};
+
+// is_interinter_compound_used(COMPOUND_WEDGE, bsize) (inter_prediction.h
+// :255-:272): comp_allowed && wedge bits > 0.
+inline bool isInterinterCompoundUsedWedge(int bsize) {
+    const int compAllowed =
+        kBlockSizeWide[bsize] < kBlockSizeHigh[bsize] ? kBlockSizeWide[bsize] : kBlockSizeHigh[bsize];
+    return compAllowed >= 8 && getWedgeParamsBits(bsize) > 0;
+}
+// RDCOST (rd_cost.h:36-:38), the local inline (the l16 rate_est macro is
+// unlinkable from l17; the RDDIV_BITS = 7 / AV1_PROB_COST_SHIFT = 9 fold).
+inline std::int64_t rdCost(std::uint32_t rdmult, std::int64_t rate, std::int64_t dist) {
+    return ((rate * (std::int64_t)rdmult + ((1 << 9) >> 1)) >> 9) + (dist << 7);
+}
+// ---------- A3E E3: the pick_wedge family ----------
+
+// svt_aom_subtract_block_c (pic_operators.c:58-:69) duplicated locally
+// (the SYM1 wb-trio precedent; l17 cannot link l6 where the landed
+// picops::residualKernel8bit lives).
+void subtractBlockLocal(int rows, int cols, std::int16_t* diff, std::ptrdiff_t diffStride, const std::uint8_t* src,
+                        std::ptrdiff_t srcStride, const std::uint8_t* pred, std::ptrdiff_t predStride) {
+    for (int r = 0; r < rows; r++) {
+        for (int c = 0; c < cols; c++) {
+            diff[c] = (std::int16_t)(src[c] - pred[c]);
+        }
+
+        diff += diffStride;
+        pred += predStride;
+        src += srcStride;
+    }
+}
+
+// svt_aom_highbd_subtract_block_c (pic_operators.c:41-:56), the same
+// duplicate discipline for the hbd arm (the uint16 planes wrap-cast).
+void highbdSubtractBlockLocal(int rows, int cols, std::int16_t* diff, std::ptrdiff_t diffStride,
+                              const std::uint16_t* src, std::ptrdiff_t srcStride, const std::uint16_t* pred,
+                              std::ptrdiff_t predStride) {
+    for (int r = 0; r < rows; r++) {
+        for (int c = 0; c < cols; c++) {
+            diff[c] = (std::int16_t)(src[c] - pred[c]);
+        }
+
+        diff += diffStride;
+        pred += predStride;
+        src += srcStride;
+    }
+}
+
+// pick_wedge, enc_inter_prediction.c:424-:487.
+void pickWedge(WedgePickCtx& ctx, const void* srcBase, int srcStride, int bsize, const std::uint8_t* p0,
+               const std::int16_t* residual1, const std::int16_t* diff10, std::int8_t* bestSign,
+               std::int8_t* bestIndex) {
+    const std::uint8_t hbd = ctx.hbdMd;
+    const std::uint32_t fullLambda = hbd ? ctx.fullLambdaMd[1] : ctx.fullLambdaMd[0];
+    const int bw = kBlockSizeWide[bsize];
+    const int bh = kBlockSizeHigh[bsize];
+    const int n = bw * bh;
+    assert(n >= 64);
+    int rate = 0;
+    std::int64_t dist = 0;
+    std::int64_t bestRd = INT64_MAX;
+    const std::int8_t wedgeTypes = (std::int8_t)(1 << getWedgeBitsLookup(bsize));
+    const int bdRound = 0;
+    alignas(32) std::int16_t residual0[32 * 32]; // src - pred0
+    if (hbd) {
+        highbdSubtractBlockLocal(bh, bw, residual0, bw, (const std::uint16_t*)srcBase, srcStride,
+                                 (const std::uint16_t*)p0, bw);
+    } else {
+        subtractBlockLocal(bh, bw, residual0, bw, (const std::uint8_t*)srcBase, srcStride, p0, bw);
+    }
+    const std::int64_t signLimit = ((std::int64_t)sumSquaresI16(residual0, n) - (std::int64_t)sumSquaresI16(residual1, n)) *
+        (1 << kWedgeWeightBits) / 2;
+    std::int16_t* ds = residual0;
+
+    wedgeComputeDeltaSquares(ds, residual0, residual1, n);
+
+    for (std::int8_t wedgeIndex = 0; wedgeIndex < wedgeTypes; ++wedgeIndex) {
+        const std::uint8_t* mask = getContiguousSoftMask(wedgeIndex, 0, bsize);
+
+        const std::int8_t wedgeSign = wedgeSignFromResiduals(ds, mask, n, signLimit);
+
+        mask = getContiguousSoftMask(wedgeIndex, wedgeSign, bsize);
+        std::uint64_t sse = wedgeSseFromResiduals(residual1, diff10, mask, n);
+        sse = roundPowerOfTwo64((std::int64_t)sse, bdRound);
+
+        std::int64_t rd = (std::int64_t)sse;
+        if (ctx.useRate) {
+            modelRdWithCurvfit(bsize, (std::int64_t)sse, n, ctx.quantizer, fullLambda, (std::uint32_t*)&rate,
+                               (std::uint64_t*)&dist);
+
+            rd = rdCost(fullLambda, rate, dist);
+        }
+        if (rd < bestRd) {
+            *bestIndex = wedgeIndex;
+            *bestSign = wedgeSign;
+            bestRd = rd;
+        }
+    }
+}
+
+// pick_wedge_fixed_sign, enc_inter_prediction.c:490-:523.
+std::int64_t pickWedgeFixedSign(WedgePickCtx& ctx, int bsize, const std::int16_t* residual1,
+                                const std::int16_t* diff10, std::int8_t wedgeSign, std::int8_t* bestIndex,
+                                const int* wedgeIdxCost) {
+    const std::uint32_t fullLambda = ctx.hbdMd ? ctx.fullLambdaMd[1] : ctx.fullLambdaMd[0];
+    const int bw = kBlockSizeWide[bsize];
+    const int bh = kBlockSizeHigh[bsize];
+    const int n = bw * bh;
+    assert(n >= 64);
+    int rate;
+    std::int64_t dist;
+    std::int64_t bestRd = INT64_MAX;
+    const std::int8_t wedgeTypes = (std::int8_t)(1 << getWedgeBitsLookup(bsize));
+    const int bdRound = 0;
+    for (std::int8_t wedgeIndex = 0; wedgeIndex < wedgeTypes; ++wedgeIndex) {
+        const std::uint8_t* mask = getContiguousSoftMask(wedgeIndex, wedgeSign, bsize);
+        std::uint64_t sse = wedgeSseFromResiduals(residual1, diff10, mask, n);
+        sse = roundPowerOfTwo64((std::int64_t)sse, bdRound);
+        std::int64_t rd = (std::int64_t)sse;
+        if (ctx.useRdModel) {
+            modelRdWithCurvfit(bsize, (std::int64_t)sse, n, ctx.quantizer, fullLambda, (std::uint32_t*)&rate,
+                               (std::uint64_t*)&dist);
+            rate += (std::uint32_t)wedgeIdxCost[wedgeIndex];
+            rd = rdCost(fullLambda, rate, dist);
+        }
+        if (rd < bestRd) {
+            *bestIndex = wedgeIndex;
+            bestRd = rd;
+        }
+    }
+    return bestRd;
+}
+
+// pick_interinter_wedge, enc_inter_prediction.c:525-:538.
+void pickInterinterWedge(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
+                         const std::int16_t* residual1, const std::int16_t* diff10, const void* srcBase,
+                         int srcStride) {
+    std::int8_t wedgeIndex = -1;
+    std::int8_t wedgeSign = 0;
+
+    assert(isInterinterCompoundUsedWedge(bsize));
+
+    pickWedge(ctx, srcBase, srcStride, bsize, p0, residual1, diff10, &wedgeSign, &wedgeIndex);
+    comp->wedgeSign = (std::uint8_t)wedgeSign;
+    comp->wedgeIndex = (std::uint8_t)wedgeIndex;
+}
+
+// pick_interinter_seg, enc_inter_prediction.c:540-:584.
+void pickInterinterSeg(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
+                       const std::uint8_t* p1, const std::int16_t* residual1, const std::int16_t* diff10) {
+    const std::uint8_t hbd = ctx.hbdMd;
+    const std::uint32_t fullLambda = hbd ? ctx.fullLambdaMd[1] : ctx.fullLambdaMd[0];
+    const int bw = kBlockSizeWide[bsize];
+    const int bh = kBlockSizeHigh[bsize];
+    const int n = 1 << ebNumPelsLog2Lookup[bsize];
+    int rate;
+    std::int64_t dist;
+    DiffwtdMaskType curMaskType;
+    std::int64_t bestRd = INT64_MAX;
+    DiffwtdMaskType bestMaskType = Diffwtd38;
+
+    const int bdRound = 0;
+    // try each mask type and its inverse
+    for (curMaskType = Diffwtd38; curMaskType <= Diffwtd38Inv;
+         curMaskType = (DiffwtdMaskType)(curMaskType + 1)) {
+        alignas(16) std::uint8_t tempMask[2 * 32 * 32];
+        // build mask and inverse
+        if (hbd) {
+            buildCompoundDiffwtdMaskHighbd(tempMask, curMaskType, (const std::uint16_t*)p0, bw,
+                                           (const std::uint16_t*)p1, bw, bh, bw, 10);
+        } else {
+            buildCompoundDiffwtdMask(tempMask, curMaskType, p0, bw, p1, bw, bh, bw);
+        }
+
+        // compute rd for mask
+        const std::uint64_t sse = wedgeSseFromResiduals(residual1, diff10, tempMask, n);
+        std::int64_t rd0;
+
+        if (ctx.useRate) {
+            modelRdWithCurvfit(bsize, (std::int64_t)roundPowerOfTwo64((std::int64_t)sse, bdRound), n, ctx.quantizer,
+                               fullLambda, (std::uint32_t*)&rate, (std::uint64_t*)&dist);
+
+            rd0 = rdCost(fullLambda, rate, dist);
+        } else {
+            rd0 = (std::int64_t)sse;
+        }
+        if (rd0 < bestRd) {
+            bestMaskType = curMaskType;
+            bestRd = rd0;
+        }
+    }
+
+    comp->maskType = bestMaskType;
+}
+
+// pick_interinter_mask, enc_inter_prediction.c:586-:598.
+void pickInterinterMask(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
+                        const std::uint8_t* p1, const std::int16_t* residual1, const std::int16_t* diff10,
+                        const void* srcBase, int srcStride) {
+    if (comp->type == CompoundWedge) {
+        pickInterinterWedge(ctx, comp, bsize, p0, residual1, diff10, srcBase, srcStride);
+    } else if (comp->type == CompoundDiffwtd) {
+        pickInterinterSeg(ctx, comp, bsize, p0, p1, residual1, diff10);
+    } else {
+        assert(0);
+    }
+}
 // ---------- A3E E2: the curvfit RD-model family ----------
 // interp_rgrid_curv, enc_inter_prediction.c:204-:249 and
 // interp_dgrid_curv, :251-:270 - MECHANICALLY extracted literal-for-
@@ -754,11 +965,6 @@ void modelRdCurvfit(int bsize, double sseNorm, double xqr, double* rateF, double
     *distbysseF = pdist[1];
 }
 
-// RDCOST (rd_cost.h:36-:38), the local inline (the l16 rate_est macro is
-// unlinkable from l17; the RDDIV_BITS = 7 / AV1_PROB_COST_SHIFT = 9 fold).
-inline std::int64_t rdCost(std::uint32_t rdmult, std::int64_t rate, std::int64_t dist) {
-    return ((rate * (std::int64_t)rdmult + ((1 << 9) >> 1)) >> 9) + (dist << 7);
-}
 
 // model_rd_with_curvfit, enc_inter_prediction.c:316-:361. The pcs/dequants
 // wall threads as the quantizer value (the dequants->y_dequant_qtx

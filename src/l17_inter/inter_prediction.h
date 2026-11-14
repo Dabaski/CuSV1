@@ -518,6 +518,60 @@ Mv clampMvToUmvBorderSb(std::int32_t mbToLeftEdge, std::int32_t mbToRightEdge, s
                         std::int32_t mbToBottomEdge, const Mv* srcMv, std::int32_t bw, std::int32_t bh,
                         std::int32_t ssX, std::int32_t ssY);
 
+// eb_num_pels_log2_lookup, common_utils.c.
+extern const std::uint8_t ebNumPelsLog2Lookup[kBlockSizesAll];
+// ---------- A3E E3: the pick_wedge family ----------
+
+// InterInterCompoundData, definitions.h:1280-:1293 (the fields the pick
+// family consumes).
+struct InterInterCompoundData {
+    CompoundType type;
+    std::uint8_t wedgeIndex;
+    std::uint8_t wedgeSign;
+    DiffwtdMaskType maskType;
+};
+
+// The ModeDecisionContext / PictureControlSet fields the pick family
+// consumes (the AMVP1 carrier precedent). hbdMd is the FOLDED
+// SVT_EFFECTIVE_HBD_MD (0 = 8-bit, 1 = 10-bit; the EB_DUAL_BIT_MD fold
+// is caller-side - named deviation).
+struct WedgePickCtx {
+    std::uint8_t hbdMd;
+    std::uint32_t fullLambdaMd[2]; // [EB_8_BIT_MD, EB_10_BIT_MD]
+    std::uint8_t useRate;          // inter_comp_ctrls.use_rate
+    std::uint8_t useRdModel;       // inter_intra_comp_ctrls.use_rd_model
+    std::int16_t quantizer;        // dequants->y_dequant_qtx[q][1]
+    std::int32_t blkOrgX;
+    std::int32_t blkOrgY;
+};
+
+// pick_wedge, enc_inter_prediction.c:424-:487. srcBase is the ALREADY
+// OFFSET source pointer (the reference's y_buffer + blk_org_x +
+// blk_org_y * y_stride), read as uint8 or uint16 per hbdMd.
+void pickWedge(WedgePickCtx& ctx, const void* srcBase, int srcStride, int bsize, const std::uint8_t* p0,
+               const std::int16_t* residual1, const std::int16_t* diff10, std::int8_t* bestSign,
+               std::int8_t* bestIndex);
+
+// pick_wedge_fixed_sign, enc_inter_prediction.c:490-:523. wedgeIdxCost
+// threads the ctx->md_rate_est_ctx->wedge_idx_fac_bits[bsize] row (the
+// reference indexes [bsize][wedge_index] inside).
+std::int64_t pickWedgeFixedSign(WedgePickCtx& ctx, int bsize, const std::int16_t* residual1,
+                                const std::int16_t* diff10, std::int8_t wedgeSign, std::int8_t* bestIndex,
+                                const int* wedgeIdxCost);
+
+// pick_interinter_wedge, enc_inter_prediction.c:525-:538.
+void pickInterinterWedge(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
+                         const std::int16_t* residual1, const std::int16_t* diff10, const void* srcBase,
+                         int srcStride);
+
+// pick_interinter_seg, enc_inter_prediction.c:540-:584.
+void pickInterinterSeg(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
+                       const std::uint8_t* p1, const std::int16_t* residual1, const std::int16_t* diff10);
+
+// pick_interinter_mask, enc_inter_prediction.c:586-:598.
+void pickInterinterMask(WedgePickCtx& ctx, InterInterCompoundData* comp, int bsize, const std::uint8_t* p0,
+                        const std::uint8_t* p1, const std::int16_t* residual1, const std::int16_t* diff10,
+                        const void* srcBase, int srcStride);
 // ---------- A3E J4: the dispatch rung ----------
 
 // svt_highbd_inter_predictor, inter_prediction.c:1455-:1523. The

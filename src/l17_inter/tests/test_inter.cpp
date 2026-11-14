@@ -1845,6 +1845,285 @@ TEST_CASE("sum_squares_i16 and wedge_sse_from_residuals (ip:2533-2541, :2468-247
     CHECK(inter::wedgeSseFromResiduals(r1b, db, mb, 1) == (32767 * 32767 + 2048) >> 12);
 }
 
+// ------------------------------------------------------------- A3E E3
+// The pick_wedge family (enc_inter_prediction.c:424-:598). Oracles: the
+// test recomputes the ENTIRE selection loops independently (the wedge
+// sign via the landed wedgeSignFromResiduals kernel, the SSE via the
+// landed wedgeSseFromResiduals kernel, the RD via a local RDCOST
+// transcription) and compares the chosen (index, sign, rd) - the
+// selection logic (strict <, first-wins, the rate addition, the skip
+// override plumbing) is what the fixtures discriminate.
+
+namespace pickoracle {
+
+// The wedge family fixtures are 8x8 (the smallest wedge carrier, N=64).
+constexpr int kBw = 8, kBh = 8, kN = 64;
+
+// Deterministic residual fill.
+void fill(std::int16_t* a, int n, std::uint32_t seed, int scale) {
+    std::uint32_t s = seed;
+    for (int i = 0; i < n; ++i) {
+        s = s * 1664525u + 1013904223u;
+        a[i] = (std::int16_t)(((int)((s >> 16) & 0xFF) - 128) * scale / 8);
+    }
+}
+
+// uint8 plane fill (the p0/p1 fixtures).
+std::uint8_t fill8(std::uint32_t seed) {
+    std::uint32_t s = seed;
+    s = s * 1664525u + 1013904223u;
+    return (std::uint8_t)((s >> 16) & 0xFF);
+}
+
+void fillPlane8(std::uint8_t* a, int n, std::uint32_t seed) {
+    std::uint32_t s = seed;
+    for (int i = 0; i < n; ++i) {
+        s = s * 1664525u + 1013904223u;
+        a[i] = (std::uint8_t)((s >> 16) & 0xFF);
+    }
+}
+
+// The independent pick_wedge_fixed_sign transcription.
+std::int64_t pickFixedSign(int bsize, const std::int16_t* residual1, const std::int16_t* diff10, int sign,
+                           std::int8_t* bestIndex, std::uint32_t fullLambda, int useRdModel,
+                           std::int16_t quantizer, const int* wedgeIdxCost) {
+    const int bw = inter::kBlockSizeWide[bsize], bh = inter::kBlockSizeHigh[bsize];
+    const int n = bw * bh;
+    std::int64_t bestRd = INT64_MAX;
+    const int wtypes = 1 << inter::getWedgeBitsLookup(bsize);
+    for (int w = 0; w < wtypes; ++w) {
+        const std::uint8_t* mask = inter::getContiguousSoftMask(w, sign, bsize);
+        std::uint64_t sse = inter::wedgeSseFromResiduals(residual1, diff10, mask, n);
+        std::int64_t rd = (std::int64_t)sse;
+        if (useRdModel) {
+            std::uint32_t rate = 0;
+            std::uint64_t dist = 0;
+            inter::modelRdWithCurvfit(bsize, (std::int64_t)sse, n, quantizer, fullLambda, &rate, &dist);
+            rate += (std::uint32_t)wedgeIdxCost[w];
+            rd = (((rate * (std::int64_t)fullLambda) + 256) >> 9) + ((std::int64_t)dist << 7);
+        }
+        if (rd < bestRd) {
+            *bestIndex = (std::int8_t)w;
+            bestRd = rd;
+        }
+    }
+    return bestRd;
+}
+
+} // namespace pickoracle
+
+TEST_CASE("pick_wedge_fixed_sign matches the independent argmin (enc:490-523)") {
+    inter::initWedgeMasks();
+    std::int16_t residual1[pickoracle::kN], diff10[pickoracle::kN];
+    pickoracle::fill(residual1, pickoracle::kN, 0xABCDu, 16);
+    pickoracle::fill(diff10, pickoracle::kN, 0x1234u, 16);
+    std::int8_t gotIdx = -1;
+    const int cost[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    // use_rd_model = 0: pure SSE argmin.
+    inter::WedgePickCtx ctx{};
+    ctx.useRdModel = 0;
+    const std::int64_t rd = inter::pickWedgeFixedSign(ctx, 3, residual1, diff10, 0, &gotIdx, cost);
+    std::int8_t wantIdx = -1;
+    const std::int64_t wantRd = pickoracle::pickFixedSign(3, residual1, diff10, 0, &wantIdx, 0, 0, 0, cost);
+    CHECK(gotIdx == wantIdx);
+    CHECK(rd == wantRd);
+    // The TIE rule: with all-zero residual1/diff10 every wedge's SSE is 0,
+    // so every rd ties - the reference's strict < keeps the FIRST index.
+    {
+        std::int16_t z1[pickoracle::kN] = {0}, zd[pickoracle::kN] = {0};
+        std::int8_t tieIdx = -1;
+        inter::WedgePickCtx ctxT{};
+        ctxT.useRdModel = 0;
+        inter::pickWedgeFixedSign(ctxT, 3, z1, zd, 0, &tieIdx, cost);
+        CHECK(tieIdx == 0);
+    }
+    // use_rd_model = 1 with a strictly increasing wedge cost: the winner
+    // can differ from the pure-SSE argmin; the oracle decides.
+    ctx.useRdModel = 1;
+    ctx.quantizer = 8;
+    ctx.fullLambdaMd[0] = 200;
+    const std::int64_t rd2 = inter::pickWedgeFixedSign(ctx, 3, residual1, diff10, 1, &gotIdx, cost);
+    std::int8_t wantIdx2 = -1;
+    const std::int64_t wantRd2 =
+        pickoracle::pickFixedSign(3, residual1, diff10, 1, &wantIdx2, 200, 1, 8, cost);
+    CHECK(gotIdx == wantIdx2);
+    CHECK(rd2 == wantRd2);
+}
+
+TEST_CASE("pick_wedge picks the sign per wedge and the best RD (enc:424-487)") {
+    // src = p0 + residual0: p0 is a flat 128 plane, src carries the
+    // crafted residual pattern on top of it.
+    std::uint8_t p0[pickoracle::kN], src[pickoracle::kN];
+    std::int16_t residual0[pickoracle::kN], residual1[pickoracle::kN], diff10[pickoracle::kN];
+    pickoracle::fill(residual0, pickoracle::kN, 0x5EEDu, 8); // scale 1: src fits uint8
+    pickoracle::fill(residual1, pickoracle::kN, 0x7777u, 16);
+    pickoracle::fill(diff10, pickoracle::kN, 0x2222u, 16);
+    for (int i = 0; i < pickoracle::kN; ++i) {
+        p0[i] = 128;
+        src[i] = (std::uint8_t)(128 + residual0[i]);
+    }
+    inter::WedgePickCtx ctx{};
+    ctx.hbdMd = 0;
+    ctx.quantizer = 8;
+    ctx.fullLambdaMd[0] = 200;
+    ctx.useRate = 1;
+    ctx.blkOrgX = 0;
+    ctx.blkOrgY = 0;
+    std::int8_t gotSign = -1, gotIdx = -1;
+    inter::pickWedge(ctx, src, 8, 3, p0, residual1, diff10, &gotSign, &gotIdx);
+    // The independent transcription: residual0 = src - p0 == the crafted
+    // pattern; sign_limit; per-wedge sign + sse + RD; argmin.
+    std::int64_t signLimit = ((std::int64_t)inter::sumSquaresI16(residual0, pickoracle::kN) -
+                              (std::int64_t)inter::sumSquaresI16(residual1, pickoracle::kN)) *
+        (1 << 6) / 2;
+    std::int16_t ds[pickoracle::kN];
+    inter::wedgeComputeDeltaSquares(ds, residual0, residual1, pickoracle::kN);
+    std::int64_t bestRd = INT64_MAX;
+    std::int8_t wantSign = -1, wantIdx = -1;
+    const int wtypes = 16;
+    for (int w = 0; w < wtypes; ++w) {
+        const std::uint8_t* mask = inter::getContiguousSoftMask(w, 0, 3);
+        const std::int8_t sign = inter::wedgeSignFromResiduals(ds, mask, pickoracle::kN, signLimit);
+        const std::uint8_t* mask2 = inter::getContiguousSoftMask(w, sign, 3);
+        std::uint64_t sse = inter::wedgeSseFromResiduals(residual1, diff10, mask2, pickoracle::kN);
+        std::int64_t rd = (std::int64_t)sse;
+        if (ctx.useRate) {
+            std::uint32_t rate = 0;
+            std::uint64_t dist = 0;
+            inter::modelRdWithCurvfit(3, (std::int64_t)sse, pickoracle::kN, ctx.quantizer, ctx.fullLambdaMd[0], &rate,
+                                      &dist);
+            rd = (((rate * (std::int64_t)200) + 256) >> 9) + ((std::int64_t)dist << 7);
+        }
+        if (rd < bestRd) {
+            wantIdx = (std::int8_t)w;
+            wantSign = sign;
+            bestRd = rd;
+        }
+    }
+    CHECK(gotIdx == wantIdx);
+    CHECK(gotSign == wantSign);
+    if (gotIdx != wantIdx) {
+        // Diagnostic: dump all 16 (sign, sse, rd) triples from the shared
+        // kernels - if these match the port's internal state the pick
+        // must match too.
+        std::int16_t ds2[pickoracle::kN];
+        inter::wedgeComputeDeltaSquares(ds2, residual0, residual1, pickoracle::kN);
+        for (int w = 0; w < 16; ++w) {
+            const std::uint8_t* m = inter::getContiguousSoftMask(w, 0, 3);
+            const std::int8_t sg = inter::wedgeSignFromResiduals(ds2, m, pickoracle::kN, signLimit);
+            const std::uint8_t* m2 = inter::getContiguousSoftMask(w, sg, 3);
+            const std::uint64_t sse = inter::wedgeSseFromResiduals(residual1, diff10, m2, pickoracle::kN);
+            std::uint32_t rate = 0;
+            std::uint64_t dist = 0;
+            inter::modelRdWithCurvfit(3, (std::int64_t)sse, pickoracle::kN, 8, 200, &rate, &dist);
+            MESSAGE("w " << w << " sign " << (int)sg << " sse " << sse << " rate " << rate << " dist " << dist
+                           << " rd " << (((rate * (std::int64_t)200) + 256) >> 9) + ((std::int64_t)dist << 7));
+        }
+        MESSAGE("port picked w " << (int)gotIdx << " sign " << (int)gotSign << " | oracle w " << (int)wantIdx
+                                 << " sign " << (int)wantSign << " signLimit " << signLimit);
+        // Hypothesis check: with the limit NEGATED, is the port's pick
+        // the argmin?
+        {
+            std::int64_t bestRdN = INT64_MAX;
+            std::int8_t wIdxN = -1;
+            for (int w = 0; w < 16; ++w) {
+                const std::uint8_t* m = inter::getContiguousSoftMask(w, 0, 3);
+                const std::int8_t sg = inter::wedgeSignFromResiduals(ds2, m, pickoracle::kN, -signLimit);
+                const std::uint8_t* m2 = inter::getContiguousSoftMask(w, sg, 3);
+                const std::uint64_t sse = inter::wedgeSseFromResiduals(residual1, diff10, m2, pickoracle::kN);
+                std::uint32_t rate = 0;
+                std::uint64_t dist = 0;
+                inter::modelRdWithCurvfit(3, (std::int64_t)sse, pickoracle::kN, 8, 200, &rate, &dist);
+                const std::int64_t rd = (((rate * (std::int64_t)200) + 256) >> 9) + ((std::int64_t)dist << 7);
+                if (rd < bestRdN) {
+                    bestRdN = rd;
+                    wIdxN = (std::int8_t)w;
+                }
+            }
+            MESSAGE("negated-limit argmin w " << (int)wIdxN << " rd " << bestRdN);
+        }
+    }
+}
+
+TEST_CASE("pick_wedge: the all-tie fixture keeps the first index (strict <, enc:481-485)") {
+    inter::initWedgeMasks();
+    std::uint8_t p0[pickoracle::kN], src[pickoracle::kN];
+    std::int16_t residual1[pickoracle::kN] = {0}, diff10[pickoracle::kN] = {0};
+    for (int i = 0; i < pickoracle::kN; ++i) {
+        p0[i] = 128;
+        src[i] = 128; // residual0 == 0 as well: every rd is 0
+    }
+    inter::WedgePickCtx ctx{};
+    ctx.hbdMd = 0;
+    ctx.useRate = 0;
+    std::int8_t gotSign = -1, gotIdx = -1;
+    inter::pickWedge(ctx, src, 8, 3, p0, residual1, diff10, &gotSign, &gotIdx);
+    CHECK(gotIdx == 0);
+}
+
+TEST_CASE("pick_interinter_seg sweeps the two mask types and their inverses (enc:540-584)") {
+    inter::initWedgeMasks();
+    std::uint8_t p0[pickoracle::kN], p1[pickoracle::kN];
+    std::int16_t residual1[pickoracle::kN], diff10[pickoracle::kN];
+    for (int i = 0; i < pickoracle::kN; ++i) p0[i] = (std::uint8_t)pickoracle::fill8(0x1111u + (std::uint32_t)i);
+    for (int i = 0; i < pickoracle::kN; ++i) p1[i] = (std::uint8_t)pickoracle::fill8(0x9999u + (std::uint32_t)i);
+    pickoracle::fill(residual1, pickoracle::kN, 0x4444u, 16);
+    pickoracle::fill(diff10, pickoracle::kN, 0x8888u, 16);
+    inter::WedgePickCtx ctx{};
+    ctx.quantizer = 8;
+    ctx.fullLambdaMd[0] = 200;
+    ctx.useRate = 1;
+    inter::InterInterCompoundData comp{};
+    comp.type = inter::CompoundDiffwtd;
+    inter::pickInterinterSeg(ctx, &comp, 3, p0, p1, residual1, diff10);
+    // The independent sweep: four candidates (38, 38_INV).
+    std::int64_t bestRd = INT64_MAX;
+    int wantType = -1;
+    for (int t = 0; t < 2; ++t) {
+        std::uint8_t tempMask[2 * pickoracle::kN];
+        inter::buildCompoundDiffwtdMask(tempMask, (inter::DiffwtdMaskType)t, p0, 8, p1, 8, 8, 8);
+        const std::uint64_t sse = inter::wedgeSseFromResiduals(residual1, diff10, tempMask, pickoracle::kN);
+        std::uint32_t rate = 0;
+        std::uint64_t dist = 0;
+        inter::modelRdWithCurvfit(3, (std::int64_t)sse, pickoracle::kN, 8, 200, &rate, &dist);
+        const std::int64_t rd0 = (((rate * (std::int64_t)200) + 256) >> 9) + ((std::int64_t)dist << 7);
+        if (rd0 < bestRd) {
+            bestRd = rd0;
+            wantType = t;
+        }
+    }
+    CHECK((int)comp.maskType == wantType);
+}
+
+TEST_CASE("pick_interinter_mask dispatches by type (enc:586-598)") {
+    inter::initWedgeMasks();
+    // WEDGE: the fields route through pick_wedge (useRate 0 for a pure
+    // SSE pick) and the winner is a valid wedge index.
+    inter::WedgePickCtx ctx{};
+    ctx.quantizer = 8;
+    ctx.fullLambdaMd[0] = 200;
+    std::uint8_t p0[pickoracle::kN], p1[pickoracle::kN];
+    std::int16_t residual1[pickoracle::kN], diff10[pickoracle::kN];
+    for (int i = 0; i < pickoracle::kN; ++i) p0[i] = (std::uint8_t)pickoracle::fill8(0x3333u + (std::uint32_t)i);
+    for (int i = 0; i < pickoracle::kN; ++i) p1[i] = (std::uint8_t)pickoracle::fill8(0xCCCCu + (std::uint32_t)i);
+    pickoracle::fill(residual1, pickoracle::kN, 0x6666u, 16);
+    pickoracle::fill(diff10, pickoracle::kN, 0xAAAAu, 16);
+    inter::InterInterCompoundData comp{};
+    comp.type = inter::CompoundWedge;
+    inter::pickInterinterMask(ctx, &comp, 3, p0, p1, residual1, diff10, p0, 8);
+    CHECK(comp.wedgeIndex >= 0);
+    CHECK(comp.wedgeIndex < 16);
+    const int signVal = comp.wedgeSign;
+    const int signOk = (signVal == 0) | (signVal == 1); // bitwise, doctest-safe
+    CHECK(signOk);
+    // DIFFWTD: the mask type routes to pick_interinter_seg.
+    comp.type = inter::CompoundDiffwtd;
+    comp.maskType = (inter::DiffwtdMaskType)7; // poison
+    inter::pickInterinterMask(ctx, &comp, 3, p0, p1, residual1, diff10, p0, 8);
+    const int typeVal = (int)comp.maskType;
+    const int typeOk = (typeVal == 0) | (typeVal == 1);
+    CHECK(typeOk);
+}
 // ------------------------------------------------------------- A3E E2
 // The curvfit RD-model family (enc_inter_prediction.c:197-:361). The two
 // grid tables are RUNTIME-DIFF-VERIFIED against the reference file
