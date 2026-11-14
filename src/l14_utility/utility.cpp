@@ -101,8 +101,9 @@ BlockSize getPlaneBlockSize(BlockSize bsize, int subsampling_x, int subsampling_
 
 // get_msb, portable #else body (definitions.h:628-644): returns
 // (int32_t)floor(log2(n)). n must be > 0. svt_log2f aliases this
-// (definitions.h:592).
-static inline int getMsb(std::uint32_t n) {
+// (definitions.h:592). MU2: the static qualifier dropped, the function
+// is declared in utility.h.
+int getMsb(std::uint32_t n) {
     int log = 0;
     std::uint32_t value = n;
     int i;

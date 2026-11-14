@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstring>
 #include <mathutil.h>
+#include <utility.h>
 
 namespace l14_utility {
 
@@ -87,5 +88,43 @@ void multiplyMat(const double* m1, const double* m2, double* res, const std::int
         }
     }
 }
+
+// definitions.h / utility.h helpers (MU2).
+void memPutLe16(void* vmem, std::int32_t val) {
+    std::uint8_t* mem = static_cast<std::uint8_t*>(vmem);
+
+    mem[0] = static_cast<std::uint8_t>((val >> 0) & 0xff);
+    mem[1] = static_cast<std::uint8_t>((val >> 8) & 0xff);
+}
+
+void memPutLe24(void* vmem, std::int32_t val) {
+    std::uint8_t* mem = static_cast<std::uint8_t*>(vmem);
+
+    mem[0] = static_cast<std::uint8_t>((val >> 0) & 0xff);
+    mem[1] = static_cast<std::uint8_t>((val >> 8) & 0xff);
+    mem[2] = static_cast<std::uint8_t>((val >> 16) & 0xff);
+}
+
+void memPutLe32(void* vmem, std::int32_t val) {
+    std::uint8_t* mem = static_cast<std::uint8_t*>(vmem);
+
+    mem[0] = static_cast<std::uint8_t>((val >> 0) & 0xff);
+    mem[1] = static_cast<std::uint8_t>((val >> 8) & 0xff);
+    mem[2] = static_cast<std::uint8_t>((val >> 16) & 0xff);
+    mem[3] = static_cast<std::uint8_t>((val >> 24) & 0xff);
+}
+
+int svtNumbits(unsigned int x) {
+    x = x - ((x >> 1) & 0x55555555u);
+    x = (x & 0x33333333u) + ((x >> 2) & 0x33333333u);
+    x = (x + (x >> 4)) & 0x0F0F0F0Fu;
+    return (int)((x * 0x01010101u) >> 24);
+}
+
+int svtLog2fSafe(std::uint32_t x) {
+    return getMsb(x | 1);
+}
+
+const std::uint8_t miniGopOffset[5] = {1, 3, 7, 15, 31};
 
 }  // namespace l14_utility

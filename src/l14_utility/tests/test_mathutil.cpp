@@ -1,6 +1,143 @@
 #include <doctest.h>
 #include <mathutil.h>
 
+TEST_CASE("isPowerOfTwo over the power band and its quirk at 0") {
+    for (int k = 0; k <= 30; ++k) {
+        CHECK(l14_utility::isPowerOfTwo(1u << k) == true);
+    }
+    CHECK(l14_utility::isPowerOfTwo(0u) == true);  // quirk: (0 & -1) == 0
+    for (unsigned x = 3; x < 64; ++x) {
+        if ((x & (x - 1)) != 0) {
+            CHECK(l14_utility::isPowerOfTwo(x) == false);
+        }
+    }
+    CHECK(l14_utility::isPowerOfTwo(0x80000001ull - 1) == true);
+}
+
+TEST_CASE("rightSignedShift shifts by the sign of n") {
+    CHECK(l14_utility::rightSignedShift(5, 2) == 1);
+    CHECK(l14_utility::rightSignedShift(5, 0) == 5);
+    CHECK(l14_utility::rightSignedShift(5, -2) == 20);
+    CHECK(l14_utility::rightSignedShift(-5, 1) == -3);
+    CHECK(l14_utility::rightSignedShift(-5, -1) == -10);
+    CHECK(l14_utility::rightSignedShift(0, 3) == 0);
+}
+
+TEST_CASE("memPutLe16 writes the low byte first") {
+    std::uint8_t mem[3] = {0, 0, 0};
+    l14_utility::memPutLe16(mem, 0x1234);
+    CHECK(mem[0] == 0x34);
+    CHECK(mem[1] == 0x12);
+    CHECK(mem[2] == 0);
+    l14_utility::memPutLe16(mem, -2);
+    CHECK(mem[0] == 0xFE);
+    CHECK(mem[1] == 0xFF);
+}
+
+TEST_CASE("memPutLe24 and memPutLe32 write little-endian") {
+    std::uint8_t mem[4] = {0, 0, 0, 0};
+    l14_utility::memPutLe24(mem, 0xABCDEF);
+    CHECK(mem[0] == 0xEF);
+    CHECK(mem[1] == 0xCD);
+    CHECK(mem[2] == 0xAB);
+    l14_utility::memPutLe32(mem, 0x12345678);
+    CHECK(mem[0] == 0x78);
+    CHECK(mem[1] == 0x56);
+    CHECK(mem[2] == 0x34);
+    CHECK(mem[3] == 0x12);
+    l14_utility::memPutLe32(mem, -1);
+    CHECK(mem[0] == 0xFF);
+    CHECK(mem[1] == 0xFF);
+    CHECK(mem[2] == 0xFF);
+    CHECK(mem[3] == 0xFF);
+}
+
+// Independent oracle: a bit-loop popcount. The sweep covers 0..2^16-1 in
+// full plus wide samples above.
+TEST_CASE("svtNumbits matches a bit-loop oracle") {
+    auto oracle = [](unsigned int x) {
+        int n = 0;
+        while (x) {
+            n += (int)(x & 1u);
+            x >>= 1;
+        }
+        return n;
+    };
+    for (unsigned int x = 0; x < 65536u; ++x) {
+        CHECK(l14_utility::svtNumbits(x) == oracle(x));
+    }
+    const unsigned int samples[] = {0x80000000u, 0xF0F0F0F0u, 0xFFFFFFFFu, 0xAAAAAAAAu, 0x55555555u};
+    for (unsigned int x : samples) {
+        CHECK(l14_utility::svtNumbits(x) == oracle(x));
+    }
+}
+
+TEST_CASE("svtLog2fSafe is floor(log2(x|1))") {
+    CHECK(l14_utility::svtLog2fSafe(0) == 0);
+    CHECK(l14_utility::svtLog2fSafe(1) == 0);
+    CHECK(l14_utility::svtLog2fSafe(2) == 1);
+    CHECK(l14_utility::svtLog2fSafe(3) == 1);
+    CHECK(l14_utility::svtLog2fSafe(4) == 2);
+    CHECK(l14_utility::svtLog2fSafe(5) == 2);
+    CHECK(l14_utility::svtLog2fSafe(7) == 2);
+    CHECK(l14_utility::svtLog2fSafe(8) == 3);
+    CHECK(l14_utility::svtLog2fSafe(0x80000000u) == 31);
+}
+
+TEST_CASE("divideAndCeil rounds up") {
+    CHECK(l14_utility::divideAndCeil(7, 2) == 4);
+    CHECK(l14_utility::divideAndCeil(8, 2) == 4);
+    CHECK(l14_utility::divideAndCeil(1, 3) == 1);
+    CHECK(l14_utility::divideAndCeil(0, 3) == 0);
+    CHECK(l14_utility::divideAndCeil(-7, 2) == -3);
+}
+
+// FINDING: clip3eq is observationally identical to clip3 for pure inputs;
+// the reference carries both because the macros double-evaluate their
+// arguments (CLIP3 would compare the side effect twice). The <= shape is
+// ported verbatim and pinned at the boundaries.
+TEST_CASE("clip3eq clamps at both boundaries") {
+    CHECK(l14_utility::clip3eq(0, 10, -1) == 0);
+    CHECK(l14_utility::clip3eq(0, 10, 0) == 0);
+    CHECK(l14_utility::clip3eq(0, 10, 5) == 5);
+    CHECK(l14_utility::clip3eq(0, 10, 10) == 10);
+    CHECK(l14_utility::clip3eq(0, 10, 11) == 10);
+}
+
+TEST_CASE("twoDIndex folds y*stride + x") {
+    CHECK(l14_utility::twoDIndex(3, 2, 8) == 19);
+    CHECK(l14_utility::twoDIndex(0, 0, 8) == 0);
+    CHECK(l14_utility::twoDIndex(7, 3, 8) == 31);
+}
+
+TEST_CASE("max and min order two values") {
+    CHECK(l14_utility::max(3, 4) == 4);
+    CHECK(l14_utility::max(4, 3) == 4);
+    CHECK(l14_utility::max(3, 3) == 3);
+    CHECK(l14_utility::min(3, 4) == 3);
+    CHECK(l14_utility::min(-2, 7) == -2);
+}
+
+TEST_CASE("sqr squares its argument") {
+    CHECK(l14_utility::sqr(3) == 9);
+    CHECK(l14_utility::sqr(-3) == 9);
+    CHECK(l14_utility::sqr(0) == 0);
+    CHECK(l14_utility::sqr(65535ll) == 4294836225ll);
+}
+
+TEST_CASE("the min-value constants carry INT_MIN and 0") {
+    CHECK(l14_utility::kMinSignedValue == -2147483647 - 1);
+    CHECK(l14_utility::kMinUnsignedValue == 0);
+}
+
+TEST_CASE("miniGopOffset is the 5-entry ladder") {
+    CHECK(l14_utility::kMiniGopOffsetCount == 5);
+    const std::uint8_t expected[5] = {1, 3, 7, 15, 31};
+    for (int i = 0; i < 5; ++i) {
+        CHECK(l14_utility::miniGopOffset[i] == expected[i]);
+    }
+}
+
 TEST_CASE("linsolve solves a 1x1 system") {
     double a[1] = {4.0};
     double b[1] = {10.0};
