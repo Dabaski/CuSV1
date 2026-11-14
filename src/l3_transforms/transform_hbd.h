@@ -178,4 +178,7 @@ std::int16_t dcQuantQtxBd(std::int32_t qindex, int bd);
 // svt_aom_ac_quant_qtx (inv_transforms.c:3484-3499); delta folded 0
 std::int16_t acQuantQtxBd(std::int32_t qindex, int bd);
 
+// svt_aom_get_qzbin_factor (inv_transforms.c:3501-3514)
+std::int32_t qzbinFactorBd(std::int32_t q, int bd);
+
 }  // namespace transforms

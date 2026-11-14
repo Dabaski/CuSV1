@@ -1013,4 +1013,17 @@ std::int16_t acQuantQtxBd(std::int32_t qindex, int bd) {
     }
 }
 
+// svt_aom_get_qzbin_factor (inv_transforms.c:3501-3514)
+std::int32_t qzbinFactorBd(std::int32_t q, int bd) {
+    const std::int32_t quant = dcQuantQtxBd(q, bd);
+    switch (bd) {
+    case 8: return q == 0 ? 64 : (quant < 148 ? 84 : 80);
+    case 10: return q == 0 ? 64 : (quant < 592 ? 84 : 80);
+    case 12: return q == 0 ? 64 : (quant < 2368 ? 84 : 80);
+    default:
+        assert(0 && "bit_depth should be EB_EIGHT_BIT, EB_TEN_BIT or EB_TWELVE_BIT");
+        return -1;
+    }
+}
+
 }  // namespace transforms

@@ -1660,3 +1660,41 @@ TEST_CASE("dcQuantQtxBd/acQuantQtxBd clamp the qindex and return -1 off the bd s
     CHECK(transforms::dcQuantQtxBd(4, 9) == -1);
     CHECK(transforms::acQuantQtxBd(4, 16) == -1);
 }
+
+TEST_CASE("qzbinFactorBd matches svt_aom_get_qzbin_factor over all q x bd") {
+    // svt_aom_get_qzbin_factor (inv_transforms.c:3501-3514): q == 0 -> 64;
+    // else the dc-quant threshold split 148 / 592 / 2368 -> 84 / 80. The
+    // test-side oracle is the formula transcribed independently from the
+    // reference text, evaluated over the RUNTIME-PARSED dc tables (the
+    // thresholds are the only literals and each is formula-pinned here).
+    const std::string text = qh1::refText("/third_party/SVT-AV1/Source/Lib/Codec/inv_transforms.c");
+    const std::vector<int> dc8 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc10 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_10_QTX[QINDEX_RANGE] = {", 256);
+    const std::vector<int> dc12 =
+        qh1::tableNumbers(text, "static const int16_t dc_qlookup_12_QTX[QINDEX_RANGE] = {", 256);
+    int bad = 0;
+    for (int q = 0; q < 256; ++q) {
+        const int want8 = q == 0 ? 64 : (dc8[q] < 148 ? 84 : 80);
+        const int want10 = q == 0 ? 64 : (dc10[q] < 592 ? 84 : 80);
+        const int want12 = q == 0 ? 64 : (dc12[q] < 2368 ? 84 : 80);
+        if (transforms::qzbinFactorBd(q, 8) != want8) ++bad;
+        if (transforms::qzbinFactorBd(q, 10) != want10) ++bad;
+        if (transforms::qzbinFactorBd(q, 12) != want12) ++bad;
+    }
+    CHECK(bad == 0);
+    // the threshold boundaries themselves - the arms fire on BOTH sides of
+    // every threshold: bd 8 dc8[131]=146 < 148, dc8[132]=148; bd 10
+    // dc10[131]=584 < 592, dc10[132]=592; bd 12 dc12[132]=2367 < 2368,
+    // dc12[133]=2400
+    CHECK(transforms::qzbinFactorBd(131, 8) == 84);
+    CHECK(transforms::qzbinFactorBd(132, 8) == 80);
+    CHECK(transforms::qzbinFactorBd(131, 10) == 84);
+    CHECK(transforms::qzbinFactorBd(132, 10) == 80);
+    CHECK(transforms::qzbinFactorBd(132, 12) == 84);
+    CHECK(transforms::qzbinFactorBd(133, 12) == 80);
+    CHECK(transforms::qzbinFactorBd(0, 10) == 64);
+    CHECK(transforms::qzbinFactorBd(0, 12) == 64);
+    CHECK(transforms::qzbinFactorBd(4, 7) == -1);
+}
