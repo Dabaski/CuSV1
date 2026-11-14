@@ -140,4 +140,63 @@ void determineCompoundMode(CompoundModeCarrier* blockMi, MdCompType curType) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// A4M-4: the OBMC motion-mode surface.
+// ---------------------------------------------------------------------------
+
+// is_motion_variation_allowed_bsize (inter_prediction.h:378-380, verbatim).
+bool isMotionVariationAllowedBsize(BlockSize bsize) {
+    return (blockSizeWide[bsize] >= 8 && blockSizeHigh[bsize] >= 8);
+}
+
+// is_inter_singleref_mode (definitions.h:1610-1612, verbatim).
+std::int32_t isInterSinglerefMode(PredictionMode mode) {
+    return mode >= SINGLE_INTER_MODE_START && mode < SINGLE_INTER_MODE_END;
+}
+
+// is_global_mv_block (inter_prediction.h:382-388, verbatim; the CONFIG_
+// ENABLE_GLOBAL_MOTION guard is live at 1 in the pinned build, so the body
+// is kept - the l7 inter_symbols.cpp:195-198 twin).
+std::int32_t isGlobalMvBlock(PredictionMode mode, BlockSize bsize, TransformationType type) {
+    return (mode == GLOBALMV || mode == GLOBAL_GLOBALMV) && type > TRANSLATION_TT &&
+        isMotionVariationAllowedBsize(bsize);
+}
+
+// svt_aom_obmc_motion_mode_allowed (mode_decision.c:228-270, verbatim over
+// the carriers; the :232-234 CONFIG early-out is dead under the pinned
+// build and the :262 has_overlappable_candidates wall threads as the
+// neighbor-count > 0 test).
+MotionMode obmcMotionModeAllowed(const ObmcCtrlsCarrier& obmcCtrls, bool isMotionModeSwitchable,
+                                 std::int32_t forceIntegerMv, TransformationType gmTypeRf0,
+                                 std::uint32_t overlappableNeighbors, BlockSize bsize,
+                                 std::uint8_t situation, MvReferenceFrame rf1, PredictionMode mode) {
+    if (obmcCtrls.transFaceOff && !situation) {  // :235-237
+        return SIMPLE_TRANSLATION;
+    }
+    // check if should cap the max block size for obmc (:239-243)
+    if (blockSizeWide[bsize] > obmcCtrls.maxBlkSize || blockSizeHigh[bsize] > obmcCtrls.maxBlkSize) {
+        return SIMPLE_TRANSLATION;
+    }
+    if (!obmcCtrls.enabled) {  // :244-246
+        return SIMPLE_TRANSLATION;
+    }
+    if (!isMotionModeSwitchable) {  // :249-251 (frm_hdr->is_motion_mode_switchable)
+        return SIMPLE_TRANSLATION;
+    }
+    if (forceIntegerMv == 0) {  // :253-258
+        if (isGlobalMvBlock(mode, bsize, gmTypeRf0)) {
+            return SIMPLE_TRANSLATION;
+        }
+    }
+    if (isMotionVariationAllowedBsize(bsize) && isInterSinglerefMode(mode) &&
+        rf1 != INTRA_FRAME_MV && !(rf1 > INTRA_FRAME_MV)) {  // :259-260
+        if (!overlappableNeighbors) {  // :262 check_num_overlappable_neighbors
+            return SIMPLE_TRANSLATION;
+        }
+        return OBMC_CAUSAL;  // :266
+    } else {
+        return SIMPLE_TRANSLATION;  // :268
+    }
+}
+
 }  // namespace l16_rdo

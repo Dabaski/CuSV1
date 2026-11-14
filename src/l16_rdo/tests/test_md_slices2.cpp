@@ -247,3 +247,165 @@ TEST_CASE("l16_rdo determineCompoundMode writes the exact block_mi fields per ty
     CHECK(COMPOUND_WEDGE == 2);
     CHECK(COMPOUND_DIFFWTD == 3);
 }
+
+// ---------------------------------------------------------------------------
+// A4M-4: svt_aom_obmc_motion_mode_allowed (mode_decision.c:228-270) over the
+// three inline-helper carries (inter_prediction.h:378-388,
+// definitions.h:1610-1612).
+// ---------------------------------------------------------------------------
+using l16_rdo::MotionMode;
+using l16_rdo::SIMPLE_TRANSLATION;
+using l16_rdo::OBMC_CAUSAL;
+using l16_rdo::WARPED_CAUSAL;
+using l16_rdo::TransformationType;
+using l16_rdo::IDENTITY_TT;
+using l16_rdo::TRANSLATION_TT;
+using l16_rdo::ROTZOOM_TT;
+using l16_rdo::AFFINE_TT;
+using l16_rdo::ObmcCtrlsCarrier;
+using l16_rdo::obmcMotionModeAllowed;
+using l16_rdo::isMotionVariationAllowedBsize;
+using l16_rdo::isInterSinglerefMode;
+using l16_rdo::isGlobalMvBlock;
+using l16_rdo::NEARESTMV_PM;
+using l16_rdo::NEARMV_PM;
+using l16_rdo::GLOBALMV_PM;
+using l16_rdo::NEWMV_PM;
+using l16_rdo::NEAREST_NEARESTMV_PM;
+using l16_rdo::NEW_NEWMV_PM;
+using l16_rdo::GLOBAL_GLOBALMV_PM;
+using l16_rdo::DC_PRED_PM;
+
+TEST_CASE("l16_rdo obmcMotionModeAllowed walks the SIMPLE_TRANSLATION gate ladder") {
+    // The all-OBMC-allowed carrier: enabled, max_blk_size = 64, no face-off,
+    // switchable, sub-pel (force_integer_mv = 0), non-global gm type,
+    // overlappable neighbors present.
+    ObmcCtrlsCarrier obmc;
+    obmc.enabled = 1;
+    obmc.maxBlkSize = 64;
+    obmc.transFaceOff = 0;
+    const bool switchable = true;
+    const int forceInt = 0;
+    const std::uint32_t overl = 2;
+
+    // The allowed row: 16x16 unipred NEWMV, rf1 = NONE_FRAME -> OBMC_CAUSAL.
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == OBMC_CAUSAL);
+
+    // Gate 1 (:235-237): trans_face_off && situation == 0 -> SIMPLE even in
+    // the all-allowed carrier.
+    obmc.transFaceOff = 1;
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == SIMPLE_TRANSLATION);
+    // ...but situation 1 bypasses the face-off gate.
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_16X16, 1, NONE_FRAME_MV,
+                                NEWMV_PM) == OBMC_CAUSAL);
+    obmc.transFaceOff = 0;
+
+    // Gate 2 (:240-243): the max_blk_size cap, on both axes. Shapes whose
+    // wide or high EXCEEDS 64 are capped; 16x64/64x16 (exactly 64 in one
+    // axis) are not (the gate is strictly >).
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_128X128, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == SIMPLE_TRANSLATION);
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_64X128, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == SIMPLE_TRANSLATION);
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_128X64, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == SIMPLE_TRANSLATION);
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_16X64, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == OBMC_CAUSAL);
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_64X16, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == OBMC_CAUSAL);
+
+    // Gate 3 (:244-246): obmc_ctrls.enabled == 0.
+    obmc.enabled = 0;
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == SIMPLE_TRANSLATION);
+    obmc.enabled = 1;
+
+    // Gate 4 (:249-251): !is_motion_mode_switchable.
+    CHECK(obmcMotionModeAllowed(obmc, false, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == SIMPLE_TRANSLATION);
+
+    // Gate 5 (:253-258): force_integer_mv == 0 and the candidate is a
+    // GLOBALMV-mode candidate with a > TRANSLATION gm type.
+    CHECK(obmcMotionModeAllowed(obmc, switchable, 0, ROTZOOM_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                GLOBALMV_PM) == SIMPLE_TRANSLATION);
+    CHECK(obmcMotionModeAllowed(obmc, switchable, 0, AFFINE_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                GLOBAL_GLOBALMV_PM) == SIMPLE_TRANSLATION);
+    // The IDENTITY / TRANSLATION gm types do not trip the gate.
+    CHECK(obmcMotionModeAllowed(obmc, switchable, 0, IDENTITY_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                GLOBALMV_PM) == OBMC_CAUSAL);
+    CHECK(obmcMotionModeAllowed(obmc, switchable, 0, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                GLOBALMV_PM) == OBMC_CAUSAL);
+    // force_integer_mv == 1 skips the gm gate entirely: GLOBALMV at AFFINE
+    // proceeds.
+    CHECK(obmcMotionModeAllowed(obmc, switchable, 1, AFFINE_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                GLOBALMV_PM) == OBMC_CAUSAL);
+
+    // Gate 6 (:259-269): the bsize/mode/rf1/overlappable conjunction.
+    // Non-variation-allowed bsize (4x4).
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_4X4, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == SIMPLE_TRANSLATION);
+    // Compound mode (not single-ref).
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, ALTREF_FRAME_MV,
+                                NEW_NEWMV_PM) == SIMPLE_TRANSLATION);
+    // rf1 = INTRA_FRAME (0) fails the !(rf1 > INTRA_FRAME) arm.
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_16X16, 0, INTRA_FRAME_MV,
+                                NEWMV_PM) == SIMPLE_TRANSLATION);
+    // No overlappable neighbors.
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, 0,
+                                l16_rdo::BLOCK_16X16, 0, NONE_FRAME_MV,
+                                NEWMV_PM) == SIMPLE_TRANSLATION);
+    // NEARESTMV (single-ref) is allowed too.
+    CHECK(obmcMotionModeAllowed(obmc, switchable, forceInt, TRANSLATION_TT, overl,
+                                l16_rdo::BLOCK_8X8, 0, NONE_FRAME_MV,
+                                NEARESTMV_PM) == OBMC_CAUSAL);
+}
+
+TEST_CASE("l16_rdo the three obmc helper carries pin their domains") {
+    // is_motion_variation_allowed_bsize (inter_prediction.h:378-380): both
+    // axes >= 8 - enumerate all 22 bsizes against blockSizeWide/High.
+    for (int b = 0; b < l16_rdo::BLOCK_SIZES_ALL; ++b) {
+        const l16_rdo::BlockSize bs = (l16_rdo::BlockSize)b;
+        const int want = (l16_rdo::blockSizeWide[bs] >= 8 && l16_rdo::blockSizeHigh[bs] >= 8) ? 1 : 0;
+        CHECK((int)isMotionVariationAllowedBsize(bs) == want);
+    }
+    // is_inter_singleref_mode (definitions.h:1610-1612): NEARESTMV(13) ..
+    // NEAREST_NEARESTMV(17) exclusive; check both neighbors and both ends.
+    CHECK(isInterSinglerefMode(DC_PRED_PM) == 0);
+    CHECK(isInterSinglerefMode(NEARESTMV_PM) == 1);
+    CHECK(isInterSinglerefMode(NEARMV_PM) == 1);
+    CHECK(isInterSinglerefMode(NEWMV_PM) == 1);
+    CHECK(isInterSinglerefMode(NEAREST_NEARESTMV_PM) == 0);
+    CHECK(isInterSinglerefMode(NEW_NEWMV_PM) == 0);
+    // is_global_mv_block (inter_prediction.h:382-388): the GLOBALMV/GLOBAL_
+    // GLOBALMV + type > TRANSLATION + bsize conjunction. CONFIG_ENABLE_
+    // GLOBAL_MOTION is live (= 1), so the guard body is kept.
+    CHECK(isGlobalMvBlock(GLOBALMV_PM, l16_rdo::BLOCK_16X16, ROTZOOM_TT) == 1);
+    CHECK(isGlobalMvBlock(GLOBAL_GLOBALMV_PM, l16_rdo::BLOCK_16X16, AFFINE_TT) == 1);
+    CHECK(isGlobalMvBlock(NEWMV_PM, l16_rdo::BLOCK_16X16, ROTZOOM_TT) == 0);
+    CHECK(isGlobalMvBlock(GLOBALMV_PM, l16_rdo::BLOCK_16X16, TRANSLATION_TT) == 0);
+    CHECK(isGlobalMvBlock(GLOBALMV_PM, l16_rdo::BLOCK_16X16, IDENTITY_TT) == 0);
+    CHECK(isGlobalMvBlock(GLOBALMV_PM, l16_rdo::BLOCK_4X4, ROTZOOM_TT) == 0);
+    CHECK(isGlobalMvBlock(GLOBALMV_PM, l16_rdo::BLOCK_8X4, ROTZOOM_TT) == 0);
+    // is_motion_variation_allowed_bsize has NO upper bound: 64x64 passes.
+    CHECK(isGlobalMvBlock(GLOBALMV_PM, l16_rdo::BLOCK_64X64, ROTZOOM_TT) == 1);
+}

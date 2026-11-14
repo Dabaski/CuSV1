@@ -159,4 +159,68 @@ struct CompoundModeCarrier {
 // flag; the SVT_ERROR/assert(0) default arm is NDEBUG-dropped convention.
 void determineCompoundMode(CompoundModeCarrier* blockMi, MdCompType curType);
 
+// ---------------------------------------------------------------------------
+// A4M-4: the OBMC motion-mode surface.
+// ---------------------------------------------------------------------------
+
+// TransformationType (definitions.h:1740-1747, verbatim order). The
+// _TT suffix avoids the landed rate_est.h macro space.
+enum TransformationType {
+    IDENTITY_TT = 0,
+    TRANSLATION_TT = 1,
+    ROTZOOM_TT = 2,
+    AFFINE_TT = 3,
+    TRANS_TYPES_TT = 4,
+};
+
+// PredictionMode suffix aliases for the md_slices2 tests/surfaces (the
+// landed rate_est.h enum PredictionMode owns the plain names; the
+// inter-mode constants are the same values).
+constexpr PredictionMode DC_PRED_PM = DC_PRED;
+constexpr PredictionMode NEARESTMV_PM = NEARESTMV;
+constexpr PredictionMode NEARMV_PM = NEARMV;
+constexpr PredictionMode GLOBALMV_PM = GLOBALMV;
+constexpr PredictionMode NEWMV_PM = NEWMV;
+constexpr PredictionMode NEAREST_NEARESTMV_PM = NEAREST_NEARESTMV;
+constexpr PredictionMode NEAR_NEARMV_PM = NEAR_NEARMV;
+constexpr PredictionMode NEAREST_NEWMV_PM = NEAREST_NEWMV;
+constexpr PredictionMode NEW_NEARESTMV_PM = NEW_NEARESTMV;
+constexpr PredictionMode NEAR_NEWMV_PM = NEAR_NEWMV;
+constexpr PredictionMode NEW_NEARMV_PM = NEW_NEARMV;
+constexpr PredictionMode GLOBAL_GLOBALMV_PM = GLOBAL_GLOBALMV;
+constexpr PredictionMode NEW_NEWMV_PM = NEW_NEWMV;
+constexpr PredictionMode MB_MODE_COUNT_PM = MB_MODE_COUNT;
+
+// is_motion_variation_allowed_bsize (inter_prediction.h:378-380).
+bool isMotionVariationAllowedBsize(BlockSize bsize);
+
+// is_inter_singleref_mode (definitions.h:1610-1612).
+std::int32_t isInterSinglerefMode(PredictionMode mode);
+
+// is_global_mv_block (inter_prediction.h:382-388). CONFIG_ENABLE_GLOBAL_
+// MOTION is live (= 1, the non-RTC EbConfigMacros block), so the guard body
+// is kept (the l7 inter_symbols.cpp:195-198 twin).
+std::int32_t isGlobalMvBlock(PredictionMode mode, BlockSize bsize, TransformationType type);
+
+// ObmcControls (md_process.h:123-135), the consumed fields only.
+struct ObmcCtrlsCarrier {
+    std::uint8_t enabled;        // :124
+    std::uint8_t maxBlkSize;     // :128 max_blk_size (test cap)
+    std::uint8_t transFaceOff;   // :133 trans_face_off
+};
+
+// svt_aom_obmc_motion_mode_allowed (mode_decision.c:228-270). The walls
+// thread per the campaign pattern: obmc_ctrls as the carrier; the frm_hdr
+// pair (is_motion_mode_switchable, force_integer_mv) as flags; the
+// global-motion wmtype for rf0 as the enum (the reference's rf0 only selects
+// the global_motion slot - the slot index itself is dropped, named); the
+// blk_ptr wall as the overlappable-neighbor count
+// (has_overlappable_candidates == neighbors > 0). The !CONFIG_ENABLE_OBMC &&
+// !CONFIG_ENABLE_WARP early-out (:232-234) is DEAD under the pinned build
+// (both = 1) and is not ported.
+MotionMode obmcMotionModeAllowed(const ObmcCtrlsCarrier& obmcCtrls, bool isMotionModeSwitchable,
+                                 std::int32_t forceIntegerMv, TransformationType gmTypeRf0,
+                                 std::uint32_t overlappableNeighbors, BlockSize bsize,
+                                 std::uint8_t situation, MvReferenceFrame rf1, PredictionMode mode);
+
 }  // namespace l16_rdo
