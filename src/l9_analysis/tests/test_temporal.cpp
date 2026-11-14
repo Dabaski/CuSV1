@@ -2042,3 +2042,259 @@ TEST_CASE("l9 temporal tfUse64x64Pred oracle + threshold bands + wraparound") {
         }
     }
 }
+
+// A11D-T4: the reference's fn_ptr->vf_hbd_10 for 32x32/32x16 resolves to
+// svt_aom_highbd_10_variance32x32_c (svt_psnr.c:155-:163 the HIGHBD_VAR
+// instances). The reference's `highbd_10_variance` (:146-:153) and
+// `highbd_variance64` (:125-:143) are file-local there; the reference's
+// `svt_psnr.c` is in the A13 file set - NOT the A11 brief's port list -
+// the reference's `svt_psnr.c` HIGHBD_VAR instances are the dependency
+// the reference's `convert_64x64_info_to_32x32_info` hbd branch calls.
+namespace {
+std::uint32_t highbd10Var32x32Oracle(const std::uint16_t* src, int aStride,
+                                     const std::uint16_t* refB, int bStride,
+                                     std::uint32_t* sseOut) {
+    // The reference's HIGHBD_VAR(32, 32) instance arithmetic: ROUND_POWER_OF_TWO
+    // dispatch shifts (:146-:153) and the reference's HIGHBD_VAR macro
+    // (:155-:163) - the reference's `svt_psnr.c` (:125-:163).
+    std::uint64_t sse_long = 0;
+    std::int64_t sum_long = 0;
+    for (std::int32_t i = 0; i < 32; ++i) {
+        std::int32_t lsum = 0;
+        for (std::int32_t j = 0; j < 32; ++j) {
+            const std::int32_t diff = src[i * aStride + j] - refB[i * bStride + j];
+            lsum += diff;
+            sse_long += (std::uint32_t)(diff * diff);
+        }
+        sum_long += lsum;
+    }
+    *sseOut = (std::uint32_t)((sse_long + 8) >> 4);
+    const std::int32_t sum = (std::int32_t)((sum_long + 2) >> 2);
+    const std::int64_t var = (std::int64_t)(*sseOut) - ((std::int64_t)sum * sum) / 1024;
+    return (var >= 0) ? (std::uint32_t)var : 0;
+}
+}  // namespace
+
+TEST_CASE("l9 temporal convert64x64InfoTo32x32Info 8-bit") {
+    // A11D-T4: convert_64x64_info_to_32x32_info (temporal_filtering.c:2509-2569).
+    // The four 32x32 sub-blocks of the 64x64 luma block; each block-error =
+    // fn_ptr->vf(pred, stride << shift, src, stride << shift, &sse) << shift.
+    // shift = 0 -> variance32x32 (the landed instance); shift != 0 ->
+    // variance32x16 (the 32x16 shape the reference's BLOCK_32X16 instance
+    // reads). The 8-bit branch resolves to the landed analysis:: variance
+    // instances.
+    using analysis::temporal::convert64x64InfoTo32x32Info;
+    constexpr std::uint32_t kStride = 64;
+    std::vector<std::uint8_t> pred(kStride * kStride);
+    std::vector<std::uint8_t> src(kStride * kStride);
+    for (std::uint32_t i = 0; i < pred.size(); ++i) {
+        pred[i] = (std::uint8_t)(i * 3 + 7);
+        src[i] = (std::uint8_t)(i * 3 + 7 + 5);
+    }
+    const uint8_t* pred8[3] = {pred.data(), nullptr, nullptr};
+    const uint8_t* src8[3] = {src.data(), nullptr, nullptr};
+    const uint32_t stridePred[3] = {kStride, kStride, kStride};
+    const uint32_t strideSrc[3] = {kStride, kStride, kStride};
+
+    // Poison-filled carriers: every written field asserted, the untouched
+    // poison asserted.
+    std::int16_t mv32x32X[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    std::int16_t mv32x32Y[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    int splitFlag32x32[4] = {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A};
+    int splitFlag16x16[4][4] = {{0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A}};
+    std::uint64_t blockError[4] = {0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF};
+
+    convert64x64InfoTo32x32Info(0, 0x1234, 0x5678, mv32x32X, mv32x32Y,
+                                splitFlag32x32, &splitFlag16x16[0][0],
+                                blockError, pred8, nullptr, stridePred,
+                                src8, nullptr, strideSrc, false);
+
+    CHECK_EQ(mv32x32X[0], 0x1234);
+    CHECK_EQ(mv32x32X[1], 0x1234);
+    CHECK_EQ(mv32x32X[2], 0x1234);
+    CHECK_EQ(mv32x32X[3], 0x1234);
+    CHECK_EQ(mv32x32Y[0], 0x5678);
+    CHECK_EQ(mv32x32Y[1], 0x5678);
+    CHECK_EQ(mv32x32Y[2], 0x5678);
+    CHECK_EQ(mv32x32Y[3], 0x5678);
+    for (int i = 0; i < 4; ++i) {
+        CHECK_EQ(splitFlag32x32[i], 0);
+    }
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            CHECK_EQ(splitFlag16x16[i][j], 0);
+        }
+    }
+    // The four 32x32 block errors: each sub-block's variance32x32 shifted
+    // by shift = 0 (the reference's :2541-:2554).
+    for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            std::uint32_t expect = 0;
+            std::uint32_t sum = 0;
+            for (std::uint32_t i = 0; i < 32; ++i) {
+                for (std::uint32_t j = 0; j < 32; ++j) {
+                    const int diff = (int)src[(row * 32 + i) * kStride + col * 32 + j] -
+                                     (int)pred[(row * 32 + i) * kStride + col * 32 + j];
+                    sum += diff;
+                    expect += diff * diff;
+                }
+            }
+            const std::uint32_t var = expect - sum * sum / (32 * 32);
+            CHECK_EQ(blockError[row * 2 + col], (std::uint64_t)var);
+        }
+    }
+}
+
+TEST_CASE("l9 temporal convert64x64InfoTo32x32Info shift1") {
+    // A11D-T4: the reference's sub_sampling_shift != 0 branch - the
+    // BLOCK_32X16 instance (the reference's :2541-:2542) with the strides
+    // doubled (the reference's :2543-:2545) and the distortion shifted
+    // (the reference's :2546-:2547).
+    using analysis::temporal::convert64x64InfoTo32x32Info;
+    constexpr std::uint32_t kStride = 64;
+    std::vector<std::uint8_t> pred(kStride * kStride);
+    std::vector<std::uint8_t> src(kStride * kStride);
+    for (std::uint32_t i = 0; i < pred.size(); ++i) {
+        pred[i] = (std::uint8_t)(i * 3 + 7);
+        src[i] = (std::uint8_t)(i * 3 + 7 + 5);
+    }
+    const uint8_t* pred8[3] = {pred.data(), nullptr, nullptr};
+    const uint8_t* src8[3] = {src.data(), nullptr, nullptr};
+    const uint32_t stridePred[3] = {kStride, kStride, kStride};
+    const uint32_t strideSrc[3] = {kStride, kStride, kStride};
+
+    std::int16_t mv32x32X[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    std::int16_t mv32x32Y[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    int splitFlag32x32[4] = {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A};
+    int splitFlag16x16[4][4] = {{0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A}};
+    std::uint64_t blockError[4] = {0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF};
+
+    convert64x64InfoTo32x32Info(1, 0x1234, 0x5678, mv32x32X, mv32x32Y,
+                                splitFlag32x32, &splitFlag16x16[0][0],
+                                blockError, pred8, nullptr, stridePred,
+                                src8, nullptr, strideSrc, false);
+
+    for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            // The reference's 32x16 shape at the sub-block origin with the
+            // strides doubled: 32 wide x 16 rows (the even rows).
+            std::uint32_t expect = 0;
+            std::uint32_t sum = 0;
+            for (std::uint32_t i = 0; i < 16; ++i) {
+                for (std::uint32_t j = 0; j < 32; ++j) {
+                    const int diff = (int)src[(row * 32 + 2 * i) * kStride + col * 32 + j] -
+                                     (int)pred[(row * 32 + 2 * i) * kStride + col * 32 + j];
+                    sum += diff;
+                    expect += diff * diff;
+                }
+            }
+            const std::uint32_t var = expect - sum * sum / (32 * 16);
+            CHECK_EQ(blockError[row * 2 + col], (std::uint64_t)(var << 1));
+        }
+    }
+}
+
+TEST_CASE("l9 temporal highbd10Var instances") {
+    // A11D-T4: the reference's HIGHBD_VAR instances (svt_psnr.c:155-:172,
+    // the HIGHBD_VAR(32, 32) and HIGHBD_VAR(32, 16) instances the
+    // reference's convert_64x64_info_to_32x32_info hbd branch calls).
+    // The reference's `highbd_10_variance` (:146-:153) shifts the
+    // uint64 sse / int64 sum accumulation core by the ROUND_POWER_OF_TWO
+    // dispatch shifts: *sse = ROUND_POWER_OF_TWO(sse_long, 4) and
+    // *sum = ROUND_POWER_OF_TWO(sum_long, 2) (definitions.h:457).
+    using analysis::temporal::highbd10Var32x32;
+    using analysis::temporal::highbd10Var32x16;
+
+    // The 32x32 case: the oracle cross-check over the poison-carrier.
+    constexpr int kStride = 40;
+    std::vector<std::uint16_t> a(kStride * 40);
+    std::vector<std::uint16_t> b(kStride * 40);
+    for (std::uint32_t i = 0; i < a.size(); ++i) {
+        a[i] = (std::uint16_t)(i * 3 + 7);
+        b[i] = (std::uint16_t)(i * 3 + 7 + 5);
+    }
+    std::uint32_t sseOut = 0;
+    std::uint32_t sseExpect = 0;
+    std::uint32_t expect = highbd10Var32x32Oracle(a.data(), kStride, b.data(), kStride, &sseExpect);
+    std::uint32_t got = highbd10Var32x32(a.data(), kStride, b.data(), kStride, &sseOut);
+    CHECK_EQ(got, expect);
+    CHECK_EQ(sseOut, sseExpect);
+
+    // The 32x16 case: the reference's HIGHBD_VAR(32, 16) instance -
+    // the same core, the same ROUND_POWER_OF_TWO dispatch shifts, the
+    // 32x16 shape's variance (the reference's HIGHBD_VAR(32, 16) at
+    // svt_psnr.c:172).
+    std::uint64_t sseLong = 0;
+    std::int64_t sumLong = 0;
+    for (std::int32_t i = 0; i < 16; ++i) {
+        std::int32_t lsum = 0;
+        for (std::int32_t j = 0; j < 32; ++j) {
+            const std::int32_t diff = a[i * kStride + j] - b[i * kStride + j];
+            lsum += diff;
+            sseLong += (std::uint32_t)(diff * diff);
+        }
+        sumLong += lsum;
+    }
+    const std::uint32_t sse16 = (std::uint32_t)((sseLong + 8) >> 4);
+    const std::int32_t sum16 = (std::int32_t)((sumLong + 2) >> 2);
+    const std::int64_t var16 = (std::int64_t)sse16 - ((std::int64_t)sum16 * sum16) / 512;
+    const std::uint32_t expect16 = (var16 >= 0) ? (std::uint32_t)var16 : 0;
+    got = highbd10Var32x16(a.data(), kStride, b.data(), kStride, &sseOut);
+    CHECK_EQ(got, expect16);
+    CHECK_EQ(sseOut, sse16);
+}
+
+TEST_CASE("l9 temporal convert64x64InfoTo32x32Info hbd") {
+    // A11D-T4: the reference's hbd branch (the reference's :2549-:2567).
+    // The reference's vf_hbd_10 = the HIGHBD_VAR instances (svt_psnr.c:155-:172).
+    using analysis::temporal::convert64x64InfoTo32x32Info;
+    constexpr std::uint32_t kStride = 64;
+    std::vector<std::uint16_t> pred(kStride * kStride);
+    std::vector<std::uint16_t> src(kStride * kStride);
+    for (std::uint32_t i = 0; i < pred.size(); ++i) {
+        pred[i] = (std::uint16_t)(i * 3 + 7);
+        src[i] = (std::uint16_t)(i * 3 + 7 + 5);
+    }
+    const uint16_t* pred16[3] = {pred.data(), nullptr, nullptr};
+    const uint16_t* src16[3] = {src.data(), nullptr, nullptr};
+    const uint32_t stridePred[3] = {kStride, kStride, kStride};
+    const uint32_t strideSrc[3] = {kStride, kStride, kStride};
+
+    std::int16_t mv32x32X[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    std::int16_t mv32x32Y[4] = {0x7A7A, 0x7A7A, 0x7A7A, 0x7A7A};
+    int splitFlag32x32[4] = {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A};
+    int splitFlag16x16[4][4] = {{0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A},
+                                {0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A, 0x3A3A3A3A}};
+    std::uint64_t blockError[4] = {0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF};
+
+    convert64x64InfoTo32x32Info(0, 0x1234, 0x5678, mv32x32X, mv32x32Y,
+                                splitFlag32x32, &splitFlag16x16[0][0],
+                                blockError, nullptr, pred16, stridePred,
+                                nullptr, src16, strideSrc, true);
+
+    // The four 32x32 block errors: each sub-block's HIGHBD_VAR(32, 32)
+    // shifted by shift = 0 (the reference's :2549-:2567).
+    for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            std::uint64_t sseLong = 0;
+            std::int64_t sumLong = 0;
+            for (std::uint32_t i = 0; i < 32; ++i) {
+                for (std::uint32_t j = 0; j < 32; ++j) {
+                    const int diff = (int)src[(row * 32 + i) * kStride + col * 32 + j] -
+                                     (int)pred[(row * 32 + i) * kStride + col * 32 + j];
+                    sumLong += diff;
+                    sseLong += (std::uint32_t)(diff * diff);
+                }
+            }
+            const std::uint32_t sse = (std::uint32_t)((sseLong + 8) >> 4);
+            const std::int32_t sum = (std::int32_t)((sumLong + 2) >> 2);
+            const std::int64_t var = (std::int64_t)sse - ((std::int64_t)sum * sum) / 1024;
+            const std::uint32_t varU = (var >= 0) ? (std::uint32_t)var : 0;
+            CHECK_EQ(blockError[row * 2 + col], (std::uint64_t)varU);
+        }
+    }
+}

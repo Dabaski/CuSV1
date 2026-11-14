@@ -69,6 +69,56 @@ void getFinalFilteredPixels(bool tfChroma, bool isHighbd,
 std::int8_t tfUse64x64Pred(const std::uint32_t* pBestSad32x32, std::uint32_t pBestSad64x64,
                            std::uint8_t tfUsePred64x64OnlyTh);
 
+// A11D-T4: 1:1 port of convert_64x64_info_to_32x32_info
+// (temporal_filtering.c:2509-2569). The four 32x32 sub-blocks of the
+// 64x64 luma block; each block-error = fn_ptr->vf(pred, stride << shift,
+// src, stride << shift, &sse) << shift. The consumed MeContext fields
+// (tf_32x32_mv_x/y[4], tf_32x32_block_split_flag[4],
+// tf_16x16_block_split_flag[4][4], tf_32x32_block_error[4], idx_32x32)
+// are threaded as pointer arrays (the TF1 carrier pattern); the
+// pcs->tf_ctrls.sub_sampling_shift is threaded as the subSamplingShift
+// parameter. The 8-bit branch resolves to the landed analysis:: variance
+// instances; the hbd branch resolves to the HIGHBD_VAR instances
+// (svt_psnr.c:155-:172, the svt_psnr.c HIGHBD_VAR instances are the
+// A13 file set - NOT the A11 brief's port list - the reference's
+// svt_psnr.c HIGHBD_VAR instances are the dependency the reference's
+// convert_64x64_info_to_32x32_info hbd branch calls).
+void convert64x64InfoTo32x32Info(
+    std::uint8_t subSamplingShift,
+    std::int16_t tf64x64MvX, std::int16_t tf64x64MvY,
+    std::int16_t* tf32x32MvX,          // [4] out
+    std::int16_t* tf32x32MvY,          // [4] out
+    int* tf32x32BlockSplitFlag,        // [4] out = 0
+    int* tf16x16BlockSplitFlag,        // [4][4] out = 0 (memset 16 ints)
+    std::uint64_t* tf32x32BlockError,  // [4] out
+    const uint8_t* const* pred8,       // [PLANE_Y] readable (may be nullptr if highbd)
+    const uint16_t* const* pred16,     // [PLANE_Y] readable (may be nullptr if 8-bit)
+    const uint32_t* stridePred,        // [PLANE_Y]
+    const uint8_t* const* src8,        // [PLANE_Y]
+    const uint16_t* const* src16,      // [PLANE_Y]
+    const uint32_t* strideSrc,         // [PLANE_Y]
+    bool isHighbd);
+
+// A11D-T4: the reference's svt_psnr.c HIGHBD_VAR instances (svt_psnr.c:125-:172)
+// are the reference's fn_ptr->vf_hbd_10 dispatch targets - the A13 file set,
+// NOT the A11 brief's port list - the reference's svt_psnr.c HIGHBD_VAR
+// instances are the dependency the reference's convert_64x64_info_to_32x32_info
+// hbd branch calls. The reference's highbd_variance64 (:125-:143) is the uint64
+// sse / int64 sum accumulation core; the reference's highbd_10_variance
+// (:146-:153) is the ROUND_POWER_OF_TWO dispatch (definitions.h:457) shift
+// *sse = (sse_long + 8) >> 4 and *sum = (sum_long + 2) >> 2; the reference's
+// HIGHBD_VAR(W, H) macro (:155-:163) is the instance body: var = sse -
+// sum*sum/(W*H), the clamp at 0. The CONVERT_TO_SHORTPTR staging is not
+// present in this port (the port takes uint16 directly, the CS1/LR1
+// precedent). Only the two instances the 32x32/32x16 branch consumes are
+// ported (the T4 slice's dependency).
+std::uint32_t highbd10Var32x32(const std::uint16_t* a, int aStride,
+                               const std::uint16_t* b, int bStride,
+                               std::uint32_t* sse);
+std::uint32_t highbd10Var32x16(const std::uint16_t* a, int aStride,
+                               const std::uint16_t* b, int bStride,
+                               std::uint32_t* sse);
+
 // 1:1 port of svt_aom_noise_log1p_fp16 (temporal_filtering.c:568-586).
 int32_t noiseLog1pFp16(int32_t noiseLevelFp16);
 

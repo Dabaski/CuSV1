@@ -1,5 +1,7 @@
 #include "temporal_filter.h"
 
+#include "analysis.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>
@@ -982,6 +984,144 @@ std::int8_t tfUse64x64Pred(const std::uint32_t* pBestSad32x32, std::uint32_t pBe
         return 1;
     } else {
         return 0;
+    }
+}
+
+// A11D-T4: the reference's svt_psnr.c HIGHBD_VAR instances are the fn_ptr->vf_hbd_10
+// dispatch targets - the A13 file set, NOT the A11 brief's port list - the
+// reference's svt_psnr.c HIGHBD_VAR instances are the dependency the reference's
+// convert_64x64_info_to_32x32_info hbd branch calls. The reference's
+// highbd_variance64 (svt_psnr.c:125-:143) is the uint64 sse / int64 sum
+// accumulation core; the reference's highbd_10_variance (:146-:153) is the
+// ROUND_POWER_OF_TWO dispatch (definitions.h:457) shift *sse = (sse_long + 8) >> 4
+// and *sum = (sum_long + 2) >> 2; the reference's HIGHBD_VAR(W, H) macro
+// (:155-:163) is the instance body: var = sse - sum*sum/(W*H), the clamp at 0.
+// The CONVERT_TO_SHORTPTR staging is not present in this port (the port takes
+// uint16 directly, the CS1/LR1 precedent).
+namespace {
+void highbd10VarCore(const std::uint16_t* a, int aStride, const std::uint16_t* b, int bStride,
+                     int w, int h, std::uint64_t* sseLong, std::int64_t* sumLong) {
+    std::int64_t tsum = 0;
+    std::uint64_t tsse = 0;
+    for (int i = 0; i < h; ++i) {
+        std::int32_t lsum = 0;
+        for (int j = 0; j < w; ++j) {
+            const int diff = a[j] - b[j];
+            lsum += diff;
+            tsse += (std::uint32_t)(diff * diff);
+        }
+        tsum += lsum;
+        a += aStride;
+        b += bStride;
+    }
+    *sseLong = tsse;
+    *sumLong = tsum;
+}
+}  // namespace
+
+std::uint32_t highbd10Var32x32(const std::uint16_t* a, int aStride, const std::uint16_t* b, int bStride,
+                               std::uint32_t* sse) {
+    std::uint64_t sseLong = 0;
+    std::int64_t sumLong = 0;
+    highbd10VarCore(a, aStride, b, bStride, 32, 32, &sseLong, &sumLong);
+    *sse = (std::uint32_t)((sseLong + 8) >> 4);
+    const std::int32_t sum = (std::int32_t)((sumLong + 2) >> 2);
+    const std::int64_t var = (std::int64_t)(*sse) - ((std::int64_t)sum * sum) / (32 * 32);
+    return (var >= 0) ? (std::uint32_t)var : 0;
+}
+
+std::uint32_t highbd10Var32x16(const std::uint16_t* a, int aStride, const std::uint16_t* b, int bStride,
+                               std::uint32_t* sse) {
+    std::uint64_t sseLong = 0;
+    std::int64_t sumLong = 0;
+    highbd10VarCore(a, aStride, b, bStride, 32, 16, &sseLong, &sumLong);
+    *sse = (std::uint32_t)((sseLong + 8) >> 4);
+    const std::int32_t sum = (std::int32_t)((sumLong + 2) >> 2);
+    const std::int64_t var = (std::int64_t)(*sse) - ((std::int64_t)sum * sum) / (32 * 16);
+    return (var >= 0) ? (std::uint32_t)var : 0;
+}
+
+// A11D-T4: 1:1 port of convert_64x64_info_to_32x32_info
+// (temporal_filtering.c:2509-2569). The four 32x32 sub-blocks of the
+// 64x64 luma block; each block-error = fn_ptr->vf(pred, stride << shift,
+// src, stride << shift, &sse) << shift. The consumed MeContext fields
+// (tf_32x32_mv_x/y[4], tf_32x32_block_split_flag[4],
+// tf_16x16_block_split_flag[4][4], tf_32x32_block_error[4], idx_32x32)
+// are threaded as pointer arrays (the TF1 carrier pattern); the
+// pcs->tf_ctrls.sub_sampling_shift is threaded as the subSamplingShift
+// parameter. The 8-bit branch resolves to the landed analysis:: variance
+// instances; the hbd branch resolves to the HIGHBD_VAR instances.
+void convert64x64InfoTo32x32Info(
+    std::uint8_t subSamplingShift,
+    std::int16_t tf64x64MvX, std::int16_t tf64x64MvY,
+    std::int16_t* tf32x32MvX,          // [4] out
+    std::int16_t* tf32x32MvY,          // [4] out
+    int* tf32x32BlockSplitFlag,        // [4] out = 0
+    int* tf16x16BlockSplitFlag,        // [4][4] out = 0 (memset 16 ints)
+    std::uint64_t* tf32x32BlockError,  // [4] out
+    const uint8_t* const* pred8,       // [PLANE_Y] readable (may be nullptr if highbd)
+    const uint16_t* const* pred16,     // [PLANE_Y] readable (may be nullptr if 8-bit)
+    const uint32_t* stridePred,        // [PLANE_Y]
+    const uint8_t* const* src8,        // [PLANE_Y]
+    const uint16_t* const* src16,      // [PLANE_Y]
+    const uint32_t* strideSrc,         // [PLANE_Y]
+    bool isHighbd) {
+    // The reference's four mv copies (the reference's :2513-:2522).
+    for (int i = 0; i < 4; ++i) {
+        tf32x32MvX[i] = tf64x64MvX;
+        tf32x32MvY[i] = tf64x64MvY;
+    }
+    // The reference's :2524-:2527.
+    for (int i = 0; i < 4; ++i) {
+        tf32x32BlockSplitFlag[i] = 0;
+    }
+    // The reference's memset(ctx->tf_16x16_block_split_flag, 0,
+    // sizeof(ctx->tf_16x16_block_split_flag[0][0]) * 4 * 4) - 16 ints.
+    for (int i = 0; i < 16; ++i) {
+        tf16x16BlockSplitFlag[i] = 0;
+    }
+    // The reference's "Update the 32x32 block-error" loop (:2530-:2568).
+    constexpr std::uint32_t kPlaneY = 0;
+    constexpr std::uint32_t kBlockSize = 32;
+    for (int blockRow = 0; blockRow < 2; ++blockRow) {
+        for (int blockCol = 0; blockCol < 2; ++blockCol) {
+            std::uint64_t distortion;
+            const std::uint32_t idx32x32 = blockCol + (blockRow << 1);
+            if (!isHighbd) {
+                const std::uint8_t* predYPtr =
+                    pred8[kPlaneY] + kBlockSize * blockRow * stridePred[kPlaneY] + kBlockSize * blockCol;
+                const std::uint8_t* srcYPtr =
+                    src8[kPlaneY] + kBlockSize * blockRow * strideSrc[kPlaneY] + kBlockSize * blockCol;
+                std::uint32_t sse = 0;
+                if (subSamplingShift) {
+                    distortion = (std::uint64_t)analysis::variance32x16(
+                                     predYPtr, (int)(stridePred[kPlaneY] << subSamplingShift),
+                                     srcYPtr, (int)(strideSrc[kPlaneY] << subSamplingShift), &sse)
+                                 << subSamplingShift;
+                } else {
+                    distortion = (std::uint64_t)analysis::variance32x32(
+                                     predYPtr, (int)stridePred[kPlaneY], srcYPtr, (int)strideSrc[kPlaneY], &sse)
+                                 << subSamplingShift;
+                }
+            } else {
+                const std::uint16_t* predYPtr =
+                    pred16[kPlaneY] + kBlockSize * blockRow * stridePred[kPlaneY] + kBlockSize * blockCol;
+                const std::uint16_t* srcYPtr =
+                    src16[kPlaneY] + kBlockSize * blockRow * strideSrc[kPlaneY] + kBlockSize * blockCol;
+                std::uint32_t sse = 0;
+                if (subSamplingShift) {
+                    distortion = (std::uint64_t)highbd10Var32x16(
+                                     predYPtr, (int)(stridePred[kPlaneY] << subSamplingShift),
+                                     srcYPtr, (int)(strideSrc[kPlaneY] << subSamplingShift), &sse)
+                                 << subSamplingShift;
+                } else {
+                    distortion = (std::uint64_t)highbd10Var32x32(
+                                     predYPtr, (int)stridePred[kPlaneY], srcYPtr, (int)strideSrc[kPlaneY], &sse)
+                                 << subSamplingShift;
+                }
+            }
+            tf32x32BlockError[idx32x32] = distortion;
+        }
     }
 }
 
