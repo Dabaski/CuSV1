@@ -1496,3 +1496,246 @@ TEST_CASE("copyStatisticsToRefObjEct mfmv gate + wn unit invalidation") {
     for (int p = 0; p < 3; ++p)
         CHECK(obj.unitInfo[p][0].restorationType == l10_filters::restoration::RESTORE_NONE);
 }
+
+// ---- S11: svt_aom_rest_kernel_iter -----------------------------------------
+namespace {
+using l10_filters::cdef_driver::RestKernelWalls;
+using l10_filters::cdef_driver::RestUnitInfo;
+
+struct KernelCounters {
+    int segSearchCalls = 0;
+    int finishSearchCalls = 0;
+    int lrFilterCalls = 0;
+    int psnrCalls = 0;
+    std::vector<bool> psnrFreeMem;
+    int ssimCalls = 0;
+    int reconOutCalls = 0;
+    int padRefCalls = 0;
+    int convertCalls = 0;
+    int demuxCalls = 0;
+    std::vector<std::pair<int, int>> restPosts;
+};
+
+KernelCounters gKc;
+void kSegSearch(std::int32_t*, const CdefPic&, const CdefPic&, const CdefPic&, void*, std::uint32_t) {
+    ++gKc.segSearchCalls;
+}
+void kFinish(void*) { ++gKc.finishSearchCalls; }
+void kLrFilter(std::int32_t*, void*, void*, std::int32_t) { ++gKc.lrFilterCalls; }
+int kPsnr(void*, void*, bool freeMem) {
+    ++gKc.psnrCalls;
+    gKc.psnrFreeMem.push_back(freeMem);
+    return 0;
+}
+int kSsim(void*, void*, bool) {
+    ++gKc.ssimCalls;
+    return 0;
+}
+void kReconOut(void*, void*) { ++gKc.reconOutCalls; }
+void kPadRef(void*, void*) { ++gKc.padRefCalls; }
+void kConvert(const std::uint16_t*, std::int32_t, std::uint8_t*, std::int32_t, std::int32_t, std::int32_t) {
+    ++gKc.convertCalls;
+}
+void kPostRest(void*, int tr, int tc) { gKc.restPosts.emplace_back(tr, tc); }
+void kDemux(void*) { ++gKc.demuxCalls; }
+
+RestKernelWalls makeKernelWalls(int totalSegs, int tileCols, int tileRows) {
+    static CdefPic reconPic = makeRestPic(0x11, 32, 16, 64);
+    static CdefPic inputPic = makeRestPic(0x22, 32, 16, 64);
+    static CdefPic scaledPic = makeRestPic(0x33, 32, 16, 64);
+    static CdefPic trialRst = makeRestPic(0x44, 32, 16, 64);
+    static CdefPic orgRec = makeRestPic(0x55, 32, 16, 64);
+    RestKernelWalls w{};
+    w.rstTmpbuf = nullptr;
+    w.reconPic = &reconPic;
+    w.inputPic = &inputPic;
+    w.scaledInputPic = &scaledPic;
+    w.trialFrameRst = &trialRst;
+    w.orgRecFrame = &orgRec;
+    w.totSegSearchedRest = 0;
+    w.restSegmentsTotalCount = totalSegs;
+    w.segmentIndex = 0;
+    w.enableRestoration = true;
+    w.allowIntrabc = false;
+    w.sliceType = 2;
+    w.useBoundariesInRestSearch = false;
+    w.is16bit = false;
+    w.conv16To8Gate = false;
+    w.wnFilterEnabled = false;
+    w.wnUsePrevFrameCoeffs = false;
+    w.isRef = false;
+    w.reconEnabled = false;
+    w.statReport = false;
+    w.superresRecode = false;
+    w.computePsnr = false;
+    w.computeSsim = false;
+    w.alignedWidth = 64;
+    w.alignedHeight = 64;
+    w.tileCols = tileCols;
+    w.tileRows = tileRows;
+    w.refStat = nullptr;
+    w.restorationSegSearch = kSegSearch;
+    w.restFinishSearch = kFinish;
+    w.lrFilterFrame = kLrFilter;
+    w.psnrCalculations = kPsnr;
+    w.ssimCalculations = kSsim;
+    w.reconOutput = kReconOut;
+    w.padRefAndSetFlags = kPadRef;
+    w.convert16To8 = kConvert;
+    w.postRestResults = kPostRest;
+    w.postPicDemux = kDemux;
+    return w;
+}
+} // namespace
+
+TEST_CASE("restKernelIter counts segments and completes on the last one") {
+    gKc = KernelCounters{};
+    RestKernelWalls w = makeKernelWalls(3, 2, 2);
+    // segment 1: no completion
+    l10_filters::cdef_driver::restKernelIter(w);
+    CHECK(w.totSegSearchedRest == 1);
+    CHECK(gKc.segSearchCalls == 1);
+    CHECK(gKc.finishSearchCalls == 0);
+    CHECK(gKc.restPosts.size() == 0);
+    // segment 2: still no completion
+    l10_filters::cdef_driver::restKernelIter(w);
+    CHECK(w.totSegSearchedRest == 2);
+    // segment 3: completion -> finish + the 2x2 tile posts
+    l10_filters::cdef_driver::restKernelIter(w);
+    CHECK(w.totSegSearchedRest == 3);
+    CHECK(gKc.finishSearchCalls == 1);
+    CHECK(gKc.restPosts.size() == 4);
+    CHECK(gKc.restPosts[0] == std::make_pair(0, 0));
+    CHECK(gKc.restPosts[3] == std::make_pair(1, 1));
+    // the is_lr branch ran for each segment (the search)
+    CHECK(gKc.segSearchCalls == 3);
+
+    // an over-run call must NOT re-fire the completion (the counter is
+    // ==, not >=)
+    l10_filters::cdef_driver::restKernelIter(w);
+    CHECK(w.totSegSearchedRest == 4);
+    CHECK(gKc.finishSearchCalls == 1);
+    CHECK(gKc.restPosts.size() == 4);
+}
+
+TEST_CASE("restKernelIter non-lr defaults the rst types + normalizes stats") {
+    gKc = KernelCounters{};
+    RestKernelWalls w = makeKernelWalls(1, 1, 1);
+    w.enableRestoration = false;
+    w.frameRestorationType[0] = l10_filters::restoration::RESTORE_WIENER;
+    w.frameRestorationType[1] = l10_filters::restoration::RESTORE_SGRPROJ;
+    w.frameRestorationType[2] = l10_filters::restoration::RESTORE_SWITCHABLE;
+    // the non-I-slice normalization: intra 4096 -> 100*4096/4096 = 100
+    w.intraCodedArea = 4096;
+    w.skipCodedArea = 2048;
+    w.hpCodedArea = 1024;
+    w.avgCntZeromv = 512;
+    l10_filters::cdef_driver::restKernelIter(w);
+    // the rst types forced to RESTORE_NONE
+    CHECK(w.frameRestorationType[0] == l10_filters::restoration::RESTORE_NONE);
+    CHECK(w.frameRestorationType[1] == l10_filters::restoration::RESTORE_NONE);
+    CHECK(w.frameRestorationType[2] == l10_filters::restoration::RESTORE_NONE);
+    // 100*x/4096 with C truncation: 2048 -> 50, 1024 -> 25, 512 -> 12
+    CHECK(w.intraCodedArea == 100);
+    CHECK(w.skipCodedArea == 50);
+    CHECK(w.hpCodedArea == 25);
+    CHECK(w.avgCntZeromv == 12);
+    // no lr calls, no psnr/ssim (compute_psnr off)
+    CHECK(gKc.segSearchCalls == 0);
+    CHECK(gKc.finishSearchCalls == 0);
+    CHECK(gKc.psnrCalls == 0);
+    CHECK(gKc.ssimCalls == 0);
+}
+
+TEST_CASE("restKernelIter lr gate + the psnr/ssim dispatch") {
+    gKc = KernelCounters{};
+    RestKernelWalls w = makeKernelWalls(1, 1, 1);
+    w.frameRestorationType[0] = l10_filters::restoration::RESTORE_WIENER;
+    w.reconEnabled = true; // the lr filter gate needs is_ref/recon/stat
+    w.computePsnr = true;
+    w.computeSsim = true;
+    l10_filters::cdef_driver::restKernelIter(w);
+    // the rst types non-NONE + the recon gate -> the filter frame ran
+    CHECK(gKc.lrFilterCalls == 1);
+    CHECK(gKc.finishSearchCalls == 1);
+    // the psnr/free-mem pattern: psnr(!compute_ssim = false) then ssim(true)
+    CHECK(gKc.psnrCalls == 1);
+    CHECK(gKc.psnrFreeMem[0] == false);
+    CHECK(gKc.ssimCalls == 1);
+}
+
+TEST_CASE("restKernelIter superres recode path + the recon gates") {
+    gKc = KernelCounters{};
+    RestKernelWalls w = makeKernelWalls(1, 1, 1);
+    w.superresRecode = true;
+    w.reconEnabled = true;
+    w.isRef = true;
+    l10_filters::cdef_driver::restKernelIter(w);
+    // superres recode: psnr(false) ONLY (no ssim, no recon, no demux...)
+    // wait - the reference runs the demux/recon in the !superres branch
+    CHECK(gKc.psnrCalls == 1);
+    CHECK(gKc.psnrFreeMem[0] == false);
+    CHECK(gKc.ssimCalls == 0);
+    CHECK(gKc.reconOutCalls == 0);
+    CHECK(gKc.demuxCalls == 0);
+    // the pad runs for is_ref BEFORE the psnr block (the reference's own
+    // ordering), superres or not
+    CHECK(gKc.padRefCalls == 1);
+}
+
+TEST_CASE("restKernelIter non-ref 16-to-8 convert + recon output + demux") {
+    gKc = KernelCounters{};
+    RestKernelWalls w = makeKernelWalls(1, 1, 1);
+    w.reconEnabled = true;
+    w.isRef = false;
+    w.computePsnr = true;
+    w.conv16To8Gate = true;
+    l10_filters::cdef_driver::restKernelIter(w);
+    CHECK(gKc.convertCalls == 3); // Y + U + V
+    CHECK(gKc.psnrCalls == 1);
+    CHECK(gKc.psnrFreeMem[0] == true); // !compute_ssim
+    CHECK(gKc.reconOutCalls == 1);
+    CHECK(gKc.demuxCalls == 0); // not ref
+    CHECK(gKc.padRefCalls == 0);
+}
+
+TEST_CASE("restKernelIter I-slice zero intra area + ref demux post") {
+    gKc = KernelCounters{};
+    RestKernelWalls w = makeKernelWalls(1, 1, 1);
+    w.sliceType = 0; // I_SLICE
+    w.intraCodedArea = 4096;
+    w.isRef = true;
+    w.reconEnabled = false;
+    l10_filters::cdef_driver::restKernelIter(w);
+    CHECK(w.intraCodedArea == 0); // the I_SLICE zeroing
+    CHECK(gKc.padRefCalls == 1);
+    CHECK(gKc.demuxCalls == 1);
+    CHECK(gKc.reconOutCalls == 0); // recon disabled
+}
+
+TEST_CASE("restKernelIter wn prev-frame unit restore") {
+    gKc = KernelCounters{};
+    RestKernelWalls w = makeKernelWalls(1, 1, 1);
+    w.sliceType = 2; // not I_SLICE
+    w.wnFilterEnabled = true;
+    w.wnUsePrevFrameCoeffs = true;
+    RestUnitInfo refUnits[3];
+    for (int p = 0; p < 3; ++p) {
+        refUnits[p].restorationType = l10_filters::restoration::RESTORE_WIENER;
+        refUnits[p].wienerInfo.vfilter[0] = static_cast<std::int16_t>(100 + p);
+    }
+    for (int p = 0; p < 3; ++p) {
+        w.refUnitInfo[p] = &refUnits[p];
+        w.unitsPerTile[p] = 1;
+    }
+    RestUnitInfo pcsUnits[3];
+    for (int p = 0; p < 3; ++p) {
+        pcsUnits[p].restorationType = l10_filters::restoration::RESTORE_NONE;
+        w.unitInfo[p] = &pcsUnits[p];
+    }
+    l10_filters::cdef_driver::restKernelIter(w);
+    for (int p = 0; p < 3; ++p) {
+        CHECK(w.unitInfo[p][0].restorationType == l10_filters::restoration::RESTORE_WIENER);
+        CHECK(w.unitInfo[p][0].wienerInfo.vfilter[0] == static_cast<std::int16_t>(100 + p));
+    }
+}

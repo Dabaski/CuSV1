@@ -511,5 +511,131 @@ void copyStatisticsToRefObjEct(const RestHdr& hdr, const RestCmWalls& cmWalls, c
     RestRefStat& obj);
 #pragma warning(pop)
 
+// ---------------------------------------------------------------------------
+// S11: svt_aom_rest_kernel_iter (rest_process.c:256-:503) - the rest
+// kernel, carried.
+// ---------------------------------------------------------------------------
+
+// The parked callees of the kernel, threaded as callbacks (each is a real
+// reference function in another stage: restoration_pick.c's
+// restoration_seg_search / rest_finish_search, restoration.c's
+// svt_av1_loop_restoration_filter_frame, enc_dec/pic stats' psnr/ssim
+// calculations, svt_aom_recon_output, pad_ref_and_set_flags and the
+// 16->8-bit recon convert - no fakes, the tests drive the dispatch).
+using RestorationSegSearchFn = void (*)(std::int32_t* rstTmpbuf, const CdefPic& orgFts, const CdefPic& cpiSource,
+    const CdefPic& trialFrameRst, void* pcsCtx, std::uint32_t segmentIndex);
+using RestFinishSearchFn = void (*)(void* pcsCtx);
+using LrFilterFrameFn = void (*)(std::int32_t* rstTmpbuf, void* frameToShow, void* cm, std::int32_t optimizedLr);
+using PsnrCalcFn = int (*)(void* pcsCtx, void* scsCtx, bool freeMemory);
+using SsimCalcFn = int (*)(void* pcsCtx, void* scsCtx, bool freeMemory);
+using ReconOutputFn = void (*)(void* pcsCtx, void* scsCtx);
+using PadRefFn = void (*)(void* pcsCtx, void* scsCtx);
+using Convert16To8Fn = void (*)(const std::uint16_t* buf16, std::int32_t stride16, std::uint8_t* buf8,
+    std::int32_t stride8, std::int32_t width, std::int32_t height);
+using PostRestResultFn = void (*)(void* pcsCtx, int tileRowIdx, int tileColIdx);
+using PostPicDemuxFn = void (*)(void* pcsCtx);
+
+// RestKernelWalls: the threaded RestContext + PictureControlSet +
+// SequenceControlSet + FrameHeader + Av1Common surface, one named field
+// per consumed reference field. The FIFO/mutex machinery (the
+// EB_GET_FULL_OBJECT / svt_block_on_mutex / release walls) stays parked -
+// the kernel runs its single-threaded form; the EbPictureBufferDesc walls
+// are the CdefPic carrier.
+struct RestKernelWalls {
+    // the RestContext scratch (the allocation walls parked: the callers
+    // own the buffers)
+    std::int32_t* rstTmpbuf;
+    CdefPic* trialFrameRst;
+    CdefPic* orgRecFrame;
+    // the input state: pcs->tot_seg_searched_rest (rw),
+    // pcs->rest_segments_total_count, the segment index
+    int totSegSearchedRest;
+    int restSegmentsTotalCount;
+    std::uint32_t segmentIndex;
+    void* pcsCtx;
+    void* scsCtx;
+    // the gates: ppcs->enable_restoration, frm_hdr->allow_intrabc,
+    // pcs->slice_type (I_SLICE = 0), scs->use_boundaries_in_rest_search,
+    // SVT_EFFECTIVE_IS_16BIT_PIPELINE
+    bool enableRestoration;
+    bool allowIntrabc;
+    int sliceType;
+    bool useBoundariesInRestSearch;
+    bool is16bit;
+    // the wn prev-frame restore inputs: the ref object's unit_info +
+    // units_per_tile per plane, and the pcs rst_info (rw) surface
+    const RestUnitInfo* refUnitInfo[3];
+    std::int32_t refUnitsPerTile[3];
+    restoration::RestorationType frameRestorationType[3];
+    std::int32_t unitsPerTile[3];
+    RestUnitInfo* unitInfo[3];
+    // the cm wn_filter_ctrls gates for the restore
+    bool wnFilterEnabled;
+    bool wnUsePrevFrameCoeffs;
+    // the pics: svt_aom_get_recon_pic (threaded), the input pic
+    // (is_16bit ? input_frame16bit : enhanced_unscaled_pic), the scaled
+    // input (pcs->scaled_input_pic, may be null)
+    const CdefPic* reconPic;
+    const CdefPic* inputPic;
+    const CdefPic* scaledInputPic;
+    // the completion-block gates: ppcs->is_ref, recon_enabled,
+    // stat_report, superres_total_recode_loop > 0, compute_psnr,
+    // compute_ssim, the aligned dims, the tile grid, the ref-stat
+    // wrapper (null check)
+    bool isRef;
+    bool reconEnabled;
+    bool statReport;
+    bool superresRecode;
+    bool computePsnr;
+    bool computeSsim;
+    std::int32_t alignedWidth;
+    std::int32_t alignedHeight;
+    int tileCols;
+    int tileRows;
+    RestRefStat* refStat;
+    RestHdr hdr;
+    RestCmWalls cmWalls;
+    RestPcsWalls pcsWalls;
+    // the pcs counters the normalization writes (pcs->intra_coded_area /
+    // skip_coded_area / hp_coded_area / avg_cnt_zeromv)
+    std::uint32_t intraCodedArea;
+    std::uint64_t skipCodedArea;
+    std::uint64_t hpCodedArea;
+    std::uint64_t avgCntZeromv;
+    // the 16->8-bit recon convert: the reference gate is
+    // is_16bit && SVT_EFFECTIVE_BIT_DEPTH(encoder_bit_depth) ==
+    // EB_EIGHT_BIT (threaded) and the y/u/v buffer pairs + strides +
+    // dims (with the border pre-offsets folded in by the caller)
+    bool conv16To8Gate;
+    const std::uint16_t* conv16Buf[3];
+    std::uint8_t* conv8Buf[3];
+    std::int32_t convStride16[3];
+    std::int32_t convStride8[3];
+    std::int32_t convWidth;
+    std::int32_t convHeight;
+    std::int32_t convChromaWidth;
+    std::int32_t convChromaHeight;
+    // the callbacks
+    RestorationSegSearchFn restorationSegSearch;
+    RestFinishSearchFn restFinishSearch;
+    LrFilterFrameFn lrFilterFrame;
+    PsnrCalcFn psnrCalculations;
+    SsimCalcFn ssimCalculations;
+    ReconOutputFn reconOutput;
+    PadRefFn padRefAndSetFlags;
+    Convert16To8Fn convert16To8;
+    PostRestResultFn postRestResults;
+    PostPicDemuxFn postPicDemux;
+};
+
+// svt_aom_rest_kernel_iter (rest_process.c:256-:503): the rest kernel.
+// The is_lr branch (get_own_recon + the is_resized input selection + the
+// wn prev-frame unit restore + restoration_seg_search), then the
+// segment-completion block: rest_finish_search + the lr filter gate (or
+// the RESTORE_NONE defaults), the stats normalization, the ref-stat
+// copy, the psnr/ssim/recon/demux dispatch and the per-tile rest-result
+// posts.
+void restKernelIter(RestKernelWalls& w);
+
 } // namespace cdef_driver
 } // namespace l10_filters

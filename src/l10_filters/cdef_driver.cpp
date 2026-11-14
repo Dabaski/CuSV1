@@ -982,5 +982,126 @@ void copyStatisticsToRefObjEct(const RestHdr& hdr, const RestCmWalls& cmWalls, c
     }
 }
 
+// svt_aom_rest_kernel_iter (rest_process.c:256-:503). 1:1 in its
+// single-threaded form: the FIFO/mutex walls (EB_GET_FULL_OBJECT,
+// svt_block_on_mutex / release) stay parked - the segment counter and
+// the completion block are the kernel's real structure. The parked
+// callees are threaded as callbacks.
+void restKernelIter(RestKernelWalls& w) {
+    // the is_lr branch
+    const bool isLr = w.enableRestoration && w.allowIntrabc == 0;
+    if (isLr) {
+        // get_own_recon: if boundaries are not used, the search works on
+        // the input recon location itself
+        const CdefPic reconPic = getOwnRecon(
+            CdefScsWalls{false, 1, 1, w.is16bit}, *w.reconPic, *w.orgRecFrame, w.useBoundariesInRestSearch,
+            w.is16bit);
+        // downscale input picture if recon is resized
+        const CdefPic* inputPic = w.inputPic;
+        const bool isResized = reconPic.width != w.inputPic->width || reconPic.height != w.inputPic->height;
+        if (isResized) {
+            inputPic = w.scaledInputPic;
+        }
+        (void)inputPic;
+
+        // the wn prev-frame unit restore
+        if (w.sliceType != 0 && w.wnFilterEnabled && w.wnUsePrevFrameCoeffs) {
+            for (std::int32_t plane = 0; plane < 3; ++plane) {
+                const std::int32_t ntiles = w.unitsPerTile[plane];
+                for (std::int32_t u = 0; u < ntiles; ++u) {
+                    w.unitInfo[plane][u].restorationType = w.refUnitInfo[plane][u].restorationType;
+                    if (w.refUnitInfo[plane][u].restorationType == restoration::RESTORE_WIENER) {
+                        w.unitInfo[plane][u].wienerInfo = w.refUnitInfo[plane][u].wienerInfo;
+                    }
+                }
+            }
+        }
+        // restoration_seg_search(rst_tmpbuf, &org_fts, &cpi_source,
+        // &trial_frame_rst, pcs, segment_index) - the reference builds
+        // the Yv12 configs through svt_aom_link_eb_to_aom_buffer_desc;
+        // the CdefPic walls carry the same buffers
+        w.restorationSegSearch(w.rstTmpbuf, reconPic, *w.inputPic, *w.trialFrameRst, w.pcsCtx, w.segmentIndex);
+    }
+
+    // the segment completion block (the mutex threaded away)
+    w.totSegSearchedRest++;
+    if (w.totSegSearchedRest == w.restSegmentsTotalCount) {
+        if (isLr) {
+            w.restFinishSearch(w.pcsCtx);
+
+            // Only need recon if REF pic or recon is output
+            if (w.isRef || w.reconEnabled || w.statReport) {
+                if (w.frameRestorationType[0] != restoration::RESTORE_NONE ||
+                    w.frameRestorationType[1] != restoration::RESTORE_NONE ||
+                    w.frameRestorationType[2] != restoration::RESTORE_NONE) {
+                    w.lrFilterFrame(w.rstTmpbuf, nullptr, nullptr, 0);
+                }
+            }
+        } else {
+            w.frameRestorationType[0] = restoration::RESTORE_NONE;
+            w.frameRestorationType[1] = restoration::RESTORE_NONE;
+            w.frameRestorationType[2] = restoration::RESTORE_NONE;
+        }
+
+        // delete scaled_input_pic after lr finished (the EB_DELETE wall
+        // is threaded away: the caller owns the buffer)
+
+        // normalize stats - RC uses these even for non-ref frames
+        const int numPixels = w.alignedWidth * w.alignedHeight;
+        w.intraCodedArea = (w.sliceType == 0) ? 0 : 100 * w.intraCodedArea / numPixels;
+        w.skipCodedArea = 100 * w.skipCodedArea / numPixels;
+        w.hpCodedArea = 100 * w.hpCodedArea / numPixels;
+        w.avgCntZeromv = 100 * w.avgCntZeromv / numPixels;
+
+        if (w.refStat != nullptr) {
+            // copy stat to ref object
+            copyStatisticsToRefObjEct(w.hdr, w.cmWalls, w.pcsWalls, *w.refStat);
+        }
+
+        // Pad the reference picture and set ref POC
+        if (w.isRef) {
+            w.padRefAndSetFlags(w.pcsCtx, w.scsCtx);
+        } else {
+            // convert non-reference frame buffer from 16-bit to 8-bit
+            if (w.conv16To8Gate) {
+                w.convert16To8(w.conv16Buf[0], w.convStride16[0], w.conv8Buf[0], w.convStride8[0], w.convWidth,
+                    w.convHeight);
+                w.convert16To8(w.conv16Buf[1], w.convStride16[1], w.conv8Buf[1], w.convStride8[1],
+                    w.convChromaWidth, w.convChromaHeight);
+                w.convert16To8(w.conv16Buf[2], w.convStride16[2], w.conv8Buf[2], w.convStride8[2],
+                    w.convChromaWidth, w.convChromaHeight);
+            }
+        }
+
+        // PSNR and SSIM Calculation.
+        if (w.superresRecode) { // superres needs psnr to compute rdcost
+            w.psnrCalculations(w.pcsCtx, w.scsCtx, false);
+        } else {
+            if (w.computePsnr) {
+                w.psnrCalculations(w.pcsCtx, w.scsCtx, !w.computeSsim);
+            }
+            if (w.computeSsim) {
+                w.ssimCalculations(w.pcsCtx, w.scsCtx, true /* free memory here */);
+            }
+        }
+
+        if (!w.superresRecode) {
+            if (w.reconEnabled) {
+                w.reconOutput(w.pcsCtx, w.scsCtx);
+            }
+            // post reference picture task in packetization process
+            if (w.isRef) {
+                w.postPicDemux(w.pcsCtx);
+            }
+        }
+
+        for (int tileRowIdx = 0; tileRowIdx < w.tileRows; tileRowIdx++) {
+            for (int tileColIdx = 0; tileColIdx < w.tileCols; tileColIdx++) {
+                w.postRestResults(w.pcsCtx, tileRowIdx, tileColIdx);
+            }
+        }
+    }
+}
+
 } // namespace cdef_driver
 } // namespace l10_filters
