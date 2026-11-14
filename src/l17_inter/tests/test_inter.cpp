@@ -2278,6 +2278,87 @@ TEST_CASE("calc_target_weighted_pred_above/left paint the wsrc/mask planes (enc:
     }
     CHECK(bad3 == 0);
 }
+// ------------------------------------------------------------- A3E E5
+// compute_subpel_params (enc:2394-:2444) + tf_inter_predictor
+// (enc:2446-:2501). The scs/xd walls thread as parameters
+// (superBlockSize; the four mb_to_*_edge values for the UMV clamp).
+
+TEST_CASE("compute_subpel_params: the unscaled arm via the UMV clamp (enc:2434-2443)") {
+    inter::SubpelParams sp{0, 0, 0, 0};
+    std::int32_t posY = 0, posX = 0;
+    // Identity sf (not scaled: xs == ys == SCALE_SUBPEL_SHIFTS).
+    inter::ScaleFactors sf;
+    inter::setupScaleFactorsForFrame(&sf, 64, 64, 64, 64);
+    // mv (8, -40) q3; bw = bh = 8; edges +-48 (the E1 box).
+    inter::Mv mv{8, -40};
+    inter::computeSubpelParams(64, 50, 100, mv, &sf, 64, 64, 8, 8, -48, 48, -48, 48, 0, 0, &sp, &posY, &posX);
+    // clamp_mv_to_umv_border_sb at ss 0 doubles the mv: (16, -80), inside
+    // the E1 box [-288, 272]: unchanged. subpel_x = (16 & 15) << 6 = 0;
+    // subpel_y = (-80 & 15) << 6 = (-80 mod 16 = 0) << 6 = 0.
+    // pos = pre + (mv_q4 >> 4): x = 100 + 1 = 101; y = 50 + (-80 >> 4 = -5) = 45.
+    CHECK(sp.subpelX == 0);
+    CHECK(sp.subpelY == 0);
+    CHECK(sp.xs == inter::kScaleSubpelShifts);
+    CHECK(sp.ys == inter::kScaleSubpelShifts);
+    CHECK(posX == 101);
+    CHECK(posY == 45);
+    // A fractional mv: (5, 5) q3 -> doubled (10, 10): subpel = 10 & 15 = 10
+    // << 6 = 640; pos = pre + 0.
+    inter::Mv mv2{5, 5};
+    inter::computeSubpelParams(64, 50, 100, mv2, &sf, 64, 64, 8, 8, -48, 48, -48, 48, 0, 0, &sp, &posY, &posX);
+    CHECK(sp.subpelX == 640);
+    CHECK(sp.subpelY == 640);
+    CHECK(posX == 100);
+    CHECK(posY == 50);
+}
+
+TEST_CASE("compute_subpel_params: the scaled arm with an identity sf (enc:2400-2432)") {
+    inter::SubpelParams sp{0, 0, 0, 0};
+    std::int32_t posY = 0, posX = 0;
+    inter::ScaleFactors sf;
+    inter::setupScaleFactorsForFrame(&sf, 64, 64, 64, 64); // identity, av1_is_scaled == 0
+    // The reference gates the scaled arm on av1_is_scaled(sf) INSIDE
+    // compute_subpel_params - the identity sf takes the UNSCALED arm even
+    // here; force the scaled arm with a genuinely scaled sf.
+    inter::ScaleFactors sf2;
+    inter::setupScaleFactorsForFrame(&sf2, 128, 128, 64, 64); // 2x downscale
+    CHECK(sf2.xScaleFp != inter::kRefNoScale);
+    inter::Mv mv{0, 0};
+    inter::computeSubpelParams(64, 32, 32, mv, &sf2, 128, 128, 8, 8, -1000, 1000, -1000, 1000, 0, 0, &sp, &posY,
+                               &posX);
+    // orig_pos = (32 << 4) + 0 = 512; pos = scaled_x(512) = round((512 *
+    // x_scale_fp + off) >> 8); x_scale_fp = ((128 << 14) + 32) / 64 = 32770;
+    // off = (32770 - 16384) * 8 = 131,  512*32770 = 16,778,240 + 131, 072...
+    // hand-check via the landed scaledX instead:
+    const std::int32_t wantX = inter::scaledX((32 << 4) + 0, &sf2) + 32 /* SCALE_EXTRA_OFF, definitions.h:445 */;
+    CHECK(posX == (wantX >> inter::kScaleSubpelBits));
+    CHECK(sp.subpelX == (wantX & inter::kScaleSubpelMask));
+    CHECK(sp.xs == sf2.xStepQ4);
+}
+
+TEST_CASE("tf_inter_predictor dispatches the landed predictors (enc:2446-2501)") {
+    // 8-bit, identity sf, zero mv: the copy path; the output must equal
+    // the source block.
+    std::vector<std::uint8_t> plane(24 * 24);
+    std::uint32_t seed = 0x77u;
+    for (size_t i = 0; i < plane.size(); ++i) plane[i] = (std::uint8_t)jntoracle::lcg(seed);
+    inter::ScaleFactors sf;
+    inter::setupScaleFactorsForFrame(&sf, 64, 64, 64, 64);
+    inter::ConvolveParams cp{};
+    std::memset(&cp, 0, sizeof(cp));
+    cp.round0 = convolve::filterBits;
+    cp.round1 = convolve::filterBits;
+    std::vector<std::uint8_t> dst(8 * 8, 0x99);
+    inter::tfInterPredictor(64, plane.data(), dst.data(), 8, 8, inter::Mv{0, 0}, &sf, &cp,
+                            convolve::makeInterpFilters(convolve::InterpFilter::EIGHTTAP_REGULAR,
+                                                        convolve::InterpFilter::EIGHTTAP_REGULAR),
+                            64, 64, 8, 8, -48, 48, -48, 48, 24, 8, 8, 0);
+    int bad = 0;
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            if (dst[(size_t)y * 8 + x] != plane[(size_t)(8 + y) * 24 + 8 + x]) ++bad;
+    CHECK(bad == 0);
+}
 // ------------------------------------------------------------- A3E E2
 // The curvfit RD-model family (enc_inter_prediction.c:197-:361). The two
 // grid tables are RUNTIME-DIFF-VERIFIED against the reference file

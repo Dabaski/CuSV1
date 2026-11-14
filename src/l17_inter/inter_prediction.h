@@ -630,6 +630,27 @@ void calcTargetWeightedPredAbove(const ObmcXd& xd, int relMiCol, std::uint8_t nb
 // svt_av1_calc_target_weighted_pred_left_c, enc_inter_prediction.c:1609-:1635.
 void calcTargetWeightedPredLeft(const ObmcXd& xd, int relMiRow, std::uint8_t nbMiHeight,
                                 CalcTargetWeightedPredCtxt* ctxt);
+// ---------- A3E E5: the subpel-params + tf predictor rung ----------
+
+// compute_subpel_params, enc_inter_prediction.c:2394-:2444. The scs
+// (super_block_size) and xd (mb_to_*_edge) walls thread as parameters;
+// SCALE_EXTRA_OFF = (1 << SCALE_EXTRA_BITS) / 2 (definitions.h:445).
+void computeSubpelParams(int superBlockSize, std::int16_t preY, std::int16_t preX, Mv mv, const ScaleFactors* sf,
+                         std::uint16_t frameWidth, std::uint16_t frameHeight, std::uint8_t blkWidth,
+                         std::uint8_t blkHeight, std::int32_t mbToLeftEdge, std::int32_t mbToRightEdge,
+                         std::int32_t mbToTopEdge, std::int32_t mbToBottomEdge, std::uint32_t ssY, std::uint32_t ssX,
+                         SubpelParams* subpelParams, std::int32_t* posY, std::int32_t* posX);
+
+// tf_inter_predictor, enc_inter_prediction.c:2446-:2501. The scs/xd walls
+// thread as in computeSubpelParams; the dispatch is the landed
+// interPredictor / highbdInterPredictor pair.
+void tfInterPredictor(int superBlockSize, const std::uint8_t* srcPtr, std::uint8_t* dstPtr, std::int16_t preY,
+                      std::int16_t preX, Mv mv, const ScaleFactors* sf, ConvolveParams* convParams,
+                      std::uint32_t interpFilters, std::uint16_t frameWidth, std::uint16_t frameHeight,
+                      std::uint8_t blkWidth, std::uint8_t blkHeight, std::int32_t mbToLeftEdge,
+                      std::int32_t mbToRightEdge, std::int32_t mbToTopEdge, std::int32_t mbToBottomEdge,
+                      std::int32_t srcStride, std::int32_t dstStride, std::uint8_t bitDepth,
+                      std::uint8_t subsamplingShift);
 // ---------- A3E J4: the dispatch rung ----------
 
 // svt_highbd_inter_predictor, inter_prediction.c:1455-:1523. The

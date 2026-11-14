@@ -727,6 +727,88 @@ inline bool isInterinterCompoundUsedWedge(int bsize) {
 inline std::int64_t rdCost(std::uint32_t rdmult, std::int64_t rate, std::int64_t dist) {
     return ((rate * (std::int64_t)rdmult + ((1 << 9) >> 1)) >> 9) + (dist << 7);
 }
+// ---------- A3E E5: the subpel-params + tf predictor rung ----------
+
+// compute_subpel_params, enc_inter_prediction.c:2394-:2444.
+void computeSubpelParams(int superBlockSize, std::int16_t preY, std::int16_t preX, Mv mv, const ScaleFactors* sf,
+                         std::uint16_t frameWidth, std::uint16_t frameHeight, std::uint8_t blkWidth,
+                         std::uint8_t blkHeight, std::int32_t mbToLeftEdge, std::int32_t mbToRightEdge,
+                         std::int32_t mbToTopEdge, std::int32_t mbToBottomEdge, std::uint32_t ssY, std::uint32_t ssX,
+                         SubpelParams* subpelParams, std::int32_t* posY, std::int32_t* posX) {
+    const int isScaled = av1IsScaled(sf);
+
+    if (isScaled) {
+        int origPosY = (preY + 0) << 4 /* SUBPEL_BITS */;
+        origPosY += mv.y * (1 << (1 - (int)ssY));
+        int origPosX = (preX + 0) << 4;
+        origPosX += mv.x * (1 << (1 - (int)ssX));
+        *posY = sf->scaleValueY(origPosY, sf);
+        *posX = sf->scaleValueX(origPosX, sf);
+        *posX += (1 << kScaleExtraBits) / 2; // SCALE_EXTRA_OFF, definitions.h:445
+        *posY += (1 << kScaleExtraBits) / 2;
+
+        // Note 1/2 of the reference: the border is 2*sb_size + 32 when
+        // scaled; the top/left offset clamps at INTERPOLATION_OFFSET (8)
+        // to avoid the pack underflow (issue 1835).
+        const int borderInPixels = superBlockSize * 2 + 32;
+        const int top = -(((borderInPixels >> (int)ssY) - 8 /* INTERPOLATION_OFFSET */) << kScaleSubpelBits);
+        const int left = -(((borderInPixels >> (int)ssX) - 8) << kScaleSubpelBits);
+        const int bottom = ((frameHeight >> ssY) + 4 /* AOM_INTERP_EXTEND */) << kScaleSubpelBits;
+        const int right = ((frameWidth >> ssX) + 4) << kScaleSubpelBits;
+
+        *posY = clampInt(*posY, top, bottom);
+        *posX = clampInt(*posX, left, right);
+
+        subpelParams->subpelX = *posX & kScaleSubpelMask;
+        subpelParams->subpelY = *posY & kScaleSubpelMask;
+        subpelParams->xs = sf->xStepQ4;
+        subpelParams->ys = sf->yStepQ4;
+
+        *posY = *posY >> kScaleSubpelBits;
+        *posX = *posX >> kScaleSubpelBits;
+
+    } else {
+        const Mv mvQ4 = clampMvToUmvBorderSb(mbToLeftEdge, mbToRightEdge, mbToTopEdge, mbToBottomEdge, &mv, blkWidth,
+                                             blkHeight, (int)ssX, (int)ssY);
+
+        subpelParams->subpelX = (mvQ4.x & 15 /* SUBPEL_MASK */) << kScaleExtraBits;
+        subpelParams->subpelY = (mvQ4.y & 15) << kScaleExtraBits;
+        subpelParams->xs = kScaleSubpelShifts;
+        subpelParams->ys = kScaleSubpelShifts;
+        *posY = preY + (mvQ4.y >> 4 /* SUBPEL_BITS */);
+        *posX = preX + (mvQ4.x >> 4);
+    }
+}
+
+// tf_inter_predictor, enc_inter_prediction.c:2446-:2501.
+void tfInterPredictor(int superBlockSize, const std::uint8_t* srcPtr, std::uint8_t* dstPtr, std::int16_t preY,
+                      std::int16_t preX, Mv mv, const ScaleFactors* sf, ConvolveParams* convParams,
+                      std::uint32_t interpFilters, std::uint16_t frameWidth, std::uint16_t frameHeight,
+                      std::uint8_t blkWidth, std::uint8_t blkHeight, std::int32_t mbToLeftEdge,
+                      std::int32_t mbToRightEdge, std::int32_t mbToTopEdge, std::int32_t mbToBottomEdge,
+                      std::int32_t srcStride, std::int32_t dstStride, std::uint8_t bitDepth,
+                      std::uint8_t subsamplingShift) {
+    SubpelParams subpelParams;
+    std::int32_t posY, posX;
+    const std::uint8_t isHighbd = (std::uint8_t)(bitDepth > 8 /* EB_EIGHT_BIT */);
+
+    computeSubpelParams(superBlockSize, preY, preX, mv, sf, frameWidth, frameHeight, blkWidth, blkHeight,
+                        mbToLeftEdge, mbToRightEdge, mbToTopEdge, mbToBottomEdge, 0 /* ss_y */, 0 /* ss_x */,
+                        &subpelParams, &posY, &posX);
+
+    const std::uint8_t* srcMod = srcPtr + ((posX + (posY * srcStride)) * (1 << isHighbd));
+
+    if (isHighbd) {
+        highbdInterPredictor((const std::uint16_t*)srcMod, srcStride << subsamplingShift, (std::uint16_t*)dstPtr,
+                             dstStride << subsamplingShift, &subpelParams, sf, blkWidth,
+                             (std::uint8_t)(blkHeight >> subsamplingShift), convParams, interpFilters,
+                             0 /* use_intrabc */, bitDepth);
+    } else {
+        interPredictor(srcMod, srcStride << subsamplingShift, dstPtr, dstStride << subsamplingShift, &subpelParams, sf,
+                       blkWidth, (std::uint8_t)(blkHeight >> subsamplingShift), convParams, interpFilters,
+                       0 /* use_intrabc */);
+    }
+}
 // ---------- A3E E4: the OBMC walker + calc_target_weighted_pred family ----------
 
 // mi_size_wide/high, common_utils.c:291-:292.
