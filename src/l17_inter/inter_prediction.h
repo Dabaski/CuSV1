@@ -481,6 +481,26 @@ int skipU4x4PredInObmc(int bsize, int dir, int subsamplingX, int subsamplingY);
 // definition lives in intra_prediction.c; declared at
 // inter_prediction.c:1198). bsize threads as the 0..21 index.
 int scaleChromaBsize(int bsize, int subsamplingX, int subsamplingY);
+// ---------- A3E E2: the curvfit RD-model family ----------
+
+// interp_rgrid_curv / interp_dgrid_curv, enc_inter_prediction.c:204-:270,
+// mechanically extracted literal-for-literal (RC1 precedent).
+extern const double interpRgridCurv[4][65];
+extern const double interpDgridCurv[2][65];
+
+// bsize_curvfit_model_cat_lookup, enc_inter_prediction.c:197-:198.
+extern const std::uint8_t bsizeCurvfitModelCatLookup[kBlockSizesAll];
+
+// av1_model_rd_curvfit, enc_inter_prediction.c:294-:312 (static in the
+// reference; exported for the test oracle, DF1 precedent).
+void modelRdCurvfit(int bsize, double sseNorm, double xqr, double* rateF, double* distbysseF);
+
+// model_rd_with_curvfit, enc_inter_prediction.c:316-:361. The pcs/dequants
+// wall threads as the quantizer value (the dequants->y_dequant_qtx
+// [current_q_index][1] read is caller-side); the dequant shift is the
+// reference's constant 3 (named deviation).
+void modelRdWithCurvfit(int bsize, std::int64_t sse, int numSamples, std::int16_t quantizer, std::uint32_t rdmult,
+                        std::uint32_t* rate, std::uint64_t* dist);
 // ---------- A3E E1: the enc-side MV clamp ----------
 
 // clamp_mv (mv.h:70-:73) duplicated locally (the SYM1 wb-trio precedent;

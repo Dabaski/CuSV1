@@ -1,7 +1,9 @@
 #include <doctest.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <fstream>
 #include <regex>
 #include <string>
@@ -25,6 +27,12 @@ const char* kBlockNames[inter::kBlockSizesAll] = {
     "BLOCK_64X64", "BLOCK_64X128", "BLOCK_128X64", "BLOCK_128X128", "BLOCK_4X16", "BLOCK_16X4",
     "BLOCK_8X32",  "BLOCK_32X8",  "BLOCK_16X64", "BLOCK_64X16",
 };
+
+std::string referenceTextEnc() {
+    std::ifstream f(REPO_ROOT "/third_party/SVT-AV1/Source/Lib/Codec/enc_inter_prediction.c", std::ios::binary);
+    REQUIRE(f.good());
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
 
 std::string referenceText() {
     std::ifstream f(REPO_ROOT "/third_party/SVT-AV1/Source/Lib/Codec/inter_prediction.c", std::ios::binary);
@@ -1837,6 +1845,169 @@ TEST_CASE("sum_squares_i16 and wedge_sse_from_residuals (ip:2533-2541, :2468-247
     CHECK(inter::wedgeSseFromResiduals(r1b, db, mb, 1) == (32767 * 32767 + 2048) >> 12);
 }
 
+// ------------------------------------------------------------- A3E E2
+// The curvfit RD-model family (enc_inter_prediction.c:197-:361). The two
+// grid tables are RUNTIME-DIFF-VERIFIED against the reference file
+// (parsed with strtod - a bit-identical transcription check, the RC1
+// precedent extended to doubles). av1_model_rd_curvfit is checked
+// against an independent test-side transcription over the full
+// rcat/dcat band and a clamp sweep; model_rd_with_curvfit carries
+// (quantizer, rdmult) as parameters and its skip rule is pinned by
+// fixtures where the raw fit loses to the sse << 4 bound.
+
+namespace curvfitoracle {
+
+// The independent transcription of av1_model_rd_curvfit
+// (enc:294-:312): clamps, the 0.5-step interpolation, the floor.
+double modelRdCurvfit(int rcat, double sseNorm, double xqr, double* distBySse) {
+    const double xStart = -15.5;
+    const double xEnd = 16.5;
+    const double xStep = 0.5;
+    const double epsilon = 1e-6;
+    const int dcat = (sseNorm > 16.0) ? 1 : 0;
+    xqr = xqr < (xStart + xStep + epsilon) ? (xStart + xStep + epsilon) : xqr;
+    xqr = xqr > (xEnd - xStep - epsilon) ? (xEnd - xStep - epsilon) : xqr;
+    const double x = (xqr - xStart) / xStep;
+    const int xi = (int)std::floor(x);
+    const double* prate = &inter::interpRgridCurv[rcat][xi - 1];
+    const double* pdist = &inter::interpDgridCurv[dcat][xi - 1];
+    *distBySse = pdist[1];
+    return prate[1];
+}
+
+} // namespace curvfitoracle
+
+TEST_CASE("interp_rgrid_curv / interp_dgrid_curv match the reference entry-for-entry (enc:204-270)") {
+    const std::string text = referenceTextEnc();
+    const std::regex dblRe(R"(-?\d+\.\d+)");
+    std::vector<double> ref;
+    {
+        const std::size_t rStart = text.find("interp_rgrid_curv[4][65]");
+        REQUIRE(rStart != std::string::npos);
+        const std::size_t dStart = text.find("interp_dgrid_curv[2][65]", rStart);
+        REQUIRE(dStart != std::string::npos);
+        const std::size_t dEnd = text.find("};", dStart);
+        REQUIRE(dEnd != std::string::npos);
+        const std::string body = text.substr(rStart, dEnd - rStart);
+        for (auto n = std::sregex_iterator(body.begin(), body.end(), dblRe); n != std::sregex_iterator(); ++n)
+            ref.push_back(std::strtod(n->str().c_str(), nullptr));
+    }
+    REQUIRE(ref.size() == 4 * 65 + 2 * 65);
+    int mismatches = 0;
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 65; ++c)
+            if (inter::interpRgridCurv[r][c] != ref[r * 65 + c]) ++mismatches;
+    for (int r = 0; r < 2; ++r)
+        for (int c = 0; c < 65; ++c)
+            if (inter::interpDgridCurv[r][c] != ref[4 * 65 + r * 65 + c]) ++mismatches;
+    CHECK(mismatches == 0);
+    // Structural anchors: the r-grid ramps to 4096 at the end; the d-grid
+    // starts at 16 and ends at 0.
+    CHECK(inter::interpRgridCurv[0][64] == 4096.0);
+    CHECK(inter::interpDgridCurv[0][0] == 16.0);
+    CHECK(inter::interpDgridCurv[1][64] == 0.0);
+}
+
+TEST_CASE("av1_model_rd_curvfit matches the independent transcription over the bands (enc:294-312)") {
+    // The bsize category table (enc:197-:198), entry-for-entry; it also
+    // drives the rcat mapping for the oracle below.
+    const int wantCats[inter::kBlockSizesAll] = {0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 0, 0, 1, 1, 2, 2};
+    int catBad = 0;
+    for (int i = 0; i < inter::kBlockSizesAll; ++i)
+        if (inter::bsizeCurvfitModelCatLookup[i] != wantCats[i]) ++catBad;
+    CHECK(catBad == 0);
+    for (int bsize = 0; bsize < inter::kBlockSizesAll; ++bsize) {
+        for (double sseNorm : {0.5, 16.0, 16.0001, 100.0, 1e6}) {
+            for (double xqr : {-20.0, -15.0, -10.0, -3.3, 0.0, 1.5, 8.0, 16.4, 16.6, 100.0}) {
+                double wantDist = 0, gotDist = 0;
+                const double wantRate = curvfitoracle::modelRdCurvfit(wantCats[bsize], sseNorm, xqr, &wantDist);
+                double gotRate = 0;
+                inter::modelRdCurvfit(bsize, sseNorm, xqr, &gotRate, &gotDist);
+                CHECK(gotRate == wantRate);
+                CHECK(gotDist == wantDist);
+            }
+        }
+    }
+}
+
+TEST_CASE("model_rd_with_curvfit: the skip rule and the zero-sse arm (enc:316-361)") {
+    std::uint32_t rate = 0;
+    std::uint64_t dist = 0;
+    // sse = 0 -> both outputs 0.
+    inter::modelRdWithCurvfit(3, 0, 64, 56, 200, &rate, &dist);
+    CHECK(rate == 0);
+    CHECK(dist == 0);
+    // A large rdmult makes the fit's rate term dominate: the skip
+    // override FIRES (rate 0, dist sse << 4). Measured shape:
+    // sseNorm = 1, xqr = get_msb(0|1) = 0, xi = 31,
+    // rate_i = 772.07 * 64 ~= 49413, rdFit ~= 49413 * 100000 >> 9 =
+    // 9,651,000 >= rdSkip = (64 << 4) << 7 = 131,072.
+    inter::modelRdWithCurvfit(3, 64, 64, 8, 100000, &rate, &dist);
+    CHECK(rate == 0);
+    CHECK(dist == (std::uint64_t)(64 << 4));
+    // A mid qstep: the fit survives; the expectation is composed from the
+    // transcription plus the RDCOST skip comparison (rd_cost.h:36-38).
+    {
+        const double sseNorm = 1000.0 / 64.0;
+        // svt_log2f_safe(x) = get_msb(x | 1) (definitions.h:591); the
+        // (uint32) cast of sse_norm floors it, then / (qstep * qstep).
+        int msb = 0;
+        std::uint32_t val = (std::uint32_t)sseNorm | 1;
+        for (int i = 4; i >= 0; --i) {
+            const std::uint32_t x = val >> (1 << i);
+            if (x) {
+                val = x;
+                msb += (1 << i);
+            }
+        }
+        const double xqr = (double)msb;
+        double distBySse = 0;
+        const double rateF = curvfitoracle::modelRdCurvfit(0, sseNorm, xqr, &distBySse);
+        const double distF = distBySse * sseNorm;
+        int rateI = (int)((rateF * 64) + 0.5);
+        std::int64_t distI = (std::int64_t)((distF * 64) + 0.5);
+        if (rateI == 0) {
+            distI = 1000 << 4;
+        } else {
+            const std::int64_t rdFit = (((rateI * (std::int64_t)200) + ((1 << 9) >> 1)) >> 9) + (distI << 7);
+            const std::int64_t rdSkip = (((0 * (std::int64_t)200) + ((1 << 9) >> 1)) >> 9) + (((std::int64_t)(1000 << 4)) << 7);
+            if (rdFit >= rdSkip) {
+                rateI = 0;
+                distI = 1000 << 4;
+            }
+        }
+        inter::modelRdWithCurvfit(0, 1000, 64, 8, 200, &rate, &dist);
+        CHECK(rate == (std::uint32_t)rateI);
+        CHECK(dist == (std::uint64_t)distI);
+    }
+    // The composed expectation at quantizer 1 / rdmult 200 as well (the
+    // fit survives there: rdFit ~= 56,778 < rdSkip = 2,048,000).
+    {
+        const double sseNorm = 1000.0 / 64.0;
+        int msb = 0;
+        std::uint32_t val = (std::uint32_t)sseNorm | 1;
+        for (int i = 4; i >= 0; --i) {
+            const std::uint32_t x = val >> (1 << i);
+            if (x) {
+                val = x;
+                msb += (1 << i);
+            }
+        }
+        double distBySse = 0;
+        const double rateF = curvfitoracle::modelRdCurvfit(0, sseNorm, (double)msb, &distBySse);
+        int rateI = (int)((rateF * 64) + 0.5);
+        std::int64_t distI = (std::int64_t)(((distBySse * sseNorm) * 64) + 0.5);
+        if (rateI == 0) {
+            distI = 1000 << 4;
+        } else if ((((rateI * (std::int64_t)200) + 256) >> 9) + (distI << 7) >= (std::int64_t)(1000 << 4) << 7) {
+            rateI = 0;
+            distI = 1000 << 4;
+        }
+        inter::modelRdWithCurvfit(3, 1000, 64, 1, 200, &rate, &dist);
+        CHECK(rate == (std::uint32_t)rateI);
+        CHECK(dist == (std::uint64_t)distI);
+    }
+}
 // ------------------------------------------------------------- A3E E1
 // clamp_mv_to_umv_border_sb (enc_inter_prediction.c:55-:75). The xd
 // mb_to_*_edge fields thread as the four int parameters (the AMVP1

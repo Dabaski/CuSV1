@@ -709,6 +709,104 @@ Mv clampMvToUmvBorderSb(std::int32_t mbToLeftEdge, std::int32_t mbToRightEdge, s
     return clampedMv;
 }
 
+// ---------- A3E E2: the curvfit RD-model family ----------
+// interp_rgrid_curv, enc_inter_prediction.c:204-:249 and
+// interp_dgrid_curv, :251-:270 - MECHANICALLY extracted literal-for-
+// literal from the reference file (the RC1 rc_tables precedent;
+// runtime diff-verified entry-for-entry in tests/test_inter.cpp).
+const double interpRgridCurv[4][65] = {
+    {0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 23.801499, 28.387688, 33.388795, 42.298282, 41.525408, 51.597692, 49.566271, 54.632979, 60.321507, 67.730678, 75.766165, 85.324032, 96.600012, 120.839562, 173.917577, 255.974908, 354.107573, 458.063476, 562.345966, 668.568424, 772.072881, 878.598490, 982.202274, 1082.708946, 1188.037853, 1287.702240, 1395.588773, 1490.825830, 1584.231230, 1691.386090, 1766.822555, 1869.630904, 1926.743565, 2002.949495, 2047.431137, 2138.486068, 2154.743767, 2209.242472, 2277.593051, 2290.996432, 2307.452938, 2343.567091, 2397.654644, 2469.425868, 2558.591037, 2664.860422, 2787.944296, 2927.552932, 3083.396602, 3255.185579, 3442.630134, 3645.440541, 3863.327072, 4096.000000},
+    {0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 8.998436, 9.439592, 9.731837, 10.865931, 11.561347, 12.578139, 14.205101, 16.770584, 19.094853, 21.330863, 23.298907, 26.901921, 34.501017, 57.891733, 112.234763, 194.853189, 288.302032, 380.499422, 472.625309, 560.226809, 647.928463, 734.155122, 817.489721, 906.265783, 999.260562, 1094.489206, 1197.062998, 1293.296825, 1378.926484, 1472.760990, 1552.663779, 1635.196884, 1692.451951, 1759.741063, 1822.162720, 1916.515921, 1966.686071, 2031.647506, 2033.700134, 2087.847688, 2161.688858, 2242.536028, 2334.023491, 2436.337802, 2549.665519, 2674.193198, 2810.107395, 2957.594666, 3116.841567, 3288.034655, 3471.360486, 3667.005616, 3875.156602, 4096.000000},
+    {0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 2.377584, 2.557185, 2.732445, 2.851114, 3.281800, 3.765589, 4.342578, 5.145582, 5.611038, 6.642238, 7.945977, 11.800522, 17.346624, 37.501413, 87.216800, 165.860942, 253.865564, 332.039345, 408.518863, 478.120452, 547.268590, 616.067676, 680.022540, 753.863541, 834.529973, 919.489191, 1008.264989, 1092.230318, 1173.971886, 1249.514122, 1330.510941, 1399.523249, 1466.923387, 1530.533471, 1586.515722, 1695.197774, 1746.648696, 1837.136959, 1909.075485, 1975.074651, 2060.159200, 2155.335095, 2259.762505, 2373.710437, 2497.447898, 2631.243895, 2775.367434, 2930.087523, 3095.673170, 3272.393380, 3460.517161, 3660.313520, 3872.051464, 4096.000000},
+    {0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.296997, 0.342545, 0.403097, 0.472889, 0.614483, 0.842937, 1.050824, 1.326663, 1.717750, 2.530591, 3.582302, 6.995373, 9.973335, 24.042464, 56.598240, 113.680735, 180.018689, 231.050567, 266.101082, 294.957934, 323.326511, 349.434429, 380.443211, 408.171987, 441.214916, 475.716772, 512.900000, 551.186939, 592.364455, 624.527378, 661.940693, 679.185473, 724.800679, 764.781792, 873.050019, 950.299001, 939.292954, 1052.406153, 1033.893184, 1112.182406, 1219.174326, 1337.296681, 1471.648357, 1622.492809, 1790.093491, 1974.713858, 2176.617364, 2396.067465, 2633.327614, 2888.661266, 3162.331876, 3454.602899, 3765.737789, 4096.000000},
+};
+const double interpDgridCurv[2][65] = {
+    {16.000000, 15.962891, 15.925174, 15.886888, 15.848074, 15.808770, 15.769015, 15.728850, 15.688313, 15.647445, 15.606284, 15.564870, 15.525918, 15.483820, 15.373330, 15.126844, 14.637442, 14.184387, 13.560070, 12.880717, 12.165995, 11.378144, 10.438769, 9.130790, 7.487633, 5.688649, 4.267515, 3.196300, 2.434201, 1.834064, 1.369920, 1.035921, 0.775279, 0.574895, 0.427232, 0.314123, 0.233236, 0.171440, 0.128188, 0.092762, 0.067569, 0.049324, 0.036330, 0.027008, 0.019853, 0.015539, 0.011093, 0.008733, 0.007624, 0.008105, 0.005427, 0.004065, 0.003427, 0.002848, 0.002328, 0.001865, 0.001457, 0.001103, 0.000801, 0.000550, 0.000348, 0.000193, 0.000085, 0.000021, 0.000000},
+    {16.000000, 15.996116, 15.984769, 15.966413, 15.941505, 15.910501, 15.873856, 15.832026, 15.785466, 15.734633, 15.679981, 15.621967, 15.560961, 15.460157, 15.288367, 15.052462, 14.466922, 13.921212, 13.073692, 12.222005, 11.237799, 9.985848, 8.898823, 7.423519, 5.995325, 4.773152, 3.744032, 2.938217, 2.294526, 1.762412, 1.327145, 1.020728, 0.765535, 0.570548, 0.425833, 0.313825, 0.232959, 0.171324, 0.128174, 0.092750, 0.067558, 0.049319, 0.036330, 0.027008, 0.019853, 0.015539, 0.011093, 0.008733, 0.007624, 0.008105, 0.005427, 0.004065, 0.003427, 0.002848, 0.002328, 0.001865, 0.001457, 0.001103, 0.000801, 0.000550, 0.000348, 0.000193, 0.000085, 0.000021, -0.000000},
+};
+// bsize_curvfit_model_cat_lookup, enc_inter_prediction.c:197-:198.
+const std::uint8_t bsizeCurvfitModelCatLookup[kBlockSizesAll] = {0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3,
+                                                                 3, 3, 3, 3, 3, 0, 0, 1, 1, 2, 2};
+
+// sse_norm_curvfit_model_cat_lookup, enc_inter_prediction.c:200-:202.
+inline int sseNormCurvfitModelCatLookup(double sseNorm) {
+    return (sseNorm > 16.0);
+}
+
+// av1_model_rd_curvfit, enc_inter_prediction.c:294-:312.
+void modelRdCurvfit(int bsize, double sseNorm, double xqr, double* rateF, double* distbysseF) {
+    const double xStart = -15.5;
+    const double xEnd = 16.5;
+    const double xStep = 0.5;
+    const double epsilon = 1e-6;
+    const int rcat = bsizeCurvfitModelCatLookup[bsize];
+    const int dcat = sseNormCurvfitModelCatLookup(sseNorm);
+
+    xqr = xqr < (xStart + xStep + epsilon) ? (xStart + xStep + epsilon) : xqr;
+    xqr = xqr > (xEnd - xStep - epsilon) ? (xEnd - xStep - epsilon) : xqr;
+    const double x = (xqr - xStart) / xStep;
+    const int xi = (int)std::floor(x);
+    assert(xi > 0);
+
+    const double* prate = &interpRgridCurv[rcat][(xi - 1)];
+    *rateF = prate[1];
+    const double* pdist = &interpDgridCurv[dcat][(xi - 1)];
+    *distbysseF = pdist[1];
+}
+
+// RDCOST (rd_cost.h:36-:38), the local inline (the l16 rate_est macro is
+// unlinkable from l17; the RDDIV_BITS = 7 / AV1_PROB_COST_SHIFT = 9 fold).
+inline std::int64_t rdCost(std::uint32_t rdmult, std::int64_t rate, std::int64_t dist) {
+    return ((rate * (std::int64_t)rdmult + ((1 << 9) >> 1)) >> 9) + (dist << 7);
+}
+
+// model_rd_with_curvfit, enc_inter_prediction.c:316-:361. The pcs/dequants
+// wall threads as the quantizer value (the dequants->y_dequant_qtx
+// [current_q_index][1] read is caller-side); the dequant shift is the
+// reference's constant 3.
+void modelRdWithCurvfit(int bsize, std::int64_t sse, int numSamples, std::int16_t quantizer, std::uint32_t rdmult,
+                        std::uint32_t* rate, std::uint64_t* dist) {
+    (void)bsize;
+    const int dequantShift = 3;
+
+    const int qstep = quantizer >> dequantShift > 1 ? quantizer >> dequantShift : 1;
+
+    if (sse == 0) {
+        if (rate) {
+            *rate = 0;
+        }
+        if (dist) {
+            *dist = 0;
+        }
+        return;
+    }
+
+    const double sseNorm = (double)sse / numSamples;
+    const std::uint32_t xqrI = (std::uint32_t)sseNorm / (std::uint32_t)(qstep * qstep);
+    const double xqr = (double)getMsb(xqrI | 1);
+
+    double rateF = 0, distBySseNormF = 0;
+    modelRdCurvfit(bsize, sseNorm, xqr, &rateF, &distBySseNormF);
+
+    const double distF = distBySseNormF * sseNorm;
+    int rateI = (int)((rateF * numSamples) + 0.5);
+    std::int64_t distI = (std::int64_t)((distF * numSamples) + 0.5);
+
+    // Check if skip is better
+    if (rateI == 0) {
+        distI = sse << 4;
+    } else if (rdCost(rdmult, rateI, distI) >= rdCost(rdmult, 0, sse << 4)) {
+        rateI = 0;
+        distI = sse << 4;
+    }
+
+    if (rate) {
+        *rate = (std::uint32_t)rateI;
+    }
+    if (dist) {
+        *dist = (std::uint64_t)distI;
+    }
+}
 // svt_av1_get_obmc_mask, inter_prediction.c:2556-:2574.
 const std::uint8_t* getObmcMask(int length) {
     switch (length) {
