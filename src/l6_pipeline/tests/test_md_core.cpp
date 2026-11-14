@@ -14,9 +14,12 @@
 
 #include <amvp.h>
 #include <md_core.h>
+#include <motion.h>
+#include <picops.h>
 
 namespace mdc = pipeline::mdc;
 namespace amvp = motion::amvp;
+namespace picops = pipeline::picops;
 
 namespace {
 
@@ -942,4 +945,331 @@ TEST_CASE("l6 mdc mdStage0 pruneUsingBestMode skips H after V and smooth after D
     const std::uint64_t v_dc = o.variance(scratch, 16, srcBuf, 16, 8, 8);
     CHECK(ctx.mds0_best_cost == v_dc << 4);
     CHECK(ctx.mds0_best_class0_cost == v_dc << 4);
+}
+
+// trip 10: md_full_pel_search (product_coding_loop.c:1855-:1989) - the SAD
+// walk over the clamped search area with the OPT mv-cost term, the
+// sparse-skip rule, and the VAR/SSD dist-type branches. Oracle: a test-side
+// brute force over the same (clamped) position set.
+TEST_CASE("l6 mdc mdFullPelSearch finds the SAD optimum over the clamped area") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.blk_org_x = 40;
+    ctx.blk_org_y = 40;
+    ctx.ref_mv.x = 0;
+    ctx.ref_mv.y = 0;
+    ctx.md_subpel_skip_diag_refinement = 3;  // -> MV_COST_OPT (table-free)
+    ctx.full_lambda_md[0] = 1024;
+    ctx.fast_lambda_md[0] = 1024;
+
+    // src block at (40,40) in a 64x64 plane; ref plane with border 32.
+    std::vector<std::uint8_t> srcPlane(64 * 64);
+    std::vector<std::uint8_t> refPlane((64 + 64) * (64 + 64));  // border 32 all around
+    for (int i = 0; i < 64 * 64; ++i) srcPlane[i] = static_cast<std::uint8_t>(i * 3 + 7);
+    for (int i = 0; i < (64 + 64) * (64 + 64); ++i) refPlane[i] = static_cast<std::uint8_t>(i * 5 + 1);
+    mdc::PicBuf input{};
+    input.buf = srcPlane.data();
+    input.stride = 64;
+    input.width = 64;
+    input.height = 64;
+    mdc::PicBuf ref{};
+    ref.buf = refPlane.data() + 32 * (64 + 64) + 32;  // the (0,0) sample
+    ref.stride = 64 + 64;
+    ref.width = 64;
+    ref.height = 64;
+    ref.max_width = 64;
+    ref.max_height = 64;
+    ref.border = 32;
+
+    const std::uint32_t input_origin_index = 40 * 64 + 40;
+    std::int16_t best_x = 0, best_y = 0;
+    std::uint32_t best_cost = 0xFFFFFFFFu;
+    mdc::mdFullPelSearch(&ctx, input, ref, input_origin_index, mdc::DIST_SAD, 0, 0, -2, 2, -2, 2, 1, 0, &best_x,
+                         &best_y, &best_cost, 0, 100);
+
+    // Independent brute force over the same (clamped) window: SAD + the
+    // OPT mv cost = ROUND((|dy|+|dx|)<<8 * epb, 14), epb = rdmult>>6 = 16.
+    const std::uint8_t* srcB = srcPlane.data() + input_origin_index;
+    std::uint32_t want_cost = 0xFFFFFFFFu;
+    std::int16_t want_x = 0, want_y = 0;
+    for (int py = -2; py <= 2; ++py) {
+        for (int px = -2; px <= 2; ++px) {
+            std::uint32_t sad = 0;
+            const std::uint8_t* rp = ref.buf + (40 + py) * ref.stride + (40 + px);
+            for (int r = 0; r < 8; ++r)
+                for (int c = 0; c < 8; ++c) {
+                    const int a = srcB[r * 64 + c];
+                    const int b = rp[r * ref.stride + c];
+                    sad += static_cast<std::uint32_t>(a > b ? a - b : b - a);
+                }
+            const int dx = px * 8, dy = py * 8;
+            const int adx = dx < 0 ? -dx : dx;
+            const int ady = dy < 0 ? -dy : dy;
+            const std::int64_t mv_cost = (((ady + adx) << 8) * 16 + 8192) >> 14;
+            const std::uint32_t cost = sad + static_cast<std::uint32_t>(mv_cost);
+            if (cost < want_cost) {
+                want_cost = cost;
+                want_x = static_cast<std::int16_t>(px * 8);
+                want_y = static_cast<std::int16_t>(py * 8);
+            }
+        }
+    }
+    CHECK(best_cost == want_cost);
+    CHECK(best_x == want_x);
+    CHECK(best_y == want_y);
+}
+
+TEST_CASE("l6 mdc mdFullPelSearch clamps the area at the ref border and skips sparse") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.md_subpel_skip_diag_refinement = 3;
+    ctx.full_lambda_md[0] = 1024;
+    ctx.fast_lambda_md[0] = 1024;
+
+    std::vector<std::uint8_t> srcPlane(64 * 64);
+    std::vector<std::uint8_t> refPlane((64 + 64) * (64 + 64));
+    for (int i = 0; i < 64 * 64; ++i) srcPlane[i] = static_cast<std::uint8_t>(i * 3 + 7);
+    for (int i = 0; i < (64 + 64) * (64 + 64); ++i) refPlane[i] = static_cast<std::uint8_t>(i * 5 + 1);
+    mdc::PicBuf input{};
+    input.buf = srcPlane.data();
+    input.stride = 64;
+    mdc::PicBuf ref{};
+    ref.buf = refPlane.data() + 32 * (64 + 64) + 32;
+    ref.stride = 64 + 64;
+    ref.max_width = 64;
+    ref.max_height = 64;
+    ref.border = 32;
+
+    // (a) The clamp: blk at x=1 with mvx = -64 (>>3 = -8): the start-side
+    // clamp keeps (blk_org + mv>>3 + start) >= -border + 1 = -31 ->
+    // start >= -31 - (1 - 8) = -24... the raw start -2 stays (1-8-2 = -9
+    // > -31). End side: 1 + 8 + (-8) + end <= border + max_w - 1 = 95 ->
+    // end <= 94; raw end 2 stays. So no clamp fires here; force it: put
+    // the block at x = 90 (out of the 64 max but the clamp math does not
+    // care) and mvx = +64: 90 + 8 + end <= 95 -> end <= -3.
+    ctx.blk_org_x = 90;
+    ctx.blk_org_y = 40;
+    std::int16_t best_x = 0, best_y = 0;
+    std::uint32_t best_cost = 0xFFFFFFFFu;
+    mdc::mdFullPelSearch(&ctx, input, ref, 40 * 64 + 40, mdc::DIST_SAD, 64, 0, -2, 2, -2, 2, 1, 0, &best_x, &best_y,
+                         &best_cost, 0, 100);
+    // The end-side clamp pulls end_x to -3: the walk visits x in [-2, -3]
+    // -> EMPTY -> no position visited -> best stays untouched.
+    CHECK(best_cost == 0xFFFFFFFFu);
+    CHECK(best_x == 0);
+    CHECK(best_y == 0);
+
+    // (b) The start-side clamp: blk at y=2, mvy = -64 (>>3 = -8): start_y
+    // raw -2 -> 2 - 8 - 2 = -8 < -31? No (-8 > -31). Force: blk_org_y = 90,
+    // mvy = 64: 90 + 8 + end_y <= 95 -> end_y <= -3.
+    ctx.blk_org_x = 40;
+    ctx.blk_org_y = 90;
+    best_cost = 0xFFFFFFFFu;
+    mdc::mdFullPelSearch(&ctx, input, ref, 40 * 64 + 40, mdc::DIST_SAD, 0, 64, -2, 2, -2, 2, 1, 0, &best_x, &best_y,
+                         &best_cost, 0, 100);
+    CHECK(best_cost == 0xFFFFFFFFu);
+
+    // (c) The sparse-skip: step 2 with lev0 performed; the positions
+    // inside the lev0 box at (%4 == 0, %4 == 0) are skipped. Put the lev0
+    // box to cover the whole window: positions (x % 4 == 0 && y % 4 == 0)
+    // within it are skipped, so with start=-2..end=2, the skipped x are
+    // {0} hmm: x%4==0 within [-2,2] = {0}, y likewise. With step 2 the y
+    // positions are {-2, 0, 2}: y=0 skipped; x positions {-2,0,2}: x=0
+    // skipped. So (0,0) is skipped; the rest run.
+    ctx.blk_org_x = 40;
+    ctx.blk_org_y = 40;
+    ctx.sprs_lev0_start_x = -100;
+    ctx.sprs_lev0_end_x = 100;
+    ctx.sprs_lev0_start_y = -100;
+    ctx.sprs_lev0_end_y = 100;
+    best_cost = 0xFFFFFFFFu;
+    mdc::mdFullPelSearch(&ctx, input, ref, 40 * 64 + 40, mdc::DIST_SAD, 0, 0, -2, 2, -2, 2, 2, 1, &best_x, &best_y,
+                         &best_cost, 0, 100);
+    // The oracle over the same visited set (skip (0,0)).
+    const std::uint8_t* srcB = srcPlane.data() + 40 * 64 + 40;
+    std::uint32_t want_cost = 0xFFFFFFFFu;
+    std::int16_t want_x = 0, want_y = 0;
+    for (int py = -2; py <= 2; py += 2) {
+        for (int px = -2; px <= 2; px += 2) {
+            if (px == 0 && py == 0) continue;
+            std::uint32_t sad = 0;
+            const std::uint8_t* rp = ref.buf + (40 + py) * ref.stride + (40 + px);
+            for (int r = 0; r < 8; ++r)
+                for (int c = 0; c < 8; ++c) {
+                    const int a = srcB[r * 64 + c];
+                    const int b = rp[r * ref.stride + c];
+                    sad += static_cast<std::uint32_t>(a > b ? a - b : b - a);
+                }
+            const int dx = px * 8, dy = py * 8;
+            const std::int64_t mv_cost = (((((dy < 0 ? -dy : dy) + (dx < 0 ? -dx : dx)) << 8) * 16) + 8192) >> 14;
+            const std::uint32_t cost = sad + static_cast<std::uint32_t>(mv_cost);
+            if (cost < want_cost) {
+                want_cost = cost;
+                want_x = static_cast<std::int16_t>(px * 8);
+                want_y = static_cast<std::int16_t>(py * 8);
+            }
+        }
+    }
+    CHECK(best_cost == want_cost);
+    CHECK(best_x == want_x);
+    CHECK(best_y == want_y);
+}
+
+TEST_CASE("l6 mdc mdFullPelSearch runs the VAR and SSD dist types and the hbd SAD") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.md_subpel_skip_diag_refinement = 3;
+    ctx.full_lambda_md[0] = 1024;
+    ctx.fast_lambda_md[0] = 1024;
+    ctx.blk_org_x = 40;
+    ctx.blk_org_y = 40;
+
+    std::vector<std::uint8_t> srcPlane(64 * 64);
+    std::vector<std::uint8_t> refPlane((64 + 64) * (64 + 64));
+    for (int i = 0; i < 64 * 64; ++i) srcPlane[i] = static_cast<std::uint8_t>(i * 3 + 7);
+    for (int i = 0; i < (64 + 64) * (64 + 64); ++i) refPlane[i] = static_cast<std::uint8_t>(i * 5 + 1);
+    mdc::PicBuf input{};
+    input.buf = srcPlane.data();
+    input.stride = 64;
+    mdc::PicBuf ref{};
+    ref.buf = refPlane.data() + 32 * (64 + 64) + 32;
+    ref.stride = 64 + 64;
+    ref.max_width = 64;
+    ref.max_height = 64;
+    ref.border = 32;
+
+    // VAR: the variance at each position; oracle over the window.
+    std::int16_t best_x = 0, best_y = 0;
+    std::uint32_t best_cost = 0xFFFFFFFFu;
+    mdc::mdFullPelSearch(&ctx, input, ref, 40 * 64 + 40, mdc::DIST_VAR, 0, 0, -1, 1, -1, 1, 1, 0, &best_x, &best_y,
+                         &best_cost, 0, 100);
+    VarOracle o;
+    const std::uint8_t* srcB = srcPlane.data() + 40 * 64 + 40;
+    std::uint32_t want_cost = 0xFFFFFFFFu;
+    std::int16_t want_x = 0, want_y = 0;
+    for (int py = -1; py <= 1; ++py) {
+        for (int px = -1; px <= 1; ++px) {
+            const std::uint8_t* rp = ref.buf + (40 + py) * ref.stride + (40 + px);
+            const std::uint32_t var = o.variance(rp, static_cast<int>(ref.stride), srcB, 64, 8, 8);
+            const std::int64_t mv_cost = (((((py * 8 < 0 ? -py * 8 : py * 8) + (px * 8 < 0 ? -px * 8 : px * 8)) << 8) * 16) + 8192) >> 14;
+            const std::uint32_t cost = var + static_cast<std::uint32_t>(mv_cost);
+            if (cost < want_cost) {
+                want_cost = cost;
+                want_x = static_cast<std::int16_t>(px * 8);
+                want_y = static_cast<std::int16_t>(py * 8);
+            }
+        }
+    }
+    CHECK(best_cost == want_cost);
+    CHECK(best_x == want_x);
+    CHECK(best_y == want_y);
+
+    // SSD: the spatial full distortion (sum of squared diffs) at (0,0).
+    std::uint64_t ssd_ref = picops::spatialFullDistortion(srcPlane.data(), 40 * 64 + 40, 64,
+                                                                   refPlane.data() + 32 * (64 + 64) + 32,
+                                                                   (40 + 0) * ref.stride + (40 + 0), ref.stride, 8, 8);
+    best_cost = 0xFFFFFFFFu;
+    mdc::mdFullPelSearch(&ctx, input, ref, 40 * 64 + 40, mdc::DIST_SSD, 0, 0, 0, 0, 0, 0, 1, 0, &best_x, &best_y,
+                         &best_cost, 0, 100);
+    CHECK(best_cost == static_cast<std::uint32_t>(ssd_ref) + (((0 << 8) * 16 + 8192) >> 14));
+
+    // hbd SAD: uint16 planes through sad16b at (0,0).
+    std::vector<std::uint16_t> srcHbd(64 * 64);
+    std::vector<std::uint16_t> refHbd((64 + 64) * (64 + 64));
+    for (int i = 0; i < 64 * 64; ++i) srcHbd[i] = static_cast<std::uint16_t>(i * 37 + 11);
+    for (int i = 0; i < (64 + 64) * (64 + 64); ++i) refHbd[i] = static_cast<std::uint16_t>(i * 13 + 3);
+    mdc::PicBuf inputH{};
+    inputH.buf = reinterpret_cast<std::uint8_t*>(srcHbd.data());
+    inputH.stride = 64;
+    mdc::PicBuf refH{};
+    refH.buf = reinterpret_cast<std::uint8_t*>(refHbd.data() + 32 * (64 + 64) + 32);
+    refH.stride = 64 + 64;
+    refH.max_width = 64;
+    refH.max_height = 64;
+    refH.border = 32;
+    best_cost = 0xFFFFFFFFu;
+    mdc::mdFullPelSearch(&ctx, inputH, refH, 40 * 64 + 40, mdc::DIST_SAD, 0, 0, 0, 0, 0, 0, 1, 0, &best_x, &best_y,
+                         &best_cost, 1, 100);
+    const std::uint32_t sad16 = motion::sad16b(srcHbd.data() + 40 * 64 + 40, 64,
+                                               refHbd.data() + (40 + 32) * (64 + 64) + (40 + 32), 64 + 64, 8, 8);
+    CHECK(best_cost == sad16);
+}
+
+// trip 11: md_full_pel_search_large_lbd (product_coding_loop.c:1771-:1840).
+// The remain padding rounds the window width up to a multiple of 8, so the
+// pme-kernel part covers the whole x range (the tail walk is dead by the
+// assert - ported verbatim, unreachable). Oracle: a brute force over the
+// padded window with the same SAD + OPT-cost model.
+TEST_CASE("l6 mdc mdFullPelSearchLargeLbd covers the padded window via the pme kernel") {
+    mdc::FlCtx ctx{};
+    ctx.geom.bsize = entropy::BLOCK_8X8;
+    ctx.geom.bwidth = 8;
+    ctx.geom.bheight = 8;
+    ctx.geom.sq_size = 8;
+    ctx.blk_org_x = 40;
+    ctx.blk_org_y = 40;
+    ctx.ref_mv.x = 0;
+    ctx.ref_mv.y = 0;
+
+    std::vector<std::uint8_t> srcPlane(64 * 64);
+    std::vector<std::uint8_t> refPlane((64 + 64) * (64 + 64));
+    for (int i = 0; i < 64 * 64; ++i) srcPlane[i] = static_cast<std::uint8_t>(i * 3 + 7);
+    for (int i = 0; i < (64 + 64) * (64 + 64); ++i) refPlane[i] = static_cast<std::uint8_t>(i * 5 + 1);
+    mdc::PicBuf input{};
+    input.buf = srcPlane.data();
+    input.stride = 64;
+    mdc::PicBuf ref{};
+    ref.buf = refPlane.data() + 32 * (64 + 64) + 32;
+    ref.stride = 64 + 64;
+
+    pipeline::SvtMvCostParam params;
+    std::memset(&params, 0, sizeof(params));
+    const pipeline::Mv2 zero_mv{};
+    params.ref_mv = &zero_mv;
+    params.error_per_bit = 16;
+    params.mv_cost_type = pipeline::MV_COST_OPT;
+
+    const std::uint32_t input_origin_index = 40 * 64 + 40;
+    std::int16_t best_x = 0, best_y = 0;
+    std::uint32_t best_cost = 0xFFFFFFFFu;
+    mdc::mdFullPelSearchLargeLbd(params, &ctx, input, ref, input_origin_index, 0, 0, 0, 10, 0, 2, 1, &best_x, &best_y,
+                                 &best_cost);
+
+    // The remain padding: 10 % 8 = 2 -> remain 6 -> end 16 -> width 16, all
+    // via the kernel. Brute force 16 x 3 positions.
+    const std::uint8_t* srcB = srcPlane.data() + input_origin_index;
+    std::uint32_t want_cost = 0xFFFFFFFFu;
+    std::int16_t want_x = 0, want_y = 0;
+    for (int py = 0; py <= 2; ++py) {
+        for (int px = 0; px <= 15; ++px) {
+            std::uint32_t sad = 0;
+            const std::uint8_t* rp = ref.buf + (40 + py) * ref.stride + (40 + px);
+            for (int r = 0; r < 8; ++r)
+                for (int c = 0; c < 8; ++c) {
+                    const int a = srcB[r * 64 + c];
+                    const int b = rp[r * ref.stride + c];
+                    sad += static_cast<std::uint32_t>(a > b ? a - b : b - a);
+                }
+            const int dx = px * 8, dy = py * 8;
+            const std::int64_t mv_cost = (((((dy < 0 ? -dy : dy) + (dx < 0 ? -dx : dx)) << 8) * 16) + 8192) >> 14;
+            const std::uint32_t cost = sad + static_cast<std::uint32_t>(mv_cost);
+            if (cost < want_cost) {
+                want_cost = cost;
+                want_x = static_cast<std::int16_t>(px * 8);
+                want_y = static_cast<std::int16_t>(py * 8);
+            }
+        }
+    }
+    CHECK(best_cost == want_cost);
+    CHECK(best_x == want_x);
+    CHECK(best_y == want_y);
 }

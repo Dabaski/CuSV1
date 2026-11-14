@@ -143,6 +143,16 @@ struct FlCtx {
     std::uint8_t target_class;                     // ctx->target_class (CandClass)
     std::uint8_t ifs_level;                        // ctx->ifs_ctrls.level
     std::uint32_t md_stage_1_count[kCandClassTotal];  // ctx->md_stage_1_count
+    // The ME-search window (md_full_pel_search / nsq / sq / pme).
+    Mv2 ref_mv;                                    // ctx->ref_mv
+    std::uint8_t md_subpel_skip_diag_refinement;   // md_subpel_me_ctrls.skip_diag_refinement
+    const std::int32_t* nmv_vec_cost;              // md_rate_est_ctx->nmv_vec_cost
+    const std::int32_t* nmvcoststack0;             // md_rate_est_ctx->nmvcoststack[0]
+    const std::int32_t* nmvcoststack1;
+    std::int16_t sprs_lev0_start_x;                // ctx->sprs_lev0_* (the sparse box)
+    std::int16_t sprs_lev0_end_x;
+    std::int16_t sprs_lev0_start_y;
+    std::int16_t sprs_lev0_end_y;
     std::uint32_t full_lambda_md[2];               // ctx->full_lambda_md[EB_8_BIT_MD / EB_10_BIT_MD]
     std::uint32_t fast_lambda_md[2];
     // mds0 state (md_process.h:1191-:1200 window).
@@ -252,6 +262,25 @@ void mdStage0LightPd1(FlCtx* ctx, MdCandBf** cand_bf_ptr_array_base, MdCand* fas
 
 // md_process.c:29-:33 uni_psy_bias.
 extern const std::uint8_t uniPsyBias[64];
+
+// product_coding_loop.c:1855-:1990 md_full_pel_search. The pcs walls
+// thread: frm_hdr base_q_idx -> base_q_idx; the ref-pic buffer travels as
+// the PicBuf carrier (the scaled-ref machinery svt_aom_use_scaled_rec_
+// refs_if_needed is the caller's concern - named park).
+void mdFullPelSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, std::uint32_t input_origin_index,
+                     DistortionType dist_type, std::int16_t mvx, std::int16_t mvy,
+                     std::int16_t search_position_start_x, std::int16_t search_position_end_x,
+                     std::int16_t search_position_start_y, std::int16_t search_position_end_y,
+                     std::int16_t sparse_search_step, std::uint8_t is_sprs_lev0_performed, std::int16_t* best_mvx,
+                     std::int16_t* best_mvy, std::uint32_t* best_cost, std::uint8_t hbd_md, std::uint8_t base_q_idx);
+
+// product_coding_loop.c:1771-:1840 md_full_pel_search_large_lbd.
+void mdFullPelSearchLargeLbd(const pipeline::SvtMvCostParam& mv_cost_params, FlCtx* ctx, const PicBuf& input_pic,
+                             const PicBuf& ref_pic, std::uint32_t input_origin_index, std::int16_t mvx,
+                             std::int16_t mvy, std::int16_t search_position_start_x,
+                             std::int16_t search_position_end_x, std::int16_t search_position_start_y,
+                             std::int16_t search_position_end_y, std::int16_t sparse_search_step,
+                             std::int16_t* best_mvx, std::int16_t* best_mvy, std::uint32_t* best_cost);
 
 // product_coding_loop.c:1582-:1714 md_stage_0. The pcs walls thread:
 // scs->vq_ctrls.sharpness_ctrls.unipred_bias && pcs->ppcs->is_noise_level

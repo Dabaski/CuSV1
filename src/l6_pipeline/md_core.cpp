@@ -5,7 +5,9 @@
 #include <cassert>
 
 #include <md_slices.h>
+#include <motion.h>
 #include <packunpack.h>
+#include <picops.h>
 
 namespace pipeline {
 namespace mdc {
@@ -628,6 +630,209 @@ void mdStage0(FlCtx* ctx, MdCandBf** cand_bf_ptr_array_base, MdCand* fast_candid
 
     // Set the cost of the scratch candidate to max to get discarded @ the sorting phase
     *(cand_bf_ptr_array_base[highest_cost_index]->fast_cost) = kMaxCuCost;
+}
+
+// product_coding_loop.c:1771-:1840 md_full_pel_search_large_lbd. We cannot
+// use sparse_search_step with mpsad for search_position_start_x/
+// search_position_end_x, so for x dimension we assume sparse_search_step
+// is always 1.
+void mdFullPelSearchLargeLbd(const pipeline::SvtMvCostParam& mv_cost_params, FlCtx* ctx, const PicBuf& input_pic,
+                             const PicBuf& ref_pic, std::uint32_t input_origin_index, std::int16_t mvx,
+                             std::int16_t mvy, std::int16_t search_position_start_x,
+                             std::int16_t search_position_end_x, std::int16_t search_position_start_y,
+                             std::int16_t search_position_end_y, std::int16_t sparse_search_step,
+                             std::int16_t* best_mvx, std::int16_t* best_mvy, std::uint32_t* best_cost) {
+    std::int32_t ref_origin_index = (ctx->blk_org_x + (mvx >> 3) + search_position_start_x) +
+        (ctx->blk_org_y + (mvy >> 3) + search_position_start_y) * static_cast<std::int32_t>(ref_pic.stride);
+
+    std::int16_t remain_search_area = 8 - ((search_position_end_x - search_position_start_x) % 8);
+    remain_search_area = remain_search_area == 8 ? 0 : remain_search_area;
+    search_position_end_x = search_position_end_x > search_position_end_x + remain_search_area
+        ? search_position_end_x
+        : static_cast<std::int16_t>(search_position_end_x + remain_search_area);
+    const std::int32_t search_area_width_i = search_position_end_x - search_position_start_x;
+    const std::uint32_t search_area_height = search_position_end_y - search_position_start_y + 1;
+    assert(!(search_area_width_i & 7));
+    if (search_area_width_i & ~0x7) {
+        pipeline::svtPmeSadLoopKernel(&mv_cost_params,
+                                      input_pic.buf + input_origin_index,
+                                      input_pic.stride,
+                                      ref_pic.buf + ref_origin_index,
+                                      ref_pic.stride,
+                                      ctx->geom.bheight,
+                                      ctx->geom.bwidth,
+                                      best_cost,
+                                      best_mvx,
+                                      best_mvy,
+                                      search_position_start_x,
+                                      search_position_start_y,
+                                      static_cast<std::int16_t>(search_area_width_i & ~0x7),  // multiple of 8
+                                      static_cast<std::int16_t>(search_area_height),
+                                      sparse_search_step,
+                                      mvx,
+                                      mvy);
+    }
+
+    if (search_area_width_i & 7) {
+        for (std::int32_t refinement_pos_y = search_position_start_y; refinement_pos_y <= search_position_end_y;
+             refinement_pos_y = refinement_pos_y + sparse_search_step) {
+            std::int32_t refinement_pos_x = search_position_start_x + (search_area_width_i & ~0x7);
+            for (; refinement_pos_x <= search_position_end_x; refinement_pos_x++) {
+                ref_origin_index = (ctx->blk_org_x + (mvx >> 3) + refinement_pos_x) +
+                    (ctx->blk_org_y + (mvy >> 3) + refinement_pos_y) * static_cast<std::int32_t>(ref_pic.stride);
+
+                const std::uint32_t cost = motion::nxmSadKernelHelper(
+                    input_pic.buf + input_origin_index, input_pic.stride, ref_pic.buf + ref_origin_index,
+                    ref_pic.stride, ctx->geom.bheight, ctx->geom.bwidth);
+
+                Mv2 best_mv;
+                best_mv.x = static_cast<std::int16_t>(mvx + (refinement_pos_x * 8));
+                best_mv.y = static_cast<std::int16_t>(mvy + (refinement_pos_y * 8));
+                const std::uint32_t cost_with_err =
+                    cost + static_cast<std::uint32_t>(pipeline::fpMvErrCost(best_mv, mv_cost_params));
+                if (cost_with_err < *best_cost) {
+                    *best_mvx = best_mv.x;
+                    *best_mvy = best_mv.y;
+                    *best_cost = cost_with_err;
+                }
+            }
+        }
+    }
+}
+
+// product_coding_loop.c:1855-:1990 md_full_pel_search.
+void mdFullPelSearch(FlCtx* ctx, const PicBuf& input_pic, const PicBuf& ref_pic, std::uint32_t input_origin_index,
+                     DistortionType dist_type, std::int16_t mvx, std::int16_t mvy,
+                     std::int16_t search_position_start_x, std::int16_t search_position_end_x,
+                     std::int16_t search_position_start_y, std::int16_t search_position_end_y,
+                     std::int16_t sparse_search_step, std::uint8_t is_sprs_lev0_performed, std::int16_t* best_mvx,
+                     std::int16_t* best_mvy, std::uint32_t* best_cost, std::uint8_t hbd_md, std::uint8_t base_q_idx) {
+    // Mvcost params
+    pipeline::SvtMvCostParam mv_cost_params;
+    const std::uint32_t rdmult = dist_type != DIST_SAD
+        ? (hbd_md ? ctx->full_lambda_md[1] : ctx->full_lambda_md[0])
+        : (hbd_md ? ctx->fast_lambda_md[1] : ctx->fast_lambda_md[0]);
+    pipeline::InitMvCostParamsCtx init_ctx;
+    init_ctx.sq_size = ctx->geom.sq_size;
+    init_ctx.skip_diag_refinement = ctx->md_subpel_skip_diag_refinement;
+    init_ctx.nmv_vec_cost = ctx->nmv_vec_cost;
+    init_ctx.nmvcoststack0 = ctx->nmvcoststack0;
+    init_ctx.nmvcoststack1 = ctx->nmvcoststack1;
+    pipeline::svtInitMvCostParams(init_ctx, &mv_cost_params, &ctx->ref_mv, base_q_idx, rdmult, hbd_md);
+    std::uint32_t cost;
+    // Search area adjustment
+    if ((ctx->blk_org_x + (mvx >> 3) + search_position_start_x) < (-ref_pic.border + 1)) {
+        search_position_start_x =
+            static_cast<std::int16_t>((-ref_pic.border + 1) - (ctx->blk_org_x + (mvx >> 3)));
+    }
+
+    if ((ctx->blk_org_x + static_cast<std::int32_t>(ctx->geom.bwidth) + (mvx >> 3) + search_position_end_x) >
+        (ref_pic.border + static_cast<std::int32_t>(ref_pic.max_width) - 1)) {
+        search_position_end_x = static_cast<std::int16_t>((ref_pic.border + static_cast<std::int32_t>(ref_pic.max_width) - 1) -
+            (ctx->blk_org_x + static_cast<std::int32_t>(ctx->geom.bwidth) + (mvx >> 3)));
+    }
+
+    if ((ctx->blk_org_y + (mvy >> 3) + search_position_start_y) < (-ref_pic.border + 1)) {
+        search_position_start_y =
+            static_cast<std::int16_t>((-ref_pic.border + 1) - (ctx->blk_org_y + (mvy >> 3)));
+    }
+
+    if ((ctx->blk_org_y + static_cast<std::int32_t>(ctx->geom.bheight) + (mvy >> 3) + search_position_end_y) >
+        (ref_pic.border + static_cast<std::int32_t>(ref_pic.max_height) - 1)) {
+        search_position_end_y = static_cast<std::int16_t>((ref_pic.border + static_cast<std::int32_t>(ref_pic.max_height) - 1) -
+            (ctx->blk_org_y + static_cast<std::int32_t>(ctx->geom.bheight) + (mvy >> 3)));
+    }
+    if (dist_type == DIST_SAD && ctx->enable_psad) {
+        if (!hbd_md && (search_position_end_x - search_position_start_x) >= 7) {
+            mdFullPelSearchLargeLbd(mv_cost_params,
+                                    ctx,
+                                    input_pic,
+                                    ref_pic,
+                                    input_origin_index,
+                                    mvx,
+                                    mvy,
+                                    search_position_start_x,
+                                    search_position_end_x,
+                                    search_position_start_y,
+                                    search_position_end_y,
+                                    sparse_search_step,
+                                    best_mvx,
+                                    best_mvy,
+                                    best_cost);
+            return;
+        }
+    }
+    for (std::int32_t refinement_pos_x = search_position_start_x; refinement_pos_x <= search_position_end_x;
+         refinement_pos_x = refinement_pos_x + sparse_search_step) {
+        for (std::int32_t refinement_pos_y = search_position_start_y; refinement_pos_y <= search_position_end_y;
+             refinement_pos_y = refinement_pos_y + sparse_search_step) {
+            // If sparse search level_1, and if search level_0 previously performed
+            if (sparse_search_step == 2 && is_sprs_lev0_performed) {
+                // If level_0 range
+                if ((refinement_pos_x + (mvx >> 3)) >= ctx->sprs_lev0_start_x &&
+                    (refinement_pos_x + (mvx >> 3)) <= ctx->sprs_lev0_end_x &&
+                    (refinement_pos_y + (mvy >> 3)) >= ctx->sprs_lev0_start_y &&
+                    (refinement_pos_y + (mvy >> 3)) <= ctx->sprs_lev0_end_y) {
+                    // If level_0 position
+                    if (refinement_pos_x % 4 == 0 && refinement_pos_y % 4 == 0) {
+                        continue;
+                    }
+                }
+            }
+            const std::int32_t ref_origin_index = (ctx->blk_org_x + (mvx >> 3) + refinement_pos_x) +
+                (ctx->blk_org_y + (mvy >> 3) + refinement_pos_y) * static_cast<std::int32_t>(ref_pic.stride);
+
+            if (dist_type == DIST_VAR) {
+                if (!hbd_md) {
+                    VarianceFn vf = mefnVf(ctx->geom.bsize);
+                    const std::uint8_t* pred_y = ref_pic.buf + ref_origin_index;
+                    const std::uint8_t* src_y = input_pic.buf + input_origin_index;
+                    std::uint32_t sse;
+                    cost = vf(pred_y, static_cast<std::int32_t>(ref_pic.stride), src_y,
+                              static_cast<std::int32_t>(input_pic.stride), &sse);
+                } else {
+                    const std::uint16_t* pred_y =
+                        reinterpret_cast<const std::uint16_t*>(ref_pic.buf) + ref_origin_index;
+                    const std::uint16_t* src_y =
+                        reinterpret_cast<const std::uint16_t*>(input_pic.buf) + input_origin_index;
+                    std::uint32_t sse;
+                    cost = mefnVfHbd10(pred_y, ref_pic.stride, src_y, input_pic.stride, ctx->geom.bwidth,
+                                       ctx->geom.bheight, &sse);
+                }
+            } else if (dist_type == DIST_SSD) {
+                const std::uint64_t dist = hbd_md
+                    ? picops::fullDistortionKernel16Bits(reinterpret_cast<const std::uint16_t*>(input_pic.buf),
+                                                         input_origin_index, input_pic.stride,
+                                                         reinterpret_cast<const std::uint16_t*>(ref_pic.buf),
+                                                         ref_origin_index, ref_pic.stride, ctx->geom.bwidth,
+                                                         ctx->geom.bheight)
+                    : picops::spatialFullDistortion(input_pic.buf, input_origin_index, input_pic.stride, ref_pic.buf,
+                                                    ref_origin_index, ref_pic.stride, ctx->geom.bwidth,
+                                                    ctx->geom.bheight);
+                cost = static_cast<std::uint32_t>(dist);
+            } else {
+                if (hbd_md) {
+                    cost = motion::sad16b(reinterpret_cast<const std::uint16_t*>(input_pic.buf) + input_origin_index,
+                                          input_pic.stride,
+                                          reinterpret_cast<const std::uint16_t*>(ref_pic.buf) + ref_origin_index,
+                                          ref_pic.stride, ctx->geom.bheight, ctx->geom.bwidth);
+                } else {
+                    cost = motion::nxmSadKernelHelper(input_pic.buf + input_origin_index, input_pic.stride,
+                                                      ref_pic.buf + ref_origin_index, ref_pic.stride,
+                                                      ctx->geom.bheight, ctx->geom.bwidth);
+                }
+            }
+            Mv2 best_mv;
+            best_mv.x = static_cast<std::int16_t>(mvx + (refinement_pos_x * 8));
+            best_mv.y = static_cast<std::int16_t>(mvy + (refinement_pos_y * 8));
+            cost += static_cast<std::uint32_t>(pipeline::fpMvErrCost(best_mv, mv_cost_params));
+            if (cost < *best_cost) {
+                *best_mvx = best_mv.x;
+                *best_mvy = best_mv.y;
+                *best_cost = cost;
+            }
+        }
+    }
 }
 
 }  // namespace mdc
