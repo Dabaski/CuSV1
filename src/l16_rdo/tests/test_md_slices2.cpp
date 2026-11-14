@@ -275,6 +275,16 @@ using l16_rdo::NEAREST_NEARESTMV_PM;
 using l16_rdo::NEW_NEWMV_PM;
 using l16_rdo::GLOBAL_GLOBALMV_PM;
 using l16_rdo::DC_PRED_PM;
+using l16_rdo::LAST2_FRAME_MV;
+using l16_rdo::LAST3_FRAME_MV;
+using l16_rdo::GOLDEN_FRAME_MV;
+using l16_rdo::ALTREF2_FRAME_MV;
+using l16_rdo::NEAR_NEARMV_PM;
+using l16_rdo::NEAREST_NEWMV_PM;
+using l16_rdo::NEW_NEARESTMV_PM;
+using l16_rdo::NEAR_NEWMV_PM;
+using l16_rdo::NEW_NEARMV_PM;
+
 
 TEST_CASE("l16_rdo obmcMotionModeAllowed walks the SIMPLE_TRANSLATION gate ladder") {
     // The all-OBMC-allowed carrier: enabled, max_blk_size = 64, no face-off,
@@ -408,4 +418,180 @@ TEST_CASE("l16_rdo the three obmc helper carries pin their domains") {
     CHECK(isGlobalMvBlock(GLOBALMV_PM, l16_rdo::BLOCK_8X4, ROTZOOM_TT) == 0);
     // is_motion_variation_allowed_bsize has NO upper bound: 64x64 passes.
     CHECK(isGlobalMvBlock(GLOBALMV_PM, l16_rdo::BLOCK_64X64, ROTZOOM_TT) == 1);
+}
+
+// ---------------------------------------------------------------------------
+// A4M-5: skip_compound_on_ref_types (mode_decision.c:1008-1048).
+// ---------------------------------------------------------------------------
+using l16_rdo::SkipCompXdCarrier;
+using l16_rdo::SkipCompNdMi;
+using l16_rdo::skipCompoundOnRefTypes;
+using l16_rdo::getListIdx;
+using l16_rdo::isInterCompoundMode;
+
+TEST_CASE("l16_rdo skipCompoundOnRefTypes prunes compound on the neighbour walk") {
+    // mode_decision.c:1008-1048. The xd wall threads pointer-shaped (the
+    // l7 InterMbD precedent): a NULL left/above carrier stands for the
+    // unavailable neighbour mbmi.
+    const SkipCompNdMi leftNewmvLast = {NEWMV_PM, {LAST_FRAME_MV, NONE_FRAME_MV}};
+    const SkipCompNdMi leftNewmvAlt = {NEWMV_PM, {ALTREF_FRAME_MV, NONE_FRAME_MV}};
+    const SkipCompNdMi leftNewmvLast3 = {NEWMV_PM, {LAST3_FRAME_MV, NONE_FRAME_MV}};
+    const SkipCompNdMi leftCompoundLastAlt = {NEW_NEWMV_PM, {LAST_FRAME_MV, ALTREF_FRAME_MV}};
+    const SkipCompNdMi upNewmvLast = {NEWMV_PM, {LAST_FRAME_MV, NONE_FRAME_MV}};
+    const SkipCompNdMi upCompoundLastAlt = {NEAR_NEARMV_PM, {LAST_FRAME_MV, ALTREF_FRAME_MV}};
+
+    // rf = (LAST, ALTREF): lists (0, 1) - the walk is reached.
+    const l16_rdo::MvReferenceFrame rfLastAlt[2] = {LAST_FRAME_MV, ALTREF_FRAME_MV};
+
+    // The inter_comp_ctrls.skip_on_ref_info wall = 0 -> false unconditionally.
+    {
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 1;
+        xd.upAvailable = 1;
+        xd.leftMbmi = &leftNewmvLast;
+        xd.aboveMbmi = &upNewmvLast;
+        CHECK(skipCompoundOnRefTypes(0, xd, rfLastAlt) == false);
+    }
+
+    // The same-list rule (:1016-1020): both refs from list 0 (fwd).
+    {
+        const l16_rdo::MvReferenceFrame rfFwdPair[2] = {LAST_FRAME_MV, GOLDEN_FRAME_MV};
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 0;
+        xd.upAvailable = 0;
+        xd.leftMbmi = nullptr;
+        xd.aboveMbmi = nullptr;
+        CHECK(skipCompoundOnRefTypes(1, xd, rfFwdPair) == true);
+    }
+    // ...and both from list 1 (bwd): (BWDREF, ALTREF2).
+    {
+        const l16_rdo::MvReferenceFrame rfBwdPair[2] = {BWDREF_FRAME_MV, ALTREF2_FRAME_MV};
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 0;
+        xd.upAvailable = 0;
+        xd.leftMbmi = nullptr;
+        xd.aboveMbmi = nullptr;
+        CHECK(skipCompoundOnRefTypes(1, xd, rfBwdPair) == true);
+    }
+
+    // No neighbour available at all (:1024-1026) -> false (do not skip).
+    {
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 0;
+        xd.upAvailable = 0;
+        xd.leftMbmi = nullptr;
+        xd.aboveMbmi = nullptr;
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == false);
+    }
+
+    // The left walk (:1028-1036).
+    {
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 1;
+        xd.upAvailable = 0;
+        xd.leftMbmi = &leftNewmvLast;
+        xd.aboveMbmi = nullptr;
+        // Left single-ref with ref0 == rf[0]: matched -> false.
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == false);
+    }
+    {
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 1;
+        xd.upAvailable = 0;
+        xd.leftMbmi = &leftNewmvAlt;
+        xd.aboveMbmi = nullptr;
+        // Left single-ref with ref0 == rf[1] (the || arm): matched -> false.
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == false);
+    }
+    {
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 1;
+        xd.upAvailable = 0;
+        xd.leftMbmi = &leftNewmvLast3;
+        xd.aboveMbmi = nullptr;
+        // Left single-ref with ref0 = LAST3 (neither rf): no match; above
+        // unavailable -> skip_comp stays true.
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == true);
+    }
+    {
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 1;
+        xd.upAvailable = 0;
+        xd.leftMbmi = &leftCompoundLastAlt;
+        xd.aboveMbmi = nullptr;
+        // Left compound with the EXACT pair: matched -> false.
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == false);
+    }
+    {
+        // Left compound with the pair SWAPPED: (ALTREF, LAST) is not
+        // (LAST, ALTREF) -> no match -> true.
+        const SkipCompNdMi leftCompoundSwap = {NEW_NEWMV_PM, {ALTREF_FRAME_MV, LAST_FRAME_MV}};
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 1;
+        xd.upAvailable = 0;
+        xd.leftMbmi = &leftCompoundSwap;
+        xd.aboveMbmi = nullptr;
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == true);
+    }
+
+    // The up walk (:1037-1045).
+    {
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 0;
+        xd.upAvailable = 1;
+        xd.leftMbmi = nullptr;
+        xd.aboveMbmi = &upNewmvLast;
+        // Up single-ref ref0 == rf[0]: matched -> false.
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == false);
+    }
+    {
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 0;
+        xd.upAvailable = 1;
+        xd.leftMbmi = nullptr;
+        xd.aboveMbmi = &upCompoundLastAlt;
+        // Up compound NEAR_NEARMV with the exact pair: matched -> false.
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == false);
+    }
+    {
+        // Both available: left misses, up hits -> false.
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 1;
+        xd.upAvailable = 1;
+        xd.leftMbmi = &leftNewmvLast3;
+        xd.aboveMbmi = &upNewmvLast;
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == false);
+    }
+    {
+        // Both available and both miss -> true.
+        SkipCompXdCarrier xd;
+        xd.leftAvailable = 1;
+        xd.upAvailable = 1;
+        xd.leftMbmi = &leftNewmvLast3;
+        xd.aboveMbmi = &leftNewmvLast3;
+        CHECK(skipCompoundOnRefTypes(1, xd, rfLastAlt) == true);
+    }
+
+    // get_list_idx (inter_prediction.h:505-509): the REFS_PER_FRAME+1 = 8
+    // row table {0,0,0,0,0,1,1,1}; INTRA(0)..GOLDEN(4) list 0, BWD..ALT list 1.
+    CHECK(getListIdx(INTRA_FRAME_MV) == 0);
+    CHECK(getListIdx(LAST_FRAME_MV) == 0);
+    CHECK(getListIdx(GOLDEN_FRAME_MV) == 0);
+    CHECK(getListIdx(BWDREF_FRAME_MV) == 1);
+    CHECK(getListIdx(ALTREF2_FRAME_MV) == 1);
+    CHECK(getListIdx(ALTREF_FRAME_MV) == 1);
+
+    // is_inter_compound_mode (definitions.h:1603-1608): the inclusive
+    // NEAREST_NEARESTMV..NEW_NEWMV window.
+    CHECK(isInterCompoundMode(NEAREST_NEARESTMV_PM) == 1);
+    CHECK(isInterCompoundMode(NEAR_NEARMV_PM) == 1);
+    CHECK(isInterCompoundMode(NEAREST_NEWMV_PM) == 1);
+    CHECK(isInterCompoundMode(NEW_NEARESTMV_PM) == 1);
+    CHECK(isInterCompoundMode(NEAR_NEWMV_PM) == 1);
+    CHECK(isInterCompoundMode(NEW_NEARMV_PM) == 1);
+    CHECK(isInterCompoundMode(GLOBAL_GLOBALMV_PM) == 1);
+    CHECK(isInterCompoundMode(NEW_NEWMV_PM) == 1);
+    CHECK(isInterCompoundMode(NEWMV_PM) == 0);
+    CHECK(isInterCompoundMode(GLOBALMV_PM) == 0);
+    CHECK(isInterCompoundMode(DC_PRED_PM) == 0);
 }

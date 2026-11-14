@@ -84,6 +84,7 @@ constexpr MvReferenceFrame BWDREF_FRAME_MV = 5;
 constexpr MvReferenceFrame ALTREF2_FRAME_MV = 6;
 constexpr MvReferenceFrame ALTREF_FRAME_MV = 7;
 constexpr int REF_FRAMES_MV = 8;             // definitions.h:1384 LAST_BWD_FRAME
+constexpr int REFS_PER_FRAME_MV = 7;         // definitions.h:1389
 constexpr int TOTAL_REFS_PER_FRAME_MV = 8;   // definitions.h:1377
 constexpr int FWD_REFS_MV = 4;               // definitions.h:1376
 constexpr int BWD_REFS_MV = 3;               // definitions.h:1378
@@ -222,5 +223,43 @@ MotionMode obmcMotionModeAllowed(const ObmcCtrlsCarrier& obmcCtrls, bool isMotio
                                  std::int32_t forceIntegerMv, TransformationType gmTypeRf0,
                                  std::uint32_t overlappableNeighbors, BlockSize bsize,
                                  std::uint8_t situation, MvReferenceFrame rf1, PredictionMode mode);
+
+// ---------------------------------------------------------------------------
+// A4M-5: skip_compound_on_ref_types (mode_decision.c:1008-1048).
+// ---------------------------------------------------------------------------
+
+// get_list_idx (inter_prediction.h:505-509) over ref_type_to_list_idx
+// (:505, REFS_PER_FRAME + 1 = 8 rows {0,0,0,0,0,1,1,1}). Module-boundary
+// carry (the landed rate_est.h spells no twin).
+std::uint8_t getListIdx(MvReferenceFrame refType);
+
+// is_inter_compound_mode (definitions.h:1603-1608). CONFIG_ENABLE_INTER_
+// COMPOUND is live (= 1), so the body is kept (the l7 inter_symbols.cpp
+// :228-230 twin).
+std::int32_t isInterCompoundMode(PredictionMode mode);
+
+// The neighbor BlockModeInfo surface the walk reads (block_structures.h
+// block_mi.mode/ref_frame).
+struct SkipCompNdMi {
+    PredictionMode mode;
+    MvReferenceFrame refFrame[2];
+};
+
+// The xd wall (MacroBlockD, coding_unit.h): the two availability flags and
+// the neighbor mbmi pointers, pointer-shaped like the l7 InterMbD precedent
+// (NULL when the edge is unavailable).
+struct SkipCompXdCarrier {
+    std::int32_t leftAvailable;    // xd->left_available
+    std::int32_t upAvailable;      // xd->up_available
+    const SkipCompNdMi* leftMbmi;  // xd->left_mbmi->block_mi
+    const SkipCompNdMi* aboveMbmi; // xd->above_mbmi->block_mi
+};
+
+// skip_compound_on_ref_types (mode_decision.c:1008-1048): the
+// inter_comp_ctrls.skip_on_ref_info wall threads as the first parameter.
+// The rf pair is the compound candidate's ref_frame (the caller's domain;
+// rf[1] is a list-1 slot for every call site - the :1017 get_list_idx(rf[1])
+// read is defined only there).
+bool skipCompoundOnRefTypes(bool skipOnRefInfo, const SkipCompXdCarrier& xd, const MvReferenceFrame rf[2]);
 
 }  // namespace l16_rdo

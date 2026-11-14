@@ -199,4 +199,64 @@ MotionMode obmcMotionModeAllowed(const ObmcCtrlsCarrier& obmcCtrls, bool isMotio
     }
 }
 
+// ---------------------------------------------------------------------------
+// A4M-5: skip_compound_on_ref_types.
+// ---------------------------------------------------------------------------
+
+// ref_type_to_list_idx (inter_prediction.h:505, verbatim).
+static const std::uint8_t kRefTypeToListIdx[REFS_PER_FRAME_MV + 1] = {0, 0, 0, 0, 0, 1, 1, 1};
+
+// get_list_idx (inter_prediction.h:507-509, verbatim).
+std::uint8_t getListIdx(MvReferenceFrame refType) {
+    return kRefTypeToListIdx[refType];
+}
+
+// is_inter_compound_mode (definitions.h:1603-1608, verbatim; the CONFIG_
+// ENABLE_INTER_COMPOUND guard is live at 1 - the l7 inter_symbols.cpp twin).
+std::int32_t isInterCompoundMode(PredictionMode mode) {
+    return mode >= NEAREST_NEARESTMV && mode <= NEW_NEWMV;
+}
+
+// skip_compound_on_ref_types (mode_decision.c:1008-1048, verbatim over the
+// carriers).
+bool skipCompoundOnRefTypes(bool skipOnRefInfo, const SkipCompXdCarrier& xd, const MvReferenceFrame rf[2]) {
+    if (!skipOnRefInfo) {  // :1009-1011 (ctx->inter_comp_ctrls.skip_on_ref_info)
+        return false;
+    }
+
+    // If both references are from the same list, skip compound (:1015-1020)
+    const std::uint8_t listIdx0 = getListIdx(rf[0]);
+    const std::uint8_t listIdx1 = getListIdx(rf[1]);
+    if (listIdx0 == listIdx1) {
+        return true;
+    }
+
+    // Skip compound unless neighbours selected the ref frames (:1022-1026)
+    bool skipComp = true;
+    if (!xd.leftAvailable && !xd.upAvailable) {
+        return false;
+    }
+
+    if (xd.leftAvailable) {  // :1028-1036
+        const SkipCompNdMi* const leftMi = xd.leftMbmi;
+        if ((isInterSinglerefMode(leftMi->mode) &&
+             (leftMi->refFrame[0] == rf[0] || leftMi->refFrame[0] == rf[1])) ||
+            (isInterCompoundMode(leftMi->mode) &&
+             (leftMi->refFrame[0] == rf[0] && leftMi->refFrame[1] == rf[1]))) {
+            return false;
+        }
+    }
+    if (xd.upAvailable) {  // :1037-1045
+        const SkipCompNdMi* const aboveMi = xd.aboveMbmi;
+        if ((isInterSinglerefMode(aboveMi->mode) &&
+             (aboveMi->refFrame[0] == rf[0] || aboveMi->refFrame[0] == rf[1])) ||
+            (isInterCompoundMode(aboveMi->mode) &&
+             (aboveMi->refFrame[0] == rf[0] && aboveMi->refFrame[1] == rf[1]))) {
+            return false;
+        }
+    }
+
+    return skipComp;  // :1047
+}
+
 }  // namespace l16_rdo
