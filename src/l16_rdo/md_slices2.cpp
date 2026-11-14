@@ -3,6 +3,7 @@
 // body is a verbatim transcription of its cited reference span with the
 // ModeDecisionContext/pcs walls threaded as carrier structs.
 #include "md_slices2.h"
+#include "md_slices.h"
 
 namespace l16_rdo {
 
@@ -404,6 +405,200 @@ std::int32_t isDcOnlySafe(const DcOnlyCarrier& c) {
     const std::uint32_t spreadVar = maxVar - minVar;
 
     return (blkVar < 2000 && spreadVar < 4000);
+}
+
+// ---------------------------------------------------------------------------
+// A4M-8: choose_best_av1_mv_pred + its three carries.
+// ---------------------------------------------------------------------------
+
+// svt_av1_mv_bit_cost_light (rd_cost.c:62-68, verbatim).
+std::int32_t mvBitCostLight(const Mv* mv, const Mv* ref) {
+    const std::uint32_t factor = 50;
+    const std::uint32_t absmvdiffx = mv->x > ref->x ? (std::uint32_t)(mv->x - ref->x)
+                                                    : (std::uint32_t)(ref->x - mv->x);  // ABS
+    const std::uint32_t absmvdiffy = mv->y > ref->y ? (std::uint32_t)(mv->y - ref->y)
+                                                    : (std::uint32_t)(ref->y - mv->y);
+    const std::uint32_t mv_rate = 1296 + (factor * (absmvdiffx + absmvdiffy));
+    return mv_rate;
+}
+
+// av1_drl_ctx (rd_cost.h:85-89, verbatim).
+std::uint8_t av1DrlCtx(const CandidateMv* refMvStack, std::int32_t refIdx) {
+    return refMvStack[refIdx].weight >= REF_CAT_LEVEL_MD
+        ? refMvStack[refIdx + 1].weight >= REF_CAT_LEVEL_MD ? 0 : 1
+        : refMvStack[refIdx + 1].weight < REF_CAT_LEVEL_MD ? 2 : 0;
+}
+
+// compound_ref0_mode (inter_prediction.h:312-343, the LUT verbatim; the
+// asserts are fixture-pinned by the compound-domain test).
+PredictionMode compoundRef0Mode(PredictionMode mode) {
+    static const PredictionMode lut[MB_MODE_COUNT] = {
+        MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT,
+        MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT,
+        MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT,
+        NEARESTMV,     // NEAREST_NEARESTMV
+        NEARMV,        // NEAR_NEARMV
+        NEARESTMV,     // NEAREST_NEWMV
+        NEWMV,         // NEW_NEARESTMV
+        NEARMV,        // NEAR_NEWMV
+        NEWMV,         // NEW_NEARMV
+        GLOBALMV,      // GLOBAL_GLOBALMV
+        NEWMV,         // NEW_NEWMV
+    };
+    return lut[mode];
+}
+
+// compound_ref1_mode (inter_prediction.h:345-376, the LUT verbatim).
+PredictionMode compoundRef1Mode(PredictionMode mode) {
+    static const PredictionMode lut[MB_MODE_COUNT] = {
+        MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT,
+        MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT,
+        MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT, MB_MODE_COUNT,
+        NEARESTMV,     // NEAREST_NEARESTMV
+        NEARMV,        // NEAR_NEARMV
+        NEWMV,         // NEAREST_NEWMV
+        NEARESTMV,     // NEW_NEARESTMV
+        NEWMV,         // NEAR_NEWMV
+        NEARMV,        // NEW_NEARMV
+        GLOBALMV,      // GLOBAL_GLOBALMV
+        NEWMV,         // NEW_NEWMV
+    };
+    return lut[mode];
+}
+
+// svt_aom_get_av1_mv_pred_drl (adaptive_mv_pred.c:1407-1457, verbatim over
+// the two wall reads).
+void getAv1MvPredDrl(const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                     const std::uint8_t* refMvCount, MvReferenceFrame refFrame, std::uint8_t isCompound,
+                     PredictionMode mode, std::uint8_t drlIndex, Mv nearestmv[2], Mv nearmv[2], Mv refMv[2]) {
+    if (!isCompound && mode != GLOBALMV) {  // :1413-1417
+        nearestmv[0] = refMvStack[refFrame][0].this_mv;
+        nearmv[0] = refMvStack[refFrame][1].this_mv;
+    }
+
+    if (isCompound && mode != GLOBAL_GLOBALMV) {  // :1419-1424
+        const std::int32_t refMvIdx = drlIndex + 1;
+        nearestmv[0] = refMvStack[refFrame][0].this_mv;
+        nearestmv[1] = refMvStack[refFrame][0].comp_mv;
+        nearmv[0] = refMvStack[refFrame][refMvIdx].this_mv;
+        nearmv[1] = refMvStack[refFrame][refMvIdx].comp_mv;
+    } else if (drlIndex > 0 && mode == NEARMV) {  // :1425-1429
+        const Mv curMv = refMvStack[refFrame][1 + drlIndex].this_mv;
+        nearmv[0] = curMv;
+    }
+
+    refMv[0] = nearestmv[0];  // :1431-1432
+    refMv[1] = nearestmv[1];
+
+    if (isCompound) {  // :1434-1449
+        std::int32_t refMvIdx = drlIndex;
+        // Special case: NEAR_NEWMV and NEW_NEARMV modes use
+        // 1 + mbmi->ref_mv_idx (like NEARMV) instead of
+        // mbmi->ref_mv_idx (like NEWMV)
+        if (mode == NEAR_NEWMV || mode == NEW_NEARMV) {
+            refMvIdx = 1 + drlIndex;
+        }
+
+        if (compoundRef0Mode(mode) == NEWMV) {
+            refMv[0] = refMvStack[refFrame][refMvIdx].this_mv;
+        }
+
+        if (compoundRef1Mode(mode) == NEWMV) {
+            refMv[1] = refMvStack[refFrame][refMvIdx].comp_mv;
+        }
+    } else {
+        if (mode == NEWMV) {  // :1451-1455
+            if (refMvCount[refFrame] > 1) {
+                refMv[0] = refMvStack[refFrame][drlIndex].this_mv;
+            }
+        }
+    }
+}
+
+// svt_aom_choose_best_av1_mv_pred (mode_decision.c:554-645, verbatim over
+// the carriers).
+void chooseBestAv1MvPred(const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                         const std::uint8_t* refMvCount, bool shutFastRate, std::uint8_t approxInterRate,
+                         const std::int32_t* nmvVecCost, const std::int32_t* const* nmvCostStack,
+                         const std::int32_t drlModeFacBits[DRL_MODE_CONTEXTS_MD][2],
+                         MvReferenceFrame refFrame, PredictionMode mode, Mv mv0, Mv mv1,
+                         std::uint8_t* bestDrlIndex, Mv bestPredMv[2]) {
+    if (shutFastRate) {  // :560-562
+        return;
+    }
+    if (approxInterRate > 1) {  // :563-568
+        *bestDrlIndex = 0;
+        bestPredMv[0] = refMvStack[refFrame][0].this_mv;
+        bestPredMv[1] = refMvStack[refFrame][0].comp_mv;
+        return;
+    }
+    const std::int16_t mv0x = mv0.x;
+    const std::int16_t mv0y = mv0.y;
+    const std::int16_t mv1x = mv1.x;
+    const std::int16_t mv1y = mv1.y;
+
+    const std::uint8_t isCompound = (std::uint8_t)isInterCompoundMode(mode);  // :574
+
+    std::uint8_t maxDrlIndex;
+    Mv nearestmv[2] = {{{0}}, {{0}}};
+    Mv nearmv[2];
+    Mv refMv[2];
+    Mv mv;
+
+    maxDrlIndex = getMaxDrlIndex(refMvCount[refFrame], mode);  // :584
+
+    if (maxDrlIndex == 1) {  // :587-591
+        *bestDrlIndex = 0;
+        bestPredMv[0] = refMvStack[refFrame][0].this_mv;
+        bestPredMv[1] = refMvStack[refFrame][0].comp_mv;
+    } else {
+        std::uint32_t bestMvCost = 0xFFFFFFFF;
+        for (std::uint8_t drli = 0; drli < maxDrlIndex; drli++) {  // :595-643
+            getAv1MvPredDrl(refMvStack, refMvCount, refFrame, isCompound, mode, drli, nearestmv, nearmv, refMv);
+
+            // compute the rate for this drli Cand
+            mv.y = mv0y;  // :599-600
+            mv.x = mv0x;
+            std::uint32_t mvRate = 0;
+            if (approxInterRate) {
+                mvRate = (std::uint32_t)mvBitCostLight(&mv, &refMv[0]);
+            } else {
+                mvRate = (std::uint32_t)mvBitCost((std::int32_t)mv.as_int, (std::int32_t)refMv[0].as_int,
+                                                  nmvVecCost, nmvCostStack, MV_COST_WEIGHT);
+            }
+
+            if (isCompound) {  // :609-621
+                mv.y = mv1y;
+                mv.x = mv1x;
+                if (approxInterRate) {
+                    mvRate += (std::uint32_t)mvBitCostLight(&mv, &refMv[1]);
+                } else {
+                    mvRate += (std::uint32_t)mvBitCost((std::int32_t)mv.as_int, (std::int32_t)refMv[1].as_int,
+                                                       nmvVecCost, nmvCostStack, MV_COST_WEIGHT);
+                }
+            }
+
+            const std::int32_t newMv = (mode == NEWMV || mode == NEW_NEWMV);  // :623
+            if (newMv) {
+                for (std::int32_t idx = 0; idx < 2; ++idx) {  // :626-635
+                    if (refMvCount[refFrame] > idx + 1) {
+                        const std::uint8_t drl1Ctx = av1DrlCtx(&refMvStack[refFrame][0], idx);
+                        mvRate += drlModeFacBits[drl1Ctx][drli != idx];
+                        if (drli == idx) {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (mvRate < bestMvCost) {  // :637-642
+                bestMvCost = mvRate;
+                *bestDrlIndex = drli;
+                bestPredMv[0] = refMv[0];
+                bestPredMv[1] = refMv[1];
+            }
+        }
+    }
 }
 
 }  // namespace l16_rdo

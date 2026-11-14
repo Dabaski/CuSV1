@@ -353,4 +353,55 @@ struct DcOnlyCarrier {
 // uint8_t; the port returns int (the same 0/1).
 std::int32_t isDcOnlySafe(const DcOnlyCarrier& c);
 
+// ---------------------------------------------------------------------------
+// A4M-8: choose_best_av1_mv_pred + its three carries.
+// ---------------------------------------------------------------------------
+
+// CandidateMv (mv.h:51-55, verbatim).
+struct CandidateMv {
+    Mv this_mv;
+    Mv comp_mv;
+    std::int32_t weight;
+};
+
+// MAX_REF_MV_STACK_SIZE (definitions.h:1343) / REF_CAT_LEVEL (:1344) /
+// DRL_MODE_CONTEXTS (:1322). The _MD suffix avoids the landed macro space.
+#define MAX_REF_MV_STACK_SIZE_MD 8
+#define REF_CAT_LEVEL_MD 640
+#define DRL_MODE_CONTEXTS_MD 3
+
+// svt_av1_mv_bit_cost_light (rd_cost.c:62-68). Module-boundary carry: the
+// landed rate_est trio has mvBitCost (:877) but not the light form.
+std::int32_t mvBitCostLight(const Mv* mv, const Mv* ref);
+
+// av1_drl_ctx (rd_cost.h:85-89).
+std::uint8_t av1DrlCtx(const CandidateMv* refMvStack, std::int32_t refIdx);
+
+// compound_ref0_mode / compound_ref1_mode (inter_prediction.h:312-343 /
+// :345-376): the two 25-entry LUTs verbatim. Exposed for the drl-carry
+// tests (the amvp.cpp:1203/1213 twins are file-local).
+PredictionMode compoundRef0Mode(PredictionMode mode);
+PredictionMode compoundRef1Mode(PredictionMode mode);
+
+// svt_aom_get_av1_mv_pred_drl (adaptive_mv_pred.c:1407-1457).
+// Module-boundary carry (the landed twin is l5 amvp.cpp:1283). Deviation,
+// named: the ModeDecisionContext/blk_ptr walls thread as the two reads the
+// body consumes - the ref_mv_stack array and the xd->ref_mv_count array;
+// the :1426 assert is NDEBUG-dropped.
+void getAv1MvPredDrl(const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                     const std::uint8_t* refMvCount, MvReferenceFrame refFrame, std::uint8_t isCompound,
+                     PredictionMode mode, std::uint8_t drlIndex, Mv nearestmv[2], Mv nearmv[2], Mv refMv[2]);
+
+// svt_aom_choose_best_av1_mv_pred (mode_decision.c:554-645). The walls
+// thread per the campaign pattern: ctx->ref_mv_stack as the array,
+// blk_ptr->av1xd->ref_mv_count as the count array, shut_fast_rate /
+// approx_inter_rate as flags, md_rate_est_ctx as the three reads (nmv_vec_
+// cost, nmvcoststack, drl_mode_fac_bits).
+void chooseBestAv1MvPred(const CandidateMv refMvStack[MODE_CTX_REF_FRAMES_MV][MAX_REF_MV_STACK_SIZE_MD],
+                         const std::uint8_t* refMvCount, bool shutFastRate, std::uint8_t approxInterRate,
+                         const std::int32_t* nmvVecCost, const std::int32_t* const* nmvCostStack,
+                         const std::int32_t drlModeFacBits[DRL_MODE_CONTEXTS_MD][2],
+                         MvReferenceFrame refFrame, PredictionMode mode, Mv mv0, Mv mv1,
+                         std::uint8_t* bestDrlIndex, Mv bestPredMv[2]);
+
 }  // namespace l16_rdo

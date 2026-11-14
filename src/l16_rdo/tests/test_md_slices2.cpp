@@ -830,3 +830,309 @@ TEST_CASE("l16_rdo isDcOnlySafe gates on the SB/shape/size and variance spread")
     sbVar[11] = 1999;
     CHECK(isDcOnlySafe(c) == 1);
 }
+
+// ---------------------------------------------------------------------------
+// A4M-8: svt_aom_choose_best_av1_mv_pred (mode_decision.c:554-645) over the
+// three carries: svt_av1_mv_bit_cost_light (rd_cost.c:62-68), av1_drl_ctx
+// (rd_cost.h:85-89) and svt_aom_get_av1_mv_pred_drl (adaptive_mv_pred.c
+// :1407-1457).
+// ---------------------------------------------------------------------------
+using l16_rdo::CandidateMv;
+using l16_rdo::chooseBestAv1MvPred;
+using l16_rdo::mvBitCostLight;
+using l16_rdo::av1DrlCtx;
+using l16_rdo::getAv1MvPredDrl;
+
+TEST_CASE("l16_rdo mvBitCostLight pins the 1296 + 50x|diff| shape") {
+    // rd_cost.c:62-68: factor 50, base 1296, the ABS component sum.
+    Mv mv, ref;
+    mv.x = 12;
+    mv.y = -30;
+    ref.x = 10;
+    ref.y = -25;
+    CHECK(mvBitCostLight(&mv, &ref) == 1296 + 50 * (2 + 5));
+    CHECK(mvBitCostLight(&mv, &mv) == 1296);
+    // The signs are absolute-differenced on both components.
+    Mv a, b;
+    a.x = -4;
+    a.y = 4;
+    b.x = 4;
+    b.y = -4;
+    CHECK(mvBitCostLight(&a, &b) == 1296 + 50 * (8 + 8));
+}
+
+TEST_CASE("l16_rdo av1DrlCtx pins the four weight-region rows") {
+    // rd_cost.h:85-89: w_i >= REF_CAT_LEVEL(640) ? (w_j >= 640 ? 0 : 1)
+    // : (w_j < 640 ? 2 : 0).
+    CandidateMv stack[MAX_REF_MV_STACK_SIZE_MD];
+    for (int i = 0; i < MAX_REF_MV_STACK_SIZE_MD; ++i) {
+        stack[i].weight = 1000;
+    }
+    CHECK(av1DrlCtx(stack, 0) == 0);  // (1000, 1000)
+    stack[1].weight = 100;
+    CHECK(av1DrlCtx(stack, 0) == 1);  // (1000, 100)
+    stack[0].weight = 100;
+    CHECK(av1DrlCtx(stack, 0) == 2);  // (100, 100)
+    stack[1].weight = 1000;
+    CHECK(av1DrlCtx(stack, 0) == 0);  // (100, 1000)
+    // The boundary itself is >= (REF_CAT_LEVEL included in the high band).
+    stack[0].weight = 640;
+    stack[1].weight = 639;
+    CHECK(av1DrlCtx(stack, 0) == 1);
+    stack[1].weight = 640;
+    CHECK(av1DrlCtx(stack, 0) == 0);
+}
+
+TEST_CASE("l16_rdo getAv1MvPredDrl pins the mode x compound selection") {
+    // adaptive_mv_pred.c:1407-1457. The ctx->ref_mv_stack wall threads as
+    // the stack array; blk_ptr->av1xd->ref_mv_count as the count array.
+    CandidateMv stack[29][MAX_REF_MV_STACK_SIZE_MD];
+    for (int r = 0; r < 29; ++r) {
+        for (int s = 0; s < MAX_REF_MV_STACK_SIZE_MD; ++s) {
+            stack[r][s].this_mv.as_int = (std::uint32_t)((100 * (s + 1)) | ((200 * (s + 1)) << 16));
+            stack[r][s].comp_mv.as_int = (std::uint32_t)((-300 * (s + 1)) | ((400 * (s + 1)) << 16));
+            stack[r][s].weight = 1000;
+        }
+    }
+    std::uint8_t count[29];
+    for (int r = 0; r < 29; ++r) {
+        count[r] = 3;
+    }
+
+    Mv nearest[2], near[2], ref[2];
+    nearest[0].as_int = nearest[1].as_int = 0;
+    near[0].as_int = near[1].as_int = 0;
+    ref[0].as_int = ref[1].as_int = 0;
+    // Unipred NEWMV: nearest = stack[0].this, near = stack[1].this; ref =
+    // stack[drl].this when count > 1 (NEWMV); the [1] slots stay the
+    // zero-init (nearestmv[1] is read but never written for unipred).
+    getAv1MvPredDrl(stack, count, 1 /*LAST*/, 0, NEWMV_PM, 2, nearest, near, ref);
+    CHECK(nearest[0].as_int == stack[1][0].this_mv.as_int);
+    CHECK(nearest[1].as_int == 0);
+    CHECK(near[0].as_int == stack[1][1].this_mv.as_int);
+    CHECK(near[1].as_int == 0);
+    CHECK(ref[0].as_int == stack[1][2].this_mv.as_int);
+    CHECK(ref[1].as_int == 0);
+    // Unipred NEWMV with count == 1: the ref stays nearestmv[0].
+    count[1] = 1;
+    getAv1MvPredDrl(stack, count, 1, 0, NEWMV_PM, 0, nearest, near, ref);
+    CHECK(ref[0].as_int == stack[1][0].this_mv.as_int);
+    count[1] = 3;
+    // Unipred NEARMV at drl 0: near = stack[1].this (the else-if needs
+    // drl > 0).
+    getAv1MvPredDrl(stack, count, 1, 0, NEARMV_PM, 0, nearest, near, ref);
+    CHECK(ref[0].as_int == stack[1][0].this_mv.as_int);
+    CHECK(near[0].as_int == stack[1][1].this_mv.as_int);
+    // Unipred NEARMV at drl 2: near = stack[3].this.
+    getAv1MvPredDrl(stack, count, 1, 0, NEARMV_PM, 2, nearest, near, ref);
+    CHECK(near[0].as_int == stack[1][3].this_mv.as_int);
+    CHECK(ref[0].as_int == stack[1][0].this_mv.as_int);
+    // Unipred GLOBALMV: nothing is written; ref stays the zero-init.
+    nearest[0].as_int = 0xDEADBEEF;
+    nearest[1].as_int = 0xCAFEBABE;
+    near[0].as_int = 0x11111111;
+    near[1].as_int = 0x22222222;
+    getAv1MvPredDrl(stack, count, 1, 0, GLOBALMV_PM, 0, nearest, near, ref);
+    CHECK(nearest[0].as_int == 0xDEADBEEF);
+    CHECK(near[0].as_int == 0x11111111);
+    CHECK(ref[0].as_int == 0xDEADBEEF);
+    CHECK(ref[1].as_int == 0xCAFEBABE);
+    // Compound NEAREST_NEARESTMV: nearest = stack[0] pair; near = stack
+    // [drl+1] pair; ref = nearest pair (ref0/ref1 modes are NEAREST).
+    getAv1MvPredDrl(stack, count, 16, 1, NEAREST_NEARESTMV_PM, 1, nearest, near, ref);
+    CHECK(ref[0].as_int == stack[16][0].this_mv.as_int);
+    CHECK(ref[1].as_int == stack[16][0].comp_mv.as_int);
+    CHECK(near[0].as_int == stack[16][2].this_mv.as_int);
+    CHECK(near[1].as_int == stack[16][2].comp_mv.as_int);
+    // Compound NEW_NEWMV at drl 1: ref = stack[1] pair (both ref modes are
+    // NEWMV, ref_mv_idx = drl).
+    getAv1MvPredDrl(stack, count, 16, 1, NEW_NEWMV_PM, 1, nearest, near, ref);
+    CHECK(ref[0].as_int == stack[16][1].this_mv.as_int);
+    CHECK(ref[1].as_int == stack[16][1].comp_mv.as_int);
+    // Compound NEAR_NEWMV at drl 0: the special case lifts ref_mv_idx to
+    // 1 + drl; compound_ref0_mode(NEAR_NEWMV) = NEARMV (not NEWMV), so
+    // ref[0] KEEPS the nearestmv slot (stack[0]); only ref[1] is lifted
+    // (compound_ref1_mode = NEWMV -> stack[1].comp_mv).
+    getAv1MvPredDrl(stack, count, 16, 1, NEAR_NEWMV_PM, 0, nearest, near, ref);
+    CHECK(near[0].as_int == stack[16][1].this_mv.as_int);
+    CHECK(ref[0].as_int == stack[16][0].this_mv.as_int);
+    CHECK(ref[1].as_int == stack[16][1].comp_mv.as_int);
+    // Compound NEW_NEARMV at drl 1: the mirror - ref[0] lifts (ref0 mode =
+    // NEWMV, idx = 1 + drl = 2), ref[1] keeps nearest (ref1 mode = NEARMV).
+    getAv1MvPredDrl(stack, count, 16, 1, NEW_NEARMV_PM, 1, nearest, near, ref);
+    CHECK(ref[0].as_int == stack[16][2].this_mv.as_int);
+    CHECK(ref[1].as_int == stack[16][0].comp_mv.as_int);
+    // Compound GLOBAL_GLOBALMV: only ref = nearest pair.
+    getAv1MvPredDrl(stack, count, 16, 1, GLOBAL_GLOBALMV_PM, 1, nearest, near, ref);
+    CHECK(ref[0].as_int == stack[16][0].this_mv.as_int);
+    CHECK(ref[1].as_int == stack[16][0].comp_mv.as_int);
+}
+
+TEST_CASE("l16_rdo chooseBestAv1MvPred walks the DRL cost loop") {
+    // mode_decision.c:554-645. Hand-computed expectations from the
+    // reference arithmetic (the independent oracle): the light cost is
+    // 1296 + 50*|diff| (rd_cost.c:62-68); the full cost is
+    // ROUND_POWER_OF_TWO(mv_cost*108, 7) with mv_cost = joint + comp rows;
+    // the NEW-mode drl bits add drl_mode_fac_bits[drl_ctx][drli != idx].
+    CandidateMv stack[29][MAX_REF_MV_STACK_SIZE_MD];
+    for (int r = 0; r < 29; ++r) {
+        for (int s = 0; s < MAX_REF_MV_STACK_SIZE_MD; ++s) {
+            stack[r][s].this_mv.as_int = 0;
+            stack[r][s].comp_mv.as_int = 0;
+            stack[r][s].weight = 1000;
+        }
+    }
+    // ref frame slot 1 (LAST): stack[0] = (0,0), stack[1] = (8,0),
+    // stack[2] = (16,0).
+    stack[1][0].this_mv.x = 0;
+    stack[1][0].this_mv.y = 0;
+    stack[1][1].this_mv.x = 8;
+    stack[1][1].this_mv.y = 0;
+    stack[1][2].this_mv.x = 16;
+    stack[1][2].this_mv.y = 0;
+    stack[1][0].comp_mv.x = 4;
+    stack[1][0].comp_mv.y = 4;
+    stack[1][1].comp_mv.x = 12;
+    stack[1][1].comp_mv.y = 4;
+    stack[1][2].comp_mv.x = 20;
+    stack[1][2].comp_mv.y = 4;
+    // The compound slot (ref frame type 16 = LAST|ALTREF): mirror rows so
+    // the compound loop discriminates (stack[16][1] holds the injected
+    // pair).
+    stack[16][0].this_mv.x = 0;
+    stack[16][0].this_mv.y = 0;
+    stack[16][1].this_mv.x = 8;
+    stack[16][1].this_mv.y = 0;
+    stack[16][2].this_mv.x = 16;
+    stack[16][2].this_mv.y = 0;
+    stack[16][0].comp_mv.x = 4;
+    stack[16][0].comp_mv.y = 4;
+    stack[16][1].comp_mv.x = 12;
+    stack[16][1].comp_mv.y = 4;
+    stack[16][2].comp_mv.x = 20;
+    stack[16][2].comp_mv.y = 4;
+    std::uint8_t count[29];
+    for (int r = 0; r < 29; ++r) {
+        count[r] = 3;
+    }
+    // The cost tables: joint {100, 200, 300, 400}; comp rows |i|.
+    std::vector<std::int32_t> joint = {100, 200, 300, 400};
+    std::vector<std::int32_t> compRow(2 * MV_UPP + 1);
+    for (int i = -MV_UPP; i <= MV_UPP; ++i) {
+        compRow[i + MV_UPP] = i < 0 ? -i : i;
+    }
+    const std::int32_t* compPtr[2] = {compRow.data() + MV_UPP, compRow.data() + MV_UPP};
+    // drl_mode_fac_bits[ctx][b]: all ctx rows {10, 20}.
+    const std::int32_t drlFac[DRL_MODE_CONTEXTS_MD][2] = {{10, 20}, {10, 20}, {10, 20}};
+
+    std::uint8_t drl = 0xAA;
+    Mv pred[2];
+    pred[0].as_int = 0xAAAAAAAA;
+    pred[1].as_int = 0xBBBBBBBB;
+    Mv mv0;
+    mv0.as_int = 0;
+    Mv mv1;
+    mv1.as_int = 0;
+
+    // Branch 1 (:560-562): shut_fast_rate -> outputs untouched.
+    chooseBestAv1MvPred(stack, count, true, 0, joint.data(), compPtr, drlFac, 1, NEWMV_PM, mv0, mv1, &drl, pred);
+    CHECK(drl == 0xAA);
+    CHECK(pred[0].as_int == 0xAAAAAAAA);
+
+    // Branch 2 (:563-568): approx_inter_rate > 1 -> drl 0 + stack[0] pair.
+    chooseBestAv1MvPred(stack, count, false, 2, joint.data(), compPtr, drlFac, 1, NEWMV_PM,
+                                 mv0, mv1, &drl, pred);
+    CHECK(drl == 0);
+    CHECK(pred[0].as_int == stack[1][0].this_mv.as_int);
+    CHECK(pred[1].as_int == stack[1][0].comp_mv.as_int);
+
+    // Branch 3 (:587-591): max_drl_index == 1 (NEWMV, count 1) -> drl 0 +
+    // stack[0].
+    count[1] = 1;
+    chooseBestAv1MvPred(stack, count, false, 0, joint.data(), compPtr, drlFac, 1, NEWMV_PM,
+                                 mv0, mv1, &drl, pred);
+    CHECK(drl == 0);
+    CHECK(pred[0].as_int == stack[1][0].this_mv.as_int);
+    CHECK(pred[1].as_int == stack[1][0].comp_mv.as_int);
+    count[1] = 3;
+
+    // The light-cost loop (approx_inter_rate == 1), NEWMV, mv0 = stack[1].
+    // Per-drli (ref = stack[drli].this_mv, compound_ref0 NEWMV arm):
+    //   drl 0: 1296 + 50*8 + fac[0][0] = 1296+400+10 = 1706
+    //   drl 1: 1296 + 50*0 + fac[0][1] + fac[0][0] = 1296+30 = 1326
+    //   drl 2: 1296 + 50*16 + fac[0][1] + fac[0][1] = 1296+800+40 = 2136
+    mv0 = stack[1][1].this_mv;
+    mv1.as_int = 0;
+    drl = 0xAA;
+    pred[0].as_int = 0xAAAAAAAA;
+    pred[1].as_int = 0xBBBBBBBB;
+    chooseBestAv1MvPred(stack, count, false, 1, joint.data(), compPtr, drlFac, 1, NEWMV_PM,
+                                 mv0, mv1, &drl, pred);
+    CHECK(drl == 1);
+    CHECK(pred[0].as_int == stack[1][1].this_mv.as_int);
+    CHECK(pred[1].as_int == 0);  // the unipred ref_mv[1] stays the zero-init
+
+    // mv0 = stack[0] (the nearest): drl 0 wins (1296+10).
+    mv0 = stack[1][0].this_mv;
+    chooseBestAv1MvPred(stack, count, false, 1, joint.data(), compPtr, drlFac, 1, NEWMV_PM,
+                                 mv0, mv1, &drl, pred);
+    CHECK(drl == 0);
+    CHECK(pred[0].as_int == stack[1][0].this_mv.as_int);
+
+    // The full-cost loop (approx_inter_rate == 0), NEWMV, mv0 = stack[1]:
+    //   drl 0: mv_cost = 100 + 8 = 108 -> rate (108*108+64)>>7 = 91; +10
+    //          = 101
+    //   drl 1: mv_cost = 100 + 0 = 100 -> rate 84; +20+10 = 114
+    //   drl 2: mv_cost = 100 + 8 = 108 -> rate 91; +20+20 = 131
+    mv0 = stack[1][1].this_mv;
+    chooseBestAv1MvPred(stack, count, false, 0, joint.data(), compPtr, drlFac, 1, NEWMV_PM,
+                                 mv0, mv1, &drl, pred);
+    CHECK(drl == 1);
+    CHECK(pred[0].as_int == stack[1][1].this_mv.as_int);
+    // mv0 = stack[0]: drl 0 wins (94 vs 121 vs 156).
+    mv0 = stack[1][0].this_mv;
+    chooseBestAv1MvPred(stack, count, false, 0, joint.data(), compPtr, drlFac, 1, NEWMV_PM,
+                                 mv0, mv1, &drl, pred);
+    CHECK(drl == 0);
+
+    // The compound NEW_NEWMV loop (light cost): both components cost.
+    // mv0 = stack[1].this (8,0), mv1 = stack[1].comp (12,4):
+    //   drl 1: (1296 + 0) + (1296 + 0) + 30 = 2646+30 = 2676? The
+    //   reference: mv_rate = cost(mv0) then += cost(mv1) then += fac -> the
+    //   two 1296 bases BOTH count.
+    //   drl 1 total = 1296 + 1296 + 30 = 2622+... = 2622 + 0? Recompute:
+    //   1296 + 0 + 1296 + 0 + 30 = 2622.
+    //   drl 0: 1296 + 50*8 + 1296 + 50*8 + 10 = 1296+400+1296+400+10 = 3402
+    //   drl 2: 1296 + 50*8 + 1296 + 50*8 + 40 = 3432
+    mv0 = stack[1][1].this_mv;
+    mv1 = stack[1][1].comp_mv;
+    chooseBestAv1MvPred(stack, count, false, 1, joint.data(), compPtr, drlFac, 16, NEW_NEWMV_PM,
+                                 mv0, mv1, &drl, pred);
+    CHECK(drl == 1);
+    CHECK(pred[0].as_int == stack[16][1].this_mv.as_int);
+    CHECK(pred[1].as_int == stack[16][1].comp_mv.as_int);
+
+    // max_drl_index == 0 (NEARESTMV): the loop body never runs and BOTH
+    // outputs keep their input values (:587 the == 1 test, the else loop
+    // bounds drli < 0).
+    drl = 0x5A;
+    pred[0].as_int = 0x1357;
+    chooseBestAv1MvPred(stack, count, false, 1, joint.data(), compPtr, drlFac, 1, NEARESTMV_PM,
+                        mv0, mv1, &drl, pred);
+    CHECK(drl == 0x5A);
+    CHECK(pred[0].as_int == 0x1357);
+
+    // The exact-tie row (the strict < at :637): NEARMV never overrides
+    // ref_mv (both drl slots cost against stack[0]) and NEARMV carries no
+    // drl fac bits (new_mv false) - with mv0 = stack[0] both slots cost
+    // exactly 1296 at approx_inter_rate 1. The reference keeps the FIRST
+    // slot (drl 0); a <= tie-break would flip to drl 1.
+    mv0 = stack[1][0].this_mv;
+    mv1.as_int = 0;
+    drl = 0xAA;
+    pred[0].as_int = 0xAAAAAAAA;
+    chooseBestAv1MvPred(stack, count, false, 1, joint.data(), compPtr, drlFac, 1, NEARMV_PM,
+                        mv0, mv1, &drl, pred);
+    CHECK(drl == 0);
+    CHECK(pred[0].as_int == stack[1][0].this_mv.as_int);
+}
