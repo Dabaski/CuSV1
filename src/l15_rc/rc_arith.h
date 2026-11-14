@@ -39,6 +39,10 @@ constexpr int kMaxHierarchicalLevel = 6;
 constexpr int kMaxTemporalLayers = 6;
 constexpr int kMaxMinigopSize = 1 << (kMaxTemporalLayers - 1);
 
+// MAX_ARF_LAYERS (rc_process.h:35) - hoisted above RATE_CONTROL, which
+// sizes active_best_quality by it (the A9D postencode pyramid).
+constexpr int kMaxArfLayers = 6;
+
 // RATE_CONTROL carrier (rc_process.h:108-202): mirrors of the consumed
 // fields only; grows with the slices that consume them.
 struct RcControl {
@@ -103,6 +107,18 @@ struct RcControl {
     // (pass2_strategy.c:392-455; rc_process.h:124, :167).
     std::int64_t gfGroupBits;       // rc->gf_group_bits
     std::int64_t vbrBitsOffTarget;  // rc->vbr_bits_off_target
+
+    // the A9D pass-init walls (pass2_strategy.c:971-1058).
+    std::int64_t vbrBitsOffTargetFast;  // rc->vbr_bits_off_target_fast
+    int rateErrorEstimate;              // rc->rate_error_estimate
+
+    // the A9D twopass-postencode wall (pass2_strategy.c:1063-1269): the
+    // active-best-quality pyramid + MINQ_ADJ_LIMIT (rc_process.h:22).
+    int activeBestQuality[kMaxArfLayers + 1];  // rc->active_best_quality
+
+    // the A9D rc_init_frame_stats rate-averaging period
+    // (rc->rate_average_periodin_frames, uint64 in the reference).
+    std::uint64_t rateAveragePeriod;
 };
 
 // RateControlCfg carrier (the enc_ctx->rc_cfg mirrors the bodies consume;
@@ -187,6 +203,23 @@ struct PcsCarrier {
     // the A9R calculate_gf_stats consumes (pass2_strategy.c:341-390).
     int gfInterval;                  // pcs->gf_interval
     bool idrFlag;                    // pcs->idr_flag
+
+    // the A9D kf-rate-assignment walls (pass2_strategy.c:594-742).
+    bool endOfSequenceRegion;        // pcs->end_of_sequence_region
+    int framesInSw;                  // pcs->frames_in_sw
+
+    // the A9D is_new_gf_group / process_first_pass_stats walls
+    // (pass2_strategy.c:761-845).
+    int isNewGfGroup;                // pcs->is_new_gf_group
+    bool gfUpdateDue;                // pcs->gf_update_due
+
+    // the A9D twopass-postencode wall (pass2_strategy.c:1063-1269).
+    int layerDepth;                  // ppcs->layer_depth
+
+    // the A9D rc-process walls (rc_process.c:568-605).
+    bool disableCdfUpdate;           // frm_hdr.disable_cdf_update
+    int overshootSeen;               // ppcs->overshoot_seen
+    int undershootSeen;              // ppcs->undershoot_seen
 };
 
 // ASSIGN_MINQ_TABLE (rc_tables.h:36-39, the CONFIG_ENABLE_HIGH_BIT_DEPTH=0
@@ -295,7 +328,6 @@ constexpr int kMaxQpValue = 63;
 constexpr int kBperMbNormbits = 9;
 constexpr int kStaticKfGroupThresh = 99;
 constexpr int kMaxGfInterval = 32;
-constexpr int kMaxArfLayers = 6;
 constexpr int kCriticalBufferLevel = 15;
 constexpr int kOptimalBufferLevel = 70;
 constexpr double kMaxGfuBoostFactor = 10.0;
@@ -362,6 +394,37 @@ int getGfuBoostFromR0Lap(double minFactor, double maxFactor, double r0, int fram
 
 // svt_av1_calculate_boost_bits (rc_process.c:641-667): verbatim.
 int calculateBoostBits(int frameCount, int boost, std::int64_t totalGroupBits);
+
+// layer_fraction (pass2_strategy.c:238): the ARF-layer weight table
+// {1.0, 0.80, 0.7, 0.60, 0.60, 1.0, 1.0}.
+extern const double kLayerFraction[kMaxArfLayers + 1];
+
+// SvtAv1FrameUpdateType (EbSvtAv1Enc.h:181-190): the two overlay arms the
+// allocator zeroes.
+constexpr int kSvtAv1IntnlOverlayUpdate = 4;
+constexpr int kSvtAv1OverlayUpdate = 5;
+
+// GfGroupMemberView: the gf_group[idx] member surface the allocator
+// reads (update_type, layer_depth) and writes (base_frame_target).
+struct GfGroupMemberView {
+    int updateType;       // gf_group[idx]->update_type
+    int layerDepth;       // gf_group[idx]->layer_depth
+    int baseFrameTarget;  // gf_group[idx]->base_frame_target (OUT)
+};
+
+// allocate_gf_group_bits (pass2_strategy.c:240-307): verbatim; the pcs wall
+// threads (gf_interval drives the loops, hierarchical_levels is
+// max_arf_layer); the gf_interval PARAMETER (the reference's own argument)
+// only feeds the baseline < gf_interval>>1 doubling gate. gfGroup needs
+// >= pcs.gfInterval entries.
+void allocateGfGroupBits(const PcsCarrier& pcs, RcControl& rc, GfGroupMemberView* gfGroup,
+                         std::int64_t gfGroupBits, int gfArfBits, int gfInterval, bool keyFrame, bool useArf);
+
+// av1_gop_bit_allocation (pass2_strategy.c:457-463): the composition - the
+// landed calculateBoostBits over rc->baseline_gf_interval / rc->gfu_boost,
+// then allocate_gf_group_bits.
+void av1GopBitAllocation(const PcsCarrier& pcs, RcControl& rc, GfGroupMemberView* gfGroup, int gfInterval,
+                         bool isKeyFrame, bool useArf, std::int64_t gfGroupBits);
 
 // ---- A9R (the remaining pure arithmetic): rc_process.c rd-multiplier
 // family ----
@@ -511,14 +574,413 @@ struct GfGroupStatsCarrier {
 // The TWO_PASS stats walk (firstpass.h:80-118): the FIRSTPASS_STATS read
 // window (twopass->stats_in .. stats_buf_ctx->stats_in_end) threaded as a
 // base pointer + count + walk position (input_stats pass2_strategy.c:37-45
-// and reset_fpf_position :33-35 ride it).
+// and reset_fpf_position :33-35 ride it), grown with the A9D group-bit
+// state fields.
 struct TwoPassCarrier {
     const FirstpassStatsCarrier* statsIn;  // twopass->stats_in (walk base)
     int statsInCount;                      // stats_in_end - stats_in_start
     int statsInPos;                        // the walk position
     bool hasTotalStats;                    // stats_buf_ctx->total_stats != NULL
     std::int64_t bitsLeft;                 // twopass->bits_left
+    std::int64_t kfGroupBits;              // twopass->kf_group_bits
+    std::int64_t kfGroupErrorLeft;         // twopass->kf_group_error_left
+    double modifiedErrorMin;               // twopass->modified_error_min
+    double modifiedErrorMax;               // twopass->modified_error_max
+    double modifiedErrorLeft;              // twopass->modified_error_left
+    int kfZeroMotionPct;                   // twopass->kf_zeromotion_pct
+    int extendMinq;                        // twopass->extend_minq
+    int extendMaxq;                        // twopass->extend_maxq
+    int extendMinqFast;                    // twopass->extend_minq_fast
 };
+
+// lap_rc_init (pass2_strategy.c:512-555): verbatim; the walls thread (the
+// two_pass_cfg vbrmin/vbrmax sections, the static_config target_bit_rate +
+// the scs new_framerate). The `stats_in <= stats_in_end` guard is preserved
+// (stats_in_end is the exclusive one-past pointer): the body runs one final
+// time before input_stats EOFs, so num_stats = window length + 1 and the
+// arg frame's coded_error joins the sum. MUTATES the carrier's
+// modifiedErrorMin/Max/Left and bitsLeft; the walk position rewinds.
+void lapRcInit(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, std::int64_t vbrminSection,
+               std::int64_t vbrmaxSection, std::int64_t targetBitRate, double newFramerate);
+
+// lap_rc_group_error_calc (pass2_strategy.c:562-581): verbatim; the walk cap
+// is rc->frames_to_key. Returns modified_error_total; the position rewinds.
+double lapRcGroupErrorCalc(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, int framesToKey);
+
+// forward declaration: the full carrier is declared with the postencode
+// family below (the reference's rate_control_param_ptr wall).
+struct RcIntervalParamCarrier;
+
+// set_kf_interval_variables (pass2_strategy.c:594-627): verbatim; the walls
+// thread (lap_rc, pcs->end_of_sequence_region, static_config.
+// intra_period_length, the rate_control_param_ptr->end_of_seq_seen on the
+// RcIntervalParamCarrier). kfGroupErr may be NULL (the reference's own
+// guard). The <= end quirk applies (see lapRcInit).
+void setKfIntervalVariables(TwoPassCarrier& twopass, FirstpassStatsCarrier& thisFrame, double* kfGroupErr,
+                            int numFramesToDetectScenecut, bool lapRc, bool endOfSequenceRegion,
+                            int intraPeriodLength, RcControl& rc, RcIntervalParamCarrier& rcParam);
+
+// get_kf_group_bits (pass2_strategy.c:629-642): verbatim; the walls thread
+// (lap_rc, pcs->frames_in_sw, intra_period_length,
+// pcs->end_of_sequence_region).
+std::int64_t getKfGroupBits(bool lapRc, int framesInSw, int intraPeriodLength, bool endOfSequenceRegion,
+                            const RcControl& rc, const TwoPassCarrier& twopass, double kfGroupErr);
+
+// MAX_KF_BITS_INTERVAL_SINGLE_PASS (pass2_strategy.c:644).
+constexpr int kMaxKfBitsIntervalSinglePass = 5;
+
+// kf_group_rate_assingment (pass2_strategy.c:651-742): verbatim; the walls
+// thread (lap_rc, intra_period_length, static_config target_bit_rate +
+// new_framerate, the two_pass_cfg.vbrmax_section, twopass->passes, the
+// pcs->rate_control_param_ptr on RcIntervalParamCarrier).
+// The caller-advanced walk convention holds: (twopass->stats_in - 1) after
+// the rewind reads the CALLER'S this_frame element (statsInPos >= 1).
+void kfGroupRateAssignment(PcsCarrier& pcs, RcControl& rc, TwoPassCarrier& twopass,
+                           FirstpassStatsCarrier thisFrame, RcIntervalParamCarrier& rcParam, bool lapRc,
+                           int intraPeriodLength, std::int64_t targetBitRate, double newFramerate,
+                           int vbrmaxSection, std::uint8_t passes);
+
+// DEFAULT_GRP_WEIGHT (pass2_strategy.c:744).
+constexpr double kDefaultGrpWeight = 1.0;
+
+// process_first_pass_stats (pass2_strategy.c:761-819): verbatim; the walls
+// thread: the stats_buf_ctx pointers (total_stats / total_left_stats /
+// stats_in_start, all nullable like the reference's own gates), the
+// two_pass_cfg.vbrmin/vbrmax ride getSectionTargetBandwidth +
+// getTwopassWorstQuality through the rc_cfg under/over_shoot_pct, scs->
+// lap_rc + passes, scs->encoder_bit_depth, scs first_pass_downsample +
+// max_input_luma_* (into the one-pass worst-quality call), rc_cfg->
+// best_allowed_q. MUTATES the two left/total stats and the walk position.
+void processFirstPassStats(const PcsCarrier& pcs, RcControl& rc, const RcConfig& rcCfg, TwoPassCarrier& twopass,
+                           FirstpassStatsCarrier& thisFrame, FirstpassStatsCarrier* totalStats,
+                           FirstpassStatsCarrier* totalLeftStats, const FirstpassStatsCarrier* statsInStart,
+                           bool lapRc, std::uint8_t passes, int encoderBitDepth, int underShootPct,
+                           int overShootPct, bool firstPassDownsample, int maxInputLumaWidth,
+                           int maxInputLumaHeight);
+
+// GfGroupPocView: the gf_group[pic_i] member surface is_new_gf_group reads
+// and writes (the NULL check threads as hasPcs; the is_incomp_mg_frame twin
+// threads as incompMgFrame).
+struct GfGroupPocView {
+    bool hasPcs;               // gf_group[pic_i] != NULL
+    std::uint64_t pictureNumber;  // gf_group[pic_i]->picture_number
+    bool gfUpdateDue;          // read AND cleared
+    bool incompMgFrame;        // svt_aom_is_incomp_mg_frame twin
+};
+
+// is_new_gf_group (pass2_strategy.c:823-845): verbatim; the pcs head wall
+// threads (is_new_gf_group OUT, gf_update_due, gf_interval,
+// picture_number); the head's own is_incomp_mg_frame twin is the
+// incompMgFrame argument. The member loop bound is pcs.gfInterval (the
+// reference's own); gfGroup needs >= gfInterval entries. MUTATES the
+// members' gf_update_due.
+void isNewGfGroup(PcsCarrier& pcs, GfGroupPocView* gfGroup, bool incompMgFrame);
+
+// FrameInfo (enc_ctx->frame_info): the set_rc_param writes.
+struct FrameInfoCarrier {
+    int frameWidth;   // frame_info->frame_width
+    int frameHeight;  // frame_info->frame_height
+    int mbCols;       // frame_info->mb_cols
+    int mbRows;       // frame_info->mb_rows
+    int numMbs;       // frame_info->num_mbs
+    int bitDepth;     // frame_info->bit_depth
+};
+
+// SvtAv1RcMode (EbSvtAv1Enc.h:175-179): CQP_OR_CRF = 0, VBR = 1, CBR = 2.
+constexpr int kSvtAv1RcModeCqp = 0;
+constexpr int kSvtAv1RcModeVbr = 1;
+constexpr int kSvtAv1RcModeCbr = 2;
+
+// svt_aom_set_rc_param (pass2_strategy.c:906-949): verbatim; the scs
+// static_config walls thread as scalars; the two_pass_cfg vbr sections and
+// the sf_cfg.sframe_dist/sframe_mode writes are out-params (the reference
+// writes enc_ctx fields).
+void setRcParam(bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight, int encoderBitDepth,
+                int vbrMinSectionPct, int vbrMaxSectionPct, int rateControlMode, int minQpAllowed,
+                int maxQpAllowed, bool gopConstraintRc, int staticOverShootPct, int staticUnderShootPct,
+                int staticMaximumBufferMs, int staticStartingBufferMs, int staticOptimalBufferMs,
+                int staticMaxIntraBitratePct, int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo,
+                RcConfig& rcCfg, int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode);
+
+// svt_av1_init_single_pass_lap (pass2_strategy.c:971-995): verbatim
+// including the svt_aom_set_rc_param composition (the landed setRcParam,
+// same walls) and the !stats_in_end gate (the empty buffer returns before
+// ANY write).
+void initSinglePassLap(TwoPassCarrier& twopass, RcControl& rc, bool firstPassDownsample, int maxInputLumaWidth,
+                       int maxInputLumaHeight, int encoderBitDepth, int vbrMinSectionPct, int vbrMaxSectionPct,
+                       int rateControlMode, int minQpAllowed, int maxQpAllowed, bool gopConstraintRc,
+                       int staticOverShootPct, int staticUnderShootPct, int staticMaximumBufferMs,
+                       int staticStartingBufferMs, int staticOptimalBufferMs, int staticMaxIntraBitratePct,
+                       int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo, RcConfig& rcCfg,
+                       int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode);
+
+// read_stat_from_file (pass2_strategy.c:955-969): verbatim - the NAME says
+// file, the body walks the in-memory stats buffer. NAMED DEVIATION: the
+// reference casts away const on twopass->stats_in to fill zero-tnb entries
+// in place; the port takes the mutable buffer directly. The per-layer
+// previous_num_bits[MAX_TEMPORAL_LAYERS] walk and the total_stats->
+// stat_struct.total_num_bits write are 1:1.
+void readStatFromFile(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf,
+                      FirstpassStatsCarrier* totalStats);
+
+// svt_av1_init_second_pass (pass2_strategy.c:997-1058): verbatim including
+// the svt_aom_set_rc_param composition and the svt_av1_new_framerate call
+// (both landed). The stats_in_end cell doubles as the accumulate target
+// (the reference zeroes it and accumulates the whole window into it);
+// the caller owns that cell.
+void initSecondPass(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf, FirstpassStatsCarrier* statsInEnd,
+                    FirstpassStatsCarrier* totalStats, FirstpassStatsCarrier* totalLeftStats, RcControl& rc,
+                    double& scsNewFramerate, std::int64_t targetBitRate, int numMbs, bool firstPassDownsample,
+                    int maxInputLumaWidth, int maxInputLumaHeight, int encoderBitDepth, int vbrMinSectionPct,
+                    int vbrMaxSectionPct, int rateControlMode, int minQpAllowed, int maxQpAllowed,
+                    bool gopConstraintRc, int staticOverShootPct, int staticUnderShootPct,
+                    int staticMaximumBufferMs, int staticStartingBufferMs, int staticOptimalBufferMs,
+                    int staticMaxIntraBitratePct, int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo,
+                    RcConfig& rcCfg, int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode);
+
+// svt_av1_twopass_zero_stats (firstpass.c:133-139) and
+// svt_av1_accumulate_stats (firstpass.c:141-146): DUPLICATED from the l9
+// AN20 twins (this layer cannot link l9 - the SYM1 wb-trio precedent);
+// duration starts at 1.0 and the stat_struct is NOT accumulated.
+void twopassZeroStats(FirstpassStatsCarrier* section);
+void accumulateStats(FirstpassStatsCarrier* section, const FirstpassStatsCarrier* frame);
+
+// ---- A9D: initial_rc_process.c (the tpl-group pieces) ----
+
+// TplControls (pcs.h:459-486): the fields the tpl-group pieces consume and
+// write. The enum values are the reference's own ordinals: DC_PRED = 0,
+// PAETH_PRED = 12 (definitions.h:1295-1302, the RE4 errata pin);
+// DEFAULT_SHAPE = 0 / N2_SHAPE = 1 / N4_SHAPE = 2 (definitions.h:2046-2048);
+// EIGHTH_PEL = 0 / QUARTER_PEL = 1 / HALF_PEL = 2 / FULL_PEL = 3
+// (definitions.h:847).
+struct TplControlsCarrier {
+    int enable;                 // uint8
+    int computeRate;            // uint8
+    int enableTplQps;           // uint8
+    int disableIntraPredNref;   // uint8
+    int intraModeEnd;           // PredictionMode
+    int pfShape;                // TxCoeffShape
+    int useSadInSrcSearch;      // uint8
+    int reducedTplGroup;        // int8 (-1 sentinel)
+    double r0AdjustFactor;      // double
+    int dispenserSearchLevel;   // uint8
+    int subsampleTx;            // uint8
+    int synthBlkSize;           // uint8
+    int subpelDepth;            // SUBPEL_FORCE_STOP
+    int subpelDiagRefinement;   // uint8
+};
+
+// TplGroupPicView: the tpl_group[i] member surface the tpl-group pieces
+// consume (the is_pic_skipped twin pd_process.c:998-1003 threads as
+// picSkipped).
+struct TplGroupPicView {
+    std::uint64_t pictureNumber;  // tpl_group[i]->picture_number
+    int temporalLayerIndex;       // tpl_group[i]->temporal_layer_index
+    bool picSkipped;              // svt_aom_is_pic_skipped twin threaded
+};
+
+// is_frame_already_exists (initial_rc_process.c:161-168): verbatim; the
+// walk is over the first endIndex members only (a pointer array - the
+// reference dereferences pcs->tpl_group[i]). TEMPLATED on the member view
+// type: the same body serves TplGroupPicView and LadPcsView (which extends
+// it) - the reference passes the same pcs pointers to both.
+template <typename View>
+bool isFrameAlreadyExists(const View* const* tplGroup, int endIndex, std::uint64_t picNum) {
+    for (int i = 0; i < endIndex; i++) {
+        if (tplGroup[i]->pictureNumber == picNum) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// validate_pic_for_tpl (initial_rc_process.c:171-188): verbatim (the same
+// template note as isFrameAlreadyExists). The head pcs walls thread:
+// tpl_ctrls.reduced_tpl_group (the carrier), the tpl_valid_pic[] byte array
+// and used_tpl_frame_num (both head-pcs state the reference mutates). NOTE
+// the reference indexes tpl_valid_pic by the EXTEND-group index
+// (pic_index), not by the tpl-group index - the caller
+// (store_extended_group) passes the ext-group index i.
+template <typename View>
+void validatePicForTpl(const TplControlsCarrier& tplCtrls, const View* const* tplGroup,
+                       std::uint8_t* tplValidPic, std::uint32_t& usedTplFrameNum, int picIndex) {
+    // Check whether the i-th pic already exists in the tpl group
+    if (!isFrameAlreadyExists(tplGroup, picIndex, tplGroup[picIndex]->pictureNumber) &&
+        // In the middle pass when rc_stat_gen_pass_mode is set, pictures in
+        // the highest temporal layer are skipped, except the first one. The
+        // condition is added to prevent validating these frames for tpl
+        !tplGroup[picIndex]->picSkipped) {
+        // Discard low important pictures from tpl group
+        if (tplCtrls.reducedTplGroup >= 0) {
+            if (tplGroup[picIndex]->temporalLayerIndex <= tplCtrls.reducedTplGroup) {
+                tplValidPic[picIndex] = 1;
+                usedTplFrameNum++;
+            }
+        } else {
+            tplValidPic[picIndex] = 1;
+            usedTplFrameNum++;
+        }
+    }
+}
+
+// set_tpl_params (initial_rc_process.c:319-401): verbatim; the scs->
+// input_resolution wall threads. Writes every TplControlsCarrier field per
+// level 0..5 (the default assert(0) arm is removed under NDEBUG).
+void setTplParams(TplControlsCarrier& tplCtrls, int tplLevel, int inputResolution);
+
+// svt_aom_set_tpl_group (initial_rc_process.c:204-305): verbatim; the
+// pcs == NULL path threads as hasPcs (the early synth_blk_size return);
+// the consumed pcs fields (slice_type, hierarchical_levels) and the scs
+// walls (input_resolution, tpl_lad_mg, static_config.rate_control_mode)
+// thread. The carrier is ZEROED first (the reference's local
+// TplControls = {0}). Returns synth_blk_size.
+int setTplGroup(TplControlsCarrier& tplCtrls, bool hasPcs, int sliceType, int hierarchicalLevels,
+                int inputResolution, int tplGroupLevel, int sourceWidth, int sourceHeight, bool tplLadMg,
+                int rateControlMode);
+
+// ---- A9D: initial_rc_process.c (the LAD queue) ----
+
+// LadPcsView: the PictureParentControlSet surface the LAD walk consumes and
+// writes. It EXTENDS TplGroupPicView (the S11 member view) so the landed
+// isFrameAlreadyExists / validatePicForTpl consume it directly - the
+// reference passes the same pcs pointers to both. The cross-file predicate
+// twins (pd_process.c) thread as booleans.
+struct LadPcsView : TplGroupPicView {
+    std::int64_t extMgId;         // pcs->ext_mg_id
+    std::uint32_t extMgSize;      // pcs->ext_mg_size
+    bool endOfSequenceFlag;       // pcs->end_of_sequence_flag
+    int sliceType;                // pcs->slice_type (I_SLICE = 1)
+    int hierarchicalLevels;       // pcs->hierarchical_levels
+    bool delayedIntra;            // svt_aom_is_delayed_intra twin threaded
+    bool tplParamsReady;          // pcs->tpl_params_ready (written)
+    bool endOfSequenceRegion;     // pcs->end_of_sequence_region (written)
+    TplControlsCarrier tplCtrls;  // the member's own tpl_ctrls (written)
+};
+
+// LadQueue (initial_rc_process.c:36-40): the ring of entries; entry->pcs
+// threads as the LadPcsView pointer (NULL = the empty slot). The walk
+// contract is the reference's own: the filled region ends at a NULL entry.
+struct LadQueueCarrier {
+    LadPcsView** cirBuf;       // cir_buf (an array of nullable pcs pointers)
+    std::uint32_t cirBufSize;  // cir_buf_size
+};
+
+// OUT_Q_ADVANCE (definitions.h:63): ((h) == (size) - 1) ? 0 : (h) + 1.
+std::uint32_t outQAdvance(std::uint32_t h, std::uint32_t size);
+
+// The head-pcs container walls store_extended_group writes (ext_group,
+// tpl_group and their sizes, tpl_valid_pic, used_tpl_frame_num).
+struct LadGroupOutputs {
+    LadPcsView** extGroup;         // pcs->ext_group
+    std::uint32_t extGroupSize;    // pcs->ext_group_size
+    LadPcsView** tplGroup;         // pcs->tpl_group
+    std::uint32_t tplGroupSize;    // pcs->tpl_group_size
+    std::uint8_t* tplValidPic;     // pcs->tpl_valid_pic
+    std::uint32_t usedTplFrameNum; // pcs->used_tpl_frame_num
+};
+
+// store_extended_group (initial_rc_process.c:406-520): verbatim; the queue
+// copy walk, the ext-group reset (memset + the [0] pre-set - NOT counted in
+// used_tpl_frame_num), the limited-size derivation (the I_SLICE / startup
+// gates), the I_SLICE / gop-end tpl walk (append-then-validate - the size
+// always equals i+1 at the validate site, so tplGroup[i] == extGroup[i]) and
+// the set_tpl_params walk. NAMED PARKS: the LAD_MG_PRINT debug blocks
+// (:426-438, :505-519) and the svt_aom_assert_err guards (NDEBUG-dropped).
+// The scs walls thread (the head's input_resolution, tpl_lad_mg, static_
+// config.hierarchical_levels, static_config.startup_mg_size,
+// pcs->last_idr_picture); the head's enc_mode threads for the params walk.
+void storeExtendedGroup(LadPcsView& head, const LadQueueCarrier& queue, std::uint32_t startIdx,
+                        std::int64_t endMg, int headEncMode, int headInputResolution, int tplLadMg,
+                        int scsHierarchicalLevels, int startupMgSize, std::uint64_t lastIdrPicture,
+                        LadGroupOutputs& out);
+
+// process_lad_queue (initial_rc_process.c:527-636): the send-out decision
+// walk. NAMED PARKS: the stats-in write block (:595-618, the
+// stats_in_write_mutex + stats_buf_ctx + total_stats walls) and
+// irc_send_picture_out (:620) - dropped; the send decision, the
+// end_of_sequence_region write, the store call, the entry pop and the head
+// advance port. The head's scs->lad_mg threads as headLadMg. queueHead
+// threads the persistent queue->head (read + advanced).
+void processLadQueue(LadQueueCarrier& queue, std::uint32_t& queueHead, bool passThru, int headLadMg,
+                     int headEncMode, int headInputResolution, int tplLadMg, int scsHierarchicalLevels,
+                     int startupMgSize, std::uint64_t lastIdrPicture, LadGroupOutputs& out);
+
+// ---- A9D: rc_process.c (the sb-qindex composition + the packetization
+// feedback routing) ----
+
+// forward declarations: the carriers are declared with the AQ-series below
+// (the S13 composition sits earlier in the header than they do).
+struct CrRefreshCarrier;
+struct MeStatCarrier;
+struct FrameHdrCarrier;
+
+// generate_sb_qindex (rc_process.c:738-753): the composition driver over
+// THREE landed primitives - rcInitSbQindex (AQ8), normalizeSbDeltaQ (AQ9,
+// gated on delta_q_present && delta_q_res != 1) and generateB64MeQindexMap
+// (gated on the stats_based_sb_lambda_modulation wall). The walls thread
+// exactly as the landed callees do.
+void generateSbQindex(int rcMode, CrRefreshCarrier& cr, FrameHdrCarrier& hdr, std::uint8_t* sbQindex,
+                      const std::uint16_t* const* variance, std::uint16_t pcsSbTotalCount,
+                      const MeStatCarrier& me, bool enableVarianceBoost, int varianceBoostStrength,
+                      int encoderBitDepth, std::uint8_t varianceOctile, std::uint8_t varianceBoostCurve,
+                      int aqMode, bool tplEnable, double r0, std::uint16_t scsSbTotalCount,
+                      std::uint16_t ppcsB64TotalCount, bool superresOrResize,
+                      bool statsBasedSbLambdaModulation, int sliceType, int temporalLayerIndex,
+                      std::uint8_t* b64MeQindex);
+
+// rc_process_packetization_feedback (rc_process.c:756-811): the routing
+// driver. NAMED PARKS: the svt_block_on_mutex/svt_release_mutex pair
+// (:763, :770), the svt_av1_coded_frames_stat_calc call site (:776, the
+// rc_crf_cqp coded-frames stat queue walk) and the object releases
+// (:800-810) - dropped; the overlay gate, the rc_param count/reset walk
+// and the FULL postencode routing port. use_rtc_cbr_path (rc_process.c,
+// rc_cfg->mode == AOM_CBR && static_config.rtc) threads as useRtcCbrPath;
+// the scs->is_short_clip and the resize_mode == RESIZE_DYNAMIC gates
+// thread (the landed callees consume them); the VBR twopass routing
+// consumes the landed S10 twins.
+void rcProcessPacketizationFeedback(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                                    const CrRefreshCarrier& cr, RcIntervalParamCarrier& rcParam,
+                                    TwoPassCarrier& twopass, std::uint16_t b64TotalCount, int bitDepth,
+                                    int& frameUpdated, bool useRtcCbrPath, bool gopConstraintRc,
+                                    bool maxBitRate, bool isShortClip, bool resizeDynamic);
+
+// MINQ_ADJ_LIMIT (rc_process.h:22) / HIGH_UNDERSHOOT_RATIO (:23).
+constexpr int kMinqAdjLimit = 48;
+constexpr int kHighUndershootRatio = 2;
+
+// svt_av1_twopass_postencode_update_gop_const (pass2_strategy.c:1063-1174):
+// verbatim; the state lives on the RcIntervalParamCarrier (the gop-const
+// interval param), the quality pyramid on RcControl.activeBestQuality and
+// the rc walls (worst/active_worst quality, avg_frame_bandwidth) on
+// RcControl. The scs->is_short_clip gate threads as isShortClip; the
+// ppcs->layer_depth threads (the pyramid start).
+void twopassPostencodeUpdateGopConst(RcControl& rc, const RcConfig& rcCfg, RcIntervalParamCarrier& rcParam,
+                                     const PcsCarrier& ppcs, bool isShortClip, int layerDepth);
+
+// svt_av1_twopass_postencode_update (pass2_strategy.c:1176-1269): verbatim;
+// the twin that keeps the rate error on rc and the extend_* state on the
+// TWO_PASS carrier. NOTE: this twin has NO is_short_clip else-branch
+// adjust block (the gop-const twin's :1130-1137 block is absent) and its
+// extend_minq clamp is the plain (0, minq_adj_limit) form.
+void twopassPostencodeUpdate(RcControl& rc, const RcConfig& rcCfg, TwoPassCarrier& twopass,
+                             const PcsCarrier& ppcs, bool isShortClip, int layerDepth);
+
+// frame_max_bits (pass2_strategy.c:55-58): verbatim; the
+// enc_ctx->two_pass_cfg.vbrmax_section wall threads. CLIP3(0, max,
+// value) = utility.h:101.
+int frameMaxBits(const RcControl& rc, int vbrmaxSection);
+
+// calculate_total_gf_group_bits (pass2_strategy.c:186-220): verbatim; the
+// walls thread (rc frames_to_key/baseline_gf_interval/avg+max frame
+// bandwidth; twopass kf_group_bits/kf_group_error_left - the carrier, and
+// the walk is not consumed here; the scs lap_rc/lad_mg/hierarchical_levels/
+// intra_period_length gates; pcs->frames_in_sw; the two_pass_cfg.
+// vbrmax_section wall for the frame_max_bits call). MUTATES
+// twopass.kfGroupBits (the -= total update). gfGroupErr is
+// gf_stats.gf_group_err.
+std::int64_t calculateTotalGfGroupBits(const RcControl& rc, int vbrmaxSection, TwoPassCarrier& twopass,
+                                       bool lapRc, int ladMg, int hierarchicalLevels, int intraPeriodLength,
+                                       int framesInSw, double gfGroupErr);
 
 // accumulate_this_frame_stats (pass2_strategy.c:168-171): verbatim.
 void accumulateThisFrameStats(const FirstpassStatsCarrier& stats, double modFrameErr,
@@ -981,14 +1443,73 @@ void rcUpdateRateCorrectionFactors(RcControl& rc, const RcConfig& rcCfg, PcsCarr
                                    const CrRefreshCarrier& cr, std::uint16_t b64TotalCount, int width,
                                    int height, int bitDepth);
 
-// RateControlIntervalParamContext (pcs.h), consumed fields only - grows
-// with the slices that consume it (the carrier-grows precedent).
+// RateControlIntervalParamContext (encode_context.h), consumed fields only -
+// grows with the slices that consume them (the carrier-grows precedent).
 struct RcIntervalParamCarrier {
+    std::uint64_t firstPoc;      // first_poc
+    std::int32_t size;           // size
+    std::int32_t processedFrameNumber;  // processed_frame_number
+    std::int64_t vbrBitsOffTarget;      // vbr_bits_off_target
+    std::int64_t vbrBitsOffTargetFast;  // vbr_bits_off_target_fast
     int rollingTargetBits;       // rc_param_ptr->rolling_target_bits
     int rollingActualBits;       // rc_param_ptr->rolling_actual_bits
-    std::int64_t totalActualBits;  // rc_param_ptr->total_actual_bits
-    std::int64_t totalTargetBits;  // rc_param_ptr->total_target_bits
+    int rateErrorEstimate;       // rate_error_estimate
+    std::int64_t totalActualBits;  // total_actual_bits
+    std::int64_t totalTargetBits;  // total_target_bits
+    int extendMinq;              // extend_minq
+    int extendMaxq;              // extend_maxq
+    int extendMinqFast;          // extend_minq_fast
+    std::uint8_t endOfSeqSeen;   // end_of_seq_seen
 };
+
+// rc_param_reset (rc_process.c:555-566): verbatim; resets the interval-param
+// carrier into its default values (first_poc / rolling bits untouched).
+void rcParamReset(RcIntervalParamCarrier& rcParam);
+
+// svt_aom_update_rc_counts (rc_process.c:568-590): verbatim; the
+// frm_hdr.showable_frame / disable_cdf_update gates ride the PcsCarrier.
+void updateRcCounts(RcControl& rc, const PcsCarrier& ppcs);
+
+// reset_rc_param (rc_process.c:592-605): verbatim; resets the ppcs recode
+// counters (loop_count, overshoot_seen, undershoot_seen).
+void resetRcParam(PcsCarrier& ppcs);
+
+// rc_init_frame_stats (rc_process.c:607-640): the portable surface is the
+// rate-averaging period walk + the ME-distortion average. Named parks (the
+// l6/l4 walls, unreachable from this layer): the ppcs->r0_gen
+// svt_aom_generate_r0beta call site (:611-613) and the three
+// get_ref_*_percentage walks (:616-618). The scs->passes > 1 &&
+// static_config.max_bit_rate gate threads as twoPassWithMaxBitRate; the
+// total_stats->count ride is totalStatsCount. MAX_RATE_AVG_PERIOD
+// (rc_process.h:48-50) = CODED_FRAMES_STAT_QUEUE_MAX_DEPTH >> 1 = 1000.
+void rcInitFrameStats(RcControl& rc, int sliceType, std::uint16_t b64TotalCount,
+                      const std::uint32_t* me64x64Distortion, bool twoPassWithMaxBitRate,
+                      double totalStatsCount);
+
+// rc_handle_superres (rc_process.c:674-736): the decision surface. The
+// ppcs/tpl_group member walls thread as SuperresPcsCarrier (one type - both
+// are PictureParentControlSet reads). NAMED PARKS: svt_aom_init_resize_
+// picture (:688, the resize machinery), the svt_aom_set_gm_controls pair
+// (:692, the EMC1/l16 wall - the super_res_off derivation stays live through
+// the setGmControls callable seam), the picture-decision fifo posts
+// (:698-709) and every svt_release_object / svt_aom_release_pa_reference_
+// objects call - the WHICH-member release decision lands in the out flags
+// (release[i] / releaseHead). ENC_SINGLE_PASS = 0; SUPERRES_RANDOM = 2;
+// RESIZE_NONE = 0.
+struct SuperresPcsCarrier {
+    bool frameSuperresEnabled;   // ppcs->frame_superres_enabled
+    bool frameResizeEnabled;     // ppcs->frame_resize_enabled
+    int temporalLayerIndex;      // ppcs->temporal_layer_index
+    std::int64_t extMgId;        // ppcs->ext_mg_id
+    bool tplEnable;              // ppcs->tpl_ctrls.enable
+    bool incompMgFrame;          // member: svt_aom_is_incomp_mg_frame twin
+                                 // (pd_process.c:5006-5008) threaded
+};
+
+bool rcHandleSuperres(int pass, int superresMode, int resizeMode, std::uint16_t meSegmentsTotalCount,
+                      SuperresPcsCarrier& ppcs, const SuperresPcsCarrier* tplGroup, std::uint32_t tplGroupSize,
+                      int& meSegmentsCompletionCount, int& meProcessedB64Count, bool* release,
+                      bool& releaseHead, const std::function<void(bool)>& setGmControls);
 
 // svt_av1_rc_postencode_update_gop_const (rc_vbr_cbr.c:1495-1561): verbatim;
 // the rolling/total bits go to the interval-param carrier; NO low-motion

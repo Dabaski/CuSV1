@@ -582,3 +582,495 @@ TEST_CASE("roundPowerOfTwo pins the definitions rounding shift") {
     // value=552, n=2: (552 + 2) >> 2 = 554 >> 2 = 138.
     CHECK(l15_rc::roundPowerOfTwo(552, 2) == 138);
 }
+
+// ---- A9D S1: rc_process.c rc_param_reset :555-566 +
+// svt_aom_update_rc_counts :568-590 + reset_rc_param :592-605 ----
+
+TEST_CASE("rc_param_reset resets the interval-param carrier") {
+    l15_rc::RcIntervalParamCarrier param{};
+    param.firstPoc = 7;
+    param.size = 5;
+    param.processedFrameNumber = 5;
+    param.vbrBitsOffTarget = 12345;
+    param.vbrBitsOffTargetFast = 999;
+    param.rollingTargetBits = 100;
+    param.rollingActualBits = 90;
+    param.rateErrorEstimate = 12;
+    param.totalActualBits = 500000;
+    param.totalTargetBits = 480000;
+    param.extendMinq = 3;
+    param.extendMaxq = 4;
+    param.extendMinqFast = 2;
+
+    l15_rc::rcParamReset(param);
+
+    // rc_param_reset (rc_process.c:555-566) writes ELEVEN fields; first_poc,
+    // rolling_target_bits and rolling_actual_bits are NOT touched.
+    CHECK(param.size == -1);
+    CHECK(param.processedFrameNumber == 0);
+    CHECK(param.vbrBitsOffTarget == 0);
+    CHECK(param.vbrBitsOffTargetFast == 0);
+    CHECK(param.rateErrorEstimate == 0);
+    CHECK(param.totalActualBits == 0);
+    CHECK(param.totalTargetBits == 0);
+    CHECK(param.extendMinq == 0);
+    CHECK(param.extendMaxq == 0);
+    CHECK(param.extendMinqFast == 0);
+    // the untouched trio keeps its values.
+    CHECK(param.firstPoc == 7);
+    CHECK(param.rollingTargetBits == 100);
+    CHECK(param.rollingActualBits == 90);
+}
+
+TEST_CASE("update_rc_counts walks the showable gate and the cdf branch") {
+    // svt_aom_update_rc_counts (rc_process.c:568-590): showable frames
+    // increment frames_since_key and decrement frames_to_key; the
+    // disable_cdf_update branch moves frames_since_cdf_update.
+    {
+        l15_rc::RcControl rc = drvRc();
+        rc.framesSinceKey = 8;
+        rc.framesToKey = 20;
+        rc.framesSinceCdfUpdate = 0;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.showableFrame = true;
+        pcs.disableCdfUpdate = false;
+        l15_rc::updateRcCounts(rc, pcs);
+        CHECK(rc.framesSinceKey == 9);
+        CHECK(rc.framesToKey == 19);
+        CHECK(rc.framesSinceCdfUpdate == 0);
+    }
+    {
+        l15_rc::RcControl rc = drvRc();
+        rc.framesSinceKey = 8;
+        rc.framesToKey = 20;
+        rc.framesSinceCdfUpdate = 3;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.showableFrame = true;
+        pcs.disableCdfUpdate = true;
+        l15_rc::updateRcCounts(rc, pcs);
+        CHECK(rc.framesSinceKey == 9);
+        CHECK(rc.framesToKey == 19);
+        CHECK(rc.framesSinceCdfUpdate == 4);
+    }
+    {
+        // not showable: NOTHING moves (the whole walk is inside the gate).
+        l15_rc::RcControl rc = drvRc();
+        rc.framesSinceKey = 8;
+        rc.framesToKey = 20;
+        rc.framesSinceCdfUpdate = 3;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.showableFrame = false;
+        pcs.disableCdfUpdate = false;
+        l15_rc::updateRcCounts(rc, pcs);
+        CHECK(rc.framesSinceKey == 8);
+        CHECK(rc.framesToKey == 20);
+        CHECK(rc.framesSinceCdfUpdate == 3);
+    }
+}
+
+TEST_CASE("reset_rc_param zeroes the ppcs recode counters") {
+    // reset_rc_param (rc_process.c:592-605): loop_count + the recode
+    // seen-flags on the ppcs wall.
+    l15_rc::PcsCarrier pcs = drvPcs();
+    pcs.loopCount = 4;
+    pcs.overshootSeen = 1;
+    pcs.undershootSeen = 1;
+    l15_rc::resetRcParam(pcs);
+    CHECK(pcs.loopCount == 0);
+    CHECK(pcs.overshootSeen == 0);
+    CHECK(pcs.undershootSeen == 0);
+}
+
+TEST_CASE("rc_init_frame_stats pins the rate-average period and the ME-dist walk") {
+    // rc_init_frame_stats (rc_process.c:607-640): the r0/r0beta call and the
+    // three ref-percentage walks are the named parks (l6/l4 walls); the
+    // portable surface is the rate-averaging period + the ME-dist average.
+    static const std::uint32_t d64[4] = {1000, 2000, 3000, 4000};
+    {
+        // two-pass + max_bit_rate: the period is total_stats->count, then
+        // MIN-ed with MAX_RATE_AVG_PERIOD (the 1500 count clamps to 1000).
+        l15_rc::RcControl rc = drvRc();
+        rc.curAvgBaseMeDist = 500;
+        l15_rc::rcInitFrameStats(rc, l15_rc::kBslice, 4, d64, true, 1500.0);
+        CHECK(rc.rateAveragePeriod == 1000);
+        // non-I_SLICE: prev <- cur (500), cur <- avg(1000+2000+3000+4000)/4.
+        CHECK(rc.prevAvgBaseMeDist == 500);
+        CHECK(rc.curAvgBaseMeDist == 2500);
+        // a count below the clamp passes through.
+        l15_rc::rcInitFrameStats(rc, l15_rc::kBslice, 4, d64, true, 800.0);
+        CHECK(rc.rateAveragePeriod == 800);
+    }
+    {
+        // I_SLICE: the ME-dist walk is skipped entirely (a null pointer is
+        // never dereferenced on the I_SLICE path).
+        l15_rc::RcControl rc = drvRc();
+        rc.prevAvgBaseMeDist = 11;
+        rc.curAvgBaseMeDist = 22;
+        l15_rc::rcInitFrameStats(rc, l15_rc::kIslice, 1, nullptr, false, 60.0);
+        CHECK(rc.prevAvgBaseMeDist == 11);
+        CHECK(rc.curAvgBaseMeDist == 22);
+    }
+    {
+        // NOT (two-pass + max_bit_rate): the 60 default.
+        l15_rc::RcControl rc = drvRc();
+        l15_rc::rcInitFrameStats(rc, l15_rc::kBslice, 4, d64, false, 1500.0);
+        CHECK(rc.rateAveragePeriod == 60);
+        l15_rc::rcInitFrameStats(rc, l15_rc::kBslice, 4, d64, true, 30.0);
+        CHECK(rc.rateAveragePeriod == 30);
+    }
+}
+
+// ---- A9D S3: rc_process.c rc_handle_superres :674-736 ----
+
+TEST_CASE("rc_handle_superres gates, the segment reset and the release walk") {
+    // ENC_SINGLE_PASS = 0; SUPERRES_NONE/FIXED/RANDOM = 0/1/2;
+    // RESIZE_NONE = 0. The parked call sites (init_resize_picture, the
+    // gm-controls pair, the fifo posts, the object releases) thread: the
+    // gm derivation arrives at the callable with the super_res_off flag,
+    // the release decisions land in the out flags.
+    {
+        // pass != ENC_SINGLE_PASS: false, NOTHING moves.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameSuperresEnabled = true;
+        int completion = 9, processed = 9;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        bool gmCalled = false;
+        CHECK(l15_rc::rcHandleSuperres(1, 4, 0, 2, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead,
+                                       [&](bool) { gmCalled = true; }) == false);
+        CHECK(completion == 9);
+        CHECK(processed == 9);
+        CHECK(gmCalled == false);
+    }
+    {
+        // superres_mode <= SUPERRES_RANDOM: false.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameSuperresEnabled = true;
+        int completion = 9, processed = 9;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 2, 0, 2, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(completion == 9);
+    }
+    {
+        // frame_superres_enabled with RESIZE_NONE: early exit true, the
+        // segment counters zeroed, super_res_off = FALSE (super-res is ON).
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameSuperresEnabled = true;
+        ppcs.tplEnable = true;
+        int completion = 5, processed = 7;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        bool superResOffSeen = true;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 3, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead,
+                                       [&](bool off) { superResOffSeen = off; }) == true);
+        CHECK(completion == 0);
+        CHECK(processed == 0);
+        CHECK(superResOffSeen == false);
+        CHECK(releaseHead == false);
+    }
+    {
+        // frame_resize_enabled with RESIZE_DYNAMIC: early exit true,
+        // super_res_off = false (resize_mode != RESIZE_NONE).
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameResizeEnabled = true;
+        int completion = 5, processed = 7;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        bool superResOffSeen = true;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 3, 1, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead,
+                                       [&](bool off) { superResOffSeen = off; }) == true);
+        CHECK(superResOffSeen == false);
+    }
+    {
+        // frame_resize_enabled with RESIZE_NONE and no superres: early exit
+        // true, super_res_off = TRUE (the resize-only case).
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.frameResizeEnabled = true;
+        int completion = 5, processed = 7;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        bool superResOffSeen = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, nullptr, 0, completion, processed, release,
+                                       releaseHead,
+                                       [&](bool off) { superResOffSeen = off; }) == true);
+        CHECK(superResOffSeen == true);
+    }
+    {
+        // No superres/resize; tpl ON at layer 0: the release walk. Member 0
+        // is incomp with ext_mg_id == head+1 (released); member 1 is
+        // non-incomp with ext_mg_id == head (released).
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.extMgId = 10;
+        ppcs.tplEnable = true;
+        ppcs.temporalLayerIndex = 0;
+        l15_rc::SuperresPcsCarrier group[2] = {};
+        group[0].incompMgFrame = true;
+        group[0].extMgId = 11;
+        group[1].incompMgFrame = false;
+        group[1].extMgId = 10;
+        int completion = 0, processed = 0;
+        bool release[2] = {false, false};
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, group, 2, completion, processed, release,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(release[0] == true);
+        CHECK(release[1] == true);
+        CHECK(releaseHead == false);
+    }
+    {
+        // The ext_mg_id quirk: an incomp member at head's OWN id (+0) is NOT
+        // released; a non-incomp member at head+1 is NOT released; an incomp
+        // member FURTHER than head+1 (the >= would catch) is NOT released -
+        // the reference's condition is equality, not a range.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.extMgId = 10;
+        ppcs.tplEnable = true;
+        ppcs.temporalLayerIndex = 0;
+        l15_rc::SuperresPcsCarrier group[3] = {};
+        group[0].incompMgFrame = true;
+        group[0].extMgId = 10;
+        group[1].incompMgFrame = false;
+        group[1].extMgId = 11;
+        group[2].incompMgFrame = true;
+        group[2].extMgId = 12;
+        int completion = 0, processed = 0;
+        bool release[3] = {false, false, false};
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, group, 3, completion, processed, release,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(release[0] == false);
+        CHECK(release[1] == false);
+        CHECK(release[2] == false);
+    }
+    {
+        // tpl ON at a NON-zero layer: no release at all.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.extMgId = 10;
+        ppcs.tplEnable = true;
+        ppcs.temporalLayerIndex = 1;
+        l15_rc::SuperresPcsCarrier group[1] = {};
+        group[0].incompMgFrame = true;
+        group[0].extMgId = 11;
+        int completion = 0, processed = 0;
+        bool release[1] = {false};
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, group, 1, completion, processed, release,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(release[0] == false);
+        CHECK(releaseHead == false);
+    }
+    {
+        // tpl OFF: the ppcs itself is released.
+        l15_rc::SuperresPcsCarrier ppcs{};
+        ppcs.tplEnable = false;
+        int completion = 0, processed = 0;
+        bool releaseHead = false;
+        CHECK(l15_rc::rcHandleSuperres(0, 4, 0, 1, ppcs, nullptr, 0, completion, processed, nullptr,
+                                       releaseHead, [&](bool) {}) == false);
+        CHECK(releaseHead == true);
+    }
+}
+
+// ---- A9D S13: rc_process.c generate_sb_qindex (:738-753) +
+// rc_process_packetization_feedback (:756-811) ----
+
+TEST_CASE("generate_sb_qindex composes the three landed primitives") {
+    // 4 SBs, all variances 0 -> rcInitSbQindex writes the base qindex
+    // everywhere; the normalize gate and the map gate route on the flags.
+    static const std::uint16_t varRow[4] = {0, 0, 0, 0};
+    static const std::uint16_t* varRows[1] = {varRow};
+    const std::uint16_t* const* var = varRows;
+    l15_rc::CrRefreshCarrier cr{};
+    cr.applyCyclicRefresh = 0;
+    l15_rc::FrameHdrCarrier hdr{};
+    hdr.baseQIdx = 120;
+    hdr.deltaQPresent = true;
+    hdr.deltaQRes = 2;
+    l15_rc::MeStatCarrier me = drvMe();
+    static const std::uint32_t costVar[1] = {5000};  // the map walk reads it
+    me.me8x8CostVariance = costVar;
+    me.b64TotalCount = 1;
+    std::uint8_t sbQ[4] = {7, 7, 7, 7};
+    std::uint8_t b64Map[4] = {7, 7, 7, 7};
+
+    l15_rc::generateSbQindex(l15_rc::kRcCbr, cr, hdr, sbQ, var, 4, me, false, 0, 8, 0, 0, 0, false, 0.0, 4, 4,
+                             false, true, l15_rc::kBslice, 1, b64Map);
+
+    // rcInitSbQindex wrote the base qindex (no CR, no boost).
+    CHECK(sbQ[0] == 120);
+    CHECK(sbQ[3] == 120);
+    // FINDING (the reference's own dead site): rc_init_sb_qindex CLEARS
+    // delta_q_present first (rc_aq.c:599), so the composition's normalize
+    // gate (delta_q_present && res != 1) never fires - the arm is
+    // unreachable by the reference's own ordering. The port reproduces it:
+    // the flag is FALSE after the composition.
+    CHECK(hdr.deltaQPresent == false);
+    // the stats-based map: sliceType B, layer 1 -> the landed
+    // generateB64MeQindexMap writes per its own rule (nonzero here).
+    CHECK(b64Map[0] != 7);  // the map walk overwrote the poison
+    {
+        // res == 1: the normalize arm would skip anyway (the dead site) -
+        // the map still runs.
+        std::uint8_t sbQ2[4] = {7, 7, 7, 7};
+        l15_rc::FrameHdrCarrier hdr2{};
+        hdr2.baseQIdx = 100;
+        hdr2.deltaQPresent = true;
+        hdr2.deltaQRes = 1;
+        l15_rc::generateSbQindex(l15_rc::kRcCbr, cr, hdr2, sbQ2, var, 4, me, false, 0, 8, 0, 0, 0, false, 0.0, 4, 4,
+                                 false, true, l15_rc::kBslice, 1, b64Map);
+        CHECK(hdr2.deltaQPresent == false);
+        CHECK(sbQ2[0] == 100);
+    }
+    {
+        // delta_q_present false: the normalize arm skips; the map gate off:
+        // the map stays the poison.
+        std::uint8_t sbQ3[4] = {7, 7, 7, 7};
+        std::uint8_t map3[4] = {7, 7, 7, 7};
+        l15_rc::FrameHdrCarrier hdr3{};
+        hdr3.baseQIdx = 90;
+        hdr3.deltaQPresent = false;
+        l15_rc::generateSbQindex(l15_rc::kRcCbr, cr, hdr3, sbQ3, var, 4, me, false, 0, 8, 0, 0, 0, false, 0.0, 4, 4,
+                                 false, false, l15_rc::kBslice, 1, map3);
+        CHECK(sbQ3[0] == 90);
+        CHECK(map3[0] == 7);
+    }
+}
+
+TEST_CASE("rc_process_packetization_feedback routes the four postencode paths") {
+    {
+        // the VBR + gop_constraint path: the param reset walk + BOTH
+        // postencode twins (the param's vbr_bits_off_target moves twice).
+        l15_rc::RcControl rc = drvRc();
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcVbr;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.isOverlay = false;
+        pcs.baseFrameTarget = 1000;
+        pcs.projectedFrameSize = 800;
+        pcs.totalNumBits = 800;
+        pcs.baseQIdx = 120;
+        pcs.layerDepth = 2;
+        pcs.showableFrame = false;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.size = 3;
+        param.processedFrameNumber = 2;
+        param.totalActualBits = 1000;
+        param.totalTargetBits = 2000;
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, false, true,
+                                               false, false, false);
+        // the count walk: 2 -> 3 == size -> the RESET fired.
+        CHECK(param.processedFrameNumber == 0);
+        CHECK(param.size == -1);
+        // postencodeUpdateGopConst does NOT touch param.vbr_bits_off_target
+        // (the rc_vbr_cbr twin handles rate factors/rolling); the twopass
+        // twin adds 1000-800 once.
+        CHECK(param.vbrBitsOffTarget == 200);
+        // updateRcCounts: showable false -> frames_since_key unchanged.
+        CHECK(rc.framesSinceKey == 8);
+    }
+    {
+        // the VBR non-gop path: the rc-side twins (rc.vbr_bits_off_target).
+        l15_rc::RcControl rc = drvRc();
+        rc.totalActualBits = 1000;
+        rc.totalTargetBits = 2000;
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcVbr;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.isOverlay = false;
+        pcs.baseFrameTarget = 1000;
+        pcs.projectedFrameSize = 800;
+        pcs.totalNumBits = 800;
+        pcs.baseQIdx = 120;
+        pcs.layerDepth = 2;
+        pcs.showableFrame = false;
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, false, false,
+                                               false, false, false);
+        CHECK(rc.vbrBitsOffTarget == 200);
+        // updateRcCounts ran (showable false: nothing moves).
+        CHECK(rc.framesSinceKey == 8);
+    }
+    {
+        // the overlay gate: the param count does NOT move, but the routing
+        // still runs.
+        l15_rc::RcControl rc = drvRc();
+        rc.totalActualBits = 1000;
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcVbr;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.isOverlay = true;
+        pcs.baseFrameTarget = 1000;
+        pcs.projectedFrameSize = 800;
+        pcs.totalNumBits = 800;
+        pcs.baseQIdx = 120;
+        pcs.layerDepth = 2;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.processedFrameNumber = 2;
+        param.size = 3;
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, false, false,
+                                               false, false, false);
+        CHECK(param.processedFrameNumber == 2);  // NOT incremented
+        CHECK(rc.vbrBitsOffTarget == 200);       // the routing ran
+    }
+    {
+        // the AOM_Q path: NOTHING runs (the parked stat-calc call site) -
+        // no param count, no rc movement.
+        l15_rc::RcControl rc = drvRc();
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcQ;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.isOverlay = false;
+        pcs.showableFrame = true;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.processedFrameNumber = 2;
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, false, false,
+                                               true, false, false);
+        CHECK(param.processedFrameNumber == 3);  // the count walk ran
+        CHECK(rc.vbrBitsOffTarget == 0);         // no postencode twin
+        CHECK(rc.framesSinceKey == 8);           // updateRcCounts NOT called (the Q path)
+    }
+    {
+        // the RTC-CBR path: postencodeUpdateRtcCbr folds the qindex.
+        l15_rc::RcControl rc = drvRc();
+        l15_rc::RcConfig cfg = drvCfg();
+        cfg.mode = l15_rc::kRcCbr;
+        l15_rc::PcsCarrier pcs = drvPcs();
+        pcs.frameType = l15_rc::kKeyFrame;
+        pcs.isOverlay = false;
+        pcs.baseQIdx = 120;
+        pcs.totalNumBits = 800;
+        pcs.showableFrame = false;
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::TwoPassCarrier tp{};
+        l15_rc::CrRefreshCarrier cr{};
+        l15_rc::MeStatCarrier me = drvMe();
+        int frameUpdated = 0;
+        const int q0Before = rc.avgFrameQindex[0];
+        l15_rc::rcProcessPacketizationFeedback(rc, cfg, pcs, cr, param, tp, 1, 8, frameUpdated, true, false,
+                                               false, false, false);
+        // the KEY-frame fold: (3*q0 + 120 + 2) >> 2.
+        CHECK(rc.avgFrameQindex[0] == (int)l15_rc::roundPowerOfTwo(3 * q0Before + 120, 2));
+        CHECK(rc.framesSinceKey == 0);
+    }
+}

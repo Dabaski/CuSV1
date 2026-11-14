@@ -824,3 +824,1326 @@ TEST_CASE("svt_av1_new_framerate clamps below 0.1 and drives the update") {
         CHECK(rc.avgFrameBandwidth == 3000000);
     }
 }
+
+// ---- A9D S4: pass2_strategy.c frame_max_bits (:55-58) +
+// calculate_total_gf_group_bits (:186-220) ----
+
+TEST_CASE("frame_max_bits is the vbrmax share clipped to max_frame_bandwidth") {
+    // avg 10,000 * 190/100 = 19,000; the 50,000 ceiling does not bind.
+    {
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 10000;
+        rc.maxFrameBandwidth = 50000;
+        CHECK(l15_rc::frameMaxBits(rc, 190) == 19000);
+    }
+    {
+        // the ceiling binds: 19,000 > 10,000 -> 10,000.
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 10000;
+        rc.maxFrameBandwidth = 10000;
+        CHECK(l15_rc::frameMaxBits(rc, 190) == 10000);
+    }
+    {
+        // vbrmax 0: the product is 0, the CLIP3 low bound keeps 0.
+        l15_rc::RcControl rc{};
+        rc.avgFrameBandwidth = 10000;
+        rc.maxFrameBandwidth = 50000;
+        CHECK(l15_rc::frameMaxBits(rc, 0) == 0);
+    }
+}
+
+TEST_CASE("calculate_total_gf_group_bits walks the kf scaling and the clamps") {
+    // The oracle: (kf_group_bits * (gf_err / kf_error_left)) truncated, the
+    // three clamps, and the kf_group_bits -= total update.
+    {
+        // kf bits 1000, err left 500, gf err 250 -> 500 total; the kf pool
+        // drops to 500.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, 250.0) == 500);
+        CHECK(tp.kfGroupBits == 500);
+    }
+    {
+        // kf_group_bits <= 0: 0 total, and the pool does not move.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 0;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, 250.0) == 0);
+        CHECK(tp.kfGroupBits == 0);
+    }
+    {
+        // err_left <= 0: 0 total.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 0;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, 250.0) == 0);
+        CHECK(tp.kfGroupBits == 1000);
+    }
+    {
+        // the lap scaling branch: (lad_mg + 1) * 2^hier < intra_period.
+        // kf 1000 * min(frames_in_sw 30, frames_to_key 60) / 60 = 500, then
+        // * (250/500) = 250.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.framesToKey = 60;
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        // lad_mg 2, hier 3 -> 3*8 = 24 < 240.
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, true, 2, 3, 240, 30, 250.0) == 250);
+        CHECK(tp.kfGroupBits == 750);
+    }
+    {
+        // the lap gate NOT taken ((lad_mg+1)*2^hier == intra_period): the
+        // unscaled path. 3*8 = 24 == 24 -> no scaling.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.framesToKey = 60;
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, true, 2, 3, 24, 30, 250.0) == 500);
+    }
+    {
+        // negative result clamps to 0 (gf_err < 0).
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, -250.0) == 0);
+        CHECK(tp.kfGroupBits == 1000);
+    }
+    {
+        // above the kf pool: clamps at kf_group_bits (gf_err > err_left).
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 190, tp, false, 0, 0, 0, 0, 2000.0) == 1000);
+        CHECK(tp.kfGroupBits == 0);
+    }
+    {
+        // the data-rate variability clip: max_bits * baseline_gf_interval.
+        // vbrmax 50: max_bits = 100000*50/100 = 50000; *8 = 400,000. The raw
+        // total is 800,000 (kf 1,000,000 * (400/500)); the clip binds.
+        l15_rc::TwoPassCarrier tp{};
+        tp.kfGroupBits = 1000000;
+        tp.kfGroupErrorLeft = 500;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 8;
+        rc.avgFrameBandwidth = 100000;
+        rc.maxFrameBandwidth = 1000000;
+        CHECK(l15_rc::calculateTotalGfGroupBits(rc, 50, tp, false, 0, 0, 0, 0, 400.0) == 400000);
+        CHECK(tp.kfGroupBits == 600000);
+    }
+}
+
+// ---- A9D S5: pass2_strategy.c allocate_gf_group_bits (:240-307) +
+// layer_fraction (:238) + av1_gop_bit_allocation (:457-463) ----
+
+namespace {
+
+// an 8-frame hierarchical-3 group: KF at 0, ARFs at layers 3/2, an INTNL_ARF
+// at layer 1, leaves elsewhere.
+void hier3Group(l15_rc::GfGroupMemberView* g, int* layerDepthOverride = nullptr) {
+    const int ut[8] = {0, 3, 1, 3, 1, 1, 6, 1};
+    const int ld[8] = {0, 3, 0, 2, 0, 0, 1, 0};
+    for (int i = 0; i < 8; ++i) {
+        g[i].updateType = ut[i];
+        g[i].layerDepth = layerDepthOverride ? layerDepthOverride[i] : ld[i];
+        g[i].baseFrameTarget = -1;  // poison: the walk must write every idx
+    }
+}
+
+}  // namespace
+
+TEST_CASE("allocate_gf_group_bits pins the 8-frame hier-3 allocation") {
+    l15_rc::GfGroupMemberView g[8];
+    hier3Group(g);
+    l15_rc::PcsCarrier pcs{};
+    pcs.gfInterval = 8;
+    pcs.hierarchicalLevels = 3;
+    l15_rc::RcControl rc{};
+    rc.baselineGfInterval = 8;
+    rc.gfuBoost = 2400;
+    // gfu_boost 2400 over 1000 group bits -> gf_arf_bits 750 (the >1023
+    // divisor path); total 1000-750 = 250; base = 250/8 = 31.
+    l15_rc::av1GopBitAllocation(pcs, rc, g, 8, true, true, 1000);
+    // key frame idx0 is SKIPPED (frame_index 1) - still the poison.
+    CHECK(g[0].baseFrameTarget == -1);
+    // idx1 ARF layer3: 31 + 45; idx3 ARF layer2: 31 + 105;
+    // idx6 INTNL_ARF layer1: 31 + 600.
+    CHECK(g[1].baseFrameTarget == 76);
+    CHECK(g[3].baseFrameTarget == 136);
+    CHECK(g[6].baseFrameTarget == 631);
+    // the leaves and the KF-chain idx7: 31.
+    CHECK(g[2].baseFrameTarget == 31);
+    CHECK(g[4].baseFrameTarget == 31);
+    CHECK(g[5].baseFrameTarget == 31);
+    CHECK(g[7].baseFrameTarget == 31);
+}
+
+TEST_CASE("allocate_gf_group_bits pins the overlay zero and the no-arf path") {
+    {
+        // an OVERLAY member gets 0, not the base bits.
+        l15_rc::GfGroupMemberView g[4];
+        g[0].updateType = 1; g[0].layerDepth = 0; g[0].baseFrameTarget = -1;
+        g[1].updateType = 5; g[1].layerDepth = 0; g[1].baseFrameTarget = -1;  // OVERLAY
+        g[2].updateType = 1; g[2].layerDepth = 0; g[2].baseFrameTarget = -1;
+        g[3].updateType = 4; g[3].layerDepth = 0; g[3].baseFrameTarget = -1;  // INTNL_OVERLAY
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 4;
+        pcs.hierarchicalLevels = 1;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 4;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 4, false, true, 400);
+        // gfu_boost 0 -> gf_arf_bits 0 (the calculate_boost_bits zero gate);
+        // total 400; base = 100.
+        CHECK(g[0].baseFrameTarget == 100);
+        CHECK(g[1].baseFrameTarget == 0);
+        CHECK(g[2].baseFrameTarget == 100);
+        CHECK(g[3].baseFrameTarget == 0);
+    }
+    {
+        // use_arf false + non-key: the (use_arf || !key_frame) gate still
+        // fires (!key_frame) - but gfu_boost 0 makes gf_arf_bits 0, so the
+        // whole pool is the base.
+        l15_rc::GfGroupMemberView g[4];
+        for (int i = 0; i < 4; ++i) {
+            g[i].updateType = 1;
+            g[i].layerDepth = 0;
+            g[i].baseFrameTarget = -1;
+        }
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 4;
+        pcs.hierarchicalLevels = 1;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 4;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 4, false, false, 400);
+        CHECK(g[0].baseFrameTarget == 100);
+        CHECK(g[3].baseFrameTarget == 100);
+    }
+    {
+        // use_arf false + KEY: the (use_arf || !key_frame) gate FAILS - no
+        // subtraction; the pool stays whole but the ARF layer still takes
+        // its extra bits out of gf_arf_bits.
+        l15_rc::GfGroupMemberView g[4];
+        for (int i = 0; i < 4; ++i) {
+            g[i].updateType = (i == 1) ? 3 : 1;
+            g[i].layerDepth = (i == 1) ? 1 : 0;
+            g[i].baseFrameTarget = -1;
+        }
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 4;
+        pcs.hierarchicalLevels = 1;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 4;
+        rc.gfuBoost = 400;
+        // gfu_boost 400 -> chunks 400+400=800; arf = 400*400/800 = 200.
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 4, true, false, 400);
+        // NO subtraction: total 400; base = 100; the ARF layer1 (max layer)
+        // takes fraction 1.0 of gf_arf_bits -> extra 200.
+        CHECK(g[0].baseFrameTarget == -1);  // key frame: skipped
+        CHECK(g[1].baseFrameTarget == 100 + 200);
+        CHECK(g[2].baseFrameTarget == 100);
+        CHECK(g[3].baseFrameTarget == 100);
+    }
+    {
+        // baseline_gf_interval 0: base_frame_bits = 1.
+        l15_rc::GfGroupMemberView g[2];
+        for (int i = 0; i < 2; ++i) {
+            g[i].updateType = 1;
+            g[i].layerDepth = 0;
+            g[i].baseFrameTarget = -1;
+        }
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 2;
+        pcs.hierarchicalLevels = 1;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 0;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 2, false, false, 400);
+        CHECK(g[0].baseFrameTarget == 1);
+        CHECK(g[1].baseFrameTarget == 1);
+    }
+    {
+        // the doubling loop: baseline 2 < 8>>1 = 4 -> the ARF/INTNL_ARF
+        // layer_frames DOUBLE-count (+1 / +2), splitting the extra bits.
+        l15_rc::GfGroupMemberView g[8];
+        hier3Group(g);
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.hierarchicalLevels = 3;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 2;
+        rc.gfuBoost = 2400;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 8, true, true, 1000);
+        // REFERENCE QUIRK: av1_gop_bit_allocation passes rc->baseline_gf_
+        // interval (=2 here, NOT the gf_interval param) as the frame count
+        // to calculate_boost_bits: chunks = 2*100+2400 = 2600, the >1023
+        // divisor halves both -> 1200*1000/1300 = 923.
+        // total = 1000-923 = 77; base = 77/2 = 38.
+        // layer_frames after both walks: layer1 = 1+2 = 3, layer2 = 2,
+        // layer3 = 2.
+        // i=1: extra[1] = (int)(923*0.8)/3 = 246; arf -= 738 -> 185.
+        // i=2: extra[2] = (int)(185*0.7)/2 = 64; arf -= 129 -> 56.
+        // i=3: extra[3] = 56/2 = 28.
+        CHECK(g[1].baseFrameTarget == 38 + 28);
+        CHECK(g[3].baseFrameTarget == 38 + 64);
+        CHECK(g[6].baseFrameTarget == 38 + 246);
+        CHECK(g[2].baseFrameTarget == 38);
+    }
+    {
+        // the doubling gate's OTHER side: baseline 5 is NOT < 8>>1 = 4, so
+        // no doubling (a mutation that compares against gf_interval itself
+        // would fire here - 5 < 8).
+        l15_rc::GfGroupMemberView g[8];
+        hier3Group(g);
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.hierarchicalLevels = 3;
+        l15_rc::RcControl rc{};
+        rc.baselineGfInterval = 5;
+        rc.gfuBoost = 2400;
+        l15_rc::av1GopBitAllocation(pcs, rc, g, 8, true, true, 1000);
+        // arf = calculate_boost_bits(5, 2400, 1000): chunks 2900 -> divisor
+        // 2 -> 1200*1000/1450 = 827; total = 173; base = 34; NO doubling:
+        // extra[1] = 661, extra[2] = 116, extra[3] = 50.
+        CHECK(g[1].baseFrameTarget == 34 + 50);
+        CHECK(g[3].baseFrameTarget == 34 + 116);
+        CHECK(g[6].baseFrameTarget == 34 + 661);
+        CHECK(g[2].baseFrameTarget == 34);
+    }
+}
+
+// ---- A9D S6: pass2_strategy.c lap_rc_init (:512-555) +
+// lap_rc_group_error_calc (:562-581) ----
+
+namespace {
+
+// a lap window: 3 stats with coded errors 1/2/3 and total_num_bits 100/200/
+// 300.
+std::vector<l15_rc::FirstpassStatsCarrier> lapWindow() {
+    std::vector<l15_rc::FirstpassStatsCarrier> v;
+    const double ce[3] = {1.0, 2.0, 3.0};
+    const std::uint64_t nb[3] = {100, 200, 300};
+    for (int i = 0; i < 3; ++i) {
+        l15_rc::FirstpassStatsCarrier s{};
+        s.frame = (double)i;
+        s.codedError = ce[i];
+        s.count = 1.0;
+        s.duration = 1.0;
+        s.statStruct.totalNumBits = nb[i];
+        v.push_back(s);
+    }
+    return v;
+}
+
+l15_rc::TwoPassCarrier lapWalk(const std::vector<l15_rc::FirstpassStatsCarrier>& stats) {
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = (int)stats.size();
+    tp.statsInPos = 0;
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 1000;
+    return tp;
+}
+
+}  // namespace
+
+TEST_CASE("lap_rc_init walks the lookahead window with the <= end quirk") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = lapWindow();
+    l15_rc::TwoPassCarrier tp = lapWalk(stats);
+    // the caller's current frame (coded_error 10, total_num_bits 10).
+    l15_rc::FirstpassStatsCarrier arg{};
+    arg.codedError = 10.0;
+    arg.statStruct.totalNumBits = 10;
+
+    l15_rc::lapRcInit(tp, arg, 50, 190, 3000000, 30.0);
+
+    // QUIRK: the `stats_in <= stats_in_end` guard runs the body one final
+    // time before input_stats EOFs -> num_stats = window + 1 = 4, and the
+    // coded-error sum is the arg + all three elements = 16.
+    // DOUBLE_DIVIDE_CHECK: num_stats + 0.000001 -> avg = 16/4.000001.
+    const double avg = 16.0 / (4.0 + 0.000001);
+    CHECK(std::fabs(tp.modifiedErrorMin - (avg * 50.0 / 100.0)) <= 1e-9);
+    CHECK(std::fabs(tp.modifiedErrorMax - (avg * 190.0 / 100.0)) <= 1e-9);
+    // the second walk: calculate_modified_err = total_num_bits, accumulated
+    // arg + all three = 10 + 100 + 200 + 300 = 610.
+    CHECK(std::fabs(tp.modifiedErrorLeft - 610.0) <= 1e-9);
+    // bits_left += (int64)(num_stats * (target / framerate)) = 4 * 100000.
+    CHECK(tp.bitsLeft == 1000 + 400000);
+    // the walk position rewound.
+    CHECK(tp.statsInPos == 0);
+}
+
+TEST_CASE("lap_rc_init pins the empty-window and the rewind") {
+    // pos == count at entry: the body still runs once (the <= guard), the
+    // input_stats EOFs immediately; num_stats 1, coded error = arg only.
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = lapWindow();
+    l15_rc::TwoPassCarrier tp = lapWalk(stats);
+    tp.statsInPos = 3;  // at the end
+    l15_rc::FirstpassStatsCarrier arg{};
+    arg.codedError = 10.0;
+    arg.statStruct.totalNumBits = 10;
+    l15_rc::lapRcInit(tp, arg, 50, 190, 3000000, 30.0);
+    const double avg = 10.0 / (1.0 + 0.000001);
+    CHECK(std::fabs(tp.modifiedErrorMin - (avg * 50.0 / 100.0)) <= 1e-9);
+    CHECK(std::fabs(tp.modifiedErrorLeft - 10.0) <= 1e-9);
+    CHECK(tp.bitsLeft == 1000 + 100000);
+    CHECK(tp.statsInPos == 3);
+}
+
+TEST_CASE("lap_rc_group_error_calc caps at frames_to_key and rewinds") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = lapWindow();
+    {
+        // frames_to_key 2: terms = arg + loaded[0] (the cap).
+        l15_rc::TwoPassCarrier tp = lapWalk(stats);
+        l15_rc::FirstpassStatsCarrier arg{};
+        arg.codedError = 10.0;
+        arg.statStruct.totalNumBits = 10;
+        const double total = l15_rc::lapRcGroupErrorCalc(tp, arg, 2);
+        CHECK(std::fabs(total - 110.0) <= 1e-9);
+        CHECK(tp.statsInPos == 0);
+    }
+    {
+        // frames_to_key beyond the window: the EOF break - arg + all three
+        // = 610 (the same <= quirk as lap_rc_init).
+        l15_rc::TwoPassCarrier tp = lapWalk(stats);
+        l15_rc::FirstpassStatsCarrier arg{};
+        arg.codedError = 10.0;
+        arg.statStruct.totalNumBits = 10;
+        const double total = l15_rc::lapRcGroupErrorCalc(tp, arg, 50);
+        CHECK(std::fabs(total - 610.0) <= 1e-9);
+        CHECK(tp.statsInPos == 0);
+    }
+}
+
+// ---- A9D S7: pass2_strategy.c set_kf_interval_variables (:594-627) +
+// get_kf_group_bits (:629-642) + kf_group_rate_assingment (:651-742) ----
+
+namespace {
+
+// the KF fixture: a 4-stat window, the caller's frame (total_num_bits 50)
+// already consumed - the walk starts at pos 1 (the caller-advanced
+// convention). total_num_bits 100/200/300/400.
+std::vector<l15_rc::FirstpassStatsCarrier> kfWindow() {
+    std::vector<l15_rc::FirstpassStatsCarrier> v;
+    const std::uint64_t nb[4] = {100, 200, 300, 400};
+    for (int i = 0; i < 4; ++i) {
+        l15_rc::FirstpassStatsCarrier s{};
+        s.frame = (double)i;
+        s.codedError = 1.0;
+        s.count = 1.0;
+        s.duration = 1.0;
+        s.statStruct.totalNumBits = nb[i];
+        v.push_back(s);
+    }
+    return v;
+}
+
+l15_rc::TwoPassCarrier kfWalk(const std::vector<l15_rc::FirstpassStatsCarrier>& stats) {
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = (int)stats.size();
+    tp.statsInPos = 1;  // the caller already consumed stats[0]
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 100000;
+    tp.modifiedErrorLeft = 1000.0;
+    tp.kfGroupBits = -1;  // poison: the assignment must overwrite
+    tp.kfGroupErrorLeft = -1;
+    return tp;
+}
+
+l15_rc::FirstpassStatsCarrier kfArg() {
+    l15_rc::FirstpassStatsCarrier arg{};
+    arg.codedError = 1.0;
+    arg.count = 1.0;
+    arg.duration = 1.0;
+    arg.statStruct.totalNumBits = 50;
+    return arg;
+}
+
+l15_rc::RcControl kfRc() {
+    l15_rc::RcControl rc{};
+    rc.avgFrameBandwidth = 10000;
+    rc.maxFrameBandwidth = 1000000;
+    rc.kfBoost = 400;
+    rc.framesToKey = -1;  // poison
+    rc.framesSinceKey = 8;
+    rc.framesSinceCdfUpdate = 8;
+    return rc;
+}
+
+}  // namespace
+
+TEST_CASE("set_kf_interval_variables walks, caps and writes the lap outcomes") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    {
+        // non-lap: frames_to_key = MIN(intra+1, walked). From the
+        // caller-advanced pos 1 the window holds 3 elements + the <= quirk
+        // extra iteration -> walked = 4 -> MIN(11, 4) = 4.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        double kfGroupErr = 0.0;
+        l15_rc::setKfIntervalVariables(tp, arg, &kfGroupErr, 11, false, false, 10, rc, param);
+        CHECK(rc.framesToKey == 4);
+        // the accumulated error: arg 50 + 200 + 300 + 400 = 950.
+        CHECK(std::fabs(kfGroupErr - 950.0) <= 1e-9);
+        // no rewind here (the caller kf_group_rate_assingment rewinds).
+        CHECK(tp.statsInPos == 4);
+        CHECK(param.endOfSeqSeen == 0);
+    }
+    {
+        // the NULL kf_group_err: the walk runs, nothing accumulates.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        l15_rc::setKfIntervalVariables(tp, arg, nullptr, 11, false, false, 10, rc, param);
+        CHECK(rc.framesToKey == 4);
+    }
+    {
+        // num_frames_to_detect_scenecut == 0: early return, NOTHING moves.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        double kfGroupErr = 7.0;
+        l15_rc::setKfIntervalVariables(tp, arg, &kfGroupErr, 0, false, false, 10, rc, param);
+        CHECK(rc.framesToKey == -1);
+        CHECK(std::fabs(kfGroupErr - 7.0) <= 1e-9);
+        CHECK(tp.statsInPos == 1);
+    }
+    {
+        // lap + !end_of_sequence_region: frames_to_key = intra + 1.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        double kfGroupErr = 0.0;
+        l15_rc::setKfIntervalVariables(tp, arg, &kfGroupErr, 11, true, false, 10, rc, param);
+        CHECK(rc.framesToKey == 11);
+        CHECK(param.endOfSeqSeen == 0);
+    }
+    {
+        // lap + end_of_sequence_region: the param's end_of_seq_seen = 1 and
+        // the MIN path applies.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        double kfGroupErr = 0.0;
+        l15_rc::setKfIntervalVariables(tp, arg, &kfGroupErr, 11, true, true, 10, rc, param);
+        CHECK(rc.framesToKey == 4);
+        CHECK(param.endOfSeqSeen == 1);
+    }
+}
+
+TEST_CASE("get_kf_group_bits selects the lap bandwidth or the error split") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    l15_rc::RcControl rc = kfRc();
+    rc.framesToKey = 11;
+    l15_rc::TwoPassCarrier tp = kfWalk(stats);
+    {
+        // non-lap: bits_left * (err / modified_error_left).
+        CHECK(l15_rc::getKfGroupBits(false, 3, 10, false, rc, tp, 950.0) == 95000);
+    }
+    {
+        // lap + frames_in_sw < intra + !eos: frames_to_key * bandwidth.
+        CHECK(l15_rc::getKfGroupBits(true, 3, 10, false, rc, tp, 950.0) == 110000);
+    }
+    {
+        // lap + eos: the error split despite lap.
+        CHECK(l15_rc::getKfGroupBits(true, 3, 10, true, rc, tp, 950.0) == 95000);
+    }
+    {
+        // lap + frames_in_sw >= intra: the error split.
+        CHECK(l15_rc::getKfGroupBits(true, 10, 10, false, rc, tp, 950.0) == 95000);
+    }
+}
+
+TEST_CASE("kf_group_rate_assingment pins the one-pass composition") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    l15_rc::TwoPassCarrier tp = kfWalk(stats);
+    l15_rc::RcControl rc = kfRc();
+    l15_rc::PcsCarrier pcs{};
+    l15_rc::RcIntervalParamCarrier param{};
+    l15_rc::FirstpassStatsCarrier arg = kfArg();
+    l15_rc::kfGroupRateAssignment(pcs, rc, tp, arg, param, false, 10, 3000000, 30.0, 190, 1);
+    // walked kf_group_err 950, frames_to_key MIN(11, 4) = 4.
+    // kf_group_bits: 100000 * (950/1000) = 95000; the max_grp_bits clip:
+    // 19000 * 4 = 76000 -> kf_group_bits 76000.
+    // bits_left: 100000 - 76000 = 24000.
+    // kf_bits = calculate_boost_bits(MIN(4, INT_MAX) - 1 = 3, 400, 76000):
+    // chunks 700 -> 400*76000/700 = 43428.
+    CHECK(rc.framesToKey == 4);
+    CHECK(rc.framesSinceKey == 0);
+    CHECK(rc.framesSinceCdfUpdate == 0);
+    CHECK(tp.kfGroupBits == 76000 - 43428);
+    CHECK(tp.bitsLeft == 24000);
+    CHECK(pcs.baseFrameTarget == 43428);
+    // kf_group_error_left = 950 - 50 = 900.
+    CHECK(tp.kfGroupErrorLeft == 900);
+    // modified_error_left = 1000 - 950 = 50.
+    CHECK(std::fabs(tp.modifiedErrorLeft - 50.0) <= 1e-9);
+    CHECK(tp.kfZeroMotionPct == 0);
+    CHECK(tp.statsInPos == 1);
+}
+
+TEST_CASE("kf_group_rate_assingment pins the two-pass kf_bits branch") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    l15_rc::TwoPassCarrier tp = kfWalk(stats);
+    l15_rc::RcControl rc = kfRc();
+    l15_rc::PcsCarrier pcs{};
+    l15_rc::RcIntervalParamCarrier param{};
+    l15_rc::FirstpassStatsCarrier arg = kfArg();
+    l15_rc::kfGroupRateAssignment(pcs, rc, tp, arg, param, false, 10, 3000000, 30.0, 190, 2);
+    // passes == 2: kf_bits = (int)(kf_group_bits * (stats_in - 1)->
+    // stat_struct.total_num_bits / kf_group_err) = 76000 * 100 / 950 = 8000.
+    CHECK(pcs.baseFrameTarget == 8000);
+    CHECK(tp.kfGroupBits == 76000 - 8000);
+}
+
+// ---- A9D S8: pass2_strategy.c process_first_pass_stats (:761-819) +
+// is_new_gf_group (:823-845) ----
+
+namespace {
+
+// the process_first_pass_stats fixture: 3 stats in the window, a total and
+// a total_left stats pair.
+l15_rc::FirstpassStatsCarrier pfStat(double frame, double codedError, std::uint64_t tnb) {
+    l15_rc::FirstpassStatsCarrier s{};
+    s.frame = frame;
+    s.codedError = codedError;
+    s.count = 1.0;
+    s.duration = 1.0;
+    s.statStruct.totalNumBits = tnb;
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("process_first_pass_stats first-frame case and the left-stats subtract") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = {pfStat(0.0, 10.0, 100), pfStat(1.0, 20.0, 200),
+                                                              pfStat(2.0, 30.0, 400)};
+    l15_rc::FirstpassStatsCarrier totalStats = pfStat(3.0, 60.0, 700);
+    totalStats.count = 3.0;
+    l15_rc::FirstpassStatsCarrier totalLeftStats = totalStats;
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = 3;
+    tp.statsInPos = 0;
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 300000;
+    l15_rc::RcControl rc{};
+    rc.bestQuality = 0;
+    rc.worstQuality = 255;
+    rc.avgFrameQindex[1] = -1;
+    rc.avgFrameQindex[0] = -1;
+    l15_rc::RcConfig cfg{};
+    cfg.bestAllowedQ = 40;
+    l15_rc::PcsCarrier pcs{};
+    pcs.pictureNumber = 0;
+    l15_rc::FirstpassStatsCarrier thisFrame{};
+
+    l15_rc::processFirstPassStats(pcs, rc, cfg, tp, thisFrame, &totalStats, &totalLeftStats, stats.data(), false, 1,
+                                  8, 50, 40, false, 1920, 1080);
+
+    // one-pass: tmp_q = get_twopass_worst_quality(section_error,
+    // 0, section_target_bandwidth, 1.0). section_length = 3,
+    // section_error = 60/3 = 20; stb = (int)(300000 / 3) = 100000.
+    const int expected = oracleTwopassWq(false, 1920, 1080, 20.0, 0.0, 100000, 1.0, 50, 40, 0, 255,
+                                         qPowTerm(), acTable());
+    CHECK(rc.activeWorstQuality == expected);
+    CHECK(rc.avgFrameQindex[1] == expected);
+    // the integer division: (tmp_q + best_allowed_q) / 2 truncates.
+    CHECK(rc.avgFrameQindex[0] == (expected + 40) / 2);
+    // the walk consumed frame 0.
+    CHECK(tp.statsInPos == 1);
+    CHECK(thisFrame.statStruct.totalNumBits == 100);
+    // subtract_stats on total_left_stats: frame 3 - 0 = 3, coded_error
+    // 60 - 10 = 50, count 3 - 1 = 2, duration 1 - 1 = 0 (pfStat's duration
+    // is 1.0 - the fixture never overrode it).
+    CHECK(std::fabs(totalLeftStats.frame - 3.0) <= 1e-9);
+    CHECK(std::fabs(totalLeftStats.codedError - 50.0) <= 1e-9);
+    CHECK(std::fabs(totalLeftStats.count - 2.0) <= 1e-9);
+    CHECK(std::fabs(totalLeftStats.duration - 0.0) <= 1e-9);
+}
+
+TEST_CASE("process_first_pass_stats the two-pass first-frame search") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = {pfStat(0.0, 10.0, 100), pfStat(1.0, 20.0, 200),
+                                                              pfStat(2.0, 30.0, 400)};
+    l15_rc::FirstpassStatsCarrier totalStats = pfStat(3.0, 60.0, 700);
+    totalStats.count = 3.0;
+    l15_rc::FirstpassStatsCarrier totalLeftStats = totalStats;
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = 3;
+    tp.statsInPos = 0;
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 3920000;
+    l15_rc::RcControl rc{};
+    rc.bestQuality = 0;
+    rc.worstQuality = 255;
+    l15_rc::RcConfig cfg{};
+    cfg.bestAllowedQ = 40;
+    l15_rc::PcsCarrier pcs{};
+    pcs.pictureNumber = 0;
+    l15_rc::FirstpassStatsCarrier thisFrame{};
+
+    l15_rc::processFirstPassStats(pcs, rc, cfg, tp, thisFrame, &totalStats, &totalLeftStats, stats.data(), false, 2,
+                                  8, 50, 40, false, 1920, 1080);
+
+    // passes == 2: ref_qindex = stats_in_start->stat_struct.worst_qindex.
+    // The fixture leaves it 0 -> ref_q = ac[0]/4 = 16.0; ref bits =
+    // total_stats->stat_struct.total_num_bits = 700.
+    // test-side transcription of the reference search (:786-801).
+    const double refQ = 16.0;
+    const std::int64_t refBits = 700;
+    const std::int64_t target = 3920000;
+    int low = 0, high = 255;
+    while (low < high) {
+        const int mid = (low + high) >> 1;
+        const double q = l15_rc::convertQindexToQ(mid, 8);
+        const int midBits = (int)(refBits * refQ / q);
+        if (midBits > target) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    CHECK(rc.activeWorstQuality == low);
+}
+
+TEST_CASE("process_first_pass_stats the picture_number gate and the EOF") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = {pfStat(0.0, 10.0, 100)};
+    l15_rc::FirstpassStatsCarrier totalStats = pfStat(1.0, 10.0, 100);
+    totalStats.count = 1.0;
+    l15_rc::FirstpassStatsCarrier totalLeftStats = totalStats;
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = stats.data();
+    tp.statsInCount = 1;
+    tp.statsInPos = 1;  // the window is already consumed
+    tp.hasTotalStats = true;
+    tp.bitsLeft = 300000;
+    l15_rc::RcControl rc{};
+    rc.avgFrameQindex[1] = -1;
+    l15_rc::RcConfig cfg{};
+    l15_rc::PcsCarrier pcs{};
+    pcs.pictureNumber = 0;
+    l15_rc::FirstpassStatsCarrier thisFrame{};
+    l15_rc::processFirstPassStats(pcs, rc, cfg, tp, thisFrame, &totalStats, &totalLeftStats, stats.data(), false, 1,
+                                  8, 50, 40, false, 1920, 1080);
+    // the input_stats EOF: the subtract never runs (the values stay).
+    CHECK(std::fabs(totalLeftStats.codedError - 10.0) <= 1e-9);
+    CHECK(tp.statsInPos == 1);
+    {
+        // picture_number != 0: the whole first-frame case is skipped - the
+        // q fields are untouched; the subtract still runs on frame 1.
+        const std::vector<l15_rc::FirstpassStatsCarrier> stats2 = {pfStat(0.0, 10.0, 100),
+                                                                   pfStat(1.0, 20.0, 200)};
+        l15_rc::FirstpassStatsCarrier ts = pfStat(2.0, 30.0, 300);
+        ts.count = 2.0;
+        l15_rc::FirstpassStatsCarrier tls = ts;
+        l15_rc::TwoPassCarrier tp2{};
+        tp2.statsIn = stats2.data();
+        tp2.statsInCount = 2;
+        tp2.statsInPos = 1;  // the caller-advanced convention
+        tp2.hasTotalStats = true;
+        tp2.bitsLeft = 300000;
+        l15_rc::RcControl rc2{};
+        rc2.avgFrameQindex[1] = 77;
+        rc2.avgFrameQindex[0] = 77;
+        l15_rc::RcConfig cfg2{};
+        l15_rc::PcsCarrier pcs2{};
+        pcs2.pictureNumber = 5;
+        l15_rc::FirstpassStatsCarrier tf2{};
+        l15_rc::processFirstPassStats(pcs2, rc2, cfg2, tp2, tf2, &ts, &tls, stats2.data(), false, 1, 8, 50, 40,
+                                      false, 1920, 1080);
+        CHECK(rc2.avgFrameQindex[1] == 77);
+        CHECK(rc2.avgFrameQindex[0] == 77);
+        CHECK(tf2.statStruct.totalNumBits == 200);
+        CHECK(std::fabs(tls.codedError - 10.0) <= 1e-9);
+        CHECK(tp2.statsInPos == 2);
+    }
+}
+
+TEST_CASE("is_new_gf_group the simple and the incomplete-minigop paths") {
+    {
+        // NOT an incomplete-mg frame: is_new_gf_group = gf_update_due.
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.isNewGfGroup = -1;
+        pcs.gfUpdateDue = 1;
+        l15_rc::isNewGfGroup(pcs, nullptr, false);
+        CHECK(pcs.isNewGfGroup == 1);
+        pcs.gfUpdateDue = 0;
+        l15_rc::isNewGfGroup(pcs, nullptr, false);
+        CHECK(pcs.isNewGfGroup == 0);
+    }
+    {
+        // an incomplete-mg frame: the member walk. Member 1 is within the
+        // gf_interval POC distance (the == gf_interval boundary counts),
+        // incomp, and gf_update_due -> 1; the clear pass zeroes every
+        // member's gf_update_due.
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.pictureNumber = 100;
+        pcs.gfUpdateDue = 0;
+        l15_rc::GfGroupPocView group[8] = {};
+        group[0].hasPcs = true;
+        group[0].pictureNumber = 50;   // |50-100| = 50 > 8 -> NOT counted
+        group[0].gfUpdateDue = 1;
+        group[0].incompMgFrame = true;
+        group[1].hasPcs = true;
+        group[1].pictureNumber = 108;  // |108-100| = 8 == gf_interval -> counted
+        group[1].gfUpdateDue = 1;
+        group[1].incompMgFrame = true;
+        group[2].hasPcs = false;       // the NULL member: skipped
+        group[2].gfUpdateDue = 1;
+        l15_rc::isNewGfGroup(pcs, group, true);
+        CHECK(pcs.isNewGfGroup == 1);
+        CHECK(group[0].gfUpdateDue == false);
+        CHECK(group[1].gfUpdateDue == false);
+        // the NULL member is NOT cleared (the reference's own
+        // if (pcs->gf_group[pic_i]) guard).
+        CHECK(group[2].gfUpdateDue == true);
+    }
+    {
+        // an incomplete-mg frame with NO matching member: 0, no clears.
+        l15_rc::PcsCarrier pcs{};
+        pcs.gfInterval = 8;
+        pcs.pictureNumber = 100;
+        l15_rc::GfGroupPocView group[8] = {};
+        group[0].hasPcs = true;
+        group[0].pictureNumber = 105;
+        group[0].gfUpdateDue = 1;
+        group[0].incompMgFrame = false;  // not incomp -> not counted
+        l15_rc::isNewGfGroup(pcs, group, true);
+        CHECK(pcs.isNewGfGroup == 0);
+        CHECK(group[0].gfUpdateDue == true);
+    }
+}
+
+// ---- A9D S9: pass2_strategy.c set_rc_param (:906-949) +
+// read_stat_from_file (:955-969) + init_single_pass_lap (:971-995) +
+// init_second_pass (:997-1058) ----
+
+TEST_CASE("set_rc_param derives the cfg and the frame_info") {
+    l15_rc::FrameInfoCarrier fi{};
+    l15_rc::RcConfig cfg{};
+    int vbrmin = -1, vbrmax = -1, sframeDist = -1, sframeMode = -1;
+    // non-downsample: 1920x1080 -> mb 120x68, 8160 mbs.
+    l15_rc::setRcParam(false, 1920, 1080, 8, 50, 190, 1, 10, 63, false, 25, 35, 10000, 3000, 6000, 2000, 1500,
+                       fi, cfg, vbrmin, vbrmax, sframeDist, sframeMode);
+    CHECK(fi.frameWidth == 1920);
+    CHECK(fi.frameHeight == 1080);
+    CHECK(fi.mbCols == 120);
+    CHECK(fi.mbRows == 68);
+    CHECK(fi.numMbs == 8160);
+    CHECK(fi.bitDepth == 8);
+    CHECK(vbrmin == 50);
+    CHECK(vbrmax == 190);
+    // SVT_AV1_RC_MODE_VBR (1) -> AOM_VBR (0).
+    CHECK(cfg.mode == l15_rc::kRcVbr);
+    // quantizer_to_qindex[10] = 40, [63] = 255 (the index*4 ladder).
+    CHECK(cfg.bestAllowedQ == 40);
+    CHECK(cfg.worstAllowedQ == 255);
+    CHECK(cfg.overShootPct == 25);
+    CHECK(cfg.underShootPct == 35);
+    // the VBR buffer overrides.
+    CHECK(cfg.maximumBufferSizeMs == 240000);
+    CHECK(cfg.startingBufferLevelMs == 60000);
+    CHECK(cfg.optimalBufferLevelMs == 60000);
+    CHECK(cfg.maxIntraBitratePct == 2000);
+    CHECK(cfg.maxInterBitratePct == 1500);
+    CHECK(sframeDist == 0);
+    CHECK(sframeMode == 0);
+    {
+        // gop_constraint_rc zeroes the shoot pcts; CQP (0) -> AOM_Q (2) and
+        // the static buffer ms pass through; downsample doubles the dims.
+        l15_rc::FrameInfoCarrier fi2{};
+        l15_rc::RcConfig cfg2{};
+        int vbrmin2 = -1, vbrmax2 = -1, sd2 = -1, sm2 = -1;
+        l15_rc::setRcParam(true, 640, 360, 10, 50, 190, 0, 0, 63, true, 25, 35, 7777, 8888, 9999, 2000, 1500,
+                           fi2, cfg2, vbrmin2, vbrmax2, sd2, sm2);
+        CHECK(fi2.frameWidth == 1280);
+        CHECK(fi2.frameHeight == 720);
+        CHECK(fi2.mbCols == 80);
+        CHECK(fi2.mbRows == 46);
+        CHECK(cfg2.mode == l15_rc::kRcQ);
+        CHECK(cfg2.overShootPct == 0);
+        CHECK(cfg2.underShootPct == 0);
+        CHECK(cfg2.maximumBufferSizeMs == 7777);
+        CHECK(cfg2.startingBufferLevelMs == 8888);
+        CHECK(cfg2.optimalBufferLevelMs == 9999);
+    }
+    {
+        // CBR (2) -> AOM_CBR (1).
+        l15_rc::RcConfig cfg3{};
+        l15_rc::FrameInfoCarrier fi3{};
+        int v3, v4, sd3, sm3;
+        l15_rc::setRcParam(false, 64, 64, 8, 50, 190, 2, 10, 63, false, 25, 35, 1, 2, 3, 0, 0,
+                           fi3, cfg3, v3, v4, sd3, sm3);
+        CHECK(cfg3.mode == l15_rc::kRcCbr);
+    }
+}
+
+TEST_CASE("read_stat_from_file fills zero-tnb entries per layer") {
+    // window: {100 (layer1), 0 (layer1), 50 (layer0)}.
+    std::vector<l15_rc::FirstpassStatsCarrier> buf(3);
+    for (int i = 0; i < 3; ++i) {
+        buf[i].frame = (double)i;
+        buf[i].count = 1.0;
+        buf[i].duration = 1.0;
+    }
+    buf[0].statStruct.totalNumBits = 100;
+    buf[0].statStruct.temporalLayerIndex = 1;
+    buf[1].statStruct.totalNumBits = 0;
+    buf[1].statStruct.temporalLayerIndex = 1;
+    buf[2].statStruct.totalNumBits = 50;
+    buf[2].statStruct.temporalLayerIndex = 0;
+    l15_rc::FirstpassStatsCarrier totalStats{};
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = buf.data();
+    tp.statsInCount = 3;
+    tp.hasTotalStats = true;
+    l15_rc::readStatFromFile(tp, buf.data(), &totalStats);
+    // frame1 filled from previous_num_bits[layer1] = 100.
+    CHECK(buf[1].statStruct.totalNumBits == 100);
+    // total = 100 + 100 + 50 = 250 -> total_stats.
+    CHECK(totalStats.statStruct.totalNumBits == 250);
+}
+
+TEST_CASE("init_single_pass_lap resets the twopass and rc counters") {
+    // the set_rc_param composition runs through the same walls (verified by
+    // the cfg writes); the counters reset.
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsInCount = 3;  // the stats_in_end-present gate
+    tp.bitsLeft = 999;
+    tp.modifiedErrorMin = 9.0;
+    tp.modifiedErrorMax = 9.0;
+    tp.modifiedErrorLeft = 9.0;
+    tp.kfZeroMotionPct = 0;
+    l15_rc::RcControl rc{};
+    rc.vbrBitsOffTarget = 123;
+    rc.vbrBitsOffTargetFast = 456;
+    rc.rateErrorEstimate = 789;
+    l15_rc::FrameInfoCarrier fi{};
+    l15_rc::RcConfig cfg{};
+    int v1, v2, sd, sm;
+    l15_rc::initSinglePassLap(tp, rc, false, 1920, 1080, 8, 50, 190, 1, 10, 63, false, 25, 35, 1, 2, 3, 0, 0,
+                              fi, cfg, v1, v2, sd, sm);
+    CHECK(tp.bitsLeft == 0);
+    CHECK(tp.modifiedErrorMin == 0.0);
+    CHECK(tp.modifiedErrorMax == 0.0);
+    CHECK(tp.modifiedErrorLeft == 0.0);
+    CHECK(tp.kfZeroMotionPct == 100);
+    CHECK(rc.vbrBitsOffTarget == 0);
+    CHECK(rc.vbrBitsOffTargetFast == 0);
+    CHECK(rc.rateErrorEstimate == 0);
+    // the set_rc_param composition ran (the cfg derivation is observable).
+    CHECK(cfg.mode == l15_rc::kRcVbr);
+    CHECK(fi.numMbs == 8160);
+    {
+        // the empty-stats gate: NOTHING moves.
+        l15_rc::TwoPassCarrier tp2{};
+        tp2.statsInCount = 0;
+        tp2.bitsLeft = 999;
+        tp2.kfZeroMotionPct = 5;
+        l15_rc::RcControl rc2{};
+        rc2.vbrBitsOffTarget = 123;
+        l15_rc::FrameInfoCarrier fi2{};
+        l15_rc::RcConfig cfg2{};
+        int w1, w2, wd, wm;
+        l15_rc::initSinglePassLap(tp2, rc2, false, 1920, 1080, 8, 50, 190, 1, 10, 63, false, 25, 35, 1, 2, 3, 0, 0,
+                                  fi2, cfg2, w1, w2, wd, wm);
+        CHECK(tp2.bitsLeft == 999);
+        CHECK(tp2.kfZeroMotionPct == 5);
+        CHECK(rc2.vbrBitsOffTarget == 123);
+        // set_rc_param did NOT run.
+        CHECK(fi2.numMbs == 0);
+    }
+}
+
+TEST_CASE("init_second_pass accumulates, derives the framerate and walks the error") {
+    std::vector<l15_rc::FirstpassStatsCarrier> buf(3);
+    for (int i = 0; i < 3; ++i) {
+        buf[i].frame = (double)i + 1.0;
+        buf[i].codedError = 10.0 * (i + 1);
+        buf[i].count = 1.0;
+        buf[i].duration = 1.0;
+        buf[i].statStruct.totalNumBits = 100 * (i + 1);
+        buf[i].statStruct.temporalLayerIndex = 0;
+    }
+    l15_rc::FirstpassStatsCarrier statsInEnd{};  // the accumulator cell
+    statsInEnd.frame = 99.0;                     // poison: zero_stats must clear
+    statsInEnd.duration = 99.0;
+    l15_rc::FirstpassStatsCarrier totalStats{};
+    totalStats.frame = 88.0;
+    l15_rc::FirstpassStatsCarrier totalLeftStats{};
+    l15_rc::TwoPassCarrier tp{};
+    tp.statsIn = buf.data();
+    tp.statsInCount = 3;
+    tp.statsInPos = 0;
+    tp.hasTotalStats = true;
+    tp.bitsLeft = -1;
+    tp.kfZeroMotionPct = 0;
+    l15_rc::RcControl rc{};
+    rc.vbrBitsOffTarget = 123;
+    rc.vbrBitsOffTargetFast = 456;
+    rc.rateErrorEstimate = 789;
+    rc.avgFrameBandwidth = -1;
+    l15_rc::FrameInfoCarrier fi{};
+    l15_rc::RcConfig cfg{};
+    double scsFr = 0.0;
+    int v1, v2, sd, sm;
+    l15_rc::initSecondPass(tp, buf.data(), &statsInEnd, &totalStats, &totalLeftStats, rc, scsFr, 3000000, 100,
+                           false, 1920, 1080, 8, 50, 190, 1, 10, 63, false, 25, 35, 1, 2, 3, 0, 0,
+                           fi, cfg, v1, v2, sd, sm);
+    // the accumulator cell: zero_stats then accumulate the three frames:
+    // frame 1+2+3 = 6, coded_error 10+20+30 = 60, count 3, duration
+    // 1 + 1+1+1 = 4 (zero_stats starts duration at 1.0).
+    CHECK(std::fabs(statsInEnd.frame - 6.0) <= 1e-9);
+    CHECK(std::fabs(statsInEnd.codedError - 60.0) <= 1e-9);
+    CHECK(std::fabs(statsInEnd.count - 3.0) <= 1e-9);
+    CHECK(std::fabs(statsInEnd.duration - 4.0) <= 1e-9);
+    // the accumulate's total_num_bits = 100+200+300 = 600.
+    CHECK(statsInEnd.statStruct.totalNumBits == 600);
+    // total_stats <- stats_in_end; total_left_stats <- total_stats.
+    CHECK(std::fabs(totalStats.frame - 6.0) <= 1e-9);
+    CHECK(std::fabs(totalLeftStats.frame - 6.0) <= 1e-9);
+    // frame_rate = 10000000.0 * 3 / 4 = 7,500,000.
+    CHECK(std::fabs(scsFr - 7500000.0) <= 1e-9);
+    CHECK(rc.avgFrameBandwidth == (int)(3000000 / 7500000.0));
+    // bits_left = (int64)(4.0 * 3000000 / 10000000.0) = (int64)1.2 = 1.
+    CHECK(tp.bitsLeft == 1);
+    // read_stat_from_file: no zero-tnb entries; the sum 600 -> total_stats.
+    CHECK(totalStats.statStruct.totalNumBits == 600);
+    // avg_error = 60 / (3 + 0.000001); the vbrmin/vbrmax 50/190 splits.
+    const double avg = 60.0 / (3.0 + 0.000001);
+    CHECK(std::fabs(tp.modifiedErrorMin - (avg * 50.0 / 100.0)) <= 1e-9);
+    CHECK(std::fabs(tp.modifiedErrorMax - (avg * 190.0 / 100.0)) <= 1e-9);
+    // the modified-error walk: calculate_modified_err = tnb per frame.
+    CHECK(std::fabs(tp.modifiedErrorLeft - 600.0) <= 1e-9);
+    // the counter resets and the zeromotion pin.
+    CHECK(rc.vbrBitsOffTarget == 0);
+    CHECK(rc.vbrBitsOffTargetFast == 0);
+    CHECK(rc.rateErrorEstimate == 0);
+    CHECK(tp.kfZeroMotionPct == 100);
+}
+
+// ---- A9D S10: pass2_strategy.c svt_av1_twopass_postencode_update_gop_const
+// (:1063-1174) + svt_av1_twopass_postencode_update (:1176-1269) ----
+
+namespace {
+
+l15_rc::RcControl peRc() {
+    l15_rc::RcControl rc{};
+    rc.worstQuality = 255;
+    rc.activeWorstQuality = 100;   // maxq_adj_limit = 155
+    rc.avgFrameBandwidth = 10000;
+    rc.rollingTargetBits = 500;
+    rc.rollingActualBits = 400;
+    for (int i = 0; i < 7; ++i) rc.activeBestQuality[i] = -1;
+    return rc;
+}
+
+l15_rc::PcsCarrier pePcs() {
+    l15_rc::PcsCarrier pcs{};
+    pcs.baseFrameTarget = 1000;
+    pcs.projectedFrameSize = 800;  // undershoot: +200
+    pcs.isOverlay = false;
+    pcs.layerDepth = 2;
+    pcs.baseQIdx = 120;
+    pcs.frameType = l15_rc::kInterFrame;       // not kf_gf_arf
+    pcs.updateType = l15_rc::kSvtAv1LfUpdate;  // not kf_gf_arf
+    return pcs;
+}
+
+}  // namespace
+
+TEST_CASE("twopass_postencode_update_gop_const pins the undershoot arm") {
+    l15_rc::RcControl rc = peRc();
+    l15_rc::RcConfig cfg{};
+    cfg.underShootPct = 10;
+    cfg.overShootPct = 40;
+    l15_rc::RcIntervalParamCarrier param{};
+    param.vbrBitsOffTarget = 0;
+    param.totalActualBits = 1000;
+    param.totalTargetBits = 2000;
+    param.rollingTargetBits = 500;
+    param.rollingActualBits = 400;
+    param.extendMinq = 2;
+    param.extendMaxq = 2;
+    param.extendMinqFast = 5;
+    param.vbrBitsOffTargetFast = 7;
+    l15_rc::PcsCarrier pcs = pePcs();
+
+    l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+
+    // vbr_bits_off_target += 1000 - 800 = +200.
+    CHECK(param.vbrBitsOffTarget == 200);
+    // rate_error = (200*100)/1000 = 20; target = (200*100)/2000 = 10.
+    CHECK(param.rateErrorEstimate == 20);
+    // the pyramid: [2..6] = 120, [0..1] untouched (-1).
+    CHECK(rc.activeBestQuality[1] == -1);
+    CHECK(rc.activeBestQuality[2] == 120);
+    CHECK(rc.activeBestQuality[6] == 120);
+    // undershoot: --extend_maxq (2->1); rolling 500 >= 400 -> ++extend_minq
+    // (2->3); the clamps keep both.
+    CHECK(param.extendMinq == 3);
+    CHECK(param.extendMaxq == 1);
+    // the fast block: projected 800 < thresh 500? NO; vbr_off_fast 7 ->
+    // extend_minq_fast = MIN(5, 48-3) = 5.
+    CHECK(param.extendMinqFast == 5);
+    CHECK(param.vbrBitsOffTargetFast == 7);
+}
+
+TEST_CASE("twopass_postencode_update_gop_const pins the overshoot and the fast feed") {
+    {
+        // overshoot: base 500, projected 1200 -> -700; rate_error = -70
+        // < -40 -> --extend_minq; rolling 500 < 600 -> extend_maxq += 1.
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.totalTargetBits = 2000;
+        param.rollingTargetBits = 500;
+        param.rollingActualBits = 600;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 500;
+        pcs.projectedFrameSize = 1200;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        CHECK(param.vbrBitsOffTarget == -700);
+        CHECK(param.rateErrorEstimate == -70);
+        CHECK(param.extendMinq == 1);
+        CHECK(param.extendMaxq == 3);
+    }
+    {
+        // the fast feed: base 2000, projected 100 -> thresh 1000 > 100 and
+        // rate_error 20 > 0 -> vbr_off_fast += 900 (clamped to
+        // 4*avg_frame_bandwidth = 40000 - no clamp here);
+        // extend_minq_fast = (int)(900 * 8 / 10000) = 0; MIN(0, 47) = 0.
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.totalTargetBits = 2000;
+        param.rollingTargetBits = 500;
+        param.rollingActualBits = 400;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        param.extendMinqFast = 5;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 2000;
+        pcs.projectedFrameSize = 100;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        CHECK(param.vbrBitsOffTarget == 1900);
+        CHECK(param.vbrBitsOffTargetFast == 900);
+        CHECK(param.extendMinqFast == 0);
+    }
+    {
+        // the kf_gf_arf frame: the fast block SKIPPED entirely (the state
+        // keeps its values).
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.extendMinqFast = 5;
+        param.vbrBitsOffTargetFast = 7;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.updateType = l15_rc::kSvtAv1ArfUpdate;  // kf_gf_arf
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        CHECK(param.extendMinqFast == 5);
+        CHECK(param.vbrBitsOffTargetFast == 7);
+    }
+    {
+        // the overlay frame: NO pyramid write, NO extend adjustments.
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.isOverlay = true;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        CHECK(rc.activeBestQuality[2] == -1);
+        CHECK(param.extendMinq == 2);
+        CHECK(param.extendMaxq == 2);
+    }
+    {
+        // the short-clip overshoot: rate_error_estimate_target < -100
+        // (-700*100/500 = -140) -> extend_maxq += 10; the short-clip
+        // extend_minq clamp lower bound -12.
+        l15_rc::RcControl rc = peRc();
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 1000;
+        param.totalTargetBits = 500;
+        param.rollingTargetBits = 500;
+        param.rollingActualBits = 600;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 500;
+        pcs.projectedFrameSize = 1200;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, true, pcs.layerDepth);
+        CHECK(param.extendMinq == 1);
+        CHECK(param.extendMaxq == 12);
+    }
+    {
+        // the extreme-local-overshoot else arm: avg_frame_bandwidth 200 ->
+        // projected 500 > 2*base 200 and > 2*avg 400 -> ++extend_maxq;
+        // rolling 100 < 200 -> --extend_minq (the unwind).
+        l15_rc::RcControl rc = peRc();
+        rc.avgFrameBandwidth = 200;
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 5;
+        cfg.overShootPct = 40;
+        l15_rc::RcIntervalParamCarrier param{};
+        param.totalActualBits = 100000;
+        param.totalTargetBits = 200000;
+        param.rollingTargetBits = 100;
+        param.rollingActualBits = 200;
+        param.extendMinq = 2;
+        param.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 100;
+        pcs.projectedFrameSize = 500;
+        l15_rc::twopassPostencodeUpdateGopConst(rc, cfg, param, pcs, false, pcs.layerDepth);
+        // rate_error = (400*100)/100000 = 0 -> the else arm.
+        CHECK(param.rateErrorEstimate == 0);
+        CHECK(param.extendMinq == 1);
+        CHECK(param.extendMaxq == 3);
+    }
+}
+
+TEST_CASE("twopass_postencode_update pins the rc/twopass state split") {
+    {
+        // undershoot on the rc/twopass walls.
+        l15_rc::RcControl rc = peRc();
+        rc.totalActualBits = 1000;
+        rc.totalTargetBits = 2000;
+        rc.vbrBitsOffTargetFast = 7;
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 10;
+        cfg.overShootPct = 40;
+        l15_rc::TwoPassCarrier tp{};
+        tp.extendMinq = 2;
+        tp.extendMaxq = 2;
+        tp.extendMinqFast = 5;
+        l15_rc::PcsCarrier pcs = pePcs();
+        l15_rc::twopassPostencodeUpdate(rc, cfg, tp, pcs, false, pcs.layerDepth);
+        CHECK(rc.vbrBitsOffTarget == 200);
+        CHECK(rc.rateErrorEstimate == 20);
+        CHECK(rc.activeBestQuality[2] == 120);
+        CHECK(tp.extendMinq == 3);
+        CHECK(tp.extendMaxq == 1);
+        CHECK(tp.extendMinqFast == 5);
+    }
+    {
+        // the twopass twin has NO short-clip else-block: the else arm with
+        // short clip does NOT run the -5/+5 adjustments. avg_frame_bandwidth
+        // 200 makes the local-overshoot ++ fire; the unwind then pulls it
+        // back (--), netting the original value.
+        l15_rc::RcControl rc = peRc();
+        rc.avgFrameBandwidth = 200;
+        rc.totalActualBits = 100000;
+        rc.totalTargetBits = 200000;
+        rc.rollingTargetBits = 300;  // > actual -> the unwind hits extend_maxq
+        rc.rollingActualBits = 200;
+        l15_rc::RcConfig cfg{};
+        cfg.underShootPct = 5;
+        cfg.overShootPct = 40;
+        l15_rc::TwoPassCarrier tp{};
+        tp.extendMinq = 40;  // > 48/3 = 16: the gop-const twin would -5
+        tp.extendMaxq = 2;
+        l15_rc::PcsCarrier pcs = pePcs();
+        pcs.baseFrameTarget = 100;
+        pcs.projectedFrameSize = 500;
+        l15_rc::twopassPostencodeUpdate(rc, cfg, tp, pcs, true, pcs.layerDepth);
+        // else arm: ++extend_maxq (2->3, projected 500 > 2*avg 400); unwind
+        // rolling 300 > 200 -> --extend_maxq (3->2); NO short-clip block;
+        // extend_minq stays 40 (clamped 0..48); extend_maxq NOT clamped
+        // (short clip).
+        CHECK(tp.extendMinq == 40);
+        CHECK(tp.extendMaxq == 2);
+    }
+}
+
+TEST_CASE("kf_group_rate_assingment pins the lap path and the clip") {
+    const std::vector<l15_rc::FirstpassStatsCarrier> stats = kfWindow();
+    {
+        // lap: frames_to_key = intra + 1 = 11; kf_group_bits =
+        // 11 * 10000 = 110000 (frames_in_sw 3 < 10); the max_grp_bits clip
+        // 19000 * 11 = 209000 -> no clip.
+        // bits_left -= (110000 + (3 - 11) * 100000) = 100000 + 690000.
+        // frames_to_key_clipped = (int)(5 * 30) = 150 >= 11 -> no bit clip.
+        // kf_bits = calculate_boost_bits(MIN(11, 150) - 1 = 10, 400,
+        // 110000): chunks 1400 -> 400*110000/1400 = 31428.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        l15_rc::PcsCarrier pcs{};
+        l15_rc::RcIntervalParamCarrier param{};
+        pcs.framesInSw = 3;
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        l15_rc::kfGroupRateAssignment(pcs, rc, tp, arg, param, true, 10, 3000000, 30.0, 190, 1);
+        CHECK(rc.framesToKey == 11);
+        CHECK(tp.kfGroupBits == 110000 - 31428);
+        CHECK(tp.bitsLeft == 100000 - (110000 - 800000));
+        CHECK(pcs.baseFrameTarget == 31428);
+    }
+    {
+        // the kf_group_bits clip: a tiny max_frame_bandwidth. avg 10000,
+        // vbrmax 10 -> max_bits 1000; max_grp_bits = 1000 * 4 = 4000 ->
+        // kf_group_bits 4000; bits_left 96000.
+        l15_rc::TwoPassCarrier tp = kfWalk(stats);
+        l15_rc::RcControl rc = kfRc();
+        rc.maxFrameBandwidth = 2000;
+        l15_rc::PcsCarrier pcs{};
+        l15_rc::RcIntervalParamCarrier param{};
+        l15_rc::FirstpassStatsCarrier arg = kfArg();
+        // kf_group_bits 4000; then kf_bits = calculate_boost_bits(3, 400,
+        // 4000): chunks 700 -> 400*4000/700 = 2285; the final -= gives 1715.
+        l15_rc::kfGroupRateAssignment(pcs, rc, tp, arg, param, false, 10, 3000000, 30.0, 10, 1);
+        CHECK(tp.kfGroupBits == 4000 - 2285);
+        CHECK(tp.bitsLeft == 96000);
+    }
+}

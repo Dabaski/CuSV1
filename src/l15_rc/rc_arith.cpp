@@ -2966,4 +2966,1384 @@ int getGfuQTpl(const RcControl& rc, int targetActiveQuality, int bitDepth) {
     return q;
 }
 
+// ---- A9D: rc_process.c (the interval-param resets and the rc counts) ----
+
+// rc_param_reset (rc_process.c:555-566): verbatim.
+void rcParamReset(RcIntervalParamCarrier& rcParam) {
+    rcParam.size = -1;
+    rcParam.processedFrameNumber = 0;
+    rcParam.vbrBitsOffTarget = 0;
+    rcParam.vbrBitsOffTargetFast = 0;
+    rcParam.rateErrorEstimate = 0;
+    rcParam.totalActualBits = 0;
+    rcParam.totalTargetBits = 0;
+    rcParam.extendMinq = 0;
+    rcParam.extendMaxq = 0;
+    rcParam.extendMinqFast = 0;
+}
+
+// svt_aom_update_rc_counts (rc_process.c:568-590): verbatim; the scs/enc_ctx
+// walls thread (the rc carrier + the ppcs frm_hdr gates).
+void updateRcCounts(RcControl& rc, const PcsCarrier& ppcs) {
+    if (ppcs.showableFrame) {
+        // If this is a show_existing_frame with a source other than altref,
+        // or if it is not a displayed forward keyframe, the keyframe update
+        // counters were incremented when it was originally encoded.
+        rc.framesSinceKey++;
+        rc.framesToKey--;
+        // Reset whenever the CDF is updated for the current frame,
+        // covering keyframes, warmup, scene changes, and periodic updates.
+        if (!ppcs.disableCdfUpdate) {
+            rc.framesSinceCdfUpdate = 0;
+        } else {
+            rc.framesSinceCdfUpdate++;
+        }
+    }
+}
+
+// reset_rc_param (rc_process.c:592-605): verbatim.
+void resetRcParam(PcsCarrier& ppcs) {
+    ppcs.loopCount = 0;
+    ppcs.overshootSeen = 0;
+    ppcs.undershootSeen = 0;
+}
+
+// MAX_RATE_AVG_PERIOD (rc_process.h:48-50):
+// CODED_FRAMES_STAT_QUEUE_MAX_DEPTH (2000) >> 1.
+constexpr std::uint64_t kMaxRateAvgPeriod = 1000;
+
+// rc_init_frame_stats (rc_process.c:607-640): the parked call sites
+// (svt_aom_generate_r0beta, the three get_ref_*_percentage walks) are named
+// in the header; the bodies here are the two portable walks.
+void rcInitFrameStats(RcControl& rc, int sliceType, std::uint16_t b64TotalCount,
+                      const std::uint32_t* me64x64Distortion, bool twoPassWithMaxBitRate,
+                      double totalStatsCount) {
+    // Set rate averaging period
+    if (twoPassWithMaxBitRate) {
+        rc.rateAveragePeriod = (std::uint64_t)totalStatsCount;
+    } else {
+        rc.rateAveragePeriod = 60;
+    }
+    rc.rateAveragePeriod = rc.rateAveragePeriod < kMaxRateAvgPeriod ? rc.rateAveragePeriod : kMaxRateAvgPeriod;
+
+    // Store the avg ME distortion
+    if (sliceType != kIslice) {
+        rc.prevAvgBaseMeDist = rc.curAvgBaseMeDist;
+        std::uint64_t avgMeDist = 0;
+        for (int b64Idx = 0; b64Idx < b64TotalCount; ++b64Idx) {
+            avgMeDist += me64x64Distortion[b64Idx];
+        }
+        avgMeDist /= b64TotalCount;
+        rc.curAvgBaseMeDist = (std::uint32_t)avgMeDist;
+    }
+}
+
+// rc_handle_superres (rc_process.c:674-736): the two gates, the super_res_off
+// derivation, the segment-counter reset and the release-decision walk; the
+// parked call sites are named in the header. ENC_SINGLE_PASS = 0,
+// SUPERRES_RANDOM = 2, RESIZE_NONE = 0 (EbSvtAv1Enc.h enums, counted from 0).
+bool rcHandleSuperres(int pass, int superresMode, int resizeMode, std::uint16_t meSegmentsTotalCount,
+                      SuperresPcsCarrier& ppcs, const SuperresPcsCarrier* tplGroup, std::uint32_t tplGroupSize,
+                      int& meSegmentsCompletionCount, int& meProcessedB64Count, bool* release,
+                      bool& releaseHead, const std::function<void(bool)>& setGmControls) {
+    constexpr int kEncSinglePass = 0;
+    constexpr int kSuperresRandom = 2;
+    constexpr int kResizeNone = 0;
+    (void)meSegmentsTotalCount;  // the fifo-post park consumes it
+
+    if (pass != kEncSinglePass) {
+        return false;
+    }
+
+    if (superresMode <= kSuperresRandom) {
+        return false;
+    }
+
+    // Determine denom and scale down picture by selected denom
+    // (svt_aom_init_resize_picture - the named park).
+    if (ppcs.frameSuperresEnabled || ppcs.frameResizeEnabled) {
+        // Reset gm based on super-res on/off
+        const bool superResOff = ppcs.frameSuperresEnabled == false && resizeMode == kResizeNone;
+        setGmControls(superResOff);
+
+        // Initialize Segments as picture decision process
+        meSegmentsCompletionCount = 0;
+        meProcessedB64Count = 0;
+
+        // (the segment fifo posts + the rate-control-task release - the
+        // named park.)
+
+        return true;  // Signal early exit
+    }
+
+    // PA ref objs are no longer needed if super-res isn't performed on
+    // current frame; the release CALLS are the named park - the decision
+    // lands in the out flags.
+    if (ppcs.tplEnable) {
+        if (ppcs.temporalLayerIndex == 0) {
+            for (std::uint32_t i = 0; i < tplGroupSize; i++) {
+                if (tplGroup[i].incompMgFrame) {
+                    if (tplGroup[i].extMgId == ppcs.extMgId + 1) {
+                        if (release) release[i] = true;
+                    }
+                } else {
+                    if (tplGroup[i].extMgId == ppcs.extMgId) {
+                        if (release) release[i] = true;
+                    }
+                }
+            }
+        }
+    } else {
+        releaseHead = true;
+    }
+
+    return false;
+}
+
+// ---- A9D: pass2_strategy.c (the GF group-bit allocation) ----
+
+// frame_max_bits (pass2_strategy.c:55-58): verbatim; CLIP3 (utility.h:101)
+// inlined.
+int frameMaxBits(const RcControl& rc, int vbrmaxSection) {
+    const std::int64_t maxBits = (std::int64_t)rc.avgFrameBandwidth * vbrmaxSection / 100;
+    return (int)(maxBits < 0 ? 0 : (maxBits > rc.maxFrameBandwidth ? rc.maxFrameBandwidth : maxBits));
+}
+
+// calculate_total_gf_group_bits (pass2_strategy.c:186-220): verbatim; the
+// two_pass_cfg.vbrmax_section wall threads for the frame_max_bits call.
+std::int64_t calculateTotalGfGroupBits(const RcControl& rc, int vbrmaxSection, TwoPassCarrier& twopass,
+                                       bool lapRc, int ladMg, int hierarchicalLevels, int intraPeriodLength,
+                                       int framesInSw, double gfGroupErr) {
+    const int maxBits = frameMaxBits(rc, vbrmaxSection);
+    std::int64_t totalGroupBits;
+    // Calculate the bits to be allocated to the group as a whole.
+    if ((twopass.kfGroupBits > 0) && (twopass.kfGroupErrorLeft > 0)) {
+        std::int64_t kfGroupBits;
+        if (lapRc && (ladMg + 1) * (1 << hierarchicalLevels) < intraPeriodLength) {
+            kfGroupBits = (std::int64_t)twopass.kfGroupBits * (framesInSw < rc.framesToKey ? framesInSw : rc.framesToKey) /
+                rc.framesToKey;
+        } else {
+            kfGroupBits = twopass.kfGroupBits;
+        }
+        totalGroupBits = (std::int64_t)(kfGroupBits * (gfGroupErr / twopass.kfGroupErrorLeft));
+    } else {
+        totalGroupBits = 0;
+    }
+
+    // Clamp odd edge cases.
+    totalGroupBits = (totalGroupBits < 0) ? 0
+        : (totalGroupBits > twopass.kfGroupBits) ? twopass.kfGroupBits
+                                                 : totalGroupBits;
+
+    // Clip based on user supplied data rate variability limit.
+    if (totalGroupBits > (std::int64_t)maxBits * rc.baselineGfInterval) {
+        totalGroupBits = (std::int64_t)maxBits * rc.baselineGfInterval;
+    }
+    twopass.kfGroupBits = twopass.kfGroupBits - totalGroupBits > 0 ? twopass.kfGroupBits - totalGroupBits : 0;
+    return totalGroupBits;
+}
+
+// layer_fraction (pass2_strategy.c:238): verbatim.
+const double kLayerFraction[kMaxArfLayers + 1] = {1.0, 0.80, 0.7, 0.60, 0.60, 1.0, 1.0};
+
+// allocate_gf_group_bits (pass2_strategy.c:240-307): verbatim.
+void allocateGfGroupBits(const PcsCarrier& pcs, RcControl& rc, GfGroupMemberView* gfGroup,
+                         std::int64_t gfGroupBits, int gfArfBits, int gfInterval, bool keyFrame, bool useArf) {
+    std::int64_t totalGroupBits = gfGroupBits;
+    int baseFrameBits;
+    int layerFrames[kMaxArfLayers + 1] = {0};
+
+    // Subtract the extra bits set aside for ARF frames from the Group Total
+    if (useArf || !keyFrame) {
+        totalGroupBits -= gfArfBits;
+    }
+
+    if (rc.baselineGfInterval) {
+        baseFrameBits = (int)(totalGroupBits / rc.baselineGfInterval);
+    } else {
+        baseFrameBits = 1;
+    }
+
+    // For key frames the frame target rate is already set
+    const int frameIndex = keyFrame ? 1 : 0;
+
+    // Check the number of frames in each layer in case we have a
+    // non standard group length.
+    const int maxArfLayer = pcs.hierarchicalLevels;
+    for (int idx = frameIndex; idx < pcs.gfInterval; ++idx) {
+        if ((gfGroup[idx].updateType == kSvtAv1ArfUpdate) || (gfGroup[idx].updateType == kSvtAv1IntnlArfUpdate)) {
+            layerFrames[gfGroup[idx].layerDepth]++;
+        }
+    }
+    if (rc.baselineGfInterval < (gfInterval >> 1)) {
+        for (int idx = frameIndex; idx < pcs.gfInterval; ++idx) {
+            if (gfGroup[idx].updateType == kSvtAv1ArfUpdate) {
+                layerFrames[gfGroup[idx].layerDepth] += 1;
+            }
+            if (gfGroup[idx].updateType == kSvtAv1IntnlArfUpdate) {
+                layerFrames[gfGroup[idx].layerDepth] += 2;
+            }
+        }
+    }
+    // Allocate extra bits to each ARF layer
+    int layerExtraBits[kMaxArfLayers + 1] = {0};
+    for (int i = 1; i <= maxArfLayer; ++i) {
+        if (layerFrames[i]) {  // to make sure there is a picture with the depth
+            const double fraction = (i == maxArfLayer) ? 1.0 : kLayerFraction[i];
+            layerExtraBits[i] = (int)((gfArfBits * fraction) / (1 > layerFrames[i] ? 1 : layerFrames[i]));
+            gfArfBits -= (int)(gfArfBits * fraction);
+        }
+    }
+
+    // Now combine ARF layer and baseline bits to give total bits for each frame.
+    int arfExtraBits;
+    for (int idx = frameIndex; idx < pcs.gfInterval; ++idx) {
+        switch (gfGroup[idx].updateType) {
+        case kSvtAv1ArfUpdate:
+        case kSvtAv1IntnlArfUpdate:
+            arfExtraBits = layerExtraBits[gfGroup[idx].layerDepth];
+            gfGroup[idx].baseFrameTarget = baseFrameBits + arfExtraBits;
+            break;
+        case kSvtAv1IntnlOverlayUpdate:
+        case kSvtAv1OverlayUpdate:
+            gfGroup[idx].baseFrameTarget = 0;
+            break;
+        default:
+            gfGroup[idx].baseFrameTarget = baseFrameBits;
+            break;
+        }
+    }
+}
+
+// av1_gop_bit_allocation (pass2_strategy.c:457-463): verbatim.
+void av1GopBitAllocation(const PcsCarrier& pcs, RcControl& rc, GfGroupMemberView* gfGroup, int gfInterval,
+                         bool isKeyFrame, bool useArf, std::int64_t gfGroupBits) {
+    // Calculate the extra bits to be used for boosted frame(s)
+    const int gfArfBits = calculateBoostBits(rc.baselineGfInterval, rc.gfuBoost, gfGroupBits);
+    // Allocate bits to each of the frames in the GF group.
+    allocateGfGroupBits(pcs, rc, gfGroup, gfGroupBits, gfArfBits, gfInterval, isKeyFrame, useArf);
+}
+
+// lap_rc_init (pass2_strategy.c:512-555): verbatim; DOUBLE_DIVIDE_CHECK
+// (firstpass.h:23) inlined.
+void lapRcInit(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, std::int64_t vbrminSection,
+               std::int64_t vbrmaxSection, std::int64_t targetBitRate, double newFramerate) {
+    int numStats = 0;
+    double modifiedErrorTotal = 0.0;
+    double codedErrorTotal = 0.0;
+    const int startPosition = twopass.statsInPos;
+    const FirstpassStatsCarrier thisFrameRef = thisFrame;
+
+    // loop over the look ahead and calculate the coded error
+    while (twopass.statsInPos <= twopass.statsInCount) {
+        // Accumulate total number of stats available till end of the look ahead
+        numStats++;
+        // Accumulate error.
+        codedErrorTotal += thisFrame.codedError;
+        // Load the next frame's stats.
+        if (EOF == inputStats(twopass, thisFrame)) {
+            break;
+        }
+    }
+    // Calculate modified_error_min and modified_error_max which is needed in
+    // modified_error_total calculation
+    const double avgError = codedErrorTotal / (numStats < 0 ? numStats - 0.000001 : numStats + 0.000001);
+
+    twopass.modifiedErrorMin = (avgError * (double)vbrminSection) / 100;
+    twopass.modifiedErrorMax = (avgError * (double)vbrmaxSection) / 100;
+    twopass.statsInPos = startPosition;
+    thisFrame = thisFrameRef;
+
+    // loop over the look ahead and calculate the modified_error_total
+    while (twopass.statsInPos <= twopass.statsInCount) {
+        // Accumulate error.
+        modifiedErrorTotal += calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+        // Load the next frame's stats.
+        if (EOF == inputStats(twopass, thisFrame)) {
+            break;
+        }
+    }
+
+    twopass.modifiedErrorLeft = modifiedErrorTotal;
+    twopass.bitsLeft += (std::int64_t)(numStats * ((double)targetBitRate / newFramerate));
+    twopass.statsInPos = startPosition;
+}
+
+// lap_rc_group_error_calc (pass2_strategy.c:562-581): verbatim.
+double lapRcGroupErrorCalc(TwoPassCarrier& twopass, FirstpassStatsCarrier thisFrame, int framesToKey) {
+    int numStats = 0;
+    double modifiedErrorTotal = 0.0;
+    const int startPosition = twopass.statsInPos;
+
+    // loop over the look ahead and calculate the modified_error_total
+    while (twopass.statsInPos <= twopass.statsInCount && numStats < framesToKey) {
+        numStats++;
+        // Accumulate error.
+        modifiedErrorTotal += calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+        // Load the next frame's stats.
+        if (EOF == inputStats(twopass, thisFrame)) {
+            break;
+        }
+    }
+    twopass.statsInPos = startPosition;
+    return modifiedErrorTotal;
+}
+
+// set_kf_interval_variables (pass2_strategy.c:594-627): verbatim.
+void setKfIntervalVariables(TwoPassCarrier& twopass, FirstpassStatsCarrier& thisFrame, double* kfGroupErr,
+                            int numFramesToDetectScenecut, bool lapRc, bool endOfSequenceRegion,
+                            int intraPeriodLength, RcControl& rc, RcIntervalParamCarrier& rcParam) {
+    int framesToKey = 0;
+    if (numFramesToDetectScenecut == 0) {
+        return;
+    }
+
+    while (twopass.statsInPos <= twopass.statsInCount && framesToKey < numFramesToDetectScenecut) {
+        // Accumulate kf group error.
+        if (kfGroupErr != NULL) {
+            *kfGroupErr += calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+        }
+
+        ++framesToKey;
+        if (EOF == inputStats(twopass, thisFrame)) {
+            break;
+        }
+    }
+    if (lapRc && endOfSequenceRegion) {
+        rcParam.endOfSeqSeen = 1;
+    }
+    if (lapRc && !endOfSequenceRegion) {
+        rc.framesToKey = intraPeriodLength + 1;
+    } else {
+        rc.framesToKey = (intraPeriodLength + 1) < framesToKey ? (intraPeriodLength + 1) : framesToKey;
+    }
+}
+
+// get_kf_group_bits (pass2_strategy.c:629-642): verbatim.
+std::int64_t getKfGroupBits(bool lapRc, int framesInSw, int intraPeriodLength, bool endOfSequenceRegion,
+                            const RcControl& rc, const TwoPassCarrier& twopass, double kfGroupErr) {
+    std::int64_t kfGroupBits;
+    if (lapRc && framesInSw < intraPeriodLength && !endOfSequenceRegion) {
+        kfGroupBits = (std::int64_t)rc.framesToKey * rc.avgFrameBandwidth;
+    } else {
+        kfGroupBits = (std::int64_t)(twopass.bitsLeft * (kfGroupErr / twopass.modifiedErrorLeft));
+    }
+
+    return kfGroupBits;
+}
+
+// kf_group_rate_assingment (pass2_strategy.c:651-742): verbatim.
+void kfGroupRateAssignment(PcsCarrier& pcs, RcControl& rc, TwoPassCarrier& twopass,
+                           FirstpassStatsCarrier thisFrame, RcIntervalParamCarrier& rcParam, bool lapRc,
+                           int intraPeriodLength, std::int64_t targetBitRate, double newFramerate,
+                           int vbrmaxSection, std::uint8_t passes) {
+    int kfBits = 0;
+    double kfModErr;
+    double kfGroupErr = 0.0;
+    int framesToKeyClipped = INT_MAX;
+    std::int64_t kfGroupBitsClipped = INT64_MAX;
+
+    rc.framesSinceKey = 0;
+    rc.framesSinceCdfUpdate = 0;
+    const int startPosition = twopass.statsInPos;
+
+    twopass.kfGroupBits = 0;        // Total bits available to kf group
+    twopass.kfGroupErrorLeft = 0;   // Group modified error score.
+    kfModErr = calculateModifiedErr(twopass.hasTotalStats, thisFrame.statStruct.totalNumBits);
+    setKfIntervalVariables(twopass, thisFrame, &kfGroupErr, intraPeriodLength + 1, lapRc,
+                           pcs.endOfSequenceRegion, intraPeriodLength, rc, rcParam);
+
+    // Calculate the number of bits that should be assigned to the kf group.
+    if ((twopass.bitsLeft > 0 && twopass.modifiedErrorLeft > 0.0) || lapRc) {
+        // Maximum number of bits for a single normal frame (not key frame).
+        const int maxBits = frameMaxBits(rc, vbrmaxSection);
+
+        // Maximum number of bits allocated to the key frame group.
+        std::int64_t maxGrpBits;
+
+        // Default allocation based on bits left and relative
+        // complexity of the section.
+        twopass.kfGroupBits = getKfGroupBits(lapRc, pcs.framesInSw, intraPeriodLength, pcs.endOfSequenceRegion, rc,
+                                             twopass, kfGroupErr);
+        // Clip based on maximum per frame rate defined by the user.
+        maxGrpBits = (std::int64_t)maxBits * (std::int64_t)rc.framesToKey;
+        if (twopass.kfGroupBits > maxGrpBits) {
+            twopass.kfGroupBits = maxGrpBits;
+        }
+    } else {
+        twopass.kfGroupBits = 0;
+    }
+    twopass.kfGroupBits = twopass.kfGroupBits > 0 ? twopass.kfGroupBits : 0;
+    if (lapRc) {
+        // For 1 PASS VBR, as the lookahead is moving, the bits left is
+        // recalculated for the next KF. The second term is added again as it
+        // is part of look ahead of the next KF
+        twopass.bitsLeft -= (twopass.kfGroupBits +
+                             (std::int64_t)(((std::int64_t)pcs.framesInSw - (std::int64_t)rc.framesToKey) *
+                                            ((double)targetBitRate / newFramerate)));
+    } else {
+        twopass.bitsLeft = twopass.bitsLeft - twopass.kfGroupBits > 0 ? twopass.bitsLeft - twopass.kfGroupBits : 0;
+    }
+    if (lapRc) {
+        // In the case of single pass based on LAP, frames to key may have an
+        // inaccurate value, and hence should be clipped to an appropriate
+        // interval.
+        framesToKeyClipped = (int)(kMaxKfBitsIntervalSinglePass * newFramerate);
+        // This variable calculates the bits allocated to kf_group with a
+        // clipped frames_to_key.
+        if (rc.framesToKey > framesToKeyClipped) {
+            kfGroupBitsClipped = (std::int64_t)((double)twopass.kfGroupBits * framesToKeyClipped /
+                                                rc.framesToKey);
+        }
+    }
+    // Reset the first pass file position.
+    twopass.statsInPos = startPosition;
+
+    // Store the zero motion percentage
+    twopass.kfZeroMotionPct = 0;
+    // Work out how many bits to allocate for the key frame itself.
+    // In case of LAP enabled for VBR, if the frames_to_key value is
+    // very high, we calculate the bits based on a clipped value of
+    // frames_to_key.
+    if (passes == 2) {
+        kfBits = (int)(twopass.kfGroupBits * twopass.statsIn[twopass.statsInPos - 1].statStruct.totalNumBits /
+                       kfGroupErr);
+    } else {
+        const int ftkMin = rc.framesToKey < framesToKeyClipped ? rc.framesToKey : framesToKeyClipped;
+        const std::int64_t bitsMin = twopass.kfGroupBits < kfGroupBitsClipped ? twopass.kfGroupBits
+                                                                              : kfGroupBitsClipped;
+        kfBits = calculateBoostBits(ftkMin - 1, rc.kfBoost, bitsMin);
+    }
+
+    twopass.kfGroupBits -= kfBits;
+
+    // Save the bits to spend on the key frame.
+    pcs.baseFrameTarget = kfBits;
+
+    // Note the total error score of the kf group minus the key frame itself.
+    twopass.kfGroupErrorLeft = (std::int64_t)(kfGroupErr - kfModErr);
+
+    // Adjust the count of total modified error left.
+    // The count of bits left is adjusted elsewhere based on real coded frame
+    // sizes.
+    twopass.modifiedErrorLeft -= kfGroupErr;
+}
+
+// process_first_pass_stats (pass2_strategy.c:761-819): verbatim.
+void processFirstPassStats(const PcsCarrier& pcs, RcControl& rc, const RcConfig& rcCfg, TwoPassCarrier& twopass,
+                           FirstpassStatsCarrier& thisFrame, FirstpassStatsCarrier* totalStats,
+                           FirstpassStatsCarrier* totalLeftStats, const FirstpassStatsCarrier* statsInStart,
+                           bool lapRc, std::uint8_t passes, int encoderBitDepth, int underShootPct,
+                           int overShootPct, bool firstPassDownsample, int maxInputLumaWidth,
+                           int maxInputLumaHeight) {
+    if (pcs.pictureNumber == 0 && totalStats != nullptr && totalLeftStats != nullptr) {
+        if (lapRc) {
+            /*
+             * Accumulate total_stats using available limited number of stats,
+             * and assign it to total_left_stats.
+             */
+            *totalLeftStats = *totalStats;
+        }
+        // Special case code for first frame.
+        const int sectionTargetBandwidth =
+            getSectionTargetBandwidth(rc, lapRc, totalStats->count, (int)pcs.pictureNumber, twopass.bitsLeft);
+        const double sectionLength = totalLeftStats->count;
+        const double sectionError = totalLeftStats->codedError / sectionLength;
+        int tmpQ;
+        if (passes == 2) {
+            const int refQindex = statsInStart->statStruct.worstQindex;
+            const double refQ = convertQindexToQ(refQindex, encoderBitDepth);
+            const std::int64_t refGfGroupBits = (std::int64_t)(totalStats->statStruct.totalNumBits);
+            const std::int64_t targetGfGroupBits = twopass.bitsLeft;
+            {
+                int low = rc.bestQuality;
+                int high = rc.worstQuality;
+
+                while (low < high) {
+                    const int mid = (low + high) >> 1;
+                    const double q = convertQindexToQ(mid, encoderBitDepth);
+                    const int midBits = (int)(refGfGroupBits * refQ / q);
+
+                    if (midBits > targetGfGroupBits) {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+                tmpQ = low;
+            }
+        } else {
+            tmpQ = getTwopassWorstQuality(firstPassDownsample, maxInputLumaWidth, maxInputLumaHeight, sectionError, 0,
+                                          sectionTargetBandwidth, kDefaultGrpWeight, encoderBitDepth, underShootPct,
+                                          overShootPct, rc.bestQuality, rc.worstQuality);
+        }
+
+        rc.activeWorstQuality = tmpQ;
+        rc.avgFrameQindex[kInterFrame] = tmpQ;
+        rc.avgFrameQindex[kKeyFrame] = (tmpQ + rcCfg.bestAllowedQ) / 2;
+    }
+
+    if (EOF == inputStats(twopass, thisFrame)) {
+        return;
+    }
+
+    // Update the total stats remaining structure.
+    if (totalLeftStats != nullptr) {
+        subtractStats(*totalLeftStats, thisFrame);
+    }
+}
+
+// is_new_gf_group (pass2_strategy.c:823-845): verbatim.
+void isNewGfGroup(PcsCarrier& pcs, GfGroupPocView* gfGroup, bool incompMgFrame) {
+    pcs.isNewGfGroup = 0;
+    if (!incompMgFrame) {
+        pcs.isNewGfGroup = pcs.gfUpdateDue ? 1 : 0;
+    } else {
+        for (int picI = 0; picI < pcs.gfInterval; ++picI) {
+            // For P-pictures, since the pictures might get released and
+            // replaced by other pictures, we check the POC difference
+            const std::int64_t pocDelta =
+                (std::int64_t)gfGroup[picI].pictureNumber - (std::int64_t)pcs.pictureNumber;
+            if (gfGroup[picI].hasPcs && (int)(pocDelta < 0 ? -pocDelta : pocDelta) <= pcs.gfInterval &&
+                gfGroup[picI].incompMgFrame && gfGroup[picI].gfUpdateDue) {
+                pcs.isNewGfGroup = 1;
+            }
+        }
+        if (pcs.isNewGfGroup) {
+            for (int picI = 0; picI < pcs.gfInterval; ++picI) {
+                if (gfGroup[picI].hasPcs) {
+                    gfGroup[picI].gfUpdateDue = 0;
+                }
+            }
+        }
+    }
+}
+
+// ---- A9D: pass2_strategy.c (the rc-param derivation and the pass inits) ----
+
+// svt_av1_twopass_zero_stats (firstpass.c:133-139): the duplicated l9 twin.
+void twopassZeroStats(FirstpassStatsCarrier* section) {
+    section->frame = 0.0;
+    section->codedError = 0.0;
+    section->count = 0.0;
+    section->duration = 1.0;
+    section->statStruct = StatStructCarrier{};
+}
+
+// svt_av1_accumulate_stats (firstpass.c:141-146): the duplicated l9 twin.
+void accumulateStats(FirstpassStatsCarrier* section, const FirstpassStatsCarrier* frame) {
+    section->frame += frame->frame;
+    section->codedError += frame->codedError;
+    section->count += frame->count;
+    section->duration += frame->duration;
+}
+
+// svt_aom_set_rc_param (pass2_strategy.c:906-949): verbatim.
+void setRcParam(bool firstPassDownsample, int maxInputLumaWidth, int maxInputLumaHeight, int encoderBitDepth,
+                int vbrMinSectionPct, int vbrMaxSectionPct, int rateControlMode, int minQpAllowed,
+                int maxQpAllowed, bool gopConstraintRc, int staticOverShootPct, int staticUnderShootPct,
+                int staticMaximumBufferMs, int staticStartingBufferMs, int staticOptimalBufferMs,
+                int staticMaxIntraBitratePct, int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo,
+                RcConfig& rcCfg, int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode) {
+    if (firstPassDownsample) {
+        frameInfo.frameWidth = maxInputLumaWidth << 1;
+        frameInfo.frameHeight = maxInputLumaHeight << 1;
+        frameInfo.mbCols = ((maxInputLumaWidth + 16 - 1) / 16) << 1;
+        frameInfo.mbRows = ((maxInputLumaHeight + 16 - 1) / 16) << 1;
+    } else {
+        frameInfo.frameWidth = maxInputLumaWidth;
+        frameInfo.frameHeight = maxInputLumaHeight;
+        frameInfo.mbCols = (maxInputLumaWidth + 16 - 1) / 16;
+        frameInfo.mbRows = (maxInputLumaHeight + 16 - 1) / 16;
+    }
+    frameInfo.numMbs = frameInfo.mbCols * frameInfo.mbRows;
+    frameInfo.bitDepth = encoderBitDepth;
+    // input config from options
+    vbrminSection = vbrMinSectionPct;
+    vbrmaxSection = vbrMaxSectionPct;
+    rcCfg.mode = rateControlMode == kSvtAv1RcModeVbr ? kRcVbr
+        : (rateControlMode == kSvtAv1RcModeCbr ? kRcCbr : kRcQ);
+    rcCfg.bestAllowedQ = kQuantizerToQindex[minQpAllowed];
+    rcCfg.worstAllowedQ = kQuantizerToQindex[maxQpAllowed];
+
+    if (gopConstraintRc) {
+        rcCfg.overShootPct = 0;
+        rcCfg.underShootPct = 0;
+    } else {
+        rcCfg.overShootPct = staticOverShootPct;
+        rcCfg.underShootPct = staticUnderShootPct;
+    }
+    const bool isVbr = rcCfg.mode == kRcVbr;
+    rcCfg.maximumBufferSizeMs = isVbr ? 240000 : staticMaximumBufferMs;
+    rcCfg.startingBufferLevelMs = isVbr ? 60000 : staticStartingBufferMs;
+    rcCfg.optimalBufferLevelMs = isVbr ? 60000 : staticOptimalBufferMs;
+
+    rcCfg.maxIntraBitratePct = staticMaxIntraBitratePct;
+    rcCfg.maxInterBitratePct = staticMaxInterBitratePct;
+
+    sframeDist = 0;  // sf_cfg.sframe_dist (the static_config echo)
+    sframeMode = 0;  // sf_cfg.sframe_mode
+}
+
+// svt_av1_init_single_pass_lap (pass2_strategy.c:971-995): verbatim.
+void initSinglePassLap(TwoPassCarrier& twopass, RcControl& rc, bool firstPassDownsample, int maxInputLumaWidth,
+                       int maxInputLumaHeight, int encoderBitDepth, int vbrMinSectionPct, int vbrMaxSectionPct,
+                       int rateControlMode, int minQpAllowed, int maxQpAllowed, bool gopConstraintRc,
+                       int staticOverShootPct, int staticUnderShootPct, int staticMaximumBufferMs,
+                       int staticStartingBufferMs, int staticOptimalBufferMs, int staticMaxIntraBitratePct,
+                       int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo, RcConfig& rcCfg,
+                       int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode) {
+    if (twopass.statsInCount == 0) {
+        return;
+    }
+
+    setRcParam(firstPassDownsample, maxInputLumaWidth, maxInputLumaHeight, encoderBitDepth, vbrMinSectionPct,
+               vbrMaxSectionPct, rateControlMode, minQpAllowed, maxQpAllowed, gopConstraintRc,
+               staticOverShootPct, staticUnderShootPct, staticMaximumBufferMs, staticStartingBufferMs,
+               staticOptimalBufferMs, staticMaxIntraBitratePct, staticMaxInterBitratePct, frameInfo, rcCfg,
+               vbrminSection, vbrmaxSection, sframeDist, sframeMode);
+
+    // This variable monitors how far behind the second ref update is lagging.
+
+    twopass.bitsLeft = 0;
+    twopass.modifiedErrorMin = 0.0;
+    twopass.modifiedErrorMax = 0.0;
+    twopass.modifiedErrorLeft = 0.0;
+
+    // Reset the vbr bits off target counters
+    rc.vbrBitsOffTarget = 0;
+    rc.vbrBitsOffTargetFast = 0;
+
+    rc.rateErrorEstimate = 0;
+
+    // Static sequence monitor variables.
+    twopass.kfZeroMotionPct = 100;
+}
+
+// read_stat_from_file (pass2_strategy.c:955-969): verbatim (the body walks
+// the in-memory buffer; see the header note on the const cast).
+void readStatFromFile(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf,
+                      FirstpassStatsCarrier* totalStats) {
+    std::uint64_t totalNumBits = 0;
+    std::uint64_t previousNumBits[kMaxTemporalLayers] = {0};
+    for (int i = 0; i < twopass.statsInCount; ++i) {
+        if (statsBuf[i].statStruct.totalNumBits == 0) {
+            statsBuf[i].statStruct.totalNumBits =
+                previousNumBits[statsBuf[i].statStruct.temporalLayerIndex];
+        }
+        previousNumBits[statsBuf[i].statStruct.temporalLayerIndex] = statsBuf[i].statStruct.totalNumBits;
+        totalNumBits += statsBuf[i].statStruct.totalNumBits;
+    }
+    totalStats->statStruct.totalNumBits = totalNumBits;
+}
+
+// svt_av1_init_second_pass (pass2_strategy.c:997-1058): verbatim.
+void initSecondPass(TwoPassCarrier& twopass, FirstpassStatsCarrier* statsBuf, FirstpassStatsCarrier* statsInEnd,
+                    FirstpassStatsCarrier* totalStats, FirstpassStatsCarrier* totalLeftStats, RcControl& rc,
+                    double& scsNewFramerate, std::int64_t targetBitRate, int numMbs, bool firstPassDownsample,
+                    int maxInputLumaWidth, int maxInputLumaHeight, int encoderBitDepth, int vbrMinSectionPct,
+                    int vbrMaxSectionPct, int rateControlMode, int minQpAllowed, int maxQpAllowed,
+                    bool gopConstraintRc, int staticOverShootPct, int staticUnderShootPct,
+                    int staticMaximumBufferMs, int staticStartingBufferMs, int staticOptimalBufferMs,
+                    int staticMaxIntraBitratePct, int staticMaxInterBitratePct, FrameInfoCarrier& frameInfo,
+                    RcConfig& rcCfg, int& vbrminSection, int& vbrmaxSection, int& sframeDist, int& sframeMode) {
+    if (statsInEnd == nullptr) {
+        return;
+    }
+    {
+        twopassZeroStats(statsInEnd);
+        std::uint64_t totalNumBits = 0;
+
+        for (int i = 0; i < twopass.statsInCount; ++i) {
+            accumulateStats(statsInEnd, &statsBuf[i]);
+            totalNumBits += statsBuf[i].statStruct.totalNumBits;
+        }
+        statsInEnd->statStruct.totalNumBits = totalNumBits;
+    }
+    setRcParam(firstPassDownsample, maxInputLumaWidth, maxInputLumaHeight, encoderBitDepth, vbrMinSectionPct,
+               vbrMaxSectionPct, rateControlMode, minQpAllowed, maxQpAllowed, gopConstraintRc,
+               staticOverShootPct, staticUnderShootPct, staticMaximumBufferMs, staticStartingBufferMs,
+               staticOptimalBufferMs, staticMaxIntraBitratePct, staticMaxInterBitratePct, frameInfo, rcCfg,
+               vbrminSection, vbrmaxSection, sframeDist, sframeMode);
+    *totalStats = *statsInEnd;
+    *totalLeftStats = *totalStats;
+
+    const double frameRate = 10000000.0 * totalStats->count / totalStats->duration;
+    // Each frame can have a different duration, as the frame rate in the
+    // source isn't guaranteed to be constant. The frame rate prior to the
+    // first frame encoded in the second pass is a guess. However, the sum
+    // duration is not. It is calculated based on the actual durations of all
+    // frames from the first pass.
+    av1NewFramerate(rc, scsNewFramerate, frameRate, targetBitRate, vbrmaxSection, numMbs);
+    twopass.bitsLeft = (std::int64_t)(totalStats->duration * (std::int64_t)targetBitRate / 10000000.0);
+    readStatFromFile(twopass, statsBuf, totalStats);
+
+    // Scan the first pass file and calculate a modified total error based
+    // upon the bias/power function used to allocate bits.
+    {
+        const double avgError = totalStats->codedError / (totalStats->count < 0 ? totalStats->count - 0.000001
+                                                                               : totalStats->count + 0.000001);
+        double modifiedErrorTotal = 0.0;
+        twopass.modifiedErrorMin = (avgError * (double)vbrminSection) / 100;
+        twopass.modifiedErrorMax = (avgError * (double)vbrmaxSection) / 100;
+        for (int i = 0; i < twopass.statsInCount; ++i) {
+            modifiedErrorTotal += calculateModifiedErr(twopass.hasTotalStats, statsBuf[i].statStruct.totalNumBits);
+        }
+        twopass.modifiedErrorLeft = modifiedErrorTotal;
+    }
+
+    // Reset the vbr bits off target counters
+    rc.vbrBitsOffTarget = 0;
+    rc.vbrBitsOffTargetFast = 0;
+    rc.rateErrorEstimate = 0;
+
+    // Static sequence monitor variables.
+    twopass.kfZeroMotionPct = 100;
+}
+
+// ---- A9D: pass2_strategy.c (the twopass postencode pair) ----
+
+// svt_av1_twopass_postencode_update_gop_const (pass2_strategy.c:1063-1174):
+// verbatim.
+void twopassPostencodeUpdateGopConst(RcControl& rc, const RcConfig& rcCfg, RcIntervalParamCarrier& rcParam,
+                                     const PcsCarrier& ppcs, bool isShortClip, int layerDepth) {
+    // VBR correction is done through rc->vbr_bits_off_target. Based on the
+    // sign of this value, a limited % adjustment is made to the target rate
+    // of subsequent frames, to try and push it back towards 0. This method
+    // is designed to prevent extreme behaviour at the end of a clip
+    // or group of frames.
+    rcParam.vbrBitsOffTarget += ppcs.baseFrameTarget - ppcs.projectedFrameSize;
+    // Target vs actual bits for this arf group.
+    int rateErrorEstimateTarget = 0;
+    // Calculate the pct rc error.
+    if (rcParam.totalActualBits) {
+        if (rcParam.totalTargetBits) {
+            rateErrorEstimateTarget = (int)((rcParam.vbrBitsOffTarget * 100) / rcParam.totalTargetBits);
+        }
+        rcParam.rateErrorEstimate = (int)((rcParam.vbrBitsOffTarget * 100) / rcParam.totalActualBits);
+        rcParam.rateErrorEstimate = clampInt(rcParam.rateErrorEstimate, -100, 100);
+    } else {
+        rcParam.rateErrorEstimate = 0;
+    }
+
+    // Update the active best quality pyramid.
+    if (!ppcs.isOverlay) {
+        for (int i = layerDepth; i <= kMaxArfLayers; ++i) {
+            rc.activeBestQuality[i] = ppcs.baseQIdx;
+        }
+    }
+
+    // If the rate control is drifting consider adjustment to min or maxq.
+    if (!ppcs.isOverlay) {
+        const int maxqAdjLimit = rc.worstQuality - rc.activeWorstQuality;
+        const int minqAdjLimit = kMinqAdjLimit;
+
+        // Undershoot.
+        if (rcParam.rateErrorEstimate > rcCfg.underShootPct) {
+            --rcParam.extendMaxq;
+            if (rcParam.rollingTargetBits >= rcParam.rollingActualBits) {
+                ++rcParam.extendMinq;
+            }
+            // Overshoot.
+        } else if (rcParam.rateErrorEstimate < -rcCfg.overShootPct) {
+            --rcParam.extendMinq;
+            if (rcParam.rollingTargetBits < rcParam.rollingActualBits) {
+                rcParam.extendMaxq += (isShortClip) ? (rateErrorEstimateTarget < -100 ? 10 : 2) : 1;
+            }
+        } else {
+            // Adjustment for extreme local overshoot.
+            if (ppcs.projectedFrameSize > (2 * ppcs.baseFrameTarget) &&
+                ppcs.projectedFrameSize > (2 * rc.avgFrameBandwidth)) {
+                ++rcParam.extendMaxq;
+            }
+
+            // Unwind undershoot or overshoot adjustment.
+            if (rcParam.rollingTargetBits < rcParam.rollingActualBits) {
+                --rcParam.extendMinq;
+            } else if (rcParam.rollingTargetBits > rcParam.rollingActualBits) {
+                --rcParam.extendMaxq;
+            }
+            if (isShortClip) {
+                if (rcParam.extendMinq > minqAdjLimit / 3) {
+                    rcParam.extendMinq -= 5;
+                }
+                if (rcParam.extendMaxq < -maxqAdjLimit / 3) {
+                    rcParam.extendMaxq += 5;
+                }
+            }
+        }
+        if (isShortClip) {
+            rcParam.extendMinq = clampInt(rcParam.extendMinq, -minqAdjLimit / 4, minqAdjLimit);
+        } else {
+            rcParam.extendMinq = clampInt(rcParam.extendMinq, 0, minqAdjLimit);
+        }
+        if (!isShortClip) {
+            rcParam.extendMaxq = clampInt(rcParam.extendMaxq, 0, maxqAdjLimit);
+        }
+
+        // If there is a big and undexpected undershoot then feed the extra
+        // bits back in quickly. One situation where this may happen is if a
+        // frame is unexpectedly almost perfectly predicted by the ARF or GF
+        // but not very well predcited by the previous frame.
+        if (!frameIsKfGfArf(ppcs) && !ppcs.isOverlay) {
+            const int fastExtraThresh = ppcs.baseFrameTarget / kHighUndershootRatio;
+            if (ppcs.projectedFrameSize < fastExtraThresh && rcParam.rateErrorEstimate > 0) {
+                rcParam.vbrBitsOffTargetFast += fastExtraThresh - ppcs.projectedFrameSize;
+                rcParam.vbrBitsOffTargetFast =
+                    rcParam.vbrBitsOffTargetFast < (4 * rc.avgFrameBandwidth)
+                        ? rcParam.vbrBitsOffTargetFast
+                        : (4 * rc.avgFrameBandwidth);
+
+                // Fast adaptation of minQ if necessary to use up the extra bits.
+                if (rc.avgFrameBandwidth) {
+                    rcParam.extendMinqFast = (int)(rcParam.vbrBitsOffTargetFast * 8 / rc.avgFrameBandwidth);
+                }
+                rcParam.extendMinqFast = rcParam.extendMinqFast < (minqAdjLimit - rcParam.extendMinq)
+                                             ? rcParam.extendMinqFast
+                                             : (minqAdjLimit - rcParam.extendMinq);
+            } else if (rcParam.vbrBitsOffTargetFast) {
+                rcParam.extendMinqFast = rcParam.extendMinqFast < (minqAdjLimit - rcParam.extendMinq)
+                                             ? rcParam.extendMinqFast
+                                             : (minqAdjLimit - rcParam.extendMinq);
+            } else {
+                rcParam.extendMinqFast = 0;
+            }
+        }
+    }
+}
+
+// svt_av1_twopass_postencode_update (pass2_strategy.c:1176-1269): verbatim.
+void twopassPostencodeUpdate(RcControl& rc, const RcConfig& rcCfg, TwoPassCarrier& twopass,
+                             const PcsCarrier& ppcs, bool isShortClip, int layerDepth) {
+    // VBR correction is done through rc->vbr_bits_off_target. Based on the
+    // sign of this value, a limited % adjustment is made to the target rate
+    // of subsequent frames, to try and push it back towards 0. This method
+    // is designed to prevent extreme behaviour at the end of a clip
+    // or group of frames.
+    rc.vbrBitsOffTarget += ppcs.baseFrameTarget - ppcs.projectedFrameSize;
+    // Target vs actual bits for this arf group.
+    int rateErrorEstimateTarget = 0;
+    // Calculate the pct rc error.
+    if (rc.totalActualBits) {
+        if (rc.totalTargetBits) {
+            rateErrorEstimateTarget = (int)((rc.vbrBitsOffTarget * 100) / rc.totalTargetBits);
+        }
+        rc.rateErrorEstimate = (int)((rc.vbrBitsOffTarget * 100) / rc.totalActualBits);
+        rc.rateErrorEstimate = clampInt(rc.rateErrorEstimate, -100, 100);
+    } else {
+        rc.rateErrorEstimate = 0;
+    }
+
+    // Update the active best quality pyramid.
+    if (!ppcs.isOverlay) {
+        for (int i = layerDepth; i <= kMaxArfLayers; ++i) {
+            rc.activeBestQuality[i] = ppcs.baseQIdx;
+        }
+    }
+
+    // If the rate control is drifting consider adjustment to min or maxq.
+    if (!ppcs.isOverlay) {
+        const int maxqAdjLimit = rc.worstQuality - rc.activeWorstQuality;
+        const int minqAdjLimit = kMinqAdjLimit;
+
+        // Undershoot.
+        if (rc.rateErrorEstimate > rcCfg.underShootPct) {
+            --twopass.extendMaxq;
+            if (rc.rollingTargetBits >= rc.rollingActualBits) {
+                ++twopass.extendMinq;
+            }
+            // Overshoot.
+        } else if (rc.rateErrorEstimate < -rcCfg.overShootPct) {
+            --twopass.extendMinq;
+            if (rc.rollingTargetBits < rc.rollingActualBits) {
+                twopass.extendMaxq += (isShortClip) ? (rateErrorEstimateTarget < -100 ? 10 : 2) : 1;
+            }
+        } else {
+            // Adjustment for extreme local overshoot.
+            if (ppcs.projectedFrameSize > (2 * ppcs.baseFrameTarget) &&
+                ppcs.projectedFrameSize > (2 * rc.avgFrameBandwidth)) {
+                ++twopass.extendMaxq;
+            }
+
+            // Unwind undershoot or overshoot adjustment.
+            if (rc.rollingTargetBits < rc.rollingActualBits) {
+                --twopass.extendMinq;
+            } else if (rc.rollingTargetBits > rc.rollingActualBits) {
+                --twopass.extendMaxq;
+            }
+        }
+
+        twopass.extendMinq = clampInt(twopass.extendMinq, 0, minqAdjLimit);
+        if (!isShortClip) {
+            twopass.extendMaxq = clampInt(twopass.extendMaxq, 0, maxqAdjLimit);
+        }
+
+        // If there is a big and undexpected undershoot then feed the extra
+        // bits back in quickly. One situation where this may happen is if a
+        // frame is unexpectedly almost perfectly predicted by the ARF or GF
+        // but not very well predcited by the previous frame.
+        if (!frameIsKfGfArf(ppcs) && !ppcs.isOverlay) {
+            const int fastExtraThresh = ppcs.baseFrameTarget / kHighUndershootRatio;
+            if (ppcs.projectedFrameSize < fastExtraThresh && rc.rateErrorEstimate > 0) {
+                rc.vbrBitsOffTargetFast += fastExtraThresh - ppcs.projectedFrameSize;
+                rc.vbrBitsOffTargetFast = rc.vbrBitsOffTargetFast < (4 * rc.avgFrameBandwidth)
+                                              ? rc.vbrBitsOffTargetFast
+                                              : (4 * rc.avgFrameBandwidth);
+
+                // Fast adaptation of minQ if necessary to use up the extra bits.
+                if (rc.avgFrameBandwidth) {
+                    twopass.extendMinqFast = (int)(rc.vbrBitsOffTargetFast * 8 / rc.avgFrameBandwidth);
+                }
+                twopass.extendMinqFast = twopass.extendMinqFast < (minqAdjLimit - twopass.extendMinq)
+                                             ? twopass.extendMinqFast
+                                             : (minqAdjLimit - twopass.extendMinq);
+            } else if (rc.vbrBitsOffTargetFast) {
+                twopass.extendMinqFast = twopass.extendMinqFast < (minqAdjLimit - twopass.extendMinq)
+                                             ? twopass.extendMinqFast
+                                             : (minqAdjLimit - twopass.extendMinq);
+            } else {
+                twopass.extendMinqFast = 0;
+            }
+        }
+    }
+}
+
+// ---- A9D: initial_rc_process.c (the tpl-group pieces) ----
+
+// (isFrameAlreadyExists / validatePicForTpl are header templates - see the
+// declaration comments for the spans and the template note.)
+
+// set_tpl_params (initial_rc_process.c:319-401): verbatim.
+void setTplParams(TplControlsCarrier& tplCtrls, int tplLevel, int inputResolution) {
+    switch (tplLevel) {
+    case 0:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 0;
+        tplCtrls.intraModeEnd = 0;  // DC_PRED
+        tplCtrls.pfShape = 0;       // DEFAULT_SHAPE
+        tplCtrls.useSadInSrcSearch = 0;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 3;  // FULL_PEL
+        tplCtrls.subpelDiagRefinement = 0;
+        break;
+    case 1:
+        tplCtrls.computeRate = 1;
+        tplCtrls.enableTplQps = 1;
+        tplCtrls.disableIntraPredNref = 0;
+        tplCtrls.intraModeEnd = 12;  // PAETH_PRED
+        tplCtrls.pfShape = 0;
+        tplCtrls.useSadInSrcSearch = 0;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 1;  // QUARTER_PEL
+        tplCtrls.subpelDiagRefinement = 0;
+        break;
+    case 2:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 1;
+        tplCtrls.intraModeEnd = 12;  // PAETH_PRED
+        tplCtrls.pfShape = inputResolution <= kInputSize480pRange ? 1 : 2;  // N2_SHAPE : N4_SHAPE
+        tplCtrls.useSadInSrcSearch = 1;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 1;
+        tplCtrls.subpelDiagRefinement = 0;
+        break;
+    case 3:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 1;
+        tplCtrls.intraModeEnd = 0;  // DC_PRED
+        tplCtrls.pfShape = inputResolution <= kInputSize480pRange ? 1 : 2;
+        tplCtrls.useSadInSrcSearch = 1;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 1;
+        tplCtrls.subpelDiagRefinement = 4;
+        break;
+    case 4:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 1;
+        tplCtrls.intraModeEnd = 0;  // DC_PRED
+        tplCtrls.pfShape = inputResolution <= kInputSize480pRange ? 1 : 2;
+        tplCtrls.useSadInSrcSearch = 1;
+        tplCtrls.dispenserSearchLevel = 0;
+        tplCtrls.subsampleTx = 0;
+        tplCtrls.subpelDepth = 3;  // FULL_PEL
+        tplCtrls.subpelDiagRefinement = 4;
+        break;
+    case 5:
+        tplCtrls.computeRate = 0;
+        tplCtrls.enableTplQps = 0;
+        tplCtrls.disableIntraPredNref = 1;
+        tplCtrls.intraModeEnd = 0;  // DC_PRED
+        tplCtrls.pfShape = inputResolution <= kInputSize480pRange ? 1 : 2;
+        tplCtrls.useSadInSrcSearch = 1;
+        tplCtrls.dispenserSearchLevel = 1;
+        tplCtrls.subsampleTx = 2;
+        tplCtrls.subpelDepth = 3;
+        tplCtrls.subpelDiagRefinement = 4;
+        break;
+    default:
+        break;
+    }
+}
+
+// svt_aom_set_tpl_group (initial_rc_process.c:204-305): verbatim.
+int setTplGroup(TplControlsCarrier& tplCtrls, bool hasPcs, int sliceType, int hierarchicalLevels,
+                int inputResolution, int tplGroupLevel, int sourceWidth, int sourceHeight, bool tplLadMg,
+                int rateControlMode) {
+    tplCtrls = TplControlsCarrier{};  // the reference's local TplControls = {0}
+
+    switch (tplGroupLevel) {
+    case 0:
+        tplCtrls.enable = 0;
+        break;
+    case 1:
+        tplCtrls.enable = 1;
+        tplCtrls.reducedTplGroup = -1;
+        tplCtrls.synthBlkSize = 16;
+        break;
+    case 2:
+        tplCtrls.enable = 1;
+        tplCtrls.reducedTplGroup = !hasPcs ? -1
+            : sliceType                    ? -1
+                                           : (hierarchicalLevels == 5 ? 4 : 3);
+        tplCtrls.synthBlkSize = 16;
+        break;
+    case 3:
+        tplCtrls.enable = 1;
+        tplCtrls.reducedTplGroup = !hasPcs ? -1 : hierarchicalLevels == 5 ? 4 : 3;
+        tplCtrls.synthBlkSize = 16;
+        break;
+    case 4:
+        tplCtrls.enable = 1;
+        tplCtrls.reducedTplGroup = !hasPcs ? -1
+            : hierarchicalLevels == 5
+            ? sliceType ? 2 : (inputResolution <= kInputSize480pRange ? 3 : 1)
+            : hierarchicalLevels == 4
+            ? sliceType ? 2 : (inputResolution <= kInputSize480pRange ? 2 : 1)
+            : sliceType ? 3
+                        : (inputResolution <= kInputSize480pRange ? 2 : 0);
+        tplCtrls.synthBlkSize = (sourceWidth < sourceHeight ? sourceWidth : sourceHeight) >= 720 ? 32 : 16;
+        break;
+    default:
+        break;
+    }
+
+    if (!hasPcs) {
+        return tplCtrls.synthBlkSize;
+    }
+
+    if (hierarchicalLevels <= tplCtrls.reducedTplGroup) {
+        tplCtrls.reducedTplGroup = -1;
+    }
+
+    // TPL may only look at a subset of available pictures in tpl group,
+    // which may affect the r0 calcuation. As a result, we defined a factor
+    // to adjust r0 (to compensate for TPL not using all available frames).
+    if (tplCtrls.reducedTplGroup >= 0) {
+        switch (hierarchicalLevels - tplCtrls.reducedTplGroup) {
+        case 0:
+        default:
+            tplCtrls.r0AdjustFactor = 0;
+            break;
+        case 1:
+            tplCtrls.r0AdjustFactor = hierarchicalLevels <= 2 ? 0.4
+                : hierarchicalLevels <= 3                     ? 0.8
+                                                              : 1.6;
+            break;
+        case 2:
+            tplCtrls.r0AdjustFactor = hierarchicalLevels <= 2 ? 0.6
+                : hierarchicalLevels <= 3                     ? 1.2
+                                                              : 2.4;
+            break;
+        case 3:
+            tplCtrls.r0AdjustFactor = hierarchicalLevels <= 3 ? 1.4 : 2.8;
+            break;
+        case 4:
+            tplCtrls.r0AdjustFactor = 4.0;
+            break;
+        case 5:
+            tplCtrls.r0AdjustFactor = 6.0;
+            break;
+        }
+
+        // Adjust r0 scaling factor based on GOP structure and lookahead
+        if (!tplLadMg) {
+            tplCtrls.r0AdjustFactor *= 1.25;
+        }
+    } else {
+        // No r0 adjustment when all frames are used
+        tplCtrls.r0AdjustFactor = 0;
+
+        // If no lookahead, apply r0 scaling
+        if (!tplLadMg) {
+            tplCtrls.r0AdjustFactor = sliceType ? 0 : hierarchicalLevels <= 2 ? 0.4
+                                                      : hierarchicalLevels <= 3 ? 0.8
+                                                                                : 1.6;
+        }
+    }
+    if (rateControlMode == kSvtAv1RcModeVbr) {
+        tplCtrls.r0AdjustFactor *= 1.25;
+        tplCtrls.r0AdjustFactor = tplCtrls.r0AdjustFactor < 3 ? tplCtrls.r0AdjustFactor : 3;
+    }
+    return tplCtrls.synthBlkSize;
+}
+
+// ---- A9D: initial_rc_process.c (the LAD queue) ----
+
+// OUT_Q_ADVANCE (definitions.h:63): verbatim.
+std::uint32_t outQAdvance(std::uint32_t h, std::uint32_t size) {
+    return h == size - 1 ? 0 : h + 1;
+}
+
+// store_extended_group (initial_rc_process.c:406-520): verbatim.
+void storeExtendedGroup(LadPcsView& head, const LadQueueCarrier& queue, std::uint32_t startIdx,
+                        std::int64_t endMg, int headEncMode, int headInputResolution, int tplLadMg,
+                        int scsHierarchicalLevels, int startupMgSize, std::uint64_t lastIdrPicture,
+                        LadGroupOutputs& out) {
+    std::uint32_t picI = 0;
+    std::uint32_t qIdx = startIdx;
+    LadPcsView* entry = queue.cirBuf[qIdx];
+
+    while (entry != NULL) {
+        if (entry->extMgId <= endMg) {
+            out.extGroup[picI++] = queue.cirBuf[qIdx];
+        }
+
+        // Increment the queue_index Iterator
+        qIdx = outQAdvance(qIdx, queue.cirBufSize);
+        // get the next entry
+        entry = queue.cirBuf[qIdx];
+    }
+
+    out.extGroupSize = picI;
+    // new tpl group needs to stop at the second I
+    out.tplGroupSize = 0;
+    // MAX_TPL_EXT_GROUP_SIZE (definitions.h:60-62) = MAX_TPL_GROUP_SIZE =
+    // 512: the reference memsets the FULL array.
+    for (std::uint32_t i = 0; i < 512; ++i) out.tplValidPic[i] = 0;
+    out.tplValidPic[0] = 1;
+    out.usedTplFrameNum = 0;
+    std::uint8_t isGopEnd = 0;
+    std::int64_t lastIntraMgId = 0;
+    const std::uint32_t mgSize = 1u << head.hierarchicalLevels;
+    std::uint32_t limitedTplGroupSize = head.sliceType == kIslice
+        ? ((1 + (tplLadMg + 1) * mgSize) < out.extGroupSize ? (1 + (tplLadMg + 1) * mgSize) : out.extGroupSize)
+        : (((tplLadMg + 1) * mgSize) < out.extGroupSize ? ((tplLadMg + 1) * mgSize) : out.extGroupSize);
+    if (startupMgSize > 0) {
+        if (head.sliceType == kIslice) {
+            const std::uint32_t cand =
+                1 + tplLadMg * (1u << scsHierarchicalLevels) + mgSize;
+            limitedTplGroupSize = cand < out.extGroupSize ? cand : out.extGroupSize;
+        } else {
+            const std::uint32_t startupMg = 1u << startupMgSize;
+            if (lastIdrPicture + startupMg == head.pictureNumber) {
+                const std::uint32_t cand = tplLadMg * (1u << scsHierarchicalLevels) + mgSize;
+                limitedTplGroupSize = cand < out.extGroupSize ? cand : out.extGroupSize;
+            }
+        }
+    }
+    for (std::uint32_t i = 0; i < limitedTplGroupSize; i++) {
+        LadPcsView* curPcs = out.extGroup[i];
+        if (curPcs->sliceType == kIslice) {
+            if (curPcs->delayedIntra) {
+                if (i == 0) {
+                    out.tplGroup[out.tplGroupSize++] = curPcs;
+                    validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+                } else {
+                    break;
+                }
+            } else {
+                if (i == 0) {
+                    out.tplGroup[out.tplGroupSize++] = curPcs;
+                    validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+                } else {
+                    out.tplGroup[out.tplGroupSize++] = curPcs;
+                    validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+                    lastIntraMgId = curPcs->extMgId;
+                    isGopEnd = 1;
+                }
+            }
+        } else {
+            if (isGopEnd == 0) {
+                out.tplGroup[out.tplGroupSize++] = curPcs;
+                validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+            } else if (curPcs->extMgId == lastIntraMgId) {
+                out.tplGroup[out.tplGroupSize++] = curPcs;
+                validatePicForTpl(head.tplCtrls, out.tplGroup, out.tplValidPic, out.usedTplFrameNum, (int)i);
+            } else {
+                break;
+            }
+        }
+    }
+
+    for (std::uint32_t picIndex = 0; picIndex < out.tplGroupSize; picIndex++) {
+        if (!out.tplGroup[picIndex]->tplParamsReady) {
+            setTplParams(out.tplGroup[picIndex]->tplCtrls, getTplParamsLevel((std::int8_t)headEncMode),
+                         headInputResolution);
+            out.tplGroup[picIndex]->tplParamsReady = 1;
+        }
+    }
+}
+
+// process_lad_queue (initial_rc_process.c:527-636): verbatim; the parked
+// call sites are named in the header.
+void processLadQueue(LadQueueCarrier& queue, std::uint32_t& queueHead, bool passThru, int headLadMg,
+                     int headEncMode, int headInputResolution, int tplLadMg, int scsHierarchicalLevels,
+                     int startupMgSize, std::uint64_t lastIdrPicture, LadGroupOutputs& out) {
+    LadPcsView* headEntry = queue.cirBuf[queueHead];
+
+    while (headEntry != NULL) {
+        LadPcsView* headPcs = headEntry;
+
+        bool sendOut;
+        if (!passThru) {
+            if (headPcs->temporalLayerIndex == 0) {
+                // delayed Intra can use the whole window relative to the next Base
+                int targetMgs = headPcs->delayedIntra ? headLadMg + 1 : headLadMg;
+                targetMgs++;  // add one for the MG including the head
+                {
+                    int numMgs = 0;  // number of MGs accumulated so far in the queue
+                    std::int64_t curMg = headPcs->extMgId;
+
+                    std::uint32_t tmpIdx = queueHead;
+                    LadPcsView* tmpEntry = queue.cirBuf[tmpIdx];
+                    std::uint32_t totAccFramesInCurMg = 0;
+                    sendOut = false;
+                    while (tmpEntry != NULL) {
+                        LadPcsView* tmpPcs = tmpEntry;
+
+                        // adjust the lad if we hit an EOS
+                        if (tmpPcs->endOfSequenceFlag) {
+                            const std::int64_t span = tmpPcs->extMgId - headPcs->extMgId + 1;
+                            const int clamp = span < 255 ? (int)span : 255;
+                            targetMgs = targetMgs < clamp ? targetMgs : clamp;
+
+                            headPcs->endOfSequenceRegion = true;
+                        }
+                        if (tmpPcs->extMgId >= curMg) {
+                            totAccFramesInCurMg++;
+
+                            if (totAccFramesInCurMg == tmpPcs->extMgSize) {
+                                numMgs++;
+                                curMg = tmpPcs->extMgId;
+                                totAccFramesInCurMg = 0;
+                            }
+
+                            if (numMgs == targetMgs) {
+                                storeExtendedGroup(*headPcs, queue, queueHead, tmpPcs->extMgId, headEncMode,
+                                                   headInputResolution, tplLadMg, scsHierarchicalLevels,
+                                                   startupMgSize, lastIdrPicture, out);
+                                sendOut = true;
+                                break;
+                            }
+                        }
+
+                        tmpIdx = outQAdvance(tmpIdx, queue.cirBufSize);
+                        tmpEntry = queue.cirBuf[tmpIdx];
+                    }
+                }
+
+            } else {
+                sendOut = true;
+            }
+        } else {
+            sendOut = true;
+        }
+
+        if (sendOut) {
+            // (the stats-in write block + irc_send_picture_out - the named
+            // parks.)
+            // take the picture out from iRc process; advance the head
+            // (head_entry->pcs = NULL - the slot empties).
+            queue.cirBuf[queueHead] = nullptr;
+            queueHead = outQAdvance(queueHead, queue.cirBufSize);
+            headEntry = queue.cirBuf[queueHead];
+        } else {
+            break;
+        }
+    }
+}
+
+// ---- A9D: rc_process.c (the sb-qindex composition + the packetization
+// feedback routing) ----
+
+// generate_sb_qindex (rc_process.c:738-753): verbatim composition.
+void generateSbQindex(int rcMode, CrRefreshCarrier& cr, FrameHdrCarrier& hdr, std::uint8_t* sbQindex,
+                      const std::uint16_t* const* variance, std::uint16_t pcsSbTotalCount,
+                      const MeStatCarrier& me, bool enableVarianceBoost, int varianceBoostStrength,
+                      int encoderBitDepth, std::uint8_t varianceOctile, std::uint8_t varianceBoostCurve,
+                      int aqMode, bool tplEnable, double r0, std::uint16_t scsSbTotalCount,
+                      std::uint16_t ppcsB64TotalCount, bool superresOrResize,
+                      bool statsBasedSbLambdaModulation, int sliceType, int temporalLayerIndex,
+                      std::uint8_t* b64MeQindex) {
+    rcInitSbQindex(rcMode, cr, hdr, sbQindex, variance, pcsSbTotalCount, me, enableVarianceBoost,
+                   varianceBoostStrength, encoderBitDepth, varianceOctile, varianceBoostCurve, aqMode, tplEnable,
+                   r0);
+
+    if (hdr.deltaQPresent && hdr.deltaQRes != 1) {
+        // adjust delta q res and normalize superblock delta q values to
+        // reduce signaling overhead
+        normalizeSbDeltaQ(hdr, sbQindex, scsSbTotalCount, ppcsB64TotalCount, superresOrResize);
+    }
+
+    // Derive a QP per 64x64 using ME distortions (to be used for lambda
+    // modulation only; not at Q/Q-1)
+    if (statsBasedSbLambdaModulation) {
+        generateB64MeQindexMap(hdr, me, b64MeQindex, sliceType, temporalLayerIndex);
+    }
+}
+
+// rc_process_packetization_feedback (rc_process.c:756-811): verbatim
+// routing; the parked call sites are named in the header.
+void rcProcessPacketizationFeedback(RcControl& rc, const RcConfig& rcCfg, PcsCarrier& ppcs,
+                                    const CrRefreshCarrier& cr, RcIntervalParamCarrier& rcParam,
+                                    TwoPassCarrier& twopass, std::uint16_t b64TotalCount, int bitDepth,
+                                    int& frameUpdated, bool useRtcCbrPath, bool gopConstraintRc,
+                                    bool maxBitRate, bool isShortClip, bool resizeDynamic) {
+    // Prevent double counting frames with overlay
+    // (the rc_param_queue_mutex pair - the named park.)
+    if (!ppcs.isOverlay) {
+        rcParam.processedFrameNumber++;
+
+        // check if all the frames in the interval have arrived
+        if (rcParam.size == rcParam.processedFrameNumber) {
+            rcParamReset(rcParam);
+        }
+    }
+
+    if (rcCfg.mode == kRcQ) {
+        // (the AOM_Q + max_bit_rate svt_av1_coded_frames_stat_calc call
+        // site - the named park; nothing else happens on this path.)
+        (void)maxBitRate;
+    } else {
+        if (useRtcCbrPath) {
+            postencodeUpdateRtcCbr(rc, rcCfg, ppcs, cr, b64TotalCount, bitDepth, resizeDynamic);
+        } else {
+            if (gopConstraintRc) {
+                postencodeUpdateGopConst(rc, rcCfg, ppcs, cr, rcParam, b64TotalCount, bitDepth, frameUpdated);
+                // Qindex calculating
+                if (rcCfg.mode == kRcVbr) {
+                    twopassPostencodeUpdateGopConst(rc, rcCfg, rcParam, ppcs, isShortClip, ppcs.layerDepth);
+                }
+            } else {
+                postencodeUpdate(rc, rcCfg, ppcs, cr, b64TotalCount, bitDepth, frameUpdated);
+                // Qindex calculating
+                if (rcCfg.mode == kRcVbr) {
+                    twopassPostencodeUpdate(rc, rcCfg, twopass, ppcs, isShortClip, ppcs.layerDepth);
+                }
+            }
+        }
+        updateRcCounts(rc, ppcs);
+    }
+
+    // (the object releases - the named park.)
+}
+
 } // namespace l15_rc
